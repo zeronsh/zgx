@@ -38,6 +38,7 @@ from PIL import Image, ImageChops, ImageGrab
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from platform_smoke import release_mounts, stop, wait_for_wm  # noqa: E402
 from wayland_pointer import VirtualPointer  # noqa: E402
+from sway_host import sway_config
 
 APP = pathlib.Path(__file__).parent / "luau_views"
 BOARD_BG, GRID, RED, GREEN = (16, 16, 16), (255, 0, 255), (255, 0, 0), (0, 255, 0)
@@ -335,7 +336,7 @@ def main():
             # driven by a virtual pointer and captured by grim.
             sway_env = dict(base, WLR_BACKENDS="headless", WLR_RENDERER="pixman", WLR_LIBINPUT_NO_DEVICES="1")
             config = pathlib.Path(private, "sway.conf")
-            config.write_text("output * mode 1280x960\ndefault_border none\n"
+            sway_config(config, "output * mode 1280x960\ndefault_border none\n"
                               "for_window [app_id=\".*\"] floating enable, move position 0 0\n")
             sway, _ = launch("sway", ["sway", "--unsupported-gpu", "-c", str(config)], sway_env)
             sockets = lambda: [p for p in pathlib.Path(private).glob("wayland-*") if p.suffix != ".lock"]

@@ -19,6 +19,7 @@ import subprocess
 import time
 
 from platform_smoke import private_runtime, stop
+from sway_host import sway_config
 
 
 def main():
@@ -113,7 +114,7 @@ def main():
         for key in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS"):
             env.pop(key, None)
         config = pathlib.Path(private, "sway.conf")
-        config.write_text("output * mode 1280x800\n")
+        sway_config(config, "output * mode 1280x800\n")
         with (args.output / "sway.log").open("w") as out:
             sway = subprocess.Popen(["sway", "--unsupported-gpu", "-c", str(config)], env=env, stdout=out, stderr=out)
         try:

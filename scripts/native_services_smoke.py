@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Exercise native Wayland file dialogs through a private GTK portal."""
-from sway_host import wait_for_openbox
+from sway_host import wait_for_openbox, sway_config
 import argparse
 import json
 import os
@@ -37,7 +37,7 @@ def main():
         for name in ('DISPLAY', 'WAYLAND_DISPLAY', 'SWAYSOCK', 'I3SOCK', 'IBUS_ADDRESS', 'XMODIFIERS', 'GTK_IM_MODULE', 'QT_IM_MODULE', 'QT_IM_MODULES', 'SDL_IM_MODULE', 'AT_SPI_BUS_ADDRESS', 'FCITX_DBUS_ADDRESS'):
             env.pop(name, None)
         config = pathlib.Path(private, 'sway.conf')
-        config.write_text('xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx platform services"] floating enable\n')
+        sway_config(config, 'xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx platform services"] floating enable\n')
         (args.output/'sway.conf').write_text(config.read_text())
         bus_config = pathlib.Path(private, 'dbus.conf')
         # No activation directories: desktop portals must not mount into this

@@ -48,7 +48,7 @@ import threading
 import time
 
 from platform_smoke import private_runtime, stop, use_ibus_engine, wait_for_ibus_xim, wait_for_wm
-from sway_host import wait_for_sway_host
+from sway_host import wait_for_sway_host, sway_config
 
 # The probe's geometry (window points; probes run at scale 1).
 PAGE = (40, 40, 600, 400)
@@ -606,7 +606,7 @@ def wayland(args, output, private):
                                "Layout=\n\n[Groups/0/Items/1]\nName=pinyin\nLayout=\n\n[GroupOrder]\n0=Default\n")
         # The probe's window fills the output: its points are the output's.
         config = pathlib.Path(private, "sway.conf")
-        config.write_text("xwayland disable\nseat seat0 fallback true\noutput * mode 900x650\ndefault_border none\n"
+        sway_config(config, "xwayland disable\nseat seat0 fallback true\noutput * mode 900x650\ndefault_border none\n"
                           if not args.inspector else
                           # Room for the probe's large page and, clear of it,
                           # Web Inspector's own window.

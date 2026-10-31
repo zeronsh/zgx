@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Check native Wayland source-over alpha on an owned nested Sway compositor."""
-from sway_host import wait_for_openbox
+from sway_host import wait_for_openbox, sway_config
 import argparse
 import json
 import os
@@ -36,7 +36,7 @@ def main():
 
         try:
             config = Path(runtime, "sway.conf")
-            config.write_text('xwayland disable\nseat seat0 fallback true\n'
+            sway_config(config, 'xwayland disable\nseat seat0 fallback true\n'
                               'output * mode 1200x800\ndefault_border none\n'
                               'for_window [title="zgx transparency"] floating enable, '
                               'border none, resize set width 320 px height 240 px, '
