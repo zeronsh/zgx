@@ -630,6 +630,59 @@ fn glass_meshes_alike_but_for_their_textures_draw_their_own() {
 }
 
 #[test]
+fn a_clear_coat_shines_over_a_rough_surface() {
+    // Black chalk, the sun behind the camera: all but no highlight.
+    let (world, square) = one(facing_square(), Material::rgb(0x000000).with(0., 1.));
+    world.add_light(Light::Directional {
+        direction: vec3(0., 0., -1.),
+        color: [1., 1., 1.],
+        intensity: 3.,
+    });
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let centre = |window: &mut Window| {
+        window.draw();
+        window.pixel(50, 50)[0]
+    };
+    let bare = centre(&mut window);
+    // A smooth coat over it shines; a rough one less; none, as before.
+    let coat = Clearcoat::new(1.).roughness(0.3);
+    world.set_clearcoat(square, Some(coat));
+    assert_eq!(world.clearcoat(square), Some(coat));
+    let shining = centre(&mut window);
+    assert!(shining > bare + 60, "{bare} {shining}");
+    world.set_clearcoat(square, Some(Clearcoat::new(1.).roughness(0.8)));
+    let rough = centre(&mut window);
+    assert!(
+        rough < shining - 30 && rough > bare,
+        "{bare} {rough} {shining}"
+    );
+    world.set_clearcoat(square, Some(Clearcoat::new(0.)));
+    assert_eq!(world.clearcoat(square), None, "no coat is none");
+    assert_eq!(centre(&mut window), bare);
+}
+
+#[test]
+fn a_coated_glass_still_shows_what_is_behind_it() {
+    let (world, pane) = red_behind_glass(Material::rgb(0xffffff).with(0., 0.));
+    world.set_transmission(pane, Some(Transmission::new(1.)));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let bare = window.pixel(50, 50);
+    world.set_clearcoat(pane, Some(Clearcoat::new(1.)));
+    window.draw();
+    let coated = window.pixel(50, 50);
+    // Facing it, a coat reflects a twenty-fifth: red, all but as bright.
+    assert!(
+        coated[0] > 180 && coated[0] < bare[0] && coated[1] < 40,
+        "{bare:?} {coated:?}"
+    );
+}
+
+#[test]
 fn a_glass_tints_what_shows_through_by_its_colour() {
     // Yellow glass over red: red passes; cyan glass: nothing does.
     let shown = |color| {
@@ -1420,8 +1473,9 @@ fn an_alpha_cutoff_with_no_texture_draws_it_whole() {
 }
 
 /// What the floor shows under a flat square's left and right, under a sun
-/// straight above: its left half see-through, as `placement` puts its map.
-fn under_a_cut_out(placement: Option<MapPlacement>) -> Option<(u8, u8)> {
+/// straight above: its left half see-through, as `placement` puts its map,
+/// under `coat`.
+fn under_a_cut_out(placement: Option<MapPlacement>, coat: Option<Clearcoat>) -> Option<(u8, u8)> {
     let vertex = |x: f32, z: f32, u: f32| Vertex {
         position: [x, 0., z],
         normal: [0., 1., 0.],
@@ -1450,6 +1504,7 @@ fn under_a_cut_out(placement: Option<MapPlacement>) -> Option<(u8, u8)> {
     world.set_texture(caster, Some(Texture::from_rgba8(2, 1, pixels).unwrap()));
     world.set_alpha_cutoff(caster, Some(0.5));
     world.set_map_placement(caster, Map::BaseColour, placement);
+    world.set_clearcoat(caster, coat);
     world.add(Object::mesh(
         Geometry::plane(8., 8.),
         Material::rgb(0xffffff).with(0., 1.),
@@ -1468,20 +1523,27 @@ fn under_a_cut_out(placement: Option<MapPlacement>) -> Option<(u8, u8)> {
 
 #[test]
 fn a_cut_out_mesh_casts_a_cut_out_shadow() {
-    let Some((clear, solid)) = under_a_cut_out(None) else {
+    let Some((clear, solid)) = under_a_cut_out(None, None) else {
         return;
     };
     assert!(
         clear > solid + 30,
         "under the clear half {clear}, the solid half {solid}"
     );
+    // Coated, placed or not: bound as its mesh is.
+    let moved = Some(MapPlacement::new().offset(0.5, 0.));
+    for (placement, (clear_at, solid_at)) in [(None, (0, 1)), (moved, (1, 0))] {
+        let halves = under_a_cut_out(placement, Some(Clearcoat::new(1.))).unwrap();
+        let [clear, solid] = [clear_at, solid_at].map(|i| [halves.0, halves.1][i]);
+        assert!(clear > solid + 30, "coated: {clear} {solid}");
+    }
 }
 
 #[test]
 fn a_cut_out_shadow_falls_where_its_map_is_placed() {
     // Moved half across, the map's clear half is on the right.
     let moved = MapPlacement::new().offset(0.5, 0.);
-    let Some((solid, clear)) = under_a_cut_out(Some(moved)) else {
+    let Some((solid, clear)) = under_a_cut_out(Some(moved), None) else {
         return;
     };
     assert!(

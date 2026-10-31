@@ -215,6 +215,35 @@ impl Transmission {
         [f.to_bits(), i.to_bits(), t.to_bits(), d.to_bits(), r, g, b]
     }
 }
+/// A clear lacquer over a mesh (`World::set_clearcoat`): car paint, a
+/// varnished table, a glazed pot. It reflects as a thin coat of glass
+/// (index of refraction 1.5), smooth or rough as it says, and what is under
+/// it shows the less the more it reflects, by Fresnel (glTF's
+/// `KHR_materials_clearcoat`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Clearcoat {
+    pub(crate) factor: f32,
+    pub(crate) roughness: f32,
+}
+impl Clearcoat {
+    /// As much of a coat as `factor` (0 to 1), a mirror's smoothness.
+    pub fn new(factor: f32) -> Self {
+        Self {
+            factor: factor.clamp(0., 1.),
+            roughness: 0.,
+        }
+    }
+    /// Its roughness: 0 a mirror, 1 chalk.
+    pub fn roughness(mut self, roughness: f32) -> Self {
+        self.roughness = roughness.clamp(0., 1.);
+        self
+    }
+    /// Its numbers, for a binding to be found by.
+    pub(crate) fn numbers(&self) -> [u32; 2] {
+        [self.factor.to_bits(), self.roughness.to_bits()]
+    }
+}
 /// A point light's cone (`World::set_spot`): it shines along `direction`,
 /// fully within `inner` radians of it, fading to nothing at `outer`.
 #[non_exhaustive]
@@ -352,7 +381,8 @@ pub(crate) struct Inner {
     morph_weights: ByIndex<(u32, Vec<f32>)>,
     /// What few meshes have: their maps' placements
     /// (`World::set_map_placement`), transmission
-    /// (`World::set_transmission`) and its maps, by index, with the generation they were
+    /// (`World::set_transmission`) and its maps and clear coat
+    /// (`World::set_clearcoat`), by index, with the generation they were
     /// set for. One table, so a mesh's frame looks once.
     extras: ByIndex<(u32, Extras)>,
     /// Meshes' surfaces (`World::set_double_sided`, `set_alpha_cutoff`), by
@@ -434,6 +464,7 @@ pub(crate) struct Extras {
     /// Its maps' placements: all as they are if it has none.
     placements: Placements,
     pub(crate) transmission: Option<Transmission>,
+    pub(crate) clearcoat: Option<Clearcoat>,
     /// Its maps of light passing through (`Map::Transmission`'s,
     /// `Map::Thickness`'s).
     pub(crate) glass_maps: [Option<crate::Texture>; crate::texture::GLASS_MAPS],
@@ -1206,6 +1237,26 @@ impl World {
         let inner = self.inner.borrow();
         inner.live(id.index, id.generation)?;
         inner.extras(id.index as usize, id.generation)?.transmission
+    }
+    /// A clear coat over object `id` (`None`: none, as most). A mesh with
+    /// one draws with a pipeline of its own; others pay nothing.
+    pub fn set_clearcoat(&self, id: ObjectId, clearcoat: Option<Clearcoat>) {
+        let clearcoat = clearcoat.filter(|c| c.factor > 0.);
+        self.change(|inner| {
+            if inner.live(id.index, id.generation).is_none() {
+                return false;
+            }
+            let extras = inner.extras_mut(id.index, id.generation);
+            let before = std::mem::replace(&mut extras.clearcoat, clearcoat);
+            inner.tidy_extras(id.index);
+            before != clearcoat
+        });
+    }
+    /// Object `id`'s clear coat, if it has one.
+    pub fn clearcoat(&self, id: ObjectId) -> Option<Clearcoat> {
+        let inner = self.inner.borrow();
+        inner.live(id.index, id.generation)?;
+        inner.extras(id.index as usize, id.generation)?.clearcoat
     }
     /// Whether object `id`'s back faces draw too, lit as their other side
     /// is (a leaf, a sheet, an open shell). Off by default: a closed shape

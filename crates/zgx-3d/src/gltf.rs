@@ -103,23 +103,12 @@ struct ModelSkin {
 type Maps = [Option<Texture>; MODEL_MAPS.len()];
 /// Where they sit on it, in the same order.
 type Placements = [MapPlacement; crate::texture::MAPS];
+/// How light passes through a material, and its clear coat.
+type Layers = (Option<crate::Transmission>, Option<crate::Clearcoat>);
 /// A material, read.
-type Look = (
-    Material,
-    Maps,
-    Surface,
-    Placements,
-    Option<crate::Transmission>,
-);
+type Look = (Material, Maps, Surface, Placements, Layers);
 /// A primitive, read.
-type Mesh = (
-    Geometry,
-    Material,
-    Maps,
-    Surface,
-    Placements,
-    Option<crate::Transmission>,
-);
+type Mesh = (Geometry, Material, Maps, Surface, Placements, Layers);
 
 /// Deeper than this, a node tree is taken for a cycle.
 const MAX_DEPTH: usize = 256;
@@ -195,8 +184,8 @@ impl Model {
                 });
                 let placements: Placements =
                     std::array::from_fn(|i| map_placement(&doc, value, MAP_TEXTURES[i]));
-                let through = transmission(value);
-                (material(value), maps, surface(value), placements, through)
+                let layers = (transmission(value), clearcoat(value));
+                (material(value), maps, surface(value), placements, layers)
             })
             .collect::<Vec<_>>();
         let meshes = list(&doc, "meshes")
@@ -387,7 +376,7 @@ impl World {
             if let Some(&camera) = node.camera.and_then(|c| model.cameras.get(c)) {
                 cameras.push((id, camera));
             }
-            for (geometry, material, maps, surface, placements, through) in &node.meshes {
+            for (geometry, material, maps, surface, placements, (through, coat)) in &node.meshes {
                 let mesh = self.add(Object::mesh(geometry.clone(), *material).child_of(id));
                 if surface.double_sided {
                     self.set_double_sided(mesh, true);
@@ -397,6 +386,9 @@ impl World {
                 }
                 if through.is_some() {
                     self.set_transmission(mesh, *through);
+                }
+                if coat.is_some() {
+                    self.set_clearcoat(mesh, *coat);
                 }
                 for (map, texture) in MODEL_MAPS.into_iter().zip(maps) {
                     if texture.is_some() {
@@ -711,6 +703,21 @@ fn transmission(value: &Value) -> Option<crate::Transmission> {
     }
     Some(through)
 }
+/// A material's clear coat: `KHR_materials_clearcoat`'s factor and
+/// roughness (not yet its textures). `None` without one, or with no coat.
+fn clearcoat(value: &Value) -> Option<crate::Clearcoat> {
+    let coat = value.get("extensions")?.get("KHR_materials_clearcoat")?;
+    let number = |key: &str| {
+        let v = coat.get(key)?.as_f64()?;
+        v.is_finite().then_some(v as f32)
+    };
+    let factor = number("clearcoatFactor").unwrap_or(0.);
+    if factor <= 0. {
+        return None;
+    }
+    let roughness = number("clearcoatRoughnessFactor").unwrap_or(0.);
+    Some(crate::Clearcoat::new(factor).roughness(roughness))
+}
 fn surface(value: &Value) -> Surface {
     let masked = value.get("alphaMode").and_then(Value::as_str) == Some("MASK");
     let cutoff = value
@@ -995,7 +1002,7 @@ impl Reader<'_> {
             if normals.is_none() {
                 smooth_normals(&mut vertices, &indices);
             }
-            let (mut material, maps, surface, placements, through) = primitive
+            let (mut material, maps, surface, placements, layers) = primitive
                 .get("material")
                 .and_then(Value::as_u64)
                 .and_then(|m| materials.get(m as usize).cloned())
@@ -1011,7 +1018,7 @@ impl Reader<'_> {
                         Maps::default(),
                         Surface::default(),
                         Placements::default(),
-                        None,
+                        (None, None),
                     )
                 });
             let mut geometry =
@@ -1078,7 +1085,7 @@ impl Reader<'_> {
                     .with_morph_targets(targets)
                     .map_err(|e| ModelError(e.into()))?;
             }
-            out.push((geometry, material, maps, surface, placements, through));
+            out.push((geometry, material, maps, surface, placements, layers));
         }
         Ok(out)
     }
@@ -2089,7 +2096,7 @@ mod tests {
                 doc["materials"][0]["extensions"] = extensions;
             });
             let model = Model::from_bytes(&glb_of(&doc, &bin)).unwrap();
-            model.nodes[0].meshes[0].5
+            model.nodes[0].meshes[0].5.0
         };
         let glass = read(json!({
             "KHR_materials_transmission": { "transmissionFactor": 0.75 },
@@ -2117,6 +2124,29 @@ mod tests {
         let placed = world.place_model(&model);
         let mesh = placed.meshes[0][0];
         assert_eq!(world.transmission(mesh), Some(crate::Transmission::new(1.)));
+    }
+
+    #[test]
+    fn a_clear_coat_is_read_with_its_roughness() {
+        let coat = |extensions: Value| {
+            let (doc, bin) = square(json!([{ "mesh": 0 }]), |doc| {
+                doc["materials"][0]["extensions"] = extensions;
+            });
+            let model = Model::from_bytes(&glb_of(&doc, &bin)).unwrap();
+            let world = World::new();
+            let mesh = world.place_model(&model).meshes[0][0];
+            world.clearcoat(mesh)
+        };
+        let read = coat(json!({
+            "KHR_materials_clearcoat": {
+                "clearcoatFactor": 0.75,
+                "clearcoatRoughnessFactor": 0.25,
+            },
+        }));
+        assert_eq!(read, Some(crate::Clearcoat::new(0.75).roughness(0.25)));
+        // Its factor defaults to no coat at all.
+        assert_eq!(coat(json!({ "KHR_materials_clearcoat": {} })), None);
+        assert_eq!(coat(json!({})), None);
     }
 
     #[test]

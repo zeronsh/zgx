@@ -37,6 +37,10 @@ What a world takes beyond meshes and lights, each costing nothing until used:
   `Map::Thickness` vary how much passes and how deep it is. glTF models bring
   theirs (`KHR_materials_transmission`, `_ior`, `_volume`, with their textures). A
   world with none pays nothing.
+- **Clear coat**: `World::set_clearcoat(id, Some(Clearcoat::new(1.).roughness(0.1)))`
+  lacquers a mesh (car paint, varnish, glaze): a coat of glass reflects over it,
+  and what is under it shows the less the more the coat reflects. glTF models
+  bring theirs (`KHR_materials_clearcoat`'s factor and roughness).
 - **Lights that follow objects, and spots**: `World::set_light_parent(light, Some(id))`
   carries a light with an object, and `World::set_spot(light, Some(Spot::new(direction,
   inner, outer)))` makes a point light a spot. A frame shades with the eight point

@@ -84,6 +84,8 @@ struct Variant {
     colored: bool,
     /// Light passes through it (`World::set_transmission`).
     transmitting: bool,
+    /// A clear coat over it (`World::set_clearcoat`).
+    coated: bool,
 }
 /// Hashes a `Variant` by its own bits: they're few and its, and the
 /// pipelines are looked up a run a frame.
@@ -102,6 +104,9 @@ impl std::hash::Hasher for VariantHasher {
     fn write_u16(&mut self, bits: u16) {
         self.0 = u64::from(bits);
     }
+    fn write_u8(&mut self, bits: u8) {
+        self.0 = u64::from(bits);
+    }
 }
 impl std::hash::Hash for Variant {
     /// As one number: it keys the pipelines, looked up a run a frame, and
@@ -117,6 +122,7 @@ impl std::hash::Hash for Variant {
             placed,
             colored,
             transmitting,
+            coated,
         } = *self;
         let fields = [
             textured,
@@ -128,6 +134,7 @@ impl std::hash::Hash for Variant {
             placed,
             colored,
             transmitting,
+            coated,
         ];
         state.write_u16(fields.iter().fold(0, |bits, &on| bits << 1 | u16::from(on)));
     }
@@ -165,7 +172,7 @@ struct Gpu {
     variants: HashMap<Variant, [wgpu::RenderPipeline; 2], ByVariant>,
     /// Skinned, morphing, cut-out or cut-out and placed meshes' depth from
     /// the sun, by which of those, made with the first such shadow.
-    shadow_variants: HashMap<(bool, bool, bool, bool), wgpu::RenderPipeline>,
+    shadow_variants: HashMap<u8, wgpu::RenderPipeline, ByVariant>,
     shadow_layout: wgpu::BindGroupLayout,
     /// Group 1 of a skinned untextured pipeline: nothing.
     empty_layout: wgpu::BindGroupLayout,
@@ -208,8 +215,11 @@ struct Gpu {
     /// Group 1 with placements as well, and samplers wrapping other than
     /// by repeating: made with the first mesh needing them.
     placed_layout: Option<wgpu::BindGroupLayout>,
-    /// Group 1 with placements, transmission and what is behind as well,
-    /// for meshes light passes through: made with the first.
+    /// Group 1 with placements and a coat's or transmission's numbers as
+    /// well, for coated meshes: made with the first.
+    layered_layout: Option<wgpu::BindGroupLayout>,
+    /// Group 1 with what is behind as well, for meshes light passes
+    /// through: made with the first.
     glass_layout: Option<wgpu::BindGroupLayout>,
     /// What is behind meshes light passes through, kept while a world has
     /// any.
@@ -567,103 +577,12 @@ impl Viewport for Renderer {
                 continue;
             }
             let key = *key;
-            let stand_ins = gpu.stand_ins.get_or_insert_with(|| {
-                let flat = |rgba: [u8; 4], srgb| {
-                    let texture = crate::Texture::from_rgba8(1, 1, rgba.to_vec()).unwrap();
-                    upload(frame.device, frame.queue, &texture, srgb).expect("its pixels, held")
-                };
-                [
-                    flat([255; 4], true),
-                    flat([255; 4], false),
-                    flat([128, 128, 255, 255], false),
-                    flat([255; 4], true),
-                    flat([255; 4], false),
-                ]
-            });
-            let views = &gpu.views;
-            let (layout, sampler) = (&gpu.texture_layout, &gpu.texture_sampler);
-            let (placed_layout, wrapped) = (&mut gpu.placed_layout, &mut gpu.wrapped_samplers);
-            let (glass_layout, behind) = (&mut gpu.glass_layout, &gpu.behind);
-            let entry = gpu.bindings.entry(key).or_insert_with(|| {
-                let view = |i: usize| {
-                    d.maps[i]
-                        .and_then(|t| views.get(&(t.id(), crate::Map::ALL[i].srgb())))
-                        .map_or(&stand_ins[i], |(view, _)| view)
-                };
-                let wrap = wrap_of(d);
-                let sampler = if wrap == [crate::Wrap::Repeat; 2] {
-                    sampler
-                } else {
-                    wrapped
-                        .entry(wrap)
-                        .or_insert_with(|| texture_sampler(frame.device, wrap))
-                };
-                use wgpu::util::DeviceExt;
-                let uniform = |label, contents: &[u8]| {
-                    frame
-                        .device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some(label),
-                            contents,
-                            usage: wgpu::BufferUsages::UNIFORM,
-                        })
-                };
-                // A mesh light passes through binds placements too (as they
-                // are, if it has none) and what is behind it.
-                let glass = d
-                    .extras
-                    .and_then(|e| e.transmission.as_ref())
-                    .zip(behind.as_ref());
-                let placement = d.extras.and_then(|e| e.placement()).filter(|_| placed(d));
-                let rows = (placement.is_some() || glass.is_some()).then(|| {
-                    let rows = placement.copied().unwrap_or_default().map(|p| p.rows());
-                    uniform("3D map placements", bytemuck::cast_slice(&rows))
-                });
-                let glass = glass.map(|(transmission, behind)| {
-                    let t = transmission;
-                    let words = [
-                        [t.factor, t.ior, t.thickness, t.distance],
-                        [t.attenuation[0], t.attenuation[1], t.attenuation[2], 0.],
-                    ];
-                    let words = uniform("3D transmission", bytemuck::cast_slice(&words));
-                    // Its maps, uploaded for this binding alone (it keeps
-                    // them).
-                    let maps = d.extras.map(|e| &e.glass_maps);
-                    let glass_maps: [Option<wgpu::TextureView>; GLASS_MAPS] =
-                        std::array::from_fn(|i| {
-                            let texture = maps.and_then(|maps| maps[i].as_ref())?;
-                            upload(frame.device, frame.queue, texture, false)
-                        });
-                    (words, &behind.whole, &behind.sampler, glass_maps)
-                });
-                let layout = match (&glass, &rows) {
-                    (Some(_), _) => {
-                        glass_layout.get_or_insert_with(|| map_layout(frame.device, true, true))
-                    }
-                    (None, Some(_)) => {
-                        placed_layout.get_or_insert_with(|| map_layout(frame.device, true, false))
-                    }
-                    (None, None) => layout,
-                };
-                // White where it has none: all passing, as thick as its
-                // transmission says.
-                let glass = glass.as_ref().map(|(words, view, sampler, maps)| {
-                    let maps = maps.each_ref().map(|m| m.as_ref().unwrap_or(&stand_ins[1]));
-                    (words, *view, *sampler, maps)
-                });
-                (
-                    map_binding(
-                        frame.device,
-                        layout,
-                        sampler,
-                        std::array::from_fn(view),
-                        rows.as_ref(),
-                        glass,
-                    ),
-                    0,
-                )
-            });
-            entry.1 = gpu.frame;
+            if let Some(entry) = gpu.bindings.get_mut(&key) {
+                entry.1 = gpu.frame;
+                continue;
+            }
+            let binding = make_binding(gpu, frame.device, frame.queue, d);
+            gpu.bindings.insert(key, (binding, gpu.frame));
         }
         let now = gpu.frame;
         gpu.geometries
@@ -674,18 +593,26 @@ impl Viewport for Renderer {
 
         // Runs of one geometry and texture, of one pass (opaque, then
         // translucent).
-        let variant_of = |d: &crate::world::Drawn| Variant {
-            // Light passing through it reads group 1: maps or stand-ins.
-            textured: transmitting(d) || d.maps.iter().any(Option::is_some),
-            skinned: skinned(d),
-            lit,
-            morphing: morphing(d),
-            two_sided: d.surface.double_sided,
-            // Cut by a base colour texture's alpha: without one, whole.
-            masked: d.surface.alpha_cutoff.is_some() && d.maps[0].is_some(),
-            placed: placed(d),
-            colored: d.geometry.colors().is_some(),
-            transmitting: transmitting(d),
+        let variant_of = |d: &crate::world::Drawn| {
+            // Its extras looked at once.
+            let (transmitting, coated) = d.extras.map_or((false, false), |e| {
+                (e.transmission.is_some(), e.clearcoat.is_some())
+            });
+            Variant {
+                // Light passing through it, or a coat, reads group 1: maps or
+                // stand-ins.
+                textured: transmitting || coated || d.maps.iter().any(Option::is_some),
+                skinned: skinned(d),
+                lit,
+                morphing: morphing(d),
+                two_sided: d.surface.double_sided,
+                // Cut by a base colour texture's alpha: without one, whole.
+                masked: d.surface.alpha_cutoff.is_some() && d.maps[0].is_some(),
+                placed: placed(d),
+                colored: d.geometry.colors().is_some(),
+                transmitting,
+                coated,
+            }
         };
         // Of one geometry and maps, a world without poses or surfaces has
         // one variant.
@@ -742,24 +669,8 @@ impl Viewport for Renderer {
         });
         if casting.is_some() {
             for run in runs.iter() {
-                let Variant {
-                    skinned,
-                    morphing,
-                    masked,
-                    placed,
-                    transmitting,
-                    ..
-                } = run.variant;
-                // A mesh light passes through casts its whole shadow (its
-                // binding isn't a cut-out shadow's).
-                let masked = masked && !transmitting;
-                // Only a cut-out shadow reads a map.
-                let placed = masked && placed;
-                let key = (skinned, morphing, masked, placed);
-                if run.glass
-                    || key == (false, false, false, false)
-                    || gpu.shadow_variants.contains_key(&key)
-                {
+                let key = shadow_key(run.variant);
+                if run.glass || key == 0 || gpu.shadow_variants.contains_key(&key) {
                     continue;
                 }
                 make_shadow_pipeline(gpu, frame.device, run.variant);
@@ -790,21 +701,11 @@ impl Viewport for Renderer {
             for run in runs.iter().filter(|run| !run.glass) {
                 let buffers = &gpu.geometries[&run.geometry];
                 let Variant {
-                    skinned,
-                    morphing,
-                    masked,
-                    placed,
-                    transmitting,
-                    ..
+                    skinned, morphing, ..
                 } = run.variant;
-                // A mesh light passes through casts its whole shadow (its
-                // binding isn't a cut-out shadow's).
-                let masked = masked && !transmitting;
-                let placed = masked && placed;
-                match gpu
-                    .shadow_variants
-                    .get(&(skinned, morphing, masked, placed))
-                {
+                let key = shadow_key(run.variant);
+                let (masked, placed) = (key & CUT_OUT != 0, key & PLACED != 0);
+                match gpu.shadow_variants.get(&key) {
                     Some(pipeline) => {
                         pass.set_pipeline(pipeline);
                         let maps = gpu.bindings.get(&run.maps).filter(|_| masked);
@@ -981,6 +882,24 @@ fn morph_block(d: &crate::world::Drawn, palette: &mut Vec<[[f32; 4]; 4]>) {
     }
 }
 
+/// A shadow pipeline's bits (`shadow_key`).
+const CUT_OUT: u8 = 4;
+const PLACED: u8 = 8;
+/// What sets `variant`'s shadow pipeline apart, as one number (looked up a
+/// run a frame): skinned, morphing, cut out (`CUT_OUT`) and, cut out,
+/// placed (`PLACED`) and coated, its maps bound as its mesh's. A mesh light
+/// passes through casts its whole shadow (its binding isn't a cut-out
+/// shadow's).
+#[inline(always)]
+fn shadow_key(variant: Variant) -> u8 {
+    let masked = variant.masked && !variant.transmitting;
+    let bit = |on: bool, bit: u8| if on { bit } else { 0 };
+    bit(variant.skinned, 1)
+        | bit(variant.morphing, 2)
+        | bit(masked, CUT_OUT)
+        | bit(masked && variant.placed, PLACED)
+        | bit(masked && variant.coated, 16)
+}
 /// A skinned, morphing or cut-out shadow's pipeline for `variant`'s meshes.
 /// Made once, rarely: out of the frame's code.
 #[cold]
@@ -992,12 +911,14 @@ fn make_shadow_pipeline(gpu: &mut Gpu, device: &wgpu::Device, variant: Variant) 
         masked,
         placed,
         transmitting,
+        coated,
         ..
     } = variant;
+    let key = shadow_key(variant);
     // A mesh light passes through casts its whole shadow.
     let masked = masked && !transmitting;
     let placed = masked && placed;
-    let key = (skinned, morphing, masked, placed);
+    let coated = masked && coated;
     let variant = Variant {
         textured: masked,
         skinned,
@@ -1010,11 +931,16 @@ fn make_shadow_pipeline(gpu: &mut Gpu, device: &wgpu::Device, variant: Variant) 
         label: Some("3D skinned, morphing or cut-out shadows"),
         source: wgpu::ShaderSource::Wgsl(wgsl(variant, 1).into()),
     });
-    let group1 = match &gpu.placed_layout {
-        Some(layout) if placed => layout,
-        _ if masked => &gpu.texture_layout,
-        _ => &gpu.empty_layout,
+    // A cut-out shadow binds its mesh's maps, as its mesh does.
+    let extent = if coated {
+        Some(Extent::Layered)
+    } else if placed {
+        Some(Extent::Placed)
+    } else {
+        masked.then_some(Extent::Maps)
     };
+    make_layout(gpu, device, extent);
+    let group1 = layout_of(gpu, extent);
     let layouts = [
         Some(&gpu.shadow_layout),
         Some(group1),
@@ -1038,22 +964,21 @@ fn make_main_pipelines(gpu: &mut Gpu, device: &wgpu::Device, variant: Variant) {
         label: Some("3D mesh variant"),
         source: wgpu::ShaderSource::Wgsl(wgsl(variant, gpu.samples).into()),
     });
+    let extent = if variant.transmitting {
+        Some(Extent::Glass)
+    } else if variant.coated {
+        Some(Extent::Layered)
+    } else if variant.placed {
+        Some(Extent::Placed)
+    } else {
+        variant.textured.then_some(Extent::Maps)
+    };
+    make_layout(gpu, device, extent);
     let group0 = match &gpu.environment_layout {
         Some((layout, _)) if variant.lit => layout,
         _ => &gpu.layout,
     };
-    if variant.transmitting && gpu.glass_layout.is_none() {
-        gpu.glass_layout = Some(map_layout(device, true, true));
-    }
-    if variant.placed && gpu.placed_layout.is_none() {
-        gpu.placed_layout = Some(map_layout(device, true, false));
-    }
-    let group1 = match (&gpu.glass_layout, &gpu.placed_layout) {
-        (Some(layout), _) if variant.transmitting => layout,
-        (_, Some(layout)) if variant.placed => layout,
-        _ if variant.textured => &gpu.texture_layout,
-        _ => &gpu.empty_layout,
-    };
+    let group1 = layout_of(gpu, extent);
     let layouts = [
         Some(group0),
         Some(group1),
@@ -1376,10 +1301,6 @@ struct Out {
 }
 "#;
 
-/// Whether light passes through `d`.
-fn transmitting(d: &crate::world::Drawn) -> bool {
-    d.extras.is_some_and(|e| e.transmission.is_some())
-}
 /// Whether any of `d`'s maps reads other than its first coordinates as they
 /// are: those need the placed pipelines, a wrap alone only a sampler.
 fn placed(d: &crate::world::Drawn) -> bool {
@@ -1414,25 +1335,40 @@ fn map_set(d: &crate::world::Drawn) -> [u64; MAPS] {
     {
         maps[0] ^= placement_key(placement);
     }
-    // Light passing through binds group 1 with maps or without (never 0).
-    if let Some(transmission) = &extras.transmission {
-        let numbers = transmission.numbers();
-        let key = numbers.iter().fold(0x8422_2325_cbf2_9ce4, |key, number| {
-            (key ^ u64::from(*number)).wrapping_mul(0x0100_0000_01b3)
-        });
-        // And its maps.
-        let key = extras.glass_maps.iter().fold(key, |key, map| {
-            let id = map.as_ref().map_or(0, crate::Texture::id);
-            (key ^ id).wrapping_mul(0x0100_0000_01b3)
-        });
+    // Light passing through or a coat binds group 1 with maps or without
+    // (never 0).
+    if extras.transmission.is_some() || extras.clearcoat.is_some() {
         // Mixed in whole (a bit set over it made two textures whose ids
         // differ in that bit alone one binding), and never all 0.
-        maps[0] ^= key;
+        maps[0] ^= layers_key(extras);
         if maps == [0; MAPS] {
             maps[0] = 1;
         }
     }
     maps
+}
+/// A number for how light passes through a mesh and its maps, and for its
+/// coat. Few meshes have either: out of `map_set`'s code.
+#[cold]
+#[inline(never)]
+fn layers_key(extras: &crate::world::Extras) -> u64 {
+    let mut key = 0x8422_2325_cbf2_9ce4_u64;
+    let mut mix = |number: u64| key = (key ^ number).wrapping_mul(0x0100_0000_01b3);
+    if let Some(transmission) = &extras.transmission {
+        transmission
+            .numbers()
+            .into_iter()
+            .for_each(|n| mix(n.into()));
+        for map in &extras.glass_maps {
+            mix(map.as_ref().map_or(0, crate::Texture::id));
+        }
+    }
+    if let Some(clearcoat) = &extras.clearcoat {
+        // Apart from a transmission's numbers.
+        mix(0xc0a7);
+        clearcoat.numbers().into_iter().for_each(|n| mix(n.into()));
+    }
+    key
 }
 /// A number for what `placement` says, never 0.
 fn placement_key(placement: &[crate::MapPlacement; MAPS]) -> u64 {
@@ -1770,7 +1706,7 @@ impl Gpu {
         });
         let stand_in = depth_map(device, 1, "3D shadow stand-in");
         let bind = frame_binding(device, &layout, &uniforms, &stand_in, &sampler, None);
-        let texture_layout = map_layout(device, false, false);
+        let texture_layout = map_layout(device, Extent::Maps);
         let texture_sampler = texture_sampler(device, [crate::Wrap::Repeat; 2]);
         let plain = main_pipelines(
             device,
@@ -1835,7 +1771,7 @@ impl Gpu {
             environment_layout: None,
             environment: None,
             environment_bind: None,
-            shadow_variants: HashMap::new(),
+            shadow_variants: HashMap::default(),
             shadow_layout,
             empty_layout,
             empty_bind,
@@ -1854,6 +1790,7 @@ impl Gpu {
             texture_layout,
             texture_sampler,
             placed_layout: None,
+            layered_layout: None,
             glass_layout: None,
             behind: None,
             wrapped_samplers: HashMap::new(),
@@ -1886,7 +1823,8 @@ const COLOR_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![15
 /// (its targets), `//P ` either's (the frame's joints and weights), `//E `
 /// an environment-lit one's (its cube and diffuse light), `//U ` a placed
 /// one's (its maps' placements and second coordinates), `//C ` a colored
-/// one's (its vertex colours), `//G ` one light passes through's, `//K ` a
+/// one's (its vertex colours), `//G ` one light passes through's, `//L ` a
+/// coated one's, `//W ` either's (their numbers), `//K ` a
 /// cut-out one's and `//N ` any other's, and `//A ` a multisampled one's
 /// (geometric specular anti-aliasing). (A cut-out or placed one is
 /// textured; a line with two prefixes is for a variant with both.) Only
@@ -1905,6 +1843,8 @@ fn wgsl(variant: Variant, samples: u32) -> String {
         b'U' => variant.placed,
         b'C' => variant.colored,
         b'G' => variant.transmitting,
+        b'L' => variant.coated,
+        b'W' => variant.transmitting || variant.coated,
         b'K' => variant.masked,
         b'N' => !variant.masked,
         b'A' => samples > 1,
@@ -1931,80 +1871,202 @@ fn wgsl(variant: Variant, samples: u32) -> String {
     }
     source
 }
-/// Group 1's layout: the maps, their sampler and, `placed`, their
-/// placements; `glass`, how light passes through and what is behind.
-fn map_layout(device: &wgpu::Device, placed: bool, glass: bool) -> wgpu::BindGroupLayout {
-    let mut entries: Vec<wgpu::BindGroupLayoutEntry> = (0..MAPS as u32)
-        .map(|binding| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
+/// Group 1 for `d`: its maps, against stand-ins where one is missing, and
+/// whatever else its pipeline binds. Made once a set of maps, rarely: out
+/// of the frame's code.
+#[cold]
+#[inline(never)]
+fn make_binding(
+    gpu: &mut Gpu,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    d: &crate::world::Drawn,
+) -> wgpu::BindGroup {
+    let stand_ins = gpu.stand_ins.get_or_insert_with(|| {
+        let flat = |rgba: [u8; 4], srgb| {
+            let texture = crate::Texture::from_rgba8(1, 1, rgba.to_vec()).unwrap();
+            upload(device, queue, &texture, srgb).expect("its pixels, held")
+        };
+        [
+            flat([255; 4], true),
+            flat([255; 4], false),
+            flat([128, 128, 255, 255], false),
+            flat([255; 4], true),
+            flat([255; 4], false),
+        ]
+    });
+    let views = &gpu.views;
+    let (layout, sampler) = (&gpu.texture_layout, &gpu.texture_sampler);
+    let (placed_layout, wrapped) = (&mut gpu.placed_layout, &mut gpu.wrapped_samplers);
+    let (layered_layout, glass_layout) = (&mut gpu.layered_layout, &mut gpu.glass_layout);
+    let behind = &gpu.behind;
+    let view = |i: usize| {
+        d.maps[i]
+            .and_then(|t| views.get(&(t.id(), crate::Map::ALL[i].srgb())))
+            .map_or(&stand_ins[i], |(view, _)| view)
+    };
+    let wrap = wrap_of(d);
+    let sampler = if wrap == [crate::Wrap::Repeat; 2] {
+        sampler
+    } else {
+        wrapped
+            .entry(wrap)
+            .or_insert_with(|| texture_sampler(device, wrap))
+    };
+    use wgpu::util::DeviceExt;
+    let uniform = |label, contents: &[u8]| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents,
+            usage: wgpu::BufferUsages::UNIFORM,
         })
-        .collect();
-    entries.push(wgpu::BindGroupLayoutEntry {
-        binding: MAPS as u32,
-        visibility: wgpu::ShaderStages::FRAGMENT,
+    };
+    // A mesh light passes through, or with a coat, binds
+    // placements too (as they are, if it has none) and their
+    // numbers; one light passes through, what is behind it.
+    let glass = d
+        .extras
+        .and_then(|e| e.transmission.as_ref())
+        .zip(behind.as_ref());
+    let coat = d.extras.and_then(|e| e.clearcoat.as_ref());
+    let placement = d.extras.and_then(|e| e.placement()).filter(|_| placed(d));
+    let layered = glass.is_some() || coat.is_some();
+    let rows = (placement.is_some() || layered).then(|| {
+        let rows = placement.copied().unwrap_or_default().map(|p| p.rows());
+        uniform("3D map placements", bytemuck::cast_slice(&rows))
+    });
+    let words = layered.then(|| {
+        let (a, b) = glass.map_or(([0.; 4], [0.; 4]), |(t, _)| {
+            (
+                [t.factor, t.ior, t.thickness, t.distance],
+                [t.attenuation[0], t.attenuation[1], t.attenuation[2], 0.],
+            )
+        });
+        let c = coat.map_or([0.; 4], |c| [c.factor, c.roughness, 0., 0.]);
+        uniform("3D layers", bytemuck::cast_slice(&[a, b, c]))
+    });
+    let glass = glass.map(|(_, behind)| {
+        // Its maps, uploaded for this binding alone (it keeps
+        // them).
+        let maps = d.extras.map(|e| &e.glass_maps);
+        let glass_maps: [Option<wgpu::TextureView>; GLASS_MAPS] = std::array::from_fn(|i| {
+            let texture = maps.and_then(|maps| maps[i].as_ref())?;
+            upload(device, queue, texture, false)
+        });
+        (&behind.whole, &behind.sampler, glass_maps)
+    });
+    let layout = if glass.is_some() {
+        glass_layout.get_or_insert_with(|| map_layout(device, Extent::Glass))
+    } else if layered {
+        layered_layout.get_or_insert_with(|| map_layout(device, Extent::Layered))
+    } else if rows.is_some() {
+        placed_layout.get_or_insert_with(|| map_layout(device, Extent::Placed))
+    } else {
+        layout
+    };
+    // White where it has none: all passing, as thick as its
+    // transmission says.
+    let glass = glass.as_ref().map(|(view, sampler, maps)| {
+        let maps = maps.each_ref().map(|m| m.as_ref().unwrap_or(&stand_ins[1]));
+        (*view, *sampler, maps)
+    });
+    map_binding(
+        device,
+        layout,
+        sampler,
+        std::array::from_fn(view),
+        rows.as_ref(),
+        words.as_ref(),
+        glass,
+    )
+}
+/// Group 1's layout as far as `extent`, made if no pipeline has it yet.
+fn make_layout(gpu: &mut Gpu, device: &wgpu::Device, extent: Option<Extent>) {
+    let layout = match extent {
+        Some(Extent::Placed) => &mut gpu.placed_layout,
+        Some(Extent::Layered) => &mut gpu.layered_layout,
+        Some(Extent::Glass) => &mut gpu.glass_layout,
+        Some(Extent::Maps) | None => return,
+    };
+    if let Some(extent) = extent {
+        layout.get_or_insert_with(|| map_layout(device, extent));
+    }
+}
+/// Group 1's layout as far as `extent` (`None`: nothing), made
+/// (`make_layout`).
+fn layout_of(gpu: &Gpu, extent: Option<Extent>) -> &wgpu::BindGroupLayout {
+    fn made(layout: &Option<wgpu::BindGroupLayout>) -> &wgpu::BindGroupLayout {
+        layout.as_ref().expect("made")
+    }
+    match extent {
+        None => &gpu.empty_layout,
+        Some(Extent::Maps) => &gpu.texture_layout,
+        Some(Extent::Placed) => made(&gpu.placed_layout),
+        Some(Extent::Layered) => made(&gpu.layered_layout),
+        Some(Extent::Glass) => made(&gpu.glass_layout),
+    }
+}
+/// How much group 1 binds: each extent all of the one before and more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Extent {
+    /// The maps and their sampler.
+    Maps,
+    /// Their placements as well.
+    Placed,
+    /// The numbers of a coat or of light passing through as well.
+    Layered,
+    /// What is behind a mesh light passes through, and its maps, as well.
+    Glass,
+}
+/// Group 1's layout, as far as `extent`.
+fn map_layout(device: &wgpu::Device, extent: Extent) -> wgpu::BindGroupLayout {
+    let fragment = wgpu::ShaderStages::FRAGMENT;
+    let texture = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: fragment,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
+    let uniform = |binding, visibility| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let sampler = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: fragment,
         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
         count: None,
-    });
-    if placed {
-        entries.push(wgpu::BindGroupLayoutEntry {
-            binding: MAPS as u32 + 1,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        });
+    };
+    let mut entries: Vec<wgpu::BindGroupLayoutEntry> = (0..MAPS as u32).map(texture).collect();
+    entries.push(sampler(MAPS as u32));
+    if extent >= Extent::Placed {
+        entries.push(uniform(
+            MAPS as u32 + 1,
+            wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ));
     }
-    if glass {
-        let fragment = wgpu::ShaderStages::FRAGMENT;
+    if extent >= Extent::Layered {
+        entries.push(uniform(MAPS as u32 + 2, fragment));
+    }
+    if extent >= Extent::Glass {
+        // What is behind, its sampler, and its maps: how much passes, how
+        // thick.
         entries.extend([
-            wgpu::BindGroupLayoutEntry {
-                binding: MAPS as u32 + 2,
-                visibility: fragment,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: MAPS as u32 + 3,
-                visibility: fragment,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: MAPS as u32 + 4,
-                visibility: fragment,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
+            texture(MAPS as u32 + 3),
+            sampler(MAPS as u32 + 4),
+            texture(MAPS as u32 + 5),
+            texture(MAPS as u32 + 6),
         ]);
-        // Its maps: how much passes, how thick.
-        entries.extend((5..7).map(|binding| wgpu::BindGroupLayoutEntry {
-            binding: MAPS as u32 + binding,
-            visibility: fragment,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        }));
     }
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("3D maps"),
@@ -2214,8 +2276,8 @@ fn map_binding(
     sampler: &wgpu::Sampler,
     maps: [&wgpu::TextureView; MAPS],
     placements: Option<&wgpu::Buffer>,
+    layers: Option<&wgpu::Buffer>,
     glass: Option<(
-        &wgpu::Buffer,
         &wgpu::TextureView,
         &wgpu::Sampler,
         [&wgpu::TextureView; GLASS_MAPS],
@@ -2236,15 +2298,15 @@ fn map_binding(
             binding: MAPS as u32 + 1,
             resource: buffer.as_entire_binding(),
         }))
+        .chain(layers.map(|buffer| wgpu::BindGroupEntry {
+            binding: MAPS as u32 + 2,
+            resource: buffer.as_entire_binding(),
+        }))
         .chain(
             glass
                 .into_iter()
-                .flat_map(|(words, behind, sampler, [passing, thick])| {
+                .flat_map(|(behind, sampler, [passing, thick])| {
                     [
-                        wgpu::BindGroupEntry {
-                            binding: MAPS as u32 + 2,
-                            resource: words.as_entire_binding(),
-                        },
                         wgpu::BindGroupEntry {
                             binding: MAPS as u32 + 3,
                             resource: wgpu::BindingResource::TextureView(behind),
@@ -2432,13 +2494,15 @@ struct Frame {
 //U     let uv = vec3(select(first, second, p.u.w > 0.5), 1.0);
 //U     return vec2(dot(p.u.xyz, uv), dot(p.v.xyz, uv));
 //U }
-//G struct Glass {
-//G     // How much passes through, its index of refraction, thickness and
-//G     // attenuation distance; its attenuation colour.
-//G     a: vec4<f32>,
-//G     b: vec4<f32>,
-//G }
-//G @group(1) @binding(7) var<uniform> glass: Glass;
+//W struct Layers {
+//W     // How much passes through, its index of refraction, thickness and
+//W     // attenuation distance; its attenuation colour; how much coat and
+//W     // how rough.
+//W     a: vec4<f32>,
+//W     b: vec4<f32>,
+//W     coat: vec4<f32>,
+//W }
+//W @group(1) @binding(7) var<uniform> layers: Layers;
 //G @group(1) @binding(8) var behind: texture_2d<f32>;
 //G @group(1) @binding(9) var behind_sampler: sampler;
 //G @group(1) @binding(10) var transmission_texture: texture_2d<f32>;
@@ -2447,8 +2511,8 @@ struct Frame {
 //G // the index of refraction through the thickness (`scale` its mesh's),
 //G // blurred as rough as the surface, the light lost on the way taken out.
 //G fn through(world: vec3<f32>, n: vec3<f32>, v: vec3<f32>, roughness: f32, scale: f32) -> vec3<f32> {
-//G     let ior = glass.a.y;
-//G     let ray = normalize(refract(-v, n, 1.0 / ior)) * glass.a.z * scale;
+//G     let ior = layers.a.y;
+//G     let ray = normalize(refract(-v, n, 1.0 / ior)) * layers.a.z * scale;
 //G     let seen = frame.view_projection * vec4(world + ray, 1.0);
 //G     let uv = vec2(0.5, -0.5) * seen.xy / seen.w + 0.5;
 //G     let level = f32(textureNumLevels(behind) - 1u) * roughness * clamp(ior * 2.0 - 2.0, 0.0, 1.0);
@@ -2457,7 +2521,7 @@ struct Frame {
 //G         color = decode(color);
 //G     }
 //G     // Beer's law: falling to the attenuation colour every distance.
-//G     let lost = -log(glass.b.rgb) / glass.a.w;
+//G     let lost = -log(layers.b.rgb) / layers.a.w;
 //G     return color * exp(-lost * length(ray));
 //G }
 //P @group(2) @binding(0) var<storage, read> palette: array<mat4x4<f32>>;
@@ -2744,14 +2808,19 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
         if !front {
             n = -n;
         }
+        // A coat lies smooth over what its normal map bumps.
+//L         let coat_n = n;
 //T         n = bumped(n, dpx, dpy, duvx, duvy, bump);
         let v = normalize(frame.camera.xyz - in.world);
         let metallic = in.material.x * surface.b;
         let given = clamp(in.material.y * surface.g, 0.02, 1.0);
         let a = given * given;
         let roughness = sqrt(sqrt(clamp(a * a + widening, 0.0, 1.0)));
+//L         let coat_given = clamp(layers.coat.y, 0.02, 1.0);
+//L         let coat_a = coat_given * coat_given;
+//L         let coat_rough = sqrt(sqrt(clamp(coat_a * coat_a + widening, 0.0, 1.0)));
         // What passes through takes the place of its diffuse light.
-//G         let see_through = glass.a.x * passing * (1.0 - metallic);
+//G         let see_through = layers.a.x * passing * (1.0 - metallic);
 //G         let tinted = base;
 //G         base *= 1.0 - see_through;
         var sun = frame.sun_color.rgb;
@@ -2759,6 +2828,8 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
             sun *= sunlit(in.world, n);
         }
         lit = shade(base, metallic, roughness, n, v, -frame.sun_direction.xyz, sun);
+        // A coat's own highlights: glass's (a black dielectric's alone).
+//L         var coat_lit = shade(vec3(0.0), 0.0, coat_rough, coat_n, v, -frame.sun_direction.xyz, sun);
         for (var i = 0u; i < u32(frame.params.x); i++) {
             let light = frame.points[i];
             let to = light[0].xyz - in.world;
@@ -2767,6 +2838,7 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
             // Within a spot's cone (all round: 1).
             let cone = clamp(dot(light[2].xyz, -to / distance) + light[2].w, 0.0, 1.0);
             lit += shade(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
+//L             coat_lit += shade(vec3(0.0), 0.0, coat_rough, coat_n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
         }
         // Ambient light: the hemisphere seen by the surface for its diffuse
         // part, and along its reflection, by Fresnel, for its specular one
@@ -2788,11 +2860,22 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
 //E     surround = (surround + along * reflectance(f0, roughness, n_v)) * frame.environment.x;
         lit += surround * occlusion;
         lit += in.emissive * glow;
+        // A coat reflects its surroundings as glass, and what is under it
+        // (its light included) shows the less the more it reflects.
+//L         let coat_r = reflect(-v, coat_n);
+//L         let coat_n_v = max(dot(coat_n, v), 0.0);
+//L         let coat_rough2 = coat_rough * coat_rough;
+//L         let coat_fresnel = 0.04 + (max(1.0 - coat_rough2, 0.04) - 0.04) * pow(1.0 - coat_n_v, 5.0);
+//L         var coat_around = mix(frame.ground.rgb, frame.sky.rgb, coat_r.y * 0.5 + 0.5) * coat_fresnel * (1.0 - 0.5 * coat_rough2);
+//E //L     coat_around = textureSampleLevel(environment_cube, environment_sampler, turned(coat_r), coat_rough * frame.environment.w).rgb * reflectance(vec3(0.04), coat_rough, coat_n_v) * frame.environment.x;
+//W         var under = 1.0;
+//L         under = 1.0 - layers.coat.x * (0.04 + 0.96 * pow(1.0 - coat_n_v, 5.0));
+//L         lit = lit * under + layers.coat.x * (coat_lit + coat_around * occlusion);
         lit = tone_map(lit * frame.params.z);
         // What shows through, behind already mapped, less what reflects.
-//G         let facing_f0 = pow((glass.a.y - 1.0) / (glass.a.y + 1.0), 2.0);
+//G         let facing_f0 = pow((layers.a.y - 1.0) / (layers.a.y + 1.0), 2.0);
 //G         let reflects = facing_f0 + (1.0 - facing_f0) * pow(1.0 - n_v, 5.0);
-//G         lit += through(in.world, n, v, roughness, in.scale * thick) * tinted * see_through * (1.0 - reflects);
+//G         lit += through(in.world, n, v, roughness, in.scale * thick) * tinted * see_through * (1.0 - reflects) * under;
     }
     if frame.params.y > 0.5 {
         lit = encode(clamp(lit, vec3(0.0), vec3(1.0)));
@@ -2862,7 +2945,8 @@ mod tests {
                 "second_uv",
                 "vertex_color",
                 "behind",
-                "glass.",
+                "layers.",
+                "coat",
                 "discard",
             ] {
                 assert!(!line.contains(name), "{line}");
@@ -2890,6 +2974,13 @@ mod tests {
         });
         assert!(glass.contains("var thickness_texture: texture_2d<f32>"));
         assert!(!textured.contains("thickness_texture"));
+        let coated = source(|v| {
+            v.textured = true;
+            v.coated = true;
+        });
+        assert!(coated.contains("var<uniform> layers: Layers"));
+        assert!(coated.contains("coat_lit") && !coated.contains("behind"));
+        assert!(glass.contains("var<uniform> layers: Layers") && !glass.contains("coat_lit"));
     }
 
     #[test]

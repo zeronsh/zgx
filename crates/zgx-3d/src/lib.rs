@@ -58,6 +58,6 @@ pub use orbit::{Answer, Orbit, OrbitControls};
 pub use pick::Hit;
 pub use texture::{Map, MapPlacement, Texture, Wrap};
 pub use world::{
-    Camera, Light, LightId, MAX_JOINTS, Material, Object, ObjectId, POINT_LIGHTS, Skin, Spot,
-    ToneMapping, Transmission, World, srgb_to_linear,
+    Camera, Clearcoat, Light, LightId, MAX_JOINTS, Material, Object, ObjectId, POINT_LIGHTS, Skin,
+    Spot, ToneMapping, Transmission, World, srgb_to_linear,
 };
