@@ -14626,6 +14626,16 @@ pub fn shader_modules() -> Vec<(&'static str, String)> {
             "layer shader",
             filter_source("fn layer(input:LayerInput)->vec4<f32> { return input.color; }"),
         ),
+        // zgx's own: every app with a radial gradient or a CSS colour
+        // filter compiles them, so FXC must as any built-in.
+        (
+            "radial fill",
+            fill_source(zgx::decoration::radial_shader().source()),
+        ),
+        (
+            "colour filter",
+            filter_source(zgx::decoration::color_filter_shader().source()),
+        ),
         ("blur", include_str!("blur.wgsl").to_owned()),
         (
             "blur, dual-source",
