@@ -12,24 +12,25 @@ use winit::{
 };
 use x11_dl::xlib;
 
-/// Have winit handle what it queued for `window`'s X11 connection now.
-pub(crate) fn nudge(window: &Window) {
+/// Xlib, and `window`'s display and X window, if it is an X11 window.
+fn raw(window: &Window) -> Option<(&'static xlib::Xlib, *mut xlib::Display, xlib::Window)> {
     static XLIB: OnceLock<Option<xlib::Xlib>> = OnceLock::new();
-    let Some(x) = XLIB.get_or_init(|| xlib::Xlib::open().ok()) else {
-        return;
-    };
+    let x = XLIB.get_or_init(|| xlib::Xlib::open().ok()).as_ref()?;
     let (Ok(display), Ok(handle)) = (window.display_handle(), window.window_handle()) else {
-        return;
+        return None;
     };
     let (RawDisplayHandle::Xlib(display), RawWindowHandle::Xlib(handle)) =
         (display.as_raw(), handle.as_raw())
     else {
+        return None;
+    };
+    Some((x, display.display?.as_ptr().cast(), handle.window))
+}
+/// Have winit handle what it queued for `window`'s X11 connection now.
+pub(crate) fn nudge(window: &Window) {
+    let Some((x, display, xwindow)) = raw(window) else {
         return;
     };
-    let Some(display) = display.display else {
-        return;
-    };
-    let display = display.as_ptr().cast::<xlib::Display>();
     // SAFETY: winit's display, open while `window` (which holds winit's
     // connection) is borrowed, on the thread that runs its event loop
     // (winit made Xlib thread-safe besides, XInitThreads). The atom is
@@ -46,12 +47,28 @@ pub(crate) fn nudge(window: &Window) {
             serial: 0,
             send_event: 1,
             display,
-            window: handle.window,
+            window: xwindow,
             message_type: atom,
             format: 32,
             data: xlib::ClientMessageData::new(),
         };
-        (x.XSendEvent)(display, handle.window, 0, 0, &mut event);
+        (x.XSendEvent)(display, xwindow, 0, 0, &mut event);
+        (x.XFlush)(display);
+    }
+}
+/// Show `cursor`, another connection's cursor on the same X server (a web
+/// page's, GTK's), over `window`. winit doesn't know: the window's own cursor
+/// comes back by hiding and showing winit's.
+#[cfg(feature = "webkitgtk")]
+pub(crate) fn define_cursor(window: &Window, cursor: xlib::Cursor) {
+    let Some((x, display, xwindow)) = raw(window) else {
+        return;
+    };
+    // SAFETY: winit's display and window, as `nudge`'s; a cursor is a
+    // server resource any client may name, and one freed while a window
+    // shows it lives on until the window shows another.
+    unsafe {
+        (x.XDefineCursor)(display, xwindow, cursor);
         (x.XFlush)(display);
     }
 }

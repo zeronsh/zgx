@@ -1633,6 +1633,9 @@ struct Host {
     #[cfg(target_os = "linux")]
     primary_revision: u64,
     native_cursor: Option<CursorIcon>,
+    /// A page's image cursor the window shows (`sync_cursor`).
+    #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
+    page_cursor: Option<crate::native_host::webkitgtk::WindowCursor>,
     /// The window's cursor rects are off (see `disable_cursor_rects`).
     #[cfg(target_os = "macos")]
     cursor_rects_off: bool,
@@ -2013,6 +2016,8 @@ impl Host {
             #[cfg(target_os = "linux")]
             primary_revision: 0,
             native_cursor: None,
+            #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
+            page_cursor: None,
             #[cfg(target_os = "macos")]
             cursor_rects_off: false,
             cursor_query: None,
@@ -2740,6 +2745,14 @@ impl Host {
         self.show_issues();
         // Native geometry that changed without zgx pixels to show with it.
         self.native.flush();
+        self.sync_cursor(&window);
+        self.sync_ime_area(&window);
+        self.sync_accessibility();
+        Ok(())
+    }
+    /// Set the window's cursor: the captured or hovered node's, a page's, or
+    /// none over a native view (which sets its own).
+    fn sync_cursor(&mut self, window: &Window) {
         let ui = &self.context.ui;
         let pointer = ui
             .input
@@ -2781,7 +2794,38 @@ impl Host {
         let over_native = over_native || self.resize_edge.is_some();
         #[cfg(target_os = "macos")]
         if !std::mem::replace(&mut self.cursor_rects_off, true) {
-            crate::native_host::disable_cursor_rects(&window);
+            crate::native_host::disable_cursor_rects(window);
+        }
+        // A page's own image (`cursor: url(…)`), made for the window as the
+        // page set it (`sync_page_cursor`).
+        #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
+        {
+            let page = (!over_native)
+                .then(|| crate::native_host::webkitgtk::hovered_cursor(ui))
+                .flatten();
+            if let Some(own) = page {
+                if self.page_cursor.as_ref() != Some(&own) {
+                    match &own {
+                        crate::native_host::webkitgtk::WindowCursor::Custom(custom) => {
+                            window.set_cursor(custom.clone())
+                        }
+                        crate::native_host::webkitgtk::WindowCursor::X11(cursor) => {
+                            crate::x11_nudge::define_cursor(window, *cursor)
+                        }
+                    }
+                    self.page_cursor = Some(own);
+                }
+                self.native_cursor = None;
+                return;
+            }
+            if let Some(own) = self.page_cursor.take() {
+                // winit set none of it: shown again, its own cursor is.
+                if matches!(own, crate::native_host::webkitgtk::WindowCursor::X11(_)) {
+                    window.set_cursor_visible(false);
+                    window.set_cursor_visible(true);
+                }
+                self.native_cursor = None;
+            }
         }
         if over_native {
             self.native_cursor = None;
@@ -2789,14 +2833,26 @@ impl Host {
             // Only when zgx's own choice changes, so at a page's edge it never
             // takes back a cursor the page has just set.
             #[cfg(target_os = "macos")]
-            crate::native_host::set_cursor(&window, cursor);
+            crate::native_host::set_cursor(window, cursor);
             #[cfg(not(target_os = "macos"))]
             window.set_cursor(cursor);
             self.native_cursor = Some(cursor);
         }
-        self.sync_ime_area(&window);
-        self.sync_accessibility();
-        Ok(())
+    }
+    /// A page's cursor changed, maybe with no frame to come (WebKit sets it
+    /// after its web process placed the pointer): its image, if it is one,
+    /// made a cursor of the window's, and the window's cursor set now.
+    #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
+    fn sync_page_cursor(&mut self, event_loop: &ActiveEventLoop) {
+        if !crate::native_host::webkitgtk::cursor_changed(&self.context.ui) {
+            return;
+        }
+        crate::native_host::webkitgtk::make_cursors(&self.context.ui, |source| {
+            event_loop.create_custom_cursor(source)
+        });
+        if let Some(window) = self.window.clone() {
+            self.sync_cursor(&window);
+        }
     }
     /// Tell the input method where the focused editor or page edits.
     fn sync_ime_area(&mut self, window: &Window) {
@@ -7008,6 +7064,8 @@ impl WindowManager {
                     return;
                 }
             }
+            #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
+            host.sync_page_cursor(event_loop);
         }
         ready |= !self.factory.pending.borrow().is_empty();
         let deadline = self

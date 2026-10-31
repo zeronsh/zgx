@@ -35,6 +35,8 @@ macro_rules! api {
             pub g_object_new: unsafe extern "C" fn(GType, *const c_char, ...) -> Ptr,
             /// `g_signal_emit_by_name(instance, signal, …)`.
             pub g_signal_emit_by_name: unsafe extern "C" fn(Ptr, *const c_char, ...),
+            /// `gdk_x11_cursor_get_xcursor(cursor)`: a GDK built with X11's.
+            pub gdk_x11_cursor_get_xcursor: Option<unsafe extern "C" fn(Ptr) -> std::ffi::c_ulong>,
             _libraries: Vec<Library>,
         }
         impl Api {
@@ -58,6 +60,7 @@ macro_rules! api {
                     $( $name: find(&libraries, stringify!($name))?, )*
                     g_object_new: find(&libraries, "g_object_new")?,
                     g_signal_emit_by_name: find(&libraries, "g_signal_emit_by_name")?,
+                    gdk_x11_cursor_get_xcursor: find(&libraries, "gdk_x11_cursor_get_xcursor").ok(),
                     _libraries: libraries,
                 })
             }
@@ -133,6 +136,13 @@ api! {
     fn gdk_seat_get_keyboard(Ptr) -> Ptr;
     fn gdk_cursor_new_from_name(Ptr, *const c_char) -> Ptr;
     fn gdk_window_get_cursor(Ptr) -> Ptr;
+    fn gdk_display_sync(Ptr);
+    fn gdk_cursor_get_surface(Ptr, *mut f64, *mut f64) -> Ptr;
+    fn cairo_surface_get_type(Ptr) -> c_int;
+    fn cairo_surface_get_device_scale(Ptr, *mut f64, *mut f64);
+    fn cairo_image_surface_get_format(Ptr) -> c_int;
+    fn cairo_image_surface_get_width(Ptr) -> c_int;
+    fn cairo_image_surface_get_height(Ptr) -> c_int;
     fn gdk_unicode_to_keyval(u32) -> c_uint;
     // cairo.
     fn cairo_image_surface_create(c_int, c_int, c_int) -> Ptr;
@@ -402,6 +412,7 @@ pub const GDK_BUTTON1_MASK: c_uint = 1 << 8;
 pub const GDK_SUPER_MASK: c_uint = 1 << 26;
 pub const GDK_META_MASK: c_uint = 1 << 28;
 pub const CAIRO_FORMAT_ARGB32: c_int = 0;
+pub const CAIRO_SURFACE_TYPE_IMAGE: c_int = 0;
 pub const CAIRO_OPERATOR_CLEAR: c_int = 0;
 pub const CAIRO_OPERATOR_OVER: c_int = 2;
 pub const G_CONNECT_AFTER: c_int = 1;

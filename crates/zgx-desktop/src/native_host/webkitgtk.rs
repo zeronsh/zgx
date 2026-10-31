@@ -640,6 +640,19 @@ impl Gtk {
                 false,
             );
             (api.gtk_widget_show_all)(window);
+            // The cursor the page wants, as WebKit sets it (after its web
+            // process placed the pointer: never in step with an event).
+            let gdk = (api.gtk_widget_get_window)(view);
+            if !gdk.is_null() {
+                connect(
+                    api,
+                    gdk,
+                    "notify::cursor",
+                    handler(on_cursor as *const ()),
+                    data,
+                    false,
+                );
+            }
             (api.gtk_widget_grab_focus)(view);
             self.pages.borrow_mut().insert(spec.id, page);
         }
@@ -656,7 +669,11 @@ impl Gtk {
         unsafe {
             let list = (api.webkit_web_view_get_back_forward_list)(page.view);
             let inspector = (api.webkit_web_view_get_inspector)(page.view);
-            for object in [page.window, page.view, page.content, list, inspector] {
+            let gdk = (api.gtk_widget_get_window)(page.view);
+            for object in [page.window, page.view, page.content, list, inspector, gdk] {
+                if object.is_null() {
+                    continue;
+                }
                 (api.g_signal_handlers_disconnect_matched)(
                     object,
                     gtk::G_SIGNAL_MATCH_DATA,
@@ -1257,9 +1274,6 @@ impl Page {
             if kind == 1 && self.buttons.get() == 0 {
                 check_clipboard();
             }
-            if kind != 3 {
-                self.report_cursor(api, window);
-            }
         }
     }
     /// Tell the UI thread the cursor the page set, if it changed.
@@ -1272,7 +1286,7 @@ impl Page {
         if cursor == self.cursor.replace(cursor) {
             return;
         }
-        let shape = GTK.with(|gtk| {
+        let named = GTK.with(|gtk| {
             let mut cursors = gtk.cursors.borrow_mut();
             if cursors.is_empty() {
                 // SAFETY: GDK's named cursors for its default display, on
@@ -1289,12 +1303,36 @@ impl Page {
             cursors
                 .iter()
                 .find(|(named, _)| *named == cursor)
-                .map_or(zgx::cursor::Cursor::Default, |(_, shape)| *shape)
+                .map(|(_, shape)| *shape)
         });
+        // An image (`cursor: url(…)`), or none set: the arrow. On X11 GDK
+        // keeps no image of a cursor it made of one, only the server's
+        // cursor, which zgx's window can show as well.
+        // SAFETY: the window's live cursor, on GTK's thread.
+        let shape = match (named, unsafe { cursor_image(api, cursor) }) {
+            (Some(shape), _) => PageCursor::Named(shape),
+            (None, Some(image)) => PageCursor::Image(Arc::new(image)),
+            (None, None) => match api.gdk_x11_cursor_get_xcursor {
+                Some(xcursor)
+                    if !cursor.is_null() && !BRIDGED.load(std::sync::atomic::Ordering::Relaxed) =>
+                {
+                    // SAFETY: an X11 display's live cursor (`BRIDGED` is
+                    // Wayland's), on GTK's thread. The server has made it
+                    // before winit's connection names it: GTK's connection
+                    // may still hold the request (the window kept its last
+                    // cursor, its new one unknown).
+                    unsafe {
+                        (api.gdk_display_sync)((api.gdk_display_get_default)());
+                        PageCursor::X11(xcursor(cursor))
+                    }
+                }
+                _ => PageCursor::Named(zgx::cursor::Cursor::Default),
+            },
+        };
         let id = self.id;
         deliver(move || {
             if let Some(page) = ui_page(id) {
-                page.set_cursor(shape);
+                page.set_page_cursor(shape);
             }
         });
     }
@@ -1429,6 +1467,99 @@ const CURSORS: &[(&str, zgx::cursor::Cursor)] = {
         ("zoom-out", ZoomOut),
     ]
 };
+
+/// The cursor a page set: one of the theme's, an image of its own, or on
+/// X11 the server's cursor GDK made of that image.
+enum PageCursor {
+    Named(zgx::cursor::Cursor),
+    Image(Arc<CursorImage>),
+    X11(u64),
+}
+/// A page's own cursor, as the window shows it while the pointer is over it
+/// (`hovered_cursor`).
+#[derive(Clone, PartialEq)]
+pub(crate) enum WindowCursor {
+    Custom(winit::window::CustomCursor),
+    X11(u64),
+}
+/// A cursor's image: straight (not premultiplied) RGBA rows, and where its
+/// hot spot is, in its pixels.
+struct CursorImage {
+    rgba: Vec<u8>,
+    width: u16,
+    height: u16,
+    hot: (u16, u16),
+}
+/// `cursor`'s image, if GDK keeps it as one (as WebKit's `url()` cursors
+/// are): its pixels, unpremultiplied, and its hot spot scaled to them.
+///
+/// # Safety
+/// On GTK's thread, `cursor` a live cursor or null.
+unsafe fn cursor_image(api: &Api, cursor: Ptr) -> Option<CursorImage> {
+    if cursor.is_null() {
+        return None;
+    }
+    // SAFETY: as the caller promises; the surface GDK returns is ours to
+    // destroy, and its pixels are read within its stride and height, as an
+    // ARGB32 image (premultiplied, native-endian: B, G, R, A here).
+    unsafe {
+        let (mut x, mut y) = (0., 0.);
+        let surface = (api.gdk_cursor_get_surface)(cursor, &mut x, &mut y);
+        if surface.is_null() {
+            return None;
+        }
+        let image = ((api.cairo_surface_get_type)(surface) == gtk::CAIRO_SURFACE_TYPE_IMAGE
+            && (api.cairo_image_surface_get_format)(surface) == gtk::CAIRO_FORMAT_ARGB32)
+            .then(|| {
+                (api.cairo_surface_flush)(surface);
+                let (width, height) = (
+                    (api.cairo_image_surface_get_width)(surface).clamp(0, u16::MAX as c_int),
+                    (api.cairo_image_surface_get_height)(surface).clamp(0, u16::MAX as c_int),
+                );
+                let stride = (api.cairo_image_surface_get_stride)(surface) as usize;
+                let data = (api.cairo_image_surface_get_data)(surface);
+                let (mut sx, mut sy) = (1., 1.);
+                (api.cairo_surface_get_device_scale)(surface, &mut sx, &mut sy);
+                let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+                for row in 0..height as usize {
+                    let line =
+                        std::slice::from_raw_parts(data.add(row * stride), width as usize * 4);
+                    for pixel in line.as_chunks::<4>().0 {
+                        let alpha = pixel[3] as u32;
+                        let straight = |c: u8| {
+                            (c as u32 * 255 + alpha / 2)
+                                .checked_div(alpha)
+                                .map_or(0, |c| c.min(255) as u8)
+                        };
+                        rgba.extend([
+                            straight(pixel[2]),
+                            straight(pixel[1]),
+                            straight(pixel[0]),
+                            pixel[3],
+                        ]);
+                    }
+                }
+                let hot = |at: f64, scale: f64, size: c_int| {
+                    (at * scale).round().clamp(0., (size - 1).max(0) as f64) as u16
+                };
+                CursorImage {
+                    rgba,
+                    width: width as u16,
+                    height: height as u16,
+                    hot: (hot(x, sx, width), hot(y, sy, height)),
+                }
+            })
+            .filter(|image| image.width > 0 && image.height > 0);
+        (api.cairo_surface_destroy)(surface);
+        image
+    }
+}
+unsafe extern "C" fn on_cursor(window: Ptr, _: Ptr, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: GDK passes the view's window, whose cursor changed, and this
+    // handler's page, on GTK's thread.
+    unsafe { page(data).report_cursor(api, window) };
+}
 
 unsafe extern "C" fn draw_page(id: Ptr) -> gtk::gboolean {
     GTK.with(|gtk| {
@@ -2339,6 +2470,8 @@ thread_local! {
     /// Windows whose page moved its caret or began or ended editing
     /// (`ime_moved`).
     static IME_MOVED: RefCell<Vec<Weak<RefCell<Scene>>>> = const { RefCell::new(Vec::new()) };
+    /// Windows whose page set a cursor (`cursor_changed`).
+    static CURSOR_MOVED: RefCell<Vec<Weak<RefCell<Scene>>>> = const { RefCell::new(Vec::new()) };
 }
 fn ui_page(id: u64) -> Option<Rc<UiPage>> {
     UI_PAGES.with(|pages| pages.borrow().get(&id).and_then(Weak::upgrade))
@@ -2374,6 +2507,10 @@ struct UiPage {
     embedding: RefCell<Option<String>>,
     embeddings: Cell<u64>,
     handle: RefCell<Option<zgx::compose::NodeHandle>>,
+    /// The cursor of its own the page set: an image, and the window's cursor
+    /// made of it (`make_cursors`), or X11's.
+    own_cursor: RefCell<Option<(Arc<CursorImage>, Option<winit::window::CustomCursor>)>>,
+    x11_cursor: Cell<Option<u64>>,
     /// The `<select>` popup to show, and a count its box follows (made
     /// with the first box, in its runtime).
     options: RefCell<Option<Rc<OptionMenu>>>,
@@ -2405,6 +2542,26 @@ impl UiPage {
                 page.run(command);
             }
         });
+    }
+    /// The cursor the page set: its box's (one of zgx's), or an image the
+    /// window shows over it; the window's cursor follows now (`cursor_changed`).
+    fn set_page_cursor(&self, cursor: PageCursor) {
+        *self.own_cursor.borrow_mut() = None;
+        self.x11_cursor.set(None);
+        let shape = match cursor {
+            PageCursor::Named(shape) => shape,
+            PageCursor::Image(image) => {
+                *self.own_cursor.borrow_mut() = Some((image, None));
+                zgx::cursor::Cursor::Default
+            }
+            PageCursor::X11(cursor) => {
+                self.x11_cursor.set(Some(cursor));
+                zgx::cursor::Cursor::Default
+            }
+        };
+        self.set_cursor(shape);
+        let scene = self.scene.borrow().clone();
+        CURSOR_MOVED.with(|moved| moved.borrow_mut().push(scene));
     }
     fn set_cursor(&self, cursor: zgx::cursor::Cursor) {
         if let (Some(node), Some(scene)) = (self.node.get(), self.scene.borrow().upgrade())
@@ -2668,6 +2825,8 @@ fn backend(
         embedding: RefCell::new(None),
         embeddings: Cell::new(0),
         handle: RefCell::new(None),
+        own_cursor: RefCell::new(None),
+        x11_cursor: Cell::new(None),
     });
     let spec = Spec {
         id: web.id(),
@@ -2953,6 +3112,69 @@ pub(crate) fn ime_moved(ui: &Ui) -> bool {
         });
         moved.len() != count
     })
+}
+/// Whether a page in `ui`'s window set a cursor since last asked.
+pub(crate) fn cursor_changed(ui: &Ui) -> bool {
+    if !live() {
+        return false;
+    }
+    CURSOR_MOVED.with(|moved| {
+        let mut moved = moved.borrow_mut();
+        let count = moved.len();
+        moved.retain(|scene| {
+            scene.strong_count() > 0 && !std::ptr::eq(scene.as_ptr(), Rc::as_ptr(&ui.scene))
+        });
+        moved.len() != count
+    })
+}
+/// `ui`'s pages, in its window.
+fn window_pages(ui: &Ui) -> Vec<Rc<UiPage>> {
+    UI_PAGES.with(|pages| {
+        pages
+            .borrow()
+            .values()
+            .filter_map(Weak::upgrade)
+            .filter(|page| std::ptr::eq(page.scene.borrow().as_ptr(), Rc::as_ptr(&ui.scene)))
+            .collect()
+    })
+}
+/// Make the image cursors `ui`'s pages set into cursors of the window's
+/// (`make` is winit's, which needs its event loop).
+pub(crate) fn make_cursors(
+    ui: &Ui,
+    make: impl Fn(winit::window::CustomCursorSource) -> winit::window::CustomCursor,
+) {
+    for page in window_pages(ui) {
+        if let Some((image, made @ None)) = &mut *page.own_cursor.borrow_mut() {
+            let (x, y) = image.hot;
+            match winit::window::CustomCursor::from_rgba(
+                image.rgba.clone(),
+                image.width,
+                image.height,
+                x,
+                y,
+            ) {
+                Ok(source) => *made = Some(make(source)),
+                Err(error) => eprintln!("zgx: a page's cursor image was left out: {error}"),
+            }
+        }
+    }
+}
+/// The cursor of its own of the page under the pointer: its image, made
+/// (`make_cursors`), or X11's.
+pub(crate) fn hovered_cursor(ui: &Ui) -> Option<WindowCursor> {
+    if !live() {
+        return None;
+    }
+    let hovered = ui.input.hovered()?;
+    let page = window_pages(ui)
+        .into_iter()
+        .find(|page| page.node.get() == Some(hovered))?;
+    if let Some(cursor) = page.x11_cursor.get() {
+        return Some(WindowCursor::X11(cursor));
+    }
+    let made = page.own_cursor.borrow().as_ref()?.1.clone()?;
+    Some(WindowCursor::Custom(made))
 }
 /// Move zgx's focus to or from pages' boxes as their controllers asked.
 pub(crate) fn sync_focus(ui: &Ui) {
