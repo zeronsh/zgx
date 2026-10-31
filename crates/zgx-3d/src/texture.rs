@@ -66,16 +66,27 @@ pub enum Map {
     /// transmission's thickness (glTF's volume thickness texture). Read as
     /// `Transmission` is.
     Thickness,
+    /// How much of its clear coat there is at each point (red), multiplying
+    /// the coat's factor (`World::set_clearcoat`; glTF's clearcoat
+    /// texture). Read as `Transmission` is, and only while it has a coat.
+    Clearcoat,
+    /// How rough its clear coat is at each point (green), multiplying the
+    /// coat's roughness. Read as `Clearcoat` is.
+    ClearcoatRoughness,
+    /// Which way its clear coat faces at each point, as `Normal` says for
+    /// the surface under it (each its own). Read as `Clearcoat` is.
+    ClearcoatNormal,
 }
-/// How many maps a mesh may have, but for those of light passing through.
+/// How many maps a mesh may have, but for those of its layers.
 pub(crate) const MAPS: usize = 5;
-/// How many maps light passing through a mesh may have.
-pub(crate) const GLASS_MAPS: usize = 2;
+/// How many maps a mesh's layers (light passing through, a clear coat) may
+/// have: `Transmission`'s on.
+pub(crate) const LAYER_MAPS: usize = 5;
 impl Map {
-    /// A map of light passing through: its place in `Extras::glass_maps`.
-    /// (They follow `ALL`'s: one comparison.)
+    /// A map of a mesh's layers: its place in `Extras::layer_maps`. (They
+    /// follow `ALL`'s: one comparison.)
     #[inline(always)]
-    pub(crate) fn glass(self) -> Option<usize> {
+    pub(crate) fn layer(self) -> Option<usize> {
         (self as usize).checked_sub(MAPS)
     }
     /// Every map, in the order a frame binds them.

@@ -704,7 +704,8 @@ fn transmission(value: &Value) -> Option<crate::Transmission> {
     Some(through)
 }
 /// A material's clear coat: `KHR_materials_clearcoat`'s factor and
-/// roughness (not yet its textures). `None` without one, or with no coat.
+/// roughness (its textures are maps: `MAP_TEXTURES`). `None` without one,
+/// or with no coat.
 fn clearcoat(value: &Value) -> Option<crate::Clearcoat> {
     let coat = value.get("extensions")?.get("KHR_materials_clearcoat")?;
     let number = |key: &str| {
@@ -739,9 +740,9 @@ fn surface(value: &Value) -> Surface {
     }
 }
 
-/// The maps a model's meshes may have: `Map::ALL`'s, then light passing
-/// through's.
-const MODEL_MAPS: [crate::Map; 7] = [
+/// The maps a model's meshes may have: `Map::ALL`'s, then their layers'
+/// (light passing through's, a clear coat's).
+const MODEL_MAPS: [crate::Map; 10] = [
     crate::Map::BaseColour,
     crate::Map::MetalRoughness,
     crate::Map::Normal,
@@ -749,6 +750,9 @@ const MODEL_MAPS: [crate::Map; 7] = [
     crate::Map::Occlusion,
     crate::Map::Transmission,
     crate::Map::Thickness,
+    crate::Map::Clearcoat,
+    crate::Map::ClearcoatRoughness,
+    crate::Map::ClearcoatNormal,
 ];
 /// Where a material names each of its maps' textures (`MODEL_MAPS`' order).
 const MAP_TEXTURES: [&[&str]; MODEL_MAPS.len()] = [
@@ -763,6 +767,17 @@ const MAP_TEXTURES: [&[&str]; MODEL_MAPS.len()] = [
         "transmissionTexture",
     ],
     &["extensions", "KHR_materials_volume", "thicknessTexture"],
+    &["extensions", "KHR_materials_clearcoat", "clearcoatTexture"],
+    &[
+        "extensions",
+        "KHR_materials_clearcoat",
+        "clearcoatRoughnessTexture",
+    ],
+    &[
+        "extensions",
+        "KHR_materials_clearcoat",
+        "clearcoatNormalTexture",
+    ],
 ];
 /// The image of the texture `material` names at `path`, if it has one.
 fn material_image(doc: &Value, material: &Value, path: &[&str]) -> Option<usize> {
@@ -2147,6 +2162,31 @@ mod tests {
         // Its factor defaults to no coat at all.
         assert_eq!(coat(json!({ "KHR_materials_clearcoat": {} })), None);
         assert_eq!(coat(json!({})), None);
+    }
+
+    #[test]
+    fn a_clear_coats_textures_are_maps() {
+        let (doc, bin) = square(json!([{ "mesh": 0 }]), |doc| {
+            doc["materials"][0]["extensions"] = json!({
+                "KHR_materials_clearcoat": {
+                    "clearcoatFactor": 1.0,
+                    "clearcoatTexture": { "index": 0 },
+                    "clearcoatRoughnessTexture": { "index": 0 },
+                    "clearcoatNormalTexture": { "index": 0 },
+                },
+            });
+            doc["textures"] = json!([{ "source": 0 }]);
+            doc["images"] = json!([{ "uri": format!("data:image/png;base64,{RED_BLUE}") }]);
+        });
+        let model = Model::from_bytes(&glb_of(&doc, &bin)).unwrap();
+        let world = World::new();
+        let mesh = world.place_model(&model).meshes[0][0];
+        let id = |map| world.map(mesh, map).map(|t| t.id());
+        let coat = id(crate::Map::Clearcoat);
+        assert!(coat.is_some());
+        assert_eq!(id(crate::Map::ClearcoatRoughness), coat);
+        assert_eq!(id(crate::Map::ClearcoatNormal), coat);
+        assert_eq!(id(crate::Map::Normal), None);
     }
 
     #[test]
