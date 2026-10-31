@@ -664,6 +664,58 @@ fn a_clear_coat_shines_over_a_rough_surface() {
 }
 
 #[test]
+fn maps_vary_a_clear_coat_across_a_mesh() {
+    // Black chalk under the sun behind the camera, coated smooth.
+    let (world, square) = one(facing_square(), Material::rgb(0x000000).with(0., 1.));
+    world.add_light(Light::Directional {
+        direction: vec3(0., 0., -1.),
+        color: [1., 1., 1.],
+        intensity: 3.,
+    });
+    world.set_clearcoat(square, Some(Clearcoat::new(1.).roughness(0.3)));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let near_centre = |window: &mut Window| {
+        window.draw();
+        (window.pixel(46, 50)[0], window.pixel(54, 50)[0])
+    };
+    let (left, right) = near_centre(&mut window);
+    assert!(left > 150 && right > 150, "coated whole: {left} {right}");
+    // None on the left half, all on the right (eight texels a side: at the
+    // centre's neighbours, filtering mixes none of the other half in).
+    let halves = |left: [u8; 4], right: [u8; 4]| {
+        let pixels = [[left; 8], [right; 8]].concat().concat();
+        Texture::from_rgba8(16, 1, pixels).unwrap()
+    };
+    let map = halves([0, 0, 0, 255], [255; 4]);
+    world.set_map(square, Map::Clearcoat, Some(map.clone()));
+    assert_eq!(world.map(square, Map::Clearcoat), Some(map));
+    let (left, right) = near_centre(&mut window);
+    assert!(
+        left < 40 && right > 150,
+        "coated on the right: {left} {right}"
+    );
+    // Rough on the left: its highlight spread thin there.
+    world.set_map(square, Map::Clearcoat, None);
+    world.set_clearcoat(square, Some(Clearcoat::new(1.).roughness(1.)));
+    let rough = halves([0, 255, 0, 255], [0, 77, 0, 255]);
+    world.set_map(square, Map::ClearcoatRoughness, Some(rough));
+    let (left, right) = near_centre(&mut window);
+    assert!(
+        i32::from(left) < i32::from(right) - 30,
+        "rougher on the left: {left} {right}"
+    );
+    world.set_clearcoat(square, Some(Clearcoat::new(1.).roughness(0.3)));
+    // A coat's normal map turns its highlight away, not the surface's.
+    world.set_map(square, Map::ClearcoatRoughness, None);
+    let tilted = halves([230, 128, 200, 255], [230, 128, 200, 255]);
+    world.set_map(square, Map::ClearcoatNormal, Some(tilted));
+    let (left, right) = near_centre(&mut window);
+    assert!(left < 120 && right < 120, "turned away: {left} {right}");
+}
+
+#[test]
 fn a_coated_glass_still_shows_what_is_behind_it() {
     let (world, pane) = red_behind_glass(Material::rgb(0xffffff).with(0., 0.));
     world.set_transmission(pane, Some(Transmission::new(1.)));

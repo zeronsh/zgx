@@ -7,7 +7,7 @@
 //! opaque meshes' depth as the sun sees them.
 use crate::{
     math::{Mat4, Vec3},
-    texture::{GLASS_MAPS, MAPS},
+    texture::{LAYER_MAPS, MAPS},
     world::{Inner, Light, POINT_LIGHTS},
 };
 use std::{cell::RefCell, collections::HashMap, rc::Weak};
@@ -1347,8 +1347,11 @@ fn map_set(d: &crate::world::Drawn) -> [u64; MAPS] {
     }
     maps
 }
+/// Of a mesh's layer maps (`Extras::layer_maps`), how many are light
+/// passing through's; a clear coat's follow.
+const GLASS_MAPS: usize = 2;
 /// A number for how light passes through a mesh and its maps, and for its
-/// coat. Few meshes have either: out of `map_set`'s code.
+/// coat and its maps. Few meshes have either: out of `map_set`'s code.
 #[cold]
 #[inline(never)]
 fn layers_key(extras: &crate::world::Extras) -> u64 {
@@ -1359,7 +1362,11 @@ fn layers_key(extras: &crate::world::Extras) -> u64 {
             .numbers()
             .into_iter()
             .for_each(|n| mix(n.into()));
-        for map in &extras.glass_maps {
+        for map in extras
+            .layer_maps
+            .iter()
+            .flat_map(|maps| &maps[..GLASS_MAPS])
+        {
             mix(map.as_ref().map_or(0, crate::Texture::id));
         }
     }
@@ -1367,6 +1374,13 @@ fn layers_key(extras: &crate::world::Extras) -> u64 {
         // Apart from a transmission's numbers.
         mix(0xc0a7);
         clearcoat.numbers().into_iter().for_each(|n| mix(n.into()));
+        for map in extras
+            .layer_maps
+            .iter()
+            .flat_map(|maps| &maps[GLASS_MAPS..])
+        {
+            mix(map.as_ref().map_or(0, crate::Texture::id));
+        }
     }
     key
 }
@@ -1862,7 +1876,7 @@ fn wgsl(variant: Variant, samples: u32) -> String {
             }
             rest = &rest[4..];
         }
-        let code = rest.trim_start();
+        let code = rest.trim_ascii_start();
         if code.is_empty() || code.starts_with("//") {
             continue;
         }
@@ -1945,16 +1959,23 @@ fn make_binding(
         let c = coat.map_or([0.; 4], |c| [c.factor, c.roughness, 0., 0.]);
         uniform("3D layers", bytemuck::cast_slice(&[a, b, c]))
     });
-    let glass = glass.map(|(_, behind)| {
-        // Its maps, uploaded for this binding alone (it keeps
-        // them).
-        let maps = d.extras.map(|e| &e.glass_maps);
-        let glass_maps: [Option<wgpu::TextureView>; GLASS_MAPS] = std::array::from_fn(|i| {
-            let texture = maps.and_then(|maps| maps[i].as_ref())?;
-            upload(device, queue, texture, false)
-        });
-        (&behind.whole, &behind.sampler, glass_maps)
-    });
+    // Its layers' maps, uploaded for this binding alone (it keeps them):
+    // light passing through's if it does, a coat's if it has one.
+    // (A mesh with none, most, looks at none.)
+    let mut layer_maps: [Option<wgpu::TextureView>; LAYER_MAPS] = Default::default();
+    if let Some(maps) = d.extras.and_then(|e| e.layer_maps.as_deref()) {
+        for (i, map) in maps.iter().enumerate() {
+            let used = if i < GLASS_MAPS {
+                glass.is_some()
+            } else {
+                coat.is_some()
+            };
+            if let Some(texture) = map.as_ref().filter(|_| used) {
+                layer_maps[i] = upload(device, queue, texture, false);
+            }
+        }
+    }
+    let glass = glass.map(|(_, behind)| (&behind.whole, &behind.sampler));
     let layout = if glass.is_some() {
         glass_layout.get_or_insert_with(|| map_layout(device, Extent::Glass))
     } else if layered {
@@ -1964,19 +1985,23 @@ fn make_binding(
     } else {
         layout
     };
-    // White where it has none: all passing, as thick as its
-    // transmission says.
-    let glass = glass.as_ref().map(|(view, sampler, maps)| {
-        let maps = maps.each_ref().map(|m| m.as_ref().unwrap_or(&stand_ins[1]));
-        (*view, *sampler, maps)
-    });
+    // White where it has none (all passing, as thick as its transmission
+    // says, as much coat and as rough as it says), a coat's normal flat.
+    let layer_view = |i: usize| {
+        let stand_in = &stand_ins[if i == LAYER_MAPS - 1 { 2 } else { 1 }];
+        layer_maps[i].as_ref().unwrap_or(stand_in)
+    };
+    let layers = words
+        .as_ref()
+        .map(|words| (words, [2, 3, 4].map(layer_view)));
+    let glass = glass.map(|(view, sampler)| (view, sampler, [0, 1].map(layer_view)));
     map_binding(
         device,
         layout,
         sampler,
         std::array::from_fn(view),
         rows.as_ref(),
-        words.as_ref(),
+        layers,
         glass,
     )
 }
@@ -2056,7 +2081,14 @@ fn map_layout(device: &wgpu::Device, extent: Extent) -> wgpu::BindGroupLayout {
         ));
     }
     if extent >= Extent::Layered {
-        entries.push(uniform(MAPS as u32 + 2, fragment));
+        // Their numbers, and a coat's maps: how much, how rough, which way
+        // it faces.
+        entries.extend([
+            uniform(MAPS as u32 + 2, fragment),
+            texture(MAPS as u32 + 7),
+            texture(MAPS as u32 + 8),
+            texture(MAPS as u32 + 9),
+        ]);
     }
     if extent >= Extent::Glass {
         // What is behind, its sampler, and its maps: how much passes, how
@@ -2276,7 +2308,7 @@ fn map_binding(
     sampler: &wgpu::Sampler,
     maps: [&wgpu::TextureView; MAPS],
     placements: Option<&wgpu::Buffer>,
-    layers: Option<&wgpu::Buffer>,
+    layers: Option<(&wgpu::Buffer, [&wgpu::TextureView; LAYER_MAPS - GLASS_MAPS])>,
     glass: Option<(
         &wgpu::TextureView,
         &wgpu::Sampler,
@@ -2298,10 +2330,30 @@ fn map_binding(
             binding: MAPS as u32 + 1,
             resource: buffer.as_entire_binding(),
         }))
-        .chain(layers.map(|buffer| wgpu::BindGroupEntry {
-            binding: MAPS as u32 + 2,
-            resource: buffer.as_entire_binding(),
-        }))
+        .chain(
+            layers
+                .into_iter()
+                .flat_map(|(words, [coat, rough, normal])| {
+                    [
+                        wgpu::BindGroupEntry {
+                            binding: MAPS as u32 + 2,
+                            resource: words.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: MAPS as u32 + 7,
+                            resource: wgpu::BindingResource::TextureView(coat),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: MAPS as u32 + 8,
+                            resource: wgpu::BindingResource::TextureView(rough),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: MAPS as u32 + 9,
+                            resource: wgpu::BindingResource::TextureView(normal),
+                        },
+                    ]
+                }),
+        )
         .chain(
             glass
                 .into_iter()
@@ -2507,6 +2559,9 @@ struct Frame {
 //G @group(1) @binding(9) var behind_sampler: sampler;
 //G @group(1) @binding(10) var transmission_texture: texture_2d<f32>;
 //G @group(1) @binding(11) var thickness_texture: texture_2d<f32>;
+//L @group(1) @binding(12) var coat_texture: texture_2d<f32>;
+//L @group(1) @binding(13) var coat_roughness_texture: texture_2d<f32>;
+//L @group(1) @binding(14) var coat_normal_texture: texture_2d<f32>;
 //G // What shows through at `world`, seen along `v`: what is behind, bent by
 //G // the index of refraction through the thickness (`scale` its mesh's),
 //G // blurred as rough as the surface, the light lost on the way taken out.
@@ -2782,6 +2837,11 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
 //T     occlusion = textureSample(occlusion_texture, map_sampler, uvs[4]).r;
 //G     let passing = textureSample(transmission_texture, map_sampler, in.uv).r;
 //G     let thick = textureSample(thickness_texture, map_sampler, in.uv).g;
+//L     let coat_amount = layers.coat.x * textureSample(coat_texture, map_sampler, in.uv).r;
+//L     let coat_given = clamp(layers.coat.y * textureSample(coat_roughness_texture, map_sampler, in.uv).g, 0.02, 1.0);
+//L     let coat_bump = textureSample(coat_normal_texture, map_sampler, in.uv).xyz;
+//L     let coat_duvx = dpdx(in.uv);
+//L     let coat_duvy = dpdy(in.uv);
 //T     let dpx = dpdx(in.world);
 //T     let dpy = dpdy(in.world);
 //T     let duvx = dpdx(uvs[2]);
@@ -2808,15 +2868,15 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
         if !front {
             n = -n;
         }
-        // A coat lies smooth over what its normal map bumps.
-//L         let coat_n = n;
+        // A coat faces as its own normal map says, not as the surface's
+        // under it does.
+//L         let coat_n = bumped(n, dpx, dpy, coat_duvx, coat_duvy, coat_bump);
 //T         n = bumped(n, dpx, dpy, duvx, duvy, bump);
         let v = normalize(frame.camera.xyz - in.world);
         let metallic = in.material.x * surface.b;
         let given = clamp(in.material.y * surface.g, 0.02, 1.0);
         let a = given * given;
         let roughness = sqrt(sqrt(clamp(a * a + widening, 0.0, 1.0)));
-//L         let coat_given = clamp(layers.coat.y, 0.02, 1.0);
 //L         let coat_a = coat_given * coat_given;
 //L         let coat_rough = sqrt(sqrt(clamp(coat_a * coat_a + widening, 0.0, 1.0)));
         // What passes through takes the place of its diffuse light.
@@ -2869,8 +2929,8 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
 //L         var coat_around = mix(frame.ground.rgb, frame.sky.rgb, coat_r.y * 0.5 + 0.5) * coat_fresnel * (1.0 - 0.5 * coat_rough2);
 //E //L     coat_around = textureSampleLevel(environment_cube, environment_sampler, turned(coat_r), coat_rough * frame.environment.w).rgb * reflectance(vec3(0.04), coat_rough, coat_n_v) * frame.environment.x;
 //W         var under = 1.0;
-//L         under = 1.0 - layers.coat.x * (0.04 + 0.96 * pow(1.0 - coat_n_v, 5.0));
-//L         lit = lit * under + layers.coat.x * (coat_lit + coat_around * occlusion);
+//L         under = 1.0 - coat_amount * (0.04 + 0.96 * pow(1.0 - coat_n_v, 5.0));
+//L         lit = lit * under + coat_amount * (coat_lit + coat_around * occlusion);
         lit = tone_map(lit * frame.params.z);
         // What shows through, behind already mapped, less what reflects.
 //G         let facing_f0 = pow((layers.a.y - 1.0) / (layers.a.y + 1.0), 2.0);

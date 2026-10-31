@@ -458,6 +458,8 @@ struct Posed {
     joints: Option<std::ops::Range<usize>>,
     weights: Option<std::ops::Range<usize>>,
 }
+/// A mesh's layers' maps, `Map::Transmission`'s on.
+pub(crate) type LayerMaps = [Option<crate::Texture>; crate::texture::LAYER_MAPS];
 /// What few meshes have, kept apart (see `Inner::extras`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Extras {
@@ -465,9 +467,10 @@ pub(crate) struct Extras {
     placements: Placements,
     pub(crate) transmission: Option<Transmission>,
     pub(crate) clearcoat: Option<Clearcoat>,
-    /// Its maps of light passing through (`Map::Transmission`'s,
-    /// `Map::Thickness`'s).
-    pub(crate) glass_maps: [Option<crate::Texture>; crate::texture::GLASS_MAPS],
+    /// Its layers' maps, `Map::Transmission`'s on.
+    /// (Boxed, made with the first: few meshes have any, and every mesh
+    /// in this table would carry their room.)
+    pub(crate) layer_maps: Option<Box<LayerMaps>>,
 }
 impl Extras {
     /// Its maps' placements, if any is set.
@@ -660,14 +663,18 @@ impl Inner {
         }
         extras
     }
-    /// Object `id`'s `i`th map of light passing through (`Map::glass`), and
+    /// Object `id`'s `i`th map of its layers (`Map::layer`), and
     /// whether that changed it. Rare: out of `set_map`'s code.
     #[cold]
     #[inline(never)]
-    fn set_glass_map(&mut self, id: ObjectId, i: usize, texture: Option<crate::Texture>) -> bool {
+    fn set_layer_map(&mut self, id: ObjectId, i: usize, texture: Option<crate::Texture>) -> bool {
         let id_of = texture.as_ref().map(crate::Texture::id);
         let extras = self.extras_mut(id.index, id.generation);
-        let before = std::mem::replace(&mut extras.glass_maps[i], texture);
+        let maps = extras.layer_maps.get_or_insert_default();
+        let before = std::mem::replace(&mut maps[i], texture);
+        if maps.iter().all(Option::is_none) {
+            extras.layer_maps = None;
+        }
         self.tidy_extras(id.index);
         before.as_ref().map(crate::Texture::id) != id_of
     }
@@ -995,8 +1002,8 @@ impl World {
             if inner.live(id.index, id.generation).is_none() {
                 return false;
             }
-            if let Some(i) = map.glass() {
-                return inner.set_glass_map(id, i, texture);
+            if let Some(i) = map.layer() {
+                return inner.set_layer_map(id, i, texture);
             }
             let (_, maps) = inner
                 .textures
@@ -1034,9 +1041,9 @@ impl World {
     pub fn map(&self, id: ObjectId, map: crate::Map) -> Option<crate::Texture> {
         let inner = self.inner.borrow();
         inner.live(id.index, id.generation)?;
-        if let Some(i) = map.glass() {
+        if let Some(i) = map.layer() {
             let extras = inner.extras(id.index as usize, id.generation)?;
-            return extras.glass_maps[i].clone();
+            return extras.layer_maps.as_ref()?[i].clone();
         }
         inner.maps(id.index as usize, id.generation)[map as usize].cloned()
     }
@@ -1188,7 +1195,7 @@ impl World {
     pub fn map_placement(&self, id: ObjectId, map: crate::Map) -> Option<crate::MapPlacement> {
         let inner = self.inner.borrow();
         inner.live(id.index, id.generation)?;
-        if map.glass().is_some() {
+        if map.layer().is_some() {
             return None;
         }
         let placed = inner.placement(id.index as usize, id.generation)?[map as usize];
@@ -1197,9 +1204,9 @@ impl World {
     /// Where object `id`'s `map` sits on it (`None`: its first texture
     /// coordinates as they are, repeating). A mesh whose maps read anywhere
     /// else draws with a pipeline of its own, a wrap alone only with another
-    /// sampler; others pay nothing. Maps of light passing through
-    /// (`Map::Transmission`, `Map::Thickness`) aren't placed: nothing
-    /// changes.
+    /// sampler; others pay nothing. Maps of a mesh's layers (light passing
+    /// through, a clear coat: `Map::Transmission` on) aren't placed:
+    /// nothing changes.
     pub fn set_map_placement(
         &self,
         id: ObjectId,
@@ -1207,7 +1214,7 @@ impl World {
         placement: Option<crate::MapPlacement>,
     ) {
         self.change(|inner| {
-            if inner.live(id.index, id.generation).is_none() || map.glass().is_some() {
+            if inner.live(id.index, id.generation).is_none() || map.layer().is_some() {
                 return false;
             }
             let placement = placement.unwrap_or_default();
