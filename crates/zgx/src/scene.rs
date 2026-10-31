@@ -1857,6 +1857,9 @@ struct ColdMaps {
     outline_styles: NodeMap<crate::decoration::BorderStyle>,
     /// Boxes whose width their content doesn't size (`set_contained`).
     contained: NodeMap<Contained>,
+    /// Gradient masks (`set_mask_gradient`), each with the size its mask
+    /// image was last made at.
+    mask_gradients: NodeMap<(crate::decoration::Gradient, (f32, f32))>,
 }
 /// A node painted outside its parent's fade (`Scene::set_outside_fade`).
 #[derive(Clone, Copy, Debug)]
@@ -6420,6 +6423,7 @@ impl Scene {
                 || cold.image_rendering.contains_key(&id)
                 || cold.outline_styles.contains_key(&id)
                 || cold.contained.contains_key(&id)
+                || cold.mask_gradients.contains_key(&id)
         }) || self.has_own_text_shadows(id);
         self.set_special(id, COLD, cold);
     }
@@ -6750,6 +6754,34 @@ impl Scene {
             .as_ref()
             .is_some_and(|cold| !cold.size_calcs.is_empty())
     }
+    /// Gradient masks' images (`set_mask_gradient`) made again for nodes
+    /// laid out at another size since: the mask is the box's.
+    #[cold]
+    #[inline(never)]
+    fn place_mask_gradients(&mut self) {
+        let Some(maps) = &mut self.cold else { return };
+        let mut masks = std::mem::take(&mut maps.mask_gradients);
+        for (id, (gradient, made)) in &mut masks {
+            if !self.contains(*id) {
+                continue;
+            }
+            let bounds = self.world_bounds(*id);
+            let size = (bounds.width, bounds.height);
+            if *made == size {
+                continue;
+            }
+            *made = size;
+            let mask = gradient.image(size.0, size.1).map(|image| ImageMask {
+                image: Arc::new(image),
+                offset: (0., 0.),
+                size,
+            });
+            self.set_mask(*id, mask);
+        }
+        if let Some(maps) = &mut self.cold {
+            maps.mask_gradients = masks;
+        }
+    }
     /// Move each sticky node to where its scroll view's position puts it,
     /// now that layout has placed everything. After the content's own
     /// move: the node's old place is damaged where a copy of the content
@@ -6862,6 +6894,7 @@ impl Scene {
             maps.outline_styles.remove(&id);
             maps.steps.remove(&id);
             maps.contained.remove(&id);
+            maps.mask_gradients.remove(&id);
         }
     }
     /// Hit `id` and what it holds where an animation is taking it, not
@@ -10203,6 +10236,13 @@ impl Scene {
             .is_some_and(|cold| !cold.sticky.is_empty())
         {
             self.place_sticky();
+        }
+        if self
+            .cold
+            .as_ref()
+            .is_some_and(|cold| !cold.mask_gradients.is_empty())
+        {
+            self.place_mask_gradients();
         }
         let _span = crate::profile::span(crate::profile::Phase::Damage);
         report.layout_nodes = std::mem::take(&mut self.pending_layout_nodes);
@@ -15043,6 +15083,45 @@ mod local_transform_tests {
         .color_matrix()
         .unwrap();
         assert_eq!(grey[0], [0., 0., 0., 0.5]);
+    }
+    /// A gradient mask is an image mask of the box made at the next flush,
+    /// its alpha the gradient's, and made again when the box resizes;
+    /// removed, the mask goes too.
+    #[test]
+    fn gradient_masks_follow_the_box() {
+        use crate::canvas::GradientStop;
+        use crate::decoration::Gradient;
+        let (mut scene, id) = placed(40., 20.);
+        // Left to right: transparent to opaque.
+        let stops: Arc<[GradientStop]> = vec![
+            GradientStop {
+                offset: 0.,
+                color: Color(0, 0, 0, 0),
+            },
+            GradientStop {
+                offset: 1.,
+                color: Color(0, 0, 0, 255),
+            },
+        ]
+        .into();
+        scene.set_mask_gradient(id, Some(Gradient::Linear { angle: 0., stops }));
+        scene.flush();
+        let mask = scene.mask(id).expect("made at the flush");
+        assert_eq!(mask.size, (40., 20.));
+        assert_eq!((mask.image.width(), mask.image.height()), (40, 20));
+        let alpha = |mask: &ImageMask, x: usize| mask.image.pixels()[x * 4 + 3];
+        assert!(alpha(mask, 0) < 10 && alpha(mask, 39) > 245, "a ramp");
+        assert!(alpha(mask, 10) < alpha(mask, 30));
+        // Resized: made again at the new size.
+        scene.set_style(id, fixed(80., 20.));
+        scene.flush();
+        let mask = scene.mask(id).unwrap();
+        assert_eq!(mask.size, (80., 20.));
+        assert_eq!(mask.image.width(), 80);
+        // Gone: no mask.
+        scene.set_mask_gradient(id, None);
+        scene.flush();
+        assert!(scene.mask(id).is_none());
     }
     #[test]
     fn masks_promote_and_move_by_compositing_alone() {
