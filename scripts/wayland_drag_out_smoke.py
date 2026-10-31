@@ -37,6 +37,7 @@ from PIL import Image
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from platform_smoke import stop  # noqa: E402
 from wayland_pointer import VirtualPointer  # noqa: E402
+from sway_host import sway_config
 
 OUTPUT = (1600, 1000)
 # drag_probe's chip, in its Drag window (at the output's top-left).
@@ -83,7 +84,7 @@ def main():
             for key in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS"):
                 env.pop(key, None)
             config = pathlib.Path(private, "sway.conf")
-            config.write_text(
+            sway_config(config,
                 "output * mode %dx%d\ndefault_border none\nfor_window [app_id=\".*\"] floating enable\n"
                 "for_window [title=\"Drag\"] move position 0 0\n"
                 "for_window [title=\"Other\"] move position 900 0\n"

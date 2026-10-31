@@ -44,6 +44,7 @@ from PIL import Image, ImageChops
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from platform_smoke import stop  # noqa: E402
 from wayland_pointer import VirtualPointer  # noqa: E402
+from sway_host import sway_config
 
 OUTPUT = (1280, 960)
 CONTENT = (16, 20, 28)
@@ -111,7 +112,7 @@ def main():
         runtime.mkdir(mode=0o700)
         env["XDG_RUNTIME_DIR"] = str(runtime)
         config = runtime / "sway.conf"
-        config.write_text("output * mode %dx%d scale %g\ndefault_border none\n"
+        sway_config(config, "output * mode %dx%d scale %g\ndefault_border none\n"
                           "for_window [app_id=\".*\"] floating enable, move position 0 0\n" % (*output, scale))
         sway, _ = launch(f"sway-{scale}x", ["sway", "--unsupported-gpu", "-c", str(config)], env)
         sockets = lambda: [p for p in runtime.glob("wayland-*") if p.suffix != ".lock"]
@@ -170,7 +171,7 @@ def main():
             # sway: clicked.
             env = dict(base, WLR_BACKENDS="headless", WLR_RENDERER="pixman", WLR_LIBINPUT_NO_DEVICES="1")
             config = pathlib.Path(private, "sway.conf")
-            config.write_text("output * mode %dx%d\ndefault_border none\n"
+            sway_config(config, "output * mode %dx%d\ndefault_border none\n"
                               "for_window [app_id=\".*\"] floating enable, move position 0 0\n" % OUTPUT)
             sway, _ = launch("sway", ["sway", "--unsupported-gpu", "-c", str(config)], env)
             sockets = lambda: [p for p in pathlib.Path(private).glob("wayland-*") if p.suffix != ".lock"]

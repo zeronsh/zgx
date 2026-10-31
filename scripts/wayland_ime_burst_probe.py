@@ -18,6 +18,7 @@ import subprocess
 import time
 
 from platform_smoke import private_runtime, stop
+from sway_host import sway_config
 
 
 def strings(trace, method):
@@ -39,7 +40,7 @@ def run_session(args, mode, index, cursor_delay_ms):
         profile.parent.mkdir(parents=True)
         profile.write_text('[Groups/0]\nName=Default\nDefault Layout=us\nDefaultIM=pinyin\n\n[Groups/0/Items/0]\nName=keyboard-us\nLayout=\n\n[Groups/0/Items/1]\nName=pinyin\nLayout=\n\n[GroupOrder]\n0=Default\n')
         config = pathlib.Path(private, 'sway.conf')
-        config.write_text('xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx direct winit IME probe"] fullscreen enable\n')
+        sway_config(config, 'xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx direct winit IME probe"] fullscreen enable\n')
         (output/'profile').write_text(profile.read_text())
         (output/'sway.conf').write_text(config.read_text())
         bus_config = pathlib.Path(private, 'dbus.conf')

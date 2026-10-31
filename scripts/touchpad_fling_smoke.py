@@ -14,6 +14,7 @@ import time
 
 from platform_smoke import stop
 from wayland_pointer import VirtualPointer
+from sway_host import sway_config
 
 OUTPUT = (1280, 800)
 # The scroll example's viewport colour, rgb(0x203040), around its rows.
@@ -41,7 +42,7 @@ def main():
         for key in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS"):
             env.pop(key, None)
         config = pathlib.Path(private, "sway.conf")
-        config.write_text("output * mode %dx%d\ndefault_border none\n"
+        sway_config(config, "output * mode %dx%d\ndefault_border none\n"
                           "for_window [app_id=\".*\"] floating enable, move position 0 0\n" % OUTPUT)
         try:
             launch("sway", ["sway", "--unsupported-gpu", "-c", str(config)], env)

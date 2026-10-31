@@ -29,6 +29,7 @@ from PIL import Image
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from platform_smoke import release_mounts, stop, wait_for_wm  # noqa: E402
 from wayland_pointer import VirtualPointer  # noqa: E402
+from sway_host import sway_config
 
 # The example's buttons, in its window's points.
 PASTE, COPY, FIELD = (80, 51), (210, 51), (340, 51)
@@ -185,7 +186,7 @@ def main():
             # Wayland: the window at the output's top left.
             sway_env = dict(base, WLR_BACKENDS="headless", WLR_RENDERER="pixman", WLR_LIBINPUT_NO_DEVICES="1")
             config = pathlib.Path(private, "sway.conf")
-            config.write_text("output * mode 1280x960\ndefault_border none\n"
+            sway_config(config, "output * mode 1280x960\ndefault_border none\n"
                               "for_window [app_id=\".*\"] floating enable, move position 0 0\n")
             launch("sway", ["sway", "--unsupported-gpu", "-c", str(config)], sway_env)
             sockets = lambda: [p for p in pathlib.Path(private).glob("wayland-*") if p.suffix != ".lock"]

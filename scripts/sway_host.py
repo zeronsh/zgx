@@ -57,3 +57,14 @@ def wait_for_openbox(env, output, process, timeout=10):
         if time.monotonic() >= deadline:
             raise RuntimeError('Openbox EWMH title properties unavailable; inspect openbox-readiness.log')
         time.sleep(.05)
+
+
+# An owned Sway repeats no key. A key's release can reach it late on a loaded
+# runner, and then the client, or an input method's keyboard grab (Fcitx
+# repeats keys itself), repeated the key: "nihao" composed 您好.
+KEYBOARD = "input type:keyboard repeat_rate 0\n"
+
+
+def sway_config(path, text):
+    """Write an owned Sway's config: `text`, with keys that don't repeat."""
+    path.write_text(text + KEYBOARD)

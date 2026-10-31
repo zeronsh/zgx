@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Exercise a native Wayland client across live Sway output scale 1 -> 2 -> 1."""
-from sway_host import wait_for_openbox
+from sway_host import wait_for_openbox, sway_config
 import argparse
 import json
 import math
@@ -26,7 +26,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="zgx-live-dpi-") as runtime:
         os.chmod(runtime, 0o700)
         config = pathlib.Path(runtime, "sway.conf")
-        config.write_text('xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx live DPI probe"] fullscreen enable\n')
+        sway_config(config, 'xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx live DPI probe"] fullscreen enable\n')
         (args.output / "sway.conf").write_text(config.read_text())
         env = dict(os.environ, XDG_RUNTIME_DIR=runtime, WLR_BACKENDS="x11", WLR_X11_OUTPUTS="1", WLR_RENDERER="pixman")
         for name in ("DISPLAY", "WAYLAND_DISPLAY", "SWAYSOCK", "I3SOCK"):
