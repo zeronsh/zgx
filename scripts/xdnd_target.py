@@ -3,9 +3,11 @@
 (GTK's own XDND on X11, its `wl_data_device` on Wayland with
 `GDK_BACKEND=wayland`) and prints what each one carried.
 
-    xdnd_target.py TITLE X Y [--refuse]
+    xdnd_target.py TITLE X Y [--refuse] [--image]
 
-Each drop prints `RECEIVED <target> <text>` with the format it asked for.
+Each drop prints `RECEIVED <target> <text>` with the format it asked for;
+with `--image` it asks for PNG first, and prints `RECEIVED image/png <n>
+bytes <first four, in hex>` for one.
 With `--refuse` it answers every position "not here", so a drag released
 over it is not dropped; it prints `MOTION` as positions arrive."""
 import argparse
@@ -29,7 +31,9 @@ def main():
     parser.add_argument("--refuse", action="store_true")
     # A slow target: it finishes with a drop this long after taking its data.
     parser.add_argument("--finish-delay", type=float, default=0.)
+    parser.add_argument("--image", action="store_true", help="ask for PNG first")
     args = parser.parse_args()
+    formats = (["image/png"] if args.image else []) + FORMATS
 
     window = Gtk.Window(title=args.title)
     window.set_default_size(400, 200)
@@ -39,13 +43,13 @@ def main():
     area.add(Gtk.Label(label=args.title))
     window.add(area)
 
-    targets = [Gtk.TargetEntry.new(name, 0, index) for index, name in enumerate(FORMATS)]
+    targets = [Gtk.TargetEntry.new(name, 0, index) for index, name in enumerate(formats)]
     # Motion and drops answered here, not by GTK's defaults.
     area.drag_dest_set(0, targets, Gdk.DragAction.COPY)
 
     def offered(context):
         names = [str(atom) for atom in context.list_targets()]
-        return next((name for name in FORMATS if name in names), None)
+        return next((name for name in formats if name in names), None)
 
     def motion(widget, context, x, y, time):
         if args.refuse:
@@ -63,8 +67,12 @@ def main():
         return True
 
     def received(widget, context, x, y, data, info, time):
-        text = data.get_data().decode("utf-8", "replace") if data.get_length() >= 0 else ""
-        print("RECEIVED", FORMATS[info], repr(text), flush=True)
+        if formats[info].startswith("image/"):
+            raw = data.get_data() if data.get_length() >= 0 else b""
+            print("RECEIVED", formats[info], len(raw), "bytes", raw[:4].hex(), flush=True)
+        else:
+            text = data.get_data().decode("utf-8", "replace") if data.get_length() >= 0 else ""
+            print("RECEIVED", formats[info], repr(text), flush=True)
 
         def finish():
             Gtk.drag_finish(context, data.get_length() >= 0, False, time)
