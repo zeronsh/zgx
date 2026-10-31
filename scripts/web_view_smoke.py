@@ -290,6 +290,8 @@ def page_checks(session, ime, transparent=False):
         return checks
     if ime:
         return ime(session, checks)
+    if not session.wayland:
+        checks["cursors"] = cursor_checks(session)
     session.click(160, 180)
     click = session.wait(lambda: [m for m in session.messages() if "click" in m[0]], "the click never reached the page")[0]
     if click[0]["click"] != [100, 40] or click[1] != "https://probe.zgx.test" or not click[2]:
@@ -332,6 +334,54 @@ def page_checks(session, ime, transparent=False):
     scrolled = session.wait(lambda: [m for m in session.messages() if "scrolled" in m[0]], "the wheel never scrolled the page")
     checks["scrolled"] = scrolled[0][0]["scrolled"]
     return checks
+
+
+def cursor_checks(session):
+    """The page's cursors as X shows them, each after one move and nothing
+    after it (WebKit sets a cursor after its web process placed the pointer):
+    the theme's hand over the target, the page's own image over its box (16
+    × 16 red, its hot spot at 4, 4), the arrow over the plain page."""
+    import ctypes
+
+    class Image(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_short), ("y", ctypes.c_short), ("width", ctypes.c_ushort),
+                    ("height", ctypes.c_ushort), ("xhot", ctypes.c_ushort), ("yhot", ctypes.c_ushort),
+                    ("serial", ctypes.c_ulong), ("pixels", ctypes.POINTER(ctypes.c_ulong)),
+                    ("atom", ctypes.c_ulong), ("name", ctypes.c_char_p)]
+    x11 = ctypes.CDLL("libX11.so.6")
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XFree.argtypes = [ctypes.c_void_p]
+    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    fixes = ctypes.CDLL("libXfixes.so.3")
+    fixes.XFixesGetCursorImage.argtypes = [ctypes.c_void_p]
+    fixes.XFixesGetCursorImage.restype = ctypes.POINTER(Image)
+    display = x11.XOpenDisplay(session.env["DISPLAY"].encode())
+
+    def shown():
+        image = fixes.XFixesGetCursorImage(display)
+        try:
+            c = image.contents
+            return {"name": c.name.decode() if c.name else None, "size": (c.width, c.height),
+                    "hot": (c.xhot, c.yhot), "first": c.pixels[0] & 0xffffffff}
+        finally:
+            x11.XFree(image)
+    wanted = {
+        "pointer": ((160, 180), lambda c: c["name"] == "pointer"),
+        "image": ((460, 170), lambda c: c["size"] == (16, 16) and c["hot"] == (4, 4) and c["first"] == 0xffff0000),
+        "default": ((340, 340), lambda c: c["name"] == "default"),
+    }
+    found = {}
+    try:
+        for label, ((x, y), good) in wanted.items():
+            session.xdo("mousemove", "--window", session.window, x, y)
+            try:
+                found[label] = session.wait(lambda: (lambda c: c if good(c) else None)(shown()), "", 3)
+            except AssertionError:
+                raise AssertionError(f"the page's {label} cursor never showed (X shows {shown()})")
+    finally:
+        x11.XCloseDisplay(display)
+    return {label: c["name"] or f"{c['size'][0]}x{c['size'][1]} image" for label, c in found.items()}
 
 
 def compose(session, checks):

@@ -463,7 +463,10 @@ its window) come back to the app's shortcuts, as on macOS. An input method
 composes into the page through an input method context of zgx's, fed by the
 window's (IBus or Fcitx5, XIM or text-input-v3): the candidates follow the
 page's caret. A `<select>`'s popup is a zgx menu under the element; WebKit's
-own context menu and full screen are off. On X11 the page uses the system
+own context menu and full screen are off. The cursor is the one WebKit sets,
+as it sets it: CSS's named cursors are the theme's, and an image cursor
+(`cursor: url(…)`) is the window's while the pointer is over the page, made of
+its image on Wayland and, on X11, the very cursor GDK made on the server. On X11 the page uses the system
 clipboard itself; on Wayland, where GTK's connection never has the keyboard
 and so can't set or read the selection, a paste key gives the page zgx's
 clipboard text first, and what the page copies goes to zgx's clipboard as
@@ -511,8 +514,6 @@ Unlike macOS:
   WebGL pages cost more than on macOS.
 - The page renders at the window's scale through its zoom, so
   `devicePixelRatio` is 1 at any scale.
-- The cursor is the page's for the CSS cursors with a name in the cursor
-  theme; an image cursor (`cursor: url(...)`) shows as the arrow.
 - A message posted to `window.webkit.messageHandlers.zgx` directly, rather
   than through `window.zgx`, has no origin (empty) and `main_frame` false.
 - On Wayland the clipboard bridge carries text: what the page copies reaches

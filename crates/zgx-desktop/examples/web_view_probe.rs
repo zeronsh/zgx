@@ -3,8 +3,9 @@
 //! (40, 40), 600 × 400, with a red zgx square drawn over its bottom right
 //! corner, and a zgx button before the page at (660, 40); on the page a
 //! field at (20, 20), 300 × 40, a `<select>` at
-//! (360, 20), 200 × 30, a green target at (20, 100), 200 × 80, and enough
-//! height to scroll.
+//! (360, 20), 200 × 30, a green target at (20, 100), 200 × 80 (a pointer
+//! cursor), a box with an image cursor (16 × 16 red, its hot spot at 4, 4)
+//! at (360, 100), 120 × 60, and enough height to scroll.
 //!
 //! Prints `FINISHED <url>` as the page loads, `EVAL <json>` for a script it
 //! then evaluates, `PAGE <json>` for each message the page sends (what it
@@ -28,8 +29,9 @@ html, body { margin: 0; background: rgb(0, 0, 255); height: 3000px; }
 #field { position: absolute; left: 20px; top: 20px; width: 300px; height: 40px; font-size: 20px; box-sizing: border-box; }
 #choice { position: absolute; left: 360px; top: 20px; width: 200px; height: 30px; }
 #heading { position: absolute; left: 20px; top: 200px; margin: 0; font-size: 20px; color: white; }
-#target { position: absolute; left: 20px; top: 100px; width: 200px; height: 80px; background: rgb(0, 255, 0); }
-</style></head><body><h1 id="heading">Probe heading</h1><input id="field" aria-label="Probe field"><select id="choice"><option>Alpha</option><option>Beta</option><option>Gamma</option></select><div id="target"></div><script>
+#target { position: absolute; left: 20px; top: 100px; width: 200px; height: 80px; background: rgb(0, 255, 0); cursor: pointer; }
+#imaged { position: absolute; left: 360px; top: 100px; width: 120px; height: 60px; cursor: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR42mP4z8DwnxLMMGrAqAGjBgwXAwAwxP4QisZM5QAAAABJRU5ErkJggg==) 4 4, auto; }
+</style></head><body><h1 id="heading">Probe heading</h1><input id="field" aria-label="Probe field"><select id="choice"><option>Alpha</option><option>Beta</option><option>Gamma</option></select><div id="target"></div><div id="imaged"></div><script>
 const post = (value) => window.zgx.postMessage(value);
 const field = document.getElementById('field');
 document.getElementById('target').addEventListener('click', (e) => post({ click: [e.offsetX, e.offsetY], detail: e.detail }));
