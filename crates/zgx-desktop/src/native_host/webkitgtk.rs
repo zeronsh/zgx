@@ -29,7 +29,7 @@ use std::{
 };
 use zgx::{
     compose::{View, component, div, gpu_view, menu_item, switch},
-    input::{EventContext, InputEvent, Modifiers, PointerButton},
+    input::{DragItem, DragPhase, DraggedText, EventContext, InputEvent, Modifiers, PointerButton},
     scene::{NodeId, Rect, Scene},
     style::Styled,
     web_view::{
@@ -334,12 +334,27 @@ struct Page {
     preedit: RefCell<(String, u32)>,
     /// The `<select>` popup showing, a reference held.
     options: Cell<Ptr>,
+    /// The page's images, by URL, so a dragged one's bytes come from
+    /// WebKit (an authenticated page's too), not the network.
+    images: RefCell<HashMap<String, Ptr>>,
 }
 
 /// Defines `window.zgx.postMessage(value)`: what it posts carries the
 /// sending document's origin and whether it is the top frame, read before
 /// the page's own scripts run, with the page's secret (`NONCE`), which no
 /// script of the page can read, so none can post as another origin.
+/// zgx's own script world in a page: its scripts and message handlers are
+/// out of the page's sight, so the page can't forge what they report.
+const WORLD: &std::ffi::CStr = c"zgx";
+/// A drag out of the page, as its `dragstart` sees it (in zgx's world): its
+/// text, first URI and image source, read as it is dispatched. Last of its
+/// listeners (one added on the window as it is dispatched, so after the
+/// page's own), unless the page cancelled the drag, zgx cancels WebKit's, so
+/// WebKit never begins a GTK drag (which can't begin while zgx's window holds
+/// the pointer: GTK warned), and drags it instead. A page stopping the
+/// event short of the window keeps its drag, and zgx drags it as well.
+/// `zgxDragEnded()` gives the dragged element its `dragend`.
+const DRAG_SCRIPT: &str = "(() => { const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zgxDrag; if (!handler) return; const post = handler.postMessage.bind(handler); let source = null; addEventListener('dragstart', (event) => { const data = event.dataTransfer; const uri = data ? (data.getData('text/uri-list').split(/\\r?\\n/).find((line) => line && !line.startsWith('#')) || '') : ''; const image = event.target && event.target.closest ? event.target.closest('img') : null; const drag = { t: data ? data.getData('text/plain') : '', u: uri, i: image ? (image.currentSrc || image.src) : '' }; let posted = false; addEventListener('dragstart', (late) => { if (late !== event || event.defaultPrevented) return; posted = true; event.preventDefault(); source = event.target; post(drag); }, { once: true }); setTimeout(() => { if (!posted && !event.defaultPrevented) post(drag); }, 0); }, true); window.zgxDragEnded = () => { const target = source; source = null; if (target) target.dispatchEvent(new DragEvent('dragend', { bubbles: true })); }; })();";
 const CHANNEL_SCRIPT: &str = "(() => { const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zgx; if (!handler || window.zgx) return; const post = handler.postMessage.bind(handler); const stringify = JSON.stringify; const origin = location.origin; const main = window === window.top; Object.defineProperty(window, 'zgx', { value: Object.freeze({ postMessage(value) { post({ n: NONCE, o: origin, m: main, b: stringify(value === undefined ? null : value) }); } }) }); Object.defineProperty(window, 'zgui', { value: window.zgx }); })();"; // rename-to-zgx: keep
 
 /// What a page is made with, sent to GTK's thread.
@@ -450,6 +465,22 @@ impl Gtk {
             for (source, top) in &spec.scripts {
                 add(source, *top);
             }
+            (api.webkit_user_content_manager_register_script_message_handler_in_world)(
+                content,
+                c"zgxDrag".as_ptr(),
+                WORLD.as_ptr(),
+            );
+            let drag = c(DRAG_SCRIPT);
+            let script = (api.webkit_user_script_new_for_world)(
+                drag.as_ptr(),
+                0,
+                0,
+                WORLD.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+            );
+            (api.webkit_user_content_manager_add_script)(content, script);
+            (api.webkit_user_script_unref)(script);
             if spec.messages {
                 (api.webkit_user_content_manager_register_script_message_handler)(
                     content,
@@ -527,6 +558,7 @@ impl Gtk {
                 cursor: Cell::new(null_mut()),
                 preedit: RefCell::new((String::new(), 0)),
                 options: Cell::new(null_mut()),
+                images: RefCell::new(HashMap::new()),
             });
             let data = Rc::as_ptr(&page) as Ptr;
             let handler = |f: *const ()| std::mem::transmute::<*const (), gtk::GCallback>(f);
@@ -639,6 +671,30 @@ impl Gtk {
                 data,
                 false,
             );
+            connect(
+                api,
+                content,
+                "script-message-received::zgxDrag",
+                handler(on_drag_message as *const ()),
+                data,
+                false,
+            );
+            connect(
+                api,
+                view,
+                "resource-load-started",
+                handler(on_resource as *const ()),
+                data,
+                false,
+            );
+            connect(
+                api,
+                view,
+                "drag-begin",
+                handler(on_drag_begin as *const ()),
+                data,
+                false,
+            );
             (api.gtk_widget_show_all)(window);
             // The cursor the page wants, as WebKit sets it (after its web
             // process placed the pointer: never in step with an event).
@@ -688,6 +744,7 @@ impl Gtk {
                 (api.webkit_policy_decision_ignore)(decision);
                 (api.g_object_unref)(decision);
             }
+            page.forget_images();
             page.choose(None);
             (api.webkit_web_view_stop_loading)(page.view);
             (api.gtk_widget_destroy)(page.window);
@@ -894,6 +951,76 @@ impl Page {
             }
         });
     }
+    /// The page began a drag: what it carries, an image's bytes as WebKit has
+    /// them (not the network: an authenticated page's too), to the UI thread.
+    fn begin_drag(&self, drag: DragData) {
+        let id = self.id;
+        let resource = (!drag.image.is_empty())
+            .then(|| self.images.borrow().get(&drag.image).copied())
+            .flatten();
+        let Some(resource) = resource else {
+            deliver(move || {
+                if let Some(page) = ui_page(id) {
+                    page.drag_ready(drag, None);
+                }
+            });
+            return;
+        };
+        unsafe extern "C" fn got(resource: Ptr, result: Ptr, data: Ptr) {
+            let api = gtk::api().expect("GTK runs");
+            // SAFETY: the drag boxed below, and WebKit's answer for the
+            // resource, its bytes copied and freed.
+            let (id, drag) = *unsafe { Box::from_raw(data as *mut (u64, DragData)) };
+            let bytes = unsafe {
+                let mut length = 0;
+                let raw = (api.webkit_web_resource_get_data_finish)(
+                    resource,
+                    result,
+                    &mut length,
+                    null_mut(),
+                );
+                let bytes = (!raw.is_null() && length > 0)
+                    .then(|| std::slice::from_raw_parts(raw, length).to_vec());
+                (api.g_free)(raw as Ptr);
+                bytes
+            };
+            deliver(move || {
+                if let Some(page) = ui_page(id) {
+                    page.drag_ready(drag, bytes);
+                }
+            });
+        }
+        let api = gtk::api().expect("GTK runs");
+        let boxed = Box::into_raw(Box::new((id, drag))) as Ptr;
+        // SAFETY: a resource the page keeps, on GTK's thread; `got` takes the
+        // box.
+        unsafe { (api.webkit_web_resource_get_data)(resource, null_mut(), got, boxed) };
+    }
+    /// Release a kept image resource (`images`).
+    fn release_image(&self, resource: Ptr) {
+        let api = gtk::api().expect("GTK runs");
+        // SAFETY: a resource this page referenced, on GTK's thread; its
+        // handler (this page's) goes first.
+        unsafe {
+            (api.g_signal_handlers_disconnect_matched)(
+                resource,
+                gtk::G_SIGNAL_MATCH_DATA,
+                0,
+                0,
+                null_mut(),
+                null_mut(),
+                self as *const Page as Ptr,
+            );
+            (api.g_object_unref)(resource);
+        }
+    }
+    /// Release every kept image (a new document, or the page closing).
+    fn forget_images(&self) {
+        let images = std::mem::take(&mut *self.images.borrow_mut());
+        for resource in images.into_values() {
+            self.release_image(resource);
+        }
+    }
     fn uri(&self) -> String {
         let api = gtk::api().expect("GTK runs");
         // SAFETY: a getter of the live view on GTK's thread.
@@ -1093,6 +1220,16 @@ impl Page {
                         (api.gtk_widget_hide)(self.window);
                     }
                 }
+                Command::DragEnded => (api.webkit_web_view_evaluate_javascript)(
+                    self.view,
+                    c"zgxDragEnded()".as_ptr(),
+                    -1,
+                    WORLD.as_ptr(),
+                    std::ptr::null(),
+                    null_mut(),
+                    None,
+                    null_mut(),
+                ),
                 Command::Pointer(pointer) => self.pointer(pointer),
                 Command::Key {
                     press,
@@ -1623,6 +1760,97 @@ unsafe extern "C" fn on_inspector_attach(inspector: Ptr, _: Ptr) -> gtk::gboolea
     unsafe { (api.g_idle_add_full)(0, detach, (api.g_object_ref)(inspector), None) };
     0
 }
+/// What a page's `dragstart` carried (`DRAG_SCRIPT`).
+struct DragData {
+    text: String,
+    uri: String,
+    image: String,
+}
+unsafe extern "C" fn on_drag_message(_: Ptr, result: Ptr, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: GTK passes the posted value (a 4.1 JavaScript result) and this
+    // handler's page; its properties are read as JavaScriptCore gives them,
+    // released after.
+    let page = unsafe { page(data) };
+    let value = unsafe { (api.webkit_javascript_result_get_js_value)(result) };
+    if unsafe { (api.jsc_value_is_object)(value) } == 0 {
+        return;
+    }
+    let read = |name: &std::ffi::CStr| unsafe {
+        let property = (api.jsc_value_object_get_property)(value, name.as_ptr());
+        let raw = (api.jsc_value_to_string)(property);
+        let out = string(raw);
+        (api.g_free)(raw as Ptr);
+        (api.g_object_unref)(property);
+        out
+    };
+    page.begin_drag(DragData {
+        text: read(c"t"),
+        uri: read(c"u"),
+        image: read(c"i"),
+    });
+}
+unsafe extern "C" fn on_resource(_: Ptr, resource: Ptr, _: Ptr, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: GTK passes the resource WebKit loads and this handler's page;
+    // the resource is kept (referenced) until it is known not an image, a
+    // new document comes or the page closes (`forget_images`).
+    unsafe {
+        let page = page(data);
+        let uri = string((api.webkit_web_resource_get_uri)(resource));
+        (api.g_object_ref)(resource);
+        if let Some(old) = page.images.borrow_mut().insert(uri, resource) {
+            page.release_image(old);
+        }
+        let handler = std::mem::transmute::<*const (), gtk::GCallback>(on_response as *const ());
+        connect(api, resource, "notify::response", handler, data, false);
+    }
+}
+unsafe extern "C" fn on_response(resource: Ptr, _: Ptr, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: GTK passes a resource this page keeps and the page; its
+    // response's type is read on GTK's thread.
+    unsafe {
+        let page = page(data);
+        let response = (api.webkit_web_resource_get_response)(resource);
+        let kind = if response.is_null() {
+            String::new()
+        } else {
+            string((api.webkit_uri_response_get_mime_type)(response))
+        };
+        if !kind.starts_with("image/") {
+            let mut images = page.images.borrow_mut();
+            if let Some(uri) = images
+                .iter()
+                .find(|(_, kept)| **kept == resource)
+                .map(|(uri, _)| uri.clone())
+            {
+                images.remove(&uri);
+                drop(images);
+                page.release_image(resource);
+            }
+        }
+    }
+}
+/// A GTK drag WebKit began (where nothing held the pointer): ended, from an
+/// idle callback, after GTK finished beginning it (ended within this signal,
+/// GTK warned of a widget and display it no longer had); zgx drags instead.
+unsafe extern "C" fn on_drag_begin(_: Ptr, context: Ptr, _: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    unsafe extern "C" fn cancel(context: Ptr) -> gtk::gboolean {
+        let api = gtk::api().expect("GTK runs");
+        // SAFETY: the drag referenced below, released here.
+        unsafe {
+            (api.gtk_drag_cancel)(context);
+            (api.g_object_unref)(context);
+        }
+        0
+    }
+    // SAFETY: GTK passes the drag it began; referenced for the callback.
+    unsafe {
+        (api.g_idle_add_full)(0, cancel, (api.g_object_ref)(context), None);
+    }
+}
 unsafe extern "C" fn on_load_changed(_: Ptr, event: c_int, data: Ptr) {
     // SAFETY: GTK passes this handler's page.
     let page = unsafe { page(data) };
@@ -1633,8 +1861,11 @@ unsafe extern "C" fn on_load_changed(_: Ptr, event: c_int, data: Ptr) {
             web.update_state(|state| state.error = None);
             web.emit(WebViewEvent::NavigationStarted { url });
         }),
-        // WEBKIT_LOAD_COMMITTED.
-        2 => page.post(move |web| web.emit(WebViewEvent::NavigationCommitted { url })),
+        // WEBKIT_LOAD_COMMITTED: a new document, whose images come anew.
+        2 => {
+            page.forget_images();
+            page.post(move |web| web.emit(WebViewEvent::NavigationCommitted { url }))
+        }
         // WEBKIT_LOAD_FINISHED (after a failure too).
         3 => page.post(move |web| {
             if web.state().with_untracked(|state| state.error.is_none()) {
@@ -2393,6 +2624,8 @@ enum Command {
         scale: f64,
     },
     Shown(bool),
+    /// zgx's drag of what the page dragged ended (`DRAG_SCRIPT`).
+    DragEnded,
     Pointer(Pointer),
     Key {
         press: bool,
@@ -2511,6 +2744,13 @@ struct UiPage {
     /// made of it (`make_cursors`), or X11's.
     own_cursor: RefCell<Option<(Arc<CursorImage>, Option<winit::window::CustomCursor>)>>,
     x11_cursor: Cell<Option<u64>>,
+    /// Where the button went down, in the window's points, while it's held.
+    pressed: Cell<Option<(f32, f32)>>,
+    /// A drag the page began, its text and what it carries to other apps,
+    /// until the pointer next moves (`drag_ready`).
+    dragging: RefCell<Option<(String, Vec<DragItem>)>>,
+    /// What the drag begun carries, for its start (`View::drag_export`'s).
+    exporting: RefCell<Option<Vec<DragItem>>>,
     /// The `<select>` popup to show, and a count its box follows (made
     /// with the first box, in its runtime).
     options: RefCell<Option<Rc<OptionMenu>>>,
@@ -2605,10 +2845,70 @@ impl UiPage {
             ((y - shown.y) * sy) as f64 * scale,
         ))
     }
+    /// The page began a drag (its GTK drag ended): zgx's, from the press,
+    /// as the pointer next moves. Its text is what a field takes (the
+    /// selection, else the link's or image's address); other apps get the
+    /// image's bytes, the address, and the text.
+    fn drag_ready(&self, drag: DragData, image: Option<Vec<u8>>) {
+        if self.pressed.get().is_none() {
+            return;
+        }
+        let url = if drag.image.is_empty() {
+            drag.uri
+        } else {
+            drag.image
+        };
+        let text = if drag.text.is_empty() {
+            url.clone()
+        } else {
+            drag.text
+        };
+        let mut items = Vec::new();
+        if let Some(bytes) = image {
+            items.push(DragItem::Image(bytes.into()));
+        }
+        if !url.is_empty() {
+            items.push(DragItem::Url(url));
+        }
+        if !text.is_empty() {
+            items.push(DragItem::Text(text.clone()));
+        }
+        *self.dragging.borrow_mut() = Some((text, items));
+    }
     /// Its box's input.
     fn input(&self, event: &mut EventContext) {
         let state = modifier_state(event.pointer_modifiers());
         match event.event.clone() {
+            InputEvent::PointerMove { .. }
+                if self.pressed.get().is_some() && self.dragging.borrow().is_some() =>
+            {
+                let (Some((x, y)), Some((text, items))) =
+                    (self.pressed.take(), self.dragging.take())
+                else {
+                    return;
+                };
+                event.start_drag_from(DraggedText::new(text), x, y);
+                *self.exporting.borrow_mut() = Some(items);
+                // The page's press ends where it began: the drag is zgx's.
+                if let Some((x, y)) = self.local(x, y) {
+                    self.send(Command::Pointer(Pointer::Button {
+                        press: false,
+                        x,
+                        y,
+                        button: 1,
+                        state,
+                    }));
+                }
+            }
+            InputEvent::Drag(drag) if drag.phase == DragPhase::Start => {
+                if let Some(items) = self.exporting.take() {
+                    event.set_drag_export(items);
+                }
+            }
+            // The page's dragged element hears its drag end.
+            InputEvent::Drag(drag) if drag.phase == DragPhase::End => {
+                self.send(Command::DragEnded);
+            }
             InputEvent::PointerMove { x, y } => {
                 if let Some((x, y)) = self.local(x, y) {
                     self.send(Command::Pointer(Pointer::Move { x, y, state }));
@@ -2623,6 +2923,10 @@ impl UiPage {
             InputEvent::PointerDown { x, y, button } => {
                 event.focus();
                 event.capture_pointer();
+                if button == PointerButton::Primary {
+                    self.pressed.set(Some((x, y)));
+                    *self.dragging.borrow_mut() = None;
+                }
                 if let Some((x, y)) = self.local(x, y) {
                     let button = gdk_button(button);
                     self.send(Command::Pointer(Pointer::Button {
@@ -2636,6 +2940,8 @@ impl UiPage {
             }
             InputEvent::PointerUp { x, y, button } => {
                 event.release_pointer();
+                self.pressed.set(None);
+                *self.dragging.borrow_mut() = None;
                 if let Some((x, y)) = self.local(x, y) {
                     let button = gdk_button(button);
                     self.send(Command::Pointer(Pointer::Button {
@@ -2827,6 +3133,9 @@ fn backend(
         handle: RefCell::new(None),
         own_cursor: RefCell::new(None),
         x11_cursor: Cell::new(None),
+        pressed: Cell::new(None),
+        dragging: RefCell::new(None),
+        exporting: RefCell::new(None),
     });
     let spec = Spec {
         id: web.id(),

@@ -518,4 +518,12 @@ Unlike macOS:
   than through `window.zgx`, has no origin (empty) and `main_frame` false.
 - On Wayland the clipboard bridge carries text: what the page copies reaches
   other apps as plain text, and the primary selection is the page's own.
-- Dragging out of the page, and files dropped on it, are not supported.
+- A drag out of the page is zgx's: its link, image or selected text drops
+  on zgx's targets (as `DraggedText`, the selection or the address) and,
+  out of the window, on other apps (the address, the text, and an image's
+  bytes as WebKit has them, so a page behind a login drags its images too).
+  A selection goes as plain text. The page's own drag is cancelled once its
+  `dragstart` listeners ran (WebKit's GTK drag can't begin while zgx's
+  window holds the pointer), and the dragged element hears `dragend` as
+  zgx's drag ends. Files dropped on a page, and drags within it, are not
+  supported.

@@ -292,6 +292,7 @@ def page_checks(session, ime, transparent=False):
         return ime(session, checks)
     if not session.wayland:
         checks["cursors"] = cursor_checks(session)
+    checks["dragged out"] = drag_checks(session)
     session.click(160, 180)
     click = session.wait(lambda: [m for m in session.messages() if "click" in m[0]], "the click never reached the page")[0]
     if click[0]["click"] != [100, 40] or click[1] != "https://probe.zgx.test" or not click[2]:
@@ -382,6 +383,79 @@ def cursor_checks(session):
     finally:
         x11.XCloseDisplay(display)
     return {label: c["name"] or f"{c['size'][0]}x{c['size'][1]} image" for label, c in found.items()}
+
+
+def drag_checks(session):
+    """Drags out of the page, with real input: its link onto a zgx drop target
+    beside it, then onto another app's (a GTK window right of the probe's,
+    clear of it: a drag leaves zgx by its window's bounds), and its image
+    onto one asking for PNG first. On Wayland the GTK window is a Wayland
+    client of the same Sway, floated where its config puts it (800, 0)."""
+    def screen(x, y):
+        return session.origin[0] + x, session.origin[1] + y
+
+    def drag(start, end):
+        sx, sy = screen(*start)
+        session.xdo("mousemove", sx, sy)
+        time.sleep(.3)
+        session.xdo("mousedown", 1)
+        for step in range(1, 25):
+            x = sx + (end[0] - sx) * step / 24
+            y = sy + (end[1] - sy) * step / 24
+            session.xdo("mousemove", int(x), int(y))
+            time.sleep(.05)
+        time.sleep(.5)
+        session.xdo("mouseup", 1)
+        time.sleep(.5)
+
+    found = {}
+    link, image, target = (80, 292), (430, 250), (705, 130)
+    drag(link, screen(*target))
+    found["onto zgx"] = session.wait(lambda: session.lines("DROPPED "), "the page's link never dropped on zgx's target")[0]
+    if found["onto zgx"] != "https://example.com/dragged":
+        raise AssertionError(f"zgx's target got {found['onto zgx']!r}")
+    # The page hears its drag end, and GTK never tried a drag of its own.
+    session.wait(lambda: any(m[0].get("dragend") for m in session.messages()), "the page never heard its drag end")
+    if "gtk_drag" in session.log.read_text():
+        raise AssertionError("GTK warned of a drag: see application.log")
+    script = str(pathlib.Path(__file__).resolve().parent / "xdnd_target.py")
+    for name, start, extra in (("link", link, []), ("image", image, ["--image"])):
+        x, y = screen(790, 100)
+        log = session.output / f"target-{name}.log"
+        env = dict(session.wayland, GDK_BACKEND="wayland") if session.wayland else session.env
+        with log.open("w") as out:
+            target_app = subprocess.Popen([sys.executable, script, f"Page {name} drops", str(x), str(y)] + extra,
+                                          env=env, stdout=out, stderr=subprocess.STDOUT)
+        try:
+            session.wait(lambda: "READY" in log.read_text(), f"the {name} drop target never opened", 15)
+            time.sleep(1)
+            if session.wayland:
+                # Floated at (800, 0) by Sway's config, its default size.
+                centre = screen(1000, 100)
+            else:
+                # Clear of the probe's window, then its centre, where its
+                # window manager put it.
+                subprocess.run(["xdotool", "search", "--name", f"^Page {name} drops$", "windowmove", "--sync", str(x), str(y)],
+                               env=session.env, capture_output=True)
+                geometry = subprocess.run(["xdotool", "search", "--name", f"^Page {name} drops$", "getwindowgeometry"],
+                                          env=session.env, capture_output=True, text=True).stdout
+                left, top = map(int, re.search(r"Position: (\d+),(\d+)", geometry).groups())
+                width, height = map(int, re.search(r"Geometry: (\d+)x(\d+)", geometry).groups())
+                centre = (left + width // 2, top + height // 2)
+            drag(start, centre)
+            got = session.wait(lambda: [l for l in log.read_text().splitlines() if l.startswith("RECEIVED")],
+                               f"another app never took the page's {name}", 10)[0]
+        finally:
+            target_app.terminate()
+            target_app.wait(5)
+        if name == "link" and "https://example.com/dragged" not in got:
+            raise AssertionError(f"the app got {got!r}")
+        if name == "image" and not got.startswith("RECEIVED image/png 82 bytes 89504e47"):
+            raise AssertionError(f"the app got {got!r} for the image")
+        found[f"{name} onto an app"] = got[len("RECEIVED "):]
+    if "gtk_drag" in session.log.read_text():
+        raise AssertionError("GTK warned of a drag: see application.log")
+    return found
 
 
 def compose(session, checks):
@@ -537,7 +611,7 @@ def x11(args, output, private):
     owned = []
     try:
         with (output / "xvfb.log").open("w") as log:
-            xvfb = subprocess.Popen(["Xvfb", "-r", "-noreset", "-displayfd", "1", "-screen", "0", "1024x768x24", "-ac"],
+            xvfb = subprocess.Popen(["Xvfb", "-r", "-noreset", "-displayfd", "1", "-screen", "0", "1400x900x24", "-ac"],
                                     stdout=subprocess.PIPE, stderr=log, text=True)
         owned.append(xvfb)
         if not select.select([xvfb.stdout], [], [], 30)[0]:
@@ -656,7 +730,9 @@ def wayland(args, output, private):
                                "Layout=\n\n[Groups/0/Items/1]\nName=pinyin\nLayout=\n\n[GroupOrder]\n0=Default\n")
         # The probe's window fills the output: its points are the output's.
         config = pathlib.Path(private, "sway.conf")
-        sway_config(config, "xwayland disable\nseat seat0 fallback true\noutput * mode 900x650\ndefault_border none\n"
+        sway_config(config, "xwayland disable\nseat seat0 fallback true\noutput * mode 1260x650\ndefault_border none\n"
+                          "default_floating_border none\nfor_window [title=\"^Web view probe$\"] floating enable, move position 0 0\n"
+                          "for_window [title=\"^Page .* drops$\"] floating enable, move position 800 0\n"
                           if not args.inspector else
                           # Room for the probe's large page and, clear of it,
                           # Web Inspector's own window.

@@ -93,6 +93,12 @@ api! {
     fn gtk_init_check(*mut c_int, *mut *mut *mut c_char) -> gboolean;
     fn gtk_main();
     fn gtk_offscreen_window_new() -> Ptr;
+    fn gtk_drag_cancel(Ptr);
+    fn webkit_web_resource_get_uri(Ptr) -> *const c_char;
+    fn webkit_web_resource_get_response(Ptr) -> Ptr;
+    fn webkit_uri_response_get_mime_type(Ptr) -> *const c_char;
+    fn webkit_web_resource_get_data(Ptr, Ptr, unsafe extern "C" fn(Ptr, Ptr, Ptr), Ptr);
+    fn webkit_web_resource_get_data_finish(Ptr, Ptr, *mut usize, *mut *mut GError) -> *mut u8;
     fn gtk_offscreen_window_get_type() -> GType;
     fn gtk_window_get_type() -> GType;
     fn gtk_window_resize(Ptr, c_int, c_int);
@@ -179,6 +185,8 @@ api! {
     fn webkit_security_manager_register_uri_scheme_as_cors_enabled(Ptr, *const c_char);
     fn webkit_user_content_manager_new() -> Ptr;
     fn webkit_user_content_manager_register_script_message_handler(Ptr, *const c_char) -> gboolean;
+    fn webkit_user_content_manager_register_script_message_handler_in_world(Ptr, *const c_char, *const c_char) -> gboolean;
+    fn webkit_user_script_new_for_world(*const c_char, c_int, c_int, *const c_char, *const *const c_char, *const *const c_char) -> Ptr;
     fn webkit_user_content_manager_add_script(Ptr, Ptr);
     fn webkit_user_script_new(*const c_char, c_int, c_int, *const *const c_char, *const *const c_char) -> Ptr;
     fn webkit_user_script_unref(Ptr);

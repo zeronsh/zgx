@@ -5,7 +5,10 @@
 //! field at (20, 20), 300 × 40, a `<select>` at
 //! (360, 20), 200 × 30, a green target at (20, 100), 200 × 80 (a pointer
 //! cursor), a box with an image cursor (16 × 16 red, its hot spot at 4, 4)
-//! at (360, 100), 120 × 60, and enough height to scroll.
+//! at (360, 100), 120 × 60, a link (to https://example.com/dragged) at (20,
+//! 240), a 60 × 60 red image at (360, 180), and enough height to scroll.
+//! Beside the page, a gray zgx drop target at (660, 100), 90 × 60, prints
+//! `DROPPED <text>` for each drag dropped on it.
 //!
 //! Prints `FINISHED <url>` as the page loads, `EVAL <json>` for a script it
 //! then evaluates, `PAGE <json>` for each message the page sends (what it
@@ -29,9 +32,11 @@ html, body { margin: 0; background: rgb(0, 0, 255); height: 3000px; }
 #field { position: absolute; left: 20px; top: 20px; width: 300px; height: 40px; font-size: 20px; box-sizing: border-box; }
 #choice { position: absolute; left: 360px; top: 20px; width: 200px; height: 30px; }
 #heading { position: absolute; left: 20px; top: 200px; margin: 0; font-size: 20px; color: white; }
+#link { position: absolute; left: 20px; top: 240px; font-size: 20px; color: white; }
+#pic { position: absolute; left: 360px; top: 180px; width: 60px; height: 60px; }
 #target { position: absolute; left: 20px; top: 100px; width: 200px; height: 80px; background: rgb(0, 255, 0); cursor: pointer; }
 #imaged { position: absolute; left: 360px; top: 100px; width: 120px; height: 60px; cursor: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR42mP4z8DwnxLMMGrAqAGjBgwXAwAwxP4QisZM5QAAAABJRU5ErkJggg==) 4 4, auto; }
-</style></head><body><h1 id="heading">Probe heading</h1><input id="field" aria-label="Probe field"><select id="choice"><option>Alpha</option><option>Beta</option><option>Gamma</option></select><div id="target"></div><div id="imaged"></div><script>
+</style></head><body><h1 id="heading">Probe heading</h1><input id="field" aria-label="Probe field"><select id="choice"><option>Alpha</option><option>Beta</option><option>Gamma</option></select><div id="target"></div><div id="imaged"></div><a id="link" href="https://example.com/dragged">Drag me</a><img id="pic" alt="red" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR42mP4z8DwnxLMMGrAqAGjBgwXAwAwxP4QisZM5QAAAABJRU5ErkJggg=="><script>
 const post = (value) => window.zgx.postMessage(value);
 const field = document.getElementById('field');
 document.getElementById('target').addEventListener('click', (e) => post({ click: [e.offsetX, e.offsetY], detail: e.detail }));
@@ -46,6 +51,7 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === 'j') e.preventDefault();
 }, true);
 addEventListener('resize', () => post({ resized: innerHeight }));
+addEventListener('dragend', () => post({ dragend: true }));
 let scrolled = false;
 addEventListener('scroll', () => { if (!scrolled && scrollY > 0) { scrolled = true; post({ scrolled: scrollY }); } });
 </script></body></html>"#;
@@ -128,6 +134,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .w(120.)
                             .h(120.)
                             .bg(rgba(0xff0000ff)),
+                    )
+                    // A zgx drop target for drags out of the page.
+                    .child(
+                        div()
+                            .absolute()
+                            .left(660.)
+                            .top(100.)
+                            .w(90.)
+                            .h(60.)
+                            .bg(rgba(0x808080ff))
+                            .on_drop(|text: &zgx::input::DraggedText, _| {
+                                println!("DROPPED {}", text.text())
+                            }),
                     )
                     // zgx content before the page in Tab's order.
                     .child(
