@@ -354,7 +354,7 @@ jobs:
         run: exit "$status"
   macos:
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -423,7 +423,7 @@ jobs:
   # the GPU suite run on developer machines.
   windows:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
