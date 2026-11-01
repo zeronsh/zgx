@@ -3589,13 +3589,17 @@ fn styled(
         });
     } else {
         for (pseudo, lits) in &node.pseudo {
+            if *pseudo == Pseudo::Container {
+                view = container_query(view, lits);
+                continue;
+            }
             let lits = lits.clone();
             let style = move |s: Styles| apply_all(s, &lits);
             view = match pseudo {
                 Pseudo::Hover => view.hover(style),
                 Pseudo::Active => view.active(style),
                 Pseudo::Focus => view.focus(style),
-                Pseudo::Disabled => view.disabled_style(style),
+                _ => view.disabled_style(style),
             };
         }
     }
@@ -4008,6 +4012,20 @@ fn range_view(
     view
 }
 
+/// A `queries` entry on `view` (`View::when_container`), or with no styles
+/// `container = true` (`View::container`).
+#[cold]
+#[inline(never)]
+fn container_query(view: View, lits: &[(Prop, Lit)]) -> View {
+    if lits.is_empty() {
+        return view.container();
+    }
+    let Some((query, styles)) = crate::node::query_of(lits) else {
+        return view;
+    };
+    let styles = styles.to_vec();
+    view.when_container(query, move |s| apply_all(s, &styles))
+}
 /// Whether `node` is a library component that names an inner node with
 /// its label (`FollowedLabel`), not its root.
 fn follows_label(node: &Node) -> bool {

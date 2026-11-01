@@ -1454,6 +1454,8 @@ pub(crate) struct UiStorage {
     after_layout: RefCell<Vec<Box<dyn FnOnce()>>>,
     /// Run after every layout pass that changes the layout, by owning node.
     layout_listeners: RefCell<crate::scene::NodeMap<Vec<LayoutListener>>>,
+    /// Boxes views' container queries read (`View::container`).
+    pub(crate) containers: RefCell<crate::scene::NodeMap<crate::container_query::Container>>,
     mount_initialization: RefCell<Option<Rc<MountInitialization>>>,
     /// Views mounting now, nested (`Ui::mounting`).
     mounting: Cell<u32>,
@@ -1715,6 +1717,7 @@ impl Ui {
             observed_visibility: RefCell::default(),
             after_layout: RefCell::new(Vec::new()),
             layout_listeners: RefCell::default(),
+            containers: RefCell::default(),
             mount_initialization: RefCell::new(None),
             mounting: Cell::new(0),
             open_elements: RefCell::default(),

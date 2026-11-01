@@ -1518,7 +1518,17 @@ export type DragExport = { text: string?, url: string?, files: { string }? }
 export type Size = { w: number, h: number }
 export type DragPoint = { x: number, y: number, local_x: number, local_y: number, w: number, h: number }
 
--- Plain styles, for `hover`, `active`, `focus`, `disabled` and
+-- A container query: `style` while the container above (`container =
+-- true`) is within these bounds, in points of its content box.
+export type Query = {
+	min_width: number?,
+	max_width: number?,
+	min_height: number?,
+	max_height: number?,
+	style: Styles?,
+}
+
+-- Plain styles, for `hover`, `active`, `focus`, `disabled`, `queries` and
 -- `context_menu_style`.
 export type Styles = {
 	-- Size and position.
@@ -2052,6 +2062,15 @@ export type NodeProps = {
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: boolean?,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: { Query }?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and

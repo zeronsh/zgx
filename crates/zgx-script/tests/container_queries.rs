@@ -1,67 +1,49 @@
-//! A ref's `width` and `height` are followed: a computed reading them runs
-//! again when layout resizes its element, within the same frame (as a
-//! browser's ResizeObserver and container queries settle before paint), so
-//! a layout can answer the room it has. An element's own fields are plain
-//! reads.
+//! `container` and `queries` as scripts write them: styles that follow the
+//! size of the container above, without script running as it changes.
 mod common;
+
 use common::Harness;
 
-#[test]
-fn a_layout_answers_its_width_in_the_frame_it_changes() {
-    let mut h = Harness::inline(
-        r##"local main = ui.ref()
-        local wide = ui.computed(function()
-            return (main.width or 400) >= 300
-        end)
-        return ui.row { id = "app", ref = main, w_full = true, h_full = true,
-            ui.show(function()
-                return wide:get()
-            end, ui.column { id = "sidebar", w = 100, shrink = 0 }),
-            ui.column { id = "content", grow = 1 },
-        }"##,
-    );
-    assert!(h.find("sidebar").is_some());
-    assert_eq!(h.bounds("content").width, 300.);
-    // Narrower than the breakpoint: one frame's layout hides the sidebar
-    // and gives its room to the content.
-    h.ui.scene.borrow_mut().resize(250., 300.);
-    h.ui.prepare_frame();
-    assert!(h.find("sidebar").is_none());
-    assert_eq!(h.bounds("content").width, 250.);
-    h.ui.scene.borrow_mut().resize(400., 300.);
-    h.ui.prepare_frame();
-    assert!(h.find("sidebar").is_some());
-    assert_eq!(h.bounds("content").width, 300.);
+fn width(h: &mut Harness, id: &str) -> f32 {
+    h.frames(1);
+    let node = h.find(id).unwrap();
+    h.ui.scene.borrow().bounds(node).width
 }
 
 #[test]
-fn a_layout_that_answers_itself_forever_is_reported_once_and_kept() {
+fn a_query_follows_its_containers_width() {
     let mut h = Harness::inline(
-        r##"local box = ui.ref()
-        local on = ui.state("on", false)
+        r##"local wide = ui.state("wide", 1000)
         return ui.column {
-            ui.div { id = "box", ref = box, h = 20, w = function()
-                if not on:get() then
-                    return 100
-                end
-                return if (box.width or 100) > 150 then 100 else 200
-            end },
+            ui.button { id = "narrow", on_click = function() wide:set(450) end, "narrow" },
+            ui.button { id = "tiny", on_click = function() wide:set(300) end, "tiny" },
+            ui.row { container = true, w = wide,
+                ui.div { id = "side", h = 20, w = 0,
+                    queries = {
+                        { min_width = 600, style = { w = 200 } },
+                        { max_width = 300, style = { w = 50 } },
+                    },
+                },
+            },
         }"##,
     );
-    let heard = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
-    let told = heard.clone();
-    h.host
-        .on_error(move |error| told.borrow_mut().push(error.to_string()));
-    h.ui.contain_layout_feedback();
-    h.host
-        .set_state("on", zgx_script::Value::Bool(true))
-        .unwrap();
-    h.frames(5);
-    let box_ = h.find("box").unwrap();
-    let held = h.ui.scene.borrow().bounds(box_).width;
-    assert!(held == 100. || held == 200., "{held}");
-    h.frames(5);
-    assert_eq!(h.ui.scene.borrow().bounds(box_).width, held, "held");
-    assert_eq!(heard.borrow().len(), 1, "{:?}", heard.borrow());
-    assert!(heard.borrow()[0].contains("did not settle"));
+    assert_eq!(width(&mut h, "side"), 200.);
+    h.click("narrow");
+    assert_eq!(width(&mut h, "side"), 0.);
+    h.click("tiny");
+    assert_eq!(width(&mut h, "side"), 50.);
+    assert_eq!(h.error(), None);
+}
+
+#[test]
+fn a_query_with_an_unknown_key_says_what_it_takes() {
+    let code = r##"return ui.row { container = true, w = 500,
+        ui.div { queries = { { min_w = 600, style = { w = 200 } } } },
+    }"##;
+    let error = zgx_script::testing::TestApp::try_new(|runtime| {
+        zgx_script::ScriptHost::inline(runtime, "app", code)
+    })
+    .err()
+    .unwrap_or_default();
+    assert!(error.contains("min_width"), "{error}");
 }

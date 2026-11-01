@@ -1398,6 +1398,10 @@ pub(crate) enum Pseudo {
     Active,
     Focus,
     Disabled,
+    /// A container query (`queries`): its styles' first entry is its
+    /// condition (`query_lit`), the rest what it sets; with no styles at
+    /// all, `container = true`. No interaction slot.
+    Container,
 }
 impl Pseudo {
     /// Its place in zgx's interaction styles (and `variants::INTERACTION`).
@@ -3172,6 +3176,8 @@ const LATE_FIELDS: &[&str] = &[
     "selection_radius",
     "autocorrect",
     "smart_punctuation",
+    "container",
+    "queries",
 ];
 
 /// A key no style property names, taken where it lies once the walk finds
@@ -3223,6 +3229,25 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 hit: false,
             });
             layout.hit = target;
+        }
+        // A container: a `Pseudo::Container` with no styles (a query has
+        // its bounds), so no node carries a field for it.
+        "container" => {
+            if lua.unpack::<bool>(value)? {
+                node.pseudo.push((Pseudo::Container, Styles::from([])));
+            }
+        }
+        "queries" => {
+            let mlua::Value::Table(list) = value else {
+                return Err(mlua::Error::runtime(QUERIES));
+            };
+            for entry in list.sequence_values::<mlua::Value>() {
+                let mlua::Value::Table(entry) = entry? else {
+                    return Err(mlua::Error::runtime(QUERIES));
+                };
+                node.pseudo
+                    .push((Pseudo::Container, query_styles(lua, &entry)?));
+            }
         }
         "inputmode" => {}
         // `ui.each`'s reorder, read by `ui.each` itself.
@@ -6078,9 +6103,81 @@ pub(crate) fn computed_state(_: &Lua, env: &Env, f: Function) -> crate::value::S
 pub(crate) fn interaction_of(pseudo: &[(Pseudo, Styles)]) -> [Vec<(Prop, Lit)>; 4] {
     let mut out: [Vec<(Prop, Lit)>; 4] = Default::default();
     for (pseudo, styles) in pseudo {
-        out[pseudo.slot()].extend(styles.iter().cloned());
+        if *pseudo != Pseudo::Container {
+            out[pseudo.slot()].extend(styles.iter().cloned());
+        }
     }
     out
+}
+
+const QUERIES: &str = "`queries` takes a list of queries: { { min_width = 600, style = { … } } }";
+/// One `queries` entry: its bounds (`min_width`, `max_width`, `min_height`,
+/// `max_height`) as `query_lit`, then the literal styles of its `style`.
+#[cold]
+#[inline(never)]
+fn query_styles(lua: &Lua, entry: &Table) -> mlua::Result<Styles> {
+    let bound = |key: &str| -> mlua::Result<f32> {
+        Ok(entry
+            .raw_get::<Option<f64>>(key)?
+            .map_or(f32::NAN, |v| v as f32))
+    };
+    let bounds = zgx::decoration::Corners {
+        top_left: bound("min_width")?,
+        top_right: bound("max_width")?,
+        bottom_right: bound("min_height")?,
+        bottom_left: bound("max_height")?,
+    };
+    for pair in entry.pairs::<String, mlua::Value>() {
+        let (key, _) = pair?;
+        if !matches!(
+            key.as_str(),
+            "min_width" | "max_width" | "min_height" | "max_height" | "style"
+        ) {
+            return Err(mlua::Error::runtime(format!(
+                "a query takes `min_width`, `max_width`, `min_height`, `max_height` and \
+                 `style`, not `{key}`"
+            )));
+        }
+    }
+    let mut lits = Vec::new();
+    if let Some(styles) = entry.raw_get::<Option<Table>>("style")? {
+        for pair in styles.pairs::<String, mlua::Value>() {
+            let (name, value) = pair?;
+            let prop = Prop::parse(&name).ok_or_else(|| {
+                mlua::Error::runtime(format!("unknown style `{name}` in a query"))
+            })?;
+            let Source::Lit(lit) = source(lua, prop.ty(), &name, value)? else {
+                return Err(mlua::Error::runtime(format!(
+                    "a query's `{name}` must be a plain value, as `hover`'s are"
+                )));
+            };
+            lits.push((prop, lit));
+        }
+    }
+    lits.sort_by_key(|(prop, _)| specificity(*prop));
+    lits.insert(0, query_lit(bounds));
+    Ok(lits.into())
+}
+/// A query's bounds as its styles' first entry: min and max width, min and
+/// max height, NaN where not given, in a `Corners`' four.
+fn query_lit(bounds: zgx::decoration::Corners) -> (Prop, Lit) {
+    (Prop::Corners, Lit::Corners(bounds))
+}
+/// `query_lit`'s other way: the query and the styles after it.
+pub(crate) fn query_of(
+    styles: &[(Prop, Lit)],
+) -> Option<(zgx::container_query::Query, &[(Prop, Lit)])> {
+    let ((Prop::Corners, Lit::Corners(b)), rest) = styles.split_first()? else {
+        return None;
+    };
+    let bound = |v: f32| (!v.is_nan()).then_some(v);
+    let query = zgx::container_query::Query {
+        min_w: bound(b.top_left),
+        max_w: bound(b.top_right),
+        min_h: bound(b.bottom_right),
+        max_h: bound(b.bottom_left),
+    };
+    Some((query, rest))
 }
 /// The other way: the slots that set anything.
 pub(crate) fn pseudo_of(slots: [Vec<(Prop, Lit)>; 4]) -> Vec<(Pseudo, Styles)> {
