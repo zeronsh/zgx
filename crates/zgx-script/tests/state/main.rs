@@ -47,6 +47,8 @@ mod plugin_shared;
 mod plugin_targets;
 #[path = "../plugins.rs"]
 mod plugins;
+#[path = "../reload_cache.rs"]
+mod reload_cache;
 #[path = "../router.rs"]
 mod router;
 #[path = "../script.rs"]
