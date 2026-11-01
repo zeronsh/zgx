@@ -439,6 +439,19 @@ const HAN_KOREAN: u32 = 2;
 /// fonts are its, as for a line with neither.
 const HAN_BY_LANGUAGE: u32 = 3;
 
+/// zgx patch: the language `line`'s Han characters are in, as a line built
+/// alone takes it from its kana or hangul (`FontFeatures::HAN`: 1 Japanese,
+/// 2 Korean), for text measured apart from its line (zgx's min-content
+/// copy, a word to a line), which takes it as that feature. 0 where it has
+/// neither, or the app's language decides every line's
+/// (`FontSystem::set_language`).
+pub fn line_han(font_system: &FontSystem, line: &str) -> u32 {
+    if line.is_ascii() || font_system.han_by_language() {
+        return HAN_NONE;
+    }
+    han_hint(line)
+}
+
 /// zgx: the language `line`'s Han characters are in, by its first kana
 /// (Japanese) or hangul (Korean), as browsers guess a text's when nothing
 /// names it. A line without the lead bytes of either (U+1000–U+1FFF,
@@ -1036,6 +1049,20 @@ pub struct ShapeGlyph {
 }
 
 impl ShapeGlyph {
+    /// zgx patch: `layout` for a left-to-right line laid out outside
+    /// cosmic-text (zgx's plain text from its words).
+    #[inline]
+    pub fn laid(
+        &self,
+        font_size: f32,
+        line_height_opt: Option<f32>,
+        x: f32,
+        y: f32,
+        w: f32,
+    ) -> LayoutGlyph {
+        self.layout(font_size, line_height_opt, x, y, w, unicode_bidi::Level::ltr())
+    }
+
     const fn layout(
         &self,
         font_size: f32,
@@ -1183,6 +1210,32 @@ impl ShapeWord {
         empty
     }
 
+    /// zgx patch: `new` for a word of a left-to-right line (`plain_words`),
+    /// shaped alone: all of `word`, its glyphs' ranges from its start.
+    pub fn plain(
+        font_system: &mut FontSystem,
+        word: &str,
+        attrs_list: &AttrsList,
+        blank: bool,
+    ) -> Self {
+        // The run key's attributes are found again for this list, as a line
+        // finds them (`build_spans`): the last list's address could be this
+        // one's, its attributes another's.
+        #[cfg(feature = "shape-run-cache")]
+        {
+            font_system.shape_buffer.run_key_line = 0;
+        }
+        Self::new(
+            font_system,
+            word,
+            attrs_list,
+            0..word.len(),
+            unicode_bidi::Level::ltr(),
+            blank,
+            Shaping::Advanced,
+        )
+    }
+
     /// See [`Self::new`].
     ///
     /// Reuses as much of the pre-existing internal allocations as possible.
@@ -1279,6 +1332,83 @@ impl ShapeWord {
         }
         width
     }
+}
+
+/// zgx patch: a line's words as `ShapeSpan::build` finds them in a line
+/// that `ShapeLine::build` shapes as one left-to-right span: each word's
+/// byte range and whether it is a blank, in order. False, whatever it told,
+/// for a line that is not one such span or that `build` treats otherwise: a
+/// tab (its stop), a soft hyphen, a line that may need the bidi analysis
+/// or a language hint (`classify`), or a break between two ASCII
+/// punctuation marks (where `build` probes the font for a ligature that may
+/// keep them one word). Text of several lines stops at its first break.
+/// Each word shaped alone (`ShapeWord::new` over its own text) has the
+/// glyphs it has in the line: the shape-run cache already shapes runs
+/// without their context.
+pub fn plain_words(line: &str, word: impl FnMut(Range<usize>, bool)) -> bool {
+    plain_line(line) && line_words(line, word)
+}
+
+/// zgx patch: whether `line` may be laid out from its words (`plain_words`)
+/// by its bytes: no tab, line or paragraph separator, or soft hyphen, and
+/// beyond ASCII nothing `classify` finds. One pass, stopping at the first
+/// that disqualifies it (a text of several lines, at its first break).
+pub fn plain_line(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    // Eight bytes at a time while they are printable ASCII (none below
+    // 0x20, none above 0x7F): most text, a rejected one's first line too.
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let mut from = 0;
+    while let Some(eight) = bytes.get(from..from + 8) {
+        let word = u64::from_le_bytes(eight.try_into().unwrap_or([0; 8]));
+        let below_space = word.wrapping_sub(0x2020_2020_2020_2020) & !word & HIGH;
+        if (word & HIGH) | below_space != 0 {
+            break;
+        }
+        from += 8;
+    }
+    let mut ascii = true;
+    for (i, &b) in bytes.iter().enumerate().skip(from) {
+        match b {
+            b'\t' | b'\n' | b'\r' | 0x1C..=0x1E => return false,
+            0xC2 if bytes.get(i + 1) == Some(&0xAD) => return false,
+            _ => ascii &= b.is_ascii(),
+        }
+    }
+    !line.is_empty() && (ascii || classify(bytes) == 0)
+}
+
+/// zgx patch: `plain_words` for a line `plain_line` accepted: its words,
+/// or false at a break between two ASCII punctuation marks.
+pub fn line_words(line: &str, mut word: impl FnMut(Range<usize>, bool)) -> bool {
+    let mut start_word = 0;
+    for (end_lb, _) in unicode_linebreak::linebreaks(line) {
+        if end_lb > 0 && end_lb < line.len() {
+            let before = line[..end_lb].chars().next_back();
+            let after = line[end_lb..].chars().next();
+            if let (Some(a), Some(b)) = (before, after) {
+                if a.is_ascii_punctuation() && b.is_ascii_punctuation() {
+                    return false;
+                }
+            }
+        }
+        let mut start_lb = end_lb;
+        for (i, c) in line[start_word..end_lb].char_indices().rev() {
+            if c.is_whitespace() {
+                start_lb = start_word + i;
+            } else {
+                break;
+            }
+        }
+        if start_word < start_lb {
+            word(start_word..start_lb, false);
+        }
+        for (i, c) in line[start_lb..end_lb].char_indices() {
+            word(start_lb + i..start_lb + i + c.len_utf8(), true);
+        }
+        start_word = end_lb;
+    }
+    true
 }
 
 /// A shaped span (for bidirectional processing)

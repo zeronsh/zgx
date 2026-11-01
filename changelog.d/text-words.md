@@ -1,0 +1,5 @@
+---
+section: fixed
+---
+- **A new paragraph is prepared from its words** (zgx-gpu). A paragraph that cosmic-text shapes as one left-to-right span, plain or rich, is now measured and laid out from its words. Each word is shaped once and shared by every text that holds it. Before, every new text built a cosmic-text line around its cached words, then copied their glyphs and laid them out again. Glyphs, positions and sizes are cosmic-text's, bit for bit. text_bench (prepared) measures 1,000 new paragraphs in 5 ms instead of 19, and streams one in 8.5 ms instead of 32. A label whose text changes every frame costs 13.5 K instructions to measure, not 23.7 K; wrapped, 38 K, not 89 K. Lines with tabs, right-to-left text, hyphenation, letter spacing, fallback families or a word across runs take the old path.
+- **A Japanese or Korean line's min-content is measured in its language** (zgx-gpu). Measured from its one-word-a-line copy, as some lines are, a word of kanji alone lost the line's kana and took the system language's Chinese face: 11.23 px where the line gives 11.0. The copy now takes the line's language.
