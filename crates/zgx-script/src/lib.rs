@@ -38,6 +38,8 @@ mod data;
 mod design;
 pub mod driver;
 mod element;
+mod elements_report;
+pub use elements_report::{ElementGroup, ElementsReport, ListedElement};
 mod errors;
 #[cfg(target_os = "macos")]
 mod file_events;
@@ -1320,6 +1322,45 @@ impl ScriptHost {
     /// kinds: what `zgx inspect errors` lists.
     pub fn issues(&self) -> Vec<(zgx::issues::IssueKind, String)> {
         self.0.issues.borrow().last.iter().cloned().collect()
+    }
+    /// Where a plugin can put something and what it can read there: the
+    /// app's named elements (ids, classes, hooks) by the elements that
+    /// `provide` context, as mounted under `handle` in `ui`, with names the
+    /// source declares that aren't showing (`mounted: false`). The mounted
+    /// tree is kept only while plugins are loaded; without, it lists the
+    /// source (`live: false`).
+    pub fn elements(
+        &self,
+        ui: &zgx::widgets::Ui,
+        handle: &zgx::compose::ViewHandle,
+    ) -> ElementsReport {
+        let current = self.0.current.borrow();
+        let Some(loaded) = current.as_ref() else {
+            return ElementsReport {
+                live: false,
+                root: ElementGroup {
+                    selector: String::new(),
+                    provides: Vec::new(),
+                    inherited: Vec::new(),
+                    elements: Vec::new(),
+                    groups: Vec::new(),
+                    count: 1,
+                },
+            };
+        };
+        let sources: Vec<(PathBuf, String)> = match &self.0.app {
+            Script::Inline { name, code } => vec![(PathBuf::from(name), code.clone())],
+            script => script
+                .dir()
+                .map(|dir| check::scripts(&dir))
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|file| Some((file.clone(), std::fs::read_to_string(file).ok()?)))
+                .collect(),
+        };
+        let hooks = loaded.lowering.hooks.as_deref();
+        let mounted = hooks.map(|hooks| hooks.mounted.borrow().clone());
+        elements_report::report(ui, handle, &loaded.root, mounted.as_ref(), &sources)
     }
     /// What each plugin adds at the app's elements (`ui.contribute { target
     /// }`, `ui.filter`), in the order they made them: its target, where it

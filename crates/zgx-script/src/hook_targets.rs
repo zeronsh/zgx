@@ -18,6 +18,8 @@ use std::collections::BTreeSet;
 pub(crate) struct Targets {
     pub(crate) ids: BTreeSet<String>,
     pub(crate) hooks: BTreeSet<String>,
+    /// Class names `class = "…"` gives, each once.
+    pub(crate) classes: BTreeSet<String>,
 }
 impl Targets {
     /// As a plugin writes them: `#id` and `hook:name`, sorted.
@@ -37,14 +39,15 @@ fn in_table(t: &[Token], i: usize) -> bool {
     i >= 1 && t[i - 1].kind == Kind::Punct && matches!(t[i - 1].text.as_str(), "{" | "," | ";")
 }
 
-/// The literal `id = "…"` and `hook = "…"` fields of `files`' tables.
+/// The literal `id = "…"`, `hook = "…"` and `class = "…"` fields of
+/// `files`' tables.
 pub(crate) fn declared(files: &[File]) -> Targets {
     let mut found = Targets::default();
     for file in files {
         let t = file.tokens;
         for i in 0..t.len().saturating_sub(2) {
             if t[i].kind != Kind::Name
-                || !matches!(t[i].text.as_str(), "id" | "hook")
+                || !matches!(t[i].text.as_str(), "id" | "hook" | "class")
                 || !(t[i + 1].kind == Kind::Punct && t[i + 1].text == "=")
                 || !in_table(t, i)
             {
@@ -53,12 +56,17 @@ pub(crate) fn declared(files: &[File]) -> Targets {
             let Some(value) = literal(&t[i + 2]).filter(|value| !value.is_empty()) else {
                 continue;
             };
-            let set = if t[i].text == "id" {
-                &mut found.ids
-            } else {
-                &mut found.hooks
-            };
-            set.insert(value.to_owned());
+            match t[i].text.as_str() {
+                "id" => {
+                    found.ids.insert(value.to_owned());
+                }
+                "hook" => {
+                    found.hooks.insert(value.to_owned());
+                }
+                _ => found
+                    .classes
+                    .extend(value.split_whitespace().map(str::to_owned)),
+            }
         }
     }
     found

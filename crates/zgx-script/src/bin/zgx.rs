@@ -424,6 +424,7 @@ ZGX_INSPECT_SOCKET=1): with one running, --app is not needed.
   scroll <target> <dy> command <id>
   errors               lint
   contributions        each plugin's targets: where, live matches, error (JSON)
+  elements             named elements by the context they read, for plugins (JSON)
   frames [n] [--runs N] [--all] [--since MARK|FRAME] [--keep N]
   mark [name]          switch [name] [on|off]
   wait <target> [--text T] [--gone] [--timeout MS]
@@ -790,6 +791,12 @@ const TOOLS: &[Tool] = &[
         "The script error, type errors, lint findings and layout warnings, or none.",
     ),
     (
+        "zgx_elements",
+        "elements",
+        &[],
+        "Where a plugin can put something and what it can read there: the app's ids, classes and hooks grouped by each element that provides context (`provide`), outermost the root, each group with a selector that reaches it and the context names it provides and inherits. Repeated rows are one entry with a count; private elements list nothing inside; names the source declares that aren't showing are `mounted: false`. A summary, then the same as JSON.",
+    ),
+    (
         "zgx_contributions",
         "contributions",
         &[],
@@ -991,7 +998,7 @@ fn mcp() -> ExitCode {
                                     }
                                     let mut text = answer.field("text").map(Value::to_string).unwrap_or_default();
                                     // What agents read as data, after its summary.
-                                    if *cmd == "contributions" && let Some(data) = answer.field("data") {
+                                    if matches!(*cmd, "contributions" | "elements") && let Some(data) = answer.field("data") {
                                         text = format!("{text}\n{}", data.to_json());
                                     }
                                     // A snapshot's picture, beside its text.

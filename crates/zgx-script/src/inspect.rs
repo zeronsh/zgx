@@ -394,6 +394,7 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
   command id                                     run a ui.command
   errors                                         script error, type errors, lint, layout warnings
   contributions                                  each plugin's targets: where, live matches, error
+  elements                                       named elements by the context they read (provide)
   lint                                           zgx lint over the app's scripts, file:line
   frames  [n=10] [runs=5] [all] [since] [keep]   the last frames that did anything: their phases, GPU
                                                  time, notes, what ran and why (since: a mark or frame)
@@ -739,6 +740,10 @@ impl Session {
                     lines.join("\n")
                 };
                 Ok((text, Value::Nil))
+            }
+            "elements" => {
+                let report = self.0.host.elements(&ui, &self.0.handle);
+                Ok((report.to_text(), report.to_value()))
             }
             "contributions" => {
                 let reports = self.0.host.contributions();
