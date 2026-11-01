@@ -508,8 +508,9 @@ impl UserData for Mounted {
             };
             let from = Self::node(&mut app, &target)?;
             let options = Default::default();
-            let (lines, hidden) = crate::driver::tree(&app.ui, &app.handle, Some(from), &options);
-            Ok(crate::driver::tree_text(&lines, hidden))
+            let (lines, hidden) =
+                crate::driver::tree_lines(&app.ui, &app.handle, Some(from), &options);
+            Ok(crate::driver::tree_lines_text(&lines, hidden))
         });
         methods.add_method("frames", |_, m, n: Option<usize>| {
             m.app()?.frames(n.unwrap_or(1));

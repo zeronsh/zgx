@@ -800,8 +800,6 @@ pub struct Line {
     pub value: Option<String>,
     /// Its box, in window points.
     pub bounds: Rect,
-    /// It doesn't show (`shows`): hidden, or in a closed panel.
-    pub hidden: bool,
     /// It has the keyboard focus.
     pub focused: bool,
     /// It is disabled.
@@ -810,17 +808,39 @@ pub struct Line {
     pub checked: Option<bool>,
 }
 
+/// One node as [`tree_lines`] shows it: a [`Line`], and more that may grow
+/// (it is `non_exhaustive`, unlike `Line`, which code builds).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct TreeLine {
+    /// The node as [`tree`] gives it.
+    pub line: Line,
+    /// It doesn't show (`shows`): hidden, or in a closed panel.
+    pub hidden: bool,
+}
+
 /// The tree under `from` (the view, by default), one node a line: its
 /// number, id, role, name or text, value and box, in document order.
 /// Boxes with nothing to say (no id, role or text) are left out unless
 /// `all`, their children shown in their place. Past `budget` lines, the
-/// rest are counted.
+/// rest are counted. [`tree_lines`] says more of each.
 pub fn tree(
     ui: &Ui,
     handle: &ViewHandle,
     from: Option<NodeId>,
     options: &TreeOptions,
 ) -> (Vec<Line>, usize) {
+    let (lines, hidden) = tree_lines(ui, handle, from, options);
+    (lines.into_iter().map(|l| l.line).collect(), hidden)
+}
+
+/// [`tree`], each line saying whether its node shows.
+pub fn tree_lines(
+    ui: &Ui,
+    handle: &ViewHandle,
+    from: Option<NodeId>,
+    options: &TreeOptions,
+) -> (Vec<TreeLine>, usize) {
     let scene = ui.scene.borrow();
     let semantics = ui.semantics.borrow();
     let focused = ui.input.focused();
@@ -842,21 +862,23 @@ pub fn tree(
         let next = if shown { depth + 1 } else { depth };
         if shown {
             if lines.len() < options.budget {
-                lines.push(Line {
-                    depth,
-                    number: number(node),
-                    id,
-                    role,
-                    text,
-                    // A text's value is its text again.
-                    value: s
-                        .filter(|s| s.role != Role::Label)
-                        .and_then(|s| s.value.clone()),
-                    bounds: scene.bounds(node),
+                lines.push(TreeLine {
+                    line: Line {
+                        depth,
+                        number: number(node),
+                        id,
+                        role,
+                        text,
+                        // A text's value is its text again.
+                        value: s
+                            .filter(|s| s.role != Role::Label)
+                            .and_then(|s| s.value.clone()),
+                        bounds: scene.bounds(node),
+                        focused: focused == Some(node),
+                        disabled: s.is_some_and(|s| s.disabled),
+                        checked: s.and_then(|s| s.checked),
+                    },
                     hidden: !shows(&scene, node),
-                    focused: focused == Some(node),
-                    disabled: s.is_some_and(|s| s.disabled),
-                    checked: s.and_then(|s| s.checked),
                 });
             } else {
                 hidden += 1;
@@ -876,49 +898,50 @@ pub fn tree(
 /// Lines with nothing of their own folded into what holds them: a text
 /// that only says what its parent is called (a button's label), an empty
 /// text, and a box's one text taken as its own (`#count "0"`).
-fn fold(lines: Vec<Line>) -> Vec<Line> {
-    let mut out: Vec<Line> = Vec::with_capacity(lines.len());
-    let plain =
-        |l: &Line| l.id.is_none() && matches!(l.role, None | Some("text")) && l.value.is_none();
+fn fold(lines: Vec<TreeLine>) -> Vec<TreeLine> {
+    let mut out: Vec<TreeLine> = Vec::with_capacity(lines.len());
+    let plain = |l: &TreeLine| {
+        l.line.id.is_none() && matches!(l.line.role, None | Some("text")) && l.line.value.is_none()
+    };
     for (i, line) in lines.iter().enumerate() {
-        let parent = out.iter().rev().find(|p| p.depth < line.depth);
+        let parent = out.iter().rev().find(|p| p.line.depth < line.line.depth);
         if plain(line) {
-            if line.text.as_deref().is_none_or(str::is_empty) {
+            if line.line.text.as_deref().is_none_or(str::is_empty) {
                 continue;
             }
             if let Some(parent) = parent
-                && parent.depth + 1 == line.depth
-                && parent.text == line.text
+                && parent.line.depth + 1 == line.line.depth
+                && parent.line.text == line.line.text
             {
                 continue;
             }
         }
         // A box with an id and nothing to say, holding one plain text.
         let only_child = lines.get(i + 1).filter(|next| {
-            next.depth == line.depth + 1
+            next.line.depth == line.line.depth + 1
                 && plain(next)
                 && lines
                     .get(i + 2)
-                    .is_none_or(|after| after.depth <= line.depth)
+                    .is_none_or(|after| after.line.depth <= line.line.depth)
         });
         let mut line = line.clone();
-        if line.text.is_none()
-            && line.role.is_none()
+        if line.line.text.is_none()
+            && line.line.role.is_none()
             && let Some(child) = only_child
         {
-            line.text = child.text.clone();
+            line.line.text = child.line.text.clone();
         }
         out.push(line);
     }
     // The texts taken by their boxes go.
-    let mut kept: Vec<Line> = Vec::with_capacity(out.len());
+    let mut kept: Vec<TreeLine> = Vec::with_capacity(out.len());
     for line in out {
-        if let Some(parent) = kept.iter().rev().find(|p| p.depth < line.depth)
-            && parent.depth + 1 == line.depth
-            && line.id.is_none()
-            && matches!(line.role, None | Some("text"))
-            && parent.text == line.text
-            && parent.role.is_none()
+        if let Some(parent) = kept.iter().rev().find(|p| p.line.depth < line.line.depth)
+            && parent.line.depth + 1 == line.line.depth
+            && line.line.id.is_none()
+            && matches!(line.line.role, None | Some("text"))
+            && parent.line.text == line.line.text
+            && parent.line.role.is_none()
         {
             continue;
         }
@@ -929,8 +952,18 @@ fn fold(lines: Vec<Line>) -> Vec<Line> {
 
 /// [`tree`]'s lines as text: indented two spaces a level.
 pub fn tree_text(lines: &[Line], hidden: usize) -> String {
+    let lines: Vec<(&Line, bool)> = lines.iter().map(|line| (line, false)).collect();
+    lines_text(&lines, hidden)
+}
+/// [`tree_lines`]' lines as text, as [`tree_text`], a node that doesn't
+/// show saying so.
+pub fn tree_lines_text(lines: &[TreeLine], hidden: usize) -> String {
+    let lines: Vec<(&Line, bool)> = lines.iter().map(|l| (&l.line, l.hidden)).collect();
+    lines_text(&lines, hidden)
+}
+fn lines_text(lines: &[(&Line, bool)], hidden: usize) -> String {
     let mut out = String::new();
-    for line in lines {
+    for &(line, not_shown) in lines {
         let _ = write!(out, "{}@{}", "  ".repeat(line.depth), line.number);
         if let Some(id) = &line.id {
             let _ = write!(out, " #{id}");
@@ -945,7 +978,7 @@ pub fn tree_text(lines: &[Line], hidden: usize) -> String {
             let _ = write!(out, " ={:?}", clip(value, 40));
         }
         let _ = write!(out, " {}", rect(line.bounds));
-        if line.hidden {
+        if not_shown {
             out.push_str(" hidden");
         }
         if line.focused {
