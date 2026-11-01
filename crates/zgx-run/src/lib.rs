@@ -616,6 +616,9 @@ pub fn follow_windows(host: &ScriptHost, cx: &zgx_desktop::WindowContext) -> zgx
                 let (view_host, state, id) = (host.clone(), window.open.clone(), window.id.clone());
                 let own = extras.state.clone();
                 let visible = extras.visible.clone();
+                // Devtools reach it too, while it is open (`zgx inspect`'s
+                // `window`).
+                let devtools = inspect_asked().then(|| window.title.clone());
                 let handle = factory.open(options, move |wcx| {
                     // The window's own state, as its content reads it (`win`).
                     if let Some(own) = own {
@@ -651,12 +654,28 @@ pub fn follow_windows(host: &ScriptHost, cx: &zgx_desktop::WindowContext) -> zgx
                         });
                         wcx.on_closed(move || drop(keep));
                     }
+                    let closing = id.clone();
                     wcx.on_closed(move || {
                         if state.with_untracked(Value::truthy) {
                             state.set(Value::Bool(false));
                         }
+                        #[cfg(feature = "inspect")]
+                        zgx_script::inspect::forget_window(&closing);
+                        let _ = &closing;
                     });
-                    wcx.render(view_host.window_view(&id));
+                    let handle = wcx.render(view_host.window_view(&id));
+                    #[cfg(feature = "inspect")]
+                    if let Some(title) = devtools {
+                        let session = zgx_script::inspect::Session::new(
+                            &wcx.ui,
+                            handle,
+                            &view_host,
+                            Some(wcx.inspector.clone()),
+                        );
+                        zgx_script::inspect::register_window(&id, &title, session);
+                    }
+                    #[cfg(not(feature = "inspect"))]
+                    let _ = (handle, devtools);
                 });
                 open.borrow_mut().insert(window.id.clone(), handle);
             } else if !wanted
