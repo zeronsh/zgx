@@ -183,6 +183,8 @@ export const sets = [
         description: 'click, type, key, scroll, command, set, wait and sleep.' },
       { slug: 'popups', src: 'docs/agents/inspect.md', title: 'Popovers and menus', sections: ['Popovers, menus and other popups'], unwrap: true,
         description: 'Open a popover, menu or select, wait for it, and act inside; popups past the window included.' },
+      { slug: 'windows', src: 'docs/agents/inspect.md', title: 'Other windows', sections: ["The app's other windows"], unwrap: true,
+        description: 'List the windows the app declares and act in one by its id or an item’s key: --window on every command and MCP tool.' },
       { slug: 'gestures', src: 'docs/agents/inspect.md', title: 'Record and replay gestures', sections: ['Gestures'], unwrap: true,
         description: 'Record a trackpad gesture once, replay it through the window’s own input path, and read how its frames landed.' },
       { slug: 'switches', src: 'docs/agents/inspect.md', title: 'Switches', sections: ['Switches'], unwrap: true,
