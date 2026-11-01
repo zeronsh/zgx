@@ -1874,6 +1874,10 @@ fn build_scoped_seeing(
         provided: cx.try_service::<crate::node::Provided>(),
         ..Scope::default()
     });
+    debug_assert!(
+        vm.runtime.running().is_none(),
+        "a scoped build runs untracked: `retain` relies on it"
+    );
     let previous = vm
         .lua
         .app_data_ref::<crate::node::Env>()
@@ -5798,6 +5802,10 @@ fn described(
     args: impl mlua::IntoLuaMulti,
 ) -> Option<Rc<Node>> {
     let scope = Rc::new(Scope::default());
+    debug_assert!(
+        vm.runtime.running().is_none(),
+        "a described build runs untracked: `retain` relies on it"
+    );
     let previous = vm
         .lua
         .app_data_ref::<crate::node::Env>()

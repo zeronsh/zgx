@@ -432,7 +432,18 @@ Plugins reach the network, the clipboard and files only if the host grants each:
 
 `ui.computed(f)` and `ui.effect(f)` run `f` at once and again whenever a state it read with `get` (or a tracked field: `web.title`, `term.pwd`, a ref) changes; reads with `peek` do not count. `ui.batch(f)` runs `f` and updates what its writes affect once, after it; it returns what `f` returns. Every handler already runs in a batch.
 
-`ui.on_cleanup(f)` runs `f` when what is being built goes away: a component unmounting, an effect running again, the script reloading (stop a subscription, a timer of the host's). `ui.now()` is milliseconds since the epoch, to the microsecond; it is not tracked (`os.time` counts whole seconds). `print` writes a line to the app's stderr.
+`ui.on_cleanup(f)` runs `f` when what made it goes: a component unmounting, an effect running again, the script reloading (stop a subscription, a timer of the host's).
+
+### What owns what
+
+A cleanup, a timer (`ui.after`, `ui.every`) and an effect or computed belong to the innermost of what was running as they were made:
+
+- **A build** (a component, an `each` row, `presence` or `switch` content) owns what it makes until that part goes. Content a `presence` swaps out takes its effects, and what they made, with it.
+- **An effect's run** owns what it makes until the effect runs again, and until the effect goes: its cleanups run before each new run, as a React effect's do.
+- **A computed's run** owns what it makes until its next run. A computed is a derivation, as React's `useMemo` is: start timers in an effect or a handler, not in a computed.
+- **The script** owns what its top level makes, until it reloads.
+
+`ui.now()` is milliseconds since the epoch, to the microsecond; it is not tracked (`os.time` counts whole seconds). `print` writes a line to the app's stderr.
 
 ## Large data
 

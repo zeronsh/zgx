@@ -5951,8 +5951,24 @@ end
     Ok(built.borrow::<NodeUd>()?.0.clone())
 }
 
+/// Keep `resource` (a timer, a cleanup, an effect) as long as what made
+/// it: the innermost of the scope being built and the effect or computed
+/// running. An effect's run owns what it makes until its next run, as a
+/// React effect's cleanup runs between runs; at a script's top level, the
+/// script owns it.
 pub(crate) fn retain(env: &Env, resource: Box<dyn Any>) {
-    match &*env.scope.borrow() {
+    let scope = env.scope.borrow();
+    let running = env.runtime.running();
+    // Builds run untracked: an effect running began inside the build.
+    let resource = if running.is_some() {
+        match env.runtime.own(resource) {
+            Ok(()) => return,
+            Err(resource) => resource,
+        }
+    } else {
+        resource
+    };
+    match &*scope {
         Some(scope) => scope.retained.borrow_mut().push(resource),
         None => env.retained.borrow_mut().push(resource),
     }
