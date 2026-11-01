@@ -173,6 +173,49 @@ fn a_reader_hears_every_read_of_output_since_the_last_frame() {
     assert_eq!(heard, ["alpha\nbeta", "gamma"]);
 }
 
+#[cfg(unix)]
+#[test]
+fn the_process_in_front_is_named_again_after_it_execs_another() {
+    let mut app = Harness::new();
+    // The shell, then `cat` in its place: the same pid, another program.
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session("stty -echo; printf ready; read x; exec cat"),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.until("the shell in front", |_| term.process() == "sh");
+    let pid = term.state().get().pid;
+    term.input("\r");
+    // cat's output is the next check's cue.
+    term.input("hello\r");
+    app.until("cat in front", |_| term.process() == "cat");
+    assert_eq!(term.state().get().pid, pid, "exec kept the pid");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_quiet_command_typed_at_a_shell_is_named_in_front() {
+    let mut app = Harness::new();
+    // An interactive shell (job control: a command takes the front), and
+    // a command that prints nothing after the shell's echo of it.
+    let term = Terminal::new(&app.ui.runtime, session("PS1='$ ' exec sh -i"));
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.until("the prompt", |app| {
+        app.texts().iter().any(|t| t.starts_with('$'))
+    });
+    app.until("the shell in front", |_| term.process() == "sh");
+    term.input("sleep 30\r");
+    app.until("sleep in front", |_| term.process() == "sleep");
+}
+
 /// Every `line N` shown, with the top of its box on screen, in the order
 /// the scene paints them (which assistive technology reads).
 #[cfg(unix)]

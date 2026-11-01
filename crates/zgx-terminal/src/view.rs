@@ -124,7 +124,9 @@ struct Engine {
     /// Wheel travel short of a whole line.
     scroll_rest: Cell<f32>,
     pid: Cell<u32>,
-    process_check: Cell<bool>,
+    /// When the pending check of what is in front runs: `PROCESS_CHECK`
+    /// after the latest output, pushed back by output meanwhile.
+    process_check: Cell<Option<std::time::Instant>>,
     process_task: RefCell<Option<TaskToken>>,
     /// What the app's resolver last saw in front ([`crate::front`]), the
     /// app's count of changes last seen, and its polling.
@@ -194,7 +196,7 @@ impl EngineTerminal {
             pressed: Cell::new(None),
             scroll_rest: Cell::new(0.),
             pid: Cell::new(0),
-            process_check: Cell::new(false),
+            process_check: Cell::new(None),
             process_task: RefCell::new(None),
             front: RefCell::new(None),
             resolved: Cell::new(false),
@@ -1162,17 +1164,31 @@ impl Engine {
         }
     }
 
-    /// Ask again what is in front, after the output settles.
+    /// Ask again what is in front once the output settles: `PROCESS_CHECK`
+    /// after the latest output, once. Timed from the first output of a
+    /// burst, a check could run just after a command's echo, before the
+    /// shell had started it, and a quiet command (`sleep 30`) gave no more
+    /// output to check again on.
     fn schedule_process_check(self: &Rc<Self>) {
-        if self.process_check.replace(true) {
+        let due = std::time::Instant::now() + PROCESS_CHECK;
+        if self.process_check.replace(Some(due)).is_some() {
             return;
         }
         let weak = Rc::downgrade(self);
         let task = self.runner.borrow().spawn(Box::pin(async move {
-            zgx::timer::sleep(PROCESS_CHECK).await;
-            if let Some(engine) = weak.upgrade() {
-                engine.process_check.set(false);
-                engine.check_process();
+            let mut due = due;
+            loop {
+                zgx::timer::sleep_until(due).await;
+                let Some(engine) = weak.upgrade() else { return };
+                match engine.process_check.get() {
+                    // Output since: later.
+                    Some(later) if later > due => due = later,
+                    _ => {
+                        engine.process_check.set(None);
+                        engine.check_process();
+                        return;
+                    }
+                }
             }
         }));
         *self.process_task.borrow_mut() = Some(task);
@@ -1210,14 +1226,24 @@ impl Engine {
             }
             None => {
                 let was_resolved = self.front.borrow_mut().take().is_some();
-                if pid == self.pid.replace(pid) && !was_resolved {
-                    return;
-                }
+                self.pid.set(pid);
+                // Named afresh each time: a process keeps its pid as it
+                // execs another program (the shell this session forked, read
+                // before it ran; `exec less`), and the pid alone left the old
+                // name in front for as long as nothing else took it.
                 let name = if pid == 0 {
                     String::new()
                 } else {
                     crate::process_name(pid)
                 };
+                if !was_resolved
+                    && let Some(term) = self.controller()
+                    && term
+                        .state()
+                        .with_untracked(|state| state.pid == pid && state.process == name)
+                {
+                    return;
+                }
                 (name, pid, None)
             }
         };
