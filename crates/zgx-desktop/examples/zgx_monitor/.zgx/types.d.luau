@@ -17620,10 +17620,14 @@ export type SlotProps = {
 	context: unknown?,
 	from: string?,
 }
--- What a plugin targets: an element by its `id` (`"#save"`) or declared hook
--- (`"hook:toolbar.save"`). An app's own definitions (`zgx types`) name every
--- one it declares, so a typo is an error.
+-- What a plugin targets: an element by its `id` (`"#save"`), declared hook
+-- (`"hook:toolbar.save"`) or class (`".session-row"`). An app's own
+-- definitions (`zgx types`) name every one it declares, for an editor to
+-- offer.
 export type HookTarget = string
+-- A target inside others (`"#sidebar >> .session-row"`): any text, since a
+-- chain's parts combine freely; `zgx lint` checks each `#id` and `hook:`.
+export type HookChain = string
 -- A target by role or name (`ui.selector('role:button "Save"')`): the app's
 -- internals, which may change with its next version.
 export type Selector = string
@@ -17635,10 +17639,11 @@ export type ModuleOverride = {
 	with: string,
 }
 -- A plugin's node at an element of the app's, by `target` (`"#save"`,
--- `"hook:toolbar.save"`, `ui.selector('role:button "Save"')`): before it,
+-- `"hook:toolbar.save"`, `".session-row"`, `"#sidebar >> .session-row"`,
+-- `ui.selector('role:button "Save"')`): before it,
 -- after it, or in its place (replacing takes `Capability::Override`).
 export type HookContribution = {
-	target: HookTarget | Selector,
+	target: HookTarget | HookChain | Selector,
 	before: Node?,
 	after: Node?,
 	replace: Node?,
@@ -17648,7 +17653,7 @@ export type HookContribution = {
 -- what it reads changes (it takes `Capability::Override`). A tooltip's text
 -- passes through as the element is built.
 export type HookFilter = {
-	target: HookTarget | Selector,
+	target: HookTarget | HookChain | Selector,
 	text: ((text: string) -> string)?,
 	label: ((label: string?) -> string?)?,
 	hidden: ((hidden: boolean) -> boolean)?,

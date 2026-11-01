@@ -368,3 +368,35 @@ fn a_component_requiring_at_app_checks_when_the_app_does_not() {
     assert_eq!(out.status.code(), Some(0), "{stdout}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A plugin's targets type check under strict types: an app's ids, hooks
+/// and classes, and chains of them (`zgx lint` checks each part of one).
+#[test]
+fn plugin_targets_by_class_and_chain_type_check() {
+    if !installed() {
+        return;
+    }
+    let dir = scripts(
+        "targets",
+        &[
+            (
+                "app.luau",
+                "return ui.column {\n\tid = \"sidebar\",\n\tui.row { class = \"session-row\", hook = \"session\", ui.text { \"x\" } },\n}\n",
+            ),
+            (
+                "plugin.luau",
+                "--!strict\n\
+                 ui.contribute { target = \"#sidebar\", after = ui.text { \"a\" } }\n\
+                 ui.contribute { target = \".session-row\", after = ui.text { \"b\" } }\n\
+                 ui.contribute { target = \"hook:session\", after = ui.text { \"c\" } }\n\
+                 ui.contribute { target = \"#sidebar >> .session-row\", after = ui.text { \"d\" } }\n\
+                 ui.filter { target = \"#sidebar >> .session-row\", text = function(t: string) return t end }\n",
+            ),
+        ],
+    );
+    let out = zgx().arg("check").arg(&dir).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert_eq!(stdout.trim(), "", "no findings");
+    std::fs::remove_dir_all(dir).unwrap();
+}

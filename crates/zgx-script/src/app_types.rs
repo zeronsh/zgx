@@ -490,6 +490,20 @@ mod tests {
     }
 
     #[test]
+    fn an_apps_classes_are_targets_too() {
+        let types = app(r#"return ui.row { id = "bar", class = "tool primary", ui.text { "x" } }"#);
+        assert!(
+            types.contains("export type HookTarget = \"#bar\" | \".primary\" | \".tool\"\n"),
+            "{types}"
+        );
+        // Chains combine freely: any text, which the lint checks.
+        assert!(
+            types.contains("export type HookChain = string\n"),
+            "{types}"
+        );
+    }
+
+    #[test]
     fn past_the_union_limit_targets_stay_strings() {
         let ids: Vec<String> = (0..=TARGETS_MAX)
             .map(|i| format!("id = \"n{i}\""))

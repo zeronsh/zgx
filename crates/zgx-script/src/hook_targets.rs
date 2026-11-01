@@ -26,11 +26,12 @@ impl Targets {
     pub(crate) fn written(&self) -> Vec<String> {
         let ids = self.ids.iter().map(|id| format!("#{id}"));
         let hooks = self.hooks.iter().map(|hook| format!("hook:{hook}"));
-        ids.chain(hooks).collect()
+        let classes = self.classes.iter().map(|class| format!(".{class}"));
+        ids.chain(hooks).chain(classes).collect()
     }
     /// How many there are.
     pub(crate) fn len(&self) -> usize {
-        self.ids.len() + self.hooks.len()
+        self.ids.len() + self.hooks.len() + self.classes.len()
     }
 }
 
