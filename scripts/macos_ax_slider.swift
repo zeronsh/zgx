@@ -60,7 +60,8 @@ func value() -> String { string(attribute(slider, kAXValueAttribute)) ?? "" }
 func settled(after action: String) -> String {
     let before = value()
     AXUIElementPerformAction(slider, action as CFString)
-    for _ in 0..<25 where value() == before {
+    // Up to 5 s: AXValue trails the app's tree update.
+    for _ in 0..<50 where value() == before {
         Thread.sleep(forTimeInterval: 0.1)
     }
     return value()
