@@ -1943,6 +1943,12 @@ fn apply_rare(
     target: NodeId,
     rare: &crate::style::RareStyles,
 ) {
+    // Nothing rare, on a node that had nothing rare to lose (a scene's
+    // other nodes are special): nothing to do. Here rather than at the
+    // call, in mount_style's hot closure.
+    if crate::style::is_no_rare(rare) && !scene.is_special(node) {
+        return;
+    }
     let cold = rare.cold.as_deref();
     if cold.is_some() || scene.has_cold_styles(target) || scene.has_cold_styles(node) {
         let template = cold.and_then(|cold| cold.grid_template.as_ref());

@@ -1038,6 +1038,12 @@ impl RareStyles {
     }
 }
 static NO_RARE: RareStyles = RareStyles::NONE;
+/// Whether `rare` is the one every style without rare properties shares
+/// (`Styles::rare`).
+#[inline(always)]
+pub(crate) fn is_no_rare(rare: &RareStyles) -> bool {
+    std::ptr::eq(rare, &NO_RARE)
+}
 impl Styles {
     /// Its rare properties, if it has any.
     #[inline(always)]
