@@ -17634,12 +17634,16 @@ export type SlotProps = {
 	context: unknown?,
 	from: string?,
 }
--- What a plugin targets: an element by its `id` (`"#save"`) or declared hook
--- (`"hook:toolbar.save"`). An app's own definitions (`zgx types`) name every
--- one it declares, so a typo is an error.
+-- What a plugin targets: an element by its `id` (`"#save"`), declared hook
+-- (`"hook:toolbar.save"`) or class (`".session-row"`). An app's own
+-- definitions (`zgx types`) name every one it declares, for an editor to
+-- offer.
 -- The hooks this app declares (`hook = "…"`).
 export type HookName = "toolbar.add"
-export type HookTarget = "#add" | "#all-clear" | "#api" | "#app" | "#appearance" | "#area_" | "#attach" | "#back" | "#ball" | "#banner" | "#board" | "#body" | "#budget" | "#buffer_menu" | "#busy" | "#button" | "#c1" | "#cancel" | "#cargo" | "#catalog" | "#city" | "#clear" | "#close-settings" | "#components" | "#compose" | "#composer" | "#confirm-remove" | "#copies" | "#copy_env" | "#ctx" | "#customer" | "#dark" | "#day" | "#delete" | "#docs" | "#documents" | "#done" | "#draft" | "#drawing" | "#drop-hint" | "#dropdown_catcher" | "#due" | "#duplicate" | "#editor" | "#ellipse" | "#emoji" | "#empty" | "#export_menu" | "#failure" | "#field-fill" | "#field-name" | "#file" | "#files" | "#filters" | "#find" | "#find-bar" | "#find-case" | "#find-close" | "#find-count" | "#find-next" | "#find-previous" | "#fit_frame" | "#focus" | "#folders" | "#forward" | "#frame_card" | "#frame_title" | "#frame_trace" | "#fruit" | "#g" | "#glyphs" | "#groceries" | "#guide" | "#highlight_" | "#id" | "#inbox" | "#inspector" | "#keep" | "#knob" | "#latest" | "#live" | "#load-error" | "#loading" | "#logs_menu" | "#m1" | "#m2" | "#main" | "#menu_catcher" | "#menu_dim" | "#menu_layer" | "#messages" | "#model" | "#more_menu" | "#n" | "#new" | "#new-tab" | "#next" | "#next_frame" | "#notes" | "#notifications" | "#o" | "#open" | "#open-dialog" | "#open-palette" | "#open-settings" | "#orbs" | "#orders" | "#other" | "#overlay_" | "#overlays_button" | "#overlays_hide_all" | "#overlays_menu" | "#palette" | "#panes" | "#pay" | "#plot" | "#prev_frame" | "#previous" | "#profiler" | "#range" | "#readme" | "#receive" | "#reconnect" | "#record" | "#record_start" | "#record_toggle" | "#rect" | "#redo" | "#refresh" | "#reload" | "#remove-error" | "#replace" | "#replace-all" | "#replace-one" | "#reply" | "#result_" | "#retry" | "#return" | "#revert" | "#role" | "#rows" | "#rtl" | "#runner" | "#runtime_menu" | "#s" | "#save" | "#save-error" | "#scroller" | "#search" | "#search_input" | "#search_menu" | "#select" | "#send" | "#settings" | "#ship" | "#sidebar" | "#sketch" | "#sliders" | "#snapping" | "#span_" | "#span_tooltip" | "#spans" | "#src" | "#stamp" | "#start" | "#state-" | "#status" | "#status-bar" | "#status-caret" | "#status-language" | "#status-message" | "#status-wrap" | "#status_bar" | "#status_buffer" | "#status_logs" | "#stop" | "#subject" | "#tab_placeholder" | "#target_button" | "#tasks" | "#team" | "#theme" | "#thinking" | "#thread-body" | "#thread-subject" | "#timeline" | "#title" | "#title_bar" | "#toast" | "#toast-error" | "#toasts" | "#toggle-dark" | "#toggle-rtl" | "#toolbar" | "#tooltip_" | "#total" | "#track" | "#transcript" | "#typing" | "#undo" | "#view-menu" | "#volume" | "#welcome" | "#zoom" | "#zoom-in" | "#zoom-out" | "hook:toolbar.add"
+export type HookTarget = "#add" | "#all-clear" | "#api" | "#app" | "#appearance" | "#area_" | "#attach" | "#back" | "#ball" | "#banner" | "#board" | "#body" | "#budget" | "#buffer_menu" | "#busy" | "#button" | "#c1" | "#cancel" | "#cargo" | "#catalog" | "#city" | "#clear" | "#close-settings" | "#components" | "#compose" | "#composer" | "#confirm-remove" | "#copies" | "#copy_env" | "#ctx" | "#customer" | "#dark" | "#day" | "#delete" | "#docs" | "#documents" | "#done" | "#draft" | "#drawing" | "#drop-hint" | "#dropdown_catcher" | "#due" | "#duplicate" | "#editor" | "#ellipse" | "#emoji" | "#empty" | "#export_menu" | "#failure" | "#field-fill" | "#field-name" | "#file" | "#files" | "#filters" | "#find" | "#find-bar" | "#find-case" | "#find-close" | "#find-count" | "#find-next" | "#find-previous" | "#fit_frame" | "#focus" | "#folders" | "#forward" | "#frame_card" | "#frame_title" | "#frame_trace" | "#fruit" | "#g" | "#glyphs" | "#groceries" | "#guide" | "#highlight_" | "#id" | "#inbox" | "#inspector" | "#keep" | "#knob" | "#latest" | "#live" | "#load-error" | "#loading" | "#logs_menu" | "#m1" | "#m2" | "#main" | "#menu_catcher" | "#menu_dim" | "#menu_layer" | "#messages" | "#model" | "#more_menu" | "#n" | "#new" | "#new-tab" | "#next" | "#next_frame" | "#notes" | "#notifications" | "#o" | "#open" | "#open-dialog" | "#open-palette" | "#open-settings" | "#orbs" | "#orders" | "#other" | "#overlay_" | "#overlays_button" | "#overlays_hide_all" | "#overlays_menu" | "#palette" | "#panes" | "#pay" | "#plot" | "#prev_frame" | "#previous" | "#profiler" | "#range" | "#readme" | "#receive" | "#reconnect" | "#record" | "#record_start" | "#record_toggle" | "#rect" | "#redo" | "#refresh" | "#reload" | "#remove-error" | "#replace" | "#replace-all" | "#replace-one" | "#reply" | "#result_" | "#retry" | "#return" | "#revert" | "#role" | "#rows" | "#rtl" | "#runner" | "#runtime_menu" | "#s" | "#save" | "#save-error" | "#scroller" | "#search" | "#search_input" | "#search_menu" | "#select" | "#send" | "#settings" | "#ship" | "#sidebar" | "#sketch" | "#sliders" | "#snapping" | "#span_" | "#span_tooltip" | "#spans" | "#src" | "#stamp" | "#start" | "#state-" | "#status" | "#status-bar" | "#status-caret" | "#status-language" | "#status-message" | "#status-wrap" | "#status_bar" | "#status_buffer" | "#status_logs" | "#stop" | "#subject" | "#tab_placeholder" | "#target_button" | "#tasks" | "#team" | "#theme" | "#thinking" | "#thread-body" | "#thread-subject" | "#timeline" | "#title" | "#title_bar" | "#toast" | "#toast-error" | "#toasts" | "#toggle-dark" | "#toggle-rtl" | "#toolbar" | "#tooltip_" | "#total" | "#track" | "#transcript" | "#typing" | "#undo" | "#view-menu" | "#volume" | "#welcome" | "#zoom" | "#zoom-in" | "#zoom-out" | "hook:toolbar.add" | ".bar" | ".dot" | ".row" | ".scoped" | ".sq" | ".word"
+-- A target inside others (`"#sidebar >> .session-row"`): any text, since a
+-- chain's parts combine freely; `zgx lint` checks each `#id` and `hook:`.
+export type HookChain = string
 -- A target by role or name (`ui.selector('role:button "Save"')`): the app's
 -- internals, which may change with its next version.
 export type Selector = { __zgx_selector: never }
@@ -17651,10 +17655,11 @@ export type ModuleOverride = {
 	with: string,
 }
 -- A plugin's node at an element of the app's, by `target` (`"#save"`,
--- `"hook:toolbar.save"`, `ui.selector('role:button "Save"')`): before it,
+-- `"hook:toolbar.save"`, `".session-row"`, `"#sidebar >> .session-row"`,
+-- `ui.selector('role:button "Save"')`): before it,
 -- after it, or in its place (replacing takes `Capability::Override`).
 export type HookContribution = {
-	target: HookTarget | Selector,
+	target: HookTarget | HookChain | Selector,
 	before: Node?,
 	after: Node?,
 	replace: Node?,
@@ -17664,7 +17669,7 @@ export type HookContribution = {
 -- what it reads changes (it takes `Capability::Override`). A tooltip's text
 -- passes through as the element is built.
 export type HookFilter = {
-	target: HookTarget | Selector,
+	target: HookTarget | HookChain | Selector,
 	text: ((text: string) -> string)?,
 	label: ((label: string?) -> string?)?,
 	hidden: ((hidden: boolean) -> boolean)?,
