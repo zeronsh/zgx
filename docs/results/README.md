@@ -29,10 +29,11 @@ Medians, zgx / GPUI Fast / MyGo / Rune (vlist: zgx / zgx in Luau / GPUI Fast / M
 - **Startup and idle:** level across #1056 and #1070. A warm first frame went 686.1 → 686.4 M instructions, and an 8 s idle run 1,041.6 → 1,039.7 M. The freeze measured 680.5 M and 1,039.8 M.
 - **The font cache:** the system font cache sits at one path for every version, `~/Library/Caches/zgx/system-fonts`, and 0.1.7 bumped its format. So alternating releases rebuild it for each other, about 300 M a launch. Measure startup with each binary in a block of its own.
 
-[`gate-0.1.6-0.1.7`](gate-0.1.6-0.1.7/) holds the release gate's exact counts on arm64, v0.1.6 (`e077e952`) against the 0.1.7 freeze (`fbf1d5e2`); the tag adds only version numbers:
+[`gate-0.1.6-0.1.7`](gate-0.1.6-0.1.7/) holds the release gate's exact counts: v0.1.6 (`e077e952`) against the 0.1.7 freeze (`fbf1d5e2`) on arm64 (`gate.md`), and against the tag `b03245c4`, which adds only version numbers, on x86 (`gate-x86.md`, from CI's perf job on probe PR #1297):
 - **Script updates:** 6.4% fewer instructions, the lab's scroll 4.7%, and the other core cells −0.01 to −0.48%.
 - **Textured 3D:** a frame is 63% fewer instructions, on a bench overlaid on both sides.
 - **The example apps:** 0.06 to 0.40% more, followed up in #1276.
+- **x86:** the same picture. Script updates are 6.7% fewer and the lab's scroll 4.9%. `style` reads +0.22% from inlining that arm64 doesn't show, and `animate` and `anime` read +0.12% and +0.08%.
 
 # macOS suite (2026-10-30): 0.1.6, every scene on `e077e95`
 
