@@ -366,6 +366,8 @@ pub(crate) struct Hooks {
     /// plugins add (a replacement that matched its own target would
     /// replace itself without end).
     app: std::rc::Weak<Vm>,
+    /// Contributions at a row's root already reported (`row_contributions`).
+    told: std::cell::RefCell<std::collections::HashSet<usize>>,
 }
 impl Hooks {
     pub(crate) fn extend(&mut self, added: Vec<crate::node::HookContribution>) {
@@ -1861,6 +1863,68 @@ fn warn_replaced_id(vm: &Vm, given: &str, site: Option<&str>, root: &mlua::Value
     );
 }
 
+/// A `ui.each`'s or `ui.list`'s row builder, with plugins: wrapped so what
+/// they add before or after a row's root, which isn't drawn yet, is
+/// reported (`row_contributions`). Without, the builder itself: rows build
+/// as they always have.
+#[inline(always)]
+fn row_builder(builder: &mlua::Function, vm: &Rc<Vm>, low: &Rc<Lowering>) -> mlua::Function {
+    if low.hooks.is_none() {
+        return builder.clone();
+    }
+    wrapped_row_builder(builder, vm, low)
+}
+#[cold]
+#[inline(never)]
+fn wrapped_row_builder(
+    builder: &mlua::Function,
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+) -> mlua::Function {
+    let (inner, low) = (builder.clone(), Rc::downgrade(low));
+    vm.lua
+        .create_function(move |_, args: mlua::MultiValue| {
+            let root: mlua::Value = inner.call(args)?;
+            if let Some(low) = low.upgrade()
+                && let Some(hooks) = &low.hooks
+            {
+                row_contributions(&root, hooks, &low);
+            }
+            Ok(root)
+        })
+        .unwrap_or_else(|_| builder.clone())
+}
+/// What plugins add before or after `root`, a row's: reported once each to
+/// the plugin, as it draws nothing.
+#[cold]
+#[inline(never)]
+fn row_contributions(root: &mlua::Value, hooks: &Hooks, low: &Lowering) {
+    let mlua::Value::UserData(root) = root else {
+        return;
+    };
+    let Ok(root) = root.borrow::<NodeUd>() else {
+        return;
+    };
+    for hook in hooks.at(&root.0, true, low) {
+        let place = match () {
+            _ if hook.placed(crate::node::Place::Before).is_some() => "before",
+            _ if hook.placed(crate::node::Place::After).is_some() => "after",
+            _ => continue,
+        };
+        let at = std::ptr::from_ref(hook) as usize;
+        if !hooks.told.borrow_mut().insert(at) {
+            continue;
+        }
+        if let Some(vm) = hook.vm.upgrade() {
+            vm.report(mlua::Error::runtime(format!(
+                "ui.contribute {{ target = \"{}\", {place} = … }}: its target is a row of a \
+                 ui.each or ui.list, and what goes {place} a row isn't drawn yet. Target an \
+                 element inside the row, or the list's container",
+                hook.target_text()
+            )));
+        }
+    }
+}
 /// `build_scoped`, with `see` given what `f` built.
 fn build_scoped_seeing(
     vm: &Rc<Vm>,
@@ -2478,7 +2542,7 @@ fn kind_view(
         } => crate::motion::each(
             need(&mut cx),
             items.clone(),
-            builder.clone(),
+            row_builder(builder, vm, low),
             key.clone(),
             motion.clone(),
             vm,
@@ -2510,7 +2574,7 @@ fn kind_view(
             let mut item_keys = ItemKeys::default();
             let (rows_in_keys, noted_in_keys) = (rows.clone(), noted.clone());
             let runtime = vm.runtime.clone();
-            let (builder, vm, low) = (builder.clone(), vm.clone(), low.clone());
+            let (builder, vm, low) = (row_builder(builder, vm, low), vm.clone(), low.clone());
             keyed(
                 move || {
                     keys_from.with(|list| {
@@ -6091,6 +6155,8 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
             },
         }
     };
+    let wrapped = row_builder(builder, vm, low);
+    let builder = &wrapped;
     // A row of a list with no `key`, keyed by its place: a `usize` the
     // list hashes inline, not a `ListKey` (a list scrolls by looking up
     // every row in view).
@@ -6371,6 +6437,8 @@ fn lower_item_list(
         unreachable!("lower_item_list takes lists")
     };
     let live = builder.info().num_params >= 3;
+    let wrapped = row_builder(builder, vm, low);
+    let builder = &wrapped;
     let row = {
         let (items, builder, vm, low) = (items.clone(), builder.clone(), vm.clone(), low.clone());
         move |index: Signal<usize>, _: ListKey, cx: &mut Context| -> View {

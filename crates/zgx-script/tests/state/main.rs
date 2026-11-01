@@ -25,6 +25,8 @@ mod ownership;
 mod packages;
 #[path = "../paged.rs"]
 mod paged;
+#[path = "../plugin_context.rs"]
+mod plugin_context;
 #[path = "../plugin_filters.rs"]
 mod plugin_filters;
 #[path = "../plugin_hooks.rs"]

@@ -1597,6 +1597,17 @@ pub(crate) enum Adds {
 }
 impl HookContribution {
     /// Its node, if it adds one `place`.
+    /// Its target as a selector reads it, for messages.
+    pub(crate) fn target_text(&self) -> String {
+        let t = &self.target;
+        let parts = [
+            t.id.as_ref().map(|id| format!("#{id}")),
+            t.hook.as_ref().map(|hook| format!("hook:{hook}")),
+            t.role.as_ref().map(|role| format!("role:{role}")),
+            t.text.clone(),
+        ];
+        parts.into_iter().flatten().collect::<Vec<_>>().join(" ")
+    }
     pub(crate) fn placed(&self, place: Place) -> Option<&Rc<Node>> {
         match &self.adds {
             Adds::Node(at, node) if *at == place => Some(node),
@@ -1684,10 +1695,12 @@ pub(crate) struct Scope {
     pub provided: Option<Rc<Provided>>,
 }
 /// A value a node provides its subtree, by its name.
-pub(crate) type Given = (Rc<str>, mlua::Value);
-/// The values a subtree was provided, its own over its ancestors'.
+pub(crate) type Given = (Rc<str>, (Weak<Vm>, mlua::Value));
+/// The values a subtree was provided, its own over its ancestors', each
+/// with the VM that gave it: a plugin's node reads them converted into its
+/// own (`ui.use_context`).
 #[derive(Default)]
-pub(crate) struct Provided(pub std::collections::HashMap<Rc<str>, mlua::Value>);
+pub(crate) struct Provided(pub std::collections::HashMap<Rc<str>, (Weak<Vm>, mlua::Value)>);
 
 pub(crate) struct NodeUd(pub Rc<Node>);
 impl UserData for NodeUd {}
@@ -1790,6 +1803,51 @@ fn controlled(
     };
     retain(&env, Box::new((showing, changing)));
     Ok(shown)
+}
+/// What another VM provided (the app, to a plugin's node), in `lua`'s
+/// terms: a state as the same state, read only as a plugin's shared state
+/// is, so what reads it follows it; anything else as a plain value. A
+/// function or handle can't cross: an error naming it.
+#[cold]
+#[inline(never)]
+fn crossed(
+    lua: &Lua,
+    owner: &Weak<Vm>,
+    value: &mlua::Value,
+    name: &str,
+) -> mlua::Result<mlua::Value> {
+    if let Some(signal) = state_of(value) {
+        let read = crate::value::ReadState(crate::value::State::new(signal), name.into());
+        return lua.create_userdata(read).map(mlua::Value::UserData);
+    }
+    let Some(owner) = owner.upgrade() else {
+        return Ok(mlua::Value::Nil);
+    };
+    let plain: Value = owner.lua.unpack(value.clone()).map_err(|_| {
+        mlua::Error::runtime(format!(
+            "ui.use_context(\"{name}\"): what the app provides there is a function or a \
+             handle, which can't reach a plugin; provide a value or a state"
+        ))
+    })?;
+    mlua::IntoLua::into_lua(plain, lua)
+}
+/// `provide = { name = value }`'s values, each with the VM that gives it:
+/// a plugin's node reads them converted (`ui.use_context`).
+#[cold]
+#[inline(never)]
+fn provided(lua: &Lua, value: mlua::Value) -> mlua::Result<Rc<[Given]>> {
+    let mlua::Value::Table(values) = value else {
+        return Err(mlua::Error::runtime(
+            "`provide` takes a table of names and values: `provide = { user = user }`",
+        ));
+    };
+    let owner = env(lua)?.vm.clone();
+    let mut provided: Vec<Given> = Vec::new();
+    for pair in values.pairs::<String, mlua::Value>() {
+        let (name, value) = pair?;
+        provided.push((name.as_str().into(), (owner.clone(), value)));
+    }
+    Ok(provided.into())
 }
 /// The state `value` holds, to read and follow: a plugin's read-only
 /// shared state too.
@@ -3745,19 +3803,7 @@ fn fill_from(
                 }
                 node.events.get_or_insert_default().context_menu_style = Some(lits.into());
             }
-            "provide" => {
-                let mlua::Value::Table(values) = value else {
-                    return Err(mlua::Error::runtime(
-                        "`provide` takes a table of names and values: `provide = { user = user }`",
-                    ));
-                };
-                let mut provided: Vec<(Rc<str>, mlua::Value)> = Vec::new();
-                for pair in values.pairs::<String, mlua::Value>() {
-                    let (name, value) = pair?;
-                    provided.push((name.as_str().into(), value));
-                }
-                node.provide = Some(provided.into());
-            }
+            "provide" => node.provide = Some(provided(lua, value)?),
             "theme" => {
                 let spec = if let Some(state) = state_of(&value) {
                     ThemeSpec::State(state)
@@ -5876,11 +5922,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     "ui.use_context reads what a component, row or presence is built in: call it in one's build",
                 ));
             };
-            Ok(scope
+            let Some((owner, value)) = scope
                 .provided
                 .as_ref()
-                .and_then(|p| p.0.get(name.as_str()).cloned())
-                .unwrap_or(default))
+                .and_then(|p| p.0.get(name.as_str()))
+            else {
+                return Ok(default);
+            };
+            match owner.ptr_eq(&env.vm) {
+                true => Ok(value.clone()),
+                false => crossed(lua, owner, value, &name),
+            }
         })?,
     )?;
     // `ui.on_cleanup(f)`: `f` runs when what is being built goes away (a
