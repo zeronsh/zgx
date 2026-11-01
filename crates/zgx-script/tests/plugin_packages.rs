@@ -194,3 +194,30 @@ fn contributions_list_what_each_plugin_was_lent() {
     // `matches`: the modules it required from it (badge and tone).
     assert_eq!(lent, [("p".to_string(), "@ds".to_string(), 2)]);
 }
+
+#[test]
+fn a_lent_module_compiles_once_for_every_plugin() {
+    let mut h = host("once", |dir| {
+        (1..=10)
+            .map(|n| {
+                plugin(
+                    dir,
+                    &format!("p{n}"),
+                    &format!(
+                        r##"local badge = require("@ds/badge")
+ui.contribute {{ target = "#mine", after = ui.column {{ badge("p{n}") }} }}"##
+                    ),
+                )
+            })
+            .collect()
+    });
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    assert_eq!(h.texts().len(), 11);
+    // badge and tone, once each, for ten plugin VMs.
+    assert_eq!(h.host.lent_compiles(), 2);
+    // A reload finds them compiled still.
+    h.host.reload().unwrap();
+    h.frames(1);
+    assert_eq!(h.host.lent_compiles(), 2);
+}
