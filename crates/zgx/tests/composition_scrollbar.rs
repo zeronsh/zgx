@@ -227,3 +227,61 @@ fn thumb_drag_survives_unrelated_button_release() {
     ui.dispatch(InputEvent::PointerMove { x: 196., y: 100. });
     assert_eq!(offset.get(), settled);
 }
+
+/// A scroll view's own fade (`fade_edges`) fades its rows, not its
+/// scrollbar: the bar's paint takes no fade mask where a row's does, in
+/// both paint walks.
+#[test]
+fn a_scroll_views_fade_leaves_its_scrollbar_whole() {
+    let mut ui = Ui::new(500., 400.);
+    let offset = ui.signal(0.);
+    ui.mount(
+        scroll(offset)
+            .w(200.)
+            .h(120.)
+            .fade_edges(40., 40.)
+            .scrollbar(true)
+            .child(div().h(400.).bg(zgx::style::rgb(0x336699))),
+    );
+    ui.prepare_frame();
+    let bar = bar(&ui);
+    let scene = ui.scene.borrow();
+    let in_bar = |mut id: NodeId| loop {
+        if id == bar {
+            return true;
+        }
+        match scene.parent(id) {
+            Some(parent) => id = parent,
+            None => return false,
+        }
+    };
+    let masks = |items: Vec<zgx::scene::PaintItem<'_>>| {
+        let (mut bar_masks, mut row_masks) = (Vec::new(), Vec::new());
+        for item in items {
+            let mask = item.extras.as_ref().and_then(|extras| extras.mask);
+            match in_bar(item.id) {
+                true => bar_masks.push(mask),
+                // The row: the 400-point box the view scrolls (not the root, as tall).
+                false if item.bounds.height >= 400. && item.bounds.width <= 200. => {
+                    row_masks.push(mask)
+                }
+                false => {}
+            }
+        }
+        (bar_masks, row_masks)
+    };
+    for (bar_masks, row_masks) in [
+        masks(scene.paint_items().collect()),
+        masks(scene.layer_items(None)),
+    ] {
+        assert!(!bar_masks.is_empty(), "the bar paints");
+        assert!(
+            bar_masks.iter().all(Option::is_none),
+            "the bar unfaded: {bar_masks:?}"
+        );
+        assert!(
+            !row_masks.is_empty() && row_masks.iter().all(Option::is_some),
+            "rows faded: {row_masks:?}"
+        );
+    }
+}

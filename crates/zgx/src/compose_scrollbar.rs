@@ -119,6 +119,8 @@ pub(crate) fn mount(
     horizontal: bool,
 ) {
     let overlay = ui.container(owner, Layout::Overlay, Style::default());
+    // The view's own fade (`fade`) fades its rows, not its scrollbar.
+    ui.scene.borrow_mut().set_outside_fade(overlay);
     // Its parts are placed by transforms from its corner, in points across
     // whichever way the view runs.
     ui.scene

@@ -1819,6 +1819,12 @@ struct ColdMaps {
     stacked: NodeMap<Vec<NodeId>>,
     /// Nodes raised among their siblings (`set_z`), none at 0.
     raised: NodeMap<i32>,
+    /// Nodes painted outside their parent's fade (`set_outside_fade`). (A
+    /// value of its own: a `NodeMap<()>` would share `Ui::pend_label`'s
+    /// set's code, which then isn't inlined there.) Not a cold node's
+    /// (`sync_cold`): removed nodes' entries are let go as it grows, and
+    /// never name another node (`NodeId` is generational).
+    outside_fade: NodeMap<OutsideFade>,
     /// Nodes that stick in their scroll view (`set_sticky`).
     sticky: NodeMap<Sticky>,
     /// Sizes worked out from the containing block (`set_size_calcs`).
@@ -1850,6 +1856,9 @@ struct ColdMaps {
     /// Outlines drawn dashed or dotted (`set_outline_style`).
     outline_styles: NodeMap<crate::decoration::BorderStyle>,
 }
+/// A node painted outside its parent's fade (`Scene::set_outside_fade`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OutsideFade;
 /// Where a node takes hits while an animation moves it: the place it's
 /// going, not the place it shows (Core Animation's model layer against its
 /// presentation). Painting, scroll copies and inspection keep what shows.
@@ -10890,6 +10899,22 @@ impl Scene {
                 ));
             }
             if !isolated && !border {
+                // Its own fade, while a child may paint outside it: what it
+                // was given, for those (`outside_own_fade`).
+                let given = match &own {
+                    Some(own) if self.has_outside_fade() && own.child_mask != own.mask => Some(
+                        PaintExtras {
+                            matrix: None,
+                            mask: own.mask,
+                            outer_mask: own.outer_mask,
+                            rounded: own.child_rounded,
+                            color: own.color,
+                            projective: None,
+                        }
+                        .shared(),
+                    ),
+                    _ => None,
+                };
                 let passed = match own {
                     None => context,
                     Some(own)
@@ -10920,6 +10945,7 @@ impl Scene {
                     true => self.paint_order(id, node),
                     false => self.children_raw(node),
                 };
+                let pushed = stack.len();
                 stack.extend(
                     children
                         .iter()
@@ -10930,6 +10956,11 @@ impl Scene {
                             (*child, transform, opacity, clip, passed.clone(), false)
                         }),
                 );
+                if let Some(given) = given {
+                    self.outside_own_fade(&mut stack[pushed..], &given, |entry| {
+                        (entry.0, &mut entry.4)
+                    });
+                }
                 deepest = deepest.max(stack.len());
             }
             // A box's own paint (fill, border, shadows) isn't cut by its own
@@ -10963,6 +10994,27 @@ impl Scene {
             self.walk_hints.set((deepest, result.len()));
         }
         result
+    }
+    /// A parent fading its children itself (`fade_edges`): of the children
+    /// just pushed (`pushed`), those painted outside its fade
+    /// (`set_outside_fade`, a scroll view's scrollbar) take `given`, the
+    /// fade the parent was given, instead. Out of line, after the children
+    /// are pushed as any are: only a parent with a fade of its own comes
+    /// here, and only while some node is marked.
+    #[cold]
+    #[inline(never)]
+    fn outside_own_fade<T>(
+        &self,
+        pushed: &mut [T],
+        given: &Option<std::rc::Rc<PaintExtras>>,
+        child: impl Fn(&mut T) -> (NodeId, &mut Option<std::rc::Rc<PaintExtras>>),
+    ) {
+        for entry in pushed {
+            let (id, context) = child(entry);
+            if self.outside_fade(id) {
+                *context = given.clone();
+            }
+        }
     }
     /// Every paint item, in document order from the root: paint order but
     /// for raised nodes (`set_z`), which `layer_items` puts where they paint.
@@ -11218,11 +11270,28 @@ impl<'a> Iterator for PaintIter<'a> {
             }
             .shared()
         };
+        let pushed = self.stack.len();
         self.stack
             .extend(self.scene.children_raw(node).iter().rev().map(|child| {
                 let opacity = effects.opacity;
                 (*child, transform, opacity, clip, passed.clone())
             }));
+        // As the paint walk does: children outside its own fade.
+        if child_mask != mask && self.scene.has_outside_fade() {
+            let given = PaintExtras {
+                matrix: None,
+                mask,
+                outer_mask,
+                rounded: child_rounded,
+                color,
+                projective: None,
+            }
+            .shared();
+            self.scene
+                .outside_own_fade(&mut self.stack[pushed..], &given, |entry| {
+                    (entry.0, &mut entry.4)
+                });
+        }
         Some(PaintItem {
             isolated: false,
             id,
