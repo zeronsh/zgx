@@ -97,6 +97,8 @@ struct Part {
     /// `~"part"`: what its label or text holds, anywhere in it.
     holding: Option<String>,
     role: Option<String>,
+    /// `.name`: classes it has, all of them (plugin targets only).
+    classes: Vec<String>,
     number: Option<u32>,
     row: Option<usize>,
     nth: Option<usize>,
@@ -132,6 +134,15 @@ pub fn parse(text: &str) -> Result<Target, String> {
                     .find(|c: char| c.is_whitespace() || c == '[')
                     .unwrap_or(after.len());
                 part.id = Some(after[..end].to_string());
+                rest = after[end..].trim_start();
+            } else if let Some(after) = rest.strip_prefix('.') {
+                let end = after
+                    .find(|c: char| c.is_whitespace() || c == '[' || c == '.')
+                    .unwrap_or(after.len());
+                if end == 0 {
+                    return Err(format!("`{text}`: `.` takes a class name"));
+                }
+                part.classes.push(after[..end].to_string());
                 rest = after[end..].trim_start();
             } else if let Some(after) = rest.strip_prefix('@') {
                 let end = after
@@ -193,41 +204,48 @@ pub fn parse(text: &str) -> Result<Target, String> {
 
 /// What a plugin's contribution targets (`ui.contribute { target }`): a
 /// target's static parts, matched against an element as the interface is
-/// built, not against the scene. An id, a declared hook, a role, a name
-/// (its label, or its text as written); together they narrow.
+/// built, not against the scene. An id, a declared hook, a role, classes,
+/// a name (its label, or its text as written); together they narrow.
+/// Parts before `>>` (`ancestors`, outermost first) are elements it is
+/// inside.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Static {
     pub id: Option<String>,
     pub hook: Option<String>,
     pub role: Option<String>,
+    pub classes: Vec<String>,
     pub text: Option<String>,
+    pub ancestors: Vec<Static>,
 }
 impl Static {
     /// `text` read as a target, of the parts known before the interface
-    /// shows: not a node's number, a row, the nth match or `>>`.
+    /// shows: not a node's number, a row or the nth match.
     pub(crate) fn parse(text: &str) -> Result<Self, String> {
         let Target(parts) = parse(text)?;
-        let [part] = parts.as_slice() else {
-            return Err(format!(
-                "`{text}`: a plugin's target is one element, without `>>`"
-            ));
-        };
-        if part.number.is_some()
-            || part.row.is_some()
-            || part.nth.is_some()
-            || part.holding.is_some()
-        {
-            return Err(format!(
-                "`{text}`: a plugin's target is matched as the interface is built: \
-                 an id, `hook:`, `role:` or a name, not `@n`, `row` or `[n]`"
-            ));
+        let mut statics = Vec::with_capacity(parts.len());
+        for part in &parts {
+            if part.number.is_some()
+                || part.row.is_some()
+                || part.nth.is_some()
+                || part.holding.is_some()
+            {
+                return Err(format!(
+                    "`{text}`: a plugin's target is matched as the interface is built: \
+                     an id, `hook:`, `role:`, `.class` or a name, not `@n`, `row` or `[n]`"
+                ));
+            }
+            statics.push(Self {
+                id: part.id.clone(),
+                hook: part.hook.clone(),
+                role: part.role.clone(),
+                classes: part.classes.clone(),
+                text: part.text.clone(),
+                ancestors: Vec::new(),
+            });
         }
-        Ok(Self {
-            id: part.id.clone(),
-            hook: part.hook.clone(),
-            role: part.role.clone(),
-            text: part.text.clone(),
-        })
+        let mut own = statics.pop().expect("a target has a part");
+        own.ancestors = statics;
+        Ok(own)
     }
 }
 
@@ -373,6 +391,12 @@ pub fn find_all(ui: &Ui, handle: &ViewHandle, target: &Target) -> Result<Vec<Nod
                     "`hook:{hook}` names a plugin hook; target the element by its id or name"
                 ));
             }
+            if let Some(class) = part.classes.first() {
+                return Err(format!(
+                    "`.{class}` names a class, which plugins' targets match; target the \
+                     element by its id, role or name"
+                ));
+            }
             let ids = part.id.as_ref().map(|id| handle.find_all(id));
             for node in candidates {
                 if let Some(ids) = &ids
@@ -473,6 +497,9 @@ fn show_part(part: &Part) -> String {
     }
     if let Some(role) = &part.role {
         out.push(format!("role:{role}"));
+    }
+    for class in &part.classes {
+        out.push(format!(".{class}"));
     }
     if let Some(text) = &part.text {
         out.push(format!("{text:?}"));

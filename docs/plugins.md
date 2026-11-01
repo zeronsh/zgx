@@ -37,6 +37,8 @@ ui.button { id = "clear", hook = false, "Clear done", on_click = ui.action("clea
 
 Plugins may also target an element by role and name, as the app writes them (`role:button "Add"`, or `"Add"`). That is convenient and the most fragile form; prefer declared hooks.
 
+**Classes and chains.** `.session-row` targets every element with that class (`class = "session-row"`), and a contribution goes beside or in place of each. `#sidebar >> .session-row` targets those inside `#sidebar`, at any depth: each part before a `>>` is an element above the one before it. Parts combine as one element's (`#save .primary`, `role:button "Add"`). A chain is checked as the element mounts, so one in a row of a `ui.each` inside the sidebar matches, and the same class elsewhere doesn't. `ui.filter` takes the same targets.
+
 **Let modules be replaced where that makes sense.** A module the app requires as `@app/<path>` (from its own directory) can be replaced by a trusted plugin. A relative `require("./x")` never can. The example requires its row as `@app/components/task_row` on purpose.
 
 ## What plugins do
