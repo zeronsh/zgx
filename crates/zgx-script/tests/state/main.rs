@@ -19,6 +19,8 @@ mod large_data;
 mod module_overrides;
 #[path = "../notify.rs"]
 mod notify;
+#[path = "../ownership.rs"]
+mod ownership;
 #[path = "../packages.rs"]
 mod packages;
 #[path = "../paged.rs"]

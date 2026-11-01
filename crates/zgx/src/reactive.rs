@@ -35,7 +35,16 @@ struct EffectRecord {
     /// Reads no layout: a mount runs it without drawing its text inputs
     /// first (`Runtime::batch_watched`).
     mount_pure: bool,
+    /// Has held what was made while it ran (`Runtime::own`, in
+    /// `Inner::owned`): its callback was wrapped to drop that before it runs
+    /// again, and its drop drops it. Effects that never own pay nothing.
+    owns: bool,
 }
+/// What effects made while they ran, by effect (`Runtime::own`).
+type Owned = HashMap<EffectId, Vec<Box<dyn Any>>, std::hash::BuildHasherDefault<IdHasher>>;
+/// An effect running ([`Runtime::running`]), to compare with another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Running(EffectId);
 /// Effect ids are unique integers; a multiplicative hash beats SipHash here.
 #[derive(Default, Clone, Copy)]
 struct IdHasher(u64);
@@ -143,6 +152,9 @@ struct Inner {
     /// field, not an extension: `extension` scans in order, and an entry
     /// ahead of `Themes` would tax every theme read.
     idle: RefCell<Vec<std::rc::Weak<dyn Fn()>>>,
+    /// What effects made while they ran (`Runtime::own`), by effect: few
+    /// ever do, so a side map rather than a field each.
+    owned: RefCell<Owned>,
 }
 
 /// The effect running for as long as it lives: whatever ran before runs
@@ -243,6 +255,46 @@ fn newest_first<const IN_PLACE: bool>(ids: &mut Vec<EffectId>, order: &mut Order
     }
 }
 impl Inner {
+    /// Drop what effect `id` made while it ran, with no borrow held: a
+    /// resource's drop (a script's cleanup) may run effects and make more.
+    #[cold]
+    #[inline(never)]
+    fn release(&self, id: EffectId) {
+        let made = self.owned.borrow_mut().remove(&id);
+        drop(made);
+    }
+    /// [`Inner::release`] before effect `id` runs again: untracked, so a
+    /// cleanup's reads don't become the effect's dependencies.
+    #[cold]
+    #[inline(never)]
+    fn release_before_run(&self, id: EffectId) {
+        struct Restore<'a>(&'a Cell<Option<EffectId>>, Option<EffectId>);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.1);
+            }
+        }
+        let _restore = Restore(&self.active, self.active.replace(None));
+        self.release(id);
+    }
+    /// Queue effect `id` again, in a flush's heap if one is running: it
+    /// was asked to run (`Refresh::refresh`) while it ran.
+    #[cold]
+    #[inline(never)]
+    fn run_again(&self, id: EffectId) {
+        let queued = match self.effects.borrow_mut().get_mut(&id) {
+            Some(record) if !record.stopped => !std::mem::replace(&mut record.queued, true),
+            _ => false,
+        };
+        // Not `queue`: a second caller would stop it inlining in
+        // `effect_callback`.
+        if queued {
+            match self.flushing.get() {
+                true => self.pending.borrow_mut().push(Reverse(id)),
+                false => self.queued.borrow_mut().push(id),
+            }
+        }
+    }
     /// Queue effect `id` to run: in a flush's heap if one is running.
     fn queue(&self, id: EffectId) {
         match self.flushing.get() {
@@ -375,6 +427,7 @@ impl Runtime {
                 queued: true,
                 stopped: false,
                 mount_pure,
+                owns: false,
             },
         );
         self.inner.queue(id);
@@ -405,6 +458,7 @@ impl Runtime {
                 queued: false,
                 stopped: false,
                 mount_pure: false,
+                owns: false,
             },
         );
         // Made before it runs: a first run that panics drops it, so
@@ -418,6 +472,57 @@ impl Runtime {
             (*callback.borrow_mut())();
         }
         effect
+    }
+    /// The effect running now, if one is: a computed's or an effect's run.
+    /// A host compares it with the one that ran as it began building
+    /// something, to tell which of the two made what it is given.
+    pub fn running(&self) -> Option<Running> {
+        self.inner.active.get().map(Running)
+    }
+    /// Give `resource` to the effect running now: it is dropped before that
+    /// effect runs again and when the effect goes, as a React effect's
+    /// cleanup runs between runs. Given back when no effect is running.
+    pub fn own(&self, resource: Box<dyn Any>) -> Result<(), Box<dyn Any>> {
+        let Some(id) = self.inner.active.get() else {
+            return Err(resource);
+        };
+        match self.inner.effects.borrow_mut().get_mut(&id) {
+            Some(record) if !record.owns => {
+                record.owns = true;
+                record.callback = self.releasing(id, record.callback.clone());
+            }
+            Some(_) => {}
+            None => return Err(resource),
+        }
+        self.inner
+            .owned
+            .borrow_mut()
+            .entry(id)
+            .or_default()
+            .push(resource);
+        Ok(())
+    }
+    /// Effect `id`'s `callback`, dropping what its last run made before it
+    /// runs: wrapped the first time it owns something, so a run (in
+    /// `flush`) of an effect that never does costs what it did.
+    #[cold]
+    #[inline(never)]
+    fn releasing(&self, id: EffectId, callback: Callback) -> Callback {
+        let inner = Rc::downgrade(&self.inner);
+        Rc::new(RefCell::new(move || {
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            // Wrapped while it ran: a refresh then sees this wrapper free,
+            // though the run it wraps isn't over. It runs once that is.
+            let Ok(mut run) = callback.try_borrow_mut() else {
+                inner.run_again(id);
+                return;
+            };
+            inner.release_before_run(id);
+            drop(inner);
+            run();
+        }))
     }
     /// Whether a write now runs no effects before returning: inside a batch,
     /// or a flush, which run them once they end.
@@ -789,6 +894,10 @@ impl Drop for Effect {
             if let Some(record) = record {
                 if record.stopped {
                     runtime.stopped.set(runtime.stopped.get() - 1);
+                }
+                // What it made goes with it.
+                if record.owns {
+                    runtime.release(self.id);
                 }
                 for dependency in record.dependencies {
                     if let Some(dependency) = dependency.source.upgrade() {
@@ -1165,6 +1274,94 @@ mod tests {
         before.set(1);
         after.set(1);
         assert_eq!(runs.get(), 3);
+    }
+
+    /// Logs its name when it goes, as a script's cleanup runs.
+    struct Made(
+        &'static str,
+        Rc<RefCell<Vec<&'static str>>>,
+        Option<Signal<i32>>,
+    );
+    impl Drop for Made {
+        fn drop(&mut self) {
+            if let Some(read) = &self.2 {
+                read.get();
+            }
+            self.1.borrow_mut().push(self.0);
+        }
+    }
+
+    /// What an effect's run owns goes before its next run, and with it; a
+    /// cleanup's reads aren't the effect's, and outside a run nothing owns.
+    #[test]
+    fn what_a_run_owns_goes_before_the_next_run_and_with_the_effect() {
+        let runtime = Runtime::new();
+        let input = runtime.signal(0);
+        let other = runtime.signal(0);
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let runs = Rc::new(Cell::new(0));
+        let effect = runtime.effect({
+            let (runtime, input, other) = (runtime.clone(), input.clone(), other.clone());
+            let (log, runs) = (log.clone(), runs.clone());
+            move || {
+                let n = input.get();
+                runs.set(runs.get() + 1);
+                let name = ["zero", "one", "two"][n as usize];
+                let owned = Made(name, log.clone(), Some(other.clone()));
+                assert!(runtime.own(Box::new(owned)).is_ok());
+            }
+        });
+        assert!(log.borrow().is_empty());
+        input.set(1);
+        assert_eq!(*log.borrow(), ["zero"]);
+        // The cleanup read `other`: not the effect's dependency.
+        other.set(1);
+        assert_eq!(runs.get(), 2);
+        input.set(2);
+        assert_eq!(*log.borrow(), ["zero", "one"]);
+        drop(effect);
+        assert_eq!(*log.borrow(), ["zero", "one", "two"]);
+        let given = runtime.own(Box::new(Made("loose", log.clone(), None)));
+        assert!(given.is_err(), "no effect running: given back");
+        drop(given);
+        assert_eq!(log.borrow().last(), Some(&"loose"));
+    }
+
+    /// A refresh during the run that first owns something (its callback
+    /// wrapped while it runs) doesn't run it inside itself: it runs after.
+    #[test]
+    fn a_refresh_during_the_first_owning_run_waits_for_it() {
+        let runtime = Runtime::new();
+        let input = runtime.signal(0);
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let runs = Rc::new(Cell::new(0));
+        let refresh: Rc<RefCell<Option<Refresh>>> = Rc::default();
+        let effect = runtime.effect({
+            let (runtime, input) = (runtime.clone(), input.clone());
+            let (log, runs, refresh) = (log.clone(), runs.clone(), refresh.clone());
+            move || {
+                let n = input.get();
+                runs.set(runs.get() + 1);
+                if n == 0 {
+                    return;
+                }
+                let _ = runtime.own(Box::new(Made("run", log.clone(), None)));
+                if n == 1 {
+                    // Asked to run again while it runs, then refreshed.
+                    input.set(2);
+                    if let Some(refresh) = &*refresh.borrow() {
+                        assert!(refresh.refresh(), "queued: it runs, once this run is over");
+                    }
+                    assert_eq!(runs.get(), 2, "not inside this run");
+                }
+            }
+        });
+        *refresh.borrow_mut() = Some(effect.refresher());
+        input.set(1);
+        assert_eq!(runs.get(), 3, "the second write's run came after the first");
+        assert_eq!(*log.borrow(), ["run"], "the first owning run's went first");
+        drop(effect);
+        assert_eq!(*log.borrow(), ["run", "run"]);
     }
 
     #[test]
