@@ -15,12 +15,25 @@ use cosmic_text::{
 };
 use std::{
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// Bump when fontdb or cosmic-text change what they read from a font file.
+/// Bump when fontdb or cosmic-text change what they read from a font file,
+/// with `FILE`.
 /// 3: macOS's PingFang, outside the font directories, is loaded too.
 const FORMAT: &[u8] = b"zgx system fonts 3\n";
+
+/// The cache file's name, one per format: apps built on zgx versions that
+/// read different formats keep a cache each, where with one file each
+/// rewrote what the other wrote and both loaded every font at every launch.
+const FILE: &str = "system-fonts-v3";
+
+/// How long another format's cache file (or one left half-written) stays
+/// unchanged before it is removed. An app on this format keeps its own file
+/// changed (`keep_fresh`); zgx 0.1.7 and earlier wrote `system-fonts` only
+/// when it was stale, so theirs may go while still read, and is written
+/// again at that app's next launch.
+const UNUSED: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 pub(crate) fn system_fonts() -> FontSystem {
     let mut fonts = cached_system_fonts();
@@ -197,15 +210,63 @@ type Stamps = Vec<(PathBuf, (u64, u64))>;
 
 /// Once the app has started, whether a font file changed in place since the
 /// cache was written: if one did, the next launch loads the fonts again.
+/// Then the cache is marked in use, and other formats' caches long unused
+/// are removed.
 fn check_later(cache: PathBuf, files: Stamps) {
     let _ = std::thread::Builder::new()
         .name("zgx font cache check".into())
         .spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::thread::sleep(Duration::from_secs(2));
             if stale(&files) {
-                let _ = std::fs::remove_file(cache);
+                let _ = std::fs::remove_file(&cache);
+            } else {
+                keep_fresh(&cache, SystemTime::now());
+            }
+            if let Some(dir) = cache.parent() {
+                prune(dir, SystemTime::now());
             }
         });
+}
+
+/// Marks a cache read as in use, at most once a day: reading it changes
+/// nothing `prune` sees.
+fn keep_fresh(cache: &Path, now: SystemTime) {
+    let Ok(file) = std::fs::File::options().write(true).open(cache) else {
+        return;
+    };
+    let day = Duration::from_secs(24 * 60 * 60);
+    let old = file
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|at| now.duration_since(at).is_ok_and(|age| age > day));
+    if old {
+        let _ = file.set_modified(now);
+    }
+}
+
+/// Removes the system font caches in `dir` other than this format's that
+/// have gone unchanged for `UNUSED`: older and newer formats' and files a
+/// write left half-done.
+fn prune(dir: &Path, now: SystemTime) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name == FILE || !name.starts_with("system-fonts") {
+            continue;
+        }
+        let unused = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|at| now.duration_since(at).is_ok_and(|age| age > UNUSED));
+        if unused {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Whether any of `files` is no longer as stamped.
@@ -215,9 +276,17 @@ fn stale(files: &[(PathBuf, (u64, u64))]) -> bool {
 
 fn cache_file() -> Option<PathBuf> {
     if cfg!(target_os = "macos") {
-        Some(PathBuf::from(std::env::var_os("HOME")?).join("Library/Caches/zgx/system-fonts"))
+        Some(
+            PathBuf::from(std::env::var_os("HOME")?)
+                .join("Library/Caches/zgx")
+                .join(FILE),
+        )
     } else if cfg!(windows) {
-        Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("zgx\\system-fonts"))
+        Some(
+            PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+                .join("zgx")
+                .join(FILE),
+        )
     } else {
         None
     }
@@ -523,6 +592,64 @@ mod tests {
             fonts.db().family_name(&fontdb::Family::SansSerif),
             installed
         );
+    }
+
+    /// The file is named for the format it holds.
+    #[test]
+    fn the_cache_file_is_named_for_its_format() {
+        let format = std::str::from_utf8(FORMAT).unwrap();
+        let number = format.trim_end().rsplit(' ').next().unwrap();
+        assert_eq!(FILE, format!("system-fonts-v{number}"));
+    }
+
+    /// Another format's cache, or a half-written one, goes once unchanged a
+    /// month; this format's, a recent one and other files stay.
+    #[test]
+    fn caches_of_other_formats_long_unused_are_removed() {
+        let dir = std::env::temp_dir().join(format!("zgx-font-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = SystemTime::now();
+        let long_ago = now - UNUSED - Duration::from_secs(60);
+        let lately = now - UNUSED + Duration::from_secs(60 * 60);
+        let files = [
+            ("system-fonts", long_ago, false),
+            ("system-fonts-v2", long_ago, false),
+            ("system-fonts-v3.123.partial", long_ago, false),
+            (FILE, long_ago, true),
+            ("system-fonts-v9", lately, true),
+            ("bytecode", long_ago, true),
+        ];
+        for (name, at, _) in files {
+            let file = std::fs::File::create(dir.join(name)).unwrap();
+            file.set_modified(at).unwrap();
+        }
+        prune(&dir, now);
+        for (name, _, kept) in files {
+            assert_eq!(dir.join(name).exists(), kept, "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cache in use is marked so once a day, not at every launch.
+    #[test]
+    fn a_cache_read_is_kept_fresh_daily() {
+        let path = std::env::temp_dir().join(format!("zgx-font-fresh-{}", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        let now = SystemTime::now();
+        let modified = || std::fs::metadata(&path).unwrap().modified().unwrap();
+        let hour_ago = now - Duration::from_secs(60 * 60);
+        file.set_modified(hour_ago).unwrap();
+        keep_fresh(&path, now);
+        assert_eq!(modified(), hour_ago, "an hour old is fresh");
+        let week_ago = now - Duration::from_secs(7 * 24 * 60 * 60);
+        file.set_modified(week_ago).unwrap();
+        keep_fresh(&path, now);
+        assert!(
+            modified() > week_ago + Duration::from_secs(60),
+            "a week old is marked"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The cached database is the loaded one: the same faces, in the same
