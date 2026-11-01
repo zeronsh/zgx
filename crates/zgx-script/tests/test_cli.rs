@@ -44,6 +44,60 @@ fn run(dir: &PathBuf, args: &[&str]) -> (Option<i32>, String) {
 }
 
 #[test]
+fn escape_from_a_menu_opened_with_nothing_focused_presses_no_button_after() {
+    // Zeron's report: a menu opened by a shortcut and closed with Escape put
+    // focus on the window's first button ("New chat"), so Enter pressed it.
+    let dir = app(
+        "escape-focus",
+        &[(
+            "focus.test.luau",
+            r##"
+test("Escape leaves nothing focused, so Enter presses nothing", function()
+    local app = mount()
+    app:command("open-menu")
+    expect(app:has("#alpha")).to_be(true)
+    app:key("Escape")
+    expect(app:state("open")).to_be(false)
+    app:key("Enter")
+    expect(app:state("chats")).to_be(0)
+end)
+test("a clicked button gets focus back, and Enter presses it", function()
+    local app = mount()
+    app:click("#other")
+    app:command("open-menu")
+    app:key("Escape")
+    app:key("Enter")
+    expect(app:state("others")).to_be(2)
+    expect(app:state("chats")).to_be(0)
+end)
+"##,
+        )],
+    );
+    std::fs::write(
+        dir.join("app.luau"),
+        r##"local chats = ui.state("chats", 0)
+local others = ui.state("others", 0)
+local open = ui.state("open", false)
+ui.command { id = "open-menu", title = "Open menu", run = function() open:set(true) end }
+return ui.column {
+    w = 300, h = 200,
+    ui.button { id = "new-chat", w = 80, h = 24, "New chat", on_click = function() chats:add(1) end },
+    ui.button { id = "other", w = 80, h = 24, "Other", on_click = function() others:add(1) end },
+    ui.menu {
+        open = open,
+        anchor = ui.text { "Actions" },
+        ui.menu_item { id = "alpha", "Alpha" },
+    },
+}
+"##,
+    )
+    .unwrap();
+    let (code, text) = run(&dir, &[]);
+    assert_eq!(code, Some(0), "{text}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn a_test_drags_one_node_onto_another() {
     let dir = app(
         "drag",

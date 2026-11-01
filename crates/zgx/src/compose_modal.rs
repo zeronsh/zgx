@@ -70,6 +70,9 @@ pub(crate) fn activate(
     role: Role,
     logical_parent: Option<NodeId>,
     return_focus: Option<NodeId>,
+    // What opened it (its trigger), where focus returns as it closes if
+    // what had focus before is gone and it opened from the keyboard.
+    trigger: Option<NodeId>,
     focusable: bool,
     // A submenu: its menu stays live under it.
     porous: bool,
@@ -226,11 +229,9 @@ pub(crate) fn activate(
                 if let Some(trigger) = return_focus {
                     ui.input.focus(&ui.scene, Some(trigger));
                 }
-                let pushed = if porous {
-                    ui.input.push_porous_focus_scope(&ui.scene, overlay)
-                } else {
-                    ui.input.push_focus_scope(&ui.scene, overlay)
-                };
+                let pushed = ui
+                    .input
+                    .push_focus_scope_from(&ui.scene, overlay, porous, trigger);
                 if !pushed {
                     open.set(false);
                     visible.set(false);
