@@ -43,11 +43,11 @@ Plugins may also target an element by role and name, as the app writes them (`ro
 
 | | call | needs |
 |---|---|---|
-| add beside an element | `ui.contribute { target, before = node }`, `after = node` | nothing, unless the host asks a capability for that target (`expose_hook`) |
+| add beside an element | `ui.contribute { target, before = node }`, `after = node` | nothing, unless the host asks a capability for that target (`expose_hook`) or for every contribution (`require_contribution_capability`) |
 | put a node in its place | `ui.contribute { target, replace = node }` | `Capability::Override(target)` |
 | pass a prop through a function | `ui.filter { target, text = fn, … }` (text, label, hidden, disabled, tooltip, items, order) | `Capability::Override(target)` |
 | replace an app module | `ui.override { module = "@app/…", with = "./file" }` | `Capability::Override(module)`, a trust grant (below) |
-| add to a slot the app made | `ui.contribute(name, node)` | nothing |
+| add to a slot the app made | `ui.contribute(name, node)` | nothing, unless the host asks a capability for every contribution (`require_contribution_capability`) |
 
 From the focus plugin:
 
@@ -84,7 +84,7 @@ Plugin { name: "stamps".into(), entry, grants: vec![
 
 **`Override` on a module is a trust grant.** The replacement runs in the app's VM as the app's own code, with everything the app's scripts may do: its state, its actions, its packages. That is why stamps' row can `require("@app-original/components/task_row")` (the module it replaces; only the replacement may reach it) and `require("@kit/badge")`. Grant `Override("@app/…")` as you would install the plugin's code into the app, and `Override("*")` only to a plugin you trust with the whole app.
 
-The host can also ask a capability before anyone adds beside a target: `host.expose_hook("#checkout", Some(Capability::Named("payments".into())))`.
+The host can also ask a capability before anyone adds beside a target: `host.expose_hook("#checkout", Some(Capability::Named("payments".into())))`. To lock every contribution down at once (slots, and beside any `#id` or hook), `host.require_contribution_capability(Capability::Named("contribute".into()))` makes each take that capability; `expose_hook(target, None)` (`"slot:name"` for a slot) opens one again.
 
 ## What plugins see of the app
 
