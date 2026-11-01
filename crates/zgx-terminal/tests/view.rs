@@ -121,18 +121,20 @@ fn news(app: &Harness) -> String {
 }
 
 /// Every platform's reader (Orca, VoiceOver, Narrator) hears the live
-/// region through the same frame's accessibility update.
+/// region through the same frame's accessibility update. Each line waits
+/// for the test's Enter and the test delivers each frame, so reads and
+/// frames come in the order it sets (output the view's first paint drew,
+/// before it could be news, once lost a line here).
 #[test]
 fn a_reader_hears_every_read_of_output_since_the_last_frame() {
     let mut app = Harness::new();
     app.ui.set_assistive_technology(true);
-    // Output in two reads (a command's output, then the prompt after it)
-    // before the frame whose accessibility update tells the reader.
     #[cfg(unix)]
-    let command = "echo alpha; sleep 0.3; echo beta; sleep 30";
+    let command = "stty -echo; echo ready; read a; echo alpha; read b; echo beta; \
+                   read c; echo gamma; sleep 30";
     #[cfg(windows)]
-    let command =
-        "cmd.exe /d /c echo alpha& ping -n 2 127.0.0.1 >nul& echo beta& ping -n 30 127.0.0.1 >nul";
+    let command = "cmd.exe /d /c echo ready& set /p a=& echo alpha& set /p b=& echo beta& \
+                   set /p c=& echo gamma& ping -n 30 127.0.0.1 >nul";
     let term = Terminal::new(&app.ui.runtime, session(command));
     let frames = zgx::frame::FrameClock::new();
     let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
@@ -140,23 +142,35 @@ fn a_reader_hears_every_read_of_output_since_the_last_frame() {
         frames.clone(),
         provide(renderer, zgx::terminal::terminal(&term).w(600.).h(300.)),
     ));
-    // Two reads: alpha shows alone first.
+    let mut index = 0;
+    let mut frame = |app: &mut Harness| {
+        index += 1;
+        frames.deliver(zgx::frame::Frame {
+            index,
+            time: Instant::now(),
+            interval: Duration::from_millis(16),
+        });
+        app.pump();
+    };
+    app.until("ready", |app| app.shows("ready"));
+    // What showed as the view mounted is no news; anything waiting goes.
+    frame(&mut app);
+    let before = news(&app);
+    let mut heard = Vec::new();
+    // Two reads before a frame: both said with it, in order.
+    term.input("\r");
     app.until("alpha", |app| app.shows("alpha"));
-    assert!(!app.shows("beta"), "one read showed both");
+    term.input("\r");
     app.until("beta", |app| app.shows("beta"));
-    // Not yet: news goes out with a frame.
-    assert_eq!(news(&app), "");
-    frames.deliver(zgx::frame::Frame {
-        index: 1,
-        time: Instant::now(),
-        interval: Duration::from_millis(16),
-    });
-    app.pump();
-    let heard = news(&app);
-    assert!(
-        heard.contains("alpha") && heard.contains("beta"),
-        "the reader is told {heard:?}"
-    );
+    assert_eq!(news(&app), before, "news went out before its frame");
+    frame(&mut app);
+    heard.push(news(&app));
+    // One read, the next frame: said alone.
+    term.input("\r");
+    app.until("gamma", |app| app.shows("gamma"));
+    frame(&mut app);
+    heard.push(news(&app));
+    assert_eq!(heard, ["alpha\nbeta", "gamma"]);
 }
 
 /// Every `line N` shown, with the top of its box on screen, in the order
