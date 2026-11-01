@@ -44,7 +44,9 @@ jobs:
   # job: the examples the tests build are the probes' fixtures.
   linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A cold cache (a release's version bump changes Cargo.lock) takes about
+    # twice a warm one's 21 minutes.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       # Room on the disk: this job's target/ reaches about 40 GB, more than
