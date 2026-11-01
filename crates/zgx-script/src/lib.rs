@@ -961,7 +961,8 @@ struct Loaded {
 
 /// A plugin's contribution at the app's elements, as
 /// `ScriptHost::contributions` reports it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct ContributionReport {
     /// The plugin that made it.
     pub plugin: String,
