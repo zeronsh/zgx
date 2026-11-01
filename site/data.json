@@ -3368,7 +3368,7 @@
     "released": "b03245c4"
    },
    "unit": "million instructions",
-   "how": "scripts/perf/gate.py: exact instruction counts under cachegrind, Linux arm64 (gate.md; the speed-of-light lane's release run); Luau scenes the median of 3 heap placements",
+   "how": "scripts/perf/gate.py: exact instruction counts under cachegrind, Linux arm64 (gate.md, the speed-of-light lane's release run; x86 in gate-x86.md, from CI's perf job on probe PR #1297); Luau scenes the median of 3 heap placements",
    "scenes_fields": [
     "from",
     "to",
