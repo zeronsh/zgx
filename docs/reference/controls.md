@@ -152,6 +152,8 @@ A horizontal number control: dragging, the arrow keys (1% of the range) and Home
 | --- | --- | --- | --- |
 | `value` | `State<number>`, or `() -> number` | required | clamped to the range; a function controls it, a change going to `on_change` |
 | `min`, `max` | `number` | `0`, `1` | finite, `min < max` |
+| `step` | `number` | a hundredth of the range | what an arrow moves and a drag lands on; screen readers are told it (UI Automation's SmallChange, AT-SPI's minimum increment) |
+| `value_text` | `string`, a state or a function | none | what its value reads as to screen readers ("High", "40%"), followed (`aria-valuetext`) |
 | `label` | `string` | `""` | its accessible name (not drawn) |
 | `w`, `h` | `Length` | `240`, `36` | |
 | `px`, `py` | `Length` | `8`, `6` | |

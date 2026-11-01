@@ -2727,6 +2727,82 @@ pub(crate) struct A11y {
     /// they target it (`hook:toolbar.save`). Here, with what else names the
     /// element to its readers, as few elements have one.
     pub hook: Option<Rc<str>>,
+    /// `role = "slider"`'s value, range and what moves it (boxed: few
+    /// elements are one).
+    pub range: Option<Box<A11yRange>>,
+}
+/// A custom slider's (or spin button's) `value`, `min`, `max`, `step`,
+/// `value_text`, `on_change` and `keyboard`.
+#[derive(Default, Clone)]
+pub(crate) struct A11yRange {
+    pub value: Option<Source>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
+    pub value_text: Option<Source>,
+    pub on_change: Option<Handler>,
+    pub keyboard: bool,
+}
+/// A plain element's custom slider options from `table` (`value`, `min`,
+/// `max`, `step`, `value_text`, `on_change`, `keyboard`), where its role is a
+/// slider's or a spin button's (`fill_from` leaves them, as a control's
+/// constructor reads its own), checked.
+#[inline(never)]
+fn read_range(lua: &Lua, node: &mut Node, table: &Table) -> mlua::Result<()> {
+    let given = |key: &str| -> mlua::Result<Option<mlua::Value>> {
+        Ok(Some(table.get::<mlua::Value>(key)?).filter(|v| !v.is_nil()))
+    };
+    let mut range = A11yRange {
+        min: table.get("min")?,
+        max: table.get("max")?,
+        step: table.get("step")?,
+        keyboard: table.get::<Option<bool>>("keyboard")?.unwrap_or(false),
+        ..Default::default()
+    };
+    if let Some(value) = given("value")? {
+        range.value = Some(source(lua, Ty::Num, "value", value)?);
+    }
+    if let Some(text) = given("value_text")? {
+        range.value_text = Some(source(lua, Ty::Str, "value_text", text)?);
+    }
+    if let Some(change) = given("on_change")? {
+        range.on_change = Some(handler(change)?);
+    }
+    check_range(&range)?;
+    node.a11y.get_or_insert_default().range = Some(Box::new(range));
+    Ok(())
+}
+/// A slider's `value_text` from `table`, if it has one.
+#[inline(never)]
+fn read_value_text(lua: &Lua, node: &mut Node, table: &Table) -> mlua::Result<()> {
+    let text = table.get::<mlua::Value>("value_text")?;
+    if !text.is_nil() {
+        let range = (node.a11y.get_or_insert_default().range).get_or_insert_default();
+        range.value_text = Some(source(lua, Ty::Str, "value_text", text)?);
+    }
+    Ok(())
+}
+/// A custom slider's options, as `role = "slider"` (or `"spinbutton"`)
+/// needs them: a value, a finite range, a positive step.
+fn check_range(range: &A11yRange) -> mlua::Result<()> {
+    let fail = |why: &str| Err(mlua::Error::runtime(why.to_owned()));
+    match (range.min, range.max) {
+        (Some(min), Some(max)) if min.is_finite() && max.is_finite() && min < max => {}
+        _ => return fail("a slider role needs a finite `min` below its `max`"),
+    }
+    if range.value.is_none() {
+        return fail("a slider role needs its `value`: a number, a state or a function");
+    }
+    if range
+        .step
+        .is_some_and(|step| !(step.is_finite() && step > 0.))
+    {
+        return fail("a slider's `step` is positive");
+    }
+    if range.keyboard && range.on_change.is_none() {
+        return fail("`keyboard = true` moves a slider through its `on_change`: give it one");
+    }
+    Ok(())
 }
 /// `focus_group`'s axes.
 fn focus_group(axis: &str) -> mlua::Result<zgx::input::FocusGroup> {
@@ -2833,6 +2909,7 @@ fn a11y_role(name: &str) -> Option<zgx::semantics::Role> {
         "article" => Role::Article,
         "radiogroup" => Role::RadioGroup,
         "radio" => Role::RadioButton,
+        "slider" => Role::Slider,
         "switch" => Role::Switch,
         "checkbox" => Role::CheckBox,
         "spinbutton" => Role::SpinButton,
@@ -2888,6 +2965,7 @@ pub(crate) enum InputValue {
 const WIDGET_FIELDS: &[&str] = &[
     "label",
     "value",
+    "value_text",
     "min",
     "max",
     "multiline",
@@ -3775,7 +3853,8 @@ fn fill_from(
                     mlua::Error::runtime(format!(
                         "unknown role `{name}`: one of group, button, link, heading, list, \
                          listitem, listbox, option, toolbar, status, tablist, tab, tabpanel, \
-                         dialog, img, radiogroup, radio, switch, checkbox, spinbutton, combobox, \
+                         dialog, img, radiogroup, radio, slider, switch, checkbox, spinbutton, \
+                         combobox, \
                          tree, treeitem, grid, row, gridcell, columnheader, alert, menu, \
                          menuitem, menuitemcheckbox, menuitemradio"
                     ))
@@ -4259,6 +4338,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut node = Node::new(owner, kind());
             if let Some(table) = &table {
                 fill_from(lua, &mut node, table, None, lint)?;
+                // A slider of the script's own (`role = "slider"`).
+                if node.a11y.as_ref().is_some_and(|a11y| {
+                    use zgx::semantics::Role;
+                    matches!(a11y.role, Some(Role::Slider | Role::SpinButton))
+                }) {
+                    read_range(lua, &mut node, table)?;
+                }
             }
             node_ud(lua, node)
         })
@@ -4507,7 +4593,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             crate::form::apply_field(lua, &table, false)?;
             let value = control_value(lua, &table)?;
             let kind = build(label(&table)?, value, &table)?;
-            node_ud(lua, fill(lua, Node::new(owner(lua)?, kind), Some(&table))?)
+            let slider = matches!(kind, Kind::Slider { .. });
+            let mut node = fill(lua, Node::new(owner(lua)?, kind), Some(&table))?;
+            if slider {
+                read_value_text(lua, &mut node, &table)?;
+            }
+            node_ud(lua, node)
         })
     };
     ui.set(

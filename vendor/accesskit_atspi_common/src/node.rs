@@ -1858,6 +1858,13 @@ impl PlatformNode {
         self.resolve(|node| Ok(node.numeric_value_step().unwrap_or(0.0)))
     }
 
+    /// zgx patch: what the value reads as (`aria-valuetext`, AT-SPI's
+    /// `Value.Text`, which Orca reads before the number): the node's text
+    /// value, empty without one.
+    pub fn value_text(&self) -> Result<String> {
+        self.resolve(|node| Ok(node.value().unwrap_or_default()))
+    }
+
     pub fn current_value(&self) -> Result<f64> {
         self.resolve(|node| {
             let wrapper = NodeWrapper(&node);

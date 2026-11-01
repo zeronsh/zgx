@@ -9,13 +9,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .window(WindowOptions {
             title: "zgx accessibility probe".into(),
             width: 600.,
-            height: 440.,
+            height: 500.,
             ..Default::default()
         })
         .run(move |cx| {
             let name = cx.ui.signal("Ada".to_owned());
             let count = cx.ui.signal(0_u32);
             let amount = cx.ui.signal(25_f32);
+            let shown_amount = amount.clone();
+            // A slider of the app's own (an effort level): a row, named and
+            // moved as a slider.
+            let effort = cx.ui.signal(2_f64);
+            let (effort_value, effort_text, set_effort, printed_effort) = (
+                effort.clone(),
+                effort.clone(),
+                effort.clone(),
+                effort.clone(),
+            );
             let checked = cx.ui.signal(false);
             let disabled = cx.ui.signal(false);
             let read_count = count.clone();
@@ -61,17 +71,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }),
                     )
                     .child(checkbox("AT-SPI option", checked.clone()))
-                    .child(slider("AT-SPI amount", amount.clone(), 0. ..=100.).w_full())
+                    .child(
+                        slider("AT-SPI amount", amount.clone(), 0. ..=100.)
+                            .step(5.)
+                            .value_when(move || format!("{} percent", shown_amount.get()))
+                            .w_full(),
+                    )
+                    .child(
+                        row()
+                            .w_full()
+                            .h(24.)
+                            .role(zgx::semantics::Role::Slider)
+                            .accessible_label("AT-SPI effort")
+                            .numeric_when(1., 4., move || effort_value.get())
+                            .value_when(move || {
+                                ["Low", "Medium", "High", "Max"][effort_text.get() as usize - 1]
+                                    .to_string()
+                            })
+                            .adjustable(1., move |next| {
+                                set_effort.set(next);
+                            })
+                            .adjustable_keys()
+                            .child(text("Effort")),
+                    )
                     .child(button().h(38.).child("Disable input").on_click(move || {
                         toggle.update(|v| *v = !*v);
                     })),
             );
             cx.ui.bind(view.node(), move || {
                 println!(
-                    "ATSPI name={:?} count={} amount={} checked={} disabled={}",
+                    "ATSPI name={:?} count={} amount={} effort={} checked={} disabled={}",
                     name.get(),
                     count.get(),
                     amount.get(),
+                    printed_effort.get(),
                     checked.get(),
                     disabled.get()
                 );

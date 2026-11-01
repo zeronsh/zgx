@@ -1978,6 +1978,7 @@ export type AriaRole =
 	| "article"
 	| "radiogroup"
 	| "radio"
+	| "slider"
 	| "switch"
 	| "checkbox"
 	| "spinbutton"
@@ -3168,6 +3169,21 @@ export type ContainerProps = {
 	-- switch, a button showing only an icon. A state or function is
 	-- followed: a list row's name made from what it shows now.
 	label: Label?,
+	-- A custom slider's (`role = "slider"` or "spinbutton", on a column,
+	-- row, div or overlay): its value (a number, a state or a function,
+	-- followed) between `min` and `max`, what it moves by (`step`, a
+	-- hundredth of the range without one), and what its value reads as
+	-- ("High", not "3"; followed). Screen readers increment and decrement
+	-- it, or set it, through `on_change(value)`; `keyboard = true` lets
+	-- the arrows, Page Up and Down, Home and End move it too, and makes it
+	-- focusable.
+	value: (number | State<number> | () -> number)?,
+	min: number?,
+	max: number?,
+	step: number?,
+	value_text: Reactive<string>?,
+	on_change: ((value: number) -> ...unknown)?,
+	keyboard: boolean?,
 }
 export type ScrollProps = {
 	-- Size and position.
@@ -3540,6 +3556,21 @@ export type ScrollProps = {
 	-- switch, a button showing only an icon. A state or function is
 	-- followed: a list row's name made from what it shows now.
 	label: Label?,
+	-- A custom slider's (`role = "slider"` or "spinbutton", on a column,
+	-- row, div or overlay): its value (a number, a state or a function,
+	-- followed) between `min` and `max`, what it moves by (`step`, a
+	-- hundredth of the range without one), and what its value reads as
+	-- ("High", not "3"; followed). Screen readers increment and decrement
+	-- it, or set it, through `on_change(value)`; `keyboard = true` lets
+	-- the arrows, Page Up and Down, Home and End move it too, and makes it
+	-- focusable.
+	value: (number | State<number> | () -> number)?,
+	min: number?,
+	max: number?,
+	step: number?,
+	value_text: Reactive<string>?,
+	on_change: ((value: number) -> ...unknown)?,
+	keyboard: boolean?,
 	-- The scroll position in points, both ways.
 	offset: State<number>?,
 	-- Stays at the end while the content grows, until scrolled away.
@@ -7937,8 +7968,11 @@ export type SliderProps = {
 	min: number?,
 	max: number?,
 	-- What an arrow moves (ten with Shift, or Page Up and Down), and what
-	-- a drag lands on; a hundredth of the range without one.
+	-- a drag lands on; a hundredth of the range without one. Screen readers
+	-- are told it.
 	step: number?,
+	-- What its value reads as to screen readers ("High", "40%"), followed.
+	value_text: Reactive<string>?,
 }
 -- One of a few options side by side (AppKit's segmented control; a radio
 -- group to assistive technology): the arrows move the choice.
@@ -9069,6 +9103,21 @@ export type DisclosureProps = {
 	-- switch, a button showing only an icon. A state or function is
 	-- followed: a list row's name made from what it shows now.
 	label: Label?,
+	-- A custom slider's (`role = "slider"` or "spinbutton", on a column,
+	-- row, div or overlay): its value (a number, a state or a function,
+	-- followed) between `min` and `max`, what it moves by (`step`, a
+	-- hundredth of the range without one), and what its value reads as
+	-- ("High", not "3"; followed). Screen readers increment and decrement
+	-- it, or set it, through `on_change(value)`; `keyboard = true` lets
+	-- the arrows, Page Up and Down, Home and End move it too, and makes it
+	-- focusable.
+	value: (number | State<number> | () -> number)?,
+	min: number?,
+	max: number?,
+	step: number?,
+	value_text: Reactive<string>?,
+	on_change: ((value: number) -> ...unknown)?,
+	keyboard: boolean?,
 	open: State<boolean>,
 	summary: string | Node,
 }
@@ -9807,6 +9856,21 @@ export type SectionProps = {
 	-- switch, a button showing only an icon. A state or function is
 	-- followed: a list row's name made from what it shows now.
 	label: Label?,
+	-- A custom slider's (`role = "slider"` or "spinbutton", on a column,
+	-- row, div or overlay): its value (a number, a state or a function,
+	-- followed) between `min` and `max`, what it moves by (`step`, a
+	-- hundredth of the range without one), and what its value reads as
+	-- ("High", not "3"; followed). Screen readers increment and decrement
+	-- it, or set it, through `on_change(value)`; `keyboard = true` lets
+	-- the arrows, Page Up and Down, Home and End move it too, and makes it
+	-- focusable.
+	value: (number | State<number> | () -> number)?,
+	min: number?,
+	max: number?,
+	step: number?,
+	value_text: Reactive<string>?,
+	on_change: ((value: number) -> ...unknown)?,
+	keyboard: boolean?,
 	id: any,
 	title: string,
 }
@@ -13980,6 +14044,19 @@ export type SplitProps = {
 	-- switch, a button showing only an icon. A state or function is
 	-- followed: a list row's name made from what it shows now.
 	label: Label?,
+	-- A custom slider's (`role = "slider"` or "spinbutton", on a column,
+	-- row, div or overlay): its value (a number, a state or a function,
+	-- followed) between `min` and `max`, what it moves by (`step`, a
+	-- hundredth of the range without one), and what its value reads as
+	-- ("High", not "3"; followed). Screen readers increment and decrement
+	-- it, or set it, through `on_change(value)`; `keyboard = true` lets
+	-- the arrows, Page Up and Down, Home and End move it too, and makes it
+	-- focusable.
+	value: (number | State<number> | () -> number)?,
+	step: number?,
+	value_text: Reactive<string>?,
+	on_change: ((value: number) -> ...unknown)?,
+	keyboard: boolean?,
 	-- The first pane's size in points, both ways: the divider writes it as
 	-- it drags (a `ui.persist` keeps it across launches).
 	size: State<number>?,
@@ -14804,6 +14881,21 @@ export type LayerProps = {
 	-- accent), "ghost" (no background until hovered), "danger", "default".
 	-- Other containers don't take it.
 	variant: ("primary" | "ghost" | "danger" | "default")?,
+	-- A custom slider's (`role = "slider"` or "spinbutton", on a column,
+	-- row, div or overlay): its value (a number, a state or a function,
+	-- followed) between `min` and `max`, what it moves by (`step`, a
+	-- hundredth of the range without one), and what its value reads as
+	-- ("High", not "3"; followed). Screen readers increment and decrement
+	-- it, or set it, through `on_change(value)`; `keyboard = true` lets
+	-- the arrows, Page Up and Down, Home and End move it too, and makes it
+	-- focusable.
+	value: (number | State<number> | () -> number)?,
+	min: number?,
+	max: number?,
+	step: number?,
+	value_text: Reactive<string>?,
+	on_change: ((value: number) -> ...unknown)?,
+	keyboard: boolean?,
 	open: State<boolean>?,
 	label: Label?,
 	placement: ModalPlacement?,
@@ -15175,6 +15267,21 @@ export type ModalProps = {
 	-- accent), "ghost" (no background until hovered), "danger", "default".
 	-- Other containers don't take it.
 	variant: ("primary" | "ghost" | "danger" | "default")?,
+	-- A custom slider's (`role = "slider"` or "spinbutton", on a column,
+	-- row, div or overlay): its value (a number, a state or a function,
+	-- followed) between `min` and `max`, what it moves by (`step`, a
+	-- hundredth of the range without one), and what its value reads as
+	-- ("High", not "3"; followed). Screen readers increment and decrement
+	-- it, or set it, through `on_change(value)`; `keyboard = true` lets
+	-- the arrows, Page Up and Down, Home and End move it too, and makes it
+	-- focusable.
+	value: (number | State<number> | () -> number)?,
+	min: number?,
+	max: number?,
+	step: number?,
+	value_text: Reactive<string>?,
+	on_change: ((value: number) -> ...unknown)?,
+	keyboard: boolean?,
 	-- A state, written back as it closes; or, controlled, a function saying
 	-- whether it shows, its closing going to `on_close` (a modal route).
 	open: State<boolean> | () -> boolean,
@@ -15564,6 +15671,21 @@ export type PopoverProps = {
 	-- accent), "ghost" (no background until hovered), "danger", "default".
 	-- Other containers don't take it.
 	variant: ("primary" | "ghost" | "danger" | "default")?,
+	-- A custom slider's (`role = "slider"` or "spinbutton", on a column,
+	-- row, div or overlay): its value (a number, a state or a function,
+	-- followed) between `min` and `max`, what it moves by (`step`, a
+	-- hundredth of the range without one), and what its value reads as
+	-- ("High", not "3"; followed). Screen readers increment and decrement
+	-- it, or set it, through `on_change(value)`; `keyboard = true` lets
+	-- the arrows, Page Up and Down, Home and End move it too, and makes it
+	-- focusable.
+	value: (number | State<number> | () -> number)?,
+	min: number?,
+	max: number?,
+	step: number?,
+	value_text: Reactive<string>?,
+	on_change: ((value: number) -> ...unknown)?,
+	keyboard: boolean?,
 	-- A state, written back as it closes; or, controlled, a function saying
 	-- whether it shows, its closing going to `on_close` (a modal route).
 	open: State<boolean> | () -> boolean,
@@ -16333,6 +16455,21 @@ export type SubmenuProps = {
 	-- accent), "ghost" (no background until hovered), "danger", "default".
 	-- Other containers don't take it.
 	variant: ("primary" | "ghost" | "danger" | "default")?,
+	-- A custom slider's (`role = "slider"` or "spinbutton", on a column,
+	-- row, div or overlay): its value (a number, a state or a function,
+	-- followed) between `min` and `max`, what it moves by (`step`, a
+	-- hundredth of the range without one), and what its value reads as
+	-- ("High", not "3"; followed). Screen readers increment and decrement
+	-- it, or set it, through `on_change(value)`; `keyboard = true` lets
+	-- the arrows, Page Up and Down, Home and End move it too, and makes it
+	-- focusable.
+	value: (number | State<number> | () -> number)?,
+	min: number?,
+	max: number?,
+	step: number?,
+	value_text: Reactive<string>?,
+	on_change: ((value: number) -> ...unknown)?,
+	keyboard: boolean?,
 	-- A state, written back as it closes; or, controlled, a function saying
 	-- whether it shows, its closing going to `on_close` (a modal route).
 	open: State<boolean> | () -> boolean,

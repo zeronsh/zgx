@@ -188,8 +188,27 @@ def main():
                 value = slider.get_value_iface()
                 assert Atspi.Value.get_minimum_value(value) == 0 and Atspi.Value.get_maximum_value(value) == 100
                 assert Atspi.Value.get_current_value(value) == 25
+                # Its step and its value text (AT-SPI 2.46's Value.Text).
+                assert Atspi.Value.get_minimum_increment(value) == 5, Atspi.Value.get_minimum_increment(value)
+                has_text_value = hasattr(Atspi.Value, "get_text")
+                if has_text_value:
+                    assert Atspi.Value.get_text(value) == "25 percent", Atspi.Value.get_text(value)
                 assert Atspi.Value.set_current_value(value, 65)
                 wait_for(lambda: Atspi.Value.get_current_value(value) == 65, "AT-SPI numeric value action")
+                # A slider of the app's own (a row): its value, range, step
+                # and text, set through AT-SPI as a slider's is.
+                effort = wait_for(lambda: find("AT-SPI effort"), "custom slider")
+                assert effort.get_role_name() == "slider", effort.get_role_name()
+                effort_value = effort.get_value_iface()
+                assert (Atspi.Value.get_minimum_value(effort_value), Atspi.Value.get_maximum_value(effort_value)) == (1, 4)
+                assert Atspi.Value.get_current_value(effort_value) == 2
+                assert Atspi.Value.get_minimum_increment(effort_value) == 1
+                if has_text_value:
+                    assert Atspi.Value.get_text(effort_value) == "Medium", Atspi.Value.get_text(effort_value)
+                assert Atspi.Value.set_current_value(effort_value, 3)
+                wait_for(lambda: Atspi.Value.get_current_value(effort_value) == 3, "custom slider set through AT-SPI")
+                if has_text_value:
+                    wait_for(lambda: Atspi.Value.get_text(effort_value) == "High", "custom slider's value text follows")
                 activate(option)
                 wait_for(lambda: state(option, Atspi.StateType.CHECKED), "checkbox action and checked state")
                 activate(disable)
@@ -236,7 +255,7 @@ def main():
                 subprocess.run(["import", "-display", display, "-window", "root", str(args.output / "atspi.png")], check=True, timeout=10)
                 (args.output / "results.json").write_text(json.dumps(dict(passed=True,
                     backend="live AccessKit Unix AT-SPI bridge / private D-Bus / owned X11",
-                    checks=["tree roles and names", "focus action and event", "text reading", "caret and selection actions", "native typing reflected in text interface", "button activation", "numeric value mutation", "checkbox state", "disabled and reenabled input", "bridge deactivation and fresh-state reactivation", "a labelled canvas as an image", "names from state followed, and current after reactivation"],
+                    checks=["tree roles and names", "focus action and event", "text reading", "caret and selection actions", "native typing reflected in text interface", "button activation", "numeric value mutation", "a slider's step and value text", "a custom slider's value, range, step, text and setting", "checkbox state", "disabled and reenabled input", "bridge deactivation and fresh-state reactivation", "a labelled canvas as an image", "names from state followed, and current after reactivation"],
                     final_text=Atspi.Text.get_text(text, 0, -1), final_value=Atspi.Value.get_current_value(value),
                     events_observed=len(events), process_id=app.pid,
                     limitation="AT-SPI bus-client validation; not an Orca end-user usability test."), indent=2) + "\n")

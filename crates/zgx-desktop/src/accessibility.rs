@@ -622,6 +622,11 @@ impl AccessibilityTree {
             if let Some(v) = semantic.max {
                 n.set_max_numeric_value(v);
             }
+            // What it moves by: UIA's RangeValue SmallChange, AT-SPI's
+            // minimum increment.
+            if let Some(step) = scene.numeric_step(id) {
+                n.set_numeric_value_step(step);
+            }
             if matches!(
                 semantic.role,
                 Role::Button
@@ -3319,5 +3324,66 @@ mod pacing_tests {
         assert!(pacer.update_now(at(500), false, true));
         // Focus moving goes out at once, even right after.
         assert!(pacer.update_now(at(501), true, false));
+    }
+}
+
+#[cfg(test)]
+mod slider_tests {
+    use super::*;
+    use zgx::{compose::prelude::*, widgets::Ui};
+
+    #[test]
+    fn a_custom_slider_reaches_assistive_technology_with_its_step_text_and_actions() {
+        let mut ui = Ui::new(400., 200.);
+        ui.set_assistive_technology(true);
+        let effort = ui.signal(3.0_f64);
+        let (read, write) = (effort.clone(), effort.clone());
+        let view = ui.mount(
+            column().children([
+                row()
+                    .size(200., 30.)
+                    .role(Role::Slider)
+                    .accessible_label("Effort")
+                    .numeric_when(1., 4., move || read.get())
+                    .value_when(|| "High".into())
+                    .adjustable(1., move |next| {
+                        write.set(next);
+                    })
+                    .id("effort"),
+                slider("Volume", ui.signal(20.), 0. ..=100.)
+                    .step(5.)
+                    .id("volume"),
+            ]),
+        );
+        ui.prepare_frame();
+        let mut adapter = AccessibilityTree::new();
+        let update = adapter.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "T", 1.);
+        let sent = |id: &str| {
+            let node = adapter.ids[&view.find(id).unwrap()];
+            update
+                .nodes
+                .iter()
+                .find(|(n, _)| *n == node)
+                .unwrap()
+                .1
+                .clone()
+        };
+        let effort = sent("effort");
+        assert_eq!(effort.role(), accesskit::Role::Slider);
+        assert_eq!(effort.label(), Some("Effort"));
+        assert_eq!(
+            (effort.min_numeric_value(), effort.max_numeric_value()),
+            (Some(1.), Some(4.))
+        );
+        assert_eq!(effort.numeric_value(), Some(3.));
+        assert_eq!(effort.numeric_value_step(), Some(1.));
+        assert_eq!(effort.value(), Some("High"));
+        for action in [Action::Increment, Action::Decrement, Action::SetValue] {
+            assert!(effort.supports_action(action), "{action:?}");
+        }
+        // A slider's own step, told as well.
+        let volume = sent("volume");
+        assert_eq!(volume.numeric_value_step(), Some(5.));
+        assert_eq!(volume.numeric_value(), Some(20.));
     }
 }

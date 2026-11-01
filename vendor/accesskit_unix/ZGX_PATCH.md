@@ -70,6 +70,14 @@ Chromium give it:
      embedded tree says what is focused, and a reader hearing the node
      focused after the page's field would leave the page.
 
+7. A slider's value text (`aria-valuetext`): AT-SPI 2.46's `Value.Text`
+   property (`accesskit_unix/src/atspi/interfaces/value.rs`), from the
+   node's text value (`accesskit_atspi_common/src/node.rs`, `value_text`).
+   Orca reads it before the number: an effort slider is "High", not "3".
+   zgx calls nothing it adds (it sets AccessKit's `value`), so a zgx crate
+   built from crates.io, on upstream accesskit_unix, leaves only the text
+   out.
+
 zgx-desktop's `atspi_tests` (`src/accessibility.rs`, Linux) read a zgx
 data grid and tree, and an invalid field, through the patched adapter.
 Run the vendored tests with
