@@ -24,6 +24,8 @@ use std::{
 const COMMIT: &str = "9f0e1719dc918368367d368bfe300f59bb68b5a4";
 const REPOSITORY: &str = "https://github.com/ghostty-org/ghostty.git";
 const PATCH: &str = include_str!("patches/embedded-macos.patch");
+/// The file marking a Ghostty checkout as this script's own.
+const CHECKOUT_MARKER: &str = ".zgx-ghostty-checkout";
 const OPTIONS: &[&str] = &[
     "-Dversion-string=1.3.2-dev",
     "-Dapp-runtime=none",
@@ -157,22 +159,41 @@ fn fetch(cache: &Path) -> PathBuf {
     if fs::read_to_string(&stamp).ok().as_deref() == Some(patched.as_str()) {
         return source;
     }
-    let git = |args: &[&str]| {
-        let status = Command::new("git")
+    let git_ok = |args: &[&str]| {
+        Command::new("git")
             .current_dir(&source)
             .args(args)
             .status()
-            .expect("run git");
-        assert!(status.success(), "git {args:?} failed");
+            .expect("run git")
+            .success()
     };
-    if source.join(".git").is_dir() {
-        // Fetched before, patched differently: back to the commit.
-        git(&["checkout", "--quiet", "--", "."]);
-    } else {
+    let git = |args: &[&str]| assert!(git_ok(args), "git {args:?} failed");
+    // A checkout this script made says so, and only one that does is ever
+    // deleted when it turns out broken: never what a user's
+    // `ZGX_GHOSTTY_CACHE` holds besides.
+    let marker = source.join(CHECKOUT_MARKER);
+    // Fetched before, patched differently: back to the commit. A checkout
+    // left broken (its files gone, the index with them, as a cache that
+    // keeps only some of a directory leaves it) is fetched again.
+    let reset = source.join(".git").is_dir() && git_ok(&["checkout", "--quiet", "--", "."]);
+    if !reset {
         if source.exists() {
+            assert!(
+                marker.is_file() || !source.join(".git").exists(),
+                "the Ghostty checkout at {} is broken, and this build didn't make it ({} \
+                 is missing): delete it, or set ZGX_GHOSTTY_CACHE to another directory",
+                source.display(),
+                CHECKOUT_MARKER,
+            );
+            println!(
+                "cargo:warning=zgx-ghostty-sys: deleting the broken Ghostty checkout at {} and fetching it again",
+                source.display()
+            );
             fs::remove_dir_all(&source).expect("remove a stale Ghostty checkout");
         }
         fs::create_dir_all(&source).expect("create the Ghostty checkout");
+        fs::write(&marker, "made by zgx-ghostty-sys's build script\n")
+            .expect("mark the Ghostty checkout");
         git(&["init", "--quiet"]);
         git(&["fetch", "--quiet", "--depth", "1", REPOSITORY, COMMIT]);
         git(&["checkout", "--quiet", "FETCH_HEAD"]);

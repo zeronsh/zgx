@@ -182,7 +182,10 @@ print("fn main() {}")
 PY
 # Ghostty fetched and built as a user's first build does, not from the
 # machine's shared cache (zgx-ghostty-sys keys it by commit, patch and Zig).
-ZGX_GHOSTTY_CACHE="$(cd "$target" && pwd)/ghostty-cache" cargo build --manifest-path "$features/Cargo.toml" --target-dir "$target"
+# Emptied first: CI's cache of target/ can keep part of an earlier one.
+ghostty_cache="$(cd "$target" && pwd)/ghostty-cache"
+rm -rf "$ghostty_cache"
+ZGX_GHOSTTY_CACHE="$ghostty_cache" cargo build --manifest-path "$features/Cargo.toml" --target-dir "$target"
 echo "every published feature for $platform built from its package"
 echo "== the previous release's zgx-desktop and zgx-gpu against this zgx"
 # The newest zgx-desktop on crates.io below this version.
