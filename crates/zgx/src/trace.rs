@@ -237,6 +237,17 @@ pub fn now_ms() -> f64 {
 pub fn frame_index() -> u64 {
     LOG.with_borrow(|log| log.index)
 }
+/// The frames traced after `index` (`Frame::index`), oldest first: what a
+/// watcher that read the log up to `index` has not seen.
+pub fn frames_since(index: u64) -> Vec<Frame> {
+    LOG.with_borrow(|log| {
+        log.frames
+            .iter()
+            .filter(|frame| frame.index > index)
+            .cloned()
+            .collect()
+    })
+}
 /// The last `n` frames that did anything, oldest first.
 pub fn frames(n: usize) -> Vec<Frame> {
     LOG.with_borrow(|log| {

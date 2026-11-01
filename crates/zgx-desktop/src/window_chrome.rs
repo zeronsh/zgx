@@ -363,14 +363,17 @@ mod win {
                         size_of_val(&kind) as u32,
                     );
                 }
+                acrylic(hwnd, None);
             }
         }
     }
 
     /// Put the system's backdrop behind the window: the frame, and its
     /// material, extended under the whole client, which shows it where zgx
-    /// paints nothing. Windows 11 (22H2) only; elsewhere the window is
-    /// transparent alone. `Glass::plain` has no Windows equivalent.
+    /// paints nothing. Windows 11 (22H2) has the backdrop; Windows 10 (1803
+    /// and later) blurs the same way through the composition attribute, which
+    /// is what the backdrop was built on. `Glass::plain` is a blur with no
+    /// tint there.
     fn frost(hwnd: HWND, glass: Glass, dark: bool) {
         // From the bottom, over the whole client: extended from the top, the
         // frame brings Windows' own caption buttons into the client, under
@@ -399,6 +402,100 @@ mod win {
                 size_of_val(&kind) as u32,
             );
         }
+        if !windows_11() {
+            acrylic(hwnd, Some((glass, dark != 0)));
+        }
+    }
+
+    /// The window's material, by `SetWindowCompositionAttribute`'s accent
+    /// policy: what Windows 11's backdrop does, on Windows 10 (1803 and
+    /// later). `None` takes it away.
+    fn acrylic(hwnd: HWND, glass: Option<(Glass, bool)>) {
+        const WCA_ACCENT_POLICY: i32 = 19;
+        const ACCENT_DISABLED: u32 = 0;
+        const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
+        #[repr(C)]
+        struct AccentPolicy {
+            state: u32,
+            flags: u32,
+            /// Tint, `0xAABBGGRR`.
+            gradient_color: u32,
+            animation_id: u32,
+        }
+        #[repr(C)]
+        struct CompositionAttribute {
+            attribute: i32,
+            data: *mut core::ffi::c_void,
+            size_of_data: usize,
+        }
+        type SetComposition = unsafe extern "system" fn(HWND, *mut CompositionAttribute) -> i32;
+        // SAFETY: user32 is loaded with this process; the address is its own
+        // `SetWindowCompositionAttribute`, called with the struct it takes.
+        let set: SetComposition = unsafe {
+            use windows::{
+                Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress},
+                core::{s, w},
+            };
+            let Ok(module) = GetModuleHandleW(w!("user32.dll")) else {
+                return;
+            };
+            let Some(address) = GetProcAddress(module, s!("SetWindowCompositionAttribute")) else {
+                return;
+            };
+            std::mem::transmute(address)
+        };
+        let (state, tint) = match glass {
+            Some((glass, false)) => (
+                ACCENT_ENABLE_ACRYLICBLURBEHIND,
+                match glass.plain {
+                    true => 0x00_00_00_00,
+                    false => 0x50_f0_ec_ea,
+                },
+            ),
+            Some((glass, true)) => (
+                ACCENT_ENABLE_ACRYLICBLURBEHIND,
+                match glass.plain {
+                    true => 0x00_00_00_00,
+                    false => 0x50_1a_12_14,
+                },
+            ),
+            None => (ACCENT_DISABLED, 0),
+        };
+        let mut policy = AccentPolicy {
+            state,
+            flags: 0,
+            gradient_color: tint,
+            animation_id: 0,
+        };
+        let mut attribute = CompositionAttribute {
+            attribute: WCA_ACCENT_POLICY,
+            data: (&raw mut policy).cast(),
+            size_of_data: size_of::<AccentPolicy>(),
+        };
+        // SAFETY: `attribute` describes `policy`, which outlives the call.
+        unsafe { set(hwnd, &mut attribute) };
+    }
+
+    /// Whether the system has Windows 11's backdrops (build 22000 and later).
+    fn windows_11() -> bool {
+        #[repr(C)]
+        struct VersionInfo {
+            size: u32,
+            major: u32,
+            minor: u32,
+            build: u32,
+            platform: u32,
+            service_pack: [u16; 128],
+        }
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            fn RtlGetVersion(info: *mut VersionInfo) -> i32;
+        }
+        let mut info: VersionInfo = unsafe { std::mem::zeroed() };
+        info.size = size_of::<VersionInfo>() as u32;
+        // SAFETY: ntdll's own structure, given its size.
+        let status = unsafe { RtlGetVersion(&mut info) };
+        status == 0 && info.build >= 22_000
     }
 
     /// The executable's own icon (its first icon group, the one Explorer

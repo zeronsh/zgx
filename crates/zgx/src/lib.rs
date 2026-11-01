@@ -29,6 +29,7 @@ pub mod issues;
 pub mod local_time;
 pub mod timer;
 
+pub mod diagnostics;
 pub mod env;
 pub mod frame;
 pub mod idle;

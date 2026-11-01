@@ -1,0 +1,22 @@
+[package]
+name = "zgx-profiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "A frame profiler for zgx apps: pacing, phase split, damage rects, reactive work, an in-app HUD and Chrome traces."
+keywords = ["gui", "profiler", "tracing", "zgx", "performance"]
+categories = ["development-tools::profiling", "gui"]
+
+[features]
+default = []
+# Time style and text runs inside the phases that enclose them
+# (`zgx/profile-nested`): a check in every style and text run, so never by
+# default.
+nested-phases = ["zgx/profile-nested"]
+
+[dependencies]
+zgx = { path = "../zgx", version = "0.1.6", features = ["trace"] }
+zgx-desktop = { path = "../zgx-desktop", version = "0.1.6" }

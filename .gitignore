@@ -1,5 +1,8 @@
 /target/
 **/target/
+
+# The profiler's test harness (AGENTS.md): not part of the framework.
+/examples/music-player/
 **/node_modules/
 /benchmark-results/
 .DS_Store

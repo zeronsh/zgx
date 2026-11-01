@@ -703,6 +703,10 @@ pub struct WindowContext {
     /// service (`Context::try_service`), as `zgx-script` does to label
     /// what it creates. Off, it costs nothing.
     pub inspector: zgx::inspect::Inspector,
+    /// The window's finished frames, for profilers (`zgx::diagnostics`): what
+    /// each damaged, how many nodes it laid out and painted, whether it drew
+    /// the whole window. With nothing watching, nothing is published.
+    pub diagnostics: zgx::diagnostics::Diagnostics,
     natives: zgx::native_view::NativeViews,
     #[allow(dead_code)]
     native_diagnostics: crate::native_host::NativeDiagnosticsHandle,
@@ -1466,6 +1470,11 @@ struct Host {
     /// What its listener heard, for its own banner (`show_issues`).
     issues: crate::contain::WindowIssues,
     frames_tried: u64,
+    /// Frames this host finished, and the last one, published to
+    /// `WindowContext::diagnostics` as the next frame starts (before its
+    /// layout, so a watcher's own changes paint in that frame).
+    frames_seen: u64,
+    frame_sample: Option<zgx::diagnostics::FrameSample>,
     adapter: Option<accesskit_winit::Adapter>,
     tree: AccessibilityTree,
     proxy: EventLoopProxy<Event>,
@@ -1853,6 +1862,7 @@ impl Host {
         }
         let context = WindowContext {
             inspector,
+            diagnostics: zgx::diagnostics::Diagnostics::new(),
             natives: native.natives.clone(),
             native_diagnostics: native.diagnostics.clone(),
             window_info,
@@ -1893,6 +1903,8 @@ impl Host {
             _layout_issues: layout_issues,
             issues: issues.clone(),
             frames_tried: 0,
+            frames_seen: 0,
+            frame_sample: None,
             adapter: None,
             tree: AccessibilityTree::new(),
             proxy,
@@ -2399,6 +2411,11 @@ impl Host {
             let pointer = self.pointer_inside.then_some(self.cursor);
             self.context.inspector.update(&self.context.ui, pointer);
         }
+        // The last frame that finished, to whoever watches frames (a profiler),
+        // before this one is laid out: what it changes in the scene paints now.
+        if let Some(sample) = self.frame_sample.take() {
+            self.context.diagnostics.publish(sample);
+        }
         self.sync_ime_cancellation();
         if let Some(color) = self.theme_background.take()
             && self.applied_background != Some(color)
@@ -2428,6 +2445,18 @@ impl Host {
         } else {
             &report.damage
         };
+        if self.context.diagnostics.watched() {
+            self.frames_seen += 1;
+            self.frame_sample = Some(zgx::diagnostics::FrameSample {
+                frame: self.frames_seen,
+                at: Some(std::time::Instant::now()),
+                damage: report.damage.clone(),
+                layout_nodes: report.layout_nodes,
+                paint_nodes: report.paint_nodes,
+                composite_nodes: report.composite_nodes,
+                full: forced || whole,
+            });
+        }
         // Native views: split this frame's paint into the planes under and
         // over them; paint moving between planes repaints on both.
         let planned = match &mut self.renderer {
