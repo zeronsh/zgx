@@ -33,9 +33,49 @@ pub(crate) fn news(before: &[&str], after: &[&str]) -> String {
     pieces.join("\n")
 }
 
+/// `news` less the shell's echo of what was `typed` (and not yet echoed),
+/// which a reader's own key echo has said already. What was typed waits for
+/// its echo: a read showing nothing new (the cursor's row drawn again)
+/// leaves it, and an echo of part of it leaves the rest, or the echo after
+/// it was read out a character at a time. News that isn't an echo (the
+/// command's output) is said, and ends the wait.
+pub(crate) fn less_echo(typed: &mut String, news: String) -> String {
+    if news.is_empty() {
+        return news;
+    }
+    match typed.find(news.as_str()) {
+        Some(at) => {
+            typed.drain(..at + news.len());
+            String::new()
+        }
+        None => {
+            typed.clear();
+            news
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::news;
+    use super::{less_echo, news};
+
+    #[test]
+    fn the_echo_of_what_was_typed_is_not_news() {
+        let mut typed = String::from("ls -l");
+        // A read with nothing new keeps what was typed for its echo.
+        assert_eq!(less_echo(&mut typed, String::new()), "");
+        assert_eq!(typed, "ls -l");
+        // The echo a character, then the rest, at a time: none of it said.
+        assert_eq!(less_echo(&mut typed, "l".into()), "");
+        assert_eq!(less_echo(&mut typed, "s".into()), "");
+        assert_eq!(less_echo(&mut typed, "-l".into()), "");
+        assert_eq!(typed, "");
+        // The command's output is said, and nothing typed is waited for.
+        typed.push('x');
+        assert_eq!(less_echo(&mut typed, "a.txt".into()), "a.txt");
+        assert_eq!(typed, "");
+        assert_eq!(less_echo(&mut typed, "x".into()), "x");
+    }
 
     #[test]
     fn a_reader_hears_what_is_new() {
