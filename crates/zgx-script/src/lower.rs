@@ -366,8 +366,22 @@ pub(crate) struct Hooks {
     /// plugins add (a replacement that matched its own target would
     /// replace itself without end).
     app: std::rc::Weak<Vm>,
-    /// Contributions at a row's root already reported (`row_contributions`).
-    told: std::cell::RefCell<std::collections::HashSet<usize>>,
+}
+thread_local! {
+    /// Contributions at a row's root already reported (`row_contributions`),
+    /// by their `Hooks` (one a host's lowering holds) and their own
+    /// address: kept out of `Hooks`, which every lowering holds, so its
+    /// allocation stays the size it was. Hosts on one thread (an app's
+    /// windows) keep theirs apart.
+    static TOLD: std::cell::RefCell<std::collections::HashSet<(usize, usize)>> = Default::default();
+}
+impl Drop for Hooks {
+    /// Its contributions gone (a reload), this host's reports are
+    /// forgotten: their addresses may be reused. Other hosts' stay.
+    fn drop(&mut self) {
+        let own = std::ptr::from_ref(self) as usize;
+        let _ = TOLD.try_with(|told| told.borrow_mut().retain(|(hooks, _)| *hooks != own));
+    }
 }
 impl Hooks {
     pub(crate) fn extend(&mut self, added: Vec<crate::node::HookContribution>) {
@@ -1912,7 +1926,8 @@ fn row_contributions(root: &mlua::Value, hooks: &Hooks, low: &Lowering) {
             _ => continue,
         };
         let at = std::ptr::from_ref(hook) as usize;
-        if !hooks.told.borrow_mut().insert(at) {
+        let host = std::ptr::from_ref(hooks) as usize;
+        if !TOLD.with_borrow_mut(|told| told.insert((host, at))) {
             continue;
         }
         if let Some(vm) = hook.vm.upgrade() {
