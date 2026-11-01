@@ -35,6 +35,7 @@ fn the_mcp_server_says_what_it_offers() {
     assert!(lines[0].contains(r#""protocolVersion":"2025-06-18""#));
     for tool in [
         "zgx_contributions",
+        "zgx_elements",
         "zgx_tree",
         "zgx_click",
         "zgx_type",

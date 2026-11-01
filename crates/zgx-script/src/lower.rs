@@ -365,6 +365,10 @@ pub(crate) struct Hooks {
     /// The parts targets name before `>>`, each once: elements matching one
     /// tell their subtree so (`Ancestry`).
     marks: Vec<crate::driver::Static>,
+    /// The app's elements mounted now that a host lists (`ScriptHost::
+    /// elements`): those with an id, classes, a hook, values they provide,
+    /// or that are private.
+    pub(crate) mounted: std::cell::RefCell<HashMap<zgx::scene::NodeId, Rc<Node>>>,
     /// The application's script: only its elements are targets, not what
     /// plugins add (a replacement that matched its own target would
     /// replace itself without end).
@@ -414,6 +418,15 @@ impl Hooks {
         (0..self.marks.len())
             .filter(|at| targets(&self.marks[*at], node))
             .collect()
+    }
+    /// Whether a host lists `node` (`mounted`).
+    fn listed(&self, node: &Node) -> bool {
+        std::rc::Weak::ptr_eq(&node.owner, &self.app)
+            && (node.id.is_some()
+                || !node.classes.is_empty()
+                || node.hook().is_some()
+                || node.provide.is_some()
+                || node.private)
     }
     /// Every contribution, in the order the scripts made them.
     pub(crate) fn all(&self) -> &[crate::node::HookContribution] {
@@ -496,6 +509,34 @@ fn chain_holds(chain: &[usize], mut at: Option<Rc<Ancestry>>) -> bool {
         at = here.parent.clone();
     }
     true
+}
+/// `view`, an element of the app's a host lists (`Hooks::listed`), kept in
+/// `Hooks::mounted` while it is.
+fn listed(view: View, node: &Rc<Node>, hooks: &Hooks, low: &Rc<Lowering>) -> View {
+    if !hooks.listed(node) {
+        return view;
+    }
+    struct Listed(std::rc::Weak<Lowering>, zgx::scene::NodeId);
+    impl Drop for Listed {
+        fn drop(&mut self) {
+            if let Some(low) = self.0.upgrade()
+                && let Some(hooks) = low.hooks.as_deref()
+                && let Ok(mut mounted) = hooks.mounted.try_borrow_mut()
+            {
+                mounted.remove(&self.1);
+            }
+        }
+    }
+    let (node, low) = (node.clone(), Rc::downgrade(low));
+    view.on_mount(move |handle| {
+        let Some(lowering) = low.upgrade() else {
+            return;
+        };
+        if let Some(hooks) = lowering.hooks.as_deref() {
+            hooks.mounted.borrow_mut().insert(handle.node(), node);
+            handle.retain(Listed(low, handle.node()));
+        }
+    })
 }
 /// `view`, an element matching some chained target's earlier parts, telling
 /// its subtree (`Ancestry`).
@@ -665,6 +706,7 @@ fn hooked_children(
             None if filters.is_empty() => lowered(child),
             None => counted_filters(filtered(child, &filters, low, flow), &filters),
         };
+        let main = listed(main, child, hooks, low);
         let marks = hooks.marks_of(child);
         children.push(match marks.is_empty() {
             true => main,
@@ -752,7 +794,7 @@ fn shown(node: &Rc<Node>, low: &Rc<Lowering>) -> View {
 #[inline(never)]
 fn hooked_shown(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
     let marks = hooks.marks_of(node);
-    let view = shown_element(node, low, hooks);
+    let view = listed(shown_element(node, low, hooks), node, hooks, low);
     match marks.is_empty() {
         true => view,
         false => marked(view, marks),
@@ -2072,7 +2114,8 @@ fn hooked_row(lua: &mlua::Lua, root: mlua::Value, low: &Lowering) -> mlua::Resul
     let Ok(node) = ud.borrow::<NodeUd>().map(|n| n.0.clone()) else {
         return Ok(root);
     };
-    if hooks.at(&node, true, low).is_empty() {
+    // Rows plugins add at, or a host lists (`ScriptHost::elements`).
+    if hooks.at(&node, true, low).is_empty() && !hooks.listed(&node) {
         return Ok(root);
     }
     let mut row = Node::new(node.owner.clone(), Kind::Div);

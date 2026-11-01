@@ -27,6 +27,8 @@ mod packages;
 mod paged;
 #[path = "../plugin_context.rs"]
 mod plugin_context;
+#[path = "../plugin_elements.rs"]
+mod plugin_elements;
 #[path = "../plugin_filters.rs"]
 mod plugin_filters;
 #[path = "../plugin_hooks.rs"]
