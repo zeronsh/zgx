@@ -79,6 +79,7 @@ pub mod scaffold;
 mod scene3d;
 mod socket;
 mod sorted;
+mod sources;
 mod term;
 pub mod test_runner;
 pub mod testing;
@@ -1159,10 +1160,19 @@ fn require_module<const LENDING: bool>(
         .unwrap_or(&path)
         .to_string_lossy()
         .into_owned();
-    let value = match files
-        .chunk(lua.load(code).set_name(format!("@{chunk}")))
-        .eval::<mlua::Value>()
-    {
+    // Compiled once while its bytes stay the same (a hot-reloading
+    // host's): a reload compiles only the files that changed.
+    let compiled = match files {
+        Files::Disk => host
+            .upgrade()
+            .and_then(|h| h.sources.compiled(&path, &code)),
+        Files::Bundle(_) => None,
+    };
+    let loaded = match compiled.as_deref().and_then(sources::Compiled::bytecode) {
+        Some(bytecode) => lua.load(bytecode).set_mode(mlua::chunk::ChunkMode::Binary),
+        None => files.chunk(lua.load(code)),
+    };
+    let value = match loaded.set_name(format!("@{chunk}")).eval::<mlua::Value>() {
         Ok(mlua::Value::Nil) => mlua::Value::Boolean(true),
         Ok(value) => value,
         Err(e) => {
@@ -1310,6 +1320,9 @@ struct Inner {
     /// required: the load under way's, and the last successful one's
     /// (`contributions`).
     lent: RefCell<Lent>,
+    /// The scripts' bytecode by what their files held, once the host
+    /// hot-reloads: a reload compiles only what changed.
+    sources: sources::Sources,
     /// The app's modules plugins replace (`ui.override`), by module name
     /// (`components/card` for `@app/components/card`): gathered as the
     /// plugins load, before the app, and read by the app's `require`.
@@ -1489,6 +1502,7 @@ impl ScriptHost {
             stamps: RefCell::default(),
             required: RefCell::default(),
             lent: RefCell::default(),
+            sources: sources::Sources::default(),
             overrides: RefCell::default(),
             terms: Rc::default(),
             webs: Rc::default(),
@@ -2575,6 +2589,12 @@ impl ScriptHost {
         let loaded = self.load();
         // After loading: the files it required are watched too.
         *self.0.stamps.borrow_mut() = self.stamps();
+        if self.0.sources.hot() {
+            let stamps = self.0.stamps.borrow();
+            self.0
+                .sources
+                .keep_only(stamps.iter().map(|(path, _)| path.as_path()));
+        }
         match loaded {
             Ok(mut loaded) => {
                 // What the load reported as it ran (a task's error, a
@@ -2635,7 +2655,17 @@ impl ScriptHost {
         let themes = self.0.locales.reload_if_changed(self.0.files) | self.reload_themes();
         // `changed` forgets edited images, so the reload reads them again.
         let assets = self.0.assets.changed();
-        if self.stamps() == *self.0.stamps.borrow() && !assets {
+        // From the first call on, loads keep their files' bytecode.
+        self.0.sources.hot_reload();
+        let stamps = self.stamps();
+        if stamps == *self.0.stamps.borrow() && !assets {
+            return themes;
+        }
+        // Files whose times moved but whose bytes are what is loaded (an
+        // editor saving the same text, a checkout): nothing to reload, and
+        // the app keeps its state.
+        if !assets && self.same_bytes(&stamps) {
+            *self.0.stamps.borrow_mut() = stamps;
             return themes;
         }
         // What a reload mounts can panic, and `watch` calls this: a panic
@@ -2653,6 +2683,13 @@ impl ScriptHost {
                 .set(Some(format!("The reload panicked: {message}")));
         }
         true
+    }
+    /// The script files a hot-reloading host keeps compiled, and how many
+    /// it has compiled since it began hot-reloading (for tests: a reload
+    /// compiles only what changed, and keeps no file it no longer loads).
+    #[doc(hidden)]
+    pub fn compiled_sources(&self) -> (usize, u64) {
+        self.0.sources.counts()
     }
     /// Read again the theme files that changed; whether any did. An error
     /// shows over the interface until the file reads again.
@@ -2923,6 +2960,21 @@ impl ScriptHost {
             .collect();
         files.sort();
         files.into_iter().map(Script::File).collect()
+    }
+    /// Whether `stamps`, read now, name the files of the last load and each
+    /// whose time moved holds what that load read.
+    fn same_bytes(&self, stamps: &[(PathBuf, Option<SystemTime>)]) -> bool {
+        let loaded = self.0.stamps.borrow();
+        if loaded.len() != stamps.len() || loaded.iter().zip(stamps).any(|(a, b)| a.0 != b.0) {
+            return false;
+        }
+        let moved: Vec<&std::path::Path> = loaded
+            .iter()
+            .zip(stamps)
+            .filter(|(a, b)| a.1 != b.1)
+            .map(|(_, b)| b.0.as_path())
+            .collect();
+        self.0.sources.as_loaded(&moved)
     }
     fn stamps(&self) -> Vec<(PathBuf, Option<SystemTime>)> {
         let mut paths: Vec<_> = self
@@ -3343,11 +3395,19 @@ impl ScriptHost {
         lua.sandbox(true).map_err(fail)?;
         // Building runs untracked: reading state while describing the tree
         // must not subscribe whatever is currently mounting.
+        let compiled = match (files, script) {
+            (Files::Disk, Script::File(path) | Script::Plugin { path, .. }) => {
+                self.0.sources.compiled(path, &code)
+            }
+            _ => None,
+        };
         let result = self.0.runtime.untracked(|| {
             vm.guard(limits.load, || {
-                files
-                    .chunk(lua.load(code.as_slice()).set_name(format!("@{name}")))
-                    .eval::<mlua::Value>()
+                let loaded = match compiled.as_deref().and_then(sources::Compiled::bytecode) {
+                    Some(bytecode) => lua.load(bytecode).set_mode(mlua::chunk::ChunkMode::Binary),
+                    None => files.chunk(lua.load(code.as_slice())),
+                };
+                loaded.set_name(format!("@{name}")).eval::<mlua::Value>()
             })
         });
         let result = result.map_err(|error| {
