@@ -544,6 +544,13 @@ struct FocusScope {
     previous: Option<NodeId>,
     /// What the scope below holds stays live too (a submenu over its menu).
     porous: bool,
+    /// What opened it (a popover's or menu's trigger): focus returns there
+    /// as it closes when what had focus is gone, if it opened from the
+    /// keyboard (`keyboard`).
+    trigger: Option<NodeId>,
+    /// It opened while the keyboard was in use (`focus_visible_now`), or
+    /// from a press on its trigger: focus may return to the trigger.
+    keyboard: bool,
 }
 #[derive(Clone, Copy)]
 struct Click {
@@ -644,6 +651,10 @@ struct State {
     pointer: Option<(f32, f32)>,
     file_hovered: Option<NodeId>,
     pressed: Option<NodeId>,
+    /// What the last primary press landed on, as its listeners run and
+    /// after: a popup opening from a press on its trigger counts it as
+    /// focused, as a browser's press focuses a button first.
+    last_press: Option<NodeId>,
     key_pressed: Option<(NodeId, Key)>,
     /// The window's semantics: a control's role says which keys activate it
     /// (`activates`).
@@ -1614,14 +1625,32 @@ impl InputDispatcher {
     }
     /// Enter a nested modal scope and save the previous focus for restoration.
     pub fn push_focus_scope(&self, scene: &Rc<RefCell<Scene>>, root: NodeId) -> bool {
-        self.push_scope(scene, root, false)
+        self.push_scope(scene, root, false, None)
     }
     /// As `push_focus_scope`, leaving the scope below live to the pointer
     /// and keys too: a submenu, whose parent menu's items stay hoverable.
     pub fn push_porous_focus_scope(&self, scene: &Rc<RefCell<Scene>>, root: NodeId) -> bool {
-        self.push_scope(scene, root, true)
+        self.push_scope(scene, root, true, None)
     }
-    fn push_scope(&self, scene: &Rc<RefCell<Scene>>, root: NodeId, porous: bool) -> bool {
+    /// As `push_focus_scope` (porous with `porous`), opened by `trigger`: a
+    /// popover's or menu's, where focus returns as it closes when what had
+    /// focus before is gone and it opened from the keyboard.
+    pub(crate) fn push_focus_scope_from(
+        &self,
+        scene: &Rc<RefCell<Scene>>,
+        root: NodeId,
+        porous: bool,
+        trigger: Option<NodeId>,
+    ) -> bool {
+        self.push_scope(scene, root, porous, trigger)
+    }
+    fn push_scope(
+        &self,
+        scene: &Rc<RefCell<Scene>>,
+        root: NodeId,
+        porous: bool,
+        trigger: Option<NodeId>,
+    ) -> bool {
         // Opening a sibling modal may supersede the current scope. Check the
         // node's actual ancestry, without applying the active scope boundary.
         if !self.enabled_without_scope(&scene.borrow(), root)
@@ -1639,10 +1668,21 @@ impl InputDispatcher {
             return false;
         }
         let previous = self.focused();
+        // Opened from the keyboard, or by a press on its trigger (which a
+        // browser's press would have focused): focus may go back to it.
+        let pressed = self.state.borrow().last_press;
+        let keyboard = self.focus_visible_now()
+            || (trigger.zip(pressed)).is_some_and(|(trigger, pressed)| {
+                let scene = scene.borrow();
+                pressed == trigger
+                    || (scene.contains(pressed) && scene.ancestors(pressed).any(|a| a == trigger))
+            });
         self.state.borrow_mut().scopes.push(FocusScope {
             root,
             previous,
             porous,
+            trigger,
+            keyboard,
         });
         let next = self.next_focus(&scene.borrow(), false);
         self.focus(scene, next);
@@ -1654,7 +1694,10 @@ impl InputDispatcher {
                 .iter()
                 .any(|scope| scope.root == root)
     }
-    /// Close the innermost scope and restore the previous mounted, enabled focus.
+    /// Close the innermost scope and give focus back, as browsers and native
+    /// toolkits do: to what had it as the scope opened, else (that gone) to
+    /// what opened it if that was from the keyboard, else to nothing. Never
+    /// to the window's first focusable node.
     pub fn pop_focus_scope(&self, scene: &Rc<RefCell<Scene>>) -> bool {
         let scope = self.state.borrow_mut().scopes.pop();
         let Some(scope) = scope else {
@@ -1664,10 +1707,9 @@ impl InputDispatcher {
         if scene.borrow().contains(scope.root) {
             self.route(scene, scope.root, InputEvent::FocusScopeClosed);
         }
-        let previous = scope
-            .previous
-            .filter(|id| self.enabled(&scene.borrow(), *id));
-        let next = previous.or_else(|| self.next_focus(&scene.borrow(), false));
+        let usable = |id: &NodeId| self.enabled(&scene.borrow(), *id);
+        let next = (scope.previous.filter(usable))
+            .or_else(|| scope.trigger.filter(|_| scope.keyboard).filter(usable));
         self.focus(scene, next);
         true
     }
@@ -2301,10 +2343,16 @@ impl InputDispatcher {
         }
         match &event {
             InputEvent::PointerDown { .. } => self.state.borrow_mut().pointer_modality = true,
-            InputEvent::KeyDown { modifiers, .. }
+            // As `:focus-visible`: a key that moves or types does; Escape
+            // (closing a popup) and shortcuts don't. The key is looked at
+            // only while the pointer's in use: typing keeps the keyboard's.
+            InputEvent::KeyDown { key, modifiers, .. }
                 if !modifiers.meta && !modifiers.control && !modifiers.alt =>
             {
-                self.state.borrow_mut().pointer_modality = false
+                let mut state = self.state.borrow_mut();
+                if state.pointer_modality && !matches!(key, Key::Escape) {
+                    state.pointer_modality = false;
+                }
             }
             _ => {}
         }
@@ -2527,6 +2575,9 @@ impl InputDispatcher {
             self.state.borrow_mut().file_hovered = None;
         }
         let click_count = if let InputEvent::PointerDown { x, y, button } = &event {
+            if *button == PointerButton::Primary {
+                self.state.borrow_mut().last_press = target;
+            }
             if modifiers.is_some() {
                 if let Some(target) = target {
                     self.state

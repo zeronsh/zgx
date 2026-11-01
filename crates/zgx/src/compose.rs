@@ -3692,6 +3692,7 @@ fn mount_portal_panel(
             .and_then(|menu| menu.parent.as_ref())
             .and_then(|parent| parent.panel.get()),
         if is_submenu { anchor } else { None },
+        anchor,
         panel_focusable,
         is_submenu,
         autofocus.unwrap_or(true),

@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **Escape gives focus back as browsers and native toolkits do** (zgx). A popup closing returns focus to what had it before it opened. If that's gone, it returns to the popup's trigger, but only if the popup opened from the keyboard. Otherwise nothing is focused. Before, a popup opened with nothing focused gave focus to the window's first focusable control (Zeron's "New chat"), so the next Enter pressed it. Escape no longer turns focus rings on either, as `:focus-visible` has it: a menu opened by the mouse and closed with Escape gives focus back without a ring, and one moved through with the arrows keeps it. Tab, the arrows, Home/End, Page Up/Down and typing still turn rings on, and shortcuts with Cmd, Ctrl or Alt don't. A context click on a focusable view focuses it before its menu opens, as a press does in a browser, so the menu gives focus back to it.

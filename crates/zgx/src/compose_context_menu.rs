@@ -143,6 +143,18 @@ pub(crate) fn mount(
         }
         cx.prevent_default();
         cx.stop_propagation();
+        // A context click focuses what it lands on, as any button's press
+        // does in a browser (a field's caret goes there): the menu gives
+        // focus back to it as it closes.
+        let pressed = matches!(cx.event, InputEvent::PointerDown { .. });
+        let within = ui.input.focused().is_some_and(|focused| {
+            let scene = ui.scene.borrow();
+            focused == node
+                || (scene.contains(focused) && scene.ancestors(focused).any(|a| a == node))
+        });
+        if pressed && !within && ui.input.options(node).is_some_and(|o| o.focusable) {
+            ui.input.focus(&ui.scene, Some(node));
+        }
         current.close();
         let shown = ui.runtime.signal(true);
         let anchor = if below {

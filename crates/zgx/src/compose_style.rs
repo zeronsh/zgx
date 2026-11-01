@@ -859,12 +859,14 @@ pub(crate) fn mount_style_with_intrinsic(
                     state.key_active = ActivationKey::Enter;
                     state.focus_visible = true;
                 }
-                // A key to it (not a shortcut) shows its focus.
-                InputEvent::KeyDown { modifiers, .. }
-                    if event.target == node
-                        && !modifiers.meta
-                        && !modifiers.control
-                        && !modifiers.alt =>
+                // A key to it (not a shortcut, nor Escape) shows its focus.
+                InputEvent::KeyDown {
+                    ref key, modifiers, ..
+                } if event.target == node
+                    && !modifiers.meta
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && !matches!(key, Key::Escape) =>
                 {
                     state.focus_visible = true;
                 }
