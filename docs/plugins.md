@@ -131,7 +131,7 @@ An app run with `zgx run` has no Rust of its own. Its `zgx.json` sets both sides
   - `actions` names what plugins may call.
   - `hooks` maps a target, or an `@app/…` module, to `"override"` when a plugin may replace or filter it. Adding before and after is open, so `"open"` changes nothing. `"*": "override"` offers every target.
 - **`plugins`** names each plugin's folder (its `init.luau`) or file, and its `allow` list:
-  - `shared:<key>`, `action:<name>` and `override:<target>` for what `expose` offers;
+  - `shared:<key>`, `action:<name>` and `override:<target>` for what `expose` offers, and `package:<name>` for a package in `packages` (lent below);
   - `fetch`, `clipboard`, `files`, `folders`, `terminals`, `web` and `windows` for the sandbox. `folders` is `ui.open_folder`, and the host can refuse it to every script (`ScriptHost::refuse_folders`).
 - **A grant beyond what's exposed is an error as the app loads**, naming the plugin and the grant: ``plugin `focus` is allowed `action:complete`, which the app doesn't expose (add "complete" to expose.actions)``. So is an unknown grant or a missing path.
 - **The app's script defines its actions** with `ui.actions`. Plugins call them as they call a Rust host's: `ui.invoke("complete", id)`, or `ui.action("complete", id)` as a handler. The app calls them the same way. A plugin can't define actions.
@@ -154,7 +154,24 @@ An app run with `zgx run` has no Rust of its own. Its `zgx.json` sets both sides
 
 ## Packages
 
-Modules several apps share go in a package, a folder outside the app: `ScriptHost::package("kit", dir)` or zgx.json's `"packages": { "kit": "../plugins_kit" }`. The app requires them as `@kit/…`, and a `.luaurc` alias into the folder lets `zgx check` follow them. Packages are read only, run as the app's code, and are bundled with it. Plugins reach none, except through an app module they were trusted to replace.
+Modules several apps share go in a package, a folder outside the app: `ScriptHost::package("kit", dir)` or zgx.json's `"packages": { "kit": "../plugins_kit" }`. The app requires them as `@kit/…`, and a `.luaurc` alias into the folder lets `zgx check` follow them. Packages are read only, run as the app's code, and are bundled with it. Plugins reach none they aren't lent, apart from an app module they were trusted to replace.
+
+### Lending a package to plugins
+
+A host lends a package with `Capability::Package("ds")`: to one plugin as any grant, or to every plugin, those loaded later included, with `ScriptHost::grant_all_plugins(Capability::Package("ds".into()))`. zgx.json's `allow` takes `"package:ds"` for a package it lists. An app lending its design system lets each plugin match whichever template is active:
+
+```lua
+local Badge = require("@ds/badge")
+ui.contribute { target = "#header", after = Badge { label = "beta" } }
+```
+
+- **In the plugin's own VM.** The package's modules load there as source, with state of their own: nothing is shared with the app's VM or another plugin's. A process compiles a lent module once, however many plugins require it.
+- **Only inside what was lent.** A lent module requires only inside its package or the plugin's other lent packages. `require("@app/…")`, an unlent package, or the plugin's own files from inside it is an error that names what's missing: ``package `@kit` isn't lent to plugin `p`: the host lends it with Capability::Package("kit")``.
+- **No authority.** A lent component calling `ui.fetch` or `ui.clipboard` is gated by the plugin's grants, as the plugin's own code is.
+- **It follows the package.** The package is whatever folder the host registered (Zeron's `.live` overlay). When its files change, the app and every plugin that required from it reload.
+- **Listed.** `host.contributions()` (`zgx inspect contributions`) has a `package` entry per plugin and package: `@ds`, and how many of its modules the plugin required.
+
+`zgx check` gives a plugin's files the packages its zgx.json grants lend, and the app's files all of them. `zgx types <plugin folder>` adds those aliases to the plugin's `.luaurc`, pointing at the folders zgx.json gives, so an editor's luau-lsp completes `@ds/…`. It never changes an alias already there.
 
 ## Checking
 

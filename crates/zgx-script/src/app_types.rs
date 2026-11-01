@@ -385,12 +385,133 @@ pub fn write_types_of(dir: &Path, sources: &[(PathBuf, String)]) -> Result<bool,
     Ok(true)
 }
 
+/// For a plugin's folder (`app_config::lent_to_folder`), the aliases of
+/// the packages lent to it added to its `.luaurc` (made if it has none),
+/// each naming the folder the app's `zgx.json` gives, from the `.luaurc`:
+/// an editor's luau-lsp then resolves and completes `@name/…` as zgx does.
+/// An alias already there is left as it is, and so is a `.luaurc` that
+/// isn't JSON. The names added; none for a folder that isn't a plugin's.
+pub fn write_lent_aliases(dir: &Path) -> Result<Vec<String>, CheckError> {
+    let Some(lent) = crate::app_config::lent_to_folder(dir) else {
+        return Ok(Vec::new());
+    };
+    let path = dir.join(".luaurc");
+    let mut config: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(config @ serde_json::Value::Object(_)) => config,
+            _ => return Ok(Vec::new()),
+        },
+        Err(_) => serde_json::json!({}),
+    };
+    let here = dir.canonicalize().map_err(CheckError::Io)?;
+    let object = config.as_object_mut().expect("an object");
+    let aliases = object
+        .entry("aliases")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(aliases) = aliases.as_object_mut() else {
+        return Ok(Vec::new());
+    };
+    let mut added = Vec::new();
+    for (name, folder) in lent {
+        if aliases.contains_key(&name) {
+            continue;
+        }
+        aliases.insert(name.clone(), relative_to(&here, &folder).into());
+        added.push(name);
+    }
+    if !added.is_empty() {
+        let text = serde_json::to_string_pretty(&config).expect("JSON") + "\n";
+        std::fs::write(&path, text).map_err(CheckError::Io)?;
+    }
+    Ok(added)
+}
+
+/// `to` from `from` (both absolute), with `/` on every system, as a
+/// `.luaurc`'s paths are: `../shared/ds`.
+fn relative_to(from: &Path, to: &Path) -> String {
+    let (from, to): (Vec<_>, Vec<_>) = (from.components().collect(), to.components().collect());
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> = vec!["..".into(); from.len() - common];
+    parts.extend(
+        to[common..]
+            .iter()
+            .map(|p| p.as_os_str().to_string_lossy().into_owned()),
+    );
+    parts.join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn app(source: &str) -> String {
         definitions(&[(PathBuf::from("app.luau"), source.into())])
+    }
+
+    /// An app lending `@ds` (not `@kit`) to its plugin `p`.
+    fn lending_app(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("zgx-lent-types-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["app/plugins/p", "shared/ds", "shared/kit"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("app/app.luau"), "return ui.text { \"x\" }").unwrap();
+        std::fs::write(root.join("app/plugins/p/init.luau"), "local x = 1").unwrap();
+        std::fs::write(
+            root.join("app/zgx.json"),
+            r#"{ "packages": { "ds": "../shared/ds", "kit": "../shared/kit" },
+                 "plugins": { "p": { "path": "plugins/p", "allow": ["package:ds"] } } }"#,
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn a_plugins_lent_packages_are_added_to_its_luaurc_once() {
+        let root = lending_app("luaurc");
+        let plugin = root.join("app/plugins/p");
+        assert_eq!(write_lent_aliases(&plugin).unwrap(), ["ds"]);
+        let luaurc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(plugin.join(".luaurc")).unwrap())
+                .unwrap();
+        // From the .luaurc's folder to the one zgx.json names; kit isn't lent.
+        assert_eq!(
+            luaurc["aliases"],
+            serde_json::json!({ "ds": "../../../shared/ds" })
+        );
+        assert!(
+            write_lent_aliases(&plugin).unwrap().is_empty(),
+            "added once"
+        );
+        // One already there is the author's.
+        std::fs::write(
+            plugin.join(".luaurc"),
+            r#"{ "aliases": { "ds": "./mine" } }"#,
+        )
+        .unwrap();
+        assert!(write_lent_aliases(&plugin).unwrap().is_empty());
+        assert!(
+            std::fs::read_to_string(plugin.join(".luaurc"))
+                .unwrap()
+                .contains("./mine")
+        );
+        // The app's folder is no plugin's: nothing written.
+        assert!(write_lent_aliases(&root.join("app")).unwrap().is_empty());
+        assert!(!root.join("app/.luaurc").exists());
+    }
+
+    #[test]
+    fn checking_gives_a_plugin_its_lent_packages_and_the_app_all() {
+        let root = lending_app("check");
+        let names = |file: &str| -> Vec<String> {
+            crate::app_config::aliases_for(&root.join(file))
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        };
+        assert_eq!(names("app/plugins/p/init.luau"), ["ds"]);
+        assert_eq!(names("app/app.luau"), ["ds", "kit"]);
     }
 
     #[test]

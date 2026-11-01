@@ -814,6 +814,13 @@ pub enum Capability {
     /// What the app defines (`expose_action`, `expose_shared`): a host
     /// action or shared state a plugin reaches only if granted it.
     Named(String),
+    /// A package the app requires from (`ScriptHost::package`), lent to the
+    /// plugin by its name (`"ds"`): `require("@ds/…")` loads its modules in
+    /// the plugin's own VM, as source, its state the plugin's alone. A lent
+    /// module requires only inside its package or the plugin's other lent
+    /// ones (never `@app/…`), and lends no authority: what it calls is gated
+    /// by the plugin's grants, as the plugin's own code is.
+    Package(String),
     /// Replacing an element of the app's (`ui.contribute { target,
     /// replace }`), or one of its `@app/…` modules (`ui.override`): the
     /// target or module as the plugin writes it, or `"*"` for any. Adding
@@ -948,6 +955,225 @@ impl Script {
     }
 }
 
+/// What `require` resolves with: a VM's root, aliases and packages, its
+/// modules so far, and (for a plugin) its name and every package's.
+struct Require {
+    host: std::rc::Weak<Inner>,
+    modules: Rc<RefCell<HashMap<PathBuf, Option<mlua::Value>>>>,
+    root: Option<PathBuf>,
+    aliases: HashMap<String, PathBuf>,
+    packages: Vec<(String, PathBuf)>,
+    files: Files,
+    plugin_name: Option<String>,
+    all_packages: Vec<String>,
+}
+
+/// `require(name)` from a VM: a plugin's when `LENDING` (packages lent to
+/// it, `Capability::Package`, and nothing else), else the app's, which
+/// compiles none of lending's checks.
+fn require_module<const LENDING: bool>(
+    state: &Require,
+    lua: &Lua,
+    name: String,
+) -> mlua::Result<mlua::Value> {
+    let Require {
+        host,
+        modules,
+        root,
+        aliases,
+        packages,
+        files,
+        plugin_name,
+        all_packages,
+    } = state;
+    let files = *files;
+    let plugin = LENDING;
+    let plugin_name: &Option<String> = if LENDING { plugin_name } else { &None };
+    let Some(root) = &root else {
+        return Err(mlua::Error::runtime(
+            "require needs a script loaded from a file",
+        ));
+    };
+    let fail = |why: String| mlua::Error::runtime(format!("require(\"{name}\"): {why}"));
+    // The requiring file, from its chunk name (its path in the root).
+    let caller = lua
+        .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
+        .flatten()
+        .and_then(|s| s.strip_prefix('@').map(|rel| root.join(rel)));
+    let here = caller
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .unwrap_or(root)
+        .to_path_buf();
+    // `@app/…`: the app's module, or the module a plugin replaced it
+    // with (`ui.override`); `@app-original/…`: the app's own, for
+    // that replacement alone. Plugins reach neither.
+    let mut overridden = None;
+    let joined = if let Some(rest) = name
+        .strip_prefix("@app/")
+        .or_else(|| name.strip_prefix("@app-original/"))
+    {
+        if plugin {
+            return Err(fail(
+                "`@app/…` names the app's modules, which a plugin replaces with \
+                 ui.override, not requires (no grant lends them, to a lent package's \
+                 modules either)"
+                    .into(),
+            ));
+        }
+        let module = node::module_name(rest);
+        let replacement = host
+            .upgrade()
+            .and_then(|host| host.overrides.borrow().get(&module).cloned());
+        if name.starts_with("@app-original/") {
+            // Only the module that replaced this one reaches it.
+            let from_replacement = replacement
+                .as_ref()
+                .is_some_and(|r| caller.as_deref() == Some(r.with.as_path()));
+            if !from_replacement {
+                return Err(fail(
+                    "`@app-original/…` is for the module that overrides it alone".into(),
+                ));
+            }
+            root.join(rest)
+        } else if let Some(replacement) = replacement {
+            let with = replacement.with.clone();
+            overridden = Some(replacement);
+            with
+        } else {
+            root.join(rest)
+        }
+    } else if let Some(rest) = name.strip_prefix("@self") {
+        here.join(rest.trim_start_matches('/'))
+    } else if let Some(rest) = name.strip_prefix('@') {
+        let (alias, rest) = rest.split_once('/').unwrap_or((rest, ""));
+        let base = aliases
+            .get(alias)
+            .or_else(|| {
+                packages
+                    .iter()
+                    .find(|(name, _)| name == alias)
+                    .map(|(_, dir)| dir)
+            })
+            .ok_or_else(|| match &plugin_name {
+                Some(plugin) if all_packages.iter().any(|p| p == alias) => fail(format!(
+                    "package `@{alias}` isn't lent to plugin `{plugin}`: the host \
+                     lends it with Capability::Package(\"{alias}\") (zgx.json: \
+                     \"package:{alias}\")"
+                )),
+                _ => fail(format!(
+                    "no alias `@{alias}` in .luaurc, nor a package of that name"
+                )),
+            })?;
+        base.join(rest)
+    } else if name.starts_with("./") || name.starts_with("../") {
+        // An `init.luau` is its directory as a module: its relative
+        // requires start beside that directory (as Luau's and
+        // luau-lsp's do); `@self` reaches inside it.
+        let is_init = caller
+            .as_deref()
+            .and_then(std::path::Path::file_stem)
+            .is_some_and(|stem| stem == "init");
+        let base = if is_init {
+            here.parent().unwrap_or(&here)
+        } else {
+            &here
+        };
+        base.join(&name)
+    } else {
+        root.join(&name)
+    };
+    let mut path = normalize(&joined);
+    if files.is_dir(&path) {
+        path = path.join("init.luau");
+    } else if path.extension().is_none() {
+        path.set_extension("luau");
+    }
+    // A lent package's module requires inside it, or the plugin's
+    // other lent packages: never into the plugin's own files nor
+    // anywhere else.
+    if let Some(plugin) = &plugin_name
+        && let Some((lent, _)) = packages
+            .iter()
+            .find(|(_, dir)| caller.as_deref().is_some_and(|c| within(dir, c)))
+        && !packages.iter().any(|(_, dir)| within(dir, &path))
+    {
+        return Err(fail(format!(
+            "a module of package `@{lent}` requires only inside it or the other \
+             packages lent to plugin `{plugin}` (Capability::Package)"
+        )));
+    }
+    // A replacement and what it requires come from its plugin's
+    // directory; the app's from its own.
+    let replacements: Vec<node::ModuleOverride> = host
+        .upgrade()
+        .map(|host| host.overrides.borrow().values().cloned().collect())
+        .unwrap_or_default();
+    let in_plugin = replacements
+        .iter()
+        .find(|r| overridden.as_ref() == Some(*r) || within(&r.dir, &path));
+    if !within(root, &path)
+        && in_plugin.is_none()
+        && !packages.iter().any(|(_, dir)| within(dir, &path))
+    {
+        return Err(fail(
+            "modules come from the script's directory or below, or a package \
+             (ScriptHost::package, zgx.json's \"packages\")"
+                .into(),
+        ));
+    }
+    // A plugin's files are on the disk, whatever the app's are.
+    let files = if in_plugin.is_some() && !within(root, &path) {
+        Files::Disk
+    } else {
+        files
+    };
+    match modules.borrow().get(&path) {
+        Some(Some(value)) => return Ok(value.clone()),
+        Some(None) => return Err(fail("a require cycle".into())),
+        None => {}
+    }
+    let code = files
+        .read(&path)
+        .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+    if let Some(host) = host.upgrade() {
+        host.required.borrow_mut().push(path.clone());
+        // One more module of a package lent to this plugin.
+        if let Some(plugin) = &plugin_name
+            && let Some((package, _)) = packages.iter().find(|(_, dir)| within(dir, &path))
+            && let Some(entry) = host
+                .lent
+                .borrow_mut()
+                .pending
+                .iter_mut()
+                .find(|(p, k, _)| p == plugin && k == package)
+        {
+            entry.2 += 1;
+        }
+    }
+    modules.borrow_mut().insert(path.clone(), None);
+    // Named by its path in the root: errors show it, and its own
+    // requires resolve from it.
+    let chunk = path
+        .strip_prefix(root)
+        .unwrap_or(&path)
+        .to_string_lossy()
+        .into_owned();
+    let value = match files
+        .chunk(lua.load(code).set_name(format!("@{chunk}")))
+        .eval::<mlua::Value>()
+    {
+        Ok(mlua::Value::Nil) => mlua::Value::Boolean(true),
+        Ok(value) => value,
+        Err(e) => {
+            modules.borrow_mut().remove(&path);
+            return Err(e);
+        }
+    };
+    modules.borrow_mut().insert(path, Some(value.clone()));
+    Ok(value)
+}
+
 struct Loaded {
     _vms: Vec<Rc<Vm>>,
     /// The scripts' `ui.on_mount`s outside components, run as the app's
@@ -970,12 +1196,22 @@ pub struct ContributionReport {
     pub target: String,
     /// What it does there: "before", "after", "replace" or "filter"; or
     /// "shortcut", a plugin command's shortcut dropped
-    /// (`ScriptHost::dropped_shortcuts`), its target the command's id.
+    /// (`ScriptHost::dropped_shortcuts`), its target the command's id; or
+    /// "package", a package lent to it (`Capability::Package`), its target
+    /// `@name` and `matches` the modules it required from it.
     pub place: &'static str,
     /// The elements it applies at, mounted now.
     pub matches: usize,
     /// Its latest error, if any.
     pub error: Option<String>,
+}
+
+/// The packages lent to plugins (`Capability::Package`): (plugin, package,
+/// modules it required from it), in the order the plugins ran.
+#[derive(Default)]
+struct Lent {
+    pending: Vec<(String, String, usize)>,
+    published: Vec<(String, String, usize)>,
 }
 
 /// The framework's issues a host heard (`ScriptHost::issues`), and who
@@ -1009,6 +1245,9 @@ struct Inner {
     connector: socket::SharedConnector,
     /// What each plugin may do beyond its sandbox (`grant`), by name.
     grants: RefCell<HashMap<String, Vec<Capability>>>,
+    /// What every plugin may do (`grant_all_plugins`), those loaded later
+    /// too.
+    all_plugins: RefCell<Vec<Capability>>,
     /// The plugins the app manages (`set_plugins`).
     managed: RefCell<Vec<Script>>,
     /// Host actions and shared keys plugins reach (`expose_*`).
@@ -1067,6 +1306,10 @@ struct Inner {
     stamps: RefCell<Vec<(PathBuf, Option<SystemTime>)>>,
     /// Files scripts `require`d in the last load: watched with the scripts.
     required: RefCell<Vec<PathBuf>>,
+    /// The packages lent to each plugin, and how many of their modules it
+    /// required: the load under way's, and the last successful one's
+    /// (`contributions`).
+    lent: RefCell<Lent>,
     /// The app's modules plugins replace (`ui.override`), by module name
     /// (`components/card` for `@app/components/card`): gathered as the
     /// plugins load, before the app, and read by the app's `require`.
@@ -1189,6 +1432,7 @@ impl ScriptHost {
             fetcher: Rc::default(),
             connector: Rc::default(),
             grants: RefCell::default(),
+            all_plugins: RefCell::default(),
             managed: RefCell::default(),
             exposed_actions: Rc::default(),
             exposed_shared: Rc::default(),
@@ -1244,6 +1488,7 @@ impl ScriptHost {
             error: runtime.signal(None),
             stamps: RefCell::default(),
             required: RefCell::default(),
+            lent: RefCell::default(),
             overrides: RefCell::default(),
             terms: Rc::default(),
             webs: Rc::default(),
@@ -1392,6 +1637,20 @@ impl ScriptHost {
                 error: hook.stats.error.borrow().clone(),
             })
             .collect();
+        reports.extend(
+            self.0
+                .lent
+                .borrow()
+                .published
+                .iter()
+                .map(|(plugin, package, modules)| ContributionReport {
+                    plugin: plugin.clone(),
+                    target: format!("@{package}"),
+                    place: "package",
+                    matches: *modules,
+                    error: None,
+                }),
+        );
         reports.extend(
             self.dropped_shortcuts()
                 .into_iter()
@@ -1656,6 +1915,13 @@ impl ScriptHost {
                 .or_default()
                 .push(capability)
         })
+    }
+    /// Let every plugin do `capability`: those loaded now and later, by
+    /// `plugins`, `plugin` or `set_plugins`, as if each were granted it.
+    /// An app lending its design system to all its plugins
+    /// (`Capability::Package("ds")`) grants it here once.
+    pub fn grant_all_plugins(self, capability: Capability) -> Self {
+        self.configure(|inner| inner.all_plugins.get_mut().push(capability))
     }
     /// The plugins the app loads, each with what it may do, from the next
     /// `reload` on (an app that asks its user what to allow loads a plugin
@@ -2302,6 +2568,7 @@ impl ScriptHost {
     /// Evaluates every script again and remounts the interface. State is kept.
     /// On failure the previous interface stays mounted and the error is shown.
     pub fn reload(&self) -> Result<(), String> {
+        self.0.lent.borrow_mut().pending.clear();
         self.0.commands.begin();
         self.0.windows.begin();
         let reports = self.0.error.version();
@@ -2321,6 +2588,10 @@ impl ScriptHost {
                 }
                 *self.0.current.borrow_mut() = Some(Rc::new(loaded));
                 self.0.commands.publish();
+                {
+                    let mut lent = self.0.lent.borrow_mut();
+                    lent.published = std::mem::take(&mut lent.pending);
+                }
                 let mut problems = self
                     .0
                     .current
@@ -2766,13 +3037,15 @@ impl ScriptHost {
 
     /// The app's packages (`package`), their folders canonical: plugins
     /// reach none.
-    fn packages(&self, plugin: bool) -> Vec<(String, PathBuf)> {
-        if plugin {
-            return Vec::new();
-        }
+    /// The packages a script requires from: all of them for the app's, the
+    /// ones lent to it (`Capability::Package`) for a plugin.
+    fn packages(&self, plugin: Option<&Grants>) -> Vec<(String, PathBuf)> {
         self.0
             .packages
             .iter()
+            .filter(|(name, _)| {
+                plugin.is_none_or(|grants| grants.allows(&Capability::Package(name.clone())))
+            })
             .map(|(name, dir)| {
                 let dir = normalize(dir);
                 (name.clone(), dir.canonicalize().unwrap_or(dir))
@@ -2793,8 +3066,12 @@ impl ScriptHost {
         lua: &Lua,
         dir: Option<PathBuf>,
         files: Files,
-        plugin: bool,
+        lent_to: Option<(&str, &Grants)>,
     ) -> mlua::Result<()> {
+        let plugin = lent_to.is_some();
+        let plugin_name: Option<String> = lent_to.map(|(name, _)| name.to_owned());
+        // Every package's name, to tell a plugin which one it wasn't lent.
+        let all_packages: Vec<String> = self.0.packages.iter().map(|(n, _)| n.clone()).collect();
         let host = Rc::downgrade(&self.0);
         let modules: Rc<RefCell<HashMap<PathBuf, Option<mlua::Value>>>> = Rc::default();
         let root = dir.map(|d| d.canonicalize().unwrap_or(d));
@@ -2814,7 +3091,14 @@ impl ScriptHost {
                 )));
             }
         }
-        let packages = self.packages(plugin);
+        let packages = self.packages(lent_to.map(|(_, grants)| grants));
+        if let Some(plugin) = &plugin_name {
+            self.0.lent.borrow_mut().pending.extend(
+                packages
+                    .iter()
+                    .map(|(package, _)| (plugin.clone(), package.clone(), 0)),
+            );
+        }
         for (name, dir) in &packages {
             if matches!(name.as_str(), "app" | "app-original" | "self") {
                 return Err(mlua::Error::runtime(format!(
@@ -2832,159 +3116,26 @@ impl ScriptHost {
                 )));
             }
         }
-        let require = lua.create_function(move |lua, name: String| {
-            let Some(root) = &root else {
-                return Err(mlua::Error::runtime(
-                    "require needs a script loaded from a file",
-                ));
-            };
-            let fail = |why: String| mlua::Error::runtime(format!("require(\"{name}\"): {why}"));
-            // The requiring file, from its chunk name (its path in the root).
-            let caller = lua
-                .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
-                .flatten()
-                .and_then(|s| s.strip_prefix('@').map(|rel| root.join(rel)));
-            let here = caller
-                .as_deref()
-                .and_then(std::path::Path::parent)
-                .unwrap_or(root)
-                .to_path_buf();
-            // `@app/…`: the app's module, or the module a plugin replaced it
-            // with (`ui.override`); `@app-original/…`: the app's own, for
-            // that replacement alone. Plugins reach neither.
-            let mut overridden = None;
-            let joined = if let Some(rest) = name
-                .strip_prefix("@app/")
-                .or_else(|| name.strip_prefix("@app-original/"))
-            {
-                if plugin {
-                    return Err(fail(
-                        "`@app/…` names the app's modules, which a plugin replaces with \
-                         ui.override, not requires"
-                            .into(),
-                    ));
-                }
-                let module = node::module_name(rest);
-                let replacement = host
-                    .upgrade()
-                    .and_then(|host| host.overrides.borrow().get(&module).cloned());
-                if name.starts_with("@app-original/") {
-                    // Only the module that replaced this one reaches it.
-                    let from_replacement = replacement
-                        .as_ref()
-                        .is_some_and(|r| caller.as_deref() == Some(r.with.as_path()));
-                    if !from_replacement {
-                        return Err(fail(
-                            "`@app-original/…` is for the module that overrides it alone".into(),
-                        ));
-                    }
-                    root.join(rest)
-                } else if let Some(replacement) = replacement {
-                    let with = replacement.with.clone();
-                    overridden = Some(replacement);
-                    with
-                } else {
-                    root.join(rest)
-                }
-            } else if let Some(rest) = name.strip_prefix("@self") {
-                here.join(rest.trim_start_matches('/'))
-            } else if let Some(rest) = name.strip_prefix('@') {
-                let (alias, rest) = rest.split_once('/').unwrap_or((rest, ""));
-                let base = aliases
-                    .get(alias)
-                    .or_else(|| {
-                        packages
-                            .iter()
-                            .find(|(name, _)| name == alias)
-                            .map(|(_, dir)| dir)
-                    })
-                    .ok_or_else(|| {
-                        fail(format!(
-                            "no alias `@{alias}` in .luaurc, nor a package of that name"
-                        ))
-                    })?;
-                base.join(rest)
-            } else if name.starts_with("./") || name.starts_with("../") {
-                // An `init.luau` is its directory as a module: its relative
-                // requires start beside that directory (as Luau's and
-                // luau-lsp's do); `@self` reaches inside it.
-                let is_init = caller
-                    .as_deref()
-                    .and_then(std::path::Path::file_stem)
-                    .is_some_and(|stem| stem == "init");
-                let base = if is_init {
-                    here.parent().unwrap_or(&here)
-                } else {
-                    &here
-                };
-                base.join(&name)
-            } else {
-                root.join(&name)
-            };
-            let mut path = normalize(&joined);
-            if files.is_dir(&path) {
-                path = path.join("init.luau");
-            } else if path.extension().is_none() {
-                path.set_extension("luau");
-            }
-            // A replacement and what it requires come from its plugin's
-            // directory; the app's from its own.
-            let replacements: Vec<node::ModuleOverride> = host
-                .upgrade()
-                .map(|host| host.overrides.borrow().values().cloned().collect())
-                .unwrap_or_default();
-            let in_plugin = replacements
-                .iter()
-                .find(|r| overridden.as_ref() == Some(*r) || within(&r.dir, &path));
-            if !within(root, &path)
-                && in_plugin.is_none()
-                && !packages.iter().any(|(_, dir)| within(dir, &path))
-            {
-                return Err(fail(
-                    "modules come from the script's directory or below, or a package \
-                     (ScriptHost::package, zgx.json's \"packages\")"
-                        .into(),
-                ));
-            }
-            // A plugin's files are on the disk, whatever the app's are.
-            let files = if in_plugin.is_some() && !within(root, &path) {
-                Files::Disk
-            } else {
-                files
-            };
-            match modules.borrow().get(&path) {
-                Some(Some(value)) => return Ok(value.clone()),
-                Some(None) => return Err(fail("a require cycle".into())),
-                None => {}
-            }
-            let code = files
-                .read(&path)
-                .map_err(|e| fail(format!("{}: {e}", path.display())))?;
-            if let Some(host) = host.upgrade() {
-                host.required.borrow_mut().push(path.clone());
-            }
-            modules.borrow_mut().insert(path.clone(), None);
-            // Named by its path in the root: errors show it, and its own
-            // requires resolve from it.
-            let chunk = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .into_owned();
-            let value = match files
-                .chunk(lua.load(code).set_name(format!("@{chunk}")))
-                .eval::<mlua::Value>()
-            {
-                Ok(mlua::Value::Nil) => mlua::Value::Boolean(true),
-                Ok(value) => value,
-                Err(e) => {
-                    modules.borrow_mut().remove(&path);
-                    return Err(e);
-                }
-            };
-            modules.borrow_mut().insert(path, Some(value.clone()));
-            Ok(value)
-        })?;
+        let state = Require {
+            host,
+            modules,
+            root,
+            aliases,
+            packages,
+            files,
+            plugin_name,
+            all_packages,
+        };
+        // Chosen once per VM: the app's resolver has none of lending's
+        // checks compiled in.
+        let require = match plugin {
+            false => lua.create_function(move |lua, name: String| {
+                require_module::<false>(&state, lua, name)
+            })?,
+            true => lua.create_function(move |lua, name: String| {
+                require_module::<true>(&state, lua, name)
+            })?,
+        };
         lua.globals().set("require", require)
     }
 
@@ -3003,14 +3154,15 @@ impl ScriptHost {
             (files, _) => files,
         };
         let grants = Rc::new(if plugin {
-            Grants::Only(
-                self.0
-                    .grants
-                    .borrow()
-                    .get(&name)
-                    .cloned()
-                    .unwrap_or_default(),
-            )
+            let mut granted = self
+                .0
+                .grants
+                .borrow()
+                .get(&name)
+                .cloned()
+                .unwrap_or_default();
+            granted.extend(self.0.all_plugins.borrow().iter().cloned());
+            Grants::Only(granted)
         } else {
             Grants::All
         });
@@ -3151,7 +3303,8 @@ impl ScriptHost {
                 io::install(lua, ui, platform, picked, clipboard, files_allowed)
             },
         );
-        let (dir, packages) = (script.dir(), self.packages(plugin));
+        // A plugin's lent packages' tokens too: a lent design system themes it.
+        let (dir, packages) = (script.dir(), self.packages(plugin.then_some(&*grants)));
         lazy.ui(&["prefers", "theme", "tokens"], move |lua, ui| {
             theme::install(lua, ui, dir, packages)
         });
@@ -3178,8 +3331,13 @@ impl ScriptHost {
             opens::install(lua, ui, opens, plugin)
         });
         lazy.global(&["anime"], |lua, _| anime::api::install(lua));
-        self.install_require(&lua, script.dir(), files, plugin)
-            .map_err(fail)?;
+        self.install_require(
+            &lua,
+            script.dir(),
+            files,
+            plugin.then_some((&*name, &*grants)),
+        )
+        .map_err(fail)?;
         lazy::attach(&lua, &ui, lazy).map_err(fail)?;
         ui.set_readonly(true);
         lua.sandbox(true).map_err(fail)?;

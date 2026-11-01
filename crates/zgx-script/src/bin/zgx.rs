@@ -81,6 +81,21 @@ fn types(args: Vec<String>) -> ExitCode {
             eprintln!("zgx types: {} is not an app's directory", dir.display());
             return ExitCode::from(2);
         }
+        match zgx_script::app_types::write_lent_aliases(&dir) {
+            Ok(added) if !added.is_empty() => {
+                let names: Vec<String> = added.iter().map(|n| format!("@{n}")).collect();
+                println!(
+                    "added {} to {} (lent to this plugin by the app's zgx.json)",
+                    names.join(", "),
+                    dir.join(".luaurc").display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("zgx types: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
         match zgx_script::app_types::write_types(&dir) {
             Ok(changed) => {
                 let file = zgx_script::app_types::types_file(&dir);
