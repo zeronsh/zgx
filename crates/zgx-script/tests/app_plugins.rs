@@ -121,6 +121,11 @@ fn a_grant_beyond_what_the_app_exposes_is_an_error_naming_it() {
             "plugin `focus`: unknown grant `camera`",
         ),
         (
+            CONFIG.replace("\"shared:tasks\"", "\"shared:tasks\", \"package:ds\""),
+            "plugin `focus` is allowed `package:ds`, which the app doesn't expose \
+             (add \"ds\" to packages)",
+        ),
+        (
             CONFIG.replace("plugins/focus", "plugins/missing"),
             "plugin `focus`:",
         ),

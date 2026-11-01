@@ -249,26 +249,31 @@ fn check_with(
         .filter(|(_, (_, code))| code.contains("\"@app/") || code.contains("\"@app-original/"))
         .filter_map(|(file, _)| app_root(file))
         .collect();
-    let mut groups: Vec<(Option<PathBuf>, bool, Vec<PathBuf>)> = Vec::new();
+    // Grouped too by the packages zgx.json gives them (`aliases_for`): a
+    // plugin's files see only those lent to it.
+    type Group = (Option<PathBuf>, bool, Vec<(String, PathBuf)>, Vec<PathBuf>);
+    let mut groups: Vec<Group> = Vec::new();
     for file in &files {
         let root = app_root(file).filter(|root| aliased.contains(root));
         let test = crate::test_runner::is_test(file);
+        let packages = crate::app_config::aliases_for(file);
         match groups
             .iter_mut()
-            .find(|(at, tests, _)| *at == root && *tests == test)
+            .find(|(at, tests, lent, _)| *at == root && *tests == test && *lent == packages)
         {
-            Some((_, _, group)) => group.push(file.clone()),
-            None => groups.push((root, test, vec![file.clone()])),
+            Some((.., group)) => group.push(file.clone()),
+            None => groups.push((root, test, packages, vec![file.clone()])),
         }
     }
     let test_definitions = dir.join("zgx-test.d.luau");
-    if groups.iter().any(|(_, test, _)| *test) {
+    if groups.iter().any(|(_, test, ..)| *test) {
         std::fs::write(&test_definitions, crate::test_runner::DEFINITIONS)
             .map_err(CheckError::Io)?;
     }
     let analyze = |files: &[PathBuf],
                    app: Option<&Path>,
                    tests: bool,
+                   packages: &[(String, PathBuf)],
                    at: usize|
      -> Result<Option<String>, CheckError> {
         let mut command = Command::new(&lsp);
@@ -285,13 +290,19 @@ fn check_with(
         if options.strict {
             base.insert("languageMode".into(), "strict".into());
         }
+        let mut aliases = serde_json::Map::new();
         if let Some(app) = app {
             let app = app.canonicalize().unwrap_or_else(|_| app.to_path_buf());
             let app = serde_json::Value::from(app.to_string_lossy().into_owned());
-            base.insert(
-                "aliases".into(),
-                serde_json::json!({ "app": app, "app-original": app }),
-            );
+            aliases.insert("app".into(), app.clone());
+            aliases.insert("app-original".into(), app);
+        }
+        // The packages zgx.json gives: a plugin's, those lent to it.
+        for (name, folder) in packages {
+            aliases.insert(name.clone(), folder.to_string_lossy().into_owned().into());
+        }
+        if !aliases.is_empty() {
+            base.insert("aliases".into(), aliases.into());
         }
         if !base.is_empty() {
             let file = dir.join(format!("base-{at}.luaurc"));
@@ -309,8 +320,8 @@ fn check_with(
         )))
     };
     let mut text = String::new();
-    for (at, (root, tests, group)) in groups.iter().enumerate() {
-        let Some(found) = analyze(group, root.as_deref(), *tests, at)? else {
+    for (at, (root, tests, packages, group)) in groups.iter().enumerate() {
+        let Some(found) = analyze(group, root.as_deref(), *tests, packages, at)? else {
             return Ok(None);
         };
         text.push_str(&found);

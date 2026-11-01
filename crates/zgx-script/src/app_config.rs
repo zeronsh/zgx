@@ -208,6 +208,12 @@ pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, S
                         }
                         action_capability(action)
                     }
+                    Some(("package", package)) => {
+                        if !app.packages.iter().any(|(p, _)| p == package) {
+                            return beyond(&format!("\"{package}\""), "packages");
+                        }
+                        Capability::Package(package.to_owned())
+                    }
                     Some(("override", target)) => {
                         if !overridable.iter().any(|t| t == target || t == "*") {
                             return beyond(&format!("\"{target}\": \"override\""), "expose.hooks");
@@ -225,8 +231,8 @@ pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, S
                         _ => {
                             return Err(format!(
                                 "plugin `{name}`: unknown grant `{grant}` (shared:<key>, \
-                                 action:<name>, override:<target>, fetch, clipboard, files, \
-                                 terminals, web or windows)"
+                                 action:<name>, override:<target>, package:<name>, fetch, \
+                                 clipboard, files, terminals, web or windows)"
                             ));
                         }
                     },
@@ -249,6 +255,77 @@ fn shared_capability(key: &str) -> Capability {
 /// What a plugin needs to call exposed action `name`.
 fn action_capability(name: &str) -> Capability {
     Capability::Named(format!("action:{name}"))
+}
+
+/// The package aliases `file` may require, from the `zgx.json` nearest
+/// above it: a plugin's file, those lent to it (`package:<name>`); the
+/// app's, every package. For tooling (`zgx check`, `zgx types`) to resolve
+/// `@name/…` as zgx does. Empty with no `zgx.json`, or one that doesn't
+/// read.
+pub fn aliases_for(file: &Path) -> Vec<(String, PathBuf)> {
+    let Some(dir) = file
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.join("zgx.json").is_file())
+    else {
+        return Vec::new();
+    };
+    let Ok(app) = read(dir) else {
+        return Vec::new();
+    };
+    let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    // A plugin's files: its folder's (an `init.luau`), or the file alone.
+    let owner = app.plugins.iter().find(|plugin| {
+        let entry = plugin
+            .entry
+            .canonicalize()
+            .unwrap_or_else(|_| plugin.entry.clone());
+        match entry.file_stem().is_some_and(|stem| stem == "init") {
+            true => entry.parent().is_some_and(|dir| file.starts_with(dir)),
+            false => entry == file,
+        }
+    });
+    app.packages
+        .iter()
+        .filter(|(name, _)| {
+            owner.is_none_or(|plugin| plugin.grants.contains(&Capability::Package(name.clone())))
+        })
+        .map(|(name, folder)| {
+            (
+                name.clone(),
+                folder.canonicalize().unwrap_or_else(|_| folder.clone()),
+            )
+        })
+        .collect()
+}
+
+/// The packages lent to the plugin whose folder is `dir` (one with an
+/// `init.luau`), by the `zgx.json` nearest above it: none if `dir` is no
+/// plugin's folder there.
+pub fn lent_to_folder(dir: &Path) -> Option<Vec<(String, PathBuf)>> {
+    let dir = dir.canonicalize().ok()?;
+    let config = dir
+        .ancestors()
+        .skip(1)
+        .find(|d| d.join("zgx.json").is_file())?;
+    let app = read(config).ok()?;
+    let entry = dir.join("init.luau");
+    let plugin = app
+        .plugins
+        .iter()
+        .find(|p| p.entry.canonicalize().is_ok_and(|e| e == entry))?;
+    Some(
+        app.packages
+            .iter()
+            .filter(|(name, _)| plugin.grants.contains(&Capability::Package(name.clone())))
+            .map(|(name, folder)| {
+                (
+                    name.clone(),
+                    folder.canonicalize().unwrap_or_else(|_| folder.clone()),
+                )
+            })
+            .collect(),
+    )
 }
 
 impl AppHost {

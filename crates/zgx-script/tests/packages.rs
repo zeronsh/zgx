@@ -109,7 +109,7 @@ fn a_package_reaches_nothing_outside_its_folder() {
     }
 }
 
-/// Packages are the app's: a plugin requires none.
+/// Packages are the app's: a plugin requires none it isn't lent.
 #[test]
 fn plugins_do_not_reach_the_apps_packages() {
     let kit = kit("plugin");
@@ -129,7 +129,10 @@ fn plugins_do_not_reach_the_apps_packages() {
     });
     h.ui.prepare_frame();
     let error = h.error().unwrap_or_default();
-    assert!(error.contains("nor a package of that name"), "{error}");
+    assert!(
+        error.contains("package `@kit` isn't lent to plugin `reach`"),
+        "{error}"
+    );
     assert_eq!(h.text("t"), "Hi");
 }
 
