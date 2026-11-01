@@ -252,6 +252,17 @@ impl Edit {
         }
     }
 }
+/// What a value bound to an editor reads of its changes.
+#[derive(Default)]
+struct Bound {
+    /// Its last change (every change of its text sets it, as it moves
+    /// `revision`): where, and the lengths replaced and put there
+    /// (`edit_after`).
+    last_edit: (usize, usize, usize),
+    /// The bound value's version and the editor's revision when the two
+    /// last held the same text (`bound`).
+    bound: Option<(u64, u64)>,
+}
 /// A plain-text editing model: the text, its selection, IME preedit
 /// and a bounded undo history.
 pub struct TextEditor {
@@ -261,6 +272,9 @@ pub struct TextEditor {
     composition_cancel_revision: u64,
     /// How many times its text changed (`revision`).
     revision: u64,
+    /// What a value bound to it reads of its changes (`Bound`): made at its
+    /// first change, a pointer until then (most editors never change).
+    sync: Option<Box<Bound>>,
     /// `load_next`: the next text it is given leaves nothing to undo.
     loading: bool,
     /// `answer_next`: the next text it is given joins the last step.
@@ -308,6 +322,7 @@ impl TextEditor {
             preedit: None,
             composition_cancel_revision: 0,
             revision: 0,
+            sync: None,
             loading: false,
             answering: false,
             undone: false,
@@ -370,6 +385,26 @@ impl TextEditor {
     /// is the same text, without comparing it (a long document's).
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+    /// The one change made since `revision`, if it made exactly one: where,
+    /// the length it replaced and the length it put there.
+    pub(crate) fn edit_after(&self, revision: u64) -> Option<(usize, usize, usize)> {
+        let sync = self.sync.as_ref()?;
+        (revision.wrapping_add(1) == self.revision).then_some(sync.last_edit)
+    }
+    /// The version of the value bound to it and its own revision when the
+    /// two last held the same text, if known.
+    pub(crate) fn bound(&self) -> Option<(u64, u64)> {
+        self.sync.as_ref()?.bound
+    }
+    /// Says the value bound to it at `version` holds its text at its
+    /// `revision`: kept once it has changed (`Bound`), so a value that only
+    /// ever gave it text pays nothing (its first edit copies the value
+    /// whole, as before).
+    pub(crate) fn set_bound(&mut self, version: u64, revision: u64) {
+        if let Some(sync) = &mut self.sync {
+            sync.bound = Some((version, revision));
+        }
     }
     /// The selection.
     pub fn selection(&self) -> Selection {
@@ -470,6 +505,7 @@ impl TextEditor {
         self.redo_bytes = 0;
         self.text.replace_range(range.clone(), value);
         self.revision = self.revision.wrapping_add(1);
+        self.sync.get_or_insert_default().last_edit = (range.start, range.len(), value.len());
         // Insertion can join an adjacent combining mark/ZWJ sequence. Keep the caret valid.
         let desired = range.start + value.len();
         let end = if desired == self.text.len() {
@@ -634,6 +670,7 @@ impl TextEditor {
             _ => self.text.replace_range(prefix..old_end, &inserted),
         }
         self.revision = self.revision.wrapping_add(1);
+        self.sync.get_or_insert_default().last_edit = (prefix, old_end - prefix, new_end - prefix);
         self.selection = Selection {
             anchor: self.text.len(),
             focus: self.text.len(),
@@ -1240,6 +1277,8 @@ impl TextEditor {
         self.text
             .replace_range(edit.start..edit.start + edit.inserted.len(), &edit.deleted);
         self.revision = self.revision.wrapping_add(1);
+        self.sync.get_or_insert_default().last_edit =
+            (edit.start, edit.inserted.len(), edit.deleted.len());
         self.selection = edit.before;
         self.cancel_preedit();
         let bytes = edit.deleted.len() + edit.inserted.len();
@@ -1265,6 +1304,8 @@ impl TextEditor {
         self.text
             .replace_range(edit.start..edit.start + edit.deleted.len(), &edit.inserted);
         self.revision = self.revision.wrapping_add(1);
+        self.sync.get_or_insert_default().last_edit =
+            (edit.start, edit.deleted.len(), edit.inserted.len());
         self.selection = edit.after;
         self.cancel_preedit();
         let bytes = edit.deleted.len() + edit.inserted.len();

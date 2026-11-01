@@ -516,3 +516,116 @@ fn a_long_editor_takes_a_character_straddling_a_chunk_cut() {
         assert_eq!(editor.text(), text, "{wide}");
     }
 }
+
+/// A short bound text stays the editor's through every kind of edit, the
+/// app's own values between them taken as before; a keystroke after the
+/// first goes into the bound string where it is, not as a new copy of it.
+#[test]
+fn a_short_bound_text_takes_each_edit_in_place() {
+    let mut ui = Ui::new(500., 400.);
+    let mut start = String::with_capacity(4096);
+    start.push_str("hello");
+    let value = ui.signal(start);
+    let flat = ui.signal(TextValue::Flat(String::from("one")));
+    let mounted = ui.mount(
+        column().children([
+            text_area("Notes", value.clone())
+                .id("notes")
+                .size(300., 120.),
+            text_area_value("Flat", flat.clone())
+                .id("flat")
+                .size(300., 120.),
+        ]),
+    );
+    let key = |ui: &mut Ui, key: Key| {
+        ui.dispatch(InputEvent::KeyDown {
+            key,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    };
+    assert!(
+        ui.input
+            .focus(&ui.scene, Some(mounted.find("notes").unwrap()))
+    );
+    let editor = ui.focused_editor().unwrap();
+    let same = |editor: &EditorHandle| value.get() == editor.editor.borrow().text();
+    ui.dispatch(InputEvent::Text("!".into()));
+    assert_eq!(value.get(), "hello!");
+    // Room to type into, the value unchanged (no write, no new version).
+    value.mutate(|v| {
+        v.reserve(4096);
+        false
+    });
+    let at = value.with_untracked(|v| v.as_ptr());
+    ui.dispatch(InputEvent::Text("?".into()));
+    assert_eq!(value.get(), "hello!?");
+    assert_eq!(value.with_untracked(|v| v.as_ptr()), at, "typed in place");
+    editor.editor.borrow_mut().set_selection(0, 0);
+    ui.dispatch(InputEvent::Text("¡".into()));
+    let end = editor.editor.borrow().len();
+    editor.editor.borrow_mut().set_selection(end, end);
+    key(&mut ui, Key::Backspace);
+    assert_eq!(value.get(), "¡hello!");
+    assert!(same(&editor));
+    // The app's value between keys is taken, and the next key edits it.
+    value.set(String::from("from the app"));
+    assert!(same(&editor));
+    ui.dispatch(InputEvent::Text("\nsecond".into()));
+    assert_eq!(value.get(), "from the app\nsecond");
+    // A value not in canonical form is made so, then typed into.
+    value.set(String::from("a\r\nb"));
+    assert_eq!(editor.editor.borrow().text(), "a\nb");
+    assert_eq!(value.get(), "a\nb");
+    ui.dispatch(InputEvent::Text("c".into()));
+    assert_eq!(value.get(), "a\nbc");
+    assert!(editor.undo() && same(&editor));
+    assert!(editor.redo() && same(&editor));
+    editor.paste(" pasted");
+    ui.dispatch(InputEvent::ImePreedit {
+        text: "日本".into(),
+        cursor: Some((6, 6)),
+    });
+    assert_eq!(value.get(), "a\nbc pasted", "preedit leaves it");
+    ui.dispatch(InputEvent::ImeCommit("日本".into()));
+    assert_eq!(value.get(), "a\nbc pasted日本");
+    assert!(same(&editor));
+    // A flat text value, the same.
+    assert!(
+        ui.input
+            .focus(&ui.scene, Some(mounted.find("flat").unwrap()))
+    );
+    let editor = ui.focused_editor().unwrap();
+    ui.dispatch(InputEvent::Text("s".into()));
+    editor.editor.borrow_mut().set_selection(0, 0);
+    ui.dispatch(InputEvent::Text("<".into()));
+    assert!(flat.with_untracked(|v| *v == *"<ones"));
+    assert!(editor.undo());
+    assert!(flat.with_untracked(|v| *v == *"ones"));
+    mounted.unmount();
+}
+
+/// A long bound document holding carriage returns is still made canonical,
+/// as is one with line breaks bound to a single line.
+#[test]
+fn a_long_document_with_returns_is_made_canonical() {
+    let mut ui = Ui::new(500., 400.);
+    let document: String = (0..10_000).map(|i| format!("line {i}\r\n")).collect();
+    let value = ui.signal(TextValue::from(document.as_str()));
+    let mounted = ui.mount(text_area_value("Document", value.clone()).size(300., 180.));
+    assert!(ui.input.focus(&ui.scene, Some(mounted.node())));
+    let editor = ui.focused_editor().unwrap();
+    assert_eq!(
+        editor.editor.borrow().text(),
+        document.replace("\r\n", "\n")
+    );
+    assert!(value.with_untracked(|v| !v.to_cow().contains('\r')));
+    mounted.unmount();
+    let line: String = (0..10_000).map(|i| format!("word {i}\n")).collect();
+    let value = ui.signal(TextValue::from(line.as_str()));
+    let mounted = ui.mount(text_input_value("Line", value.clone()));
+    assert!(ui.input.focus(&ui.scene, Some(mounted.node())));
+    let editor = ui.focused_editor().unwrap();
+    assert!(!editor.editor.borrow().text().contains('\n'));
+    mounted.unmount();
+}

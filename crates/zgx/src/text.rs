@@ -36,6 +36,10 @@ struct Chunks {
     /// Before each chunk, and one past the last: its bytes and line breaks.
     bytes: Vec<usize>,
     breaks: Vec<usize>,
+    /// How many carriage returns it holds, so whether a text has any is
+    /// known without reading it (`Text::has_returns`): counted where it is
+    /// made, and in the chunks an edit makes again.
+    returns: usize,
 }
 impl Chunks {
     /// The sums of what comes before each chunk, from `from` on.
@@ -90,6 +94,7 @@ impl Text {
     pub fn new(text: &str) -> Self {
         let mut chunks = Chunks {
             chunks: cut(text),
+            returns: text.matches('\r').count(),
             ..Default::default()
         };
         chunks.sum(0);
@@ -102,6 +107,10 @@ impl Text {
     /// Whether it is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+    /// Whether it holds a carriage return, without reading it.
+    pub fn has_returns(&self) -> bool {
+        self.0.returns > 0
     }
     /// How many lines it has (one more than its line breaks).
     pub fn line_count(&self) -> usize {
@@ -295,6 +304,12 @@ impl Text {
         } else {
             vec![Chunk::new(&joined)]
         };
+        let returns = |chunk: &Chunk| chunk.text.matches('\r').count();
+        chunks.returns -= chunks.chunks[first..=last]
+            .iter()
+            .map(returns)
+            .sum::<usize>();
+        chunks.returns += made.iter().map(returns).sum::<usize>();
         chunks.chunks.splice(first..=last, made);
         // An empty chunk goes, unless it is the only one.
         if chunks.chunks.len() > 1 {
@@ -748,5 +763,23 @@ mod tests {
         assert!(TextValue::from("short").as_text().is_none());
         assert!(value.ptr_eq(&value.clone()) && !value.ptr_eq(&TextValue::from(plain.as_str())));
         assert_eq!(value.to_string(), plain);
+    }
+
+    /// Whether a text holds a carriage return follows its edits, wherever
+    /// they cut its chunks, without reading it.
+    #[test]
+    fn a_text_knows_whether_it_holds_a_carriage_return() {
+        let plain = "line of text\n".repeat(4 * CHUNK / 13);
+        let mut text = Text::new(&plain);
+        assert!(!text.has_returns());
+        let at = 2 * CHUNK + 7;
+        text.replace_range(at..at, "\r");
+        assert!(text.has_returns());
+        text.replace_range(0..0, &"x".repeat(CHUNK));
+        assert!(text.has_returns(), "the chunk holding it cut again");
+        let at = text.to_cow().find('\r').unwrap();
+        text.replace_range(at..at + 1, "");
+        assert!(!text.has_returns());
+        assert!(Text::new("a\r\nb").has_returns() && !Text::new("").has_returns());
     }
 }
