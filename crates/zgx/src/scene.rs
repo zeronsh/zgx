@@ -10570,8 +10570,18 @@ impl Scene {
     ) -> Vec<PaintItem<'_>> {
         match self.plain_walks() {
             true => self.layer_items_walk::<false, false>(root, damage, &mut Vec::new(), None),
-            false => self.layer_items_walk::<true, false>(root, damage, &mut Vec::new(), None),
+            false => self.layer_items_exceptional(root, damage),
         }
+    }
+    /// `layer_items_within`'s walk with popups or a paint order, out of
+    /// line: inlined beside the plain walk, it changes that walk's code.
+    #[inline(never)]
+    fn layer_items_exceptional(
+        &self,
+        root: Option<NodeId>,
+        damage: Option<&[Rect]>,
+    ) -> Vec<PaintItem<'_>> {
+        self.layer_items_walk::<true, false>(root, damage, &mut Vec::new(), None)
     }
     /// The window's paint items (as [`Scene::layer_items`] with `None`), and
     /// into `inherited` what each took from its ancestors, for
