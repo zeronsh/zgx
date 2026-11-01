@@ -201,6 +201,9 @@ impl LayoutRun<'_> {
 #[derive(Debug)]
 pub struct LayoutRunIter<'b> {
     lines: &'b [BufferLine],
+    /// zgx patch: a paragraph laid out outside a buffer line, in place of
+    /// `lines` (`from_paragraph`).
+    paragraph: Option<(&'b str, &'b [LayoutLine])>,
     height_opt: Option<f32>,
     line_height: f32,
     scroll: f32,
@@ -230,6 +233,7 @@ impl<'b> LayoutRunIter<'b> {
     ) -> Self {
         Self {
             lines,
+            paragraph: None,
             height_opt,
             line_height,
             scroll,
@@ -239,46 +243,85 @@ impl<'b> LayoutRunIter<'b> {
             line_top: 0.0,
         }
     }
+
+    /// zgx patch: the visual lines of one left-to-right paragraph, `text`,
+    /// laid out outside a buffer line (zgx's plain text from its words), as
+    /// `from_lines` gives a buffer line's.
+    pub const fn from_paragraph(
+        text: &'b str,
+        layout: &'b [LayoutLine],
+        height_opt: Option<f32>,
+        line_height: f32,
+    ) -> Self {
+        Self {
+            lines: &[],
+            paragraph: Some((text, layout)),
+            height_opt,
+            line_height,
+            scroll: 0.0,
+            line_i: 0,
+            layout_i: 0,
+            total_height: 0.0,
+            line_top: 0.0,
+        }
+    }
+
+    /// The next of `layout`'s visual lines that shows, of buffer line
+    /// `text` (`next`).
+    fn next_in(
+        &mut self,
+        text: &'b str,
+        rtl: bool,
+        layout: &'b [LayoutLine],
+    ) -> Option<Option<LayoutRun<'b>>> {
+        while let Some(layout_line) = layout.get(self.layout_i) {
+            self.layout_i += 1;
+
+            let line_height = layout_line.line_height_opt.unwrap_or(self.line_height);
+            self.total_height += line_height;
+
+            let line_top = self.line_top - self.scroll;
+            let glyph_height = layout_line.max_ascent + layout_line.max_descent;
+            let centering_offset = (line_height - glyph_height) / 2.0;
+            let line_y = line_top + centering_offset + layout_line.max_ascent;
+            if let Some(height) = self.height_opt {
+                if line_y - layout_line.max_ascent > height {
+                    return Some(None);
+                }
+            }
+            self.line_top += line_height;
+            if line_y + layout_line.max_descent < 0.0 {
+                continue;
+            }
+
+            return Some(Some(LayoutRun {
+                line_i: self.line_i,
+                text,
+                rtl,
+                glyphs: &layout_line.glyphs,
+                decorations: &layout_line.decorations,
+                line_y,
+                line_top,
+                line_height,
+                line_w: layout_line.w,
+            }));
+        }
+        None
+    }
 }
 
 impl<'b> Iterator for LayoutRunIter<'b> {
     type Item = LayoutRun<'b>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some((text, layout)) = self.paragraph {
+            return self.next_in(text, false, layout).flatten();
+        }
         while let Some(line) = self.lines.get(self.line_i) {
             let shape = line.shape_opt()?;
             let layout = line.layout_opt()?;
-            while let Some(layout_line) = layout.get(self.layout_i) {
-                self.layout_i += 1;
-
-                let line_height = layout_line.line_height_opt.unwrap_or(self.line_height);
-                self.total_height += line_height;
-
-                let line_top = self.line_top - self.scroll;
-                let glyph_height = layout_line.max_ascent + layout_line.max_descent;
-                let centering_offset = (line_height - glyph_height) / 2.0;
-                let line_y = line_top + centering_offset + layout_line.max_ascent;
-                if let Some(height) = self.height_opt {
-                    if line_y - layout_line.max_ascent > height {
-                        return None;
-                    }
-                }
-                self.line_top += line_height;
-                if line_y + layout_line.max_descent < 0.0 {
-                    continue;
-                }
-
-                return Some(LayoutRun {
-                    line_i: self.line_i,
-                    text: line.text(),
-                    rtl: shape.rtl,
-                    glyphs: &layout_line.glyphs,
-                    decorations: &layout_line.decorations,
-                    line_y,
-                    line_top,
-                    line_height,
-                    line_w: layout_line.w,
-                });
+            if let Some(found) = self.next_in(line.text(), shape.rtl, layout) {
+                return found;
             }
             self.line_i += 1;
             self.layout_i = 0;

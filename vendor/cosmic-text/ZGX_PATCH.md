@@ -297,3 +297,36 @@ fonts if no PingFang face is loaded (another macOS has it in
 in case the file moves. zgx-gpu's
 `chinese_text_on_macos_takes_the_systems_chinese_face_in_each_chinese`
 checks both.
+
+## A paragraph's words for a layout outside a line (zgx-cosmic-text 0.19.8)
+
+zgx-gpu lays out a paragraph that this crate shapes as one left-to-right span
+from its words, kept and shared between texts, without a `BufferLine`, a
+`ShapeLine` or `layout_to_buffer` (zgx-gpu's `prepared_words.rs`). What it
+needs of this crate, all additions:
+
+- `plain_words(line, word)`: the line's words and blanks as
+  `ShapeSpan::build` finds them (the same `unicode_linebreak` breaks and
+  blank split), or false for a line `build` treats otherwise: a tab, a soft
+  hyphen, a line `classify` finds may need the bidi analysis or a language
+  hint, a break between two ASCII punctuation marks (the ligature probe).
+  It is `plain_line` (the bytes alone, one pass stopping at the first that
+  disqualifies, as most text that doesn't qualify is turned away: a line
+  break) then `line_words`.
+- `ShapeWord::plain(font_system, word, attrs_list, blank)`: a word shaped
+  alone, as the shape-run cache already shapes runs. It resets
+  `shape_buffer.run_key_line` first, as `build_spans` does: the run key keeps
+  the last attribute list's address, and a list since freed or moved could
+  share it, its attributes another's (a run shaped at another size).
+- `ShapeGlyph::laid`: `layout` for a left-to-right glyph placed outside.
+- `line_han(font_system, line)`: the language a line's kana or hangul say
+  its Han characters are in, as `build_hinted` takes it, for text measured
+  apart from its line: zgx-gpu's min-content copy of a line (a word to a
+  line, a word of kanji alone) takes it as `FontFeatures::HAN`.
+- `LayoutRunIter::from_paragraph(text, layout, height_opt, line_height)`: the
+  runs of such a paragraph's `LayoutLine`s, as `from_lines` gives a buffer
+  line's (`next` shares their walk, `next_in`).
+
+zgx-gpu's `plain_text_from_its_words_lays_out_as_its_line` and
+`rich_paragraphs_from_their_words_lay_out_as_their_line` check that its
+glyphs, runs and sizes are this crate's, bit for bit, at every width.
