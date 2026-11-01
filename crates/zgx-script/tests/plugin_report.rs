@@ -119,23 +119,38 @@ ui.command { id = "reopen", title = "Reopen", key = "cmd+o", run = function() en
         ],
         "the app's key stays its own, spelled differently or not"
     );
+    let dropped: Vec<_> = h
+        .host
+        .dropped_shortcuts()
+        .into_iter()
+        .map(|d| (d.plugin, d.command, d.key, d.reason, d.holder))
+        .collect();
+    let row = |a: &str, b: &str, c: &str, d: &str, e: &str| {
+        (
+            a.to_string(),
+            b.to_string(),
+            c.to_string(),
+            d.to_string(),
+            e.to_string(),
+        )
+    };
     assert_eq!(
-        h.host.dropped_shortcuts(),
+        dropped,
         vec![
-            zgx_script::DroppedShortcut {
-                plugin: "marks".into(),
-                command: "marks/copy".into(),
-                key: "Shift+Cmd+C".into(),
-                reason: "taken by the app".into(),
-                holder: "edit.copy".into(),
-            },
-            zgx_script::DroppedShortcut {
-                plugin: "marks".into(),
-                command: "marks/reopen".into(),
-                key: "cmd+o".into(),
-                reason: "taken by the plugin `marks`".into(),
-                holder: "marks/open".into(),
-            },
+            row(
+                "marks",
+                "marks/copy",
+                "Shift+Cmd+C",
+                "taken by the app",
+                "edit.copy"
+            ),
+            row(
+                "marks",
+                "marks/reopen",
+                "cmd+o",
+                "taken by the plugin `marks`",
+                "marks/open"
+            ),
         ]
     );
     let shortcuts: Vec<_> = h

@@ -38,7 +38,8 @@ pub struct Command {
 /// before it holds the same one (`Shift+Cmd+D` is `cmd+shift+d`), as
 /// `ScriptHost::dropped_shortcuts` reports it: the command stays, without
 /// the key, so the app can tell the plugin's author why.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct DroppedShortcut {
     /// The plugin whose command lost the key.
     pub plugin: String,

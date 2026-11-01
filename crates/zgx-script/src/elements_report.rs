@@ -12,7 +12,8 @@ use zgx::{compose::ViewHandle, scene::NodeId, widgets::Ui};
 use crate::{node::Node, value::Value};
 
 /// The app's elements, by the context they read (`ScriptHost::elements`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct ElementsReport {
     /// Whether the mounted interface is in it: kept only while plugins are
     /// loaded (otherwise it costs the app nothing, and lists the source).
@@ -23,7 +24,8 @@ pub struct ElementsReport {
 
 /// An element that provides context (`provide`), and what is inside it down
 /// to the next.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct ElementGroup {
     /// A selector that reaches it: its id, else its classes inside the
     /// nearest element with an id (`#sidebar >> .session-row`). Empty when
@@ -42,7 +44,8 @@ pub struct ElementGroup {
 }
 
 /// A named element: its id, classes and hook.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct ListedElement {
     /// Its id.
     pub id: Option<String>,

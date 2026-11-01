@@ -44,14 +44,13 @@ return ui.row {
 "##;
 
 fn named(id: Option<&str>, classes: &[&str], mounted: bool, count: usize) -> ListedElement {
-    ListedElement {
-        id: id.map(str::to_owned),
-        classes: classes.iter().map(|c| c.to_string()).collect(),
-        hook: None,
-        private: false,
-        mounted,
-        count,
-    }
+    // Non-exhaustive: built from its default, as a host outside zgx would.
+    let mut element = ListedElement::default();
+    element.id = id.map(str::to_owned);
+    element.classes = classes.iter().map(|c| c.to_string()).collect();
+    element.mounted = mounted;
+    element.count = count;
+    element
 }
 
 #[test]
@@ -73,9 +72,10 @@ fn elements_are_grouped_by_the_context_they_read() {
             .contains(&named(Some("sidebar"), &[], true, 1))
     );
     assert!(
-        root.elements.contains(&ListedElement {
-            private: true,
-            ..named(Some("vault"), &[], true, 1)
+        root.elements.contains(&{
+            let mut vault = named(Some("vault"), &[], true, 1);
+            vault.private = true;
+            vault
         }),
         "private, and nothing inside it: {:?}",
         root.elements
