@@ -1940,13 +1940,7 @@ fn hook_contribution(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<H
     })?;
     let needs = match place {
         Place::Replace => overrides(env, &written),
-        Place::Before | Place::After => env
-            .exposed_hooks
-            .borrow()
-            .get(&written)
-            .cloned()
-            .flatten()
-            .filter(|needed| !env.grants.allows(needed)),
+        Place::Before | Place::After => contribution_needs(env, &written),
     };
     if let Some(needed) = needs {
         return Err(mlua::Error::runtime(format!(
@@ -1959,6 +1953,18 @@ fn hook_contribution(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<H
         owner,
         vm: env.vm.clone(),
     })
+}
+/// The capability adding at `exposed` (a target as written, or `slot:name`)
+/// takes, if the script lacks it: what the host asked of it (`expose_hook`),
+/// else of every contribution (`require_contribution_capability`, kept as
+/// `"*"`), else none.
+fn contribution_needs(env: &Env, exposed: &str) -> Option<crate::Capability> {
+    let hooks = env.exposed_hooks.borrow();
+    let asked = match hooks.get(exposed) {
+        Some(asked) => asked.clone(),
+        None => hooks.get("*").cloned().flatten(),
+    };
+    asked.filter(|needed| !env.grants.allows(needed))
 }
 /// The capability replacing or filtering `written` takes, if the script
 /// lacks it: `Override` of the target as written, or of `"*"`.
@@ -4210,6 +4216,11 @@ pub(crate) fn install_plugins(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                 (mlua::Value::String(slot), Some(node)) => {
                     let node = expect_node(node, "a contribution")?;
                     let slot = slot.to_str()?.to_string();
+                    if let Some(needed) = contribution_needs(&env, &format!("slot:{slot}")) {
+                        return Err(mlua::Error::runtime(format!(
+                            "ui.contribute(\"{slot}\", …): {owner} needs {needed:?}"
+                        )));
+                    }
                     env.contributions.borrow_mut().push((slot, owner, node));
                 }
                 (mlua::Value::Table(table), None) => {

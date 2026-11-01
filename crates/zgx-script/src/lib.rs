@@ -1598,6 +1598,17 @@ impl ScriptHost {
             .borrow_mut()
             .insert(target.into(), capability);
     }
+    /// Ask `capability` of every plugin contribution the host hasn't named
+    /// with [`expose_hook`](Self::expose_hook): adding into a slot
+    /// (`ui.contribute(name, node)`, named `"slot:name"` there) or before or
+    /// after an element, by `#id` or a hook. Without this they are open, as
+    /// a slot is; `expose_hook(target, None)` opens one again.
+    pub fn require_contribution_capability(&self, capability: Capability) {
+        self.0
+            .exposed_hooks
+            .borrow_mut()
+            .insert("*".into(), Some(capability));
+    }
     /// State shared by the application and every script (`ui.shared`). Rust
     /// can publish model data here and observe what scripts write.
     /// Its `set` keeps the parts of the value that did not change (see

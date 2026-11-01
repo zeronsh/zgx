@@ -272,3 +272,56 @@ ui.filter { target = "#mode-a", text = function(t) return t .. "!" end }
         h.texts()
     );
 }
+
+/// A host can lock contributions down: with
+/// `require_contribution_capability`, adding into a slot or beside an
+/// element takes that capability, unless the host opens the one it names
+/// (`expose_hook(target, None)`).
+#[test]
+fn the_host_can_ask_a_capability_of_every_contribution() {
+    const SLOTTED: &str = r##"
+return ui.column {
+    ui.slot("sidebar"),
+    ui.button { id = "open", w = 60, h = 24, "Open" },
+    ui.button { id = "help", w = 60, h = 24, "Help" },
+}
+"##;
+    const ADDS: &str = r##"
+ui.contribute("sidebar", ui.text { "In the sidebar" })
+ui.contribute { target = "#open", after = ui.text { "By open" } }
+"##;
+    const OPEN_ONLY: &str =
+        r##"ui.contribute { target = "#help", after = ui.text { "By help" } }"##;
+    let locked = |code: &'static str, grants: Vec<Capability>| {
+        let entry = plugin(&format!("locked-{}", grants.len()), code);
+        Harness::new(move |runtime| {
+            let host = ScriptHost::inline(runtime, "app", SLOTTED);
+            host.require_contribution_capability(Capability::Named("contribute".into()));
+            host.expose_hook("#help", None);
+            host.set_plugins(vec![Plugin {
+                name: "locked".into(),
+                entry,
+                grants,
+            }]);
+            host
+        })
+    };
+    // Without the grant: the slot refuses it, saying what it needs.
+    let mut h = locked(ADDS, vec![]);
+    let error = h.error().unwrap_or_default();
+    assert!(
+        error.contains("sidebar") && error.contains("contribute"),
+        "{error}"
+    );
+    assert!(!h.texts().contains(&"In the sidebar".to_string()));
+    // Granted: both land.
+    let mut h = locked(ADDS, vec![Capability::Named("contribute".into())]);
+    assert_eq!(h.error(), None);
+    let texts = h.texts();
+    assert!(texts.contains(&"In the sidebar".to_string()), "{texts:?}");
+    assert!(texts.contains(&"By open".to_string()), "{texts:?}");
+    // A target the host opened takes none.
+    let mut h = locked(OPEN_ONLY, vec![]);
+    assert_eq!(h.error(), None);
+    assert!(h.texts().contains(&"By help".to_string()));
+}
