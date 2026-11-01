@@ -1404,6 +1404,13 @@ export type WindowOptions = {
 	-- False, or a state that is: made hidden, laid out and drawn meanwhile,
 	-- and shown whole as it turns true (on Wayland drawn as it shows).
 	read visible: (boolean | State<boolean>)?,
+	-- Its smallest and largest size in points, each width with its height.
+	-- The same for both: a window of fixed size, which a window manager can
+	-- still move (it refuses to move one that isn't resizable).
+	read min_width: number?,
+	read min_height: number?,
+	read max_width: number?,
+	read max_height: number?,
 	read [number]: Node | ((win: OwnWindow) -> Node),
 }
 
@@ -1426,6 +1433,10 @@ export type ItemWindow = {
 	read tabbing: ("automatic" | "preferred" | "disallowed")?,
 	read under_pointer: { number }?,
 	read visible: (boolean | State<boolean>)?,
+	read min_width: number?,
+	read min_height: number?,
+	read max_width: number?,
+	read max_height: number?,
 	read [number]: Node,
 }
 

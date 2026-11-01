@@ -52,6 +52,12 @@ pub struct WindowOptions {
     pub fullscreen: bool,
     /// Logical minimum client size.
     pub min_size: Option<(f64, f64)>,
+    /// Logical maximum client size. A window of fixed size that stays
+    /// `resizable` gives `min_size` and `max_size` the same: on macOS its
+    /// size then still reads as settable, so window managers (Raycast,
+    /// Rectangle) can move it, which they refuse for a window that isn't
+    /// resizable.
+    pub max_size: Option<(f64, f64)>,
     /// Initial physical bounds. Placement remains compositor policy on Wayland.
     pub bounds: Option<crate::WindowBounds>,
     /// The display it opens on; `None` lets the platform choose.
@@ -120,6 +126,7 @@ impl Default for WindowOptions {
             decorations: true,
             fullscreen: false,
             min_size: None,
+            max_size: None,
             bounds: None,
             display: None,
             max_frame_rate: None,
@@ -192,6 +199,7 @@ enum WindowCommand {
     Fullscreen(bool),
     Decorations(bool),
     MinSize(Option<(f64, f64)>),
+    MaxSize(Option<(f64, f64)>),
     Drag,
     RefreshInfo,
     Title(String),
@@ -242,6 +250,7 @@ impl WindowState {
             WindowCommand::Level(level) => options.level = *level,
             WindowCommand::Shadow(value) => options.shadow = *value,
             WindowCommand::MinSize(value) => options.min_size = *value,
+            WindowCommand::MaxSize(value) => options.max_size = *value,
             WindowCommand::Drag
             | WindowCommand::RefreshInfo
             | WindowCommand::LoseGpu
@@ -369,6 +378,13 @@ impl WindowHandle {
     pub fn set_min_inner_size(&self, size: Option<(f64, f64)>) {
         if size.is_none_or(|(w, h)| valid_window_size(w, h)) {
             self.command(WindowCommand::MinSize(size));
+        }
+    }
+    /// The largest logical client size the person can resize to; `None`
+    /// removes the limit. A size that isn't finite and positive is ignored.
+    pub fn set_max_inner_size(&self, size: Option<(f64, f64)>) {
+        if size.is_none_or(|(w, h)| valid_window_size(w, h)) {
+            self.command(WindowCommand::MaxSize(size));
         }
     }
     /// Start a native move gesture from a primary-pointer press on a custom titlebar.
@@ -3699,6 +3715,9 @@ impl Host {
             }
             WindowCommand::Level(level) => window.set_window_level(level.winit()),
             WindowCommand::Shadow(value) => crate::window_info::set_shadow(window, value),
+            WindowCommand::MaxSize(value) => {
+                window.set_max_inner_size(value.map(|(w, h)| LogicalSize::new(w, h)))
+            }
             WindowCommand::MinSize(value) => {
                 window.set_min_inner_size(value.map(|(w, h)| LogicalSize::new(w, h)))
             }
@@ -3732,6 +3751,12 @@ impl Host {
                     .min_size
                     .map_or((width, height), |(min_w, min_h)| {
                         (width.max(min_w), height.max(min_h))
+                    });
+                let (width, height) = self
+                    .options
+                    .max_size
+                    .map_or((width, height), |(max_w, max_h)| {
+                        (width.min(max_w), height.min(max_h))
                     });
                 if let Some(size) = window.request_inner_size(
                     LogicalSize::new(width, height).to_physical::<u32>(self.display_scale),

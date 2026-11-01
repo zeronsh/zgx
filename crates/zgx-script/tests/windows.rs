@@ -237,6 +237,35 @@ fn a_window_may_be_made_hidden() {
     assert!(error.contains("`visible` must be a boolean"), "{error}");
 }
 
+/// A window's smallest and largest size reach its host by id, each width
+/// with its height; one without the other is an error.
+#[test]
+fn a_window_says_its_smallest_and_largest_size() {
+    let h = Harness::inline(
+        r##"ui.window { id = "fixed", open = ui.state("fixed", true), min_width = 320, min_height = 200,
+            max_width = 320, max_height = 200, ui.text("Fixed") }
+        ui.window { id = "free", open = ui.state("free", true), ui.text("Free") }
+        return ui.text("main")"##,
+    );
+    assert_eq!(
+        h.host.window_size_limits("fixed"),
+        (Some((320., 200.)), Some((320., 200.)))
+    );
+    assert_eq!(h.host.window_size_limits("free"), (None, None));
+    assert_eq!(h.host.window_size_limits("none"), (None, None));
+    let error = zgx_script::testing::TestApp::try_new(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r##"ui.window { id = "w", open = ui.state("w", true), max_width = 300, ui.text("w") }
+            return ui.text("main")"##,
+        )
+    })
+    .err()
+    .expect("it doesn't load");
+    assert!(error.contains("`max_height` go together"), "{error}");
+}
+
 /// `ui.window.size`: the window's size in points, followed, for decisions
 /// layout can't make (a sidebar collapsing to icons below a width).
 #[test]
