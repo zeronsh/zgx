@@ -91,6 +91,46 @@ impl std::fmt::Debug for ElementHandle {
     }
 }
 
+/// Whether two keys (or short strings) are equal, as `str`'s `==`, with
+/// no call to libc's `memcmp` up to 24 bytes, as long as tables' keys and
+/// most labels are: a few loads that overlap where the length is between
+/// their sizes. The call costs more than such short a comparison, and its
+/// path moves with where the bytes land in memory, so a hot lookup's cost
+/// moved from build to build (#1273). Longer strings take `memcmp`.
+#[inline]
+pub(crate) fn key_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let n = a.len();
+    if n != b.len() {
+        return false;
+    }
+    let word = |s: &[u8], at: usize| u64::from_ne_bytes(s[at..at + 8].try_into().unwrap());
+    let half = |s: &[u8], at: usize| u32::from_ne_bytes(s[at..at + 4].try_into().unwrap());
+    match n {
+        0 => true,
+        1..=3 => a[0] == b[0] && a[n / 2] == b[n / 2] && a[n - 1] == b[n - 1],
+        4..=7 => half(a, 0) == half(b, 0) && half(a, n - 4) == half(b, n - 4),
+        8..=16 => word(a, 0) == word(b, 0) && word(a, n - 8) == word(b, n - 8),
+        17..=24 => {
+            word(a, 0) == word(b, 0) && word(a, 8) == word(b, 8) && word(a, n - 8) == word(b, n - 8)
+        }
+        _ => a == b,
+    }
+}
+/// Where `key` is in `fields` (sorted by key), or where it would go, as
+/// `binary_search_by`: a table of a few fields is scanned for an equal key
+/// (`key_eq`; most keys differ in length, told at a glance), and only a
+/// key not there, or a larger table, is searched in order.
+#[inline]
+fn find_key(fields: &[(Rc<str>, Value)], key: &str) -> Result<usize, usize> {
+    if fields.len() <= 8
+        && let Some(at) = fields.iter().position(|(k, _)| key_eq(k, key))
+    {
+        return Ok(at);
+    }
+    fields.binary_search_by(|(k, _)| (**k).cmp(key))
+}
+
 /// Shared subtrees compare equal without being walked.
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
@@ -98,7 +138,7 @@ impl PartialEq for Value {
             (Value::Nil, Value::Nil) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Num(a), Value::Num(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b) || a == b,
+            (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b) || key_eq(a, b),
             (Value::Text(a), Value::Text(b)) => a == b,
             (Value::Str(s), Value::Text(t)) | (Value::Text(t), Value::Str(s)) => *t == **s,
             (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b) || a[..] == b[..],
@@ -106,7 +146,7 @@ impl PartialEq for Value {
                 Rc::ptr_eq(a, b)
                     || (a.len() == b.len()
                         && a.iter().zip(b.iter()).all(|((ka, va), (kb, vb))| {
-                            (Rc::ptr_eq(ka, kb) || ka == kb) && va == vb
+                            (Rc::ptr_eq(ka, kb) || key_eq(ka, kb)) && va == vb
                         }))
             }
             // `{}` is both.
@@ -208,10 +248,19 @@ impl Value {
         }
         /// An item's `id`, borrowed: a string, or a number by value (both
         /// zeros alike).
-        #[derive(Hash, PartialEq, Eq)]
+        #[derive(Hash, Eq)]
         enum Id<'a> {
             Str(&'a str),
             Num(u64),
+        }
+        impl PartialEq for Id<'_> {
+            fn eq(&self, other: &Self) -> bool {
+                match (self, other) {
+                    (Id::Str(a), Id::Str(b)) => key_eq(a, b),
+                    (Id::Num(a), Id::Num(b)) => a == b,
+                    _ => false,
+                }
+            }
         }
         fn id_of(item: &Value) -> Option<Id<'_>> {
             match item.field("id")? {
@@ -271,11 +320,12 @@ impl Value {
                 let fields: Vec<(Rc<str>, Value)> = new
                     .iter()
                     .map(|(key, value)| {
-                        while at < was.len() && *was[at].0 < **key {
+                        // Most often the same keys: equal is told first.
+                        while at < was.len() && !key_eq(&was[at].0, key) && *was[at].0 < **key {
                             at += 1;
                         }
                         match was.get(at) {
-                            Some((k, v)) if *k == *key => {
+                            Some((k, v)) if key_eq(k, key) => {
                                 let value = value.clone().reconcile(v);
                                 unchanged = unchanged && same(&value, v);
                                 (k.clone(), value)
@@ -335,10 +385,7 @@ impl Value {
     /// A field of a map value.
     pub fn field(&self, key: &str) -> Option<&Value> {
         match self {
-            Value::Map(fields) => fields
-                .binary_search_by(|(k, _)| (**k).cmp(key))
-                .ok()
-                .map(|i| &fields[i].1),
+            Value::Map(fields) => find_key(fields, key).ok().map(|i| &fields[i].1),
             _ => None,
         }
     }
@@ -371,7 +418,7 @@ impl Value {
                     Value::List(items) if items.is_empty() => &[],
                     _ => return Err(format!("key {step} of {kind}: only tables have keys")),
                 };
-                let found = fields.binary_search_by(|(k, _)| (**k).cmp(key));
+                let found = find_key(fields, key);
                 let old = found.ok().map(|i| &fields[i].1);
                 let child = old
                     .unwrap_or(&Value::Nil)
@@ -462,7 +509,7 @@ impl Value {
                 &mut items[i - 1]
             }
             (Value::Map(fields), PathKey::Key(key)) => {
-                let Ok(at) = fields.binary_search_by(|(k, _)| (**k).cmp(key)) else {
+                let Ok(at) = find_key(fields, key) else {
                     return Ok(None);
                 };
                 let Some(fields) = Rc::get_mut(fields) else {
@@ -2638,6 +2685,50 @@ mod tests {
             map(&[("id", Value::Num(7.)), ("name", "Grace".into())])
         );
         assert_eq!(value.to_json(), r#"{"id":7,"name":"Grace"}"#);
+    }
+
+    #[test]
+    fn keys_compare_as_strings_do() {
+        let long = "abcdefghijklmnopqrstuvwxyz0123".to_string();
+        let mut keys: Vec<String> = [
+            "", "a", "b", "ab", "ba", "abc", "abd", "id", "idx", "Z", "\0", "a\0", "é", "e\u{301}",
+            "title", "titles", "titlf",
+        ]
+        .map(String::from)
+        .to_vec();
+        // Every length to past the longest compared by loads, and each
+        // with one byte changed at its start, middle and end.
+        for n in 1..=long.len() {
+            let key = &long[..n];
+            keys.push(key.to_string());
+            for at in [0, n / 2, n - 1] {
+                let mut changed = key.as_bytes().to_vec();
+                changed[at] = b'!';
+                keys.push(String::from_utf8(changed).unwrap());
+            }
+        }
+        for a in &keys {
+            for b in &keys {
+                assert_eq!(key_eq(a, b), a == b, "{a:?} against {b:?}");
+            }
+        }
+        // Found, or where it would go, as a binary search says, in tables
+        // small (scanned) and large.
+        keys.sort();
+        keys.dedup();
+        for size in [0, 1, 3, 8, 9, keys.len()] {
+            let fields: Vec<(Rc<str>, Value)> = keys[..size]
+                .iter()
+                .map(|k| (Rc::from(k.as_str()), Value::Nil))
+                .collect();
+            for key in &keys {
+                assert_eq!(
+                    find_key(&fields, key),
+                    fields.binary_search_by(|(k, _)| (**k).cmp(key.as_str())),
+                    "{key:?} in {size}"
+                );
+            }
+        }
     }
 
     #[test]
