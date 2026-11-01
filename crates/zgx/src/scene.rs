@@ -1819,6 +1819,12 @@ struct ColdMaps {
     stacked: NodeMap<Vec<NodeId>>,
     /// Nodes raised among their siblings (`set_z`), none at 0.
     raised: NodeMap<i32>,
+    /// Nodes painted outside their parent's fade (`set_outside_fade`). (A
+    /// value of its own: a `NodeMap<()>` would share `Ui::pend_label`'s
+    /// set's code, which then isn't inlined there.) Not a cold node's
+    /// (`sync_cold`): removed nodes' entries are let go as it grows, and
+    /// never name another node (`NodeId` is generational).
+    outside_fade: NodeMap<OutsideFade>,
     /// Nodes that stick in their scroll view (`set_sticky`).
     sticky: NodeMap<Sticky>,
     /// Sizes worked out from the containing block (`set_size_calcs`).
@@ -1850,6 +1856,9 @@ struct ColdMaps {
     /// Outlines drawn dashed or dotted (`set_outline_style`).
     outline_styles: NodeMap<crate::decoration::BorderStyle>,
 }
+/// A node painted outside its parent's fade (`Scene::set_outside_fade`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OutsideFade;
 /// Where a node takes hits while an animation moves it: the place it's
 /// going, not the place it shows (Core Animation's model layer against its
 /// presentation). Painting, scroll copies and inspection keep what shows.
@@ -10962,7 +10971,55 @@ impl Scene {
         if from.is_none() {
             self.walk_hints.set((deepest, result.len()));
         }
+        // Painted outside their parent's fade (a scroll view's scrollbar):
+        // put right after the walk, which takes no check for them.
+        if self.has_outside_fade() {
+            self.outside_own_fades(&mut result);
+        }
         result
+    }
+    /// `items` of nodes painted outside their parent's own fade
+    /// (`set_outside_fade`) and their subtrees, painted under the fade the
+    /// parent was given instead (its outer one). Out of line, after the
+    /// walk: a scene whose marked nodes' parents don't fade looks no
+    /// further than them.
+    #[cold]
+    #[inline(never)]
+    fn outside_own_fades(&self, items: &mut [PaintItem<'_>]) {
+        let Some(cold) = &self.cold else { return };
+        let outside: Vec<NodeId> = (cold.outside_fade.keys())
+            .copied()
+            .filter(|id| {
+                self.contains(*id)
+                    && self
+                        .node(*id)
+                        .parent
+                        .is_some_and(|parent| fades(&self.node(parent).style))
+            })
+            .collect();
+        if outside.is_empty() {
+            return;
+        }
+        for item in items {
+            let Some(given) = item.extras.as_ref().filter(|extras| extras.mask.is_some()) else {
+                continue;
+            };
+            let mut at = Some(item.id);
+            let inside = std::iter::from_fn(|| {
+                let id = at?;
+                at = self.node(id).parent;
+                Some(id)
+            })
+            .any(|id| outside.contains(&id));
+            if inside {
+                item.extras = PaintExtras {
+                    mask: given.outer_mask,
+                    outer_mask: None,
+                    ..(**given).clone()
+                }
+                .shared();
+            }
+        }
     }
     /// Every paint item, in document order from the root: paint order but
     /// for raised nodes (`set_z`), which `layer_items` puts where they paint.
@@ -11218,11 +11275,30 @@ impl<'a> Iterator for PaintIter<'a> {
             }
             .shared()
         };
+        let pushed = self.stack.len();
         self.stack
             .extend(self.scene.children_raw(node).iter().rev().map(|child| {
                 let opacity = effects.opacity;
                 (*child, transform, opacity, clip, passed.clone())
             }));
+        // Children painted outside its own fade (a scroll view's scrollbar)
+        // take the one it was given (`outside_own_fades`).
+        if child_mask != mask && self.scene.has_outside_fade() {
+            let given = PaintExtras {
+                matrix: None,
+                mask,
+                outer_mask,
+                rounded: child_rounded,
+                color,
+                projective: None,
+            }
+            .shared();
+            for entry in &mut self.stack[pushed..] {
+                if self.scene.outside_fade(entry.0) {
+                    entry.4 = given.clone();
+                }
+            }
+        }
         Some(PaintItem {
             isolated: false,
             id,
