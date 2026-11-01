@@ -651,9 +651,9 @@ struct State {
     pointer: Option<(f32, f32)>,
     file_hovered: Option<NodeId>,
     pressed: Option<NodeId>,
-    /// What the last primary press landed on, as its listeners run and
-    /// after: a popup opening from a press on its trigger counts it as
-    /// focused, as a browser's press focuses a button first.
+    /// What the last press landed on, as its listeners run and after: a
+    /// popup opening from a press on its trigger counts it as focused, as a
+    /// browser's press focuses a button first.
     last_press: Option<NodeId>,
     key_pressed: Option<(NodeId, Key)>,
     /// The window's semantics: a control's role says which keys activate it
@@ -2575,9 +2575,6 @@ impl InputDispatcher {
             self.state.borrow_mut().file_hovered = None;
         }
         let click_count = if let InputEvent::PointerDown { x, y, button } = &event {
-            if *button == PointerButton::Primary {
-                self.state.borrow_mut().last_press = target;
-            }
             if modifiers.is_some() {
                 if let Some(target) = target {
                     self.state
@@ -2595,8 +2592,12 @@ impl InputDispatcher {
             0
         };
         // This press's, whatever becomes of it (`keep_focus_for_press`).
-        let keep_focus = matches!(event, InputEvent::PointerDown { .. })
-            && std::mem::take(&mut self.state.borrow_mut().keep_focus);
+        // And what it lands on, in the same borrow (`last_press`).
+        let keep_focus = matches!(event, InputEvent::PointerDown { .. }) && {
+            let mut state = self.state.borrow_mut();
+            state.last_press = target;
+            std::mem::take(&mut state.keep_focus)
+        };
         let mut prevented = false;
         if let Some(id) = target {
             let ctx = self.route_pointer(
