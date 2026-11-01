@@ -35,6 +35,8 @@ mod plugin_elements;
 mod plugin_filters;
 #[path = "../plugin_hooks.rs"]
 mod plugin_hooks;
+#[path = "../plugin_packages.rs"]
+mod plugin_packages;
 #[path = "../plugin_report.rs"]
 mod plugin_report;
 #[path = "../plugin_rows.rs"]
