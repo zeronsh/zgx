@@ -97,6 +97,7 @@ ui.windows(list: State<{ any }>, build: (item: any) -> ItemWindow, opts: { key: 
 | `frame_autosave` | `string` | none | its frame saved under this name as it moves and resizes, and reopened where it was left (macOS, Windows, X11; on Wayland its size and maximized state) |
 | `tabbing` | `"automatic"`, `"preferred"`, `"disallowed"` | `"automatic"` | AppKit's window tabs (macOS): as the user's setting says, always, or never (a window with tabs of its own) |
 | `under_pointer` | `{ number }` | none | where it opens: its top-left this far up and left of the pointer, as `on_drag_outside`'s `{ e.grab_x, e.grab_y }`, so a tab torn off stays under the grab (macOS, Windows, X11) |
+| `min_width`, `min_height`, `max_width`, `max_height` | `number` | none | its smallest and largest size in points, each width with its height; the same for both makes a window of fixed size that window managers (Raycast, Rectangle) can still move, which they refuse for one that isn't resizable |
 | `visible` | `boolean` or `State<boolean>` | shown | false: made hidden, its content laid out and drawn meanwhile, and shown whole the moment it turns true (on Wayland, where a window appears as it first draws, its first frame is drawn as it shows: whole, with no blank frame, a frame's time later; on X11 its theme's background shows for the few milliseconds from its mapping to its first frame) |
 | `[1]` | `Node` | required | its content |
 

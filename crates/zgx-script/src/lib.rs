@@ -1119,6 +1119,10 @@ fn diagnostics_requested() -> bool {
         .any(|name| zgx::env::var_os(name).is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
+/// A declared window's smallest and largest size in points, each a width
+/// and height or none (`ScriptHost::window_size_limits`).
+pub type WindowSizeLimits = (Option<(f64, f64)>, Option<(f64, f64)>);
+
 /// Loads an application script and its plugins and mounts what they describe.
 #[derive(Clone)]
 pub struct ScriptHost(Rc<Inner>);
@@ -1773,8 +1777,8 @@ impl ScriptHost {
                 let current = host.current.borrow().clone();
                 let content = host.windows.content.borrow().get(&id).cloned();
                 match (current, content) {
-                    (Some(loaded), Some(node)) => {
-                        lower::lower(&node, &loaded.lowering).takes_unfocused_keys()
+                    (Some(loaded), Some(content)) => {
+                        lower::lower(&content.node, &loaded.lowering).takes_unfocused_keys()
                     }
                     _ => div(),
                 }
@@ -1786,6 +1790,19 @@ impl ScriptHost {
             .w_full()
             .h_full()
             .child(content.items_stretch().w_full().h_full())
+    }
+    /// Window `id`'s smallest and largest size in points (`ui.window {
+    /// min_width, min_height, max_width, max_height }`), as the last load
+    /// declared them: each a width and height, or none. The same for both,
+    /// a window of fixed size the person can't resize but a window manager
+    /// can still move.
+    pub fn window_size_limits(&self, id: &str) -> WindowSizeLimits {
+        self.0
+            .windows
+            .content
+            .borrow()
+            .get(id)
+            .map_or((None, None), |content| content.limits)
     }
     /// Run the command `id` (a menu item was chosen); whether one ran.
     pub fn run_command(&self, id: &str) -> bool {

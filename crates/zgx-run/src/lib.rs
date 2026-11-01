@@ -142,6 +142,10 @@ struct WindowConfig {
     /// (`ui.window.visible:set(true)`): an app showing an intro of its own
     /// first.
     visible: bool,
+    /// Its largest size in points (`max_width` and `max_height`): the
+    /// same as `min_width` and `min_height`, a window of fixed size that a
+    /// window manager can still move.
+    max_size: Option<(f64, f64)>,
 }
 impl AppConfig {
     /// The config for the script at `script`: its directory's `zgx.json`
@@ -185,6 +189,7 @@ impl AppConfig {
                 WindowConfig {
                     frame_autosave: None,
                     visible: true,
+                    max_size: None,
                 },
             ));
         };
@@ -218,6 +223,8 @@ impl AppConfig {
                 "width",
                 "height",
                 "min_width",
+                "max_width",
+                "max_height",
                 "min_height",
                 "titlebar",
                 "glass",
@@ -242,6 +249,11 @@ impl AppConfig {
         } else if number("min_width")?.is_some() || number("min_height")?.is_some() {
             return Err(fail("`min_width` and `min_height` go together".into()));
         }
+        let max_size = match (number("max_width")?, number("max_height")?) {
+            (Some(w), Some(h)) => Some((w, h)),
+            (None, None) => None,
+            _ => return Err(fail("`max_width` and `max_height` go together".into())),
+        };
         config.titlebar = match string("titlebar")?.as_deref() {
             None | Some("standard") => zgx_desktop::Titlebar::Standard,
             Some("inset") => zgx_desktop::Titlebar::Inset,
@@ -283,6 +295,7 @@ impl AppConfig {
             WindowConfig {
                 frame_autosave,
                 visible,
+                max_size,
             },
         ))
     }
@@ -355,12 +368,14 @@ pub fn run_hosting(
     let WindowConfig {
         frame_autosave,
         visible,
+        max_size,
     } = window_config;
     let options = WindowOptions {
         title: config.title.clone(),
         width: config.width,
         height: config.height,
         min_size: config.min_size,
+        max_size,
         titlebar: config.titlebar,
         glass: config.glass.then(zgx_desktop::Glass::default),
         frame_autosave,
@@ -577,8 +592,11 @@ pub fn follow_windows(host: &ScriptHost, cx: &zgx_desktop::WindowContext) -> zgx
                 .get(&window.id)
                 .is_some_and(|handle| !handle.is_closed());
             if wanted && !shown {
+                let (min_size, max_size) = host.window_size_limits(&window.id);
                 let options = WindowOptions {
                     title: window.title.clone(),
+                    min_size,
+                    max_size,
                     width: window.width,
                     height: window.height,
                     frame_autosave: window.frame_autosave.clone(),
@@ -672,6 +690,24 @@ mod tests {
             ("Mail", 1100., Some((600., 400.)))
         );
         assert_eq!(config.titlebar, zgx_desktop::Titlebar::Inset);
+        // A fixed size that stays resizable: min and max the same.
+        std::fs::write(
+            dir.join("zgx.json"),
+            r#"{ "min_width": 400, "min_height": 300, "max_width": 400, "max_height": 300 }"#,
+        )
+        .unwrap();
+        let (config, _, window) = AppConfig::read(&script).unwrap();
+        assert_eq!(
+            (config.min_size, window.max_size),
+            (Some((400., 300.)), Some((400., 300.)))
+        );
+        std::fs::write(dir.join("zgx.json"), r#"{ "max_width": 400 }"#).unwrap();
+        let error = AppConfig::for_script(&script).unwrap_err();
+        assert!(
+            error.contains("`max_width` and `max_height` go together"),
+            "{error}"
+        );
+        std::fs::write(dir.join("zgx.json"), "{}").unwrap();
         let visible = |script: &Path| AppConfig::read(script).unwrap().2.visible;
         assert!(visible(&script));
         // Opened hidden, for the script to show.

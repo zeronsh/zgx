@@ -129,10 +129,18 @@ struct Group {
     on_close: Option<Function>,
     vm: std::rc::Weak<crate::Vm>,
 }
+/// A window's content, and its size limits (`min_width` and the rest),
+/// kept by id beside the `Window` the host lists.
+#[derive(Clone)]
+pub(crate) struct Content {
+    pub node: Rc<Node>,
+    /// Its smallest and largest size in points, each a width and height.
+    pub limits: crate::WindowSizeLimits,
+}
 /// A group's window: built once, as its item first appears.
 struct Built {
     window: Window,
-    node: Rc<Node>,
+    node: Content,
     item: Value,
     /// `on_close` was told the person closed it.
     told: bool,
@@ -140,7 +148,7 @@ struct Built {
 
 pub(crate) struct Windows {
     runtime: Runtime,
-    pending: RefCell<Vec<(Window, Rc<Node>)>>,
+    pending: RefCell<Vec<(Window, Content)>>,
     pending_groups: RefCell<Vec<Group>>,
     /// What follows the published groups' lists, while they are published.
     following: RefCell<Option<zgx::reactive::Effect>>,
@@ -148,7 +156,7 @@ pub(crate) struct Windows {
     /// with its own (later ones are reported as they happen).
     first_errors: RefCell<Option<Vec<String>>>,
     /// The published windows' content, by id.
-    pub content: RefCell<HashMap<String, Rc<Node>>>,
+    pub content: RefCell<HashMap<String, Content>>,
     pub list: Signal<Vec<Window>>,
     /// Each window's own state (`win`), by id: the same across loads, as
     /// the host bound it when the window opened.
@@ -219,7 +227,7 @@ impl Windows {
                 return;
             };
             let mut list = fixed.clone();
-            let mut content: HashMap<String, Rc<Node>> = HashMap::new();
+            let mut content: HashMap<String, Content> = HashMap::new();
             for (n, group) in groups.iter().enumerate() {
                 let Some(vm) = group.vm.upgrade() else {
                     continue;
@@ -318,7 +326,7 @@ fn build(
     group: &Group,
     id: &str,
     item: &Value,
-) -> mlua::Result<(Window, Rc<Node>)> {
+) -> mlua::Result<(Window, Content)> {
     // `win` only for a build that takes it: the window's own, across loads.
     let state = (group.build.info().num_params >= 2).then(|| windows.state(id));
     let table: Table = match &state {
@@ -340,7 +348,7 @@ fn window_of(
     declared: bool,
     runtime: Option<(&Lua, &Windows)>,
     signals: &Runtime,
-) -> mlua::Result<(Window, Rc<Node>)> {
+) -> mlua::Result<(Window, Content)> {
     let what = |field: &str| format!("ui.window `{id}`'s `{field}`");
     // `ui.window`'s content may be `function(win)`: the window's own state.
     let mut state = None;
@@ -371,6 +379,23 @@ fn window_of(
             ))
         })?),
     };
+    // Each a width and a height, given together.
+    let size = |w: &str, h: &str| -> mlua::Result<Option<(f64, f64)>> {
+        match (table.get::<Option<f64>>(w)?, table.get::<Option<f64>>(h)?) {
+            (Some(w), Some(h)) if w.is_finite() && h.is_finite() && w > 0. && h > 0. => {
+                Ok(Some((w, h)))
+            }
+            (None, None) => Ok(None),
+            _ => Err(mlua::Error::runtime(format!(
+                "{} and `{h}` go together, finite and positive",
+                what(w)
+            ))),
+        }
+    };
+    let limits = (
+        size("min_width", "min_height")?,
+        size("max_width", "max_height")?,
+    );
     let window = Window {
         title: table
             .get::<Option<String>>("title")?
@@ -404,6 +429,10 @@ fn window_of(
             "tabbing",
             "under_pointer",
             "visible",
+            "min_width",
+            "min_height",
+            "max_width",
+            "max_height",
         ]
     } else {
         &[
@@ -414,6 +443,10 @@ fn window_of(
             "tabbing",
             "under_pointer",
             "visible",
+            "min_width",
+            "min_height",
+            "max_width",
+            "max_height",
         ]
     };
     for key in table.pairs::<mlua::Value, mlua::Value>() {
@@ -428,7 +461,7 @@ fn window_of(
             }
         }
     }
-    Ok((window, node))
+    Ok((window, Content { node, limits }))
 }
 
 /// The shared keys holding the window's title bar area and buttons
