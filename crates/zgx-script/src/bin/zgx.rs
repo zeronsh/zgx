@@ -423,6 +423,7 @@ ZGX_INSPECT_SOCKET=1): with one running, --app is not needed.
   hover <target|x,y>   right-click <target|x,y>  drag <from> <to|x,y>
   scroll <target> <dy> command <id>
   errors               lint
+  contributions        each plugin's targets: where, live matches, error (JSON)
   frames [n] [--runs N] [--all] [--since MARK|FRAME] [--keep N]
   mark [name]          switch [name] [on|off]
   wait <target> [--text T] [--gone] [--timeout MS]
@@ -789,6 +790,12 @@ const TOOLS: &[Tool] = &[
         "The script error, type errors, lint findings and layout warnings, or none.",
     ),
     (
+        "zgx_contributions",
+        "contributions",
+        &[],
+        "Each plugin contribution at the app's elements (ui.contribute, ui.filter): plugin, target, place (before, after, replace, filter), how many elements it applies at now (0: its target matches nothing shown), and its latest error. A line each, then the same as JSON.",
+    ),
+    (
         "zgx_lint",
         "lint",
         &[],
@@ -982,7 +989,11 @@ fn mcp() -> ExitCode {
                                     if let (Some(out), Some(tape)) = (&out, answer.field("data").and_then(|d| d.field("tape")).map(Value::to_string)) {
                                         std::fs::write(out, tape).map_err(|e| format!("{out}: {e}"))?;
                                     }
-                                    let text = answer.field("text").map(Value::to_string).unwrap_or_default();
+                                    let mut text = answer.field("text").map(Value::to_string).unwrap_or_default();
+                                    // What agents read as data, after its summary.
+                                    if *cmd == "contributions" && let Some(data) = answer.field("data") {
+                                        text = format!("{text}\n{}", data.to_json());
+                                    }
                                     // A snapshot's picture, beside its text.
                                     if let Some(path) = answer.field("data").and_then(|d| d.field("path")).map(Value::to_string) {
                                         let png = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;

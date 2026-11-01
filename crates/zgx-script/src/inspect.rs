@@ -393,6 +393,7 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
                                                  pacing (repeat: runs and their spread; every: ms apart)
   command id                                     run a ui.command
   errors                                         script error, type errors, lint, layout warnings
+  contributions                                  each plugin's targets: where, live matches, error
   lint                                           zgx lint over the app's scripts, file:line
   frames  [n=10] [runs=5] [all] [since] [keep]   the last frames that did anything: their phases, GPU
                                                  time, notes, what ran and why (since: a mark or frame)
@@ -738,6 +739,44 @@ impl Session {
                     lines.join("\n")
                 };
                 Ok((text, Value::Nil))
+            }
+            "contributions" => {
+                let reports = self.0.host.contributions();
+                let text = match reports.is_empty() {
+                    true => "none".to_string(),
+                    false => reports
+                        .iter()
+                        .map(|r| {
+                            let error = r
+                                .error
+                                .as_deref()
+                                .map_or(String::new(), |e| format!("  error: {e}"));
+                            format!(
+                                "{} {} {}: {} matching{error}",
+                                r.plugin, r.place, r.target, r.matches
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                };
+                let value = Value::List(
+                    reports
+                        .into_iter()
+                        .map(|r| {
+                            Value::record([
+                                ("plugin", Value::Str(r.plugin.into())),
+                                ("target", Value::Str(r.target.into())),
+                                ("place", Value::Str(r.place.into())),
+                                ("matches", Value::Num(r.matches as f64)),
+                                (
+                                    "error",
+                                    r.error.map_or(Value::Nil, |e| Value::Str(e.into())),
+                                ),
+                            ])
+                        })
+                        .collect(),
+                );
+                Ok((text, value))
             }
             "lint" => (|| {
                 let path = self
