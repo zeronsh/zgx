@@ -98,7 +98,7 @@ impl VariableHeights {
         self.index.borrow().row_at(offset)
     }
 }
-struct Anchor<K> {
+struct Anchor {
     revision: u64,
     length: usize,
     position: f32,
@@ -107,9 +107,6 @@ struct Anchor<K> {
     /// the row starts lower, in view).
     within: f32,
     at_end: bool,
-    /// The anchor row's key: rows added or removed above it move it by as
-    /// many, and it is found there by its key.
-    key: Option<K>,
 }
 
 /// Mount only visible variable-height keyed rows and an overscan margin.
@@ -315,6 +312,12 @@ fn row_style(width: f32, height: f32, measured: bool) -> crate::scene::Style {
         }
     }
 }
+/// The row a list was last asked to show (`reveal`), read out of line: the
+/// pass inlining it compiles differently (x86 per-pass cost rises).
+#[inline(never)]
+fn asked_reveal(reveal: &Signal<(u64, usize, RowAlign)>) -> (u64, usize, RowAlign) {
+    reveal.get()
+}
 fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
     offset: Signal<f32>,
     heights: VariableHeights,
@@ -437,7 +440,12 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
             // shows, the position it was put at, the focus then, and whether
             // focus goes with it (the keyboard's, not a scroll's).
             let mut pending_reveal: Option<(usize, RowAlign, f32, Option<NodeId>, bool)> = None;
-            let mut anchor: Option<Anchor<K>> = None;
+            let mut anchor: Option<Anchor> = None;
+            // The anchor row's key, for a list that keeps its place: rows
+            // added or removed above it move it by as many, and it is found
+            // there by its key. Beside the anchor, not in it, so that other
+            // lists' passes neither move nor drop a key.
+            let mut anchor_key: Option<K> = None;
             ui.bind(root, move || {
                 heights.revision.get();
                 mounted_revision.get();
@@ -481,18 +489,16 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 // Rows added or removed above the anchor row: it is as many
                 // rows on, and the view stays on it if its key is there
                 // (asked before the index is borrowed: `key` is the app's).
-                let moved = match &anchor {
-                    Some(previous)
-                        if previous.revision != revision
-                            && requested == previous.position
-                            && previous.key.is_some() =>
+                let moved = match (&anchor, &anchor_key) {
+                    (Some(previous), Some(anchor_key))
+                        if previous.revision != revision && requested == previous.position =>
                     {
                         let length = heights.index.borrow().count();
                         let shifted =
                             previous.index as i64 + length as i64 - previous.length as i64;
                         (length != previous.length
                             && (0..length as i64).contains(&shifted)
-                            && previous.key.as_ref() == Some(&key(shifted as usize)))
+                            && *anchor_key == key(shifted as usize))
                         .then_some(shifted as usize)
                     }
                     _ => None,
@@ -508,7 +514,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 let request = navigation
                     .as_ref()
                     .map(|navigation| navigation.request.get());
-                let (serial, row, align) = reveal.get();
+                let (serial, row, align) = asked_reveal(&reveal);
                 let asked = (serial != handled_reveal).then_some((row, align, false));
                 handled_reveal = serial;
                 let (length, total, position, target, geometry, next_anchor) = {
@@ -629,7 +635,6 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             index,
                             within: (position - model.row_offset(index)).max(0.),
                             at_end: limit - position <= 0.5,
-                            key: None,
                         }),
                         None if length == 0 => Some(Anchor {
                             revision,
@@ -638,7 +643,6 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             index: 0,
                             within: 0.,
                             at_end: true,
-                            key: None,
                         }),
                         None => None,
                     };
@@ -699,23 +703,21 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 // Its row's key, kept by a list that keeps its place: the
                 // last pass's while the row is the same (most passes), else
                 // the row's among those shown, which run in order from the
-                // first.
-                let next_anchor = next_anchor.map(|mut next| {
-                    if !keeps_place {
-                        return next;
+                // first. (A key left from an anchor since dropped is never
+                // read: `moved` asks for an anchor, and the next anchor
+                // gets its own.)
+                if keeps_place && let Some(next) = &next_anchor {
+                    let same = anchor.as_ref().is_some_and(|previous| {
+                        previous.index == next.index && previous.length == next.length
+                    });
+                    if !(same && anchor_key.is_some()) {
+                        anchor_key = (|| {
+                            let first = keys.first()?.1;
+                            let (key, index, ..) = keys.get(next.index.checked_sub(first)?)?;
+                            (*index == next.index).then(|| key.clone())
+                        })();
                     }
-                    let kept = anchor.as_mut().and_then(|previous| {
-                        (previous.index == next.index && previous.length == next.length)
-                            .then(|| previous.key.take())
-                            .flatten()
-                    });
-                    next.key = kept.or_else(|| {
-                        let first = keys.first()?.1;
-                        let (key, index, ..) = keys.get(next.index.checked_sub(first)?)?;
-                        (*index == next.index).then(|| key.clone())
-                    });
-                    next
-                });
+                }
                 let Some(mut ui) = weak.upgrade() else {
                     return;
                 };
