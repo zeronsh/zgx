@@ -78,6 +78,7 @@ SMOKES = [
     ("xdnd-text-drop", "python3 scripts/xdnd_text_drop_smoke.py {bin} --output {out}", False),
     ("wayland-text-drop", "python3 scripts/wayland_text_drop_smoke.py {bin} --output {out}", False),
     ("wayland-drag-out", "python3 scripts/wayland_drag_out_smoke.py {bin} --output {out}", False),
+    ("wayland-drag-out-slow", "python3 scripts/wayland_drag_out_smoke.py {bin} --output {out} --slow-target", False),
     ("zenity-dialog", "python3 scripts/zenity_dialog_smoke.py {bin}/platform_services --output {out}", False),
     ("portal-dialog", "python3 scripts/portal_dialog_smoke.py {bin}/platform_services --output {out}", False),
     ("web-view-schemes", "timeout 60s {bin}/web_view_schemes --fixture", True),
