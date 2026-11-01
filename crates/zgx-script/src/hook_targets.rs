@@ -123,19 +123,30 @@ pub(crate) fn unknown_targets(files: &[File]) -> Vec<Diagnostic> {
     let known = declared(files);
     let mut found = Vec::new();
     for file in files {
-        // Each id and hook a target names, in every part of a chain
-        // (`#sidebar >> .row`); classes and names aren't declared.
+        // Each id, hook and class a target names, in every part of a chain
+        // (`#sidebar >> .row`), a class each of `.a.b`. A class a computed
+        // `class = …` gives isn't seen: a warning, as the others are.
         let named = targets(file.tokens)
             .into_iter()
             .flat_map(|(token, target)| {
                 target
                     .split(">>")
                     .flat_map(str::split_whitespace)
-                    .map(move |word| (token, target, word))
+                    .flat_map(|word| match word.strip_prefix('.') {
+                        Some(classes) => classes
+                            .split('.')
+                            .filter(|c| !c.is_empty())
+                            .map(|c| (true, c))
+                            .collect::<Vec<_>>(),
+                        None => vec![(false, word)],
+                    })
+                    .map(move |(class, word)| (token, target, class, word))
                     .collect::<Vec<_>>()
             });
-        for (token, target, word) in named {
-            let (names, name, prefix, what) = if let Some(id) = word.strip_prefix('#') {
+        for (token, target, class, word) in named {
+            let (names, name, prefix, what) = if class {
+                (&known.classes, word, ".", "class")
+            } else if let Some(id) = word.strip_prefix('#') {
                 (&known.ids, id, "#", "id")
             } else if let Some(hook) = word.strip_prefix("hook:") {
                 (&known.hooks, hook, "hook:", "hook")
@@ -242,20 +253,26 @@ mod tests {
         assert_eq!(diagnostics[1].line, 3);
     }
     #[test]
-    fn each_part_of_a_chain_is_checked_and_classes_are_not() {
+    fn each_id_hook_and_class_of_a_chain_is_checked() {
         let diagnostics = with(
             &[
                 r#"return ui.column { id = "sidebar", ui.text { class = "row", "x" } }"#,
                 r##"ui.contribute { target = "#sidebar >> .row", after = ui.text { "a" } }
                 ui.contribute { target = "#sidebr >> .row", after = ui.text { "b" } }
-                ui.contribute { target = ".anything", after = ui.text { "c" } }"##,
+                ui.contribute { target = ".rwo", after = ui.text { "c" } }
+                ui.contribute { target = "#sidebar >> .row.nowhere", after = ui.text { "d" } }"##,
             ],
             unknown_targets,
         );
         let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
         assert_eq!(
             messages,
-            ["`#sidebr >> .row`: no element declares id = \"sidebr\"; did you mean `#sidebar`?"]
+            [
+                "`#sidebr >> .row`: no element declares id = \"sidebr\"; did you mean `#sidebar`?",
+                "`.rwo`: no element declares class = \"rwo\"; did you mean `.row`?",
+                "`#sidebar >> .row.nowhere`: no element declares class = \"nowhere\"",
+            ]
         );
+        assert!(diagnostics.iter().all(|d| d.severity == Severity::Warning));
     }
 }

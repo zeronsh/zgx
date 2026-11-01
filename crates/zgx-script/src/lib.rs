@@ -2170,10 +2170,21 @@ impl ScriptHost {
         files.sort();
         files.dedup();
         let mut found = Vec::new();
-        let sources: Vec<(PathBuf, String)> = files
+        let mut sources: Vec<(PathBuf, String)> = files
             .iter()
             .filter_map(|file| Some((file.clone(), std::fs::read_to_string(file).ok()?)))
             .collect();
+        // An app written inline is no file, but its plugins target what it
+        // declares (`unknown-target`): read with them, its own findings left
+        // as an inline app's always were.
+        let inline = match &self.0.app {
+            Script::Inline { name, code } if !files.is_empty() => {
+                let path = PathBuf::from(format!("<inline {name}>"));
+                sources.push((path.clone(), code.clone()));
+                Some(path)
+            }
+            _ => None,
+        };
         // The app's tokens' types, where its editor reads them (`zgx types`
         // or `zgx check` wrote them), as the names change: from every script
         // in its directory, as `zgx types` writes them, not only those this
@@ -2184,6 +2195,9 @@ impl ScriptHost {
             let _ = app_types::write_types(&dir);
         }
         for d in lint::lint_app(&sources) {
+            if inline.as_ref() == Some(&d.file) {
+                continue;
+            }
             let name = d.file.file_name().unwrap_or(d.file.as_os_str());
             let line = format!(
                 "{}:{}:{}: lint[{}]: {}",
