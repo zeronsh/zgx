@@ -4478,7 +4478,13 @@ impl Scene {
                 maps.flat.remove(&id);
             }
         }
-        if let Some(parent) = parent {
+        // Its parent lays out its children, unless the parent is a contents
+        // node (a presence's entry, its region): then it lays out in that
+        // one's place (`flat_item`), and so on up to the one that lays them
+        // out. Each is counted, as `flat_parent` asks.
+        let mut at = parent;
+        while let Some(parent) = at {
+            let maps = self.cold.get_or_insert_default();
             let count = maps.flat_parents.entry(parent).or_insert(0);
             *count = match on {
                 true => *count + 1,
@@ -4491,6 +4497,8 @@ impl Scene {
             let node = self.node_mut(parent);
             node.style_writes = node.style_writes.wrapping_add(1);
             self.invalidate_layout(parent);
+            let node = self.node(parent);
+            at = node.parent.filter(|_| node.contents());
         }
         self.sync_cold(id);
         self.invalidate_layout(id);
@@ -4517,8 +4525,25 @@ impl Scene {
                 && self
                     .children_raw(self.node(id))
                     .iter()
-                    .any(|child| cold.flat.contains_key(child))
+                    .any(|child| self.flat_item(*child))
         })
+    }
+    /// Whether `id` lays out in its place, its children in its parent's
+    /// flow: so set (`set_display_contents`), or a contents node
+    /// (`set_contents`) whose last child does, as a presence's entry
+    /// holding what plugins add beside its content. What a contents node
+    /// holds before its last child (an entry leaving) stays over that
+    /// child's place, as `measure_contents` lays it.
+    pub(crate) fn flat_item(&self, id: NodeId) -> bool {
+        if self.is_display_contents(id) {
+            return true;
+        }
+        let node = self.node(id);
+        node.contents()
+            && self
+                .children_raw(node)
+                .last()
+                .is_some_and(|last| self.flat_item(*last))
     }
     /// Make `id` lay out as its last child would in its place, as CSS
     /// `display: contents` does: that child's size, flex and position

@@ -1232,6 +1232,11 @@ impl Scene {
             if self.is_display_contents(*child) {
                 let inner = self.children_raw(self.node(*child)).clone();
                 out.extend(self.flatten(&inner));
+            } else if self.flat_item(*child) {
+                // A contents node over one that is: the parent's flow takes
+                // that one's; what lies over it is placed in `fold_level`.
+                let lead = *self.children_raw(self.node(*child)).last().unwrap();
+                out.extend(self.flatten(&[lead]));
             } else {
                 out.push(*child);
             }
@@ -1292,6 +1297,50 @@ impl Scene {
                 };
                 let constraints = self.relevant(*child, constraints);
                 self.store_measurement(*child, constraints, (span.width, span.height), held);
+                out.push((*child, span, constraints));
+            } else if self.flat_item(*child) {
+                // A contents node over one laid out in its place: its box is
+                // that one's, and what it holds before it lies over it, at
+                // its margins, sized within it (`measure_contents`).
+                let own = self.children_raw(self.node(*child)).clone();
+                let lead = *own.last().unwrap();
+                let held = self.fold_level(&[lead], placed, inner);
+                let (span, lead_constraints) = held
+                    .first()
+                    .map_or((Rect::default(), Constraints::default()), |(_, r, c)| {
+                        (*r, *c)
+                    });
+                let mut children = Vec::with_capacity(own.len());
+                for node in own {
+                    if node == lead {
+                        children.push((
+                            lead,
+                            Rect::new(0., 0., span.width, span.height),
+                            lead_constraints,
+                        ));
+                        continue;
+                    }
+                    let margin = self.node(node).style.margin;
+                    let within = Constraints {
+                        width: Some((span.width - margin.left - margin.right).max(0.)),
+                        height: Some((span.height - margin.top - margin.bottom).max(0.)),
+                        percent_width: Some(span.width),
+                        percent_height: Some(span.height),
+                        ..Constraints::default()
+                    };
+                    let (w, h) = self.measure(node, within);
+                    children.push((node, Rect::new(margin.left, margin.top, w, h), within));
+                }
+                let constraints = Constraints {
+                    width: Some(span.width),
+                    height: Some(span.height),
+                    percent_width: Some(inner.0),
+                    percent_height: Some(inner.1),
+                    force_width: Some(span.width),
+                    force_height: Some(span.height),
+                };
+                let constraints = self.relevant(*child, constraints);
+                self.store_measurement(*child, constraints, (span.width, span.height), children);
                 out.push((*child, span, constraints));
             } else if placed.peek().is_some_and(|(node, ..)| node == child) {
                 out.extend(placed.next());

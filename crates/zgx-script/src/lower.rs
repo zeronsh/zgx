@@ -2143,10 +2143,10 @@ fn hooked_root(
         // Rows plugins add at, or a host lists (`ScriptHost::elements`).
         Built::Row => !hooks.at(&node, true, low).is_empty() || hooks.listed(&node),
         Built::Component => adds_beside(hooks, &node, low),
-        Built::Presence => {
-            no_siblings(hooks, &node, low, "the content of a ui.presence");
-            false
-        }
+        // In place, its additions enter and leave with it: the region and
+        // the entry lay out flat over it (`Scene::flat_item`), and as it
+        // leaves it is kept where it lay (`pin_in_place`).
+        Built::Presence => adds_beside(hooks, &node, low),
     };
     // A root that is a component, a presence or a branching region gets
     // what `hooked_lower` gives it among children: as in place, it's one.
@@ -8097,7 +8097,9 @@ fn presence(
                             (b.width, b.height)
                         });
                         if let Some(scene) = &scene {
-                            scene.borrow_mut().set_contents(handle.node(), false);
+                            let mut scene = scene.borrow_mut();
+                            pin_in_place(&mut scene, handle.node());
+                            scene.set_contents(handle.node(), false);
                         }
                         // What holds it takes no input either (`leave`).
                         handle.leave();
@@ -8198,6 +8200,38 @@ fn presence(
     } else {
         region
     }
+}
+
+/// What a leaving presence entry holds laid out in its place (content
+/// plugins add beside, `in_place`), kept where it lies as it leaves: each
+/// piece absolute at the offset and size it had in the parent's flow, in
+/// a box of its own, so the one-cell grid that holds what leaves doesn't
+/// stack them. Content alone is left as it is.
+#[cold]
+#[inline(never)]
+fn pin_in_place(scene: &mut zgx::scene::Scene, entry: zgx::scene::NodeId) {
+    let [group] = scene.children(entry) else {
+        return;
+    };
+    let group = *group;
+    if !scene.is_display_contents(group) {
+        return;
+    }
+    let origin = scene.bounds(entry);
+    for piece in scene.children(group).to_vec() {
+        let at = scene.bounds(piece);
+        let mut style = scene.style(piece);
+        style.absolute = true;
+        style.width = Some(at.width);
+        style.height = Some(at.height);
+        style.margin = zgx::scene::Insets {
+            top: at.y - origin.y,
+            left: at.x - origin.x,
+            ..Default::default()
+        };
+        scene.set_style(piece, style);
+    }
+    scene.set_display_contents(group, false);
 }
 
 /// A box whose one in-flow child fills it in both directions unless it

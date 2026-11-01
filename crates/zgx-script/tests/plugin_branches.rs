@@ -1,8 +1,9 @@
 //! What plugins add beside the root of a branch: a `ui.show`'s or
 //! `ui.switch`'s, or a component's root. The additions are siblings in the
 //! parent's flow, come and go with the branch, and read what the root
-//! provides, live. Where a root can't have siblings (a presence's, the
-//! app's), the contribution reports an error.
+//! provides, live. Beside a presence's content they enter and leave with
+//! it. Where a root can't have siblings (the app's, a window's), the
+//! contribution reports an error.
 mod common;
 use common::Harness;
 use zgx_script::{Plugin, ScriptHost};
@@ -126,21 +127,122 @@ return ui.row { ui.text { "before" }, Header {}, ui.text { "after" } }
     assert_eq!(h.host.contributions()[0].matches, 1);
 }
 
+/// Every text the app shows with where it is, in tree order.
+fn placed(h: &mut Harness) -> Vec<(String, zgx::scene::Rect)> {
+    h.ui.prepare_frame();
+    let scene = h.ui.scene.borrow();
+    let mut out = Vec::new();
+    let mut stack = vec![scene.root()];
+    while let Some(n) = stack.pop() {
+        if let zgx::scene::NodeKind::Text { text, .. } = scene.kind(n) {
+            out.push((text.to_string(), scene.bounds(n)));
+        }
+        stack.extend(scene.children(n).iter().rev());
+    }
+    out
+}
+fn rects_of(placed: &[(String, zgx::scene::Rect)], text: &str) -> Vec<zgx::scene::Rect> {
+    placed
+        .iter()
+        .filter(|(t, _)| t == text)
+        .map(|(_, r)| *r)
+        .collect()
+}
+
+const PAGES: &str = r##"
+local page = ui.state("page", "a")
+ui.command { id = "next", run = function() page:set("b") end }
+return ui.row {
+    id = "app", gap = 10, items = "start",
+    ui.text { "before" },
+    ui.presence(page, function(p) return ui.row { id = "header", ui.text { p } } end,
+        { exit = { opacity = 0, duration = 100 } }),
+    ui.text { "after" },
+}
+"##;
+
 #[test]
-fn beside_a_presences_content_or_the_apps_root_is_an_error() {
+fn beside_a_presences_content_it_enters_and_leaves_with_it() {
     let mut h = with(
         "presence",
-        r##"
-local page = ui.state("page", "a")
-return ui.row {
-    id = "app",
-    ui.presence(page, function(p) return ui.row { id = "header", ui.text { p } } end),
+        PAGES,
+        r##"ui.contribute { target = "#header", after = ui.text { "x" } }"##,
+    );
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    assert_eq!(h.host.contributions()[0].error, None);
+    assert_eq!(h.texts(), ["before", "a", "x", "after"]);
+    let at = placed(&mut h);
+    let (a, x, after) = (
+        rects_of(&at, "a")[0],
+        rects_of(&at, "x")[0],
+        rects_of(&at, "after")[0],
+    );
+    // A sibling in the row's flow, with its gap, not stacked under it.
+    assert_eq!(x.y, a.y);
+    assert_eq!(x.x, a.x + a.width + 10.);
+    assert_eq!(after.x, x.x + x.width + 10.);
+
+    assert!(h.host.run_command("next"));
+    let mut frames = 0;
+    loop {
+        h.frame();
+        let now = placed(&mut h);
+        let (leaving, xs) = (rects_of(&now, "a"), rects_of(&now, "x"));
+        // What was added leaves with what it was added beside: in the same
+        // frame, not one early or late. Until then it stays where it was.
+        assert_eq!(xs.len(), 1 + leaving.len(), "frame {frames}: {now:?}");
+        if leaving.is_empty() {
+            break;
+        }
+        assert_eq!(leaving, [a], "frame {frames}");
+        assert!(
+            xs.contains(&x),
+            "frame {frames}: the leaving one in place: {xs:?}"
+        );
+        frames += 1;
+        assert!(frames < 30, "the exit ends");
+    }
+    assert!(frames >= 5, "it played its exit: {frames} frames");
+    // The entering content and its addition in the flow, as before.
+    let now = placed(&mut h);
+    assert_eq!(h.texts(), ["before", "b", "x", "after"]);
+    let (b, x) = (rects_of(&now, "b")[0], rects_of(&now, "x")[0]);
+    assert_eq!(x.x, b.x + b.width + 10.);
+    assert_eq!(h.host.contributions()[0].matches, 1);
 }
-"##,
-        r##"
-ui.contribute { target = "#header", after = ui.text { "x" } }
-ui.contribute { target = "#app", before = ui.text { "y" } }
-"##,
+
+/// Without plugins, what leaves stays exactly where it was on every frame
+/// of its exit, and what enters takes its place in the flow.
+#[test]
+fn without_plugins_a_presences_exit_keeps_its_place_every_frame() {
+    let mut h = Harness::inline(PAGES);
+    h.frames(1);
+    let before = placed(&mut h);
+    let (a, after) = (rects_of(&before, "a")[0], rects_of(&before, "after")[0]);
+    assert!(h.host.run_command("next"));
+    let mut frames = 0;
+    loop {
+        h.frame();
+        let now = placed(&mut h);
+        assert_eq!(rects_of(&now, "after"), [after], "frame {frames}");
+        let leaving = rects_of(&now, "a");
+        if leaving.is_empty() {
+            break;
+        }
+        assert_eq!(leaving, [a], "frame {frames}");
+        frames += 1;
+        assert!(frames < 30, "the exit ends");
+    }
+    assert!(frames >= 5, "it played its exit: {frames} frames");
+}
+
+#[test]
+fn beside_the_apps_root_is_an_error() {
+    let mut h = with(
+        "approot",
+        PAGES,
+        r##"ui.contribute { target = "#app", before = ui.text { "y" } }"##,
     );
     h.frames(1);
     let report = h.host.contributions();
@@ -148,17 +250,10 @@ ui.contribute { target = "#app", before = ui.text { "y" } }
         report[0]
             .error
             .as_deref()
-            .is_some_and(|e| e.contains("the content of a ui.presence")),
-        "{report:?}"
-    );
-    assert!(
-        report[1]
-            .error
-            .as_deref()
             .is_some_and(|e| e.contains("the app's root")),
         "{report:?}"
     );
-    assert!(!h.texts().iter().any(|t| t == "x" || t == "y"));
+    assert!(!h.texts().iter().any(|t| t == "y"));
 }
 
 #[test]
