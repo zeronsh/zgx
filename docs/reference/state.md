@@ -680,7 +680,7 @@ ui.contribute(
 - `a >> b`: `b` anywhere inside `a`, as `#sidebar >> .session-row`. A chain is checked as each element mounts, so it holds inside list rows and components built later; where it doesn't, nothing is added.
 - A target matching several elements contributes at each. `@n`, `row` and `[n]` are refused: they are known only once the interface shows.
 
-Under strict types a `target` is one of the app's ids, declared hooks or classes (`HookTarget`, which `zgx types` writes from its source, for an editor to offer), a chain (`HookChain`, any text: its parts combine freely, and `zgx lint` checks each `#id` and `hook:` in it), or `ui.selector('role:button "Save"')` for a role or a name, which marks it as the app's internals.
+Under strict types a `target` is one of the app's ids, declared hooks or classes (`HookTarget`, which `zgx types` writes from its source, for an editor to offer), a chain (`HookChain`, any text: its parts combine freely, and `zgx lint` warns of each `#id`, `hook:` or `.class` in it that the app doesn't declare), or `ui.selector('role:button "Save"')` for a role or a name, which marks it as the app's internals.
 
 - `before` and `after` add beside the element, in plugin order, wherever it is built; the host can make a target ask a capability with `expose_hook(target, Some(capability))`.
 - At the root of a `ui.each` or `ui.list` row they apply a row each: what is added lays out as the list's own items, moves with its row as the list reorders, goes with it when it is removed, and reads what the row's root provides (`ui.use_context`), live. What a plugin adds reads what the app provides above where it lands, nearest first: a value converted into the plugin's script, a state as the same state, read only.
