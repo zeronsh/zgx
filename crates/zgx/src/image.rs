@@ -65,6 +65,31 @@ pub enum Decoding {
     /// Off the main thread, whatever its size.
     Async,
 }
+/// An image drawn in nine pieces (a nine-patch; CSS's `border-image` with
+/// `fill`, `Scene::set_image_slice`): `slice` cuts its pixels into corners,
+/// edges and a middle, insets from its top, right, bottom and left edges
+/// in its own pixels; `widths` are those pieces' edges in the box, in
+/// points. Corners keep their size, edges stretch along their side, the
+/// middle both ways: a button's or a bubble's frame at any size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct ImageSlice {
+    /// Insets into the image (top, right, bottom, left), in its pixels.
+    pub slice: [f32; 4],
+    /// The pieces' edges in the box (top, right, bottom, left), in points.
+    pub widths: [f32; 4],
+}
+impl ImageSlice {
+    /// `slice` into the image, in its pixels, drawn `widths` wide in the
+    /// box, in points (each top, right, bottom, left).
+    pub fn new(slice: [f32; 4], widths: [f32; 4]) -> Self {
+        let clean = |v: [f32; 4]| v.map(|v| if v.is_finite() { v.max(0.) } else { 0. });
+        Self {
+            slice: clean(slice),
+            widths: clean(widths),
+        }
+    }
+}
 /// How an image's pixels are sampled where it is drawn larger or smaller
 /// than they are (CSS's `image-rendering`; `Scene::set_image_rendering`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

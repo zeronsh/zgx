@@ -7417,6 +7417,12 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         (ClipInset, Lit::Corners(c)) => {
             s.clip_inset(c.top_left, c.top_right, c.bottom_right, c.bottom_left)
         }
+        // A nine-patch: `{ top, right, bottom, left }` into the image's
+        // pixels, drawn as many points in from the box's edges.
+        (Slice, Lit::Corners(c)) => {
+            let sides = [c.top_left, c.top_right, c.bottom_right, c.bottom_left];
+            s.image_slice(sides, sides)
+        }
         // Points inside its rounded clip that its content fades out over.
         (ClipFeather, Lit::Num(v)) => s.clip_feather(*v),
         // `{ top, right, bottom, left }`; 0 keeps an edge sharp.

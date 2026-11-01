@@ -408,6 +408,39 @@ impl Scene {
         self.sync_cold(id);
         self.invalidate(id, PAINTED);
     }
+    /// Draw node `id`'s image in nine pieces as `slice` cuts it (a
+    /// nine-patch, `ImageSlice`); `None`: whole, as it fits.
+    pub fn set_image_slice(&mut self, id: NodeId, slice: Option<crate::image::ImageSlice>) {
+        let held = self
+            .cold
+            .as_ref()
+            .and_then(|cold| cold.image_slices.get(&id))
+            .copied();
+        if !self.contains(id) || held == slice {
+            return;
+        }
+        let maps = self.cold.get_or_insert_default();
+        match slice {
+            Some(slice) => maps.image_slices.insert(id, slice),
+            None => maps.image_slices.remove(&id),
+        };
+        self.sync_cold(id);
+        self.invalidate(id, PAINTED);
+    }
+    /// Whether any node's image is drawn in nine pieces.
+    #[inline(always)]
+    pub fn has_image_slices(&self) -> bool {
+        self.cold
+            .as_ref()
+            .is_some_and(|cold| !cold.image_slices.is_empty())
+    }
+    /// How node `id`'s image is cut into nine pieces (`set_image_slice`).
+    pub fn image_slice(&self, id: NodeId) -> Option<crate::image::ImageSlice> {
+        self.cold
+            .as_ref()
+            .and_then(|cold| cold.image_slices.get(&id))
+            .copied()
+    }
     /// Whether any node's image is sampled other than smoothly.
     #[inline(always)]
     pub fn has_image_rendering(&self) -> bool {

@@ -1695,6 +1695,7 @@ export type Styles = {
 	-- smaller (CSS's `image-rendering`): "pixelated", the nearest pixel, its
 	-- edges hard (pixel art, a QR code); "auto", smooth.
 	image_rendering: ("auto" | "pixelated")?,
+	slice: Sides?,
 	tint: Color?,
 	-- When its file decodes (HTML's `decoding`): "auto", where a picture up
 	-- to 256 by 256 decodes as it is first drawn and a larger one off the
@@ -1882,6 +1883,7 @@ export type StyleProps = {
 	object_position: Reactive<{ number }>?,
 	fit: Reactive<Fit>?,
 	image_rendering: ("auto" | "pixelated")?,
+	slice: Reactive<Sides>?,
 	tint: Reactive<Color>?,
 	decode: ("auto" | "sync" | "async")?,
 	dither: number?,

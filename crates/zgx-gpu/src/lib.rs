@@ -7753,6 +7753,13 @@ impl GpuRenderer {
                             ));
                             self.prepare_image_effects();
                             fill_shading = Some(Shading::ImageEffect);
+                        } else if scene.has_image_slices()
+                            && !transformed
+                            && let Some(slice) = scene.image_slice(item.id)
+                        {
+                            // In nine pieces (a nine-patch): out of line.
+                            let (opacity, edge) = (item.effects.opacity, item.effects.edge_fade);
+                            push_image_slices(&mut quads, image, slice, fade, (opacity, edge));
                         } else {
                             // Images have no procedural border/shape. Reuse those
                             // attribute lanes rather than growing every glyph instance.
@@ -13387,6 +13394,60 @@ fn glyph_quad(
         ],
         color,
         paint: [0., 1., if a.color { COLOR_GLYPH } else { 0. }, 0.],
+    }
+}
+/// `image` in its box `fade` (x, y, width, height) as nine pieces
+/// (`zgx::image::ImageSlice`): corners at their widths, edges stretched
+/// along their side, the middle both ways, each a quad of its part of the
+/// image's texture. Widths past the box shrink together, as CSS's do.
+#[cold]
+#[inline(never)]
+fn push_image_slices(
+    quads: &mut Vec<Quad>,
+    image: &zgx::image::ImageData,
+    slice: zgx::image::ImageSlice,
+    fade: [f32; 4],
+    (opacity, edge_fade): (f32, f32),
+) {
+    let [x, y, width, height] = fade;
+    let (iw, ih) = (image.width().max(1) as f32, image.height().max(1) as f32);
+    let [top, right, bottom, left] = slice.widths;
+    let fit = |a: f32, b: f32, room: f32| match a + b > room && a + b > 0. {
+        true => room / (a + b),
+        false => 1.,
+    };
+    let (sx, sy) = (fit(left, right, width), fit(top, bottom, height));
+    let (left, right, top, bottom) = (left * sx, right * sx, top * sy, bottom * sy);
+    let xs = [x, x + left, x + width - right, x + width];
+    let ys = [y, y + top, y + height - bottom, y + height];
+    let [st, sr, sb, sl] = slice.slice;
+    let us = [0., (sl / iw).min(1.), (1. - sr / iw).max(0.), 1.];
+    let vs = [0., (st / ih).min(1.), (1. - sb / ih).max(0.), 1.];
+    for row in 0..3 {
+        for column in 0..3 {
+            let (dw, dh) = (xs[column + 1] - xs[column], ys[row + 1] - ys[row]);
+            if dw <= 0. || dh <= 0. || us[column + 1] <= us[column] || vs[row + 1] <= vs[row] {
+                continue;
+            }
+            // Half a texel in at the cuts inside the image, so a piece's
+            // smoothing never takes in its neighbour's pixels.
+            let inner = |at: usize, half: f32| if at == 0 || at == 3 { 0. } else { half };
+            let (hu, hv) = (0.5 / iw, 0.5 / ih);
+            let u0 = us[column] + inner(column, hu);
+            let u1 = (us[column + 1] - inner(column + 1, hu)).max(u0);
+            let v0 = vs[row] + inner(row, hv);
+            let v1 = (vs[row + 1] - inner(row + 1, hv)).max(v0);
+            quads.push(Quad {
+                rect: [xs[column], ys[row], dw, dh],
+                uv: [u0, v0, u1 - u0, v1 - v0],
+                color: [1., 1., 1., opacity],
+                fade,
+                options: [edge_fade, 2., 0., 0.],
+                shape: [0.; 4],
+                border: [0.; 4],
+                mask: NO_MASK,
+            });
+        }
     }
 }
 /// The most pieces one line decoration is drawn in: past that, the rest of a

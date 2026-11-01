@@ -1958,6 +1958,7 @@ fn apply_rare(
             ui.text_geometry_moved();
         }
         scene.set_text_shadows(node, cold.and_then(|cold| cold.text_shadows.clone()));
+        scene.set_image_slice(node, cold.and_then(|cold| cold.image_slice));
         scene.set_image_rendering(
             node,
             cold.and_then(|cold| cold.image_rendering)
