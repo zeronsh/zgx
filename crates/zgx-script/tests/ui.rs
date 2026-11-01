@@ -318,6 +318,26 @@ fn outlines_take_width_colour_and_offset() {
     );
 }
 
+/// `slice` draws an image in nine pieces: `{ top, right, bottom, left }`
+/// into its pixels, as many points in from the box.
+#[test]
+fn image_slices_reach_the_scene() {
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            ui.div { id = "sides", w = 20, h = 20, slice = { 1, 2, 3, 4 } },
+            ui.div { id = "even", w = 20, h = 20, slice = { 6, 6, 6, 6 } },
+            ui.div { id = "whole", w = 20, h = 20 } }"##,
+    );
+    h.ui.prepare_frame();
+    let ids = ["sides", "even", "whole"].map(|id| h.find(id).unwrap());
+    let scene = h.ui.scene.borrow();
+    let sides = scene.image_slice(ids[0]).expect("sliced");
+    assert_eq!(sides.slice, [1., 2., 3., 4.]);
+    assert_eq!(sides.widths, [1., 2., 3., 4.]);
+    assert_eq!(scene.image_slice(ids[1]).unwrap().slice, [6.; 4]);
+    assert!(scene.image_slice(ids[2]).is_none());
+}
+
 /// `image_rendering = "pixelated"` reaches the scene; unsaid, smooth.
 #[test]
 fn image_rendering_reaches_the_scene() {

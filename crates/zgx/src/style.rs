@@ -743,6 +743,8 @@ pub(crate) struct ColdStyles {
     pub(crate) text_shadows: Option<std::sync::Arc<[crate::scene::TextShadow]>>,
     /// `Styled::image_rendering`.
     pub(crate) image_rendering: Option<crate::image::ImageRendering>,
+    /// `Styled::image_slice`.
+    pub(crate) image_slice: Option<crate::image::ImageSlice>,
     /// `Styled::outline_style`.
     pub(crate) outline_style: Option<crate::decoration::BorderStyle>,
     /// `Styled::w_calc` and the like.
@@ -941,6 +943,9 @@ impl RareStyles {
             }
             if theirs.image_rendering.is_some() {
                 mine.image_rendering = theirs.image_rendering;
+            }
+            if theirs.image_slice.is_some() {
+                mine.image_slice = theirs.image_slice;
             }
             if theirs.outline_style.is_some() {
                 mine.outline_style = theirs.outline_style;
@@ -2228,6 +2233,18 @@ pub trait Styled: Sized {
     /// negative draws it over the box's edge.
     fn outline_offset(mut self, offset: f32) -> Self {
         self.styles_mut().rare_mut().outline_offset = Some(offset);
+        self
+    }
+    /// Draw its image in nine pieces (a nine-patch, CSS's `border-image`
+    /// with `fill`): `slice` insets into the image's pixels (top, right,
+    /// bottom, left) cut corners, edges and a middle, drawn `widths` points
+    /// in from the box's edges. Corners keep their size, edges stretch.
+    fn image_slice(mut self, slice: [f32; 4], widths: [f32; 4]) -> Self {
+        self.styles_mut()
+            .rare_mut()
+            .cold
+            .get_or_insert_default()
+            .image_slice = Some(crate::image::ImageSlice::new(slice, widths));
         self
     }
     /// How its image, or its background image, is sampled drawn larger or

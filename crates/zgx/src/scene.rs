@@ -1853,6 +1853,8 @@ struct ColdMaps {
     flat_parents: NodeMap<u32>,
     /// Images sampled other than smoothly (`set_image_rendering`).
     image_rendering: NodeMap<crate::image::ImageRendering>,
+    /// Images drawn in nine pieces (`set_image_slice`).
+    image_slices: NodeMap<crate::image::ImageSlice>,
     /// Outlines drawn dashed or dotted (`set_outline_style`).
     outline_styles: NodeMap<crate::decoration::BorderStyle>,
 }
@@ -6334,6 +6336,7 @@ impl Scene {
                 || cold.flat.contains_key(&id)
                 || cold.flat_parents.contains_key(&id)
                 || cold.image_rendering.contains_key(&id)
+                || cold.image_slices.contains_key(&id)
                 || cold.outline_styles.contains_key(&id)
         }) || self.has_own_text_shadows(id);
         self.set_special(id, COLD, cold);
@@ -6769,6 +6772,7 @@ impl Scene {
             maps.flat.remove(&id);
             maps.flat_parents.remove(&id);
             maps.image_rendering.remove(&id);
+            maps.image_slices.remove(&id);
             maps.outline_styles.remove(&id);
             maps.steps.remove(&id);
         }

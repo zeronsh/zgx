@@ -314,6 +314,7 @@ return ui.div {
 | `layer` | `boolean` | `false` | paint the subtree into its own layer |
 | `fit` | `"fill" \| "contain" \| "cover" \| "none" \| "scale_down"` | `"fill"` | how an image fills its box |
 | `image_rendering` | `"auto" \| "pixelated"` | `"auto"` | how an image, or a background image, is sampled drawn larger or smaller (CSS's `image-rendering`): `"pixelated"`, the nearest pixel, its edges hard (pixel art, a QR code) |
+| `slice` | `{ top, right, bottom, left }` | none | the image drawn in nine pieces (a nine-patch, CSS's `border-image` with `fill`): insets into its pixels cut corners, edges and a middle, drawn as many points in from the box's edges; corners keep their size, edges stretch along their side, the middle both ways: a button's or a bubble's frame at any size. Edges wider than the box shrink together |
 | `object_position` | `{ x, y }` | `{ 0.5, 0.5 }` | where an image lies in its box where it doesn't fill it (CSS's `object-position`): fractions of the room to spare, so `{ 0.5, 0 }` keeps a portrait's top as `fit = "cover"` crops it. For `ui.image`; a `bg_image` stays centred until 0.2 |
 | `tint` | `Color` | | recolors an SVG (a state or function re-tints it) |
 | `decode` | `"auto" \| "sync" \| "async"` | `"auto"` | when an image's file decodes (HTML's `decoding`; see [Images and canvas](media.md)) |
