@@ -2592,11 +2592,17 @@ impl InputDispatcher {
             0
         };
         // This press's, whatever becomes of it (`keep_focus_for_press`).
-        // And what it lands on, in the same borrow (`last_press`).
-        let keep_focus = matches!(event, InputEvent::PointerDown { .. }) && {
+        // And, in the same borrow, what it lands on (`last_press`) and the
+        // scopes open before it: whether it opens a popup (below).
+        let (keep_focus, scopes) = if matches!(event, InputEvent::PointerDown { .. }) {
             let mut state = self.state.borrow_mut();
             state.last_press = target;
-            std::mem::take(&mut state.keep_focus)
+            (
+                std::mem::take(&mut state.keep_focus),
+                Some(state.scopes.len()),
+            )
+        } else {
+            (false, None)
         };
         let mut prevented = false;
         if let Some(id) = target {
@@ -2609,6 +2615,21 @@ impl InputDispatcher {
                 false,
             );
             prevented = ctx.prevented;
+            // The press opened a popup (a menu opens on it): its release
+            // goes to the popup, so what was pressed hears no more of it
+            // and shows pressed no longer.
+            if let Some(scopes) = scopes
+                && self.state.borrow().scopes.len() > scopes
+                && let Some(root) = self.focus_scope()
+            {
+                let inside = {
+                    let scene = scene.borrow();
+                    id == root || (scene.contains(id) && scene.ancestors(id).any(|a| a == root))
+                };
+                if !inside && scene.borrow().contains(id) {
+                    self.route(scene, id, InputEvent::PointerCancel);
+                }
+            }
             if let InputEvent::Scroll {
                 delta_x, delta_y, ..
             } = event

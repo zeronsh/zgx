@@ -352,3 +352,94 @@ fn a_menu_opened_by_clicking_its_trigger_gives_it_focus_back_without_a_ring() {
     assert_eq!(w.ui.input.focused(), Some(w.anchor));
     assert_ne!(w.ui.input.focused(), Some(w.first));
 }
+
+#[test]
+fn a_trigger_that_opened_its_menu_with_a_press_shows_pressed_no_longer() {
+    let (mut w, rest) = window();
+    let anchor = w.ui.scene.borrow().bounds(w.anchor);
+    click(&mut w.ui, anchor.x + 10., anchor.y + 10.);
+    assert!(w.open.get());
+    assert_eq!(
+        look(&w.ui, w.anchor),
+        rest[2],
+        "pressed while its menu shows"
+    );
+    press(&mut w.ui, Key::Escape, Modifiers::default());
+    assert_eq!(w.ui.input.focused(), Some(w.anchor));
+    assert_eq!(look(&w.ui, w.anchor), rest[2], "pressed after it closed");
+}
+
+/// A trigger counting its clicks and releases, which opens `open`.
+fn counting(
+    open: &zgx::reactive::Signal<bool>,
+) -> (
+    View,
+    std::rc::Rc<std::cell::Cell<u32>>,
+    std::rc::Rc<std::cell::Cell<u32>>,
+) {
+    use std::{cell::Cell, rc::Rc};
+    let (clicks, ups) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+    let (counted, up, open) = (clicks.clone(), ups.clone(), open.clone());
+    let trigger = button()
+        .id("anchor")
+        .size(80., 30.)
+        .child(text("Open"))
+        .on_click(move || {
+            counted.set(counted.get() + 1);
+            open.set(true);
+        })
+        .on_event(move |cx| {
+            if matches!(cx.event, InputEvent::PointerUp { .. })
+                && cx.phase != zgx::input::EventPhase::Capture
+            {
+                up.set(up.get() + 1);
+            }
+        });
+    (trigger, clicks, ups)
+}
+
+#[test]
+fn a_trigger_whose_press_opened_its_menu_fires_nothing_more_as_it_ends() {
+    // A menu opens on the press and chooses on the release, which goes to
+    // it: the trigger's press ends (it shows pressed no longer) without a
+    // click or a release of its own, open or closed.
+    let mut ui = Ui::new(300., 200.);
+    let open = ui.signal(false);
+    let (trigger, clicks, ups) = counting(&open);
+    let view = ui.mount(
+        column().child(menu("Actions", open.clone(), trigger).children([menu_item("Alpha")])),
+    );
+    settle(&mut ui);
+    let b = ui.scene.borrow().bounds(view.find("anchor").unwrap());
+    click(&mut ui, b.x + 10., b.y + 10.);
+    assert!(open.get(), "its press opened it");
+    assert_eq!((clicks.get(), ups.get()), (0, 0));
+    press(&mut ui, Key::Escape, Modifiers::default());
+    assert!(!open.get());
+    assert_eq!(
+        (clicks.get(), ups.get()),
+        (0, 0),
+        "nothing fired as it ended"
+    );
+}
+
+#[test]
+fn a_popover_its_triggers_click_opens_runs_that_click_once() {
+    // Opened on the release (the trigger's own click): its press was never
+    // cancelled, and the click runs once, closing nothing more.
+    let mut ui = Ui::new(300., 200.);
+    let open = ui.signal(false);
+    let (trigger, clicks, ups) = counting(&open);
+    let view = ui
+        .mount(column().child(
+            popover("Details", open.clone(), trigger).child(button().child(text("Inside"))),
+        ));
+    settle(&mut ui);
+    let b = ui.scene.borrow().bounds(view.find("anchor").unwrap());
+    click(&mut ui, b.x + 10., b.y + 10.);
+    assert!(open.get());
+    assert_eq!((clicks.get(), ups.get()), (1, 1));
+    press(&mut ui, Key::Escape, Modifiers::default());
+    assert!(!open.get());
+    assert_eq!((clicks.get(), ups.get()), (1, 1), "no second handler");
+}
