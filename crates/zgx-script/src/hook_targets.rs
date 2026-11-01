@@ -114,10 +114,21 @@ pub(crate) fn unknown_targets(files: &[File]) -> Vec<Diagnostic> {
     let known = declared(files);
     let mut found = Vec::new();
     for file in files {
-        for (token, target) in targets(file.tokens) {
-            let (names, name, prefix, what) = if let Some(id) = target.strip_prefix('#') {
+        // Each id and hook a target names, in every part of a chain
+        // (`#sidebar >> .row`); classes and names aren't declared.
+        let named = targets(file.tokens)
+            .into_iter()
+            .flat_map(|(token, target)| {
+                target
+                    .split(">>")
+                    .flat_map(str::split_whitespace)
+                    .map(move |word| (token, target, word))
+                    .collect::<Vec<_>>()
+            });
+        for (token, target, word) in named {
+            let (names, name, prefix, what) = if let Some(id) = word.strip_prefix('#') {
                 (&known.ids, id, "#", "id")
-            } else if let Some(hook) = target.strip_prefix("hook:") {
+            } else if let Some(hook) = word.strip_prefix("hook:") {
                 (&known.hooks, hook, "hook:", "hook")
             } else {
                 continue;
@@ -220,5 +231,22 @@ mod tests {
         );
         assert_eq!(diagnostics[0].line, 1);
         assert_eq!(diagnostics[1].line, 3);
+    }
+    #[test]
+    fn each_part_of_a_chain_is_checked_and_classes_are_not() {
+        let diagnostics = with(
+            &[
+                r#"return ui.column { id = "sidebar", ui.text { class = "row", "x" } }"#,
+                r##"ui.contribute { target = "#sidebar >> .row", after = ui.text { "a" } }
+                ui.contribute { target = "#sidebr >> .row", after = ui.text { "b" } }
+                ui.contribute { target = ".anything", after = ui.text { "c" } }"##,
+            ],
+            unknown_targets,
+        );
+        let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            ["`#sidebr >> .row`: no element declares id = \"sidebr\"; did you mean `#sidebar`?"]
+        );
     }
 }

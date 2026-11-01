@@ -362,6 +362,9 @@ pub(crate) struct Hooks {
     by_id: ContentMap<Rc<str>, Vec<usize>>,
     by_hook: ContentMap<Rc<str>, Vec<usize>>,
     loose: Vec<usize>,
+    /// The parts targets name before `>>`, each once: elements matching one
+    /// tell their subtree so (`Ancestry`).
+    marks: Vec<crate::driver::Static>,
     /// The application's script: only its elements are targets, not what
     /// plugins add (a replacement that matched its own target would
     /// replace itself without end).
@@ -385,8 +388,20 @@ impl Drop for Hooks {
 }
 impl Hooks {
     pub(crate) fn extend(&mut self, added: Vec<crate::node::HookContribution>) {
-        for hook in added {
+        for mut hook in added {
             let at = self.all.len();
+            hook.chain = hook
+                .target
+                .ancestors
+                .iter()
+                .map(|part| match self.marks.iter().position(|m| m == part) {
+                    Some(at) => at,
+                    None => {
+                        self.marks.push(part.clone());
+                        self.marks.len() - 1
+                    }
+                })
+                .collect();
             match (&hook.target.id, &hook.target.hook) {
                 (Some(id), _) => self.by_id.entry(id.as_str().into()).or_default().push(at),
                 (None, Some(name)) => self
@@ -405,6 +420,16 @@ impl Hooks {
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.all.is_empty()
+    }
+    /// The `marks` an element of the app's matches, if any target is a
+    /// chain (`a >> b`).
+    fn marks_of(&self, node: &Node) -> Vec<usize> {
+        if self.marks.is_empty() || !std::rc::Weak::ptr_eq(&node.owner, &self.app) {
+            return Vec::new();
+        }
+        (0..self.marks.len())
+            .filter(|at| targets(&self.marks[*at], node))
+            .collect()
     }
     /// Every contribution, in the order the scripts made them.
     pub(crate) fn all(&self) -> &[crate::node::HookContribution] {
@@ -462,6 +487,44 @@ fn targets(target: &crate::driver::Static, node: &Node) -> bool {
             .text
             .as_deref()
             .is_none_or(|text| static_name(node) == Some(text))
+        && target
+            .classes
+            .iter()
+            .all(|class| node.classes.iter().any(|own| **own == **class))
+}
+/// The elements above, as chained targets (`a >> b`) see them: the
+/// `Hooks::marks` each matched, nearest first.
+pub(crate) struct Ancestry {
+    marks: Vec<usize>,
+    parent: Option<Rc<Ancestry>>,
+}
+/// Whether `chain` (marks, outermost first) holds above, each part in some
+/// element inside the one before.
+fn chain_holds(chain: &[usize], mut at: Option<Rc<Ancestry>>) -> bool {
+    let mut need = chain.len();
+    while need > 0 {
+        let Some(here) = at else {
+            return false;
+        };
+        if here.marks.contains(&chain[need - 1]) {
+            need -= 1;
+        }
+        at = here.parent.clone();
+    }
+    true
+}
+/// `view`, an element matching some chained target's earlier parts, telling
+/// its subtree (`Ancestry`).
+#[cold]
+#[inline(never)]
+fn marked(view: View, marks: Vec<usize>) -> View {
+    zgx::compose::provide_with(
+        move |cx| Ancestry {
+            marks,
+            parent: cx.try_service::<Ancestry>(),
+        },
+        view,
+    )
 }
 /// A node's role as `role:` targets name it: the one it sets, else its
 /// kind's.
@@ -506,15 +569,44 @@ fn static_name(node: &Node) -> Option<&str> {
 /// is traced to it (assistive technology hears whose it is; the layout
 /// inspector shows the plugin's line that made it).
 fn contributed(hook: &crate::node::HookContribution, node: &Rc<Node>, low: &Rc<Lowering>) -> View {
-    let view = counted(lower(node, low), &hook.stats);
-    let from = format!("from the plugin {}", hook.owner);
+    if !hook.chain.is_empty() {
+        return chained_contribution(hook, node, low);
+    }
+    contributed_now(&hook.owner, &hook.stats, node, low)
+}
+/// `contributed` for a chained target (`a >> b`): drawn where its
+/// ancestors hold, as it mounts; else nothing, not even a flex item.
+#[cold]
+#[inline(never)]
+fn chained_contribution(
+    hook: &crate::node::HookContribution,
+    node: &Rc<Node>,
+    low: &Rc<Lowering>,
+) -> View {
+    let (owner, stats, chain) = (hook.owner.clone(), hook.stats.clone(), hook.chain.clone());
+    let (node, low) = (node.clone(), low.clone());
+    component(
+        move |cx| match chain_holds(&chain, cx.try_service::<Ancestry>()) {
+            true => contributed_now(&owner, &stats, &node, &low),
+            false => div().hidden(),
+        },
+    )
+}
+fn contributed_now(
+    owner: &str,
+    stats: &Rc<crate::node::ContributionStats>,
+    node: &Rc<Node>,
+    low: &Rc<Lowering>,
+) -> View {
+    let view = counted(lower(node, low), stats);
+    let from = format!("from the plugin {owner}");
     let described = match node
         .a11y
         .as_ref()
         .and_then(|a11y| a11y.description.as_deref())
     {
         Some(own) => format!("{own}, {from}"),
-        None => format!("From the plugin {}", hook.owner),
+        None => format!("From the plugin {owner}"),
     };
     view.accessible_description(described)
 }
@@ -573,10 +665,26 @@ fn hooked_children(
             place(crate::node::Place::Before).map(|(hook, node)| contributed(hook, node, low)),
         );
         let filters = filters_in(&at);
-        children.push(match place(crate::node::Place::Replace).next_back() {
+        let chained = at.iter().any(|hook| {
+            !hook.chain.is_empty()
+                && !matches!(
+                    hook.adds,
+                    crate::node::Adds::Node(
+                        crate::node::Place::Before | crate::node::Place::After,
+                        _
+                    )
+                )
+        });
+        let main = match place(crate::node::Place::Replace).next_back() {
+            _ if chained => chained_element(child, low, flow, !names_parent),
             Some((hook, node)) => contributed(hook, node, low),
             None if filters.is_empty() => lowered(child),
             None => counted_filters(filtered(child, &filters, low, flow), &filters),
+        };
+        let marks = hooks.marks_of(child);
+        children.push(match marks.is_empty() {
+            true => main,
+            false => marked(main, marks),
         });
         children.extend(
             place(crate::node::Place::After).map(|(hook, node)| contributed(hook, node, low)),
@@ -585,6 +693,51 @@ fn hooked_children(
     view.children(children)
 }
 
+/// An element some chained target replaces or filters (`a >> b`): which of
+/// them hold is known as it mounts, inside its ancestors, so it is chosen
+/// then. The last replacement that holds shows, else the element through
+/// the filters that hold.
+#[cold]
+#[inline(never)]
+fn chained_element(
+    child: &Rc<Node>,
+    low: &Rc<Lowering>,
+    flow: Option<&[(Prop, Lit)]>,
+    by_name: bool,
+) -> View {
+    let (child, low) = (child.clone(), low.clone());
+    let flow: Option<Vec<(Prop, Lit)>> = flow.map(<[_]>::to_vec);
+    component(move |cx| {
+        let above = cx.try_service::<Ancestry>();
+        let lowered = |child: &Rc<Node>| {
+            let view = lower(child, &low);
+            match &flow {
+                Some(flow) if child.kind.flows() => apply_all(view, flow),
+                _ => view,
+            }
+        };
+        let Some(hooks) = low.hooks.as_deref() else {
+            return lowered(&child);
+        };
+        let at: Vec<_> = hooks
+            .at(&child, by_name, &low)
+            .into_iter()
+            .filter(|hook| chain_holds(&hook.chain, above.clone()))
+            .collect();
+        if let Some((hook, node)) = at
+            .iter()
+            .rev()
+            .find_map(|hook| Some((*hook, hook.placed(crate::node::Place::Replace)?)))
+        {
+            return contributed_now(&hook.owner, &hook.stats, node, &low);
+        }
+        let filters = filters_in(&at);
+        match filters.is_empty() {
+            true => lowered(&child),
+            false => counted_filters(filtered(&child, &filters, &low, flow.as_deref()), &filters),
+        }
+    })
+}
 /// The filters among what is added at an element, each with its script,
 /// in the order the scripts filter.
 fn filters_in<'a>(
@@ -614,7 +767,18 @@ fn shown(node: &Rc<Node>, low: &Rc<Lowering>) -> View {
 #[cold]
 #[inline(never)]
 fn hooked_shown(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
+    let marks = hooks.marks_of(node);
+    let view = shown_element(node, low, hooks);
+    match marks.is_empty() {
+        true => view,
+        false => marked(view, marks),
+    }
+}
+fn shown_element(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
     let at = hooks.at(node, true, low);
+    if at.iter().any(|hook| !hook.chain.is_empty()) {
+        return chained_element(node, low, None, true);
+    }
     let replaced = at
         .iter()
         .rev()

@@ -1591,6 +1591,9 @@ pub(crate) struct HookContribution {
     pub vm: Weak<Vm>,
     /// Where it applies now and what went wrong (`ScriptHost::contributions`).
     pub stats: Rc<ContributionStats>,
+    /// Its target's ancestors (`a >> b`) as the `Hooks` they were added to
+    /// number them (`Hooks::marks`), outermost first: empty for one part.
+    pub chain: Vec<usize>,
 }
 /// A contribution's live state: the elements it applies at, mounted now,
 /// and its latest error.
@@ -1607,14 +1610,18 @@ pub(crate) enum Adds {
 impl HookContribution {
     /// Its target as a selector reads it, for messages.
     pub(crate) fn target_text(&self) -> String {
-        let t = &self.target;
-        let parts = [
-            t.id.as_ref().map(|id| format!("#{id}")),
-            t.hook.as_ref().map(|hook| format!("hook:{hook}")),
-            t.role.as_ref().map(|role| format!("role:{role}")),
-            t.text.clone(),
-        ];
-        parts.into_iter().flatten().collect::<Vec<_>>().join(" ")
+        let part = |t: &crate::driver::Static| {
+            let mut out: Vec<String> = Vec::new();
+            out.extend(t.id.as_ref().map(|id| format!("#{id}")));
+            out.extend(t.hook.as_ref().map(|hook| format!("hook:{hook}")));
+            out.extend(t.role.as_ref().map(|role| format!("role:{role}")));
+            out.extend(t.classes.iter().map(|class| format!(".{class}")));
+            out.extend(t.text.as_ref().map(|text| format!("{text:?}")));
+            out.join(" ")
+        };
+        let mut parts: Vec<String> = self.target.ancestors.iter().map(part).collect();
+        parts.push(part(&self.target));
+        parts.join(" >> ")
     }
     /// What it does there: "before", "after", "replace" or "filter".
     pub(crate) fn place_name(&self) -> &'static str {
@@ -2029,6 +2036,7 @@ fn hook_contribution(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<H
         owner,
         vm: env.vm.clone(),
         stats: Rc::default(),
+        chain: Vec::new(),
     })
 }
 /// The capability adding at `exposed` (a target as written, or `slot:name`)
@@ -2097,6 +2105,7 @@ fn hook_filter(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<HookCon
         owner,
         vm: env.vm.clone(),
         stats: Rc::default(),
+        chain: Vec::new(),
     })
 }
 

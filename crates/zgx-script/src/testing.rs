@@ -227,6 +227,8 @@ fn is_plain_id(target: &str) -> bool {
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
         && !target.starts_with("role:")
+        // `.name` is a class (targets' syntax), not an id.
+        && !target.starts_with('.')
 }
 
 /// A scripted app mounted headless, 400 by 300 points.
