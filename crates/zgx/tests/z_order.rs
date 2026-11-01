@@ -210,3 +210,50 @@ fn raising_a_node_repaints_what_it_holds() {
         "the child past its box repaints: {damage:?}"
     );
 }
+
+/// The first `z` in a scene with none, among nodes that already have other
+/// cold styles (a text shadow, which keeps `COLD` side maps): it orders at
+/// once; set back to 0, the last one, document order again. And children
+/// added under a raised parent's siblings keep their order through it.
+#[test]
+fn the_first_z_orders_and_clearing_the_last_restores_document_order() {
+    use zgx::scene::Color;
+    let mut ui = Ui::new(200., 200.);
+    let z = ui.signal(0);
+    let raised = z.clone();
+    let view = ui.mount(
+        overlay()
+            .size(100., 100.)
+            .child(
+                div()
+                    .id("a")
+                    .size(100., 100.)
+                    .bg(rgb(0xff0000))
+                    .text_shadow(1., 1., 0., Color(0, 0, 0, 255))
+                    .reactive_style(move || Styles::new().z(raised.get())),
+            )
+            .child(div().id("b").size(100., 100.).bg(rgb(0x00ff00))),
+    );
+    ui.prepare_frame();
+    let (a, b) = (view.find("a").unwrap(), view.find("b").unwrap());
+    let order = |ui: &Ui| {
+        let order = painted(ui);
+        let at = |id| order.iter().position(|item| *item == id).unwrap();
+        (at(a), at(b))
+    };
+    let (pa, pb) = order(&ui);
+    assert!(pa < pb, "no z: document order");
+    assert_eq!(ui.scene.borrow().hit_test(50., 50.), Some(b));
+    // The first z: raised over its later sibling.
+    z.set(2);
+    ui.prepare_frame();
+    let (pa, pb) = order(&ui);
+    assert!(pa > pb, "raised: paints last");
+    assert_eq!(ui.scene.borrow().hit_test(50., 50.), Some(a));
+    // The last z cleared: document order, hits as before.
+    z.set(0);
+    ui.prepare_frame();
+    let (pa, pb) = order(&ui);
+    assert!(pa < pb, "cleared: document order again");
+    assert_eq!(ui.scene.borrow().hit_test(50., 50.), Some(b));
+}

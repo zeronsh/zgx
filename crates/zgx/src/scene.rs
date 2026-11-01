@@ -1920,6 +1920,8 @@ const ZOOMED: u8 = 2;
 /// (track lists, a `z`, a paint order of its children): what looks at them
 /// is behind `contents_count`, so a scene with none pays no test of its own.
 const COLD: u8 = 4;
+/// `Scene::contents_count`'s unit for a node with any `special` bit.
+const SPECIAL_UNIT: u64 = 1 << 32;
 /// `Node::special`'s bits (`CONTENTS`, `ZOOMED`, `COLD`), as an enum rather than a
 /// `u8`: its unused values are a niche, as a `bool`'s are, so `Node` lays
 /// its byte fields out as it did with `contents: bool` (a field moved puts
@@ -2918,10 +2920,13 @@ pub struct Scene {
     /// Nodes with `Style::relative`: none keeps every absolute child placed
     /// by its parent, with no ancestor walk.
     relative_count: usize,
-    /// How many nodes are contents nodes (`set_contents`) or zoomed
-    /// (`set_zoom`), their `special` byte set: with none, style and child
-    /// changes skip looking for either.
-    contents_count: usize,
+    /// Two counts in one word, each a single test: below `SPECIAL_UNIT`,
+    /// the nodes whose children's changes and styles need looking at
+    /// (contents nodes, zoomed ones and parents painting raised children in
+    /// their own order: `laid_out_nodes`); above it, the nodes with any
+    /// `special` bit, `COLD` too (`has_special_nodes`). A scene with only
+    /// cold styles (a text shadow, a grid template) keeps the first at 0.
+    contents_count: u64,
     /// Absolute nodes whose containing block is an ancestor above their
     /// parent: their parents leave them out, and `place_escaped` positions
     /// them once the block is laid out. May hold duplicates and stale ids.
@@ -4554,7 +4559,14 @@ impl Scene {
         let node = self.node_mut(id);
         let was = node.special;
         node.special = was.with(bit, on);
+        let laid_out = (was.laid_out(), node.special.laid_out());
         match (was.any(), node.special.any()) {
+            (false, true) => self.contents_count += SPECIAL_UNIT,
+            (true, false) => self.contents_count -= SPECIAL_UNIT,
+            _ => {}
+        }
+        // Laying out specially (contents, zoomed) alone: `laid_out_nodes`.
+        match laid_out {
             (false, true) => self.contents_count += 1,
             (true, false) => self.contents_count -= 1,
             _ => {}
@@ -4676,7 +4688,7 @@ impl Scene {
     /// (`invalidate_layout`), it repaints with `CHILDREN`.
     fn children_changed(&mut self, parent: NodeId) {
         self.node_mut(parent).dirty |= CHILDREN;
-        if self.contents_count > 0 {
+        if self.laid_out_nodes() {
             self.special_children_changed(parent);
         }
     }
@@ -6237,7 +6249,10 @@ impl Scene {
             if node.special.has(COLD) {
                 self.forget_cold(id);
             }
-            self.contents_count -= 1;
+            if node.special.laid_out() {
+                self.contents_count -= 1;
+            }
+            self.contents_count -= SPECIAL_UNIT;
         }
         if !self.given_styles.is_empty() {
             self.given_styles.remove(&id);
@@ -6312,6 +6327,18 @@ impl Scene {
     #[inline(always)]
     pub(crate) fn has_special_nodes(&self) -> bool {
         self.contents_count > 0
+    }
+    /// Whether any node lays out specially or paints raised children in
+    /// their own order (`contents_count`'s first count): what child and
+    /// style changes look for, which a scene with only cold styles skips.
+    #[inline(always)]
+    fn laid_out_nodes(&self) -> bool {
+        self.contents_count as u32 != 0
+    }
+    /// Whether `id` has a `special` bit (`has_special_nodes` first).
+    #[inline(always)]
+    pub(crate) fn is_special(&self, id: NodeId) -> bool {
+        self.node(id).special.any()
     }
     /// Whether `id` has track lists or a `z` a style without them must
     /// clear, or a paint order.
@@ -6741,13 +6768,16 @@ impl Scene {
                 })
         };
         let maps = self.cold.get_or_insert_default();
-        match order {
-            Some(order) => {
-                maps.stacked.insert(parent, order);
-            }
-            None => {
-                maps.stacked.remove(&parent);
-            }
+        let had = match order {
+            Some(order) => maps.stacked.insert(parent, order).is_some(),
+            None => maps.stacked.remove(&parent).is_some(),
+        };
+        // A parent painting its children in its own order is looked at as
+        // its children change (`laid_out_nodes`).
+        match (had, maps.stacked.contains_key(&parent)) {
+            (false, true) => self.contents_count += 1,
+            (true, false) => self.contents_count -= 1,
+            _ => {}
         }
         self.sync_cold(parent);
     }
@@ -6759,7 +6789,9 @@ impl Scene {
             maps.grid_templates.remove(&id);
             maps.grid_places.remove(&id);
             maps.raised.remove(&id);
-            maps.stacked.remove(&id);
+            if maps.stacked.remove(&id).is_some() {
+                self.contents_count -= 1;
+            }
             maps.sticky.remove(&id);
             maps.size_calcs.remove(&id);
             maps.balanced.remove(&id);
