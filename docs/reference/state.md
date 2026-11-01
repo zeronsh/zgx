@@ -688,7 +688,7 @@ Under strict types a `target` is one of the app's ids, declared hooks or classes
 - `replace` takes the element's place (an element in a container's children: not the app's root, nor a split's panes) and needs `Capability::Override(target)` or `Capability::Override("*")`; the last plugin's wins.
 - `private = true` (or `hook = false`) on an element puts it and everything in it out of reach.
 - What a plugin adds has the accessible description "From the plugin `<name>`".
-- `host.contributions()` (`zgx inspect contributions`, MCP `zgx_contributions`) says what each does now: its target, place, how many elements it applies at (0: its target matches nothing showing) and its latest error. `host.elements(&ui, &handle)` (`zgx inspect elements`, MCP `zgx_elements`) lists the app's ids, classes and hooks grouped by the elements that provide context, with a selector that reaches each group and the names it provides and inherits: where a plugin can put something, and what it can read there.
+- `host.contributions()` (`zgx inspect contributions`, MCP `zgx_contributions`) says what each does now: its target, place, how many elements it applies at (0: its target matches nothing showing) and its latest error, then each plugin command's shortcut dropped because the app (or an earlier plugin) holds it (place `shortcut`; typed: `host.dropped_shortcuts()`). `host.elements(&ui, &handle)` (`zgx inspect elements`, MCP `zgx_elements`) lists the app's ids, classes and hooks grouped by the elements that provide context, with a selector that reaches each group and the names it provides and inherits: where a plugin can put something, and what it can read there.
 
 With the app above, a plugin adds a button before its Save; nothing reaches the password field:
 

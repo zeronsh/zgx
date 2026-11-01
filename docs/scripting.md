@@ -396,7 +396,7 @@ A plugin can also add next to any element of the app, or in its place, without a
 | web pages (`ui.web`, `ui.webview`) | yes | with `Capability::Web`: its own pages, with their own cookies and storage, not the app's |
 | windows of its own (`ui.window`) | yes | with `Capability::Windows` (one could pose as the app's, or the system's asking for a password); never the app's title bar (`ui.window.titlebar_area`, `controls`) |
 | files: modules, themes, images | from its directory | from its directory or below, links followed (one pointing outside is outside) |
-| commands (`ui.command`) | yes | yes, as `<plugin>/<id>`; a shortcut the app (or an earlier plugin) has stays theirs |
+| commands (`ui.command`) | yes | yes, as `<plugin>/<id>`; a shortcut the app (or an earlier plugin) has stays theirs, and the plugin's is dropped (`ScriptHost::dropped_shortcuts`) |
 | the app's modules (`@app/…`) | requires them | replaces one with `ui.override` given `Capability::Override(module)` (or `"*"`), **a trust grant**: the replacement runs as the app's own code; never requires them |
 
 A plugin's files are source, always: Luau checks no bytecode it loads, so a plugin's (or a module's) bytecode is read as source and fails to parse, rather than run. Only an app's bundle carries bytecode, its build's.

@@ -86,3 +86,90 @@ fn without_plugins_there_is_nothing_to_report() {
     let h = Harness::inline(r#"return ui.text { "plain" }"#);
     assert!(h.host.contributions().is_empty());
 }
+
+#[test]
+fn a_plugin_shortcut_the_app_holds_is_reported_dropped() {
+    let h = with(
+        "keys",
+        r##"
+ui.command { id = "edit.copy", title = "Copy", key = "cmd+shift+c", run = function() end }
+return ui.text { id = "plain", "plain" }
+"##,
+        r##"
+ui.command { id = "copy", title = "Copy link", key = "Shift+Cmd+C", run = function() end }
+ui.command { id = "open", title = "Open", key = "cmd+o", run = function() end }
+ui.command { id = "reopen", title = "Reopen", key = "cmd+o", run = function() end }
+"##,
+    );
+    h.frames(1);
+    let keys: Vec<(String, Option<String>)> = h
+        .host
+        .commands()
+        .get()
+        .into_iter()
+        .map(|c| (c.id, c.key))
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            ("marks/copy".to_string(), None),
+            ("marks/open".to_string(), Some("cmd+o".to_string())),
+            ("marks/reopen".to_string(), None),
+            ("edit.copy".to_string(), Some("cmd+shift+c".to_string())),
+        ],
+        "the app's key stays its own, spelled differently or not"
+    );
+    assert_eq!(
+        h.host.dropped_shortcuts(),
+        vec![
+            zgx_script::DroppedShortcut {
+                plugin: "marks".into(),
+                command: "marks/copy".into(),
+                key: "Shift+Cmd+C".into(),
+                reason: "taken by the app".into(),
+                holder: "edit.copy".into(),
+            },
+            zgx_script::DroppedShortcut {
+                plugin: "marks".into(),
+                command: "marks/reopen".into(),
+                key: "cmd+o".into(),
+                reason: "taken by the plugin `marks`".into(),
+                holder: "marks/open".into(),
+            },
+        ]
+    );
+    let shortcuts: Vec<_> = h
+        .host
+        .contributions()
+        .into_iter()
+        .filter(|r| r.place == "shortcut")
+        .map(|r| (r.plugin, r.target, r.matches, r.error))
+        .collect();
+    assert_eq!(
+        shortcuts[0],
+        (
+            "marks".to_string(),
+            "marks/copy".to_string(),
+            0,
+            Some(
+                "its shortcut `Shift+Cmd+C` was dropped: taken by the app (`edit.copy`)"
+                    .to_string()
+            )
+        )
+    );
+    assert_eq!(shortcuts.len(), 2);
+}
+
+#[test]
+fn without_plugins_no_shortcut_is_dropped() {
+    let h = Harness::inline(
+        r##"
+ui.command { id = "a", key = "cmd+o", run = function() end }
+ui.command { id = "b", key = "cmd+o", run = function() end }
+return ui.text { "plain" }
+"##,
+    );
+    assert!(h.host.dropped_shortcuts().is_empty());
+    assert!(h.host.contributions().is_empty());
+    assert!(h.host.commands().get().iter().all(|c| c.key.is_some()));
+}
