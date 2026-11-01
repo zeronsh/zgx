@@ -1589,6 +1589,15 @@ pub(crate) struct HookContribution {
     pub owner: Rc<str>,
     /// Its script, which runs the filters.
     pub vm: Weak<Vm>,
+    /// Where it applies now and what went wrong (`ScriptHost::contributions`).
+    pub stats: Rc<ContributionStats>,
+}
+/// A contribution's live state: the elements it applies at, mounted now,
+/// and its latest error.
+#[derive(Default)]
+pub(crate) struct ContributionStats {
+    pub live: std::cell::Cell<usize>,
+    pub error: RefCell<Option<String>>,
 }
 pub(crate) enum Adds {
     Node(Place, Rc<Node>),
@@ -1596,7 +1605,6 @@ pub(crate) enum Adds {
     Filters(Vec<(Filtered, Function)>),
 }
 impl HookContribution {
-    /// Its node, if it adds one `place`.
     /// Its target as a selector reads it, for messages.
     pub(crate) fn target_text(&self) -> String {
         let t = &self.target;
@@ -1608,6 +1616,16 @@ impl HookContribution {
         ];
         parts.into_iter().flatten().collect::<Vec<_>>().join(" ")
     }
+    /// What it does there: "before", "after", "replace" or "filter".
+    pub(crate) fn place_name(&self) -> &'static str {
+        match &self.adds {
+            Adds::Node(Place::Before, _) => "before",
+            Adds::Node(Place::After, _) => "after",
+            Adds::Node(Place::Replace, _) => "replace",
+            Adds::Filters(_) => "filter",
+        }
+    }
+    /// Its node, if it adds one `place`.
     pub(crate) fn placed(&self, place: Place) -> Option<&Rc<Node>> {
         match &self.adds {
             Adds::Node(at, node) if *at == place => Some(node),
@@ -2010,6 +2028,7 @@ fn hook_contribution(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<H
         adds: Adds::Node(place, node),
         owner,
         vm: env.vm.clone(),
+        stats: Rc::default(),
     })
 }
 /// The capability adding at `exposed` (a target as written, or `slot:name`)
@@ -2077,6 +2096,7 @@ fn hook_filter(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<HookCon
         adds: Adds::Filters(filters),
         owner,
         vm: env.vm.clone(),
+        stats: Rc::default(),
     })
 }
 

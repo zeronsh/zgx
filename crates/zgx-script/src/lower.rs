@@ -406,6 +406,10 @@ impl Hooks {
     pub(crate) fn is_empty(&self) -> bool {
         self.all.is_empty()
     }
+    /// Every contribution, in the order the scripts made them.
+    pub(crate) fn all(&self) -> &[crate::node::HookContribution] {
+        &self.all
+    }
     /// What is added at `node`, in the order the scripts added it: none at
     /// a `private` element, inside one, or at one a plugin made.
     /// `by_name`: whether its name may match (not the text that names its
@@ -502,7 +506,7 @@ fn static_name(node: &Node) -> Option<&str> {
 /// is traced to it (assistive technology hears whose it is; the layout
 /// inspector shows the plugin's line that made it).
 fn contributed(hook: &crate::node::HookContribution, node: &Rc<Node>, low: &Rc<Lowering>) -> View {
-    let view = lower(node, low);
+    let view = counted(lower(node, low), &hook.stats);
     let from = format!("from the plugin {}", hook.owner);
     let described = match node
         .a11y
@@ -572,7 +576,7 @@ fn hooked_children(
         children.push(match place(crate::node::Place::Replace).next_back() {
             Some((hook, node)) => contributed(hook, node, low),
             None if filters.is_empty() => lowered(child),
-            None => filtered(child, &filters, low, flow),
+            None => counted_filters(filtered(child, &filters, low, flow), &filters),
         });
         children.extend(
             place(crate::node::Place::After).map(|(hook, node)| contributed(hook, node, low)),
@@ -621,7 +625,7 @@ fn hooked_shown(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
     let filters = filters_in(&at);
     match filters.is_empty() {
         true => lower(node, low),
-        false => filtered(node, &filters, low, None),
+        false => counted_filters(filtered(node, &filters, low, None), &filters),
     }
 }
 /// A value passed through a plugin's filter, by its script: what it
@@ -1908,6 +1912,40 @@ fn wrapped_row_builder(
         })
         .unwrap_or_else(|_| builder.clone())
 }
+/// `view`, where a contribution applies, counted among its live matches
+/// (`ScriptHost::contributions`) while it is mounted.
+fn counted(view: View, stats: &Rc<crate::node::ContributionStats>) -> View {
+    struct Live(Rc<crate::node::ContributionStats>);
+    impl Drop for Live {
+        fn drop(&mut self) {
+            self.0.live.set(self.0.live.get().saturating_sub(1));
+        }
+    }
+    let stats = stats.clone();
+    view.on_mount(move |handle| {
+        stats.live.set(stats.live.get() + 1);
+        handle.retain(Live(stats));
+    })
+}
+/// `view`, an element plugins filter, counted for each filtering script.
+fn counted_filters(
+    mut view: View,
+    filters: &[(
+        &crate::node::HookContribution,
+        crate::node::Filtered,
+        &mlua::Function,
+    )],
+) -> View {
+    let mut seen: Vec<*const crate::node::HookContribution> = Vec::new();
+    for (hook, ..) in filters {
+        let at = std::ptr::from_ref(*hook);
+        if !seen.contains(&at) {
+            seen.push(at);
+            view = counted(view, &hook.stats);
+        }
+    }
+    view
+}
 /// What plugins add before or after `root`, a row's: reported once each to
 /// the plugin, as it draws nothing.
 #[cold]
@@ -1930,13 +1968,15 @@ fn row_contributions(root: &mlua::Value, hooks: &Hooks, low: &Lowering) {
         if !TOLD.with_borrow_mut(|told| told.insert((host, at))) {
             continue;
         }
+        let message = format!(
+            "ui.contribute {{ target = \"{}\", {place} = … }}: its target is a row of a \
+             ui.each or ui.list, and what goes {place} a row isn't drawn yet. Target an \
+             element inside the row, or the list's container",
+            hook.target_text()
+        );
+        *hook.stats.error.borrow_mut() = Some(message.clone());
         if let Some(vm) = hook.vm.upgrade() {
-            vm.report(mlua::Error::runtime(format!(
-                "ui.contribute {{ target = \"{}\", {place} = … }}: its target is a row of a \
-                 ui.each or ui.list, and what goes {place} a row isn't drawn yet. Target an \
-                 element inside the row, or the list's container",
-                hook.target_text()
-            )));
+            vm.report(mlua::Error::runtime(message));
         }
     }
 }

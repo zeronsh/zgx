@@ -957,6 +957,22 @@ struct Loaded {
     lowering: Rc<lower::Lowering>,
 }
 
+/// A plugin's contribution at the app's elements, as
+/// `ScriptHost::contributions` reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContributionReport {
+    /// The plugin that made it.
+    pub plugin: String,
+    /// Its target, as a selector reads it: `#save`, `hook:toolbar.save`.
+    pub target: String,
+    /// What it does there: "before", "after", "replace" or "filter".
+    pub place: &'static str,
+    /// The elements it applies at, mounted now.
+    pub matches: usize,
+    /// Its latest error, if any.
+    pub error: Option<String>,
+}
+
 /// The framework's issues a host heard (`ScriptHost::issues`), and who
 /// hears them by kind (`ScriptHost::on_issue`).
 #[derive(Default)]
@@ -1302,6 +1318,30 @@ impl ScriptHost {
     /// kinds: what `zgx inspect errors` lists.
     pub fn issues(&self) -> Vec<(zgx::issues::IssueKind, String)> {
         self.0.issues.borrow().last.iter().cloned().collect()
+    }
+    /// What each plugin adds at the app's elements (`ui.contribute { target
+    /// }`, `ui.filter`), in the order they made them: its target, where it
+    /// goes, how many elements it applies at now, and its latest error. A
+    /// target matching nothing shows `matches: 0`. Empty without plugins.
+    pub fn contributions(&self) -> Vec<ContributionReport> {
+        let current = self.0.current.borrow();
+        let Some(hooks) = current
+            .as_ref()
+            .and_then(|loaded| loaded.lowering.hooks.as_deref())
+        else {
+            return Vec::new();
+        };
+        hooks
+            .all()
+            .iter()
+            .map(|hook| ContributionReport {
+                plugin: hook.owner.to_string(),
+                target: hook.target_text(),
+                place: hook.place_name(),
+                matches: hook.stats.live.get(),
+                error: hook.stats.error.borrow().clone(),
+            })
+            .collect()
     }
     /// Call `hook` with each script error (a failed load, an error in a
     /// handler): for an app's log or crash reports.
