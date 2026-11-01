@@ -38,6 +38,13 @@ pub struct Window {
     /// AppKit's window tabs (macOS): `"automatic"` (the user's setting),
     /// `"preferred"` or `"disallowed"`.
     pub tabbing: Option<String>,
+}
+/// More of a window the script declares, beside its [`Window`]
+/// (`ScriptHost::window_extras`): kept apart so `Window`, which code
+/// builds, keeps its fields.
+#[derive(Clone, Default)]
+#[non_exhaustive]
+pub struct WindowExtras {
     /// Where it opens: the window's top-left this far up and left of the
     /// pointer (a tab torn off, kept under the grab).
     pub under_pointer: Option<(f64, f64)>,
@@ -95,7 +102,6 @@ impl PartialEq for Window {
             self.height,
             &self.frame_autosave,
             &self.tabbing,
-            self.under_pointer,
         ) == (
             &other.id,
             &other.title,
@@ -103,12 +109,7 @@ impl PartialEq for Window {
             other.height,
             &other.frame_autosave,
             &other.tabbing,
-            other.under_pointer,
         ) && self.open.ptr_eq(&other.open)
-            && match (&self.visible, &other.visible) {
-                (Some(a), Some(b)) => a.ptr_eq(b),
-                (a, b) => a.is_none() && b.is_none(),
-            }
     }
 }
 impl std::fmt::Debug for Window {
@@ -136,6 +137,8 @@ pub(crate) struct Content {
     pub node: Rc<Node>,
     /// Its smallest and largest size in points, each a width and height.
     pub limits: crate::WindowSizeLimits,
+    /// Where it opens, whether it shows and its own state.
+    pub extras: WindowExtras,
 }
 /// A group's window: built once, as its item first appears.
 struct Built {
@@ -207,11 +210,12 @@ impl Windows {
                 window
             })
             .collect();
+        let moved = extras_moved(&self.content.borrow(), &content);
         *self.content.borrow_mut() = content;
         self.following.borrow_mut().take();
         if groups.is_empty() {
             self.keep_states(&fixed);
-            if self.list.with_untracked(|old| *old != fixed) {
+            if moved || self.list.with_untracked(|old| *old != fixed) {
                 self.list.set(fixed);
             }
             return Vec::new();
@@ -286,13 +290,15 @@ impl Windows {
                     list.push(b.window.clone());
                 }
             }
-            {
+            let moved = {
                 let mut all = windows.content.borrow_mut();
+                let moved = extras_moved(&all, &content);
                 all.retain(|id, _| fixed.iter().any(|w| &w.id == id));
                 all.extend(content);
-            }
+                moved
+            };
             windows.keep_states(&list);
-            if windows.list.with_untracked(|old| *old != list) {
+            if moved || windows.list.with_untracked(|old| *old != list) {
                 windows.list.set(list);
             }
         });
@@ -301,6 +307,22 @@ impl Windows {
     }
 }
 
+/// Whether a window `new` declares opens elsewhere or shows by another
+/// state than in `old`: the windows' list is told again, as when they were
+/// `Window`'s.
+fn extras_moved(old: &HashMap<String, Content>, new: &HashMap<String, Content>) -> bool {
+    new.iter().any(|(id, content)| {
+        let Some(was) = old.get(id) else {
+            return false;
+        };
+        let (a, b) = (&was.extras, &content.extras);
+        a.under_pointer != b.under_pointer
+            || match (&a.visible, &b.visible) {
+                (Some(a), Some(b)) => !a.ptr_eq(b),
+                (a, b) => a.is_some() != b.is_some(),
+            }
+    })
+}
 /// An item's window id: `key(item)`, else its `id` field.
 fn key_of(vm: &crate::Vm, group: &Group, n: usize, item: &Value) -> Option<String> {
     let key = match &group.key {
@@ -334,9 +356,9 @@ fn build(
         None => vm.call(&group.build, item.clone())?,
     };
     let open = vm.runtime.signal(Value::Bool(true));
-    let (mut window, node) = window_of(&table, id.to_owned(), open, false, None, &vm.runtime)?;
-    window.state = state;
-    Ok((window, node))
+    let (window, mut content) = window_of(&table, id.to_owned(), open, false, None, &vm.runtime)?;
+    content.extras.state = state;
+    Ok((window, content))
 }
 
 /// A window from `ui.window`'s options; `declared` for `ui.window`'s own,
@@ -413,10 +435,12 @@ fn window_of(
             }
             tabbing => tabbing,
         },
+        id,
+    };
+    let extras = WindowExtras {
         under_pointer,
         visible,
         state,
-        id,
     };
     let known: &[&str] = if declared {
         &[
@@ -461,7 +485,14 @@ fn window_of(
             }
         }
     }
-    Ok((window, Content { node, limits }))
+    Ok((
+        window,
+        Content {
+            node,
+            limits,
+            extras,
+        },
+    ))
 }
 
 /// The shared keys holding the window's title bar area and buttons

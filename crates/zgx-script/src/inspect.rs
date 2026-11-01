@@ -486,7 +486,8 @@ impl Session {
                     budget: number("budget").map_or(200, |b| b as usize),
                     all: field("all").is_some_and(|v| v.truthy()),
                 };
-                let (lines, hidden) = driver::tree(&ui, &self.0.handle, from, &options);
+                let (shown, hidden) = driver::tree_lines(&ui, &self.0.handle, from, &options);
+                let lines: Vec<&driver::Line> = shown.iter().map(|l| &l.line).collect();
                 let data = Value::List(
                     lines
                         .iter()
@@ -531,7 +532,7 @@ impl Session {
                         .collect::<Vec<_>>()
                         .into(),
                 );
-                Ok((driver::tree_text(&lines, hidden), data))
+                Ok((driver::tree_lines_text(&shown, hidden), data))
             })(),
             "node" => target(&ui).map(|node| {
                 let fields = driver::node(&ui, self.0.inspector.as_ref(), node);

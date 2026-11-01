@@ -593,6 +593,7 @@ pub fn follow_windows(host: &ScriptHost, cx: &zgx_desktop::WindowContext) -> zgx
                 .is_some_and(|handle| !handle.is_closed());
             if wanted && !shown {
                 let (min_size, max_size) = host.window_size_limits(&window.id);
+                let extras = host.window_extras(&window.id);
                 let options = WindowOptions {
                     title: window.title.clone(),
                     min_size,
@@ -600,21 +601,21 @@ pub fn follow_windows(host: &ScriptHost, cx: &zgx_desktop::WindowContext) -> zgx
                     width: window.width,
                     height: window.height,
                     frame_autosave: window.frame_autosave.clone(),
-                    under_pointer: window.under_pointer,
+                    under_pointer: extras.under_pointer,
                     tabbing: match window.tabbing.as_deref() {
                         Some("preferred") => zgx_desktop::Tabbing::Preferred,
                         Some("disallowed") => zgx_desktop::Tabbing::Disallowed,
                         _ => zgx_desktop::Tabbing::Automatic,
                     },
-                    visible: window
+                    visible: extras
                         .visible
                         .as_ref()
                         .is_none_or(|visible| visible.with_untracked(Value::truthy)),
                     ..Default::default()
                 };
                 let (view_host, state, id) = (host.clone(), window.open.clone(), window.id.clone());
-                let own = window.state.clone();
-                let visible = window.visible.clone();
+                let own = extras.state.clone();
+                let visible = extras.visible.clone();
                 let handle = factory.open(options, move |wcx| {
                     // The window's own state, as its content reads it (`win`).
                     if let Some(own) = own {

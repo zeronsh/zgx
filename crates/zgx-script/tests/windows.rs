@@ -216,7 +216,8 @@ fn a_window_may_be_made_hidden() {
     let windows = h.host.windows().get();
     let visible = |id: &str| {
         let window = windows.iter().find(|w| w.id == id).unwrap();
-        window
+        h.host
+            .window_extras(&window.id)
             .visible
             .as_ref()
             .map(|v| v.with_untracked(|v| v.truthy()))
@@ -345,7 +346,10 @@ fn a_window_an_item_opens_and_closes_with_its_item() {
         ["Apple", "Berry"]
     );
     assert_eq!((windows[0].width, windows[0].height), (300., 200.));
-    assert_eq!(windows[0].under_pointer, Some((12., 8.)));
+    assert_eq!(
+        h.host.window_extras(&windows[0].id).under_pointer,
+        Some((12., 8.))
+    );
     assert!(windows[0].open.get().truthy(), "open as its item appears");
     // Its content follows the app's state.
     let mut other = Ui::with_runtime(h.ui.runtime.clone(), 300., 200.);
@@ -409,6 +413,7 @@ fn a_window_reads_its_own_state_and_no_other() {
         windows
             .iter()
             .find(|w| w.id.ends_with(":p"))
+            .map(|w| h.host.window_extras(&w.id))
             .expect("p")
             .state
             .is_none(),
@@ -422,7 +427,7 @@ fn a_window_reads_its_own_state_and_no_other() {
     };
     let (va, vb, vs) = (view(&a.id), view(&b.id), view(&settings.id));
     assert!(texts(&va).contains(&"a back 0".to_owned()));
-    let state = a.state.clone().expect("its state");
+    let state = h.host.window_extras(&a.id).state.expect("its state");
     state.active.set(zgx_script::Value::Bool(true));
     state.size.set(zgx_script::window_size_value(320., 200.));
     h.frames(1);
@@ -434,9 +439,9 @@ fn a_window_reads_its_own_state_and_no_other() {
         "b's is its own"
     );
     assert!(texts(&vs).contains(&"settings hidden".to_owned()));
-    settings
+    h.host
+        .window_extras(&settings.id)
         .state
-        .clone()
         .unwrap()
         .shown
         .set(zgx_script::Value::Bool(true));
@@ -483,8 +488,14 @@ fn a_windows_own_state_survives_a_reload() {
         other
     };
     let (va, vs) = (view(&a.id), view(&settings.id));
-    a.state.unwrap().active.set(zgx_script::Value::Bool(true));
-    settings
+    h.host
+        .window_extras(&a.id)
+        .state
+        .unwrap()
+        .active
+        .set(zgx_script::Value::Bool(true));
+    h.host
+        .window_extras(&settings.id)
         .state
         .unwrap()
         .shown

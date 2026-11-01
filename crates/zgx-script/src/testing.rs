@@ -454,8 +454,8 @@ impl TestApp {
     pub fn tree(&mut self) -> String {
         self.ui.prepare_frame();
         let (lines, hidden) =
-            crate::driver::tree(&self.ui, &self.handle, None, &Default::default());
-        crate::driver::tree_text(&lines, hidden)
+            crate::driver::tree_lines(&self.ui, &self.handle, None, &Default::default());
+        crate::driver::tree_lines_text(&lines, hidden)
     }
     fn node(&mut self, target: &str) -> NodeId {
         self.target(target).unwrap_or_else(|e| panic!("{e}"))

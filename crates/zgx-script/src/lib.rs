@@ -100,7 +100,7 @@ pub fn window_size_value(width: f32, height: f32) -> Value {
     windows::size(width, height)
 }
 pub use value::{ElementHandle, PathKey, Shared, Store, Value, tables_converted, values_converted};
-pub use windows::Window;
+pub use windows::{Window, WindowExtras};
 
 use mlua::Lua;
 use std::{
@@ -1803,6 +1803,18 @@ impl ScriptHost {
             .borrow()
             .get(id)
             .map_or((None, None), |content| content.limits)
+    }
+    /// Where window `id` opens, whether it shows and its own state
+    /// (`ui.window { under_pointer, visible }`, `win`), as the last load
+    /// declared them; the default while no load declares it.
+    pub fn window_extras(&self, id: &str) -> WindowExtras {
+        self.0
+            .windows
+            .content
+            .borrow()
+            .get(id)
+            .map(|content| content.extras.clone())
+            .unwrap_or_default()
     }
     /// Run the command `id` (a menu item was chosen); whether one ran.
     pub fn run_command(&self, id: &str) -> bool {
