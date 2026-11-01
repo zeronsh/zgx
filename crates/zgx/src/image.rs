@@ -678,6 +678,16 @@ pub mod resample {
 mod kept_tests {
     use super::*;
 
+    /// Held while a test runs: `release_decoded` gives back every kept
+    /// file's pixels in the process, so a test releasing them would take
+    /// another's from under it between two draws. One at a time.
+    static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn alone() -> std::sync::MutexGuard<'static, ()> {
+        ALONE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// An 8 by 4 file whose pixels are all opaque red.
     fn decode(bytes: &[u8]) -> Result<Arc<[u8]>, String> {
         assert_eq!(bytes, b"file");
@@ -710,6 +720,7 @@ mod kept_tests {
     /// whole and kept.
     #[test]
     fn a_kept_file_decodes_as_drawn_and_gives_its_pixels_back() {
+        let _alone = alone();
         let image = ImageData::kept(8, 4, Arc::from(&b"file"[..]), decode).unwrap();
         image.set_decoding(Decoding::Async);
         assert!(image.keeps_file());
@@ -736,6 +747,7 @@ mod kept_tests {
     /// large one off the main thread unless it is asked to wait.
     #[test]
     fn small_files_and_sync_ones_decode_in_the_frame_drawing_them() {
+        let _alone = alone();
         let small = ImageData::kept(8, 4, Arc::from(&b"file"[..]), decode).unwrap();
         let held = small.pixels_at((8, 4)).expect("decoded at once");
         assert_eq!((held.width, held.height), (8, 4));
@@ -759,6 +771,7 @@ mod kept_tests {
     /// what `pixels` borrows is still all of it.
     #[test]
     fn a_scaled_file_draws_from_its_smaller_decode() {
+        let _alone = alone();
         let image = ImageData::kept_scaled(8, 4, Arc::from(&b"file"[..]), decode, quarter).unwrap();
         let held = image.pixels_at((2, 1)).expect("small: decoded at once");
         assert_eq!((held.width, held.height), (2, 1));
@@ -779,6 +792,7 @@ mod kept_tests {
     /// A file that won't decode is tried once, not at every draw.
     #[test]
     fn a_broken_file_is_tried_once() {
+        let _alone = alone();
         let image = ImageData::kept(8, 4, Arc::from(&b"file"[..]), broken).unwrap();
         assert!(image.pixels_at((8, 4)).is_none());
         let kept = image.pixels.kept.as_ref().unwrap();
@@ -790,6 +804,7 @@ mod kept_tests {
     /// An image that doesn't keep its file has its pixels already.
     #[test]
     fn a_plain_image_needs_no_decode() {
+        let _alone = alone();
         let image = ImageData::new(1, 1, vec![1, 2, 3, 4]).unwrap();
         assert!(!image.keeps_file());
         assert!(image.pixels_at((1, 1)).is_none());
