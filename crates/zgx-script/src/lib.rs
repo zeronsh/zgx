@@ -92,7 +92,7 @@ mod windows;
 
 pub use bundle::{Bundle, BundleFile, build};
 pub use calls::{Body, Request, Response};
-pub use command::Command;
+pub use command::{Command, DroppedShortcut};
 pub use design::DesignLint;
 pub use persist::app_data_dir;
 pub use socket::{Message, Socket, SocketRequest};
@@ -967,7 +967,9 @@ pub struct ContributionReport {
     pub plugin: String,
     /// Its target, as a selector reads it: `#save`, `hook:toolbar.save`.
     pub target: String,
-    /// What it does there: "before", "after", "replace" or "filter".
+    /// What it does there: "before", "after", "replace" or "filter"; or
+    /// "shortcut", a plugin command's shortcut dropped
+    /// (`ScriptHost::dropped_shortcuts`), its target the command's id.
     pub place: &'static str,
     /// The elements it applies at, mounted now.
     pub matches: usize,
@@ -1369,17 +1371,17 @@ impl ScriptHost {
     /// What each plugin adds at the app's elements (`ui.contribute { target
     /// }`, `ui.filter`), in the order they made them: its target, where it
     /// goes, how many elements it applies at now, and its latest error. A
-    /// target matching nothing shows `matches: 0`. Empty without plugins.
+    /// target matching nothing shows `matches: 0`. Then each plugin
+    /// command's dropped shortcut (`dropped_shortcuts`), as place
+    /// "shortcut" and its error saying why. Empty without plugins.
     pub fn contributions(&self) -> Vec<ContributionReport> {
         let current = self.0.current.borrow();
-        let Some(hooks) = current
+        let hooks = current
             .as_ref()
-            .and_then(|loaded| loaded.lowering.hooks.as_deref())
-        else {
-            return Vec::new();
-        };
-        hooks
-            .all()
+            .and_then(|loaded| loaded.lowering.hooks.as_deref());
+        let mut reports: Vec<ContributionReport> = hooks
+            .map(|hooks| hooks.all())
+            .unwrap_or_default()
             .iter()
             .map(|hook| ContributionReport {
                 plugin: hook.owner.to_string(),
@@ -1388,7 +1390,31 @@ impl ScriptHost {
                 matches: hook.stats.live.get(),
                 error: hook.stats.error.borrow().clone(),
             })
-            .collect()
+            .collect();
+        reports.extend(
+            self.dropped_shortcuts()
+                .into_iter()
+                .map(|drop| ContributionReport {
+                    error: Some(format!(
+                        "its shortcut `{}` was dropped: {} (`{}`)",
+                        drop.key, drop.reason, drop.holder
+                    )),
+                    plugin: drop.plugin,
+                    target: drop.command,
+                    place: "shortcut",
+                    matches: 0,
+                }),
+        );
+        reports
+    }
+    /// The plugin commands' shortcuts the last load dropped, in declaration
+    /// order: a plugin command's key that the app's commands (or an earlier
+    /// plugin's) hold, spelled the same or not, stays theirs, and the
+    /// command is published (`commands`) without it. Each says the key, why
+    /// and the command that holds it, for the app to tell the plugin's
+    /// author. Read it as `commands` changes; empty without plugins.
+    pub fn dropped_shortcuts(&self) -> Vec<DroppedShortcut> {
+        self.0.commands.dropped.borrow().clone()
     }
     /// Call `hook` with each script error (a failed load, an error in a
     /// handler): for an app's log or crash reports.

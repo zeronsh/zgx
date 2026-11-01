@@ -34,6 +34,24 @@ pub struct Command {
     pub separator: bool,
 }
 
+/// A plugin command's shortcut zgx dropped because a command declared
+/// before it holds the same one (`Shift+Cmd+D` is `cmd+shift+d`), as
+/// `ScriptHost::dropped_shortcuts` reports it: the command stays, without
+/// the key, so the app can tell the plugin's author why.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DroppedShortcut {
+    /// The plugin whose command lost the key.
+    pub plugin: String,
+    /// The command's id (`<plugin>/<id>`).
+    pub command: String,
+    /// The shortcut as the plugin wrote it.
+    pub key: String,
+    /// "taken by the app", or "taken by the plugin `<name>`".
+    pub reason: String,
+    /// The id of the command that holds the shortcut.
+    pub holder: String,
+}
+
 type Runner = (Function, Weak<Vm>);
 /// A declared command, its runner and the plugin that declared it.
 type Pending = (Command, Option<Runner>, Option<Rc<str>>);
@@ -43,6 +61,8 @@ pub(crate) struct Commands {
     pending_reserved: RefCell<Vec<String>>,
     runners: RefCell<HashMap<String, Runner>>,
     pub list: Signal<Vec<Command>>,
+    /// The plugin shortcuts the last publish dropped, set before `list`.
+    pub dropped: RefCell<Vec<DroppedShortcut>>,
     /// The shortcuts of the commands declared `reserved`: the app's whatever
     /// has the keyboard (`ScriptHost::reserved_keys`).
     pub reserved: Signal<Vec<String>>,
@@ -53,6 +73,7 @@ impl Commands {
             pending: RefCell::default(),
             pending_reserved: RefCell::default(),
             runners: RefCell::default(),
+            dropped: RefCell::default(),
             list: runtime.signal(Vec::new()),
             reserved: runtime.signal(Vec::new()),
         }
@@ -64,22 +85,17 @@ impl Commands {
     }
     /// The load succeeded: publish what it declared.
     pub fn publish(&self) {
-        let pending = std::mem::take(&mut *self.pending.borrow_mut());
-        // The app's shortcuts first, then each plugin's not yet taken.
-        let mut taken: std::collections::HashSet<String> = pending
-            .iter()
-            .filter(|(_, _, plugin)| plugin.is_none())
-            .filter_map(|(c, _, _)| c.key.as_deref().map(shortcut))
-            .collect();
+        let mut pending = std::mem::take(&mut *self.pending.borrow_mut());
+        let dropped = match pending.iter().any(|(_, _, plugin)| plugin.is_some()) {
+            false => Vec::new(),
+            true => drop_taken(&mut pending),
+        };
+        if *self.dropped.borrow() != dropped {
+            *self.dropped.borrow_mut() = dropped;
+        }
         let mut runners = HashMap::new();
         let mut list = Vec::with_capacity(pending.len());
-        for (mut command, runner, plugin) in pending {
-            if plugin.is_some()
-                && let Some(key) = &command.key
-                && !taken.insert(shortcut(key))
-            {
-                command.key = None;
-            }
+        for (command, runner, _) in pending {
             if let Some(runner) = runner {
                 runners.insert(command.id.clone(), runner);
             }
@@ -113,6 +129,44 @@ impl Commands {
         }
         true
     }
+}
+
+/// Take each plugin command's shortcut that a command before it holds: the
+/// app's shortcuts first, then each plugin's not yet taken. What was taken.
+#[cold]
+#[inline(never)]
+fn drop_taken(pending: &mut [Pending]) -> Vec<DroppedShortcut> {
+    // Shortcut → the id of its command and the plugin that declared it.
+    let mut taken: HashMap<String, (String, Option<Rc<str>>)> = pending
+        .iter()
+        .filter(|(_, _, plugin)| plugin.is_none())
+        .filter_map(|(c, _, _)| Some((shortcut(c.key.as_deref()?), (c.id.clone(), None))))
+        .collect();
+    let mut dropped = Vec::new();
+    for (command, _, plugin) in pending.iter_mut() {
+        let (Some(plugin), Some(key)) = (plugin, &command.key) else {
+            continue;
+        };
+        match taken.entry(shortcut(key)) {
+            std::collections::hash_map::Entry::Vacant(free) => {
+                free.insert((command.id.clone(), Some(plugin.clone())));
+            }
+            std::collections::hash_map::Entry::Occupied(held) => {
+                let (holder, by) = held.get();
+                dropped.push(DroppedShortcut {
+                    plugin: plugin.to_string(),
+                    command: command.id.clone(),
+                    key: command.key.take().unwrap_or_default(),
+                    reason: match by {
+                        None => "taken by the app".to_string(),
+                        Some(by) => format!("taken by the plugin `{by}`"),
+                    },
+                    holder: holder.clone(),
+                });
+            }
+        }
+    }
+    dropped
 }
 
 /// A shortcut as compared: `Shift+Cmd+D` is `cmd+shift+d`.
