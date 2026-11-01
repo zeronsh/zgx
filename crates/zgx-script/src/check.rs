@@ -7,9 +7,14 @@
 //! until called).
 use std::{
     fmt,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
-    sync::{Arc, Mutex},
+    process::{Child, Command, Stdio},
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 /// The `ui` and `anime` globals' types, as shipped with this crate.
@@ -179,6 +184,15 @@ pub fn scripts(path: &Path) -> Vec<PathBuf> {
 
 /// Type checks the scripts at `paths` (files or directories).
 pub fn check(paths: &[PathBuf], options: &Options) -> Result<Report, CheckError> {
+    let report = check_with(paths, options, &Cancel::default())?;
+    Ok(report.expect("a check nothing cancels finishes"))
+}
+/// `check`, stopped (its luau-lsp killed) once `cancel` is: `None` then.
+fn check_with(
+    paths: &[PathBuf],
+    options: &Options,
+    cancel: &Cancel,
+) -> Result<Option<Report>, CheckError> {
     let lsp = options
         .luau_lsp
         .clone()
@@ -256,7 +270,7 @@ pub fn check(paths: &[PathBuf], options: &Options) -> Result<Report, CheckError>
                    app: Option<&Path>,
                    tests: bool,
                    at: usize|
-     -> Result<String, CheckError> {
+     -> Result<Option<String>, CheckError> {
         let mut command = Command::new(&lsp);
         command
             .arg("analyze")
@@ -285,22 +299,21 @@ pub fn check(paths: &[PathBuf], options: &Options) -> Result<Report, CheckError>
                 .map_err(CheckError::Io)?;
             command.arg(format!("--base-luaurc={}", file.display()));
         }
-        let output = command.args(files).output().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                CheckError::NotInstalled
-            } else {
-                CheckError::Io(e)
-            }
-        })?;
-        Ok(format!(
+        let Some((stdout, stderr)) = run(command.args(files), cancel)? else {
+            return Ok(None);
+        };
+        Ok(Some(format!(
             "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ))
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        )))
     };
     let mut text = String::new();
     for (at, (root, tests, group)) in groups.iter().enumerate() {
-        text.push_str(&analyze(group, root.as_deref(), *tests, at)?);
+        let Some(found) = analyze(group, root.as_deref(), *tests, at)? else {
+            return Ok(None);
+        };
+        text.push_str(&found);
     }
     let mut diagnostics = parse(&text);
     // luau-lsp names files relative to the working directory; show them
@@ -320,10 +333,55 @@ pub fn check(paths: &[PathBuf], options: &Options) -> Result<Report, CheckError>
     // A module's findings come again with each file that requires it.
     let mut seen = std::collections::HashSet::new();
     diagnostics.retain(|d| seen.insert(d.to_string()));
-    Ok(Report {
+    Ok(Some(Report {
         files: files.len(),
         diagnostics,
-    })
+    }))
+}
+/// A command's standard output and error.
+type Output = (Vec<u8>, Vec<u8>);
+/// `command`'s standard output and error, as `Command::output` gives them,
+/// unless `cancel` is set while it runs: then it is killed and `None`.
+fn run(command: &mut Command, cancel: &Cancel) -> Result<Option<Output>, CheckError> {
+    let mut child = (command.stdin(Stdio::null()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CheckError::NotInstalled
+            } else {
+                CheckError::Io(e)
+            }
+        })?;
+    let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
+    {
+        // Where `Cancel::cancel` finds it to kill.
+        let mut running = lock(&cancel.child);
+        if cancel.cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        *running = Some(child);
+    }
+    let errors = std::thread::spawn(move || {
+        let mut text = Vec::new();
+        if let Some(err) = &mut err {
+            let _ = err.read_to_end(&mut text);
+        }
+        text
+    });
+    let mut stdout = Vec::new();
+    if let Some(out) = &mut out {
+        let _ = out.read_to_end(&mut stdout);
+    }
+    let stderr = errors.join().unwrap_or_default();
+    // Reaped, killed or not: no zombie stays.
+    if let Some(mut child) = lock(&cancel.child).take() {
+        let _ = child.wait();
+    }
+    Ok((!cancel.cancelled()).then_some((stdout, stderr)))
 }
 /// The app `file` belongs to: the nearest directory holding an `app.luau`.
 fn app_root(file: &Path) -> Option<PathBuf> {
@@ -413,34 +471,272 @@ fn templated(d: &Diagnostic) -> bool {
     std::fs::read_to_string(&d.file).is_ok_and(|code| code.contains(&format!("{{{name}}}")))
 }
 
-/// A check running on its own thread (a hot-reloading host's): its report
-/// is taken once it finishes.
-pub struct Background {
-    result: Arc<Mutex<Option<Result<Report, CheckError>>>>,
+/// A check's stop: set, its luau-lsp (if one runs) is killed and nothing
+/// more of it runs.
+#[derive(Default)]
+struct Cancel {
+    cancelled: AtomicBool,
+    child: Mutex<Option<Child>>,
 }
-impl Background {
-    /// Check `paths` with `options` on a thread of its own.
-    pub fn start(paths: Vec<PathBuf>, options: Options) -> Self {
-        let result = Arc::new(Mutex::new(None));
-        let slot = result.clone();
+impl Cancel {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        if let Some(child) = lock(&self.child).as_mut() {
+            let _ = child.kill();
+        }
+    }
+    fn cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How long a check waits after it is asked for: an agent saving file after
+/// file asks again within it, and only the last runs.
+const SETTLE: Duration = Duration::from_millis(300);
+
+type Slot = Mutex<Option<Result<Report, CheckError>>>;
+/// A check asked for (`Background::start`), waiting its turn.
+struct Job {
+    paths: Vec<PathBuf>,
+    options: Options,
+    cancel: Arc<Cancel>,
+    slot: Weak<Slot>,
+    asked: Instant,
+}
+/// The process's checks: one thread runs them, one at a time, so however
+/// many hosts hot-reload in a process, one luau-lsp runs.
+struct Checks {
+    queue: Mutex<Vec<Job>>,
+    asked: Condvar,
+}
+fn checks() -> &'static Checks {
+    static CHECKS: OnceLock<Checks> = OnceLock::new();
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    let checks = CHECKS.get_or_init(|| Checks {
+        queue: Mutex::new(Vec::new()),
+        asked: Condvar::new(),
+    });
+    STARTED.call_once(|| {
         std::thread::Builder::new()
             .name("zgx-check".into())
-            .spawn(move || {
-                let report = check(&paths, &options);
-                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
-            })
+            .spawn(move || checks.serve())
             .expect("spawn the type check thread");
-        Self { result }
+    });
+    checks
+}
+impl Checks {
+    /// Runs what is asked, each once it settled; waits, doing nothing, while
+    /// nothing is.
+    fn serve(&self) {
+        loop {
+            let job = self.next();
+            // The machine's turn: every process's checks queue on it.
+            let Some(_turn) = turn(&job.cancel) else {
+                continue;
+            };
+            let result = check_with(&job.paths, &job.options, &job.cancel).transpose();
+            if let (Some(result), Some(slot)) = (result, job.slot.upgrade()) {
+                *lock(&slot) = Some(result);
+            }
+        }
+    }
+    /// The next job to run: the longest asked for, once it has settled.
+    fn next(&self) -> Job {
+        let mut queue = lock(&self.queue);
+        loop {
+            queue.retain(|job| !job.cancel.cancelled() && job.slot.strong_count() > 0);
+            let Some((at, asked)) = (queue.iter().enumerate())
+                .map(|(at, job)| (at, job.asked))
+                .min_by_key(|(_, asked)| *asked)
+            else {
+                queue = self.asked.wait(queue).unwrap_or_else(|e| e.into_inner());
+                continue;
+            };
+            let due = asked + SETTLE;
+            let now = Instant::now();
+            if now >= due {
+                return queue.remove(at);
+            }
+            queue = (self.asked.wait_timeout(queue, due - now))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+
+/// The machine's lock on checks (`turn`), in the user's temporary directory.
+fn turnstile() -> PathBuf {
+    std::env::temp_dir().join("zgx-check.lock")
+}
+/// The machine's turn to check, held while the returned file is open: a
+/// lock every process's checks take (an advisory one), so however many
+/// debug apps run, one luau-lsp runs. Taken only as a check starts, never
+/// while nothing is asked for; `None` once `cancel` is set while waiting.
+/// Where the file can't be opened or locked, the check runs without it.
+fn turn(cancel: &Cancel) -> Option<Option<std::fs::File>> {
+    let file = (std::fs::OpenOptions::new())
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(turnstile());
+    let Ok(file) = file else {
+        return Some(None);
+    };
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if cancel.cancelled() {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(std::fs::TryLockError::Error(_)) => return Some(None),
+        }
+    }
+}
+
+/// A check run for a hot-reloading host, off its thread: its report is
+/// taken once it finishes. The process runs one check at a time, each once
+/// the saves asking for it stop for a moment (`SETTLE`). Dropped, it is
+/// cancelled: one waiting never runs, and one running has its luau-lsp
+/// killed. A host asking again (its next reload) replaces it, so a host
+/// has at most one check running and one waiting.
+pub struct Background {
+    result: Arc<Slot>,
+    cancel: Arc<Cancel>,
+}
+impl Background {
+    /// Check `paths` with `options`, once the process's checks before it
+    /// ran.
+    pub fn start(paths: Vec<PathBuf>, options: Options) -> Self {
+        let result = Arc::new(Mutex::new(None));
+        let cancel = Arc::new(Cancel::default());
+        let checks = checks();
+        lock(&checks.queue).push(Job {
+            paths,
+            options,
+            cancel: cancel.clone(),
+            slot: Arc::downgrade(&result),
+            asked: Instant::now(),
+        });
+        checks.asked.notify_one();
+        Self { result, cancel }
     }
     /// The result, once the check finished.
     pub fn take(&self) -> Option<Result<Report, CheckError>> {
-        self.result.lock().unwrap_or_else(|e| e.into_inner()).take()
+        lock(&self.result).take()
+    }
+}
+impl Drop for Background {
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A luau-lsp that says it started (its PID, in `log`) and runs until
+    /// killed.
+    #[cfg(unix)]
+    fn sleeper(dir: &Path) -> (Options, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let (fake, log) = (dir.join("luau-lsp"), dir.join("started"));
+        let script = format!("#!/bin/sh\necho $$ >> '{}'\nexec sleep 30\n", log.display());
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let options = Options {
+            strict: true,
+            luau_lsp: Some(fake),
+        };
+        (options, log)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checks_run_one_at_a_time_once_saves_settle_and_die_with_their_host() {
+        let dir = std::env::temp_dir().join(format!("zgx-check-once-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = dir.join("app.luau");
+        std::fs::write(&app, "return 1\n").unwrap();
+        let (options, log) = sleeper(&dir);
+        let started = || -> Vec<u32> {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            text.lines().filter_map(|l| l.trim().parse().ok()).collect()
+        };
+        let alive = |pid: u32| {
+            Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let until = |what: &dyn Fn() -> bool| {
+            let end = Instant::now() + Duration::from_secs(5);
+            while !what() && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            what()
+        };
+        let ask = || Background::start(vec![app.clone()], options.clone());
+        // Ten reloads in a burst (a host replaces its check each time): one
+        // luau-lsp runs, for the last, once they settle.
+        let mut check = ask();
+        for _ in 0..9 {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(std::mem::replace(&mut check, ask()));
+        }
+        std::thread::sleep(SETTLE / 2);
+        assert!(started().is_empty(), "nothing runs while saves come");
+        assert!(until(&|| started().len() == 1), "{:?}", started());
+        std::thread::sleep(SETTLE * 2);
+        assert_eq!(started().len(), 1, "the burst ran once");
+        let first = started()[0];
+        assert!(alive(first));
+        // Asked again while it runs: it is killed, and the new one runs once
+        // it settles.
+        drop(std::mem::replace(&mut check, ask()));
+        assert!(
+            until(&|| !alive(first)),
+            "the replaced check's luau-lsp lives on"
+        );
+        assert!(until(&|| started().len() == 2), "{:?}", started());
+        let second = started()[1];
+        assert!(alive(second));
+        // Another host in the process waits its turn: one luau-lsp at a time.
+        let other = ask();
+        std::thread::sleep(SETTLE * 3);
+        assert_eq!(started().len(), 2, "two checks ran at once");
+        // The host gone: its luau-lsp is killed, and the other's runs.
+        drop(check);
+        assert!(until(&|| !alive(second)), "an orphan luau-lsp");
+        assert!(until(&|| started().len() == 3), "{:?}", started());
+        let third = started()[2];
+        drop(other);
+        assert!(until(&|| !alive(third)), "an orphan luau-lsp");
+        // Another process checking (holding the machine's turn): this one
+        // waits for it.
+        let holder = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(turnstile())
+            .unwrap();
+        holder.lock().unwrap();
+        let waiting = ask();
+        std::thread::sleep(SETTLE * 3);
+        assert_eq!(started().len(), 3, "ran while another process checked");
+        holder.unlock().unwrap();
+        assert!(until(&|| started().len() == 4), "{:?}", started());
+        let fourth = started()[3];
+        drop(waiting);
+        assert!(until(&|| !alive(fourth)), "an orphan luau-lsp");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn parses_gnu_output_with_continuations_and_logs() {
         let text = "[INFO] Loading definitions file: @roblox - zgx.d.luau\n\
