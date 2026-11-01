@@ -59,7 +59,7 @@ fn elements_are_grouped_by_the_context_they_read() {
     let h = with(
         "groups",
         APP,
-        r##"ui.contribute { target = "#app", before = ui.text { "x" } }"##,
+        r##"ui.contribute { target = "#sidebar", before = ui.text { "x" } }"##,
     );
     h.frames(1);
     assert_eq!(h.error(), None);

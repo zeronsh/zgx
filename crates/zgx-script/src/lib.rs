@@ -1865,6 +1865,14 @@ impl ScriptHost {
                 let content = host.windows.content.borrow().get(&id).cloned();
                 match (current, content) {
                     (Some(loaded), Some(content)) => {
+                        if let Some(hooks) = loaded.lowering.hooks.as_deref() {
+                            lower::no_siblings(
+                                hooks,
+                                &content.node,
+                                &loaded.lowering,
+                                "a window's root",
+                            );
+                        }
                         lower::lower(&content.node, &loaded.lowering).takes_unfocused_keys()
                     }
                     _ => div(),
@@ -2694,25 +2702,31 @@ impl ScriptHost {
                 mounted.into_iter().map(|f| (vm.clone(), f))
             })
             .collect();
+        let lowering = Rc::new(lower::Lowering {
+            slots,
+            // Boxed, and none without plugins adding at the app's elements.
+            hooks: (!hooks.is_empty()).then(|| Box::new(hooks)),
+            sealed: Default::default(),
+            actions: self.0.actions.clone(),
+            elements: self.0.elements.clone(),
+            runtime: self.0.runtime.clone(),
+            assets: self.0.assets.clone(),
+            inspector: self.0.inspector.clone(),
+            depth: Default::default(),
+            #[cfg(feature = "components")]
+            commands: self.0.commands.clone(),
+        });
+        // What plugins add beside the app's root, which has no siblings:
+        // an error, not nothing.
+        if let Some(hooks) = lowering.hooks.as_deref() {
+            lower::no_siblings(hooks, &root, &lowering, "the app's root");
+        }
         Ok(Loaded {
             _vms: vms,
             mounted,
             broken,
             root,
-            lowering: Rc::new(lower::Lowering {
-                slots,
-                // Boxed, and none without plugins adding at the app's elements.
-                hooks: (!hooks.is_empty()).then(|| Box::new(hooks)),
-                sealed: Default::default(),
-                actions: self.0.actions.clone(),
-                elements: self.0.elements.clone(),
-                runtime: self.0.runtime.clone(),
-                assets: self.0.assets.clone(),
-                inspector: self.0.inspector.clone(),
-                depth: Default::default(),
-                #[cfg(feature = "components")]
-                commands: self.0.commands.clone(),
-            }),
+            lowering,
         })
     }
 

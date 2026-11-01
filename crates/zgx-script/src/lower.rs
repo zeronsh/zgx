@@ -793,6 +793,11 @@ fn shown(node: &Rc<Node>, low: &Rc<Lowering>) -> View {
 #[cold]
 #[inline(never)]
 fn hooked_shown(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
+    // Plugins add beside it: in a node of the app's laid out in its place,
+    // where it is a child as any other (`beside_a_branch`).
+    if adds_beside(hooks, node, low) {
+        return lower(&Rc::new(in_place(node)), low);
+    }
     let marks = hooks.marks_of(node);
     let view = listed(shown_element(node, low, hooks), node, hooks, low);
     match marks.is_empty() {
@@ -2083,28 +2088,64 @@ fn row_builder(builder: &mlua::Function, vm: &Rc<Vm>, low: &Rc<Lowering>) -> mlu
     if low.hooks.is_none() {
         return builder.clone();
     }
-    wrapped_row_builder(builder, vm, low)
+    wrapped_builder(builder, vm, low, Built::Row)
+}
+/// What a builder builds, for what plugins add at its root
+/// (`wrapped_builder`).
+#[derive(Clone, Copy, PartialEq)]
+enum Built {
+    /// A list's row: in place where plugins add at it or a host lists it.
+    Row,
+    /// A component's root: in place where plugins add beside it.
+    Component,
+    /// A presence's content: it can't have siblings (its region lays out
+    /// one piece of content, what leaves over what enters), so plugins
+    /// adding beside it are told so.
+    Presence,
+}
+/// A component's builder, as `row_builder` a row's.
+#[inline(always)]
+fn component_builder(builder: &mlua::Function, vm: &Rc<Vm>, low: &Rc<Lowering>) -> mlua::Function {
+    if low.hooks.is_none() {
+        return builder.clone();
+    }
+    wrapped_builder(builder, vm, low, Built::Component)
+}
+/// A presence's builder, as `row_builder` a row's.
+#[inline(always)]
+fn presence_builder(builder: &mlua::Function, vm: &Rc<Vm>, low: &Rc<Lowering>) -> mlua::Function {
+    if low.hooks.is_none() {
+        return builder.clone();
+    }
+    wrapped_builder(builder, vm, low, Built::Presence)
 }
 #[cold]
 #[inline(never)]
-fn wrapped_row_builder(
+fn wrapped_builder(
     builder: &mlua::Function,
     vm: &Rc<Vm>,
     low: &Rc<Lowering>,
+    built: Built,
 ) -> mlua::Function {
     let (inner, low) = (builder.clone(), Rc::downgrade(low));
     vm.lua
         .create_function(move |lua, args: mlua::MultiValue| {
             let root: mlua::Value = inner.call(args)?;
             match low.upgrade() {
-                Some(low) => hooked_row(lua, root, &low),
+                Some(low) => hooked_root(lua, root, &low, built),
                 None => Ok(root),
             }
         })
         .unwrap_or_else(|_| builder.clone())
 }
-/// `root`, a row's, in a `display = "contents"` node if plugins add at it.
-fn hooked_row(lua: &mlua::Lua, root: mlua::Value, low: &Lowering) -> mlua::Result<mlua::Value> {
+/// `root`, as `built` says, in a `display = "contents"` node if plugins add
+/// at it (`in_place`), or with the plugins told it can't take siblings.
+fn hooked_root(
+    lua: &mlua::Lua,
+    root: mlua::Value,
+    low: &Lowering,
+    built: Built,
+) -> mlua::Result<mlua::Value> {
     let Some(hooks) = low.hooks.as_deref() else {
         return Ok(root);
     };
@@ -2114,17 +2155,95 @@ fn hooked_row(lua: &mlua::Lua, root: mlua::Value, low: &Lowering) -> mlua::Resul
     let Ok(node) = ud.borrow::<NodeUd>().map(|n| n.0.clone()) else {
         return Ok(root);
     };
-    // Rows plugins add at, or a host lists (`ScriptHost::elements`).
-    if hooks.at(&node, true, low).is_empty() && !hooks.listed(&node) {
+    let held = match built {
+        // Rows plugins add at, or a host lists (`ScriptHost::elements`).
+        Built::Row => !hooks.at(&node, true, low).is_empty() || hooks.listed(&node),
+        Built::Component => adds_beside(hooks, &node, low),
+        Built::Presence => {
+            no_siblings(hooks, &node, low, "the content of a ui.presence");
+            false
+        }
+    };
+    if !held {
         return Ok(root);
     }
-    let mut row = Node::new(node.owner.clone(), Kind::Div);
-    row.props
-        .push((Prop::Display, Source::Lit(Lit::Str("contents".into()))));
-    row.provide = node.provide.clone();
-    row.children = vec![node];
-    lua.create_userdata(NodeUd(Rc::new(row)))
+    lua.create_userdata(NodeUd(Rc::new(in_place(&node))))
         .map(mlua::Value::UserData)
+}
+/// What plugins add before or after `node`, which can't have siblings
+/// (`what` it is): an error, once each, in `ScriptHost::contributions` and
+/// to the plugin, never nothing in silence.
+pub(crate) fn no_siblings(hooks: &Hooks, node: &Node, low: &Lowering, what: &str) {
+    for hook in hooks.at(node, true, low) {
+        let place = match () {
+            _ if hook.placed(crate::node::Place::Before).is_some() => "before",
+            _ if hook.placed(crate::node::Place::After).is_some() => "after",
+            _ => continue,
+        };
+        if hook.stats.error.borrow().is_some() {
+            continue;
+        }
+        let message = format!(
+            "ui.contribute {{ target = \"{}\", {place} = … }}: its target is {what}, which \
+             can't have siblings. Target an element inside it",
+            hook.target_text()
+        );
+        *hook.stats.error.borrow_mut() = Some(message.clone());
+        if let Some(vm) = hook.vm.upgrade() {
+            vm.report(mlua::Error::runtime(message));
+        }
+    }
+}
+/// A node of the app's holding `node`, laid out in its place (`display =
+/// "contents"`), providing what `node` provides: what plugins add beside
+/// `node` is then its sibling as in any container's children, and reads
+/// what it would inside it.
+fn in_place(node: &Rc<Node>) -> Node {
+    let mut held = Node::new(node.owner.clone(), Kind::Div);
+    held.props
+        .push((Prop::Display, Source::Lit(Lit::Str("contents".into()))));
+    held.provide = node.provide.clone();
+    held.children = vec![node.clone()];
+    held
+}
+/// Whether plugins add before or after `node`.
+fn adds_beside(hooks: &Hooks, node: &Node, low: &Lowering) -> bool {
+    hooks.at(node, true, low).iter().any(|hook| {
+        hook.placed(crate::node::Place::Before).is_some()
+            || hook.placed(crate::node::Place::After).is_some()
+    })
+}
+/// Whether plugins add beside a root of a `ui.show`'s or `ui.switch`'s
+/// branches: then its region lays out its branch in its own place, the
+/// additions siblings in its parent's flow (`branch_region`).
+#[inline(always)]
+fn beside_a_branch<'a>(
+    low: &Lowering,
+    roots: impl IntoIterator<Item = Option<&'a Rc<Node>>>,
+) -> bool {
+    match low.hooks.as_deref() {
+        None => false,
+        Some(hooks) => roots_targeted(hooks, low, &mut roots.into_iter()),
+    }
+}
+#[cold]
+#[inline(never)]
+fn roots_targeted(
+    hooks: &Hooks,
+    low: &Lowering,
+    roots: &mut dyn Iterator<Item = Option<&Rc<Node>>>,
+) -> bool {
+    roots.flatten().any(|root| adds_beside(hooks, root, low))
+}
+/// A branch's region: as what it shows (`contents`), or, plugins adding
+/// beside a root of it, laid out in its place (`display_contents`), the
+/// branch's siblings its parent's.
+#[inline(always)]
+fn branch_region(region: View, beside: bool) -> View {
+    match beside {
+        false => region.contents(),
+        true => region.display_contents(),
+    }
 }
 /// `view`, where a contribution applies, counted among its live matches
 /// (`ScriptHost::contributions`) while it is mounted.
@@ -2724,10 +2843,11 @@ fn kind_view(
             then,
             otherwise,
         } => {
+            let beside = beside_a_branch(low, [Some(then), otherwise.as_ref()]);
             let (when_vm, vm) = (vm.clone(), vm.clone());
             let (then, otherwise, low) = (then.clone(), otherwise.clone(), low.clone());
             let when = Rc::new(resolve_owned(when));
-            switch(
+            let region = switch(
                 move || {
                     resolve(&when, Ty::Bool, None, &when_vm).is_some_and(|l| l == Lit::Bool(true))
                 },
@@ -2740,20 +2860,24 @@ fn kind_view(
                         (false, None) => div().hidden(),
                     }
                 },
-            )
+            );
             // Lays out as what it shows, as if in its place.
-            .contents()
+            branch_region(region, beside)
         }
         Kind::Switch {
             value,
             cases,
             default,
         } => {
+            let beside = beside_a_branch(
+                low,
+                cases.iter().map(|(_, n)| Some(n)).chain([default.as_ref()]),
+            );
             let (value_vm, vm) = (vm.clone(), vm.clone());
             let cases: Vec<(Value, Rc<Node>)> = cases.clone();
             let (default, low) = (default.clone(), low.clone());
             let value = Rc::new(resolve_owned(value));
-            switch(
+            let region = switch(
                 move || resolve_value(&value, &value_vm),
                 move |key, _| {
                     let _keep = &vm;
@@ -2766,8 +2890,8 @@ fn kind_view(
                         (None, None) => div().hidden(),
                     }
                 },
-            )
-            .contents()
+            );
+            branch_region(region, beside)
         }
         Kind::Each {
             items,
@@ -3087,8 +3211,12 @@ fn kind_view(
             build: builder,
             props,
         } => {
-            let (builder, props, vm, low) =
-                (builder.clone(), props.clone(), vm.clone(), low.clone());
+            let (builder, props, vm, low) = (
+                component_builder(builder, vm, low),
+                props.clone(),
+                vm.clone(),
+                low.clone(),
+            );
             let (given, site) = (node.id.clone(), node.source.clone());
             component(move |cx| {
                 // Contributed to a slot with a context: its own props, with
@@ -3120,7 +3248,7 @@ fn kind_view(
         } => presence(
             need(&mut cx),
             Rc::new(resolve_owned(value)),
-            builder.clone(),
+            presence_builder(builder, vm, low),
             enter.clone(),
             exit.clone(),
             *wait,
