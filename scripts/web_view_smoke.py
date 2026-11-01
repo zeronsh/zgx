@@ -528,6 +528,20 @@ def orca_checks(session, env, output, checks):
         raise AssertionError("the page's tree is not under its box; see tree.txt")
     checks["tree"] = tree.stdout.strip().splitlines()[0]
     checks["heading in the tree"] = "Probe heading"
+    # Orca reads a caret moved by a click only once it has the click's
+    # button from AT-SPI's registry; a registry that sends none fails every
+    # check below as a missed heading. Clicks on the app's own background
+    # first, until Orca has one.
+    def buttons():
+        path = output / "orca-debug.log"
+        return "EVENT MANAGER: mouse:button:" in (path.read_text(errors="replace") if path.exists() else "")
+    deadline = time.monotonic() + 20
+    while not buttons():
+        if time.monotonic() > deadline:
+            raise AssertionError("AT-SPI's registry reported no mouse buttons to Orca; see orca-debug.log")
+        session.click(700, 250)
+        time.sleep(2)
+    checks["registry reports buttons"] = "mouse:button"
     # The page's plain background first (no field: Orca stays in browse
     # mode), below the heading: Orca reads where its caret lands, or its
     # previous-heading key reads the heading, in one utterance or two.
