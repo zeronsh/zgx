@@ -1167,6 +1167,8 @@ impl ScriptHost {
     }
     fn with(runtime: &Runtime, app: Script) -> Self {
         let elements = Rc::new(element::Elements::default());
+        // Where targets (`.class`) find the classes of the elements mounted.
+        element::Classes::register(runtime, &elements);
         let warnings = SharedWarnings::default();
         if let Some(mode) = DesignLint::from_env() {
             let mut w = warnings.borrow_mut();

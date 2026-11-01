@@ -440,7 +440,7 @@ ZGX_INSPECT_SOCKET=1): with one running, --app is not needed.
   mcp                  serve these as MCP tools on stdio, for agents
                        (claude mcp add zgx -- zgx inspect mcp)
 
-Targets: #id, \"label or text\", role:button, @12, row 3, [2], a >> b.
+Targets: #id, .class, \"label or text\", role:button, @12, row 3, [2], a >> b.
 Text by default, compact; --json prints the answer as JSON.";
 
 fn inspect(args: Vec<String>) -> ExitCode {
@@ -886,7 +886,7 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
-const TARGETS: &str = "Targets: #id, \"label or text\" (in quotes), role:button, @12 (a tree number), #list row 3, \"Copy\"[2], #a >> \"b\" (inside).";
+const TARGETS: &str = "Targets: #id, .class, \"label or text\" (in quotes), role:button, @12 (a tree number), #list row 3, \"Copy\"[2], #a >> \"b\" (inside).";
 
 /// `zgx inspect mcp`: devtools as MCP tools, JSON-RPC on stdin and stdout.
 fn mcp() -> ExitCode {

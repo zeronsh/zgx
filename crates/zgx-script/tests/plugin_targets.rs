@@ -105,8 +105,18 @@ ui.filter { target = "#sidebar >> .tool", text = function(t) return t .. "!" end
 }
 
 #[test]
-fn a_test_target_says_classes_are_for_plugins() {
-    let mut h = Harness::inline(r#"return ui.button { id = "b", class = "tool", "B" }"#);
+fn a_test_target_finds_elements_by_class() {
+    let mut h = Harness::inline(
+        r#"return ui.column {
+            ui.row { id = "bar", ui.button { id = "a", class = "tool primary", "A" } },
+            ui.button { id = "b", class = "tool", "B" },
+        }"#,
+    );
+    let a = h.target("#a").unwrap();
+    assert_eq!(h.target(".primary").unwrap(), a, "one class");
+    assert_eq!(h.target(".tool.primary").unwrap(), a, "both of them");
+    assert_eq!(h.target("#bar >> .tool").unwrap(), a, "inside another");
     let error = h.target(".tool").unwrap_err();
-    assert!(error.contains("plugins"), "{error}");
+    assert!(error.contains("`.tool` matches 2 nodes"), "{error}");
+    assert!(h.target(".nothing").is_err());
 }
