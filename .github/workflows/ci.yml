@@ -459,8 +459,14 @@ jobs:
       # device on DXGI's first low-power adapter (`adapter`, #217), every
       # shader module compiled by FXC optimizing as a release build does
       # (`every_shader`), and canvas strokes drawn: FXC once overflowed its
-      # stack on the polyline module, which crashed apps on first draw. With
-      # an empty folder for the shader cache, every shader compiles.
-      - run: cargo test -p zgx-gpu --test borders --test transforms --test rounded_clip --test adapter --test shader_cache --test every_shader --test canvas --test box_model --locked
+      # stack on the polyline module, which crashed apps on first draw; and an
+      # app's own shaders compiled by FXC in a process of its own drawing
+      # as wgpu builds them (`app_shaders_d3d12`). With an empty folder for
+      # the shader cache, every shader compiles.
+      - run: cargo test -p zgx-gpu --test borders --test transforms --test rounded_clip --test adapter --test shader_cache --test every_shader --test canvas --test box_model --test app_shaders_d3d12 --locked
         env:
           LOCALAPPDATA: ${{ runner.temp }}\zgx-cold
+          ZGX_EXPECT_COLD_CACHE: "1"
+      # The app-shader HLSL generator's register map and the FXC child's
+      # job and cache key (dx12_fill, fxc_child: Windows-only modules).
+      - run: cargo test -p zgx-gpu --lib --locked -- dx12_fill fxc_child

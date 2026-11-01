@@ -13,11 +13,15 @@ mod composition;
 #[cfg(d3d11)]
 mod d3d11_frame;
 #[cfg(windows)]
+mod dx12_fill;
+#[cfg(windows)]
 mod dxgi;
 #[cfg(windows)]
 mod dxgi_present;
 mod effects;
 mod font_cache;
+#[cfg(windows)]
+mod fxc_child;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub mod iosurface;
@@ -3291,6 +3295,15 @@ impl GpuContext {
                 descriptor.backend_options.noop.enable = noop;
             }
             descriptor.flags = instance_flags(descriptor.flags, !cfg!(debug_assertions));
+            // Which compiler an app's shaders meet on Direct3D 12, and its
+            // flags (`app_fragment`).
+            #[cfg(windows)]
+            APP_SHADER_FXC.get_or_init(|| {
+                (
+                    matches!(compiler, wgpu::Dx12Compiler::Fxc),
+                    descriptor.flags.contains(wgpu::InstanceFlags::DEBUG),
+                )
+            });
             // EGL draws to the window's display, which it must be given.
             if backends == wgpu::Backends::GL
                 && let Some(window) = &window
@@ -3372,7 +3385,14 @@ impl GpuContext {
                 wgpu::Features::MAPPABLE_PRIMARY_BUFFERS
             } else {
                 wgpu::Features::empty()
-            } | (adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING),
+            } | (adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING)
+                // An app's shaders' bytecode, compiled by FXC elsewhere
+                // (`app_fragment`).
+                | if info.backend == wgpu::Backend::Dx12 {
+                    adapter.features() & wgpu::Features::PASSTHROUGH_SHADERS
+                } else {
+                    wgpu::Features::empty()
+                },
             required_limits: wgpu::Limits {
                 // Direct3D 12 makes its shader-visible view heap this large, in
                 // write-combined memory: 30 MiB at the default million, 2 MiB
@@ -5816,10 +5836,108 @@ impl GpuRenderer {
             fill_pipeline(
                 &self.device,
                 &module,
+                &module,
                 &self.context.inner.quad_layout,
                 "zgx_image_effect",
             )
         });
+    }
+    /// A shader's pipeline from WGSL `source`, built by `build(vertex,
+    /// fragment)`, or none if it fails. `apps`: an app's own shader, which
+    /// no gate has compiled: on Direct3D 12 with FXC its fragment stage
+    /// compiles in a process of its own (`app_fragment`), so one FXC can't
+    /// survive fails alone, drawing nothing.
+    fn app_built(
+        &self,
+        apps: bool,
+        source: &str,
+        entry: &str,
+        layout: AppLayout,
+        build: impl FnOnce(&wgpu::ShaderModule, &wgpu::ShaderModule) -> wgpu::RenderPipeline,
+    ) -> Option<wgpu::RenderPipeline> {
+        #[cfg(windows)]
+        let fragment = match apps.then(|| self.app_fragment(source, entry, layout)) {
+            Some(Err(error)) => {
+                eprintln!("zgx: {error}");
+                return None;
+            }
+            Some(Ok(fragment)) => fragment,
+            None => None,
+        };
+        #[cfg(not(windows))]
+        let fragment: Option<wgpu::ShaderModule> = {
+            let _ = (apps, entry, layout);
+            None
+        };
+        shader_pipeline(&self.device, || {
+            let module = self
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("shader"),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
+            build(&module, fragment.as_ref().unwrap_or(&module))
+        })
+    }
+    /// An app's fragment stage compiled by FXC in a process of its own and
+    /// handed to wgpu as bytecode (`dx12_fill`, `fxc_child`), where wgpu's
+    /// Direct3D 12 would compile it with FXC here; `None` builds it as wgpu
+    /// does (another backend or compiler, no passthrough, no child).
+    #[cfg(windows)]
+    fn app_fragment(
+        &self,
+        source: &str,
+        entry: &str,
+        layout: AppLayout,
+    ) -> Result<Option<wgpu::ShaderModule>, String> {
+        let Some(&(true, debug)) = APP_SHADER_FXC.get() else {
+            return Ok(None);
+        };
+        if self.info.backend != wgpu::Backend::Dx12
+            || !self
+                .device
+                .features()
+                .contains(wgpu::Features::PASSTHROUGH_SHADERS)
+            || APP_SHADERS_IN_PROCESS.load(std::sync::atomic::Ordering::Relaxed)
+            || !fxc_child::available()
+        {
+            return Ok(None);
+        }
+        std::hint::black_box(fxc_child::keep());
+        let layout = match layout {
+            AppLayout::Quads => dx12_fill::Layout::Quads,
+            AppLayout::Blend => dx12_fill::Layout::Blend,
+        };
+        // A shader naga can't write as HLSL is wgpu's to report.
+        let Ok((hlsl, name)) = dx12_fill::fragment_hlsl(source, entry, layout) else {
+            return Ok(None);
+        };
+        // As wgpu-hal compiles it: strict, and unoptimized with debug info
+        // under the instance's DEBUG.
+        const STRICTNESS: u32 = 1 << 11;
+        const DEBUG_SKIP_OPTIMIZATION: u32 = (1 << 0) | (1 << 2);
+        let flags = STRICTNESS | if debug { DEBUG_SKIP_OPTIMIZATION } else { 0 };
+        let job = fxc_child::Job {
+            source: &hlsl,
+            entry_point: &name,
+            target: "ps_5_1",
+            flags,
+        };
+        let code = match fxc_child::compile(&job) {
+            None => return Ok(None),
+            Some(Err(error)) => return Err(error),
+            Some(Ok(code)) => code,
+        };
+        // SAFETY: DXBC FXC compiled from the HLSL `dx12_fill` writes for
+        // this layout's root signature (checked by `app_shaders_d3d12`).
+        Ok(Some(unsafe {
+            self.device
+                .create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+                    label: Some("app shader"),
+                    dxil: Some(code.into()),
+                    ..Default::default()
+                })
+        }))
     }
     /// Compile `shader`'s pipeline if new; whether it can draw.
     fn prepare_fill(&mut self, shader: &Arc<zgx::decoration::FillShader>) -> bool {
@@ -5827,20 +5945,26 @@ impl GpuRenderer {
             return compiled.is_some();
         }
         let source = fill_source(shader.source());
-        let pipeline = fill_validates(&source).then(|| {
-            let module = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("shader fill"),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
-                });
-            fill_pipeline(
-                &self.device,
-                &module,
-                &self.context.inner.quad_layout,
-                "zgx_fill",
-            )
-        });
+        let apps = shader.source() != zgx::decoration::radial_shader().source();
+        let pipeline = fill_validates(&source)
+            .then(|| {
+                self.app_built(
+                    apps,
+                    &source,
+                    "zgx_fill",
+                    AppLayout::Quads,
+                    |vertex, fragment| {
+                        fill_pipeline(
+                            &self.device,
+                            vertex,
+                            fragment,
+                            &self.context.inner.quad_layout,
+                            "zgx_fill",
+                        )
+                    },
+                )
+            })
+            .flatten();
         self.fill_shaders.insert(shader.id(), shader.clone());
         self.fill_pipelines.insert(shader.id(), pipeline);
         self.fill_pipelines[&shader.id()].is_some()
@@ -5851,20 +5975,26 @@ impl GpuRenderer {
             return compiled.is_some();
         }
         let source = filter_source(shader.source());
-        let pipeline = fill_validates(&source).then(|| {
-            let module = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("layer shader"),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
-                });
-            fill_pipeline(
-                &self.device,
-                &module,
-                &self.context.inner.quad_layout,
-                "zgx_filter",
-            )
-        });
+        let apps = shader.source() != zgx::decoration::color_filter_shader().source();
+        let pipeline = fill_validates(&source)
+            .then(|| {
+                self.app_built(
+                    apps,
+                    &source,
+                    "zgx_filter",
+                    AppLayout::Quads,
+                    |vertex, fragment| {
+                        fill_pipeline(
+                            &self.device,
+                            vertex,
+                            fragment,
+                            &self.context.inner.quad_layout,
+                            "zgx_filter",
+                        )
+                    },
+                )
+            })
+            .flatten();
         self.filter_shaders.insert(shader.id(), shader.clone());
         self.filter_pipelines.insert(shader.id(), pipeline);
         self.filter_pipelines[&shader.id()].is_some()
@@ -5912,16 +6042,24 @@ impl GpuRenderer {
             Some(shader) => (filter_source(shader.source()), "zgx_filter_blended"),
             None => (blend_source(), "zgx_blended"),
         };
-        let pipeline = fill_validates(&source).then(|| {
-            let module = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("blended layer"),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
-                });
-            let (_, layout) = self.blend_layouts();
-            blend_pipeline(&self.device, &module, layout, entry)
+        // An app's layer shader, blended: not zgx's own blend or colour filter.
+        let apps = shader.is_some_and(|shader| {
+            shader.source() != zgx::decoration::color_filter_shader().source()
         });
+        let pipeline = fill_validates(&source)
+            .then(|| {
+                self.app_built(
+                    apps,
+                    &source,
+                    entry,
+                    AppLayout::Blend,
+                    |vertex, fragment| {
+                        let (_, layout) = self.blend_layouts();
+                        blend_pipeline(&self.device, vertex, fragment, layout, entry)
+                    },
+                )
+            })
+            .flatten();
         self.blend_pipelines.insert(key, pipeline);
         self.blend_pipelines[&key].is_some()
     }
@@ -14544,9 +14682,64 @@ fn quad_pipeline(
 /// A shader fill's pipeline, or the image effects': quads blended over the
 /// target, `module`'s `entry` shading them (`zgx_fill`, see `fill_source`;
 /// `zgx_image_effect`, see `image_effect_source`).
+/// Whether Direct3D 12 compiles with FXC, and with its debug flags (the
+/// instance's `DEBUG`): an app's shaders then compile in a child.
+#[cfg(windows)]
+static APP_SHADER_FXC: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+/// Tests: an app's shaders built in the process (wgpu's naga and FXC) when
+/// set, through a child (`app_fragment`) when not.
+static APP_SHADERS_IN_PROCESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Tests: build an app's shaders in the process (`true`) or through a child
+/// where one can (`false`, the default); for `app_shaders_d3d12`'s parity.
+#[doc(hidden)]
+pub fn set_app_shaders_in_process(in_process: bool) {
+    APP_SHADERS_IN_PROCESS.store(in_process, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The wgpu-hal whose Direct3D 12 register assignment `dx12_fill::options`
+/// follows: a wgpu update fails
+/// `the_dx12_fill_register_map_was_checked_against_this_wgpu_hal` (on every
+/// platform) until the map is checked again and `app_shaders_d3d12` passes.
+#[cfg(test)]
+const DX12_FILL_CHECKED_WGPU_HAL: &str = "29.0.4";
+
+/// The pipeline layout an app's shader draws with (`dx12_fill::Layout`).
+#[derive(Clone, Copy, Debug)]
+enum AppLayout {
+    Quads,
+    Blend,
+}
+/// Compiles handed to a child so far in this process (tests).
+#[doc(hidden)]
+pub fn app_shaders_compiled_in_child() -> usize {
+    #[cfg(windows)]
+    return fxc_child::compiled();
+    #[cfg(not(windows))]
+    0
+}
+
+/// A shader fill's or layer shader's pipeline, or none if it fails to
+/// build (a GPU error, not a panic in debug builds).
+fn shader_pipeline(
+    device: &wgpu::Device,
+    make: impl FnOnce() -> wgpu::RenderPipeline,
+) -> Option<wgpu::RenderPipeline> {
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let pipeline = make();
+    match pollster::block_on(scope.pop()) {
+        None => Some(pipeline),
+        Some(error) => {
+            eprintln!("zgx: a shader's pipeline doesn't build, so it draws nothing: {error}");
+            None
+        }
+    }
+}
+
 fn fill_pipeline(
     device: &wgpu::Device,
     module: &wgpu::ShaderModule,
+    fragment: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
     entry: &str,
 ) -> wgpu::RenderPipeline {
@@ -14568,7 +14761,7 @@ fn fill_pipeline(
         depth_stencil: None,
         multisample: Default::default(),
         fragment: Some(wgpu::FragmentState {
-            module,
+            module: fragment,
             entry_point: Some(entry),
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
@@ -14586,6 +14779,7 @@ fn fill_pipeline(
 fn blend_pipeline(
     device: &wgpu::Device,
     module: &wgpu::ShaderModule,
+    fragment: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
     entry: &str,
 ) -> wgpu::RenderPipeline {
@@ -14607,7 +14801,7 @@ fn blend_pipeline(
         depth_stencil: None,
         multisample: Default::default(),
         fragment: Some(wgpu::FragmentState {
-            module,
+            module: fragment,
             entry_point: Some(entry),
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
@@ -15441,6 +15635,29 @@ impl surface::SurfaceSource for GpuRenderer {
         if self.wide_until.is_some() {
             self.set_drawable_count(3);
         }
+    }
+}
+
+#[cfg(test)]
+mod dx12_fill_pin {
+    /// A wgpu update fails this until `dx12_fill::options`' register map is
+    /// checked against its wgpu-hal again (and `app_shaders_d3d12` passes).
+    #[test]
+    fn the_dx12_fill_register_map_was_checked_against_this_wgpu_hal() {
+        let lock = include_str!("../../../Cargo.lock");
+        let version = lock
+            .split("[[package]]")
+            .find(|package| package.contains("name = \"wgpu-hal\"\n"))
+            .and_then(|package| package.split("version = \"").nth(1))
+            .and_then(|rest| rest.split('"').next())
+            .expect("wgpu-hal in Cargo.lock");
+        assert_eq!(
+            version,
+            super::DX12_FILL_CHECKED_WGPU_HAL,
+            "wgpu-hal is {version}: check dx12_fill::options against its \
+             create_pipeline_layout, run app_shaders_d3d12, then update \
+             DX12_FILL_CHECKED_WGPU_HAL"
+        );
     }
 }
 

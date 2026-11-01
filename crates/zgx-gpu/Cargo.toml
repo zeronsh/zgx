@@ -71,7 +71,7 @@ wgpu = { version = "29.0.4", default-features = false, features = ["vulkan"] }
 
 # DXGI frame statistics for ZGX_PRESENT_LOG (dxgi.rs); the version wgpu-hal uses.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dwm", "Win32_System_Performance", "Win32_System_Threading"] }
+windows = { version = "0.62", default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dwm", "Win32_System_Performance", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Graphics_Direct3D"] }
 # wgpu's own (`wgpu::hal`), named so build.rs reads whether it is the
 # repository's (its `links` metadata: `preferred_dx12_adapter`).
 wgpu-hal = { version = "29.0.4", default-features = false }
