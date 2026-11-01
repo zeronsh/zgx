@@ -4747,7 +4747,9 @@ impl Host {
             None if internal => &[],
             None => return,
         };
-        if self.native_drag.active() {
+        // One drag at a time, though a drop the platform has, performed and
+        // only finishing, doesn't hold back the next (Wayland).
+        if !self.native_drag.may_begin() {
             return;
         }
         let image = self.popups.preview_image(drag);
@@ -4756,9 +4758,11 @@ impl Host {
         #[cfg(target_os = "linux")]
         let image = image.or_else(|| self.drawn_preview(drag));
         let (proxy, token) = (self.proxy.clone(), self.context.window.token);
-        let send = move |drag| {
+        // Heard while it is the window's hand-off: an earlier drop finishing
+        // after this one began is not this drag's.
+        let (generation, send) = self.native_drag.events(move |drag| {
             let _ = proxy.send_event(Event::NativeDrag(token, drag));
-        };
+        });
         #[cfg(target_os = "linux")]
         let begun =
             crate::native_drag::begin(&window, items, image, (drag.x as f64, drag.y as f64), send);
@@ -4766,7 +4770,7 @@ impl Host {
         let begun = crate::native_drag::begin(&window, items, image, send);
         if begun {
             zgx_gpu::present_log::log(|| "native drag begin".into());
-            self.native_drag.begun();
+            self.native_drag.begun(generation);
             self.popups.show_preview(&window, drag, None);
         }
     }
@@ -4940,6 +4944,8 @@ impl Host {
             // Over another of the app's windows: that window's to hear
             // (`WindowManager::native_drag`).
             NativeDrag::MovedIn { .. } => return Ok(()),
+            // Taken: zgx's drag ends, the platform finishing with it.
+            NativeDrag::Performed { x, y } => (x, y, Some(true)),
             // Dropped in another window (the manager dropped it there), or
             // let go past every window: the platform's part ends untaken.
             NativeDrag::DroppedIn { x, y, .. } | NativeDrag::Left { x, y } => (x, y, Some(false)),
@@ -4955,12 +4961,21 @@ impl Host {
                 position,
             });
         };
-        let superseded = self.native_drag.superseded();
-        let deactivate = self.native_drag.ended();
-        zgx_gpu::present_log::log(|| "native drag end".into());
+        // Performed (Wayland): zgx's drag ends as taken now, and the
+        // hand-off goes on until the target is done (`Handoff::may_begin`).
+        let performed_now = matches!(event, NativeDrag::Performed { .. });
+        let (superseded, performed) = (
+            self.native_drag.superseded(),
+            self.native_drag.is_performed() && !performed_now,
+        );
+        let deactivate = !performed_now && self.native_drag.ended();
+        if !performed_now {
+            zgx_gpu::present_log::log(|| "native drag end".into());
+        }
         // A drag of the window's own began since (a press after the drop,
-        // Wayland): the end is the old drag's, and the new one goes on.
-        if superseded {
+        // Wayland), or zgx's drag ended as it was performed: the end is
+        // only the hand-off's.
+        if superseded || performed {
             if deactivate {
                 self.deactivate();
             }
@@ -6080,6 +6095,18 @@ impl WindowManager {
         event: crate::native_drag::NativeDrag,
     ) -> Result<(), Box<dyn Error>> {
         use crate::native_drag::NativeDrag;
+        // Dropped and taken, its target finishing: zgx's drag ends, and the
+        // window's next drag may go to the platform (`Handoff::may_begin`).
+        if let NativeDrag::Performed { .. } = event {
+            zgx_gpu::present_log::log(|| "native drag performed".into());
+            return match self.hosts.get_mut(&token) {
+                Some(host) => {
+                    host.native_drag.performed();
+                    host.native_drag_event(event)
+                }
+                None => Ok(()),
+            };
+        }
         // Where the platform says (Wayland: in which of the app's windows),
         // else at a global point.
         let (x, y, ended, within) = match event {
@@ -6088,6 +6115,7 @@ impl WindowManager {
             NativeDrag::MovedIn { window, x, y } => (x, y, None, Some(window)),
             NativeDrag::DroppedIn { window, x, y } => (x, y, Some(false), Some(window)),
             NativeDrag::Left { x, y } => (x, y, Some(false), None),
+            NativeDrag::Performed { .. } => return Ok(()),
         };
         let Some(drag) = self
             .hosts

@@ -329,6 +329,7 @@ impl NativeData {
                     compositor: None,
                     shm: None,
                     outgoing: None,
+                    finishing: Vec::new(),
                     drag: None,
                     text: None,
                     completion: None,
@@ -553,6 +554,20 @@ struct Outgoing {
     /// The target took the drop (`dnd_drop_performed`).
     performed: bool,
 }
+impl Outgoing {
+    /// Its host hears `how`, and its source, offer and icon go.
+    fn end(self, how: crate::native_drag::NativeDrag) {
+        (self.send)(how);
+        if let Some(offer) = self.offer {
+            offer.destroy();
+        }
+        self.source.destroy();
+        if let Some((surface, buffer)) = self.icon {
+            surface.destroy();
+            buffer.destroy();
+        }
+    }
+}
 struct Completion {
     offer: wl_data_offer::WlDataOffer,
     accepted: std::sync::mpsc::Receiver<bool>,
@@ -590,6 +605,10 @@ struct State {
     shm: Option<wl_shm::WlShm>,
     /// The app's own drag, handed to the compositor (`start_drag`).
     outgoing: Option<Outgoing>,
+    /// Its earlier drags whose drops are performed and whose targets are
+    /// still finishing with them, a newer drag having begun meanwhile: each
+    /// serves its data and goes as its target finishes.
+    finishing: Vec<Outgoing>,
     drag: Option<Drag>,
     text: Option<TextDrag>,
     completion: Option<Completion>,
@@ -648,7 +667,15 @@ impl State {
     ) {
         use crate::native_drag::NativeDrag;
         use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        self.end_outgoing(false);
+        // A drop performed, its target finishing, is kept to serve its data
+        // and hear its end (`finishing`); a drag still under way ends.
+        match self.outgoing.take() {
+            Some(previous) if previous.performed => self.finishing.push(previous),
+            previous => {
+                self.outgoing = previous;
+                self.end_outgoing(false);
+            }
+        }
         let ended = |send: &dyn Fn(NativeDrag)| {
             send(NativeDrag::Ended {
                 x: point.0,
@@ -796,15 +823,7 @@ impl State {
         let Some(outgoing) = self.outgoing.take() else {
             return;
         };
-        (outgoing.send)(how);
-        if let Some(offer) = outgoing.offer {
-            offer.destroy();
-        }
-        outgoing.source.destroy();
-        if let Some((surface, buffer)) = outgoing.icon {
-            surface.destroy();
-            buffer.destroy();
-        }
+        outgoing.end(how);
     }
     fn store(&mut self, primary: bool, text: String, html: Option<String>) -> Result<(), String> {
         let (seat, serial) = self.serial.ok_or("no input has reached this client yet")?;
@@ -1228,7 +1247,33 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        let finishing = state
+            .finishing
+            .iter()
+            .position(|finishing| finishing.source == *source);
         match event {
+            // An earlier drag of the app's, dropped, its target finishing.
+            wl_data_source::Event::Send { mime_type, fd } if finishing.is_some() => {
+                let finishing = &state.finishing[finishing.expect("checked above")];
+                if let Some((_, bytes)) = finishing.data.iter().find(|(kind, _)| *kind == mime_type)
+                {
+                    write_bytes(fd, bytes.clone());
+                }
+            }
+            wl_data_source::Event::DndFinished | wl_data_source::Event::Cancelled
+                if finishing.is_some() =>
+            {
+                let done = state.finishing.remove(finishing.expect("checked above"));
+                let (x, y) = done.point;
+                zgx_gpu::present_log::log(|| "native drag end".into());
+                // Its host's newer hand-off hears none of it
+                // (`Handoff::events`).
+                done.end(crate::native_drag::NativeDrag::Ended {
+                    x,
+                    y,
+                    accepted: true,
+                });
+            }
             // The app's own drag.
             wl_data_source::Event::Send { mime_type, fd }
                 if state
@@ -1247,6 +1292,10 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for State {
                     && outgoing.source == *source
                 {
                     outgoing.performed = true;
+                    // The pointer is the window's again: its next drag may
+                    // go to the compositor before this one's target finishes.
+                    let (x, y) = outgoing.point;
+                    (outgoing.send)(crate::native_drag::NativeDrag::Performed { x, y });
                 }
             }
             wl_data_source::Event::DndFinished => {

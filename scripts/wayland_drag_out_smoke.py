@@ -52,8 +52,9 @@ def main():
     parser.add_argument("binaries", type=pathlib.Path, help="the zgx-desktop examples' directory")
     parser.add_argument("--output", type=pathlib.Path, required=True)
     # The taking target finishes with each drop 0.5 s after taking it, and the
-    # tab is grabbed at once, while the words' drop still finishes: zgx
-    # can't hand a drag off then yet (#1259), so this fails; not run in CI.
+    # tab is grabbed at once, while the words' drop still finishes: the tab
+    # goes to the compositor all the same (a drop performed holds back no
+    # drag, #1259).
     parser.add_argument("--slow-target", action="store_true")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)

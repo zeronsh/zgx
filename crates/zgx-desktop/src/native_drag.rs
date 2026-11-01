@@ -70,6 +70,15 @@ pub(crate) enum NativeDrag {
         x: f64,
         y: f64,
     },
+    /// Dropped at `x`, `y`, and taken: the target is finishing with it
+    /// (Wayland's `dnd_drop_performed`). The pointer is the window's again,
+    /// so zgx's drag ends now, and the window's next drag may go to the
+    /// platform before this one's end comes.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Performed {
+        x: f64,
+        y: f64,
+    },
 }
 
 /// A window's drag handed to the platform, as its host keeps it: whether the
@@ -89,6 +98,14 @@ pub(crate) struct Handoff {
     /// platform's end, when it comes, is the old drag's (Wayland, whose drop
     /// stays the source's until its target finishes with it).
     superseded: bool,
+    /// The drop is performed and its target finishing (Wayland): the next
+    /// drag may hand off now.
+    performed: bool,
+    /// Which hand-off is the window's: each one's events carry the
+    /// generation it began in, and are let through only while it is
+    /// current, so a drop finishing after a newer drag went to the platform
+    /// is not taken for that drag's (`events`).
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 thread_local! {
     /// How many windows' drags the platform has.
@@ -109,7 +126,43 @@ impl Handoff {
     pub(crate) fn active(&self) -> bool {
         self.active
     }
-    pub(crate) fn begun(&mut self) {
+    /// Whether a drag may go to the platform now: none has it, or its drop
+    /// is performed (`performed`), its target only finishing.
+    pub(crate) fn may_begin(&self) -> bool {
+        !self.active || self.performed
+    }
+    /// The hand-off's drop is performed: its target finishes with it.
+    pub(crate) fn performed(&mut self) {
+        self.performed |= self.active;
+    }
+    /// Whether its drop is performed (`performed`): zgx's drag ended then,
+    /// so the platform's end only ends the hand-off.
+    pub(crate) fn is_performed(&self) -> bool {
+        self.performed
+    }
+    /// The next hand-off's generation, and a filter for its events: `send`
+    /// is called only while that hand-off is the window's, once `begun`
+    /// with the generation.
+    pub(crate) fn events<T>(
+        &self,
+        send: impl Fn(T) + Send + 'static,
+    ) -> (u64, impl Fn(T) + Send + 'static) {
+        use std::sync::atomic::Ordering;
+        let current = self.generation.clone();
+        let next = current.load(Ordering::Relaxed) + 1;
+        (next, move |event| {
+            if current.load(Ordering::Relaxed) == next {
+                send(event);
+            }
+        })
+    }
+    /// The platform took a drag, of `generation` (`events`): an earlier one
+    /// still finishing is heard no more.
+    pub(crate) fn begun(&mut self, generation: u64) {
+        self.generation
+            .store(generation, std::sync::atomic::Ordering::Relaxed);
+        self.performed = false;
+        self.superseded = false;
         if !std::mem::replace(&mut self.active, true) {
             HANDED_OFF.with(|count| count.set(count.get() + 1));
         }
@@ -140,6 +193,7 @@ impl Handoff {
     /// back meanwhile, is due now.
     pub(crate) fn ended(&mut self) -> bool {
         self.superseded = false;
+        self.performed = false;
         if std::mem::take(&mut self.active) {
             HANDED_OFF.with(|count| count.set(count.get() - 1));
         }
@@ -524,16 +578,59 @@ mod macos {
 mod tests {
     use super::Handoff;
 
+    fn begin(handoff: &mut Handoff) {
+        let (generation, _) = handoff.events(|_: ()| {});
+        handoff.begun(generation);
+    }
+
     #[test]
     fn a_handoff_ends_with_the_platforms_drag() {
         let mut handoff = Handoff::default();
-        handoff.begun();
+        begin(&mut handoff);
         assert!(handoff.active());
         assert!(!handoff.ended());
         assert!(!handoff.active());
         // The next drag hands off again.
-        handoff.begun();
+        begin(&mut handoff);
         assert!(handoff.active());
+    }
+
+    /// A drop performed lets the next drag hand off; that drag's events
+    /// are heard, the earlier one's no more; each hand-off's end clears it.
+    #[test]
+    fn a_drop_performed_lets_the_next_drag_hand_off_and_hears_only_it() {
+        use std::sync::{Arc, Mutex};
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let mut handoff = Handoff::default();
+        assert!(handoff.may_begin());
+        let (first, send_first) = handoff.events({
+            let heard = heard.clone();
+            move |n: u32| heard.lock().unwrap().push(n)
+        });
+        handoff.begun(first);
+        assert!(!handoff.may_begin(), "one drag at a time");
+        send_first(1);
+        handoff.performed();
+        assert!(handoff.may_begin(), "its target only finishing");
+        let (second, send_second) = handoff.events({
+            let heard = heard.clone();
+            move |n: u32| heard.lock().unwrap().push(n)
+        });
+        handoff.begun(second);
+        assert!(!handoff.may_begin(), "the new drag isn't performed");
+        send_first(2);
+        send_second(3);
+        assert_eq!(
+            *heard.lock().unwrap(),
+            [1, 3],
+            "the first's end isn't the second's"
+        );
+        handoff.ended();
+        assert!(handoff.may_begin());
+        // Performed with nothing handed off marks nothing.
+        handoff.performed();
+        begin(&mut handoff);
+        assert!(!handoff.may_begin());
     }
 
     /// A press while the platform had the drag (Wayland, after its drop)
@@ -544,13 +641,13 @@ mod tests {
         let mut handoff = Handoff::default();
         handoff.pressed();
         assert!(!handoff.superseded(), "nothing handed off");
-        handoff.begun();
+        begin(&mut handoff);
         assert!(!handoff.superseded());
         handoff.pressed();
         assert!(handoff.superseded());
         handoff.ended();
         assert!(!handoff.superseded());
-        handoff.begun();
+        begin(&mut handoff);
         assert!(!handoff.superseded(), "the next drag starts clean");
     }
 
@@ -559,7 +656,7 @@ mod tests {
         let mut handoff = Handoff::default();
         assert!(handoff.deactivate());
         handoff.activate();
-        handoff.begun();
+        begin(&mut handoff);
         // The app taking the drop came to the front.
         assert!(!handoff.deactivate());
         assert!(handoff.ended());
@@ -572,7 +669,7 @@ mod tests {
     #[test]
     fn focus_back_during_the_platforms_drag_cancels_the_held_deactivation() {
         let mut handoff = Handoff::default();
-        handoff.begun();
+        begin(&mut handoff);
         assert!(!handoff.deactivate());
         handoff.activate();
         assert!(!handoff.ended());
