@@ -1892,15 +1892,19 @@ impl ScriptHost {
                 let content = host.windows.content.borrow().get(&id).cloned();
                 match (current, content) {
                     (Some(loaded), Some(content)) => {
-                        if let Some(hooks) = loaded.lowering.hooks.as_deref() {
-                            lower::no_siblings(
-                                hooks,
-                                &content.node,
-                                &loaded.lowering,
-                                "a window's root",
-                            );
-                        }
-                        lower::lower(&content.node, &loaded.lowering).takes_unfocused_keys()
+                        let view = match loaded.lowering.hooks.as_deref() {
+                            Some(hooks) => {
+                                lower::no_siblings(
+                                    hooks,
+                                    &content.node,
+                                    &loaded.lowering,
+                                    "a window's root",
+                                );
+                                lower::plugged(&content.node, &loaded.lowering)
+                            }
+                            None => lower::lower(&content.node, &loaded.lowering),
+                        };
+                        view.takes_unfocused_keys()
                     }
                     _ => div(),
                 }
@@ -2508,8 +2512,11 @@ impl ScriptHost {
                 let current = host.current.borrow().clone();
                 // Its root's `on_key` hears what nothing focused takes.
                 current.map_or_else(div, |loaded| {
-                    let mut view =
-                        lower::lower(&loaded.root, &loaded.lowering).takes_unfocused_keys();
+                    let mut view = match loaded.lowering.hooks.is_some() {
+                        true => lower::plugged(&loaded.root, &loaded.lowering),
+                        false => lower::lower(&loaded.root, &loaded.lowering),
+                    }
+                    .takes_unfocused_keys();
                     // With a catalog, the windows' text is in its locale's
                     // language (Han takes its fonts).
                     if host.locales.handle().is_some() {
