@@ -68,7 +68,7 @@ ui.contribute { target = "#row", after = ui.text { "e" } }
             ("#later".to_string(), "replace", 1, false),
             ("#name".to_string(), "after", 2, false),
             ("#save".to_string(), "filter", 1, false),
-            ("#row".to_string(), "after", 0, true),
+            ("#row".to_string(), "after", 2, false),
         ],
         "a target matching nothing reads 0; one in each row, a match a row"
     );
