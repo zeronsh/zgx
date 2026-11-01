@@ -50,6 +50,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binaries", type=pathlib.Path, help="the zgx-desktop examples' directory")
     parser.add_argument("--output", type=pathlib.Path, required=True)
+    # The taking target finishes with each drop 0.5 s after taking it, and the
+    # tab is grabbed at once, while the words' drop still finishes: zgx
+    # can't hand a drag off then yet (#1259), so this fails; not run in CI.
+    parser.add_argument("--slow-target", action="store_true")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     processes, checks = [], {}
@@ -91,7 +95,8 @@ def main():
             display = until("sway's socket", sockets, 10)[0].name
             env["WAYLAND_DISPLAY"] = display
             app, app_log = launch("drag_probe", [args.binaries / "drag_probe"], env)
-            _, takes_log = launch("takes", ["python3", "scripts/xdnd_target.py", "Takes drops", 0, 0], env)
+            _, takes_log = launch("takes", ["python3", "scripts/xdnd_target.py", "Takes drops", 0, 0]
+                                  + (["--finish-delay", "0.5"] if args.slow_target else []), env)
             _, refuses_log = launch("refuses", ["python3", "scripts/xdnd_target.py", "Refuses drops", 0, 0,
                                                 "--refuse"], env)
             until("the targets", lambda: "READY" in takes_log.read_text() and "READY" in refuses_log.read_text())
@@ -106,6 +111,7 @@ def main():
                     time.sleep(.03)
 
             def grab():
+                until("the last drag's end", settled)
                 pointer.move_to(*CHIP, *OUTPUT)
                 time.sleep(.2)
                 pointer.button(True)
@@ -113,6 +119,14 @@ def main():
 
             def ends():
                 return len(re.findall(r"^DRAG_END", app_log.read_text(), re.M))
+
+            # Every drag handed to the compositor has ended on zgx's side: its
+            # target finished with the drop (not just printed it). A press
+            # before then would be taken by the drop still finishing (zgx
+            # hands off one drag at a time), so each grab waits for it.
+            def settled():
+                log = app_log.read_text()
+                return log.count("native drag end") >= log.count("native drag begin")
 
             # Onto the taking target.
             grab()
@@ -158,6 +172,7 @@ def main():
             # on and dragged out onto the taking target: it takes them as
             # text, as a browser's selection drags.
             field = (10 + 40, 104 + 15)
+            until("the last drag's end", settled)
             pointer.move_to(*field, *OUTPUT)
             time.sleep(.2)
             pointer.click()
@@ -180,7 +195,8 @@ def main():
             # window's strip it drops there; let go on the bare desktop, it
             # is torn off.
             tab = (CHIP[0], CHIP[1] + 28 + 10)
-            grab_at = lambda point: (pointer.move_to(*point, *OUTPUT), time.sleep(.2), pointer.button(True),
+            grab_at = lambda point: (args.slow_target or until("the last drag's end", settled),
+                                     pointer.move_to(*point, *OUTPUT), time.sleep(.2), pointer.button(True),
                                      time.sleep(.05))
             grab_at(tab)
             glide(tab, (1100, 40))
@@ -215,6 +231,7 @@ def main():
             before = until("the Solo window", solo)
             start = (before[0] + CHIP[0], before[1] + CHIP[1])
             end = (start[0] - 300, start[1] + 150)
+            until("the last drag's end", settled)
             pointer.move_to(*start, *OUTPUT)
             time.sleep(.2)
             pointer.button(True)

@@ -4033,6 +4033,19 @@ impl Host {
         Ok(())
     }
     fn window_event(&mut self, event: WindowEvent) -> Result<(), Box<dyn Error>> {
+        // On Wayland the compositor holds the pointer while it has the drag,
+        // and gives it back at the drop, before the drop's target finishes
+        // with it: a press then is a new gesture, which that drag's end must
+        // not end (`native_drag_event`). Elsewhere no press comes meanwhile.
+        #[cfg(target_os = "linux")]
+        if self.frame_paced
+            && let WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            } = event
+        {
+            self.native_drag.pressed();
+        }
         // The GPU wakes while the frame the input makes is built, or while a
         // scroll waits for the refresh it starts on.
         if acts(&event)
@@ -4942,7 +4955,17 @@ impl Host {
                 position,
             });
         };
+        let superseded = self.native_drag.superseded();
         let deactivate = self.native_drag.ended();
+        zgx_gpu::present_log::log(|| "native drag end".into());
+        // A drag of the window's own began since (a press after the drop,
+        // Wayland): the end is the old drag's, and the new one goes on.
+        if superseded {
+            if deactivate {
+                self.deactivate();
+            }
+            return Ok(());
+        }
         if let Some(drag) = self.context.ui.input.drag_state() {
             if taken {
                 let ui = &self.context.ui;
@@ -4970,6 +4993,7 @@ impl Host {
     /// The platform's drag ended after zgx's had (its source went): the
     /// window's next drag hands off again.
     fn native_drag_gone(&mut self) {
+        zgx_gpu::present_log::log(|| "native drag end".into());
         if self.native_drag.ended() {
             self.deactivate();
         }

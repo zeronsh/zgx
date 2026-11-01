@@ -85,6 +85,10 @@ pub(crate) enum NativeDrag {
 pub(crate) struct Handoff {
     active: bool,
     deactivated: bool,
+    /// A press came while the platform had the drag: a new gesture, so the
+    /// platform's end, when it comes, is the old drag's (Wayland, whose drop
+    /// stays the source's until its target finishes with it).
+    superseded: bool,
 }
 thread_local! {
     /// How many windows' drags the platform has.
@@ -116,6 +120,18 @@ impl Handoff {
         self.deactivated = self.active;
         !self.active
     }
+    /// A press reached the window while the platform had its drag (on
+    /// Wayland, after the drop, while its target finishes with it): a drag
+    /// of its own may be under way when the platform's end comes.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn pressed(&mut self) {
+        self.superseded |= self.active;
+    }
+    /// Whether a press came since the platform took the drag (`pressed`):
+    /// its end is then not the window's current drag's.
+    pub(crate) fn superseded(&self) -> bool {
+        self.superseded
+    }
     /// The window has focus again: nothing held back is due.
     pub(crate) fn activate(&mut self) {
         self.deactivated = false;
@@ -123,6 +139,7 @@ impl Handoff {
     /// The platform's drag ended: whether the window's deactivation, held
     /// back meanwhile, is due now.
     pub(crate) fn ended(&mut self) -> bool {
+        self.superseded = false;
         if std::mem::take(&mut self.active) {
             HANDED_OFF.with(|count| count.set(count.get() - 1));
         }
@@ -517,6 +534,24 @@ mod tests {
         // The next drag hands off again.
         handoff.begun();
         assert!(handoff.active());
+    }
+
+    /// A press while the platform had the drag (Wayland, after its drop)
+    /// marks its end as the old drag's; a press with nothing handed off, or
+    /// the next hand-off, marks nothing.
+    #[test]
+    fn a_press_during_the_handoff_supersedes_its_drag() {
+        let mut handoff = Handoff::default();
+        handoff.pressed();
+        assert!(!handoff.superseded(), "nothing handed off");
+        handoff.begun();
+        assert!(!handoff.superseded());
+        handoff.pressed();
+        assert!(handoff.superseded());
+        handoff.ended();
+        assert!(!handoff.superseded());
+        handoff.begun();
+        assert!(!handoff.superseded(), "the next drag starts clean");
     }
 
     #[test]
