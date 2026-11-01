@@ -834,6 +834,13 @@ impl View {
         self.contents = true;
         self
     }
+    /// Undo `contents`: a box of its own again, for a host that puts a
+    /// region it built in a flow of its own choosing after all (with
+    /// `display_contents`, its children in its parent's).
+    pub fn not_contents(mut self) -> Self {
+        self.contents = false;
+        self
+    }
     /// A checkbox's mixed state, while `mixed` is true: a dash in place of
     /// the checkmark, and "mixed" to assistive technology, as a "select
     /// all" box shows some of its group on. Only checkboxes take it.

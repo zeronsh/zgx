@@ -665,7 +665,7 @@ fn hooked_children(
     flow: Option<&[(Prop, Lit)]>,
 ) -> View {
     let lowered = |child: &Rc<Node>| {
-        let view = lower(child, low);
+        let view = hooked_lower(child, low, hooks);
         match flow {
             Some(flow) if child.kind.flows() => apply_all(view, flow),
             _ => view,
@@ -736,7 +736,7 @@ fn chained_element(
     component(move |cx| {
         let above = cx.try_service::<Ancestry>();
         let lowered = |child: &Rc<Node>| {
-            let view = lower(child, &low);
+            let view = plugged(child, &low);
             match &flow {
                 Some(flow) if child.kind.flows() => apply_all(view, flow),
                 _ => view,
@@ -819,7 +819,7 @@ fn shown_element(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
     }
     let filters = filters_in(&at);
     match filters.is_empty() {
-        true => lower(node, low),
+        true => hooked_lower(node, low, hooks),
         false => counted_filters(filtered(node, &filters, low, None), &filters),
     }
 }
@@ -924,7 +924,7 @@ fn filtered(
     use crate::node::{Filtered, TooltipContent};
     let flow: Option<Vec<(Prop, Lit)>> = flow.filter(|_| node.kind.flows()).map(<[_]>::to_vec);
     let lowered = move |node: &Rc<Node>, low: &Rc<Lowering>| {
-        let view = lower(node, low);
+        let view = plugged(node, low);
         match &flow {
             Some(flow) => apply_all(view, flow),
             None => view,
@@ -2103,22 +2103,6 @@ enum Built {
     /// adding beside it are told so.
     Presence,
 }
-/// A component's builder, as `row_builder` a row's.
-#[inline(always)]
-fn component_builder(builder: &mlua::Function, vm: &Rc<Vm>, low: &Rc<Lowering>) -> mlua::Function {
-    if low.hooks.is_none() {
-        return builder.clone();
-    }
-    wrapped_builder(builder, vm, low, Built::Component)
-}
-/// A presence's builder, as `row_builder` a row's.
-#[inline(always)]
-fn presence_builder(builder: &mlua::Function, vm: &Rc<Vm>, low: &Rc<Lowering>) -> mlua::Function {
-    if low.hooks.is_none() {
-        return builder.clone();
-    }
-    wrapped_builder(builder, vm, low, Built::Presence)
-}
 #[cold]
 #[inline(never)]
 fn wrapped_builder(
@@ -2143,7 +2127,7 @@ fn wrapped_builder(
 fn hooked_root(
     lua: &mlua::Lua,
     root: mlua::Value,
-    low: &Lowering,
+    low: &Rc<Lowering>,
     built: Built,
 ) -> mlua::Result<mlua::Value> {
     let Some(hooks) = low.hooks.as_deref() else {
@@ -2164,11 +2148,16 @@ fn hooked_root(
             false
         }
     };
-    if !held {
-        return Ok(root);
-    }
-    lua.create_userdata(NodeUd(Rc::new(in_place(&node))))
-        .map(mlua::Value::UserData)
+    // A root that is a component, a presence or a branching region gets
+    // what `hooked_lower` gives it among children: as in place, it's one.
+    let node = match held || beside_a_branch(hooks, &node, low) {
+        true => Rc::new(in_place(&node)),
+        false => match &node.kind {
+            Kind::Component { .. } | Kind::Presence { .. } => rebuilt(&node, low),
+            _ => return Ok(root),
+        },
+    };
+    lua.create_userdata(NodeUd(node)).map(mlua::Value::UserData)
 }
 /// What plugins add before or after `node`, which can't have siblings
 /// (`what` it is): an error, once each, in `ScriptHost::contributions` and
@@ -2213,37 +2202,68 @@ fn adds_beside(hooks: &Hooks, node: &Node, low: &Lowering) -> bool {
             || hook.placed(crate::node::Place::After).is_some()
     })
 }
-/// Whether plugins add beside a root of a `ui.show`'s or `ui.switch`'s
-/// branches: then its region lays out its branch in its own place, the
-/// additions siblings in its parent's flow (`branch_region`).
-#[inline(always)]
-fn beside_a_branch<'a>(
-    low: &Lowering,
-    roots: impl IntoIterator<Item = Option<&'a Rc<Node>>>,
-) -> bool {
-    match low.hooks.as_deref() {
-        None => false,
-        Some(hooks) => roots_targeted(hooks, low, &mut roots.into_iter()),
-    }
-}
+/// `node` lowered where plugins are loaded, so lowering without them is
+/// as it was: a component's or a presence's builder wrapped for what
+/// plugins add at its root (`rebuilt`), and a `ui.show` or `ui.switch`
+/// whose branch root they add beside laid out in its place
+/// (`display_contents`), the additions siblings in its parent's flow.
 #[cold]
 #[inline(never)]
-fn roots_targeted(
-    hooks: &Hooks,
-    low: &Lowering,
-    roots: &mut dyn Iterator<Item = Option<&Rc<Node>>>,
-) -> bool {
-    roots.flatten().any(|root| adds_beside(hooks, root, low))
-}
-/// A branch's region: as what it shows (`contents`), or, plugins adding
-/// beside a root of it, laid out in its place (`display_contents`), the
-/// branch's siblings its parent's.
-#[inline(always)]
-fn branch_region(region: View, beside: bool) -> View {
-    match beside {
-        false => region.contents(),
-        true => region.display_contents(),
+fn hooked_lower(node: &Rc<Node>, low: &Rc<Lowering>, hooks: &Hooks) -> View {
+    let copy;
+    let (node, in_flow) = match &node.kind {
+        Kind::Component { .. } | Kind::Presence { .. } => {
+            copy = rebuilt(node, low);
+            (&copy, false)
+        }
+        _ => (node, beside_a_branch(hooks, node, low)),
+    };
+    // One call of `lower`: a second sways how it inlines elsewhere.
+    let view = lower(node, low);
+    match in_flow {
+        true => view.not_contents().display_contents(),
+        false => view,
     }
+}
+/// `node` lowered, by `hooked_lower` where plugins are loaded: for the
+/// plugin-only paths, which may run without them (a reload dropped them).
+#[cold]
+#[inline(never)]
+pub(crate) fn plugged(node: &Rc<Node>, low: &Rc<Lowering>) -> View {
+    match low.hooks.as_deref() {
+        Some(hooks) => hooked_lower(node, low, hooks),
+        None => lower(node, low),
+    }
+}
+/// Whether `node` is a `ui.show` or `ui.switch` plugins add beside a
+/// branch root of.
+fn beside_a_branch(hooks: &Hooks, node: &Node, low: &Lowering) -> bool {
+    let roots: Vec<&Rc<Node>> = match &node.kind {
+        Kind::Show {
+            then, otherwise, ..
+        } => std::iter::once(then).chain(otherwise).collect(),
+        Kind::Switch { cases, default, .. } => {
+            cases.iter().map(|(_, n)| n).chain(default).collect()
+        }
+        _ => return false,
+    };
+    roots.into_iter().any(|root| adds_beside(hooks, root, low))
+}
+/// A component or a presence as `node`, its builder wrapped for what
+/// plugins add at the root it builds (`wrapped_builder`).
+fn rebuilt(node: &Rc<Node>, low: &Rc<Lowering>) -> Rc<Node> {
+    let Some(vm) = node.owner.upgrade() else {
+        return node.clone();
+    };
+    let mut copy = (**node).clone();
+    match &mut copy.kind {
+        Kind::Component { build, .. } => {
+            *build = wrapped_builder(build, &vm, low, Built::Component)
+        }
+        Kind::Presence { build, .. } => *build = wrapped_builder(build, &vm, low, Built::Presence),
+        _ => return node.clone(),
+    }
+    Rc::new(copy)
 }
 /// `view`, where a contribution applies, counted among its live matches
 /// (`ScriptHost::contributions`) while it is mounted.
@@ -2843,11 +2863,10 @@ fn kind_view(
             then,
             otherwise,
         } => {
-            let beside = beside_a_branch(low, [Some(then), otherwise.as_ref()]);
             let (when_vm, vm) = (vm.clone(), vm.clone());
             let (then, otherwise, low) = (then.clone(), otherwise.clone(), low.clone());
             let when = Rc::new(resolve_owned(when));
-            let region = switch(
+            switch(
                 move || {
                     resolve(&when, Ty::Bool, None, &when_vm).is_some_and(|l| l == Lit::Bool(true))
                 },
@@ -2860,24 +2879,20 @@ fn kind_view(
                         (false, None) => div().hidden(),
                     }
                 },
-            );
+            )
             // Lays out as what it shows, as if in its place.
-            branch_region(region, beside)
+            .contents()
         }
         Kind::Switch {
             value,
             cases,
             default,
         } => {
-            let beside = beside_a_branch(
-                low,
-                cases.iter().map(|(_, n)| Some(n)).chain([default.as_ref()]),
-            );
             let (value_vm, vm) = (vm.clone(), vm.clone());
             let cases: Vec<(Value, Rc<Node>)> = cases.clone();
             let (default, low) = (default.clone(), low.clone());
             let value = Rc::new(resolve_owned(value));
-            let region = switch(
+            switch(
                 move || resolve_value(&value, &value_vm),
                 move |key, _| {
                     let _keep = &vm;
@@ -2890,8 +2905,8 @@ fn kind_view(
                         (None, None) => div().hidden(),
                     }
                 },
-            );
-            branch_region(region, beside)
+            )
+            .contents()
         }
         Kind::Each {
             items,
@@ -3211,12 +3226,8 @@ fn kind_view(
             build: builder,
             props,
         } => {
-            let (builder, props, vm, low) = (
-                component_builder(builder, vm, low),
-                props.clone(),
-                vm.clone(),
-                low.clone(),
-            );
+            let (builder, props, vm, low) =
+                (builder.clone(), props.clone(), vm.clone(), low.clone());
             let (given, site) = (node.id.clone(), node.source.clone());
             component(move |cx| {
                 // Contributed to a slot with a context: its own props, with
@@ -3248,7 +3259,7 @@ fn kind_view(
         } => presence(
             need(&mut cx),
             Rc::new(resolve_owned(value)),
-            presence_builder(builder, vm, low),
+            builder.clone(),
             enter.clone(),
             exit.clone(),
             *wait,
