@@ -86,6 +86,8 @@ Plugin { name: "stamps".into(), entry, grants: vec![
 
 **`Override` on a module is a trust grant.** The replacement runs in the app's VM as the app's own code, with everything the app's scripts may do: its state, its actions, its packages. That is why stamps' row can `require("@app-original/components/task_row")` (the module it replaces; only the replacement may reach it) and `require("@kit/badge")`. Grant `Override("@app/…")` as you would install the plugin's code into the app, and `Override("*")` only to a plugin you trust with the whole app.
 
+**What each contribution does now** is `host.contributions()`: for each `ui.contribute { target }` and `ui.filter`, in the order made, the plugin, its target, its place (`before`, `after`, `replace`, `filter`), how many elements it applies at now, and its latest error. A target matching nothing reads `matches: 0`, so a host can say "not shown here" without reading the plugin's source. The count follows the interface: an element a `ui.show` hides drops out, and one in each row of a list counts a match a row. `zgx inspect contributions` (MCP `zgx_contributions`) gives the same, a line each and then as JSON. Without plugins the list is empty and nothing is counted.
+
 The host can also ask a capability before anyone adds beside a target: `host.expose_hook("#checkout", Some(Capability::Named("payments".into())))`. To lock every contribution down at once (slots, and beside any `#id` or hook), `host.require_contribution_capability(Capability::Named("contribute".into()))` makes each take that capability; `expose_hook(target, None)` (`"slot:name"` for a slot) opens one again.
 
 ## What plugins see of the app

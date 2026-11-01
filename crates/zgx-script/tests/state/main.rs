@@ -31,6 +31,8 @@ mod plugin_context;
 mod plugin_filters;
 #[path = "../plugin_hooks.rs"]
 mod plugin_hooks;
+#[path = "../plugin_report.rs"]
+mod plugin_report;
 #[path = "../plugin_shared.rs"]
 mod plugin_shared;
 #[path = "../plugins.rs"]
