@@ -405,7 +405,7 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
   memory                                         what the app holds, by what holds it: a line each
   wait    target [text] [gone] [timeout_ms=3000] until it shows (the text), or is gone
   sleep   ms                                     let the app run
-targets: #id, \"label or text\", role:button, @12, row 3, [2], a >> b (inside)";
+targets: #id, .class, \"label or text\", role:button, @12, row 3, [2], a >> b (inside)";
 
 impl Session {
     /// The session of a window's interface `ui`, the script view mounted
@@ -420,6 +420,8 @@ impl Session {
         // Names and values computed from state wait for a reader (an
         // assistive technology): devtools are one.
         ui.set_assistive_technology(true);
+        // Targets by class (`.tool`) read its elements' classes.
+        host.expose_classes();
         if let Some(inspector) = &inspector {
             // Its labels (the script line of each node) while devtools run.
             inspector.set_warnings(true);
