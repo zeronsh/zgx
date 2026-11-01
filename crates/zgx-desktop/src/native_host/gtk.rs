@@ -199,6 +199,7 @@ api! {
     fn webkit_web_view_set_zoom_level(Ptr, f64);
     fn webkit_web_view_get_inspector(Ptr) -> Ptr;
     fn webkit_web_inspector_show(Ptr);
+    fn webkit_web_inspector_detach(Ptr);
     fn webkit_web_view_set_background_color(Ptr, *const GdkRGBA);
     fn webkit_web_view_set_input_method_context(Ptr, Ptr);
     fn webkit_input_method_context_get_type() -> GType;

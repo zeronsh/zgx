@@ -631,6 +631,14 @@ impl Gtk {
                     false,
                 );
             }
+            connect(
+                api,
+                (api.webkit_web_view_get_inspector)(view),
+                "attach",
+                handler(on_inspector_attach as *const ()),
+                data,
+                false,
+            );
             (api.gtk_widget_show_all)(window);
             (api.gtk_widget_grab_focus)(view);
             self.pages.borrow_mut().insert(spec.id, page);
@@ -647,7 +655,8 @@ impl Gtk {
         // thread; undecided navigations are ignored, as they would be.
         unsafe {
             let list = (api.webkit_web_view_get_back_forward_list)(page.view);
-            for object in [page.window, page.view, page.content, list] {
+            let inspector = (api.webkit_web_view_get_inspector)(page.view);
+            for object in [page.window, page.view, page.content, list, inspector] {
                 (api.g_signal_handlers_disconnect_matched)(
                     object,
                     gtk::G_SIGNAL_MATCH_DATA,
@@ -1460,6 +1469,28 @@ unsafe extern "C" fn on_unhandled_key(
         }
     });
     1
+}
+/// Web Inspector docking in the page (WebKit docks it in a page large
+/// enough, once the page's window counts as one, `ZgxOffscreenWindow`):
+/// detached once docked, as its own button would, into a window of its own
+/// (as WebView2's is). Docked, it drew in the page's frames but heard none
+/// of the page's input, which goes to the page's own window. (Refused here,
+/// WebKit took it as docked by the app, and detaching then showed nothing.)
+unsafe extern "C" fn on_inspector_attach(inspector: Ptr, _: Ptr) -> gtk::gboolean {
+    unsafe extern "C" fn detach(inspector: Ptr) -> gtk::gboolean {
+        let api = gtk::api().expect("GTK runs");
+        // SAFETY: the inspector referenced below, released here.
+        unsafe {
+            (api.webkit_web_inspector_detach)(inspector);
+            (api.g_object_unref)(inspector);
+        }
+        0
+    }
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: GTK passes the inspector, referenced for the callback; detached
+    // after WebKit attached it (within this signal it hasn't yet).
+    unsafe { (api.g_idle_add_full)(0, detach, (api.g_object_ref)(inspector), None) };
+    0
 }
 unsafe extern "C" fn on_load_changed(_: Ptr, event: c_int, data: Ptr) {
     // SAFETY: GTK passes this handler's page.

@@ -11,7 +11,8 @@
 //! heard: clicks, typing, compositions, keys, choices, scrolling) and `ACTION <name>`
 //! for each of the app's shortcuts that fired: Ctrl+J (the page takes it),
 //! Ctrl+K (the page leaves it alone) and Ctrl+L (reserved: the page never
-//! hears it).
+//! hears it). Ctrl+I (reserved) opens Web Inspector; `--large-page` makes the
+//! page's box 900 × 650.
 //!
 //! `--media URL`: the page at URL instead (the smoke's video and audio).
 use zgx::{
@@ -42,16 +43,21 @@ document.addEventListener('keydown', (e) => {
   post({ key: e.key, code: e.code, ctrl: e.ctrlKey });
   if (e.ctrlKey && e.key === 'j') e.preventDefault();
 }, true);
+addEventListener('resize', () => post({ resized: innerHeight }));
 let scrolled = false;
 addEventListener('scroll', () => { if (!scrolled && scrollY > 0) { scrolled = true; post({ scrolled: scrollY }); } });
 </script></body></html>"#;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `--large-page`: a page box of 900 × 650 (in a window to fit), large
+    // enough for WebKit to dock Web Inspector in it.
+    let large = std::env::args().any(|arg| arg == "--large-page");
+    let (page_width, page_height): (f32, f32) = if large { (900., 650.) } else { (600., 400.) };
     Application::new()
         .window(WindowOptions {
             title: "Web view probe".into(),
-            width: 760.,
-            height: 520.,
+            width: f64::from(page_width) + 160.,
+            height: f64::from(page_height) + 120.,
             ..Default::default()
         })
         .run(|cx| {
@@ -60,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let transparent = std::env::args().any(|arg| arg == "--transparent");
             let options = WebViewOptions {
                 transparent,
+                inspectable: true,
                 ..Default::default()
             };
             let web = WebView::new(&cx.ui.runtime, options);
@@ -106,8 +113,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .absolute()
                             .left(40.)
                             .top(40.)
-                            .w(600.)
-                            .h(400.)
+                            .w(page_width)
+                            .h(page_height)
                             .rounded(24.)
                             .bg(rgba(0xffff00ff)),
                     )
@@ -134,12 +141,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ),
             );
             let root = cx.ui.root();
+            let inspect = web.clone();
             cx.ui.on_event(root, false, move |event| {
                 if event.phase != EventPhase::Capture
                     && let InputEvent::Action(action) = &event.event
                     && let Some(action) = action.downcast_ref::<MenuAction>()
                 {
                     println!("ACTION {}", action.0);
+                    if action.0 == "i" {
+                        inspect.open_devtools();
+                    }
                     event.prevent_default();
                 }
             });
@@ -159,7 +170,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Keymap::new()
                     .bind(bind("j"))
                     .bind(bind("k"))
-                    .bind(bind("l").reserved()),
+                    .bind(bind("l").reserved())
+                    .bind(bind("i").reserved()),
             );
             cx.tasks.spawn(async move {
                 let _keep = (events, keymap, web);
