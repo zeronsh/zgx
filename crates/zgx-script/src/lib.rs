@@ -1169,8 +1169,6 @@ impl ScriptHost {
     }
     fn with(runtime: &Runtime, app: Script) -> Self {
         let elements = Rc::new(element::Elements::default());
-        // Where targets (`.class`) find the classes of the elements mounted.
-        element::Classes::register(runtime, &elements);
         let warnings = SharedWarnings::default();
         if let Some(mode) = DesignLint::from_env() {
             let mut w = warnings.borrow_mut();
@@ -1361,6 +1359,12 @@ impl ScriptHost {
         let hooks = loaded.lowering.hooks.as_deref();
         let mounted = hooks.map(|hooks| hooks.mounted.borrow().clone());
         elements_report::report(ui, handle, &loaded.root, mounted.as_ref(), &sources)
+    }
+    /// Let targets (`driver::find`'s `.class`) read the classes of this
+    /// host's elements mounted: for tests and devtools, which ask by
+    /// selector, so an app pays nothing for it.
+    pub(crate) fn expose_classes(&self) {
+        element::Classes::register(&self.0.runtime, &self.0.elements);
     }
     /// What each plugin adds at the app's elements (`ui.contribute { target
     /// }`, `ui.filter`), in the order they made them: its target, where it
