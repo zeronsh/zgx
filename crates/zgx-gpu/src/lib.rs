@@ -1277,6 +1277,8 @@ struct Shaped {
     scale: f32,
     glyphs: Vec<Glyph>,
     quads: Vec<TextQuad>,
+    /// Whether `quads` hold colour glyphs (`COLOR_GLYPH`).
+    colored: bool,
     atlas_epoch: u64,
     last_used: u64,
     /// The prepared text these glyphs were laid out from, kept while drawn.
@@ -1339,7 +1341,14 @@ struct AtlasEntry {
     height: u32,
     left: i32,
     top: i32,
+    /// A colour glyph's (an emoji's): its texels its own colours, which the
+    /// text's colour doesn't tint (`COLOR_GLYPH`).
+    color: bool,
 }
+/// `TextQuad::paint[2]` of a colour glyph's quad (`AtlasEntry::color`):
+/// placed white, with its text's alpha, so `basic`'s colour times texel
+/// leaves its colours as they are.
+const COLOR_GLYPH: f32 = 1.;
 /// A glyph's coverage blurred for a text shadow (`blurred_glyph`): `texels`
 /// in the atlas drawn over `size` device pixels, a wide blur at a power of
 /// two fewer (sampled back up bilinearly, as `effects` does).
@@ -3783,6 +3792,8 @@ pub struct GpuRenderer {
     /// The quads of the lines of a text partly in its clip, made each frame
     /// (see `render_flat`), kept for their allocation.
     visible_glyphs: Vec<TextQuad>,
+    /// Whether `visible_glyphs` hold colour glyphs (`COLOR_GLYPH`).
+    visible_colored: bool,
     /// Blurred text shadows (`place_blurred_shadows`): none until a text has
     /// one.
     blurred: Option<Box<BlurredShadows>>,
@@ -4420,6 +4431,7 @@ impl GpuRenderer {
             frame_draws: Vec::new(),
             frame_peaks: (0, 0),
             visible_glyphs: Vec::new(),
+            visible_colored: false,
             blurred: None,
             background: Color(0, 0, 0, 0),
             images: FxHashMap::default(),
@@ -7859,6 +7871,8 @@ impl GpuRenderer {
                                 bounds.height.to_bits().hash(&mut hasher);
                                 hasher.finish()
                             });
+                            // (A twin's quads come with whether they hold colour glyphs.)
+                            let mut twin_colored = false;
                             let twin = content
                                 .and_then(|content| self.shaped_like.get(&content))
                                 .and_then(|id| self.shapes.get(id))
@@ -7877,6 +7891,7 @@ impl GpuRenderer {
                                     let placed = twin.atlas_epoch == self.atlas_epoch;
                                     if placed {
                                         spare_quads.extend_from_slice(&twin.quads);
+                                        twin_colored = twin.colored;
                                     }
                                     (twin.decorations.clone(), placed.then_some(twin.atlas_epoch))
                                 });
@@ -7991,6 +8006,7 @@ impl GpuRenderer {
                                 scale: self.scale,
                                 glyphs,
                                 quads: spare_quads,
+                                colored: twin_colored,
                                 atlas_epoch: epoch.unwrap_or(0),
                                 last_used: self.frame,
                                 prepared,
@@ -8076,12 +8092,16 @@ impl GpuRenderer {
                         let rounded_spans = rich
                             .as_ref()
                             .is_some_and(|rich| rich.runs().iter().any(|run| run.radius > 0.));
-                        let place = |quads: &mut Vec<Quad>, source: &[TextQuad]| {
+                        // Holding colour glyphs (`COLOR_GLYPH`): its shadows are
+                        // their alphas, as blurred ones are (`place_blurred_shadows`).
+                        let colored_at = std::cell::Cell::new(false);
+                        let place = |quads: &mut Vec<Quad>, source: &[TextQuad], colored: bool| {
                             let from = quads.len();
+                            colored_at.set(colored);
                             if !shadows.is_empty() {
                                 shadows_at.set((quads.len(), quads.len()));
                             }
-                            for shadow in shadows.iter().rev().filter(|_| !blurred) {
+                            for shadow in shadows.iter().rev().filter(|_| !blurred && !colored) {
                                 let shadow_color = rgba(shadow.color, item.effects.opacity);
                                 place_text_quads(
                                     quads,
@@ -8097,7 +8117,7 @@ impl GpuRenderer {
                                 shadows_at.set((shadows_at.get().0, quads.len()));
                             }
                             // Plain and unselected: one colour, chosen once.
-                            if selected.is_none() && rich.is_none() {
+                            if selected.is_none() && rich.is_none() && !colored {
                                 place_text_quads(
                                     quads,
                                     source,
@@ -8116,6 +8136,15 @@ impl GpuRenderer {
                                     fade,
                                     item.effects.edge_fade,
                                     |cached| {
+                                        // A colour glyph keeps its colours, selected
+                                        // or not, with its text's alpha.
+                                        if cached.paint[2] == COLOR_GLYPH {
+                                            let alpha = match rich.is_some() {
+                                                true => cached.color[3] * item.effects.opacity,
+                                                false => plain_color[3],
+                                            };
+                                            return [1., 1., 1., alpha];
+                                        }
                                         let recolor = selected
                                             .filter(|_| cached.paint[1] > 0.5)
                                             .and_then(|h| {
@@ -8152,7 +8181,7 @@ impl GpuRenderer {
                                 fresh.take_if(|shaped| shaped.atlas_epoch == self.atlas_epoch)
                         {
                             // (A twin's, placed in this atlas already.)
-                            place(&mut quads, &shaped.quads);
+                            place(&mut quads, &shaped.quads, shaped.colored);
                             glyphs_alone = marks.is_empty()
                                 && highlight.is_none()
                                 && shaped.decorations.is_empty();
@@ -8164,7 +8193,7 @@ impl GpuRenderer {
                             && let Some(shaped) = self.shapes.get_mut(&item.id)
                             && shaped.atlas_epoch == self.atlas_epoch
                         {
-                            place(&mut quads, &shaped.quads);
+                            place(&mut quads, &shaped.quads, shaped.colored);
                             glyphs_alone = marks.is_empty()
                                 && highlight.is_none()
                                 && shaped.decorations.is_empty();
@@ -8197,8 +8226,10 @@ impl GpuRenderer {
                                         .map(rich_decoration_quad),
                                 );
                                 shaped.quads.reserve(shaped.glyphs.len());
+                                shaped.colored = false;
                                 for glyph in &shaped.glyphs {
                                     if let Some(a) = self.glyph::<MODE>(glyph.key, &mut stats)? {
+                                        shaped.colored |= a.color;
                                         shaped.quads.push(TextQuad {
                                             rect: [
                                                 (glyph.x + a.left as f32) / self.scale,
@@ -8215,7 +8246,12 @@ impl GpuRenderer {
                                             color: shaped.rich.as_ref().map_or([0.; 4], |rich| {
                                                 rgba(rich.runs()[glyph.run].color, 1.)
                                             }),
-                                            paint: [0., 1., 0., 0.],
+                                            paint: [
+                                                0.,
+                                                1.,
+                                                if a.color { COLOR_GLYPH } else { 0. },
+                                                0.,
+                                            ],
                                         });
                                     }
                                 }
@@ -8233,7 +8269,15 @@ impl GpuRenderer {
                                 stats.geometry_rebuilds += 1;
                             }
                             let visible = std::mem::take(&mut self.visible_glyphs);
-                            place(&mut quads, if partial { &visible } else { &shaped.quads });
+                            let colored = match partial {
+                                true => self.visible_colored,
+                                false => shaped.colored,
+                            };
+                            place(
+                                &mut quads,
+                                if partial { &visible } else { &shaped.quads },
+                                colored,
+                            );
                             glyphs_alone = marks.is_empty()
                                 && highlight.is_none()
                                 && shaped.decorations.is_empty();
@@ -8259,7 +8303,7 @@ impl GpuRenderer {
                         }
                         let (at, mut end) = shadows_at.get();
                         if at != usize::MAX {
-                            if blurred {
+                            if blurred || colored_at.get() {
                                 end = at
                                     + self.place_blurred_shadows(
                                         &mut quads,
@@ -11154,6 +11198,7 @@ impl GpuRenderer {
         }
         let mut visible = std::mem::take(&mut self.visible_glyphs);
         visible.clear();
+        let mut colored = false;
         let lines = |quad: &TextQuad| quad.rect[1] + quad.rect[3] >= top && quad.rect[1] <= bottom;
         let decorations = |background: bool| {
             shaped
@@ -11180,6 +11225,7 @@ impl GpuRenderer {
                     .rich
                     .as_ref()
                     .map_or([0.; 4], |rich| rgba(rich.runs()[glyph.run].color, 1.));
+                colored |= entry.color;
                 visible.push(glyph_quad(glyph, entry, self.scale, self.atlas_size, color));
             }
         }
@@ -11196,6 +11242,7 @@ impl GpuRenderer {
         }
         visible.truncate(kept);
         self.visible_glyphs = visible;
+        self.visible_colored = colored;
         Ok(true)
     }
     #[inline(always)]
@@ -11305,6 +11352,7 @@ impl GpuRenderer {
             height: p.height,
             left: p.left,
             top: p.top,
+            color: matches!(image.content, SwashContent::Color),
         };
         self.entries.insert(AtlasKey::from(key), Some(entry));
         stats.glyph_uploads += 1;
@@ -11400,7 +11448,9 @@ impl GpuRenderer {
         let mut under = Vec::new();
         if placed.is_ok() {
             for shadow in shadows.iter().rev() {
-                let sigma = shadow_sigma(shadow.blur, scale);
+                // (At least an eighth of a pixel for colour glyphs: their
+                // shadows are their alphas, as blurred ones are.)
+                let sigma = shadow_sigma(shadow.blur, scale).max(u32::from(shaped.colored));
                 let source = match blurred.filter(|_| sigma > 0) {
                     Some(text) => match text.sigmas.iter().find(|(s, _)| *s == sigma) {
                         Some((_, quads)) => quads.as_slice(),
@@ -11448,7 +11498,7 @@ impl GpuRenderer {
             text.sigmas.clear();
         }
         for shadow in shadows {
-            let sigma = shadow_sigma(shadow.blur, scale);
+            let sigma = shadow_sigma(shadow.blur, scale).max(u32::from(shaped.colored));
             let kept = |blurred: &Option<Box<BlurredShadows>>| {
                 blurred
                     .as_ref()
@@ -13336,7 +13386,7 @@ fn glyph_quad(
             a.height as f32 / atlas_size as f32,
         ],
         color,
-        paint: [0., 1., 0., 0.],
+        paint: [0., 1., if a.color { COLOR_GLYPH } else { 0. }, 0.],
     }
 }
 /// The most pieces one line decoration is drawn in: past that, the rest of a
@@ -16284,6 +16334,7 @@ mod atlas_glyph_errors_tests {
                 })
                 .collect(),
             quads: Vec::new(),
+            colored: false,
             atlas_epoch: 0,
             last_used: 0,
             prepared: None,
