@@ -29,11 +29,18 @@
 #    files left out of a package, or code only it compiles, would otherwise
 #    first fail for an app turning it on. Ghostty's terminals need Zig 0.16,
 #    as a user's build does (zgx-ghostty-sys).
-# 4. The previous release's zgx-desktop and zgx-gpu, as crates.io has them,
-#    build against the zgx 2 packaged: an app on them that runs
-#    `cargo update -p zgx` gets this zgx, and they call it in places a
-#    doc(hidden) or return-type change breaks without semver-checks seeing
-#    it (zgx-desktop 0.1.3 calls `zoom::wheel`).
+# 4. Each published crate's previous release, as crates.io has it, builds
+#    against every other zgx crate 2 packaged: an app on it that runs
+#    `cargo update` gets them, and it calls them in places a doc(hidden),
+#    return-type or literal change breaks without semver-checks seeing it
+#    (zgx-desktop 0.1.3 calls `zoom::wheel`; zgx-script 0.1.6 built
+#    zgx-components' `TabsOptions` field by field).
+# 5. cargo semver-checks of each against its previous release adds a pub
+#    field only to structs with Default (scripts/semver_defaults.py): an
+#    app's literal of one without it has no way to keep compiling
+#    (zgx-script's `Line` and `Window` at 0.1.7's first freeze). Its other
+#    lints are left to the release's rulings (docs/releasing.md). Needs
+#    cargo-semver-checks.
 # Before them: changelog.d/'s entries are well formed, and none is left out
 # of a CHANGELOG.md that has this version's section (scripts/changelog.py);
 # each fork whose version crates.io has is what crates.io has
@@ -134,9 +141,10 @@ esac
 features="$target/features-app"
 rm -rf "$features"
 mkdir -p "$features/src"
-"$python" - "$platform" "$zgx" $forks > "$features/Cargo.toml" <<'PY'
+"$python" - "$platform" "$zgx" "$target" $forks > "$features/Cargo.toml" <<'PY'
 import json, re, subprocess, sys
-platform, zgx, forks = sys.argv[1], sys.argv[2], sys.argv[3:]
+platform, zgx, target, forks = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+platform_features = {}
 # Features for some platforms alone, and which. Every other feature of a
 # published crate is built everywhere: a new one is covered unless it says
 # here where it isn't.
@@ -165,6 +173,10 @@ for package in sorted(published, key=lambda p: p["name"]):
     turned = sorted(f for f in package["features"]
                     if f != "default" and platform in ONLY.get(f"{name}/{f}", {platform}))
     print(f'{name} = {{ version = "={zgx}", features = {json.dumps(turned)} }}')
+    platform_features[name] = turned
+# The same features for semver-checks' run at the end (5).
+with open(f"{target}/platform-features.json", "w") as file:
+    json.dump(platform_features, file)
 print("\n[patch.crates-io]")
 for package in sorted(published, key=lambda p: p["name"]):
     print(f'{package["name"]} = {{ path = "../package/{package["name"]}-{zgx}" }}')
@@ -187,26 +199,99 @@ ghostty_cache="$(cd "$target" && pwd)/ghostty-cache"
 rm -rf "$ghostty_cache"
 ZGX_GHOSTTY_CACHE="$ghostty_cache" cargo build --manifest-path "$features/Cargo.toml" --target-dir "$target"
 echo "every published feature for $platform built from its package"
-echo "== the previous release's zgx-desktop and zgx-gpu against this zgx"
-# The newest zgx-desktop on crates.io below this version.
-previous=$(curl -sfL -A zgx-release-check https://index.crates.io/zg/x-/zgx-desktop |
-    grep -o '"vers":"[^"]*"' | cut -d'"' -f4 |
-    { cat; echo "$zgx"; } | sort -V | awk -v this="$zgx" '$0 == this { print last; exit } { last = $0 }')
-if [ -z "$previous" ]; then
-    echo "no earlier zgx-desktop on crates.io"
+echo "== the previous release's crates against this release"
+# Each published crate, its newest version on crates.io below this one ("-"
+# for a crate new in this release), and the features this platform builds
+# of each (the features app's, those the previous version has): one
+# "crate version features previous-features" a line, lists comma-joined.
+"$python" - "$zgx" "$target" > "$target/previous.txt" <<'PY'
+import json, subprocess, sys, urllib.error, urllib.request
+zgx, target = sys.argv[1], sys.argv[2]
+sys.stdout.reconfigure(newline="\n")  # read by the shell: no CR on Windows
+platform_features = json.load(open(f"{target}/platform-features.json"))
+def key(version):
+    return tuple(int(part) for part in version.split("-")[0].split("."))
+metadata = json.loads(subprocess.check_output(
+    ["cargo", "metadata", "--format-version", "1", "--no-deps", "--locked"]))
+for package in sorted(metadata["packages"], key=lambda p: p["name"]):
+    name = package["name"]
+    if package["publish"] is not None or not name.startswith("zgx") \
+            or package["manifest_path"].replace("\\", "/").split("/")[-3] != "crates":
+        continue
+    path = {1: "1/", 2: "2/", 3: f"3/{name[0]}/"}.get(len(name), f"{name[:2]}/{name[2:4]}/") + name
+    request = urllib.request.Request(f"https://index.crates.io/{path}", headers={"User-Agent": "zgx-release-check"})
+    try:
+        lines = urllib.request.urlopen(request, timeout=30).read().decode().splitlines()
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+        lines = []
+    versions = {entry["vers"]: entry for entry in (json.loads(line) for line in lines if line.strip())
+                if "-" not in entry["vers"] and key(entry["vers"]) < key(zgx)}
+    previous = max(versions, key=key) if versions else None
+    features = platform_features.get(name, [])
+    had = {**versions[previous].get("features", {}), **versions[previous].get("features2", {})} if previous else {}
+    print(name, previous or "-", ",".join(features) or "-", ",".join(f for f in features if f in had) or "-")
+PY
+if ! cut -d' ' -f2 "$target/previous.txt" | grep -qv '^-$'; then
+    echo "no earlier release on crates.io"
     exit 0
 fi
-compat="$target/compat-app"
-rm -rf "$compat"
-mkdir -p "$compat/src"
-{
-    printf '[package]\nname = "zgx-compat-app"\nversion = "0.0.0"\nedition = "2024"\npublish = false\n\n'
-    printf '[workspace]\n\n[dependencies]\nzgx = "=%s"\nzgx-desktop = "=%s"\nzgx-gpu = "=%s"\n\n[patch.crates-io]\n' "$zgx" "$previous" "$previous"
-    printf 'zgx = { path = "../package/zgx-%s" }\n' "$zgx"
-    for fork in $forks; do
-        printf 'zgx-%s = { path = "../package/zgx-%s-%s" }\n' "$fork" "$fork" "$(version "vendor/$fork/Cargo.toml")"
+# Each, as crates.io has it, with every other zgx crate this release's
+# package: an app on it that runs `cargo update` gets them, and it calls
+# them in places a doc(hidden), return-type or literal change breaks
+# without semver-checks seeing it (zgx-desktop 0.1.3 calls `zoom::wheel`;
+# zgx-script 0.1.6 wrote zgx-components' `TabsOptions` out field by field).
+while read -r crate previous _; do
+    if [ "$previous" = - ]; then continue; fi
+    compat="$target/compat-$crate"
+    rm -rf "$compat"
+    mkdir -p "$compat/src"
+    {
+        printf '[package]\nname = "zgx-compat-app"\nversion = "0.0.0"\nedition = "2024"\npublish = false\n\n'
+        printf '[workspace]\n\n[dependencies]\n%s = "=%s"\n\n[patch.crates-io]\n' "$crate" "$previous"
+        for other in $(cut -d' ' -f1 "$target/previous.txt"); do
+            if [ "$other" != "$crate" ]; then
+                printf '%s = { path = "../package/%s-%s" }\n' "$other" "$other" "$zgx"
+            fi
+        done
+        for fork in $forks; do
+            printf 'zgx-%s = { path = "../package/zgx-%s-%s" }\n' "$fork" "$fork" "$(version "vendor/$fork/Cargo.toml")"
+        done
+    } > "$compat/Cargo.toml"
+    printf 'use %s as _;\nfn main() {}\n' "$(echo "$crate" | tr - _)" > "$compat/src/main.rs"
+    cargo check --manifest-path "$compat/Cargo.toml" --target-dir "$target" < /dev/null
+    echo "$crate $previous builds against this release's crates"
+done < "$target/previous.txt"
+echo "== new public fields only on structs with Default (cargo semver-checks)"
+if ! cargo semver-checks --version >/dev/null 2>&1; then
+    echo "cargo-semver-checks is needed: cargo install cargo-semver-checks --locked" >&2
+    exit 1
+fi
+semver="$target/semver"
+rm -rf "$semver"
+mkdir -p "$semver"
+while read -r crate previous current had; do
+    if [ "$previous" = - ]; then continue; fi
+    # Default features and this platform's others, as the features app
+    # built them, not semver-checks' guess at them (it took
+    # zgx-ghostty-sys/link, macOS's alone, everywhere).
+    set -- --default-features
+    for feature in $(echo "$current" | tr , ' '); do
+        if [ "$feature" != - ]; then set -- "$@" --current-features "$feature"; fi
     done
-} > "$compat/Cargo.toml"
-printf 'use zgx_desktop as _;\nuse zgx_gpu as _;\nfn main() {}\n' > "$compat/src/main.rs"
-cargo check --manifest-path "$compat/Cargo.toml" --target-dir "$target"
-echo "zgx-desktop and zgx-gpu $previous build against zgx $zgx"
+    for feature in $(echo "$had" | tr , ' '); do
+        if [ "$feature" != - ]; then set -- "$@" --baseline-features "$feature"; fi
+    done
+    # Its own exit is not the verdict: the release's rulings take some
+    # lints (docs/releasing.md). A run with no summary did not check.
+    cargo semver-checks -p "$crate" --baseline-version "$previous" --color never "$@" \
+        < /dev/null > "$semver/$crate.log" 2>&1 || true
+    if ! grep -q 'Summary' "$semver/$crate.log"; then
+        cat "$semver/$crate.log" >&2
+        echo "cargo semver-checks did not check $crate against $previous" >&2
+        exit 1
+    fi
+    echo "$crate against $previous: $(grep -m1 'Summary' "$semver/$crate.log" | sed 's/^ *Summary *//')"
+done < "$target/previous.txt"
+"$python" scripts/semver_defaults.py "$semver"/*.log
