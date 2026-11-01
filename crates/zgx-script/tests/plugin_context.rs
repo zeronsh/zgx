@@ -117,17 +117,20 @@ return ui.column {
 }
 "##;
 
-/// Beside a row of `ui.each` nothing is drawn yet: an error says so.
+/// Beside a row of `ui.each`, what a plugin adds is drawn, a row each.
 #[test]
-fn before_or_after_a_rows_root_is_an_error() {
-    let h = with(
+fn before_or_after_a_rows_root_is_drawn_in_each_row() {
+    let mut h = with(
         "row",
         ROWS,
         r##"ui.contribute { target = "#row", after = ui.text { id = "extra", "Extra" } }"##,
     );
     h.frames(1);
-    let error = h.error().unwrap_or_default();
-    assert!(error.contains("a row of a ui.each or ui.list"), "{error}");
+    assert_eq!(h.error(), None);
+    assert_eq!(
+        h.texts().iter().filter(|t| t.as_str() == "Extra").count(),
+        2
+    );
 }
 
 /// Inside a row, an element takes what plugins add, as anywhere.
@@ -141,45 +144,4 @@ fn inside_a_row_an_element_takes_what_plugins_add() {
     h.frames(1);
     assert_eq!(h.error(), None);
     assert_eq!(h.text("extra"), "Extra");
-}
-
-/// Two hosts on one thread (an app's windows): each reports its own row
-/// contribution once, and one reloading doesn't make the other report
-/// again.
-#[test]
-fn hosts_on_one_thread_report_their_rows_apart() {
-    use std::{cell::Cell, rc::Rc};
-    let plugin = r##"ui.contribute { target = "#row", after = ui.text { "Extra" } }"##;
-    let counted = |h: &Harness| {
-        let n = Rc::new(Cell::new(0));
-        let told = n.clone();
-        h.host.on_error(move |message| {
-            if message.contains("a row of a ui.each") {
-                told.set(told.get() + 1);
-            }
-        });
-        n
-    };
-    let app = r##"
-local names = ui.state("names", { "a" })
-ui.command { id = "more", run = function() names:push("b") end }
-return ui.column {
-    ui.each(names, function(name) return ui.row { id = "row", ui.text { name } } end),
-}
-"##;
-    let a = with("host-a", app, plugin);
-    let b = with("host-b", app, plugin);
-    let (in_a, in_b) = (counted(&a), counted(&b));
-    a.frames(1);
-    b.frames(1);
-    assert_eq!(
-        (in_a.get(), in_b.get()),
-        (1, 1),
-        "each host its own first report"
-    );
-    a.host.reload().unwrap();
-    a.frames(1);
-    assert!(b.host.run_command("more"));
-    b.frames(1);
-    assert_eq!(in_b.get(), 1, "a's reload doesn't make b report again");
 }

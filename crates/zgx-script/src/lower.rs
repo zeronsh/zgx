@@ -370,22 +370,6 @@ pub(crate) struct Hooks {
     /// replace itself without end).
     app: std::rc::Weak<Vm>,
 }
-thread_local! {
-    /// Contributions at a row's root already reported (`row_contributions`),
-    /// by their `Hooks` (one a host's lowering holds) and their own
-    /// address: kept out of `Hooks`, which every lowering holds, so its
-    /// allocation stays the size it was. Hosts on one thread (an app's
-    /// windows) keep theirs apart.
-    static TOLD: std::cell::RefCell<std::collections::HashSet<(usize, usize)>> = Default::default();
-}
-impl Drop for Hooks {
-    /// Its contributions gone (a reload), this host's reports are
-    /// forgotten: their addresses may be reused. Other hosts' stay.
-    fn drop(&mut self) {
-        let own = std::ptr::from_ref(self) as usize;
-        let _ = TOLD.try_with(|told| told.borrow_mut().retain(|(hooks, _)| *hooks != own));
-    }
-}
 impl Hooks {
     pub(crate) fn extend(&mut self, added: Vec<crate::node::HookContribution>) {
         for mut hook in added {
@@ -2045,10 +2029,13 @@ fn warn_replaced_id(vm: &Vm, given: &str, site: Option<&str>, root: &mlua::Value
     );
 }
 
-/// A `ui.each`'s or `ui.list`'s row builder, with plugins: wrapped so what
-/// they add before or after a row's root, which isn't drawn yet, is
-/// reported (`row_contributions`). Without, the builder itself: rows build
-/// as they always have.
+/// A `ui.each`'s or `ui.list`'s row builder, with plugins: wrapped so a row
+/// whose root plugins add before or after (or replace, or filter) is that
+/// root inside a `display = "contents"` node of the app's, where it is a
+/// child as any other: what is added lays out as the list's own items,
+/// keyed with the row (it moves and goes with it), and reads what the
+/// row's root provides. Without plugins, the builder itself: rows build as
+/// they always have.
 #[inline(always)]
 fn row_builder(builder: &mlua::Function, vm: &Rc<Vm>, low: &Rc<Lowering>) -> mlua::Function {
     if low.hooks.is_none() {
@@ -2065,16 +2052,36 @@ fn wrapped_row_builder(
 ) -> mlua::Function {
     let (inner, low) = (builder.clone(), Rc::downgrade(low));
     vm.lua
-        .create_function(move |_, args: mlua::MultiValue| {
+        .create_function(move |lua, args: mlua::MultiValue| {
             let root: mlua::Value = inner.call(args)?;
-            if let Some(low) = low.upgrade()
-                && let Some(hooks) = &low.hooks
-            {
-                row_contributions(&root, hooks, &low);
+            match low.upgrade() {
+                Some(low) => hooked_row(lua, root, &low),
+                None => Ok(root),
             }
-            Ok(root)
         })
         .unwrap_or_else(|_| builder.clone())
+}
+/// `root`, a row's, in a `display = "contents"` node if plugins add at it.
+fn hooked_row(lua: &mlua::Lua, root: mlua::Value, low: &Lowering) -> mlua::Result<mlua::Value> {
+    let Some(hooks) = low.hooks.as_deref() else {
+        return Ok(root);
+    };
+    let mlua::Value::UserData(ud) = &root else {
+        return Ok(root);
+    };
+    let Ok(node) = ud.borrow::<NodeUd>().map(|n| n.0.clone()) else {
+        return Ok(root);
+    };
+    if hooks.at(&node, true, low).is_empty() {
+        return Ok(root);
+    }
+    let mut row = Node::new(node.owner.clone(), Kind::Div);
+    row.props
+        .push((Prop::Display, Source::Lit(Lit::Str("contents".into()))));
+    row.provide = node.provide.clone();
+    row.children = vec![node];
+    lua.create_userdata(NodeUd(Rc::new(row)))
+        .map(mlua::Value::UserData)
 }
 /// `view`, where a contribution applies, counted among its live matches
 /// (`ScriptHost::contributions`) while it is mounted.
@@ -2109,40 +2116,6 @@ fn counted_filters(
         }
     }
     view
-}
-/// What plugins add before or after `root`, a row's: reported once each to
-/// the plugin, as it draws nothing.
-#[cold]
-#[inline(never)]
-fn row_contributions(root: &mlua::Value, hooks: &Hooks, low: &Lowering) {
-    let mlua::Value::UserData(root) = root else {
-        return;
-    };
-    let Ok(root) = root.borrow::<NodeUd>() else {
-        return;
-    };
-    for hook in hooks.at(&root.0, true, low) {
-        let place = match () {
-            _ if hook.placed(crate::node::Place::Before).is_some() => "before",
-            _ if hook.placed(crate::node::Place::After).is_some() => "after",
-            _ => continue,
-        };
-        let at = std::ptr::from_ref(hook) as usize;
-        let host = std::ptr::from_ref(hooks) as usize;
-        if !TOLD.with_borrow_mut(|told| told.insert((host, at))) {
-            continue;
-        }
-        let message = format!(
-            "ui.contribute {{ target = \"{}\", {place} = … }}: its target is a row of a \
-             ui.each or ui.list, and what goes {place} a row isn't drawn yet. Target an \
-             element inside the row, or the list's container",
-            hook.target_text()
-        );
-        *hook.stats.error.borrow_mut() = Some(message.clone());
-        if let Some(vm) = hook.vm.upgrade() {
-            vm.report(mlua::Error::runtime(message));
-        }
-    }
 }
 /// `build_scoped`, with `see` given what `f` built.
 fn build_scoped_seeing(

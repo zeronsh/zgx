@@ -33,6 +33,8 @@ mod plugin_filters;
 mod plugin_hooks;
 #[path = "../plugin_report.rs"]
 mod plugin_report;
+#[path = "../plugin_rows.rs"]
+mod plugin_rows;
 #[path = "../plugin_shared.rs"]
 mod plugin_shared;
 #[path = "../plugin_targets.rs"]
