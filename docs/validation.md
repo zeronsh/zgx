@@ -147,6 +147,8 @@ Recorded native runs use `scripts/platform_smoke.py`, which creates and cleans u
 | macOS ARM64 target | `cargo check --workspace --all-targets --target aarch64-apple-darwin --locked` passes from Linux | Type checking only: no native linking, execution, Metal or AppKit interaction evidence |
 | macOS 26, Apple silicon, two 2× displays: popups, drags and windows ([multi-window](multi-window.md)) | `popup_probe`, `drag_probe`, `window_probe` and `corners_probe` post AppKit events to their own windows: menus past the window, press-drag-release, close on deactivation and minimize, drags within and between windows, tear-off, a window moved by its only tab, the Window menu, cascading, saved frames; text another app drags in (a pasteboard of the probe's own handed to the window's dragging destination as AppKit hands it one: refused over the chip, a copy over the Words field, nothing changed by hovering, dropped there at its end, focused and selected, `TEXT_DROP`). By hand (2026-10-23): ⌘` cycles `tab_windows`' windows | Drops into other apps, fullscreen and Space switches, and displays of different scales are not probed (a synthetic drag-out would drop at the real pointer; fullscreen takes the screen) |
 | macOS 26, Apple silicon: focus as Escape closes a popup | `escape_focus_probe` (`scripts/macos_escape_focus_probe.py`) posts AppKit key and mouse events to its own windows, its menu in a popup window of its own: opened with nothing focused, nothing is focused after Escape (not the window's first button); opened after a click on a button, that button has focus back without a ring; opened with Return and moved with an arrow, its trigger has focus with its ring | Run locally, as `popup_probe` and the other AppKit-event probes are (CI's macOS job runs none of them): all five checks passed on 2026-11-01. The ring is read from the input's modality (`focus_visible_now`), not a capture. The same rules on X11, Wayland and Windows come from the same scene code (popup windows keep their content's focus in the parent's scene): their own probes don't press Escape |
+| macOS 26, Apple silicon: sliders to VoiceOver | `scripts/macos_ax_slider.swift` reads the `atspi` example's two sliders through the accessibility API (as VoiceOver does) and moves them, 5 of 5 runs: a row of the app's own with `role = "slider"` and `ui.slider` are each an `AXSlider` whose `AXValue` is its value text ("Medium", "25 percent"), with its minimum and maximum (1–4, 0–100) and `AXIncrement`/`AXDecrement`; each action moves it by its step (2→3→2, 25→30→25), as the app's own log shows | Run locally (2026-11-01); it needs Accessibility permission for the process running it, so CI does not run it. It waits up to 5 s for `AXValue` to follow an action, which trails the app's tree update |
+| Windows 11 25H2: sliders to UI Automation | The `atspi` example's two sliders through UI Automation (`System.Windows.Automation`, `scripts/windows_uia_dump.ps1`): each a `Slider`, its RangeValue 2 in 1–4 with SmallChange 1 and 25 in 0–100 with SmallChange 5, its Value pattern the value text ("Medium", "25 percent"); RangeValue's `SetValue` moves each, read back as 3 ("High") and 65 ("65 percent"), as the app's own log shows (`effort=3 amount=65`) | Run on WING-PC (2026-11-01). `SetValue` was called on the window in the background, a system notification holding the foreground throughout (UI Automation's patterns need none) |
 
 All native rendering above uses llvmpipe, not a hardware GPU. Reproduce the isolated runs with:
 
@@ -418,6 +420,14 @@ AT-SPI's Table and TableCell interfaces and the expandable, expanded and
 collapsed states: a data grid reads as a table of all its rows, its cells
 with their row, column and header, and a tree item as open or closed
 (zgx-desktop's `atspi_tests`).
+
+Sliders, `ui.slider` and an element of the app's own with `role = "slider"`,
+reach AT-SPI in CI's `atspi_smoke.py` (the `atspi` example): each a slider
+with its value, range and minimum increment (its step), and a value set
+through AT-SPI moving it (`ui.slider` to 65, the app's own to 3). Where the
+client's libatspi reads it, its value text (`Value.Text`, AT-SPI 2.46, added
+in the vendored bridge) is checked too, and follows the set value ("High").
+macOS and Windows read the same sliders (Platform coverage).
 
 [Image fitting](platform-validation/image-fit/README.md) now supports local fluent
 Fill/Contain/Cover/None/ScaleDown styles with centered padded clipping. Core
