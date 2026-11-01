@@ -1,3 +1,39 @@
+# macOS suite (2026-10-31): 0.1.7, every scene on `afa2960`
+
+[`suite-macos-2026-10-31-afa2960`](suite-macos-2026-10-31-afa2960/): heavy, lab, animate and vlist on the 0.1.7 freeze `afa2960e`, in quiet window 44, on an M5 Max (Mac17,6) with macOS 26.4 (25E246) and two 120 Hz Studio Display XDRs. The tag `b03245c4` adds API-shape fixes off every measured path. It's the suite's protocol with six rounds a cell, each read against its round's desktop, and the still-desktop check (#1092) passed: WindowServer at 0.6% of a core with Zeron hidden, and the desktop alone at 0.4 to 0.6% in nearly every round. Every scene was accepted, and no app exited abnormally. The rivals were built again from suite sources unchanged since 0.1.6. `python scripts/build_site.py docs/results/suite-macos-2026-10-31-afa2960 --startup docs/results/startup-macos-2026-10-26-03a9d89/startup.json --gate docs/results/gate-0.1.6-0.1.7/gate.json --previous docs/results/suite-macos-2026-10-30-e077e95 --field docs/results/field-macos-2026-10-27-238ef98 --rebuilt "…"` publishes it to `site/`.
+
+Medians, zgx / GPUI Fast / MyGo / Rune (vlist: zgx / zgx in Luau / GPUI Fast / MyGo / Rune). WindowServer is over its round's desktop:
+
+| Scene, mode | CPU (% of a core) | WindowServer CPU (%) | GPU power (mW) | Memory (MB) | Frame time p99 (ms) |
+| --- | --- | --- | --- | --- | --- |
+| heavy idle | 0.00 / 0.36 / 0.00 / 0.00 | 0.00 / -0.00 / 0.05 / 0.00 | 0 / 0 / 0 / 0 | 53 / 75 / 66 / 75 | - |
+| heavy stream | 5.0 / 11.4 / 13.4 / 16.1 | 9.49 / 9.15 / 10.31 / 9.21 | 125 / 181 / 232 / 495 | 264 / 283 / 309 / 477 | 17.9 / 25.5 / 25.6 / 33.4 |
+| heavy scroll | 2.5 / 6.5 / 10.9 / 16.6 | 9.44 / 9.01 / 10.07 / 9.15 | 85 / 171 / 118 / 497 | 260 / 278 / 298 / 630 | 18.0 / 25.2 / 25.7 / 33.6 |
+| heavy both | 5.8 / 12.2 / 13.8 / 19.4 | 9.58 / 9.11 / 10.05 / 9.13 | 147 / 183 / 231 / 500 | 265 / 276 / 308 / 631 | 22.6 / 25.4 / 23.6 / 33.7 |
+| lab stream | 2.3 / 4.6 / 6.7 / 5.8 | 9.27 / 8.87 / 10.11 / 9.05 | 59 / 109 / 66 / 313 | 244 / 248 / 273 / 426 | 17.9 / 18.4 / 18.0 / 32.9 |
+| lab scroll | 2.2 / 3.7 / 5.5 / 5.4 | 9.36 / 9.02 / 9.98 / 8.80 | 64 / 107 / 100 / 311 | 241 / 247 / 263 / 419 | 18.0 / 24.7 / 18.4 / 25.7 |
+| lab both | 2.6 / 4.8 / 6.7 / 6.0 | 9.33 / 8.80 / 9.89 / 8.90 | 68 / 109 / 105 / 315 | 244 / 248 / 273 / 427 | 17.7 / 18.3 / 19.0 / 32.2 |
+| animate animate | 3.3 / 5.1 / 6.5 / 6.2 | 17.45 / 20.36 / 21.72 / 19.16 | 121 / 142 / 115 / 293 | 241 / 256 / 264 / 425 | 14.6 / 13.2 / 13.4 / 13.3 |
+| vlist scroll | 2.3 / 2.3 / 4.2 / 7.9 / 6.4 | 9.29 / 9.47 / 8.89 / 10.48 / 8.94 | 60 / 60 / 89 / 94 / 245 | 244 / 247 / 284 / 264 / 450 | 18.0 / 18.4 / 18.3 / 18.3 / 34.3 |
+| vlist fling | 2.5 / 2.5 / 4.4 / 8.0 / 7.2 | 9.16 / 9.35 / 8.83 / 10.43 / 9.07 | 61 / 62 / 90 / 95 / 245 | 245 / 247 / 290 / 265 / 452 | 18.2 / 18.4 / 18.2 / 25.0 / 41.4 |
+| vlist jump | 2.4 / 2.5 / 4.5 / 8.7 / 8.6 | 9.35 / 9.36 / 8.74 / 10.29 / 8.76 | 60 / 61 / 89 / 96 / 245 | 246 / 248 / 290 / 269 / 455 | 18.3 / 17.9 / 18.9 / 18.0 / 41.1 |
+
+**CPU, GPU and memory.** In every test zgx uses the least CPU, and the least GPU power except in animate. There its 121 mW median sits within MyGo's 115 mW spread: zgx's seven runs read 115 to 123 mW and MyGo's 110 to 141. The site's verdict says so rather than counting it a win or a loss; at 0.1.6 the same pair read 117 against 118. zgx has the least memory in every cell. Against 0.1.6, zgx's CPU is lower in every cell (heavy by 3 to 10%), and its GPU power (within 4 mW) and memory are level.
+
+**Long frames.** zgx's median of frames over 25 ms is 0.2% in heavy stream and both, one interval in 480, where 0.1.6's median was 0. Its captures had one such interval at 0.1.6 as well, and every one here is at the edge (25.2 to 27.5 ms). One heavy-both capture had five, with its p99 at 25.2 ms, which looks like the drawable phase lottery. The rivals reach 15%.
+
+**WindowServer CPU.** zgx is 0.34 to 0.61 points over the lowest rival in 9 of 10 tests, and 1.70 under every rival in animate. The cause is the one at 60 Hz: one commit per frame, delivered to each of the menu bar's contexts. On the same binary at 120 Hz, removing the menu (`ZGX_MENU_INSTALL=none`) took 0.28 ± 0.12 points and accessory activation 0.39 ± 0.09, out of heavy both's 0.47. That's the same as at 60 Hz (0.36 to 0.42), so the cost follows the contexts, not the frame rate. No other lever is left in that gap.
+
+**In the same window:**
+- **Baked loops (#1058), the gallery's sidebar at 120 Hz:** app plus WindowServer CPU fell 7.77 → 6.02 points (paired −1.82 ± 0.13), WindowServer −0.52 ± 0.14, footprint 323 → 142 MiB, GPU −2.9 mW. That matches window 42.
+- **Startup and idle:** level across #1056 and #1070. A warm first frame went 686.1 → 686.4 M instructions, and an 8 s idle run 1,041.6 → 1,039.7 M. The freeze measured 680.5 M and 1,039.8 M.
+- **The font cache:** the system font cache sits at one path for every version, `~/Library/Caches/zgx/system-fonts`, and 0.1.7 bumped its format. So alternating releases rebuild it for each other, about 300 M a launch. Measure startup with each binary in a block of its own.
+
+[`gate-0.1.6-0.1.7`](gate-0.1.6-0.1.7/) holds the release gate's exact counts on arm64, v0.1.6 (`e077e952`) against the 0.1.7 freeze (`fbf1d5e2`); the tag adds only version numbers:
+- **Script updates:** 6.4% fewer instructions, the lab's scroll 4.7%, and the other core cells −0.01 to −0.48%.
+- **Textured 3D:** a frame is 63% fewer instructions, on a bench overlaid on both sides.
+- **The example apps:** 0.06 to 0.40% more, followed up in #1276.
+
 # macOS suite (2026-10-30): 0.1.6, every scene on `e077e95`
 
 [`suite-macos-2026-10-30-e077e95`](suite-macos-2026-10-30-e077e95/): heavy, lab, animate and vlist on the v0.1.6 tag, in quiet window 39, on an M5 Max (Mac17,6) with macOS 26.4 (25E246) and a 120 Hz Studio Display XDR. It's the suite's protocol, with heavy idle in six rounds against each round's desktop, and powermetrics recording package, CPU and GPU power. Every scene was accepted, and no app exited abnormally. The rivals were built again from suite sources unchanged since 0.1.5. `python scripts/build_site.py docs/results/suite-macos-2026-10-30-e077e95 --startup docs/results/startup-macos-2026-10-26-03a9d89/startup.json --gate docs/results/gate-0.1.5-0.1.6/gate.json --previous docs/results/suite-macos-2026-10-28-d493d20 --field docs/results/field-macos-2026-10-27-238ef98 --rebuilt "…"` publishes it to `site/`.
