@@ -15,7 +15,7 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 # The formats asked for, most preferred first.
 FORMATS = ["text/uri-list", "UTF8_STRING", "text/plain;charset=utf-8", "text/plain"]
@@ -27,6 +27,8 @@ def main():
     parser.add_argument("x", type=int)
     parser.add_argument("y", type=int)
     parser.add_argument("--refuse", action="store_true")
+    # A slow target: it finishes with a drop this long after taking its data.
+    parser.add_argument("--finish-delay", type=float, default=0.)
     args = parser.parse_args()
 
     window = Gtk.Window(title=args.title)
@@ -63,7 +65,15 @@ def main():
     def received(widget, context, x, y, data, info, time):
         text = data.get_data().decode("utf-8", "replace") if data.get_length() >= 0 else ""
         print("RECEIVED", FORMATS[info], repr(text), flush=True)
-        Gtk.drag_finish(context, data.get_length() >= 0, False, time)
+
+        def finish():
+            Gtk.drag_finish(context, data.get_length() >= 0, False, time)
+            return False
+
+        if args.finish_delay > 0:
+            GLib.timeout_add(int(args.finish_delay * 1000), finish)
+        else:
+            finish()
 
     area.connect("drag-motion", motion)
     area.connect("drag-drop", drop)
