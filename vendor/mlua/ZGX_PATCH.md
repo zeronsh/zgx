@@ -133,3 +133,12 @@ The pool is off until `pool_pages(true)`, which applies to VMs made after it:
 a VM stays with what it started on. zgx turns it on with its `mimalloc`
 feature. The system allocators give free pages back by themselves
 (`malloc_zone_pressure_relief`, `malloc_trim`).
+
+## A table read from the stack as itself (zgx-mlua 0.12.7)
+
+`Table`'s `FromLua::from_stack` (`src/conversion.rs`) references a table on
+the stack (a function's result) as itself, reading its type once. The
+default went through `try_stack_value`, which read the type again
+(`Option<Table>` had already read it) and made a `Value` to unwrap. A code
+editor's highlighter returns its spans this way for each line (zgx #1276).
+Anything but a table converts as before, its error the same.
