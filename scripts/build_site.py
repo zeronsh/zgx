@@ -284,8 +284,24 @@ def headline(by):
            for key in (cpu, gpu)}
     tests = len(active)
     long_zgx = max(value(s, 'zgx', m, 'long_interval_fraction') for s, m in active)
+    # A test zgx does not lead where its runs overlap the lowest rival's:
+    # within noise, said as such (animate's GPU power at 0.1.7: zgx 115-123
+    # mW, MyGo 111-142), not counted as a loss or a win.
+    close = []
+    for s, m in active:
+        for key, name, unit, digits in ((cpu, 'CPU', '%' if PLATFORM != 'windows' else ' M cycles/s', 2),
+                                        (gpu, gpu_name, ' mW' if PLATFORM != 'windows' else ' ms/s', 0)):
+            ours = cell(s, 'zgx', m)[key]
+            best = min((r for r in rivals if r in s['frameworks']), key=lambda r: value(s, r, m, key))
+            theirs = cell(s, best, m)[key]
+            if ours['median'] >= theirs['median'] and ours['min'] <= theirs['max']:
+                close.append(f"{SCENES[s['scene']][0].lower()}'s {name} is within noise of {NAMES[best]}'s "
+                             f"(zgx {fmt(ours['min'], digits)}–{fmt(ours['max'], digits)}{unit}, {NAMES[best]} "
+                             f"{fmt(theirs['min'], digits)}–{fmt(theirs['max'], digits)}{unit})")
     if led[cpu] == tests and led[gpu] == tests:
         verdict = f'In every test, zgx uses less CPU and less {gpu_name} than {named}'
+    elif led[cpu] + led[gpu] + len(close) == 2 * tests:
+        verdict = f'In every test, zgx uses less CPU and less {gpu_name} than {named}, except that ' + '; '.join(close)
     else:
         verdict = (f'zgx uses the least CPU in {led[cpu]} of {tests} tests and the least {gpu_name} '
                    f'in {led[gpu]}, against {named}')
