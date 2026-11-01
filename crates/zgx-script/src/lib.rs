@@ -1160,9 +1160,23 @@ fn require_module<const LENDING: bool>(
         .unwrap_or(&path)
         .to_string_lossy()
         .into_owned();
-    // Compiled once while its bytes stay the same (a hot-reloading host's):
-    // a reload compiles only the files that changed.
+    // A lent package's module: compiled once for all the plugins
+    // requiring it, hot-reloading or not (its source is the same in each
+    // VM). The app's resolver compiles none of this in (`LENDING`).
+    // Otherwise compiled once while its bytes stay the same (a
+    // hot-reloading host's): a reload compiles only the files that changed.
+    let lent = LENDING
+        && matches!(files, Files::Disk)
+        && packages.iter().any(|(_, dir)| within(dir, &path));
     let compiled = match files {
+        Files::Disk if lent => host.upgrade().map(|h| {
+            let (compiled, now) = sources::compiled(&code);
+            h.lent_compiles.set(h.lent_compiles.get() + u64::from(now));
+            h.lent_compiled
+                .borrow_mut()
+                .insert(path.clone(), compiled.clone());
+            compiled
+        }),
         Files::Disk => host
             .upgrade()
             .and_then(|h| h.sources.compiled(&path, &code)),
@@ -1320,6 +1334,12 @@ struct Inner {
     /// required: the load under way's, and the last successful one's
     /// (`contributions`).
     lent: RefCell<Lent>,
+    /// The lent packages' modules, compiled once for every plugin VM that
+    /// requires them (`sources::compiled`), by path: held while the host
+    /// lends them, the paths the last load required.
+    lent_compiled: RefCell<HashMap<PathBuf, Rc<sources::Compiled>>>,
+    /// How many lent modules were compiled (not found compiled).
+    lent_compiles: Cell<u64>,
     /// The scripts' bytecode by what their files held, once the host
     /// hot-reloads: a reload compiles only what changed.
     sources: sources::Sources,
@@ -1502,6 +1522,8 @@ impl ScriptHost {
             stamps: RefCell::default(),
             required: RefCell::default(),
             lent: RefCell::default(),
+            lent_compiled: RefCell::default(),
+            lent_compiles: Cell::new(0),
             sources: sources::Sources::default(),
             overrides: RefCell::default(),
             terms: Rc::default(),
@@ -2611,6 +2633,12 @@ impl ScriptHost {
                 {
                     let mut lent = self.0.lent.borrow_mut();
                     lent.published = std::mem::take(&mut lent.pending);
+                    // Only what this load required stays compiled.
+                    let required = self.0.required.borrow();
+                    self.0
+                        .lent_compiled
+                        .borrow_mut()
+                        .retain(|path, _| required.contains(path));
                 }
                 let mut problems = self
                     .0
@@ -2960,6 +2988,12 @@ impl ScriptHost {
             .collect();
         files.sort();
         files.into_iter().map(Script::File).collect()
+    }
+    /// The lent packages' modules this host compiled, rather than found
+    /// compiled by a plugin VM before (for tests: once per process).
+    #[doc(hidden)]
+    pub fn lent_compiles(&self) -> u64 {
+        self.0.lent_compiles.get()
     }
     /// Whether `stamps`, read now, name the files of the last load and each
     /// whose time moved holds what that load read.
