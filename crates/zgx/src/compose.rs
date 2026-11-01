@@ -1297,6 +1297,40 @@ impl View {
         self.accessibility_mut().numeric = Some((min, max, Box::new(value)));
         self
     }
+    /// A custom slider or spin button that assistive technology moves
+    /// (`role(Role::Slider)` with `numeric_when`, `value_when` for what its
+    /// value reads as): its increment and decrement, `step` apart, and a
+    /// value it sets, come to `on_change` as the value they make, within
+    /// the range. Assistive technology is told the step. The keys move it
+    /// too with `adjustable_keys`.
+    pub fn adjustable(mut self, step: f64, on_change: impl FnMut(f64) + 'static) -> Self {
+        assert!(
+            !matches!(self.kind, Kind::Slider { .. }),
+            "a slider moves itself: give it `step`"
+        );
+        assert!(
+            step.is_finite() && step > 0.,
+            "an adjustable view's step is positive"
+        );
+        self.accessibility_mut().adjust = Some(Box::new(Adjust {
+            step,
+            keys: false,
+            on_change: Box::new(on_change),
+        }));
+        self
+    }
+    /// An `adjustable` view's keys, as `slider`'s: the arrows (Left and
+    /// Right the way it shows) a step, Page Up and Down or Shift with an
+    /// arrow ten, Home and End to its ends. It takes focus unless it says
+    /// otherwise.
+    pub fn adjustable_keys(mut self) -> Self {
+        let adjust = self.accessibility_mut().adjust.as_mut();
+        adjust.expect("adjustable_keys follows adjustable").keys = true;
+        if self.focusable.is_none() {
+            self.focusable = Some(true);
+        }
+        self
+    }
     /// Announce changes to the text in this subtree (`aria-live`): a
     /// count, a "Sent" note, a message arriving.
     pub fn live(mut self, live: Live) -> Self {
@@ -6065,6 +6099,85 @@ fn mount_progress(
         });
     });
 }
+/// The value a slider's `event` moves it to from `now`, within `min` and
+/// `max`: assistive technology's increment, decrement and value, and with
+/// `keys` the arrows (Left and Right the way it shows), Page Up and Down
+/// (ten steps, as Shift with an arrow is), Home and End. A step is `step`,
+/// or a hundredth of the range. `None` for what doesn't move it.
+fn adjusted(
+    event: &InputEvent,
+    now: f64,
+    (min, max): (f64, f64),
+    step: Option<f64>,
+    rtl: bool,
+    keys: bool,
+) -> Option<f64> {
+    use crate::input::Key;
+    let unit = step.unwrap_or((max - min) / 100.);
+    let toward_right = if rtl { -1. } else { 1. };
+    let big = matches!(event, InputEvent::KeyDown { modifiers, .. } if modifiers.shift);
+    let step = |direction: f64| {
+        let by = if big { unit * 10. } else { unit };
+        (now + direction * by).clamp(min, max)
+    };
+    let page = |direction: f64| (now + direction * unit * 10.).clamp(min, max);
+    Some(match event {
+        InputEvent::SetNumericValue(v) if v.is_finite() => v.clamp(min, max),
+        InputEvent::SetValue(v) => v
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())?
+            .clamp(min, max),
+        InputEvent::Increment => step(1.),
+        InputEvent::Decrement => step(-1.),
+        InputEvent::KeyDown { key, .. } if keys => match key {
+            Key::ArrowLeft => step(-toward_right),
+            Key::ArrowRight => step(toward_right),
+            Key::ArrowDown => step(-1.),
+            Key::ArrowUp => step(1.),
+            Key::PageUp => page(1.),
+            Key::PageDown => page(-1.),
+            Key::Home => min,
+            Key::End => max,
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+/// `View::adjustable` on `root`: what assistive technology (and with
+/// `keys`, the keys) moves it to goes to `on_change`, from the value, range
+/// and step its semantics say.
+#[inline(never)]
+fn mount_adjustable(ui: &mut Ui, root: NodeId, adjust: Adjust) {
+    let Adjust {
+        step,
+        keys,
+        mut on_change,
+    } = adjust;
+    ui.scene.borrow_mut().set_numeric_step(root, Some(step));
+    let (scene, semantics) = (ui.scene.clone(), ui.semantics.clone());
+    ui.on_event(root, true, move |cx| {
+        if cx.phase == EventPhase::Capture || cx.default_prevented() {
+            return;
+        }
+        let Some((min, max, now)) = semantics
+            .borrow()
+            .get(root)
+            .and_then(|node| Some((node.min?, node.max?, node.numeric_value?)))
+        else {
+            return;
+        };
+        let rtl = scene.borrow().direction(root) == crate::scene::Direction::Rtl;
+        let Some(next) = adjusted(&cx.event, now, (min, max), Some(step), rtl, keys) else {
+            return;
+        };
+        cx.prevent_default();
+        cx.stop_propagation();
+        if next.is_finite() && next != now {
+            on_change(next);
+        }
+    });
+}
 fn mount_slider(
     ui: &mut Ui,
     root: NodeId,
@@ -6074,11 +6187,15 @@ fn mount_slider(
     typography: Signal<Typography>,
 ) {
     use crate::{
-        input::{Key, PointerButton},
+        input::PointerButton,
         scene::{Style, Transform},
     };
     let (min, max) = (*range.start() as f64, *range.end() as f64);
     let span = max - min;
+    // What an arrow moves it by, as assistive technology increments it.
+    ui.scene
+        .borrow_mut()
+        .set_numeric_step(root, Some(step_size.unwrap_or(span / 100.)));
     let size = ui.observe_content_size(root);
     let theme = ui.theme_scope();
     let rail = ui.scene.borrow_mut().append(
@@ -6232,36 +6349,7 @@ fn mount_slider(
             };
             v.clamp(min, max) as f32
         };
-        // Left and right go the way it shows (right to left, Left is more).
-        let toward_right = if rtl { -1. } else { 1. };
-        let unit = step_size.unwrap_or(span / 100.);
-        let big = matches!(&cx.event, InputEvent::KeyDown { modifiers, .. } if modifiers.shift);
-        let step = |direction: f64| {
-            let by = if big { unit * 10. } else { unit };
-            (value.get() as f64 + direction * by).clamp(min, max) as f32
-        };
-        let page =
-            |direction: f64| (value.get() as f64 + direction * unit * 10.).clamp(min, max) as f32;
         let next = match &cx.event {
-            InputEvent::SetNumericValue(v) if v.is_finite() => Some(v.clamp(min, max) as f32),
-            InputEvent::SetValue(v) => v
-                .parse::<f64>()
-                .ok()
-                .filter(|v| v.is_finite())
-                .map(|v| v.clamp(min, max) as f32),
-            InputEvent::Increment => Some(step(1.)),
-            InputEvent::Decrement => Some(step(-1.)),
-            InputEvent::KeyDown { key, .. } => match key {
-                Key::ArrowLeft => Some(step(-toward_right)),
-                Key::ArrowRight => Some(step(toward_right)),
-                Key::ArrowDown => Some(step(-1.)),
-                Key::ArrowUp => Some(step(1.)),
-                Key::PageUp => Some(page(1.)),
-                Key::PageDown => Some(page(-1.)),
-                Key::Home => Some(min as f32),
-                Key::End => Some(max as f32),
-                _ => None,
-            },
             InputEvent::PointerDown {
                 x,
                 button: PointerButton::Primary,
@@ -6284,7 +6372,10 @@ fn mount_slider(
                 cx.release_pointer();
                 None
             }
-            _ => None,
+            // Assistive technology's actions and the keys, as a custom
+            // slider's (`View::adjustable`).
+            event => adjusted(event, value.get() as f64, (min, max), step_size, rtl, true)
+                .map(|v| v as f32),
         };
         if let Some(next) = next {
             if next.is_finite() {
@@ -6316,6 +6407,17 @@ pub(crate) struct Accessibility {
     hidden: bool,
     focus_group: Option<crate::input::FocusGroup>,
     label: Option<Box<dyn FnMut() -> String>>,
+    /// `View::adjustable`: what moves a custom slider (boxed: few views
+    /// have one).
+    adjust: Option<Box<Adjust>>,
+}
+/// What moves a custom slider or spin button (`View::adjustable`): its
+/// step, whether the keys do as well as assistive technology, and what
+/// hears the value they make.
+pub(crate) struct Adjust {
+    step: f64,
+    keys: bool,
+    on_change: Box<dyn FnMut(f64)>,
 }
 /// A menu item's text: `label`, or where its label changes
 /// (`accessible_label_when`: a translation, a state) what that says now, as
@@ -6355,6 +6457,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         hidden,
         focus_group,
         label,
+        adjust,
     } = accessibility;
     // Composite widgets keep one Tab stop, as a browser's do.
     let focus_group = focus_group.or(match role {
@@ -6484,6 +6587,9 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
                 node.numeric_value = Some(value);
             });
         });
+    }
+    if let Some(adjust) = adjust {
+        mount_adjustable(ui, root, *adjust);
     }
     if let Some(mut selected) = selected {
         let tree = ui.semantics.clone();

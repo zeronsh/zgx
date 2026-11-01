@@ -1287,3 +1287,62 @@ fn a_labelled_canvas_is_an_image_and_an_unlabelled_one_is_decoration() {
     let plain = h.find("plain").unwrap();
     assert!(h.ui.semantics.borrow().get(plain).is_none(), "decoration");
 }
+
+#[test]
+fn any_element_is_a_slider_with_its_value_range_text_and_what_moves_it() {
+    let mut h = Harness::inline(
+        r#"local effort = ui.state("effort", 2)
+        local volume = ui.state("volume", 40)
+        local names = { "Low", "Medium", "High", "Max" }
+        return ui.column {
+            ui.row {
+                id = "effort", role = "slider", label = "Effort", w = 200, h = 30,
+                value = effort, min = 1, max = 4, step = 1,
+                value_text = function() return names[effort:get()] end,
+                on_change = function(v) effort:set(v) end,
+                keyboard = true,
+            },
+            ui.slider { id = "volume", label = "Volume", value = volume,
+                min = 0, max = 100, step = 5,
+                value_text = function() return `{volume:get()} percent` end },
+        }"#,
+    );
+    h.ui.set_assistive_technology(true);
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    let effort = node(&mut h, "effort");
+    assert_eq!(effort.role, Role::Slider);
+    assert_eq!(effort.label, "Effort");
+    assert_eq!(
+        (effort.min, effort.max, effort.numeric_value),
+        (Some(1.), Some(4.), Some(2.))
+    );
+    assert_eq!(effort.value.as_deref(), Some("Medium"));
+    let root = h.find("effort").unwrap();
+    assert_eq!(h.ui.scene.borrow().numeric_step(root), Some(1.));
+    // Assistive technology's increment, through `on_change`.
+    h.ui.input
+        .dispatch_to(&h.ui.scene, root, InputEvent::Increment);
+    h.frames(1);
+    assert_eq!(node(&mut h, "effort").numeric_value, Some(3.));
+    assert_eq!(node(&mut h, "effort").value.as_deref(), Some("High"));
+    // The keys it asked for; focusable for them.
+    assert!(h.ui.input.focus(&h.ui.scene, Some(root)));
+    h.key(Key::End);
+    h.frames(1);
+    assert_eq!(node(&mut h, "effort").numeric_value, Some(4.));
+    h.key(Key::ArrowLeft);
+    h.frames(1);
+    assert_eq!(node(&mut h, "effort").numeric_value, Some(3.));
+    // A slider's step and value text.
+    let volume = h.find("volume").unwrap();
+    assert_eq!(h.ui.scene.borrow().numeric_step(volume), Some(5.));
+    assert_eq!(node(&mut h, "volume").value.as_deref(), Some("40 percent"));
+    assert_eq!(h.error(), None);
+}
+
+#[test]
+#[should_panic(expected = "a slider role needs a finite `min` below its `max`")]
+fn a_slider_role_needs_its_range() {
+    Harness::inline(r#"return ui.div { role = "slider", label = "Level", value = 1 }"#);
+}

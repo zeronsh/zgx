@@ -3495,6 +3495,9 @@ fn styled(
         if let Some(axis) = a11y.focus_group {
             view = view.focus_group(axis);
         }
+        if let Some(range) = &a11y.range {
+            view = range_view(view, range, vm, low);
+        }
         if let Some(error) = &a11y.error {
             let (error, vm) = (resolve_owned(error), vm.clone());
             view = view.error_when(move || match resolve(&error, Ty::Str, None, &vm) {
@@ -3523,6 +3526,41 @@ fn styled(
         }
         if node.sizes_layout() {
             view = layout_box(view, layout, vm, low);
+        }
+    }
+    view
+}
+
+/// `role = "slider"`'s value and range, what its value reads as, and what
+/// moves it (`A11yRange`); a slider's `value_text`.
+#[inline(never)]
+fn range_view(
+    mut view: View,
+    range: &crate::node::A11yRange,
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+) -> View {
+    if let (Some(value), Some(min), Some(max)) = (&range.value, range.min, range.max) {
+        let (value, vm) = (resolve_owned(value), vm.clone());
+        view = view.numeric_when(min, max, move || {
+            resolve_value(&value, &vm).as_f64().unwrap_or(min)
+        });
+    }
+    if let Some(text) = &range.value_text {
+        let (text, vm) = (resolve_owned(text), vm.clone());
+        view = view.value_when(move || match resolve(&text, Ty::Str, None, &vm) {
+            Some(Lit::Str(s)) => s.to_string(),
+            _ => String::new(),
+        });
+    }
+    if let (Some(change), Some(min), Some(max)) = (&range.on_change, range.min, range.max) {
+        let (change, vm, actions) = (change.clone(), vm.clone(), low.actions.clone());
+        let step = range.step.unwrap_or((max - min) / 100.);
+        view = view.adjustable(step, move |next| {
+            run(&change, &vm, &actions, next);
+        });
+        if range.keyboard {
+            view = view.adjustable_keys();
         }
     }
     view

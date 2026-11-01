@@ -1838,6 +1838,8 @@ struct ColdMaps {
     shadows_shown: NodeMap<Rect>,
     /// Where nodes take hits while they animate (`set_hit_target`).
     hit_targets: NodeMap<HitTarget>,
+    /// What sliders' values move by (`set_numeric_step`).
+    steps: NodeMap<f64>,
     /// Nodes whose children lay out in their place (`set_display_contents`).
     flat: NodeMap<Flat>,
     /// How many children of each parent do: a parent with some lays out
@@ -6319,6 +6321,7 @@ impl Scene {
                 || cold.size_calcs.contains_key(&id)
                 || cold.balanced.contains_key(&id)
                 || cold.hit_targets.contains_key(&id)
+                || cold.steps.contains_key(&id)
                 || cold.flat.contains_key(&id)
                 || cold.flat_parents.contains_key(&id)
                 || cold.image_rendering.contains_key(&id)
@@ -6414,6 +6417,27 @@ impl Scene {
         self.invalidate(id, PAINTED);
         self.damage_subtree(id);
         true
+    }
+    /// What slider `id`'s value moves by (the step assistive technology
+    /// increments it by: UIA's SmallChange, AT-SPI's minimum increment), or
+    /// `None` for none said. Kept beside the nodes, as few are sliders.
+    #[cold]
+    #[inline(never)]
+    pub fn set_numeric_step(&mut self, id: NodeId, step: Option<f64>) {
+        let held = (self.cold.as_ref()).and_then(|cold| cold.steps.get(&id).copied());
+        if held == step || !self.contains(id) {
+            return;
+        }
+        let maps = self.cold.get_or_insert_default();
+        match step {
+            Some(step) => maps.steps.insert(id, step),
+            None => maps.steps.remove(&id),
+        };
+        self.sync_cold(id);
+    }
+    /// What slider `id`'s value moves by (`set_numeric_step`), if said.
+    pub fn numeric_step(&self, id: NodeId) -> Option<f64> {
+        self.cold.as_ref()?.steps.get(&id).copied()
     }
     /// The width text `id` wraps at in a box `width` wide, and how far right
     /// of the box's left edge its lines start: `(width, 0)`, unless its lines
@@ -6737,6 +6761,7 @@ impl Scene {
             maps.flat_parents.remove(&id);
             maps.image_rendering.remove(&id);
             maps.outline_styles.remove(&id);
+            maps.steps.remove(&id);
         }
     }
     /// Hit `id` and what it holds where an animation is taking it, not

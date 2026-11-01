@@ -532,6 +532,31 @@ fn events_and_node_options_are_typed() {
     }
 }
 
+#[test]
+fn a_custom_sliders_options_are_typed() {
+    // What a plain element reads for `role = "slider"` (`read_range`),
+    // after the options every element takes: typed for the plain
+    // elements, and a slider's `value_text` for it.
+    let from = NODE.find("fn read_range").expect("read_range");
+    let body = &NODE[from..from + NODE[from..].find("\n}\n").expect("its end")];
+    let mut names: Vec<String> = body
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .filter(|name| is_name(name))
+        .map(str::to_owned)
+        .collect();
+    names.dedup();
+    assert!(names.len() >= 7, "{names:?}");
+    let gaps = missing(&names, &table("ContainerProps"));
+    assert!(
+        gaps.is_empty(),
+        "custom slider options not in ContainerProps: {gaps:?}"
+    );
+    let text = ["value_text".to_owned()];
+    assert!(missing(&text, &table("SliderProps")).is_empty());
+}
+
 /// The keys `text` reads from tables: `get("key")`, `get::<T>("key")`,
 /// `raw_get(…)`, and the `handler("key")` and `value("key")` closures.
 fn gets(text: &str) -> Vec<String> {
