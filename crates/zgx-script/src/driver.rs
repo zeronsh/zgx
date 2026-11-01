@@ -6,6 +6,8 @@
 //!
 //! Targets:
 //! - `#send`: the node with that id (a script's `id = "send"`);
+//! - `.tool`: nodes with that class (`class = "tool"`), `.tool.primary`
+//!   both;
 //! - `"Send"`: the node labelled or reading so (its accessible name, or its
 //!   text), the outermost of a labelled node and its own text; `~"Sen"` the
 //!   same with that anywhere in it;
@@ -391,12 +393,7 @@ pub fn find_all(ui: &Ui, handle: &ViewHandle, target: &Target) -> Result<Vec<Nod
                     "`hook:{hook}` names a plugin hook; target the element by its id or name"
                 ));
             }
-            if let Some(class) = part.classes.first() {
-                return Err(format!(
-                    "`.{class}` names a class, which plugins' targets match; target the \
-                     element by its id, role or name"
-                ));
-            }
+
             let ids = part.id.as_ref().map(|id| handle.find_all(id));
             for node in candidates {
                 if let Some(ids) = &ids
@@ -406,6 +403,11 @@ pub fn find_all(ui: &Ui, handle: &ViewHandle, target: &Target) -> Result<Vec<Nod
                 }
                 if let Some(n) = part.number
                     && number(node) != n
+                {
+                    continue;
+                }
+                if !part.classes.is_empty()
+                    && !crate::element::Classes::has(&ui.runtime, node, &part.classes)
                 {
                     continue;
                 }

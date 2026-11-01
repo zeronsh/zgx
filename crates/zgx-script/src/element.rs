@@ -821,6 +821,30 @@ impl Element {
     }
 }
 
+/// The hosts' elements on a runtime (an app's windows each have one), by
+/// which targets (`driver::find`) read the classes of a node mounted.
+#[derive(Default)]
+pub(crate) struct Classes(RefCell<Vec<Weak<Elements>>>);
+impl Classes {
+    pub fn register(runtime: &zgx::reactive::Runtime, elements: &Rc<Elements>) {
+        let classes = runtime.extension(|_| Classes::default());
+        let mut all = classes.0.borrow_mut();
+        all.retain(|e| e.strong_count() > 0);
+        all.push(Rc::downgrade(elements));
+    }
+    /// Whether the element mounted at `node` has every one of `classes`.
+    pub fn has(runtime: &zgx::reactive::Runtime, node: NodeId, classes: &[String]) -> bool {
+        let all = runtime.extension(|_| Classes::default());
+        let all = all.0.borrow();
+        all.iter().filter_map(Weak::upgrade).any(|elements| {
+            elements.at(node).is_some_and(|element| {
+                classes
+                    .iter()
+                    .all(|class| element.classes.iter().any(|own| **own == **class))
+            })
+        })
+    }
+}
 /// Every targetable element, by id and class.
 #[derive(Default)]
 pub(crate) struct Elements {
