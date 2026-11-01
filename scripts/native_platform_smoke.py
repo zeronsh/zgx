@@ -56,7 +56,13 @@ def main():
             else:
                 host=subprocess.check_output(['xdotool','search','--onlyvisible','--name','^zgx native platform$'],env=env,text=True).strip().splitlines()[0]
                 xdo('windowactivate','--sync',host);xdo('mousemove','--window',host,90,16)
-            xdo('mousedown',1);time.sleep(.15);xdo('mousemove_relative','--sync',80,55);time.sleep(.15);xdo('mouseup',1)
+            # The move is the window manager's from the moment the app asks for
+            # it (_NET_WM_MOVERESIZE, sent as it handles the press, at the
+            # pointer and with the button held): moving or releasing before then
+            # leaves the WM nothing to follow, so wait for the app to have asked.
+            xdo('mousedown',1);wait('DRAG_QUEUED');time.sleep(.2)
+            for _ in range(5):xdo('mousemove_relative','--sync',16,11);time.sleep(.03)
+            time.sleep(.15);xdo('mouseup',1)
             if a.wayland:
                 time.sleep(.15)
                 tree=json.loads(subprocess.check_output(['swaymsg','-t','get_tree','-r'],env=env,text=True));pending=[tree]
