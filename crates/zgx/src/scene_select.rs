@@ -438,6 +438,40 @@ impl Scene {
             .copied()
             .unwrap_or_default()
     }
+    /// Paint `id` outside its parent's fade (`Style::fade_edges` and the
+    /// like): a scroll view's scrollbar, which its rows fading out at the
+    /// view's edges don't take. Its parent's own fade alone: one around the
+    /// parent still fades it.
+    pub(crate) fn set_outside_fade(&mut self, id: NodeId) {
+        if !self.contains(id) {
+            return;
+        }
+        // (Set as it mounts, before it paints: nothing to damage. No cold
+        // bit, which would cost its parent's special children a walk.)
+        let fades = &mut self.cold.get_or_insert_default().outside_fade;
+        fades.insert(id, super::OutsideFade);
+        if fades.len() >= 64 && fades.len().is_power_of_two() {
+            let slots = &self.slots;
+            fades.retain(|id, _| {
+                slots
+                    .get(id.index as usize)
+                    .is_some_and(|s| s.generation == id.generation && s.node.is_some())
+            });
+        }
+    }
+    /// Whether `id` paints outside its parent's fade (`set_outside_fade`).
+    pub(crate) fn outside_fade(&self, id: NodeId) -> bool {
+        self.cold
+            .as_ref()
+            .is_some_and(|cold| cold.outside_fade.contains_key(&id))
+    }
+    /// Whether any node paints outside its parent's fade.
+    #[inline(always)]
+    pub(crate) fn has_outside_fade(&self) -> bool {
+        self.cold
+            .as_ref()
+            .is_some_and(|cold| !cold.outside_fade.is_empty())
+    }
     /// Whether any node has text shadows.
     #[inline(always)]
     pub fn has_text_shadows(&self) -> bool {
