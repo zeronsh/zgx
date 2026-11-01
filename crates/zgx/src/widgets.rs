@@ -81,23 +81,81 @@ impl EditorValue {
             EditorValue::Text(value) => value.with_untracked(TextValue::clone),
         }
     }
+    fn version(&self) -> u64 {
+        match self {
+            EditorValue::String(value) => value.version(),
+            EditorValue::Text(value) => value.version(),
+        }
+    }
     /// What `editor` holds now, after an edit (its borrow released before
-    /// the value's subscribers run: the editor's own binding is one).
+    /// the value's subscribers run: the editor's own binding is one). The
+    /// value unchanged since it last held the editor's text, and the editor
+    /// changed once since, a short text takes just that change: a keystroke
+    /// copies the keystroke, not the document.
     fn write(&self, editor: &RefCell<TextEditor>) {
+        let version = self.version();
+        let (edit, revision) = {
+            let mut editor = editor.borrow_mut();
+            let edit = editor
+                .bound()
+                .filter(|(bound, _)| *bound == version)
+                .and_then(|(_, revision)| editor.edit_after(revision))
+                .map(|(start, replaced, put)| {
+                    (
+                        start,
+                        replaced,
+                        editor.slice(start..start + put).into_owned(),
+                    )
+                });
+            // The version the write makes (a change adds one), so the
+            // binding's effect, running as it is written, knows its text.
+            let revision = editor.revision();
+            editor.set_bound(version.wrapping_add(1), revision);
+            (edit, revision)
+        };
+        let splice = |text: &mut String| match &edit {
+            Some((start, replaced, put)) if start + replaced <= text.len() => {
+                text.replace_range(*start..start + replaced, put);
+                true
+            }
+            _ => false,
+        };
         match self {
             EditorValue::String(value) => {
-                let next = editor.borrow().text().into_owned();
-                value.set(next);
+                if !value.mutate(|text| splice(text)) {
+                    let next = editor.borrow().text().into_owned();
+                    value.set(next);
+                }
             }
             EditorValue::Text(value) => {
-                let next = editor.borrow().value();
-                value.set(next);
+                let spliced = value.mutate(|text| match text {
+                    TextValue::Flat(text) => splice(text),
+                    TextValue::Long(_) => false,
+                });
+                if !spliced {
+                    let next = editor.borrow().value();
+                    value.set(next);
+                }
             }
+        }
+        let mut editor = editor.borrow_mut();
+        if editor.revision() == revision {
+            editor.set_bound(self.version(), revision);
         }
     }
     /// Its text (tracked) into `editor`, in canonical form: whether the
     /// editor's changed, and the canonical text if it isn't the value's.
+    /// The value as the editor last wrote it or read it is not read again.
     fn apply(&self, editor: &RefCell<TextEditor>, multiline: bool) -> (bool, Option<String>) {
+        let version = self.version();
+        let synced = {
+            let editor = editor.borrow();
+            editor.bound() == Some((version, editor.revision()))
+        };
+        if synced {
+            self.track();
+            return (false, None);
+        }
         let flat = |current: &str| {
             let canonical = normalize_text(current, multiline);
             let changed = editor.borrow_mut().set_text_ref(canonical.as_ref());
@@ -106,20 +164,27 @@ impl EditorValue {
                 std::borrow::Cow::Borrowed(_) => (changed, None),
             }
         };
-        match self {
+        let (changed, canonical) = match self {
             EditorValue::String(value) => value.with(|current| flat(current)),
             EditorValue::Text(value) => value.with(|current| match current {
                 TextValue::Flat(current) => flat(current),
                 TextValue::Long(text) if !is_canonical(text, multiline) => flat(&text.to_cow()),
                 TextValue::Long(_) => (editor.borrow_mut().set_value(current), None),
             }),
+        };
+        // Only a value already canonical holds the editor's text.
+        if canonical.is_none() {
+            let mut editor = editor.borrow_mut();
+            let revision = editor.revision();
+            editor.set_bound(version, revision);
         }
+        (changed, canonical)
     }
 }
-/// Whether a long text needs no `normalize_text`.
+/// Whether a long text needs no `normalize_text`, from the counts its
+/// chunks keep: a keystroke in a long document no longer reads all of it.
 fn is_canonical(text: &Text, multiline: bool) -> bool {
-    text.chunks()
-        .all(|chunk| !chunk.contains('\r') && (multiline || !chunk.contains('\n')))
+    !text.has_returns() && (multiline || text.line_count() == 1)
 }
 /// A mounted text editor (a `text_input` or `text_area`): its editing
 /// model and the value it is bound to, for hosts, tests and commands.
