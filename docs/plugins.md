@@ -68,7 +68,7 @@ A filter runs in the plugin's VM. It runs again whenever what it reads changes: 
 
 What a plugin adds is described to assistive technology as the plugin's ("From the plugin focus"), so a contributed "Confirm" next to the app's can be traced.
 
-Before and after work among a container's children. Inside a `ui.show` or `ui.switch`, which lays out as the one element it shows, an element can be replaced or filtered but not given siblings. The app's root element, and the panes of a split or a library component, are not targets. The root of a `ui.each` or `ui.list` row isn't given siblings yet either: adding before or after one is an error, so target an element inside the row or the list's container.
+Before and after work among a container's children. Inside a `ui.show` or `ui.switch`, which lays out as the one element it shows, an element can be replaced or filtered but not given siblings. The app's root element, and the panes of a split or a library component, are not targets. The root of a `ui.each` or `ui.list` row takes them a row each: what is added lays out as the list's own items, moves with its row as the list reorders, goes with it when it is removed, and reads what the row's root provides (`provide`), live.
 
 What a plugin adds reads what the app provides above where it lands (`provide`, `ui.use_context`), nearest first. A value arrives as a copy in the plugin's own script; a state arrives as the same state, read only, so what reads it follows the app's changes; a name nobody provides gives the default. A function can't cross into a plugin: providing one where a plugin's node reads it is an error naming it.
 
