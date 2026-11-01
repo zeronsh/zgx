@@ -472,7 +472,8 @@ messages (`window.zgx.postMessage`, with the sending document's origin and
 frame), user scripts, app schemes (each its own origin and a secure context),
 the navigation policy, new-window requests, profiles (named ones under
 `$XDG_DATA_HOME/<program>/web-profiles/<name>`), zoom, transparency and Web
-Inspector (a GTK window of its own) work as on macOS.
+Inspector (a window of its own, as WebView2's is: WebKit, docking it in a
+page large enough, is told to detach it at once) work as on macOS.
 
 Video and audio play through WebKit's GStreamer: `libwebkit2gtk-4.1-0`
 depends on `gstreamer1.0-plugins-base` and `-good`, which play WebM (VP8,

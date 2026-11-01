@@ -27,7 +27,10 @@ has the box for its parent, and Orca reads the page's heading from browse
 mode and names its first field as Tab moves focus there from the app's own
 button.
 `--media` (X11): a page served from localhost plays a VP8 WebM (GStreamer
-made it), and after a click an `AudioContext` runs.
+made it), and after a click an `AudioContext` runs. `--inspector`: on a
+page large enough for WebKit to dock Web Inspector in, Ctrl+I opens it in a
+window of its own, no frame of it docked shows in the page, and its
+console, typed into, reaches the page.
 """
 import argparse
 import functools
@@ -189,6 +192,77 @@ def media_checks(session):
     if found.get("audio") != "running" or not found.get("time", 0) > 0:
         raise AssertionError(f"the AudioContext did not run: {found}")
     checks["audio ran"] = f"{found['audio']}, {found['time']:.2f} s"
+    return checks
+
+
+def page_shown(session, colours=None):
+    """The page's frame as the window shows it (colours at their points)."""
+    colours = colours or dict(COLOURS)
+    def shown():
+        pixel = session.grab()
+        found = {name: pixel(*at) for name, (at, _) in colours.items()}
+        return found if all(near(found[name], colour) for name, (_, colour) in colours.items()) else None
+    try:
+        return session.wait(shown, "the page did not show as expected")
+    except AssertionError:
+        pixel = session.grab()
+        raise AssertionError("pixels: " + repr({name: (pixel(*at), colour) for name, (at, colour) in colours.items()}))
+
+
+def inspector_checks(session):
+    """Ctrl+I on a large page (one WebKit docks Web Inspector in): the
+    inspector in a window of its own, never docked in the page even for a
+    moment (docked, it would shrink the page's viewport, which the page
+    reports as it resizes), the page as it was, and the inspector's console,
+    typed into, reaching the page."""
+    session.wait(lambda: session.lines("EVAL "), "the page never loaded", 30)
+    # Low on the page, where a docked inspector would draw.
+    colours = dict(COLOURS, lower=((340, 600), COLOURS["page"][1]))
+    checks = {"pixels": page_shown(session, colours)}
+    session.key("ctrl+i")
+    if session.wayland:
+        sway = dict(session.wayland, SWAYSOCK=str(next(pathlib.Path(session.wayland["XDG_RUNTIME_DIR"]).glob("sway-ipc*.sock"))))
+        def windows():
+            tree = json.loads(subprocess.run(["swaymsg", "-t", "get_tree", "-r"], env=sway, capture_output=True, text=True).stdout)
+            found, pending = [], [tree]
+            while pending:
+                node = pending.pop()
+                pending.extend(node.get("nodes", []) + node.get("floating_nodes", []))
+                if (node.get("name") or "").startswith("Web Inspector"):
+                    found.append(node["name"])
+            return found
+        checks["inspector window"] = session.wait(windows, "Web Inspector never opened in a window of its own", 30)[0]
+        focus = ["swaymsg", '[title="^Web Inspector"] focus']
+        raise_probe = ["swaymsg", '[title="^Web view probe$"] focus']
+    else:
+        def windows():
+            return subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "Web Inspector"],
+                                  env=session.env, capture_output=True, text=True).stdout.split()
+        inspector = session.wait(windows, "Web Inspector never opened in a window of its own", 30)[0]
+        checks["inspector window"] = subprocess.run(["xdotool", "getwindowname", inspector], env=session.env,
+                                                    capture_output=True, text=True).stdout.strip()
+        focus = ["xdotool", "windowactivate", "--sync", inspector]
+        raise_probe = ["xdotool", "windowactivate", "--sync", session.window]
+        sway = session.env
+    time.sleep(2)
+    # The probe's window raised over it: the page as it was, nothing docked.
+    subprocess.run(raise_probe, env=sway, capture_output=True)
+    time.sleep(1)
+    checks["page unchanged"] = page_shown(session, colours)
+    # Its console (Escape shows it), typed into, evaluates in the page.
+    subprocess.run(focus, env=sway, capture_output=True)
+    time.sleep(2)
+    session.xdo("key", "Escape")
+    time.sleep(1)
+    session.xdo("type", "--delay", 40, "window.zgx.postMessage({inspected: true})")
+    session.xdo("key", "Return")
+    session.wait(lambda: any(m[0].get("inspected") for m in session.messages()),
+                 "the inspector's console never reached the page", 15)
+    checks["console reached the page"] = True
+    heights = [m[0]["resized"] for m in session.messages() if "resized" in m[0]]
+    if any(height < 650 for height in heights):
+        raise AssertionError(f"Web Inspector docked in the page: its viewport went {heights}")
+    checks["page viewport"] = heights or "never resized"
     return checks
 
 
@@ -444,6 +518,8 @@ def x11(args, output, private):
         if args.orca:
             start_orca(env, output, owned)
         extra = ["--transparent"] if args.transparent else []
+        # A page WebKit would dock Web Inspector in (`on_inspector_attach`).
+        extra += ["--large-page"] if args.inspector else []
         extra += ["--media", serve_media(output)] if args.media else []
         with (output / "application.log").open("w") as log:
             app = subprocess.Popen([str(args.binary.resolve())] + extra, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -487,6 +563,8 @@ def x11(args, output, private):
             return orca_checks(session, env, output, checks)
         if args.media:
             return media_checks(session), "X11"
+        if args.inspector:
+            return inspector_checks(session), "X11"
         check = ime_x11 if args.ime else read if args.orca else None
         return page_checks(session, check, args.transparent), "X11"
     finally:
@@ -528,7 +606,13 @@ def wayland(args, output, private):
                                "Layout=\n\n[Groups/0/Items/1]\nName=pinyin\nLayout=\n\n[GroupOrder]\n0=Default\n")
         # The probe's window fills the output: its points are the output's.
         config = pathlib.Path(private, "sway.conf")
-        config.write_text("xwayland disable\nseat seat0 fallback true\noutput * mode 900x650\ndefault_border none\n")
+        config.write_text("xwayland disable\nseat seat0 fallback true\noutput * mode 900x650\ndefault_border none\n"
+                          if not args.inspector else
+                          # Room for the probe's large page and, clear of it,
+                          # Web Inspector's own window.
+                          "xwayland disable\nseat seat0 fallback true\noutput * mode 1260x900\ndefault_border none\n"
+                          "default_floating_border none\nfor_window [title=\"^Web view probe$\"] floating enable, move position 0 0\n"
+                          "for_window [title=\"^Web Inspector\"] floating enable, move position 1080 0\n")
         sway_env = dict(env, WLR_BACKENDS="x11", WLR_X11_OUTPUTS="1", WLR_RENDERER="pixman")
         with (output / "sway.log").open("w") as log:
             compositor = subprocess.Popen(["sway", "--unsupported-gpu", "--config", str(config)], env=sway_env, stdout=log, stderr=log)
@@ -552,7 +636,8 @@ def wayland(args, output, private):
                     raise RuntimeError("Fcitx startup failed")
                 time.sleep(.1)
         with (output / "application.log").open("w") as log:
-            app = subprocess.Popen([str(args.binary.resolve())] + (["--transparent"] if args.transparent else []), env=native, stdout=log, stderr=subprocess.STDOUT)
+            extra = (["--transparent"] if args.transparent else []) + (["--large-page"] if args.inspector else [])
+            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=native, stdout=log, stderr=subprocess.STDOUT)
         owned.append(app)
         subprocess.run(["xdotool", "windowfocus", "--sync", window], env=env, check=False)
         info = subprocess.check_output(["xwininfo", "-id", str(window)], env=env, text=True)
@@ -572,6 +657,8 @@ def wayland(args, output, private):
                 session.xdo("type", "--clearmodifiers", "--delay", 90, character)
                 time.sleep(.3)
             return compose(session, checks)
+        if args.inspector:
+            return inspector_checks(session), "Wayland"
         return page_checks(session, ime_wayland if args.ime else None, args.transparent), "Wayland"
     finally:
         end(owned)
@@ -586,12 +673,13 @@ def main():
     parser.add_argument("--transparent", action="store_true", help="a transparent page over its box's colour")
     parser.add_argument("--orca", action="store_true", help="the page's accessible tree, and Orca reading it (X11)")
     parser.add_argument("--media", action="store_true", help="a video plays and an AudioContext runs (X11)")
+    parser.add_argument("--inspector", action="store_true", help="Web Inspector opens in a window of its own and takes input")
     parser.add_argument("--slow-replies", action="store_true",
                         help="WebKit's answers come 800 ms late (ZGX_WEBKITGTK_REPLY_DELAY_MS, debug builds only): on keys, after Ctrl is up; on the caret, after its frame")
     args = parser.parse_args()
     needed = ["Xvfb", "openbox", "xdotool", "xwininfo"]
     needed += ["sway", "dbus-daemon", "wl-copy", "wl-paste"] + (["fcitx5", "fcitx5-remote"] if args.ime else []) if args.wayland else []
-    needed += ["xclip"] if not args.wayland and not args.ime and not args.orca and not args.media else []
+    needed += ["xclip"] if not args.wayland and not args.ime and not args.orca and not args.media and not args.inspector else []
     needed += ["orca", "gdbus", "dbus-daemon"] if args.orca else []
     needed += ["gst-launch-1.0"] if args.media else []
     needed += ["ibus-daemon", "ibus", "dbus-daemon", "gsettings"] if args.ime and not args.wayland else []
