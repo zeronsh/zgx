@@ -545,7 +545,10 @@ impl Scene {
         let (width, height) = (cache.bases.0 != bases.0, cache.bases.1 != bases.1);
         cache.bases = bases;
         for (child, key) in ids.iter().zip(keys) {
-            let (widths, heights) = self.percent_bases(*child);
+            // Its own percentages, as `percent_bases` says, cached with
+            // what it reads (`reads_bits`): a load, not a look through
+            // its styles, each time a parent's bases change.
+            let (widths, heights) = self.own_percent_bases(*child);
             if (width && widths) || (height && heights) {
                 cache
                     .tree

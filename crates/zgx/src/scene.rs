@@ -8596,6 +8596,15 @@ impl Scene {
             || options.is_some_and(|o| percent(o.min_height) || percent(o.max_height));
         (widths, heights)
     }
+    /// `percent_bases`, from the bits cached with what `id` reads.
+    #[inline]
+    pub(super) fn own_percent_bases(&self, id: NodeId) -> (bool, bool) {
+        let bits = self.reads_bits(id);
+        (
+            bits & OWN_PERCENT_WIDTH != 0,
+            bits & OWN_PERCENT_HEIGHT != 0,
+        )
+    }
     /// Whether `id`'s size can depend on the available (width, height) it is
     /// measured under, unless forced. Text reads its width when it wraps;
     /// other leaves size themselves. A container passes what it is given to
