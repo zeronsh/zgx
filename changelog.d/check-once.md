@@ -1,4 +1,0 @@
----
-section: fixed
----
-- **A hot-reloading host's type check no longer piles up** (zgx-script). In a debug build, every host with `watch` ran luau-lsp over the whole app after each reload on a thread of its own, and never stopped the previous run. With several debug apps open and agents saving files, hundreds of luau-lsp processes ran at once (531 on one Mac, which ran out of memory). Now a machine runs one check at a time, however many hosts and debug processes it has. A process's checks take turns on one thread, and processes take turns on an advisory lock file in the temporary directory, held only while luau-lsp runs. Each check starts once its host's saves have stopped for 300 ms. A newer reload replaces the host's check, killing its luau-lsp if it is running, and a dropped host kills its own. When nothing is asked for, the checker's thread waits, doing nothing.
