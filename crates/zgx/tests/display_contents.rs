@@ -145,3 +145,37 @@ fn focus_keeps_document_order() {
     }
     assert_eq!(order, [Some("one"), Some("two"), Some("three")]);
 }
+
+#[test]
+fn contents_over_one_laid_out_in_place_lays_out_flat_and_keeps_what_lies_over_it() {
+    // A presence's region and entry (contents) over what plugins add beside
+    // its content (display contents): b and c are the row's items, and
+    // what leaves lies over their place, not in the flow.
+    let mut ui = Ui::new(400., 300.);
+    let view = ui.mount(
+        row()
+            .gap(10.)
+            .child(div().id("a").w(30.).h(10.))
+            .child(
+                div()
+                    .id("region")
+                    .contents()
+                    .child(div().id("leaving").absolute().w(25.).h(5.))
+                    .child(
+                        div().id("entry").contents().child(
+                            div()
+                                .display_contents()
+                                .child(div().id("b").w(40.).h(10.))
+                                .child(div().id("c").w(50.).h(10.)),
+                        ),
+                    ),
+            )
+            .child(div().id("d").w(20.).h(10.)),
+    );
+    ui.prepare_frame();
+    let x = |id| bounds(&ui, &view, id).x;
+    assert_eq!((x("a"), x("b"), x("c"), x("d")), (0., 40., 90., 150.));
+    assert_eq!(bounds(&ui, &view, "region"), Rect::new(40., 0., 100., 10.));
+    assert_eq!(bounds(&ui, &view, "entry"), Rect::new(40., 0., 100., 10.));
+    assert_eq!(bounds(&ui, &view, "leaving"), Rect::new(40., 0., 25., 5.));
+}
