@@ -1,0 +1,4 @@
+---
+section: performance
+---
+- **A hot reload compiles only the files that changed, and a save that changes nothing reloads nothing** (zgx-script): every module was compiled again on each reload. A hot-reloading host now keeps each file's bytecode by what the file held, for the files of the last load alone, so a long session's edits don't grow it; every module still runs again, as before. A watcher woken for files whose bytes are what is loaded (an editor saving the same text, a checkout touching times) no longer reloads, so the app keeps its state. In an app of 170 modules (466 KB of Luau) a reload after one module changed takes 6.5 ms where it took 14 ms, and an unchanged save 0.15 ms where it reloaded in 14 ms. A host that loads once keeps nothing. Compiled files are shared by every host and VM on a thread, by their bytes, so the same text compiles once wherever it loads.

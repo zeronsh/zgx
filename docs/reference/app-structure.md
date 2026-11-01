@@ -293,6 +293,7 @@ return ui.column {
 ## Hot reload and modules
 
 - A save to any module reloads everything: the script and every module run again in a new VM, in the order they are required. A module's top-level code runs at its first `require` in each load.
+- A reload compiles only the files whose contents changed: the host keeps each file's bytecode by what it held, for the files of the last load. A save that changes no file's contents (an editor writing the same text, a checkout touching times) reloads nothing, so the app keeps its state.
 - State survives by key, as React's Fast Refresh keeps state: changing a state's initial value does nothing to a running app, and changing its key starts it over from the new initial value. `ui.state` and `ui.persist` keys include the module's path, so moving a state to another module, or renaming the module, starts it from its initial value once. `ui.shared` keys are global.
 - What a module does at its top level happens on every load: effects and computed values are made again (the previous load's end with it), commands are declared again. Put what must happen once per launch, not once per load, behind state: the terminal's `saved.luau` restores the saved layout only while there are no tabs.
 - Terminal sessions (`ui.term(id)`) and web pages (`ui.web(id)`) belong to the host and outlive reloads; each load asks for them again by id.
