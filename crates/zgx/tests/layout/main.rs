@@ -10,6 +10,8 @@ mod composition_line_height;
 mod composition_percent;
 #[path = "../composition_wrap.rs"]
 mod composition_wrap;
+#[path = "../container_queries.rs"]
+mod container_queries;
 #[path = "../contents_layout.rs"]
 mod contents_layout;
 #[path = "../display_contents.rs"]

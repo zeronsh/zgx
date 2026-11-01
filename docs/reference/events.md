@@ -221,25 +221,34 @@ A ref (`ui.ref()`, given to nodes as `ref = r`) answers `r:get()` and `r.element
 
 ### Container queries
 
-A layout that changes with the room it has (CSS's container and media queries) reads its container's width through a ref, `r.width`. The change lands in the frame the size changes: layout, the computed and layout again all run before it shows, as a browser settles its ResizeObserver callbacks before painting.
+A layout that changes with the room it has (CSS's container and media queries) marks the box it depends on `container = true`, and gives the elements inside it `queries`: styles each takes while the nearest container's content box is within its bounds. They follow the container's size as layout changes it, in the frame it changes, without the script running: a resize that crosses no bound costs nothing.
 
 ```lua
-local root = ui.ref()
-local wide = ui.computed(function()
-	return (root.width or 900) >= 900
-end)
 return ui.row {
-	ref = root,
+	container = true,
 	w_full = true,
 	h_full = true,
-	ui.show(function()
-		return wide:get()
-	end, ui.column { w = 220, shrink = 0, "Sidebar" }),
-	ui.column { grow = 1, "Content" },
+	ui.column {
+		w = 220,
+		shrink = 0,
+		hidden = true,
+		queries = { { min_width = 900, style = { hidden = false } } },
+		"Sidebar",
+	},
+	ui.column {
+		grow = 1,
+		p = 24,
+		queries = { { max_width = 600, style = { p = 12 } } },
+		"Content",
+	},
 }
 ```
 
-Query a box whose size does not depend on what the query changes (here the window's row): a box sized by its content that hid content below a width could go back and forth (zgx stops after a few rounds).
+- A query takes `min_width`, `max_width`, `min_height` and `max_height` (inclusive, in points) and `style`, plain values as `hover`'s are. Queries apply in order, the last that holds winning; `hover` and the others go over them.
+- A container's content doesn't size its width (CSS's inline-size containment), so what a query changes inside it can't change what it reads. Give it a width, a percentage or `grow`, or let its parent stretch it; one sized by nothing is 0 wide, and a debug build says so in its banner.
+- Without a container above, a query never holds.
+
+Where styles can't say it (a different component, a computed count of columns), read the size through a ref: `r.width` and `r.height` are followed, so a computed reading them runs again as layout resizes the element, in the same frame. Query a box whose size doesn't depend on what the computed changes: one that could go back and forth stops after a few rounds.
 
 ## Gotchas
 

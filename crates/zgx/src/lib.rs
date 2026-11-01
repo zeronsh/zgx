@@ -67,6 +67,7 @@ mod compose_split;
 mod compose_style;
 mod compose_tooltip;
 mod compose_virtual_keyboard;
+pub mod container_query;
 pub mod style;
 pub mod theme;
 

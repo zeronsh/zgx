@@ -1413,6 +1413,42 @@ impl View {
         self.mounted.push(Box::new(f));
         self
     }
+    /// Make this view a container its descendants' queries
+    /// (`View::when_container`) read, as CSS's `container-type: size`.
+    pub fn container(mut self) -> Self {
+        self.rare_mut().mount_flags |= CONTAINER;
+        self
+    }
+    /// Styles merged over the view's own (and its `reactive_style`) while
+    /// `query` holds for the nearest container above it (`View::container`),
+    /// as a CSS `@container` rule: they follow the container's size as
+    /// layout changes it, in the frame it changes, without script.
+    /// Interaction styles go over them. Without a container it never holds.
+    pub fn when_container(
+        mut self,
+        query: crate::container_query::Query,
+        style: impl FnOnce(Styles) -> Styles,
+    ) -> Self {
+        let patch = style(Styles::new());
+        let link = crate::container_query::Link::default();
+        let read = link.clone();
+        let mut own = self.reactive_style.take();
+        self.reactive_style = Some(Box::new(move |out: &mut Option<Styles>| {
+            if let Some(f) = own.as_mut() {
+                f(out);
+            }
+            let size = read.borrow().as_ref().map(Signal::get);
+            if size.is_some_and(|size| query.holds(size)) {
+                out.get_or_insert_with(Styles::new).merge(&patch);
+            }
+        }));
+        // Its style first runs as the mount ends, after this.
+        self.on_mount(move |handle| {
+            if let Some(ui) = handle.ui_handle().upgrade() {
+                *link.borrow_mut() = crate::container_query::link(&ui, handle.node(), query);
+            }
+        })
+    }
     /// Styles merged over the view's own, computed in an effect: they change
     /// as what `style` reads does, without mounting again.
     pub fn reactive_style(mut self, mut style: impl FnMut() -> Styles + 'static) -> Self {
@@ -5299,8 +5335,12 @@ const AUTOCORRECT: u8 = 4;
 /// `Rare::mount_flags`: an editor's quotes and dashes are made curly and long
 /// (`View::smart_punctuation`).
 const SMART_PUNCTUATION: u8 = 8;
-/// `View::window_drag`, `View::hollow`, and an editor's `autocorrect` and
-/// `smart_punctuation`, rare: apart from the element's common path.
+/// `Rare::mount_flags`: its descendants' container queries read it
+/// (`View::container`).
+const CONTAINER: u8 = 16;
+/// `View::window_drag`, `View::hollow`, `View::container`, and an editor's
+/// `autocorrect` and `smart_punctuation`, rare: apart from the element's
+/// common path.
 #[cold]
 #[inline(never)]
 fn mount_flagged(
@@ -5329,6 +5369,10 @@ fn mount_flagged(
     }
     if flags & WINDOW_DRAG != 0 {
         mount_window_drag(ui, root);
+    }
+    // Before its children mount, so their queries find it.
+    if flags & CONTAINER != 0 {
+        crate::container_query::register(ui, root);
     }
     // Registered, so the pointer's walk looks at it, and marked.
     if flags & HOLLOW != 0 {

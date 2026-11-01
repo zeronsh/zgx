@@ -1720,7 +1720,17 @@ export type DragExport = { text: string?, url: string?, files: { string }? }
 export type Size = { w: number, h: number }
 export type DragPoint = { x: number, y: number, local_x: number, local_y: number, w: number, h: number }
 
--- Plain styles, for `hover`, `active`, `focus`, `disabled` and
+-- A container query: `style` while the container above (`container =
+-- true`) is within these bounds, in points of its content box.
+export type Query = {
+	min_width: number?,
+	max_width: number?,
+	min_height: number?,
+	max_height: number?,
+	style: Styles?,
+}
+
+-- Plain styles, for `hover`, `active`, `focus`, `disabled`, `queries` and
 -- `context_menu_style`.
 export type Styles = {
 	-- Size and position.
@@ -2254,6 +2264,15 @@ export type NodeProps = {
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: boolean?,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: { Query }?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -2626,6 +2645,15 @@ export type Props = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -2919,6 +2947,8 @@ export type Props_disabled = (boolean | Readable<boolean> | (() -> boolean) | St
 export type Props_hover = Styles?
 export type Props_active = Styles?
 export type Props_focus = Styles?
+export type Props_container = boolean?
+export type Props_queries = { Query }?
 export type Props_layout = ("height" | "width" | "size" | "position" | boolean)?
 export type Props_layout_id = string?
 export type Props_layout_ease = Easing?
@@ -3226,6 +3256,15 @@ export type ContainerProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -3613,6 +3652,15 @@ export type ScrollProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -4011,6 +4059,15 @@ export type TextProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -4382,6 +4439,15 @@ export type MarkdownViewProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -4809,6 +4875,15 @@ export type RichProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -5174,6 +5249,15 @@ export type ImageProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -5549,6 +5633,15 @@ export type SvgProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -6019,6 +6112,15 @@ export type Scene3DProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -6407,6 +6509,15 @@ export type CanvasProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -6804,6 +6915,15 @@ export type CheckboxProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -7179,6 +7299,15 @@ export type InputProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -7655,6 +7784,15 @@ export type ProgressProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -8021,6 +8159,15 @@ export type SliderProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -8405,6 +8552,15 @@ export type SegmentedProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -8782,6 +8938,15 @@ export type StepperProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -9160,6 +9325,15 @@ export type DisclosureProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -9550,6 +9724,15 @@ export type AccordionProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -9913,6 +10096,15 @@ export type SectionProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -10302,6 +10494,15 @@ export type SeparatorProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -10673,6 +10874,15 @@ export type TabsProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -11066,6 +11276,15 @@ export type TreeProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -11455,6 +11674,15 @@ export type DataGridProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -11840,6 +12068,15 @@ export type CalendarProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -12218,6 +12455,15 @@ export type DatePickerProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -12594,6 +12840,15 @@ export type TimeFieldProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -12969,6 +13224,15 @@ export type ComboboxProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -13352,6 +13616,15 @@ export type CommandPaletteProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -13723,6 +13996,15 @@ export type SelectProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -14101,6 +14383,15 @@ export type SplitProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -14497,6 +14788,15 @@ export type ListProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -14942,6 +15242,15 @@ export type LayerProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -15328,6 +15637,15 @@ export type ModalProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -15732,6 +16050,15 @@ export type PopoverProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -16142,6 +16469,15 @@ export type MenuItemProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -16516,6 +16852,15 @@ export type SubmenuProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -16908,6 +17253,15 @@ export type WebViewProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -17293,6 +17647,15 @@ export type TerminalProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -17659,6 +18022,15 @@ export type SlotProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -18076,6 +18448,15 @@ export type EachOptions = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -18457,6 +18838,15 @@ export type PresenceOptions = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and

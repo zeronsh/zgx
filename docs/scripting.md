@@ -276,7 +276,21 @@ ui.column {
 
 ### Responsive layout
 
-A layout that changes with the room it has, as CSS's media and container queries change one, reads its container's size through a ref: `r.width` and `r.height` are followed, so a computed reading them runs again when layout resizes the element. The change lands in the frame the size changes: layout, the computed and layout again all run before it shows, as a browser settles its ResizeObserver callbacks before painting, so nothing flashes at the old layout.
+A layout that changes with the room it has, as CSS's container queries change one, marks the box it depends on `container = true` and gives what's inside `queries`: styles taken while the container is within bounds, applied without running the script as it resizes.
+
+```lua
+return ui.row {
+	container = true,
+	w_full = true,
+	h_full = true,
+	ui.column { w = 220, hidden = true, queries = { { min_width = 900, style = { hidden = false } } }, "Mailboxes" },
+	ui.column { grow = 1, "Messages" },
+}
+```
+
+A container's content doesn't size its width, so give it one (here the window's). See [container queries](reference/events.md#container-queries).
+
+For what styles can't say, read a container's size through a ref: `r.width` and `r.height` are followed, so a computed reading them runs again when layout resizes the element. The change lands in the frame the size changes: layout, the computed and layout again all run before it shows, as a browser settles its ResizeObserver callbacks before painting, so nothing flashes at the old layout.
 
 ```lua
 local root = ui.ref()

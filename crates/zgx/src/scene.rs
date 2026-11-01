@@ -1855,6 +1855,8 @@ struct ColdMaps {
     image_rendering: NodeMap<crate::image::ImageRendering>,
     /// Outlines drawn dashed or dotted (`set_outline_style`).
     outline_styles: NodeMap<crate::decoration::BorderStyle>,
+    /// Boxes whose width their content doesn't size (`set_contained`).
+    contained: NodeMap<Contained>,
 }
 /// A node painted outside its parent's fade (`Scene::set_outside_fade`).
 #[derive(Clone, Copy, Debug)]
@@ -1903,6 +1905,8 @@ impl HitTarget {
 /// second user of `NodeMap<()>`'s insert stops it inlining into the label
 /// queue's, on every mount.
 struct Flat;
+/// A box whose width its content doesn't size (`Scene::set_contained`).
+struct Contained;
 /// A node holding at `top` below its scroll view's top (`Scene::set_sticky`).
 #[derive(Clone, Copy)]
 struct Sticky {
@@ -4509,6 +4513,33 @@ impl Scene {
         self.sync_cold(id);
         self.invalidate_layout(id);
     }
+    /// Size `id`'s width as if it held nothing, unless its style, its
+    /// parent or a stretch gives it one (CSS's `contain: inline-size`, which
+    /// `container-type` implies): what a container query changes inside it
+    /// can't change the width it reads. Held content then sizes only its
+    /// height.
+    pub fn set_contained(&mut self, id: NodeId, on: bool) {
+        if self.is_contained(id) == on || !self.contains(id) {
+            return;
+        }
+        let maps = self.cold.get_or_insert_default();
+        match on {
+            true => {
+                maps.contained.insert(id, Contained);
+            }
+            false => {
+                maps.contained.remove(&id);
+            }
+        }
+        self.sync_cold(id);
+        self.invalidate_layout(id);
+    }
+    /// Whether `id`'s width is its own, not its content's (`set_contained`).
+    pub fn is_contained(&self, id: NodeId) -> bool {
+        self.cold
+            .as_ref()
+            .is_some_and(|cold| cold.contained.contains_key(&id))
+    }
     /// Whether `id` lays its children out in its place
     /// (`set_display_contents`).
     pub fn is_display_contents(&self, id: NodeId) -> bool {
@@ -6388,6 +6419,7 @@ impl Scene {
                 || cold.flat_parents.contains_key(&id)
                 || cold.image_rendering.contains_key(&id)
                 || cold.outline_styles.contains_key(&id)
+                || cold.contained.contains_key(&id)
         }) || self.has_own_text_shadows(id);
         self.set_special(id, COLD, cold);
     }
@@ -6829,6 +6861,7 @@ impl Scene {
             maps.image_rendering.remove(&id);
             maps.outline_styles.remove(&id);
             maps.steps.remove(&id);
+            maps.contained.remove(&id);
         }
     }
     /// Hit `id` and what it holds where an animation is taking it, not
@@ -9502,6 +9535,32 @@ impl Scene {
         }
         Some(size)
     }
+    /// `measure_uncached` for a container (`set_contained`) with no width of
+    /// its own: as wide as its padding, through `measured` as a zoomed node
+    /// is, its result kept under the room asked. `None`: its style sizes it.
+    #[cold]
+    #[inline(never)]
+    fn measure_contained(&mut self, id: NodeId, constraints: Constraints) -> Option<(f32, f32)> {
+        let style = &self.node(id).style;
+        if style.width.is_some() || style.width_percent.is_some() {
+            return None;
+        }
+        let padding = style.padding_edges.unwrap_or(Insets::all(style.padding));
+        let width = dimension(
+            padding.left.max(0.) + padding.right.max(0.),
+            style.min_width,
+            style.max_width,
+        );
+        let mut inner = Constraints {
+            force_width: Some(width),
+            ..constraints
+        };
+        let size = self.measured(id, &mut inner, true);
+        if let Some(measurement) = &mut self.node_mut(id).measurement {
+            measurement.constraints = constraints;
+        }
+        Some(size)
+    }
     /// `measure_uncached` for a contents node (as its last child) or a
     /// zoomed one: laid out in its own points, under its parent's room
     /// divided by its zoom, the room it takes times it. A zoomed node's
@@ -9512,6 +9571,12 @@ impl Scene {
     #[cold]
     #[inline(never)]
     fn measure_special(&mut self, id: NodeId, constraints: Constraints) -> Option<(f32, f32)> {
+        if constraints.force_width.is_none()
+            && self.is_contained(id)
+            && let Some(size) = self.measure_contained(id, constraints)
+        {
+            return Some(size);
+        }
         if self.has_flat_children(id) {
             return self.measure_flat(id, constraints);
         }

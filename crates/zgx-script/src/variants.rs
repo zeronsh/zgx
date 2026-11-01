@@ -484,7 +484,14 @@ pub(crate) fn apply(node: &mut node::Node, selection: Rc<Selection>) {
             over(&mut merged, styles);
             *styles = merged;
         }
+        let queries = node
+            .pseudo
+            .iter()
+            .filter(|(pseudo, _)| *pseudo == node::Pseudo::Container)
+            .cloned()
+            .collect::<Vec<_>>();
         node.pseudo = node::pseudo_of(own);
+        node.pseudo.extend(queries);
         return;
     }
     for &prop in &selection.recipe.props {
