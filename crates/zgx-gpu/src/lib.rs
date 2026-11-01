@@ -1100,6 +1100,21 @@ struct TextQuad {
     color: [f32; 4],
     paint: [f32; 4],
 }
+/// A rounded span background's quads among a text's (`shape.w`, untextured)
+/// rounded on their own boxes rather than the text's: draw.wgsl rounds a
+/// quad's `fade` box, which `place_text_quads` gives as the text's. Each
+/// line's piece of a wrapped span is a quad of its own, so each rounds on
+/// its own ends (CSS's `box-decoration-break: clone`). Out of line: texts
+/// without one never come here.
+#[cold]
+#[inline(never)]
+fn round_own_boxes(quads: &mut [Quad]) {
+    for quad in quads {
+        if quad.shape[3] > 0.5 && quad.options[1] == 0. {
+            quad.fade = quad.rect;
+        }
+    }
+}
 /// A kept text's quads at `x`, `y`, each coloured by `color`.
 fn place_text_quads(
     quads: &mut Vec<Quad>,
@@ -8056,7 +8071,13 @@ impl GpuRenderer {
                         let blurred = shadows.iter().any(|shadow| shadow.blur > 0.);
                         // Where its shadows' quads went, to be drawn apart.
                         let shadows_at = std::cell::Cell::new((usize::MAX, 0));
+                        // Rounded span backgrounds (inline code chips): each
+                        // piece rounds on its own box (`round_own_boxes`).
+                        let rounded_spans = rich
+                            .as_ref()
+                            .is_some_and(|rich| rich.runs().iter().any(|run| run.radius > 0.));
                         let place = |quads: &mut Vec<Quad>, source: &[TextQuad]| {
+                            let from = quads.len();
                             if !shadows.is_empty() {
                                 shadows_at.set((quads.len(), quads.len()));
                             }
@@ -8117,6 +8138,9 @@ impl GpuRenderer {
                                         }
                                     },
                                 );
+                            }
+                            if rounded_spans {
+                                round_own_boxes(&mut quads[from..]);
                             }
                         };
                         // Its shape as it was, inside its clip and with the atlas it
