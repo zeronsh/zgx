@@ -18,13 +18,15 @@ by colours the shell prints.
 `--orca`: over a private AT-SPI bus with Orca running, a row of the grid is
 in the window's accessible tree as a label with the text it shows, and
 Orca speaks a line of new output (a live region of the latest output)
-without reading back the shell's echo of the typed command.
+without reading back the shell's echo of the typed command, whole or a
+character at a time.
 
 Build with `cargo build -p zgx-desktop --features terminal --example
 terminal_pane` first."""
 import argparse
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -203,11 +205,22 @@ if row:
 """
 
 
+def announced(output):
+    """What the terminal's live region announced so far, in order (Orca's
+    debug log of AT-SPI's announcement events)."""
+    path = output / "orca-debug.log"
+    text = path.read_text(errors="replace") if path.exists() else ""
+    return [m.group(1).strip() for m in re.finditer(
+        r" - EVENT MANAGER: object:announcement for \[status bar: .*?\] in \[application: 'terminal_pane'\]"
+        r" \(\d+, \d+, ?(.*)\)$", text, re.MULTILINE)]
+
+
 def orca_checks(env, output, xdo, window, type_line):
     """A row in the accessible tree, and Orca speaking new output."""
     xdo("mousemove", "--window", window, 450, 300, "click", 1)
     time.sleep(0.3)
-    type_line("clear; echo zgx-tree-$((40+2))")
+    typed = ["clear; echo zgx-tree-$((40+2))", "echo zgx-spoken-$((40+2))"]
+    type_line(typed[0])
     deadline = time.monotonic() + 40
     row = ""
     while time.monotonic() < deadline and "ROW" not in row:
@@ -221,7 +234,7 @@ def orca_checks(env, output, xdo, window, type_line):
     if "'Terminal'" not in parent:
         raise AssertionError(f"the rows' container isn't named Terminal: {parent}")
     print("terminal: " + parent)
-    type_line("echo zgx-spoken-$((40+2))")
+    type_line(typed[1])
     deadline = time.monotonic() + 20
     nudged = time.monotonic()
     while not any("zgx-spoken-42" in line for line in spoken(output)):
@@ -237,6 +250,12 @@ def orca_checks(env, output, xdo, window, type_line):
     echoed = [line for line in spoken(output) if "echo zgx-spoken" in line]
     if echoed:
         raise AssertionError(f"Orca read the typed command back as output: {echoed[:3]}")
+    # Nor a character at a time: the live region announced only output
+    # (the prompt after it, `$`, is output too).
+    echoes = [text for text in announced(output)
+              if text and text != "$" and "zgx-" not in text and any(text in line for line in typed)]
+    if echoes:
+        raise AssertionError(f"the live region announced the shell's echo of typing: {echoes[:10]}")
     print("terminal: Orca spoke the new output, and not the shell's echo of the command")
 
 

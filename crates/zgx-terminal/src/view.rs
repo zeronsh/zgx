@@ -87,6 +87,14 @@ struct Engine {
     /// label), and what was typed since: a shell's echo of it is not news.
     news: Signal<String>,
     typed: RefCell<String>,
+    /// News since the live region last went out, published once a frame
+    /// (`publish_news`): reads before a frame's accessibility update each
+    /// set the region, and a reader heard only the last (a command's
+    /// output lost to the prompt after it).
+    pending_news: RefCell<String>,
+    news_wake: RefCell<Option<zgx::task::LatestSender<()>>>,
+    news_task: RefCell<Option<TaskToken>>,
+    frames: RefCell<Option<zgx::frame::FrameClock>>,
     focused: Cell<bool>,
     /// The hidden editor, or the terminal's node (a press focuses it first),
     /// has keyboard focus; the two settle into `focused` once a dispatch is
@@ -164,6 +172,10 @@ impl EngineTerminal {
             preedit: runtime.signal(String::new()),
             news: runtime.signal(String::new()),
             typed: RefCell::new(String::new()),
+            pending_news: RefCell::new(String::new()),
+            news_wake: RefCell::new(None),
+            news_task: RefCell::new(None),
+            frames: RefCell::new(None),
             focused: Cell::new(false),
             input_has: Cell::new(false),
             root_has: Cell::new(false),
@@ -245,6 +257,28 @@ impl Engine {
         }));
         // The task before ends with its token.
         *self.task.borrow_mut() = Some(task);
+        // News waits for the next frame, its accessibility update carrying
+        // everything read since the last (`publish_news`).
+        let (news_wake, mut news_woken) = zgx::task::latest::<()>();
+        *self.news_wake.borrow_mut() = Some(news_wake);
+        let weak = Rc::downgrade(self);
+        let news_task = self.runner.borrow().spawn(Box::pin(async move {
+            while news_woken.recv().await.is_some() {
+                let frames = {
+                    let Some(engine) = weak.upgrade() else { return };
+                    engine.frames.borrow().clone()
+                };
+                if let Some(frames) = frames {
+                    frames.next().await;
+                }
+                let Some(engine) = weak.upgrade() else { return };
+                let news = std::mem::take(&mut *engine.pending_news.borrow_mut());
+                if !news.is_empty() {
+                    engine.news.set(news);
+                }
+            }
+        }));
+        *self.news_task.borrow_mut() = Some(news_task);
         // A wake the last task didn't read: the session won't wake again
         // until it is read.
         self.refresh();
@@ -458,9 +492,32 @@ impl Engine {
             }
             self.caret.set(caret);
             if !news.is_empty() {
-                self.news.set(news);
+                self.publish_news(news);
             }
         });
+    }
+
+    /// Tell readers `news` with the frame's accessibility update: added to
+    /// what is waiting for it, so that two reads before a frame are both
+    /// heard, once each. Without a frame clock (no window), at once.
+    fn publish_news(&self, news: String) {
+        let waiting = {
+            let mut pending = self.pending_news.borrow_mut();
+            if !pending.is_empty() {
+                pending.push('\n');
+            }
+            pending.push_str(&news);
+            pending.clone()
+        };
+        match &*self.news_wake.borrow() {
+            Some(wake) if self.frames.borrow().is_some() => {
+                wake.send(());
+            }
+            _ => {
+                self.pending_news.borrow_mut().clear();
+                self.news.set(waiting);
+            }
+        }
     }
 
     /// What a reader hears of rows `changed` from what `rows` show: new
@@ -477,11 +534,7 @@ impl Engine {
             }
         }
         let news = crate::news::news(&before, &after);
-        let typed = std::mem::take(&mut *self.typed.borrow_mut());
-        if !typed.is_empty() && typed.contains(news.as_str()) {
-            return String::new();
-        }
-        news
+        crate::news::less_echo(&mut self.typed.borrow_mut(), news)
     }
 
     /// Slot `slot`'s paint and line, made on first use.
@@ -1326,6 +1379,9 @@ pub fn terminal_view(term: &Terminal) -> View {
         };
         if let Some(platform) = cx.try_service::<PlatformService>() {
             *engine.platform.borrow_mut() = Some(platform);
+        }
+        if let Some(frames) = cx.try_service::<zgx::frame::FrameClock>() {
+            *engine.frames.borrow_mut() = Some((*frames).clone());
         }
         engine.views.set(engine.views.get() + 1);
         engine.full.set(true);

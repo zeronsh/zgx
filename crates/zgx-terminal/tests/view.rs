@@ -109,6 +109,56 @@ fn output_shows_in_rows_and_reports_reach_the_controller() {
     });
 }
 
+/// What the terminal's live region (its `Status` node) says now.
+fn news(app: &Harness) -> String {
+    app.ui
+        .semantics
+        .borrow()
+        .iter()
+        .find(|(_, node)| node.role == zgx::semantics::Role::Status)
+        .map(|(_, node)| node.label.clone())
+        .unwrap_or_default()
+}
+
+/// Every platform's reader (Orca, VoiceOver, Narrator) hears the live
+/// region through the same frame's accessibility update.
+#[test]
+fn a_reader_hears_every_read_of_output_since_the_last_frame() {
+    let mut app = Harness::new();
+    app.ui.set_assistive_technology(true);
+    // Output in two reads (a command's output, then the prompt after it)
+    // before the frame whose accessibility update tells the reader.
+    #[cfg(unix)]
+    let command = "echo alpha; sleep 0.3; echo beta; sleep 30";
+    #[cfg(windows)]
+    let command =
+        "cmd.exe /d /c echo alpha& ping -n 2 127.0.0.1 >nul& echo beta& ping -n 30 127.0.0.1 >nul";
+    let term = Terminal::new(&app.ui.runtime, session(command));
+    let frames = zgx::frame::FrameClock::new();
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        frames.clone(),
+        provide(renderer, zgx::terminal::terminal(&term).w(600.).h(300.)),
+    ));
+    // Two reads: alpha shows alone first.
+    app.until("alpha", |app| app.shows("alpha"));
+    assert!(!app.shows("beta"), "one read showed both");
+    app.until("beta", |app| app.shows("beta"));
+    // Not yet: news goes out with a frame.
+    assert_eq!(news(&app), "");
+    frames.deliver(zgx::frame::Frame {
+        index: 1,
+        time: Instant::now(),
+        interval: Duration::from_millis(16),
+    });
+    app.pump();
+    let heard = news(&app);
+    assert!(
+        heard.contains("alpha") && heard.contains("beta"),
+        "the reader is told {heard:?}"
+    );
+}
+
 /// Every `line N` shown, with the top of its box on screen, in the order
 /// the scene paints them (which assistive technology reads).
 #[cfg(unix)]
