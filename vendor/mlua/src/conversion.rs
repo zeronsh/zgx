@@ -190,6 +190,19 @@ impl FromLua for Table {
             _ => Err(Error::from_lua_conversion(value.type_name(), "table", None)),
         }
     }
+
+    // zgx patch: a table on the stack (a function's result, as a code
+    // editor's highlighter returns each line) referenced as itself, with no
+    // `Value` made first and its type read once. Anything else as before.
+    #[inline]
+    unsafe fn from_stack(idx: c_int, lua: &RawLua) -> Result<Self> {
+        let state = lua.state();
+        if ffi::lua_type(state, idx) == ffi::LUA_TTABLE {
+            ffi::lua_xpush(state, lua.ref_thread(), idx);
+            return Ok(Table(lua.try_pop_ref_thread()?));
+        }
+        Self::from_lua(lua.try_stack_value(idx, None)?, lua.lua())
+    }
 }
 
 impl IntoLua for Function {

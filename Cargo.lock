@@ -5245,7 +5245,7 @@ dependencies = [
 
 [[package]]
 name = "zgx-mlua"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "bstr",
  "either",
