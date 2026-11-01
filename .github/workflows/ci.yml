@@ -95,6 +95,8 @@ jobs:
         run: python3 scripts/test_compare.py -v
       - name: Which windows the Windows probes' guard takes as their app's
         run: python3 scripts/test_windows_guard.py -v
+      - name: New pub fields only on structs with Default (the release check's)
+        run: python3 scripts/test_semver_defaults.py -v
       - run: cargo fmt --all -- --check
       # Every Luau script in the repository (examples and probes too), as
       # stylua.toml and .styluaignore have them.
