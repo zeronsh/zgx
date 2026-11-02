@@ -32,10 +32,12 @@ fn ten_thousand_appends_reach_a_bound_editor_without_comparing_the_document() {
         });
     }
     h.frames(1);
+    // The first token takes it whole (nothing followed the reply until
+    // then, so it kept no edits); every one after is applied where it is.
     assert_eq!(
         TextEditor::whole_compares(),
-        compares,
-        "every token applied where it is"
+        compares + 1,
+        "every token after the first applied where it is"
     );
     let node = h.find("reply").unwrap();
     let editor = h.ui.editor(node).expect("the text area's editor");

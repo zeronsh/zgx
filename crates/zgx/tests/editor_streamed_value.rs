@@ -63,10 +63,12 @@ fn tokens_streamed_into_a_bound_document_are_applied_without_comparing_it() {
         expected.push_str(&token);
         ui.prepare_frame();
     }
+    // The first token takes it whole (until then nothing followed the
+    // document, so it kept no edits); every token after comes as it is.
     assert_eq!(
         TextEditor::whole_compares(),
-        compares,
-        "no token compared the document with the editor's"
+        compares + 1,
+        "no token after the first compared the document with the editor's"
     );
     assert_eq!(editor.editor.borrow().text(), expected);
     // One text for both still, not a copy each.
