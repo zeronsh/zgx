@@ -225,6 +225,18 @@ impl FontFeatures {
     }
 }
 
+/// zgx: a span's inline padding (`Attrs::padding_opt`): room before its
+/// first glyph and after its last, in EM (CSS's inline padding: an inline
+/// code chip's); and, for a box in the line in place of its glyphs (an
+/// inline node's room), how far the box reaches above the baseline and
+/// below, in EM: its glyphs then take no room but the padding, and the line
+/// grows to hold the box.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Padding {
+    pub across: LetterSpacing,
+    pub inline_box: Option<(LetterSpacing, LetterSpacing)>,
+}
+
 /// A wrapper for letter spacing to get around that f32 doesn't implement Eq and Hash
 #[derive(Clone, Copy, Debug)]
 pub struct LetterSpacing(pub f32);
@@ -330,7 +342,7 @@ pub struct Attrs<'a> {
     pub letter_spacing_opt: Option<LetterSpacing>,
     /// zgx: room added before a span's first glyph and after its last, in
     /// EM (CSS's inline padding: an inline code chip's)
-    pub padding_opt: Option<LetterSpacing>,
+    pub padding_opt: Option<Padding>,
     /// zgx: the optical size variable fonts shape and draw at (their
     /// `opsz` axis), in pixels: CSS's `font-optical-sizing: auto` sets it to
     /// the font size. 0 leaves the font's default.
@@ -433,7 +445,28 @@ impl<'a> Attrs<'a> {
 
     /// zgx: set the span's inline padding (in EM)
     pub const fn padding(mut self, padding: f32) -> Self {
-        self.padding_opt = Some(LetterSpacing(padding));
+        let inline_box = match self.padding_opt {
+            Some(Padding { inline_box, .. }) => inline_box,
+            None => None,
+        };
+        self.padding_opt = Some(Padding {
+            across: LetterSpacing(padding),
+            inline_box,
+        });
+        self
+    }
+
+    /// zgx: set the span's inline box (`inline_box_opt`): `above` the
+    /// baseline and `below` it, in EM
+    pub const fn inline_box(mut self, above: f32, below: f32) -> Self {
+        let across = match self.padding_opt {
+            Some(Padding { across, .. }) => across,
+            None => LetterSpacing(0.),
+        };
+        self.padding_opt = Some(Padding {
+            across,
+            inline_box: Some((LetterSpacing(above), LetterSpacing(below))),
+        });
         self
     }
 
@@ -526,7 +559,7 @@ pub struct AttrsOwned {
     pub metrics_opt: Option<CacheMetrics>,
     /// Letter spacing (tracking) in EM
     pub letter_spacing_opt: Option<LetterSpacing>,
-    pub padding_opt: Option<LetterSpacing>,
+    pub padding_opt: Option<Padding>,
     pub optical: u16,
     pub masked: bool,
     pub font_features: FontFeatures,
@@ -620,7 +653,7 @@ impl AttrsList {
         self.spans.insert(range, AttrsOwned::new(attrs));
     }
 
-    /// zgx: whether the defaults or any span set padding.
+    /// zgx: whether the defaults or any span set padding (or an inline box).
     pub fn has_padding(&self) -> bool {
         self.defaults.padding_opt.is_some()
             || self.spans.iter().any(|(_, attrs)| attrs.padding_opt.is_some())

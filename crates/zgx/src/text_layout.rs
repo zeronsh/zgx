@@ -463,6 +463,9 @@ impl TextLayout for Inset {
     fn hit_test(&self, x: f32, y: f32) -> usize {
         self.inner.hit_test(x - self.dx, y)
     }
+    fn baseline(&self, byte_offset: usize) -> Option<f32> {
+        self.inner.baseline(byte_offset)
+    }
     fn caret(&self, byte_offset: usize) -> Rect {
         self.moved(self.inner.caret(byte_offset))
     }
@@ -532,6 +535,14 @@ pub trait TextLayout {
     }
     /// Its width and height.
     fn size(&self) -> (f32, f32);
+    /// The baseline, down the layout, of the line that holds the character
+    /// at UTF-8 offset `byte_offset`, where the shaper knows it: an inline
+    /// node (`RichText::with_boxes`) sits on it. `None` (the default) centres
+    /// one on its line.
+    fn baseline(&self, byte_offset: usize) -> Option<f32> {
+        let _ = byte_offset;
+        None
+    }
     /// Returns a UTF-8 byte offset on a grapheme boundary.
     fn hit_test(&self, x: f32, y: f32) -> usize;
     /// The caret's rectangle at UTF-8 offset `byte_offset`.
@@ -639,7 +650,10 @@ impl FallbackTextLayout {
                 run_index += 1;
             }
             let run = &rich.runs()[run_index];
-            let line = run.font.line_height.resolve(run.font_size);
+            let mut line = run.font.line_height.resolve(run.font_size);
+            if rich.has_boxes() {
+                line = rich.box_line(run_index, line);
+            }
             let newline = grapheme.contains(['\r', '\n']);
             let advance = run.estimated_advance(grapheme, index);
             if newline || width.is_some_and(|w| x > 0. && x + advance > w.max(0.)) {

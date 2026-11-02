@@ -153,7 +153,7 @@ impl TextRun {
     /// em a cell, zero-width characters none, and the run's padding on its
     /// first and last.
     pub(crate) fn estimated_advance(&self, grapheme: &str, at: usize) -> f32 {
-        let glyph = if matches!(grapheme, "\u{200B}" | "\u{2060}") {
+        let glyph = if matches!(grapheme, "\u{200B}" | "\u{2060}" | "\u{2063}") {
             0.
         } else {
             self.font_size * 0.6 + self.font.letter_spacing.pixels()
@@ -180,6 +180,22 @@ impl Default for TextRun {
     }
 }
 
+/// A box in a line (`RichText::with_boxes`): run `run` keeps its room (its
+/// padding across, the run a character with no width of its own) and reaches
+/// `above` the baseline and `below` it, the line growing to hold it, as a tall
+/// glyph's would: an inline node's place.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineBox {
+    /// The run that keeps its room.
+    pub run: usize,
+    /// How far it reaches above the baseline.
+    pub above: f32,
+    /// How far it reaches below the baseline.
+    pub below: f32,
+    /// The text it stands for: copied in its place, and read out.
+    pub text: Arc<str>,
+}
+
 /// Validated, immutable styled display text. Runs cover the entire string exactly;
 /// empty strings use no runs. Adjacent styles may cross grapheme boundaries: the
 /// native shaper still shapes the paragraph continuously.
@@ -188,6 +204,9 @@ pub struct RichText {
     options: crate::text_layout::TextOptions,
     text: Arc<str>,
     runs: Arc<[TextRun]>,
+    /// Its runs that are boxes in the line, by run; most text has none.
+    /// Behind one pointer: the text stays in its allocation's size class.
+    boxes: Option<Arc<Vec<InlineBox>>>,
 }
 impl RichText {
     /// `text` styled by `runs`. Errs unless the runs cover the text in
@@ -221,7 +240,54 @@ impl RichText {
             text,
             runs,
             options: Default::default(),
+            boxes: None,
         })
+    }
+    /// With `boxes`: runs that hold a box in the line (an inline node's
+    /// room). Errs unless they are in run order, one a run, each a run of
+    /// the text, reaching a finite distance no less than zero.
+    pub fn with_boxes(mut self, boxes: impl Into<Vec<InlineBox>>) -> Result<Self, &'static str> {
+        let boxes: Vec<InlineBox> = boxes.into();
+        let mut next = 0;
+        for inline in boxes.iter() {
+            if inline.run < next || inline.run >= self.runs.len() {
+                return Err("inline boxes must be on runs of the text, in order, one a run");
+            }
+            if !(inline.above.is_finite() && inline.below.is_finite())
+                || inline.above < 0.
+                || inline.below < 0.
+            {
+                return Err("an inline box must reach a finite distance no less than zero");
+            }
+            next = inline.run + 1;
+        }
+        self.boxes = (!boxes.is_empty()).then(|| Arc::new(boxes));
+        Ok(self)
+    }
+    /// Its runs that are boxes in the line (`with_boxes`), in run order.
+    pub fn boxes(&self) -> &[InlineBox] {
+        self.boxes.as_deref().map_or(&[], Vec::as_slice)
+    }
+    /// Run `run`'s box, if it holds one.
+    pub fn inline_box(&self, run: usize) -> Option<&InlineBox> {
+        let boxes = self.boxes.as_deref()?;
+        boxes
+            .binary_search_by_key(&run, |inline| inline.run)
+            .ok()
+            .map(|at| &boxes[at])
+    }
+    /// `line`, run `run`'s line height, or its box's height if taller
+    /// (`with_boxes`). Out of line: most text has no box.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn box_line(&self, run: usize, line: f32) -> f32 {
+        self.inline_box(run)
+            .map_or(line, |inline| line.max(inline.above + inline.below))
+    }
+    /// Whether any run holds a box (`with_boxes`).
+    #[inline]
+    pub(crate) fn has_boxes(&self) -> bool {
+        self.boxes.is_some()
     }
     /// With `options`: how text that doesn't fit ends, and its line clamp.
     pub fn with_options(mut self, options: crate::text_layout::TextOptions) -> Self {
@@ -248,12 +314,14 @@ impl RichText {
     pub(crate) fn same_metrics(&self, other: &Self) -> bool {
         self.options == other.options
             && self.text == other.text
+            && self.boxes == other.boxes
             && self.runs.len() == other.runs.len()
-            && self
-                .runs
-                .iter()
-                .zip(other.runs.iter())
-                .all(|(a, b)| a.range == b.range && a.font == b.font && a.font_size == b.font_size)
+            && self.runs.iter().zip(other.runs.iter()).all(|(a, b)| {
+                a.range == b.range
+                    && a.font == b.font
+                    && a.font_size == b.font_size
+                    && a.padding[0] == b.padding[0]
+            })
     }
     /// `!same_metrics`, for `Scene::set_leaf_kind`: written apart so that
     /// `same_metrics` keeps the callers it is inlined into (a third one
@@ -261,12 +329,14 @@ impl RichText {
     pub(crate) fn metrics_differ(&self, other: &Self) -> bool {
         self.options != other.options
             || self.text != other.text
+            || self.boxes != other.boxes
             || self.runs.len() != other.runs.len()
-            || self
-                .runs
-                .iter()
-                .zip(other.runs.iter())
-                .any(|(a, b)| a.range != b.range || a.font != b.font || a.font_size != b.font_size)
+            || self.runs.iter().zip(other.runs.iter()).any(|(a, b)| {
+                a.range != b.range
+                    || a.font != b.font
+                    || a.font_size != b.font_size
+                    || a.padding[0] != b.padding[0]
+            })
     }
     /// The text.
     pub fn text(&self) -> &str {
@@ -282,6 +352,7 @@ impl RichText {
         self.text
             .len()
             .saturating_add(std::mem::size_of_val(self.runs.as_ref()))
+            .saturating_add(std::mem::size_of_val(self.boxes()))
             .saturating_add(
                 self.runs
                     .iter()
@@ -315,7 +386,10 @@ pub fn fallback_measure(rich: &RichText, width: Option<f32>) -> (f32, f32) {
             run_index += 1;
         }
         let run = &rich.runs[run_index];
-        let line = run.font.line_height.resolve(run.font_size);
+        let mut line = run.font.line_height.resolve(run.font_size);
+        if rich.has_boxes() {
+            line = rich.box_line(run_index, line);
+        }
         if grapheme == "\n" || grapheme == "\r\n" || grapheme == "\r" {
             if limit.is_some_and(|limit| row >= limit) {
                 return (
@@ -377,6 +451,7 @@ impl RichText {
         let text = self.text();
         let mut lines = String::with_capacity(text.len() + 16);
         let mut runs: Vec<TextRun> = Vec::with_capacity(self.runs().len() + 4);
+        let mut boxes: Vec<InlineBox> = Vec::new();
         let mut start = 0;
         for end in crate::text_layout::break_opportunities(text) {
             if start > 0 {
@@ -392,7 +467,7 @@ impl RichText {
             let line = text[start..end].trim_end();
             let (from, at) = (start, lines.len());
             lines.push_str(line);
-            for run in self.runs() {
+            for (index, run) in self.runs().iter().enumerate() {
                 let (a, b) = (
                     run.range.start.max(from),
                     run.range.end.min(from + line.len()),
@@ -400,12 +475,20 @@ impl RichText {
                 if a < b {
                     let mut part = run.clone();
                     part.range = at + (a - from)..at + (b - from);
+                    if let Some(inline) = self.inline_box(index) {
+                        boxes.push(InlineBox {
+                            run: runs.len(),
+                            ..inline.clone()
+                        });
+                    }
                     runs.push(part);
                 }
             }
             start = end;
         }
-        RichText::new(lines, runs).unwrap_or_else(|_| self.clone())
+        RichText::new(lines, runs)
+            .and_then(|lines| lines.with_boxes(boxes))
+            .unwrap_or_else(|_| self.clone())
     }
 }
 #[cfg(test)]

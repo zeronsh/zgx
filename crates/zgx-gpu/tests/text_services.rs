@@ -83,3 +83,44 @@ fn headless_words_stay_bounded_and_release_on_demand() {
     frame(15001);
     assert!(held().0 > 0);
 }
+
+/// A node in a paragraph's text (`TextSpan::node`), shaped as a renderer
+/// shapes it: its top `baseline` above the line's baseline, the text about
+/// it on that baseline too, and its line grown to hold it.
+#[test]
+fn an_inline_node_sits_on_its_lines_baseline() {
+    use zgx::scene::NodeKind;
+    let services = TextServices::new();
+    let mut ui = Ui::new(320., 240.);
+    services.install(&mut ui.scene.borrow_mut());
+    let node = InlineNode::new(column().w(30.).h(40.).id("formula"));
+    let view = ui.mount(
+        column().w(320.).text_size(15.).child(
+            rich_text()
+                .id("para")
+                .child(text_span("where "))
+                .child(text_span("$x$").node(&node, 30., 40., 30.))
+                .child(text_span(" holds")),
+        ),
+    );
+    ui.prepare_frame();
+    let scene = ui.scene.borrow();
+    let paragraph = scene.children(view.find("para").unwrap())[0];
+    let NodeKind::RichText { text } = scene.kind(paragraph) else {
+        panic!("a paragraph");
+    };
+    let layout = scene.shape_rich_text(text, None);
+    let baseline = layout.baseline(0).unwrap();
+    let at = scene.bounds(paragraph);
+    let room = scene.bounds(view.find("formula").unwrap());
+    assert!(
+        (room.y + 30. - (at.y + baseline)).abs() < 0.01,
+        "{room:?} on {baseline} of {at:?}"
+    );
+    assert!(
+        room.y >= at.y - 0.01 && room.y + 40. <= at.y + at.height + 0.01,
+        "{room:?} in {at:?}"
+    );
+    // On one line, after its words.
+    assert!(room.x > at.x && at.height < 60., "{room:?} in {at:?}");
+}

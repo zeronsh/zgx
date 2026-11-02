@@ -227,6 +227,65 @@ fn a_restyled_span_keeps_a_selection_across_it() {
     assert_eq!(h.error(), None);
 }
 
+/// `ui.span { node = …, w, h, baseline, text = … }`: a node in the line in
+/// place of its text, as wide and tall as the span says (`w` following a
+/// state reflows it in place), copied as its text.
+#[test]
+fn a_span_holds_a_node_in_its_line_and_copies_as_its_text() {
+    use zgx::input::{InputEvent, PointerButton};
+    let mut h = Harness::inline(
+        r##"local wide = ui.state("wide", 30)
+        return ui.rich {
+            id = "para",
+            selectable = true,
+            w = 300,
+            "where ",
+            ui.span {
+                node = ui.column { id = "formula", w = "100%", h = "100%", bg = "#4080c0" },
+                w = wide,
+                h = 40,
+                baseline = 30,
+                text = "$x$",
+            },
+            " holds",
+        }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    let room = |h: &mut Harness| {
+        let formula = h.find("formula").unwrap();
+        let scene = h.ui.scene.borrow();
+        scene.bounds(scene.parent(formula).unwrap())
+    };
+    let para = h.find("para").unwrap();
+    let para = h.ui.scene.borrow().bounds(para);
+    let first = room(&mut h);
+    assert_eq!((first.width, first.height), (30., 40.));
+    assert!(para.height >= 40., "the line holds it: {para:?}");
+    let button = PointerButton::Primary;
+    let (x, y) = (para.x, para.y + para.height / 2.);
+    h.ui.dispatch(InputEvent::PointerDown {
+        x: x + 1.,
+        y,
+        button,
+    });
+    h.ui.dispatch(InputEvent::PointerMove { x: x + 290., y });
+    h.ui.dispatch(InputEvent::PointerUp {
+        x: x + 290.,
+        y,
+        button,
+    });
+    h.frames(1);
+    assert_eq!(h.ui.selected_text(), "where $x$ holds");
+    h.host
+        .set_state("wide", zgx_script::Value::Num(50.))
+        .unwrap();
+    h.frames(2);
+    let after = room(&mut h);
+    assert_eq!((after.x, after.y, after.width), (first.x, first.y, 50.));
+    assert_eq!(h.error(), None);
+}
+
 /// `wrap = "balance"` balances a text's lines; a state switches it.
 #[test]
 fn wrap_balance_narrows_the_lines_and_follows_state() {

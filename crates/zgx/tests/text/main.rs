@@ -8,6 +8,8 @@ mod composition_rich_text;
 mod find_in_page;
 #[path = "../i18n.rs"]
 mod i18n;
+#[path = "../inline_node.rs"]
+mod inline_node;
 #[path = "../inspect.rs"]
 mod inspect;
 #[path = "../links.rs"]

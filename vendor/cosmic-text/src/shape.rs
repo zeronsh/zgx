@@ -716,6 +716,22 @@ fn shape_run(
         let Some(padding) = attrs.padding_opt else {
             continue;
         };
+        // An inline box: its glyphs take no room but its padding, reach as
+        // far as the box above the baseline and below, and the line holds
+        // the box and the text about it (the font's own reach).
+        if let Some((above, below)) = padding.inline_box {
+            glyph.x_advance = 0.;
+            glyph.x_offset = 0.;
+            glyph.y_offset = 0.;
+            if let Some(metrics) = glyph.metrics_opt.as_mut() {
+                let fit =
+                    (above.0.max(glyph.ascent) + below.0.max(glyph.descent)) * metrics.font_size;
+                metrics.line_height = metrics.line_height.max(fit);
+            }
+            glyph.ascent = above.0;
+            glyph.descent = below.0;
+        }
+        let padding = padding.across;
         if glyph.start == 0 || attrs_list.get_span(glyph.start - 1) != attrs {
             glyph.x_advance += padding.0;
             glyph.x_offset += padding.0;
