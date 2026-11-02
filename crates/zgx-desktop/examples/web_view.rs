@@ -15,10 +15,12 @@
 use std::time::Duration;
 use std::{cell::RefCell, rc::Rc};
 use zgx::{
+    actions::{Action, KeyBinding, Keymap, Keystroke},
     compose::prelude::*,
+    input::{EventPhase, InputEvent, Key, Modifiers},
     web_view::{WebView, WebViewEvent, WebViewOptions},
 };
-use zgx_desktop::{Application, WindowOptions};
+use zgx_desktop::{Application, MenuAction, WindowOptions};
 
 const PAGE: &str = r#"<!doctype html>
 <html><head><meta charset="utf-8"><title>zgx web view</title>
@@ -361,7 +363,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .child(toolbar)
                     .child(page),
             );
-            let keep = Rc::new(RefCell::new(Some(subscription)));
+            // Ctrl+F: find the heading's first word, printing `FIND`. Pressed
+            // in the page (which leaves it alone), it reaches this binding:
+            // WebView2's own find key is off.
+            let root = cx.ui.root();
+            let finder = web.clone();
+            cx.ui.on_event(root, false, move |event| {
+                if event.phase != EventPhase::Capture
+                    && let InputEvent::Action(action) = &event.event
+                    && action.downcast_ref::<MenuAction>().is_some_and(|action| action.0 == "find")
+                {
+                    finder.find("Hello", Default::default(), |found| {
+                        println!("FIND Hello found={} matches={:?}", found.found, found.matches)
+                    });
+                    event.prevent_default();
+                }
+            });
+            let control = Modifiers {
+                control: true,
+                ..Default::default()
+            };
+            let keymap = cx.ui.input.bind_keys(
+                root,
+                Keymap::new().bind(
+                    KeyBinding::new(
+                        [Keystroke::new(Key::Character("f".into()), control)],
+                        Action::new(MenuAction("find".into())),
+                    )
+                    .expect("one keystroke"),
+                ),
+            );
+            let keep = Rc::new(RefCell::new(Some((subscription, keymap))));
             cx.on_closed(move || drop(keep.borrow_mut().take()));
             if fixture {
                 run_fixture(
@@ -616,6 +648,28 @@ fn run_fixture(cx: &mut zgx_desktop::WindowContext, web: WebView, fixture: Fixtu
                 "print and the page's window.print() show the print panel on the window",
                 printed == [true, true],
                 format!("{printed:?}"),
+            );
+            // Find: the heading's word, found and selected; a word the page
+            // hasn't, not; then cleared.
+            let finds = Rc::new(RefCell::new(Vec::new()));
+            for text in ["Hello", "nowhere-in-the-page"] {
+                let finds = finds.clone();
+                web.find(text, Default::default(), move |found| {
+                    finds.borrow_mut().push(found.found)
+                });
+            }
+            for _ in 0..40 {
+                if finds.borrow().len() == 2 {
+                    break;
+                }
+                sleep(25).await;
+            }
+            web.clear_find();
+            let finds = finds.borrow().clone();
+            check(
+                "find finds the heading's word and not a word the page hasn't",
+                finds == [true, false],
+                format!("{finds:?}"),
             );
             web.run_js("window.zgx.postMessage({hello: 1})");
             sleep(200).await;

@@ -123,7 +123,7 @@ objc2-user-notifications = { version = "=0.3.2", default-features = false, featu
 zgx-ghostty-sys = { path = "../zgx-ghostty-sys", version = "0.1.8", optional = true }
 libc = { version = "0.2", optional = true }
 # Native views over zgx (src/native_host): web pages, clipping masks, backdrops.
-objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKWebViewConfiguration", "WKBackForwardList", "WKBackForwardListItem", "WKNavigationDelegate", "WKNavigation", "WKNavigationAction", "WKNavigationResponse", "WKWebsiteDataStore", "WKUserContentController", "WKUserScript", "WKScriptMessageHandler", "WKScriptMessage", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo", "WKSecurityOrigin", "WKPreferences", "WKURLSchemeHandler", "WKURLSchemeTask", "WKOpenPanelParameters"] }
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKWebViewConfiguration", "WKBackForwardList", "WKBackForwardListItem", "WKNavigationDelegate", "WKNavigation", "WKNavigationAction", "WKNavigationResponse", "WKWebsiteDataStore", "WKUserContentController", "WKUserScript", "WKScriptMessageHandler", "WKScriptMessage", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo", "WKSecurityOrigin", "WKPreferences", "WKURLSchemeHandler", "WKURLSchemeTask", "WKOpenPanelParameters", "WKFindConfiguration", "WKFindResult"] }
 # Answers custom-scheme requests on the main queue, from whatever thread served them.
 dispatch2 = "0.3"
 block2 = "0.6"

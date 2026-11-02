@@ -91,6 +91,12 @@ def main():
         wait_for(lambda: heard("MESSAGE"), "the page's message after a click in it")
         print("ok: a click in the page reaches it")
 
+        # Ctrl+F in the page: WebView2's own find key is off, so the page
+        # leaves it to the app, whose binding finds the heading's word.
+        win.key("ctrl+f")
+        wait_for(lambda: heard("FIND Hello found=true"), "the app's find after Ctrl+F in the page")
+        print("ok: Ctrl+F in the page reaches the app, and its find finds the heading")
+
         # zgx's composer over the page: the click and the keyboard are zgx's.
         win.click(window, *at(400, 700))
         time.sleep(0.3)

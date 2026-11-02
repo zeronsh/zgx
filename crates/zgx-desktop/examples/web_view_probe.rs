@@ -24,8 +24,9 @@
 //! hears it). F9 asks the page for its green target full screen (it fills
 //! the box; `FULL_SCREEN <bool>` prints as the state changes) and Ctrl+E
 //! (reserved) exits it. Ctrl+P (reserved) prints the page, and F7 has the
-//! page call `window.print()`. Ctrl+I (reserved) opens Web Inspector; `--large-page` makes the
-//! page's box 900 × 650.
+//! page call `window.print()`. Ctrl+I (reserved) opens Web Inspector; Ctrl+F
+//! finds "Probe" and Ctrl+G a word the page hasn't, each printing `FIND
+//! <text> found=… matches=…`; `--large-page` makes the page's box 900 × 650.
 //!
 //! `--media URL`: the page at URL instead (the smoke's video and audio).
 //! `--unaccelerated`: the page painted on the CPU
@@ -215,6 +216,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if action.0 == "p" {
                         inspect.print();
                     }
+                    // Find: Ctrl+F the heading's word (again, the next
+                    // match), Ctrl+G a word nowhere in the page.
+                    if let Some(text) = match action.0.as_str() {
+                        "f" => Some("Probe"),
+                        "g" => Some("nowhere-in-the-page"),
+                        _ => None,
+                    } {
+                        inspect.find(text, Default::default(), move |found| {
+                            println!(
+                                "FIND {text} found={} matches={:?}",
+                                found.found, found.matches
+                            )
+                        });
+                    }
                     event.prevent_default();
                 }
             });
@@ -237,7 +252,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .bind(bind("l").reserved())
                     .bind(bind("i").reserved())
                     .bind(bind("e").reserved())
-                    .bind(bind("p").reserved()),
+                    .bind(bind("p").reserved())
+                    .bind(bind("f").reserved())
+                    .bind(bind("g").reserved()),
             );
             // `FULL_SCREEN <bool>` as the page's full screen changes.
             let full_screen = {

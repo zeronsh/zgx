@@ -36,8 +36,9 @@ use windows::{
     core::{HRESULT, HSTRING, Interface, PCWSTR, PWSTR},
 };
 use zgx::web_view::{
-    NavigationKind, NavigationRequest, SchemeRequest, SchemeResponder, SchemeResponse,
-    ScriptResult, WeakWebView, WebProfile, WebView, WebViewBackend, WebViewCommand, WebViewEvent,
+    FindOptions, FindResult, NavigationKind, NavigationRequest, SchemeRequest, SchemeResponder,
+    SchemeResponse, ScriptResult, WeakWebView, WebProfile, WebView, WebViewBackend, WebViewCommand,
+    WebViewEvent,
 };
 
 // The loader linked in (webview2-com-sys ships it): no DLL beside the app.
@@ -429,6 +430,9 @@ pub(crate) struct Page {
     /// Commits the tree of the window it shows in, for changes made outside
     /// that window's frames (the page becoming ready, or going).
     commit: RefCell<Option<Rc<dyn Fn()>>>,
+    /// The text and case last searched for (`WebView::find`), so the same
+    /// again steps to the next match.
+    finding: RefCell<Option<(String, bool)>>,
     /// Keys WebView2 saw pressed in it, for the page's word that it left
     /// them alone (`webview2_keys`).
     pressed: RefCell<super::webview2_keys::Pressed>,
@@ -462,6 +466,96 @@ impl WebViewBackend for Backend {
             }
         }
     }
+    fn find(&self, text: &str, options: &FindOptions, reply: Box<dyn FnOnce(FindResult)>) {
+        let page = &self.0;
+        let reply = Rc::new(Cell::new(Some(reply)));
+        let answer = {
+            let reply = reply.clone();
+            move |result: FindResult| {
+                if let Some(reply) = reply.take() {
+                    reply(result);
+                }
+            }
+        };
+        let ready = page.ready.borrow();
+        let Some(ready) = ready.as_ref().filter(|_| page.started.get()) else {
+            return answer(FindResult::default());
+        };
+        // SAFETY: WebView2 objects on the UI thread, where it calls the
+        // completion back.
+        let started = unsafe {
+            (|| -> windows::core::Result<()> {
+                let finder = ready.view.cast::<ICoreWebView2_28>()?.Find()?;
+                let search = (text.to_owned(), options.case_sensitive);
+                if page.finding.borrow().as_ref() == Some(&search) {
+                    if options.backwards {
+                        finder.FindPrevious()?;
+                    } else {
+                        finder.FindNext()?;
+                    }
+                    answer(found(&finder));
+                    return Ok(());
+                }
+                let find = ready
+                    .environment
+                    .cast::<ICoreWebView2Environment15>()?
+                    .CreateFindOptions()?;
+                find.SetFindTerm(&HSTRING::from(text))?;
+                find.SetIsCaseSensitive(options.case_sensitive)?;
+                find.SetShouldHighlightAllMatches(true)?;
+                // zgx's app shows what it found, not WebView2's own bar.
+                find.SetSuppressDefaultFindDialog(true)?;
+                *page.finding.borrow_mut() = Some(search);
+                let backwards = options.backwards;
+                let session = finder.clone();
+                let answer = answer.clone();
+                finder.Start(
+                    &find,
+                    &FindStartCompletedHandler::create(Box::new(move |_| {
+                        // Started at the first match: the last, backwards.
+                        if backwards {
+                            let _ = session.FindPrevious();
+                        }
+                        answer(found(&session));
+                        Ok(())
+                    })),
+                )
+            })()
+        };
+        if started.is_err() {
+            *page.finding.borrow_mut() = None;
+            answer(FindResult::default());
+        }
+    }
+    fn clear_find(&self) {
+        let page = &self.0;
+        *page.finding.borrow_mut() = None;
+        if let Some(ready) = page.ready.borrow().as_ref() {
+            // SAFETY: WebView2's find on the UI thread.
+            unsafe {
+                if let Ok(finder) = ready
+                    .view
+                    .cast::<ICoreWebView2_28>()
+                    .and_then(|view| view.Find())
+                {
+                    let _ = finder.Stop();
+                }
+            }
+        }
+    }
+}
+/// What a find session has found: its matches, as WebView2 counts them.
+///
+/// # Safety
+/// On the UI thread.
+unsafe fn found(finder: &ICoreWebView2Find) -> FindResult {
+    let mut count = -1;
+    // SAFETY: as the caller promises.
+    let _ = unsafe { finder.MatchCount(&mut count) };
+    let mut result = FindResult::default();
+    result.found = count > 0;
+    result.matches = u32::try_from(count).ok();
+    result
 }
 impl Drop for Backend {
     fn drop(&mut self) {
@@ -522,6 +616,7 @@ pub(crate) fn backend(web: &WebView, parent: HWND, scale: f32) -> Option<Rc<Page
         commit: RefCell::new(None),
         pressed: RefCell::default(),
         swallowed: RefCell::default(),
+        finding: RefCell::default(),
     });
     web.attach(Rc::new(Backend(page.clone())));
     let mut schemes: Vec<String> = Vec::new();
@@ -651,6 +746,11 @@ impl Page {
                 settings.SetAreDevToolsEnabled(options.inspectable)?;
                 // WebKit shows no link status bar.
                 settings.SetIsStatusBarEnabled(false)?;
+                // Find, print, reload, zoom, history and devtools keys are
+                // the app's, as on macOS and Linux: `WebView::find` finds.
+                if let Ok(settings) = settings.cast::<ICoreWebView2Settings3>() {
+                    settings.SetAreBrowserAcceleratorKeysEnabled(false)?;
+                }
                 if let Some(agent) = &options.user_agent
                     && let Ok(settings) = settings.cast::<ICoreWebView2Settings2>()
                 {

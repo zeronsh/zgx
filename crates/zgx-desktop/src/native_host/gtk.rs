@@ -209,6 +209,11 @@ api! {
     fn webkit_file_chooser_request_cancel(Ptr);
     fn webkit_print_operation_new(Ptr) -> Ptr;
     fn webkit_print_operation_run_dialog(Ptr, Ptr) -> c_int;
+    fn webkit_web_view_get_find_controller(Ptr) -> Ptr;
+    fn webkit_find_controller_search(Ptr, *const c_char, c_uint, c_uint);
+    fn webkit_find_controller_search_next(Ptr);
+    fn webkit_find_controller_search_previous(Ptr);
+    fn webkit_find_controller_search_finish(Ptr);
     fn webkit_download_cancel(Ptr);
     fn webkit_security_manager_register_uri_scheme_as_secure(Ptr, *const c_char);
     fn webkit_security_manager_register_uri_scheme_as_cors_enabled(Ptr, *const c_char);
@@ -448,6 +453,11 @@ pub struct GdkEventExpose {
 
 /// `WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER`.
 pub const WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER: c_int = 2;
+/// `WebKitFindOptions`: matches whatever their case, from the end back,
+/// and past the page's end.
+pub const WEBKIT_FIND_OPTIONS_CASE_INSENSITIVE: c_uint = 1 << 0;
+pub const WEBKIT_FIND_OPTIONS_BACKWARDS: c_uint = 1 << 3;
+pub const WEBKIT_FIND_OPTIONS_WRAP_AROUND: c_uint = 1 << 4;
 pub const GDK_MOTION_NOTIFY: c_int = 3;
 pub const GDK_BUTTON_PRESS: c_int = 4;
 pub const GDK_BUTTON_RELEASE: c_int = 7;
