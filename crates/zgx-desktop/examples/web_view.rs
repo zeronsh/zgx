@@ -56,7 +56,14 @@ const PAGE: &str = r#"<!doctype html>
   </div>
 </main></body></html>"#;
 
-/// A window's sheet, and the window, if one is attached (a page's dialog).
+/// Whether `view` or one inside it is one of AppKit's print panel's.
+#[cfg(target_os = "macos")]
+fn holds_print_view(view: &objc2_app_kit::NSView) -> bool {
+    view.class().name().to_string_lossy().contains("Print")
+        || view.subviews().iter().any(|child| holds_print_view(&child))
+}
+/// A window's sheet, and the window, if one is attached (a page's dialog,
+/// a print panel).
 #[cfg(target_os = "macos")]
 fn attached_sheet() -> Option<(
     objc2::rc::Retained<objc2_app_kit::NSWindow>,
@@ -575,6 +582,40 @@ fn run_fixture(cx: &mut zgx_desktop::WindowContext, web: WebView, fixture: Fixtu
                 files.asked.get() == Some(true)
                     && chosen == Some(Ok("\"zgx-fixture-upload.txt\"".into())),
                 format!("multiple {:?}, chosen {chosen:?}", files.asked.get()),
+            );
+            // Printing: the app's `print`, then the page's `window.print()`,
+            // each the print panel as a sheet on the window, cancelled here.
+            let mut printed = Vec::new();
+            for from_page in [false, true] {
+                if from_page {
+                    web.run_js("window.print()");
+                } else {
+                    web.print();
+                }
+                let mut sheet = None;
+                for _ in 0..80 {
+                    sleep(50).await;
+                    sheet = attached_sheet();
+                    if sheet.is_some() {
+                        break;
+                    }
+                }
+                // A sheet holding a print panel's views.
+                printed.push(sheet.as_ref().is_some_and(|(_, sheet)| {
+                    sheet
+                        .contentView()
+                        .is_some_and(|view| holds_print_view(&view))
+                }));
+                if let Some((parent, sheet)) = sheet {
+                    // NSModalResponseCancel.
+                    parent.endSheet_returnCode(&sheet, 0);
+                }
+                sleep(500).await;
+            }
+            check(
+                "print and the page's window.print() show the print panel on the window",
+                printed == [true, true],
+                format!("{printed:?}"),
             );
             web.run_js("window.zgx.postMessage({hello: 1})");
             sleep(200).await;

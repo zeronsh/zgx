@@ -51,6 +51,32 @@ const OBSERVED: [&str; 6] = [
     "canGoBack",
     "canGoForward",
 ];
+/// The print panel for the page, a sheet on its window (`WebView::print`,
+/// the page's `window.print()`); nothing for a page in no window.
+fn print_page(view: &WKWebView) {
+    let Some(window) = view.window() else {
+        return;
+    };
+    // SAFETY: WKWebView's print operation (macOS 11) and AppKit's print
+    // calls on the main thread; no delegate, so no selector is called back.
+    unsafe {
+        let info = objc2_app_kit::NSPrintInfo::sharedPrintInfo();
+        let operation = view.printOperationWithPrintInfo(&info);
+        operation.setShowsPrintPanel(true);
+        operation.setShowsProgressPanel(true);
+        // WebKit's print view comes with no size, and prints blank without
+        // one: the page's own.
+        if let Some(printed) = operation.view() {
+            printed.setFrame(view.bounds());
+        }
+        operation.runOperationModalForWindow_delegate_didRunSelector_contextInfo(
+            &window,
+            None,
+            None,
+            std::ptr::null_mut(),
+        );
+    }
+}
 /// A page's script dialog (`alert`, `confirm`, `prompt` with its default).
 enum Dialog {
     Alert,
@@ -172,6 +198,10 @@ fn history(
 
 /// The page-side name of the app's message channel.
 const CHANNEL: &str = "zgx";
+/// The page's `window.print()`, posted here (`PRINT_SCRIPT`): WKWebView's
+/// own print call for it is unpublished.
+const PRINT: &str = "zgxPrint";
+const PRINT_SCRIPT: &str = "(() => { const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zgxPrint; if (handler) window.print = () => handler.postMessage(null); })();";
 /// Defines `window.zgx.postMessage(value)`, sending `value` as JSON.
 const CHANNEL_SCRIPT: &str = "(() => { const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zgx; if (!handler || window.zgx) return; Object.defineProperty(window, 'zgx', { value: Object.freeze({ postMessage(value) { handler.postMessage(JSON.stringify(value === undefined ? null : value)); } }) }); Object.defineProperty(window, 'zgui', { value: window.zgx }); })();"; // rename-to-zgx: keep
 
@@ -371,6 +401,13 @@ define_class!(
     unsafe impl WKScriptMessageHandler for Observer {
         #[unsafe(method(userContentController:didReceiveScriptMessage:))]
         fn message(&self, _controller: &WKUserContentController, message: &WKScriptMessage) {
+            // SAFETY: the message's name, on the main thread.
+            if unsafe { message.name() }.to_string() == PRINT {
+                if let Some(view) = self.ivars().view.borrow().load() {
+                    print_page(&view);
+                }
+                return;
+            }
             // SAFETY: getters of the message WebKit passes for this call
             // (main thread); the body is any of the JavaScript-bridged
             // Foundation objects, which `json` reads as `AnyObject`.
@@ -882,6 +919,20 @@ impl MacWebView {
                 );
                 content.addUserScript(&script);
             }
+            {
+                let content = configuration.userContentController();
+                content.addScriptMessageHandler_name(
+                    ProtocolObject::from_ref(&*observer),
+                    &NSString::from_str(PRINT),
+                );
+                let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                    mtm.alloc(),
+                    &NSString::from_str(PRINT_SCRIPT),
+                    WKUserScriptInjectionTime::AtDocumentStart,
+                    true,
+                );
+                content.addUserScript(&script);
+            }
             if options.messages {
                 let content = configuration.userContentController();
                 content.addScriptMessageHandler_name(
@@ -1130,6 +1181,9 @@ impl WebViewBackend for MacWebView {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn print(&self) {
+        print_page(&self.view);
+    }
 }
 impl Drop for MacWebView {
     fn drop(&mut self) {
@@ -1153,8 +1207,9 @@ impl Drop for MacWebView {
             }
             self.view.setNavigationDelegate(None);
             self.view.setUIDelegate(None);
+            let content = self.view.configuration().userContentController();
+            content.removeScriptMessageHandlerForName(&NSString::from_str(PRINT));
             if self.messages {
-                let content = self.view.configuration().userContentController();
                 content.removeScriptMessageHandlerForName(&NSString::from_str(CHANNEL));
             }
             self.view.stopLoading();

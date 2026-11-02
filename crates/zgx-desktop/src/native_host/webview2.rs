@@ -451,6 +451,17 @@ impl WebViewBackend for Backend {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn print(&self) {
+        if let Some(ready) = self.0.ready.borrow().as_ref() {
+            // SAFETY: WebView2 on the UI thread. Its print preview, as the
+            // page's `window.print()` shows.
+            unsafe {
+                if let Ok(view) = ready.view.cast::<ICoreWebView2_16>() {
+                    let _ = view.ShowPrintUI(COREWEBVIEW2_PRINT_DIALOG_KIND_BROWSER);
+                }
+            }
+        }
+    }
 }
 impl Drop for Backend {
     fn drop(&mut self) {

@@ -20,7 +20,8 @@
 //! Ctrl+K (the page leaves it alone) and Ctrl+L (reserved: the page never
 //! hears it). F9 asks the page for its green target full screen (it fills
 //! the box; `FULL_SCREEN <bool>` prints as the state changes) and Ctrl+E
-//! (reserved) exits it. Ctrl+I (reserved) opens Web Inspector; `--large-page` makes the
+//! (reserved) exits it. Ctrl+P (reserved) prints the page, and F7 has the
+//! page call `window.print()`. Ctrl+I (reserved) opens Web Inspector; `--large-page` makes the
 //! page's box 900 × 650.
 //!
 //! `--media URL`: the page at URL instead (the smoke's video and audio).
@@ -59,6 +60,7 @@ field.addEventListener('compositionend', (e) => post({ composition: 'end', data:
 document.addEventListener('keydown', (e) => {
   post({ key: e.key, code: e.code, ctrl: e.ctrlKey });
   if (e.ctrlKey && e.key === 'j') e.preventDefault();
+  if (e.key === 'F7') { post({ printing: true }); window.print(); }
   if (e.key === 'F8') for (const dot of document.querySelectorAll('.dot')) dot.style.background = 'rgb(0, 255, 0)';
   if (e.key === 'F9') document.getElementById('target').requestFullscreen();
 }, true);
@@ -192,6 +194,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if action.0 == "e" {
                         inspect.exit_full_screen();
                     }
+                    if action.0 == "p" {
+                        inspect.print();
+                    }
                     event.prevent_default();
                 }
             });
@@ -213,7 +218,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .bind(bind("k"))
                     .bind(bind("l").reserved())
                     .bind(bind("i").reserved())
-                    .bind(bind("e").reserved()),
+                    .bind(bind("e").reserved())
+                    .bind(bind("p").reserved()),
             );
             // `FULL_SCREEN <bool>` as the page's full screen changes.
             let full_screen = {
