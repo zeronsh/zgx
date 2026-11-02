@@ -1292,6 +1292,21 @@ impl Engine {
         }
     }
 
+    /// The checks waiting on the last window's tasks, on this one's: they
+    /// would end with that window, their pending flags left set, and no
+    /// check was ever scheduled again (the process in front never named
+    /// after a tab moved to another window and the first closed).
+    fn move_timers(self: &Rc<Self>) {
+        if self.process_check.take().is_some() {
+            self.process_task.borrow_mut().take();
+            self.schedule_process_check();
+        }
+        if self.polling.replace(false) {
+            self.poll_task.borrow_mut().take();
+            self.poll();
+        }
+    }
+
     /// Ask the resolver twice a second while it resolves this terminal and
     /// the app doesn't say when what it sees changes.
     fn poll(self: &Rc<Self>) {
@@ -1409,6 +1424,7 @@ pub fn terminal_view(term: &Terminal) -> View {
                 if let (Some(engine), Some(runner)) = (&engine, cx.try_service::<TaskRunner>()) {
                     *engine.runner.borrow_mut() = (*runner).clone();
                     engine.listen();
+                    engine.move_timers();
                 }
                 engine
             }
