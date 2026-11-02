@@ -1529,3 +1529,41 @@ mod baked {
         assert!(h.baked().is_none());
     }
 }
+
+/// A box whose colour reads a selection, moved and faded by
+/// `anime.animate`: the selection changing elsewhere re-runs the box's style
+/// and leaves what the animation set, and the selection reaching the box
+/// changes its colour, the animated values kept.
+#[test]
+fn an_unrelated_restyle_keeps_what_animate_set() {
+    let mut h = Harness::inline(
+        r##"local sel = ui.state("sel", 0)
+        ui.command { id = "elsewhere", run = function() sel:set(sel:get() + 2) end }
+        ui.command { id = "mine", run = function() sel:set(1) end }
+        ui.command { id = "go", run = function()
+            anime.animate("#box", { x = 100, opacity = 0.5, duration = 100, ease = "linear" })
+        end }
+        return ui.column {
+            ui.div { id = "box", w = 10, h = 10,
+                bg = function() return if sel:get() == 1 then "#ff8800" else "#223344" end },
+        }"##,
+    );
+    h.frame();
+    assert!(h.host.run_command("go"));
+    h.frame();
+    h.run_ms(200.);
+    close(h.x("box"), 100., "x after the animation");
+    close(h.opacity("box"), 0.5, "opacity after the animation");
+    for _ in 0..3 {
+        assert!(h.host.run_command("elsewhere"));
+        h.frame();
+        close(h.x("box"), 100., "x after an unrelated change");
+        close(h.opacity("box"), 0.5, "opacity after an unrelated change");
+        assert_eq!(h.fill("box"), Color(0x22, 0x33, 0x44, 255));
+    }
+    assert!(h.host.run_command("mine"));
+    h.frame();
+    assert_eq!(h.fill("box"), Color(0xff, 0x88, 0, 255));
+    close(h.x("box"), 100., "x after the colour changed");
+    close(h.opacity("box"), 0.5, "opacity after the colour changed");
+}
