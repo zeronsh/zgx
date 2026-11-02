@@ -134,3 +134,26 @@ fn a_target_does_not_reach_another_views_modal() {
     assert!(find(&ui, &first, r#""Theirs""#).is_err());
     assert!(find(&ui, &other, r#""Theirs""#).is_ok());
 }
+
+/// A scroll view's node says where it is in what it can scroll, so an
+/// offset past its range (content shrunk under it) shows apart from an
+/// elastic stretch left behind; other nodes say nothing of scrolling.
+#[test]
+fn a_scroll_views_node_tells_its_offset_and_range() {
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            ui.scroll { id = "nav", w = 120, h = 100,
+                ui.column { ui.div { h = 300 } } },
+            ui.div { id = "plain", w = 10, h = 10 },
+        }"##,
+    );
+    let mut field = |target: &str| {
+        let node = h.find(target).unwrap();
+        zgx_script::driver::node(&h.ui, None, node)
+            .into_iter()
+            .find(|(k, _)| k == "scroll")
+            .map(|(_, v)| v)
+    };
+    assert_eq!(field("nav").as_deref(), Some("offset 0 of 0 to 200"));
+    assert_eq!(field("plain"), None);
+}

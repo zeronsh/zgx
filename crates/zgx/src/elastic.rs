@@ -90,6 +90,24 @@ impl Elastic {
     fn stretched(&self) -> bool {
         self.shown.with_untracked(|s| *s) != 0.
     }
+    /// Whether its content fits: it can't scroll, so nothing stretches it.
+    fn fits(&self) -> bool {
+        self.limit() <= 0.
+    }
+    /// Back in place at once, its push and spring forgotten.
+    fn snap(&self) {
+        self.spring.set(None);
+        self.next.set(None);
+        self.bounced.set(None);
+        self.pushed.set(0.);
+        if self.stretched() {
+            self.shown.set(0.);
+        }
+    }
+    /// Whether it is still on its way back: stretched, or due a step.
+    fn moving(&self) -> bool {
+        self.stretched() || self.next.get().is_some()
+    }
 }
 
 /// The document's elastic state.
@@ -104,8 +122,12 @@ pub(crate) struct State {
     /// The momentum bounced off an edge: the rest of it is spent there, as
     /// AppKit's is, not bounced again each time the spring settles.
     bounced: bool,
-    /// The view the gesture stretches (or springs back).
+    /// The view the gesture stretches.
     active: Option<Weak<Elastic>>,
+    /// Every view stretched or springing back (`active` among them): each
+    /// springs back on its own, whichever the next gesture takes. Empty
+    /// unless something is stretched.
+    moving: Vec<Weak<Elastic>>,
     /// Swipes between pages are on (`Ui::set_navigation_swipes`).
     pub(crate) swipes: bool,
     /// The gesture's first scroll is still to come: only it starts a swipe.
@@ -149,6 +171,47 @@ pub(crate) fn register(
     shown
 }
 
+/// `view` is stretched (or springing back): kept with the others.
+fn keep_moving(ui: &Ui, view: &Rc<Elastic>) {
+    let mut state = ui.elastic_state().borrow_mut();
+    if !state
+        .moving
+        .iter()
+        .any(|moving| moving.as_ptr() == Rc::as_ptr(view))
+    {
+        state.moving.push(Rc::downgrade(view));
+    }
+}
+
+/// The views stretched or springing back, alive.
+fn moving(ui: &Ui) -> Vec<Rc<Elastic>> {
+    let state = ui.elastic_state().borrow();
+    state.moving.iter().filter_map(Weak::upgrade).collect()
+}
+
+/// `id`'s scroll view's offset, how far it can scroll and its stretch, if
+/// `id` is a scroll view (its root, or the viewport or content inside).
+pub(crate) fn report(ui: &Ui, id: NodeId) -> Option<(f32, f32, f32)> {
+    let scene = ui.scene.borrow();
+    let state = ui.elastic_state().borrow();
+    std::iter::once(id)
+        .chain(scene.ancestors(id).take(2))
+        .find_map(|node| {
+            state
+                .views
+                .iter()
+                .find(|(root, _)| *root == node)
+                .and_then(|(_, view)| view.upgrade())
+        })
+        .map(|view| {
+            (
+                view.offset.with_untracked(|o| *o),
+                view.limit(),
+                view.shown.with_untracked(|s| *s),
+            )
+        })
+}
+
 fn active(ui: &Ui) -> Option<Rc<Elastic>> {
     ui.elastic_state().borrow().active.as_ref()?.upgrade()
 }
@@ -187,8 +250,15 @@ pub(crate) fn gesture(ui: &Ui, phase: ScrollGesture) {
             }
         }
     };
-    if release && let Some(view) = active(ui) {
-        view.release(now);
+    if release && !ui.elastic_state().borrow().moving.is_empty() {
+        // Every stretched view, not the active one alone: one a gesture
+        // left as another took over springs back too.
+        for view in moving(ui) {
+            match view.fits() {
+                true => view.snap(),
+                false => view.release(now),
+            }
+        }
     }
 }
 
@@ -289,6 +359,10 @@ pub(crate) fn after_scroll(ui: &Ui, event: &InputEvent, result: &DispatchResult)
     let Some(view) = view else {
         return;
     };
+    if view.fits() {
+        view.snap();
+        return;
+    }
     // Only past the edge the delta pushes toward.
     let at = view.offset.with_untracked(|o| *o);
     let limit = view.limit();
@@ -319,7 +393,20 @@ pub(crate) fn after_scroll(ui: &Ui, event: &InputEvent, result: &DispatchResult)
         }
     }
     view.push(delta);
-    ui.elastic_state().borrow_mut().active = Some(Rc::downgrade(&view));
+    keep_moving(ui, &view);
+    let previous = ui
+        .elastic_state()
+        .borrow_mut()
+        .active
+        .replace(Rc::downgrade(&view));
+    // Another view the gesture left stretched springs back from where it
+    // shows (it's in `moving`, so it steps on its own).
+    if let Some(previous) = previous.and_then(|previous| previous.upgrade())
+        && !Rc::ptr_eq(&previous, &view)
+        && previous.spring.get().is_none()
+    {
+        previous.release(now);
+    }
 }
 
 /// Whether the gesture over `target` becomes a swipe between pages
@@ -339,14 +426,50 @@ fn swipe(ui: &Ui, target: Option<NodeId>) -> bool {
 
 /// When the stretched view next steps back. Nothing stretched, nothing.
 pub(crate) fn next_step(ui: &Ui) -> Option<Instant> {
-    active(ui)?.next.get()
+    let state = ui.elastic_state().borrow();
+    if state.moving.is_empty() {
+        return None;
+    }
+    state
+        .moving
+        .iter()
+        .filter_map(|view| view.upgrade()?.next.get())
+        .min()
 }
 
 /// Step the spring (or end a bounce) due by `now`; whether it moved.
 pub(crate) fn advance(ui: &Ui, now: Instant) -> bool {
-    let Some(view) = active(ui) else {
+    if ui.elastic_state().borrow().moving.is_empty() {
         return false;
-    };
+    }
+    let mut moved = false;
+    for view in moving(ui) {
+        moved |= step(ui, &view, now);
+    }
+    // Settled views (and unmounted ones) leave the list; the active one
+    // too, once settled.
+    let mut state = ui.elastic_state().borrow_mut();
+    state
+        .moving
+        .retain(|view| view.upgrade().is_some_and(|view| view.moving()));
+    if state
+        .active
+        .as_ref()
+        .and_then(Weak::upgrade)
+        .is_none_or(|view| !view.moving())
+    {
+        state.active = None;
+    }
+    moved
+}
+
+/// Step `view`'s spring (or end its bounce) if due by `now`; whether it
+/// moved.
+fn step(ui: &Ui, view: &Rc<Elastic>, now: Instant) -> bool {
+    if view.fits() && view.moving() {
+        view.snap();
+        return true;
+    }
     if view.next.get().is_none_or(|next| next > now) {
         return false;
     }
@@ -365,11 +488,7 @@ pub(crate) fn advance(ui: &Ui, now: Instant) -> bool {
     let t = now.saturating_duration_since(since).as_secs_f32();
     let shown = from * (1. + SPRING * t) * (-SPRING * t).exp();
     if shown.abs() < 0.5 {
-        view.spring.set(None);
-        view.next.set(None);
-        view.pushed.set(0.);
-        view.shown.set(0.);
-        ui.elastic_state().borrow_mut().active = None;
+        view.snap();
     } else {
         view.shown.set(shown);
         // A step a refresh (`Ui::set_refresh_interval`).

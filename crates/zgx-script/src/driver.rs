@@ -1086,6 +1086,17 @@ pub fn node(
         out.push(("focused".into(), "yes".into()));
     }
     out.push(("box".into(), rect(scene.bounds(node))));
+    // A scroll view: where it is in what it can scroll, and any stretch.
+    if let Some((offset, range, stretch)) = ui.scroll_report(node) {
+        let mut scroll = format!("offset {} of 0 to {}", short(offset), short(range));
+        if offset < 0. || offset > range + 0.5 {
+            scroll.push_str(" (past its range)");
+        }
+        if stretch != 0. {
+            scroll.push_str(&format!(", stretched {}", short(stretch)));
+        }
+        out.push(("scroll".into(), scroll));
+    }
     // Where it takes clicks, if an animation is taking it elsewhere
     // (`hit = "target"`).
     let off = scene.hit_offset(node);
@@ -1112,4 +1123,14 @@ pub fn drag(ui: &mut Ui, from: Rect, to: Rect) {
     );
     let end = (to.x + to.width / 2., to.y + to.height / 3.);
     drag_between(ui, start, end);
+}
+
+/// A coordinate as `zgx inspect` shows it: whole when it is, else to a
+/// tenth.
+fn short(v: f32) -> String {
+    if v.fract() == 0. {
+        format!("{v}")
+    } else {
+        format!("{v:.1}")
+    }
 }

@@ -2859,6 +2859,14 @@ impl Ui {
     pub fn set_elastic_scrolling(&self, elastic: bool) {
         self.storage.elastic.borrow_mut().enabled = elastic;
     }
+    /// For devtools (`zgx inspect`): `id`'s scroll view's offset, how far
+    /// it can scroll, and its elastic stretch (0 unless a trackpad pushed it
+    /// past an edge), when `id` is a scroll view (its root, or the viewport
+    /// or content inside). An offset past its range and a stretch left
+    /// behind look alike on screen; these tell them apart.
+    pub fn scroll_report(&self, id: NodeId) -> Option<(f32, f32, f32)> {
+        crate::elastic::report(self, id)
+    }
     /// Take a trackpad's swipe between pages as navigation, as Safari does:
     /// a gesture that starts across where nothing under it scrolls that way
     /// (each scroll view at its edge), over a view that takes navigation
