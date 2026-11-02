@@ -219,3 +219,72 @@ fn fractional_dpi_change_uses_the_exact_retained_scroll_offset() {
     assert_eq!(fresh, 0.);
     assert_eq!(live, fresh);
 }
+/// Scroll content that repaints rather than copies when it moves (a layer of
+/// its own: a fade, an isolated group) damages what went or moved in it
+/// after the move where it was painted, before the move: a node gone (a
+/// hovered row's lane under a still pointer) or a box laid out again.
+#[test]
+fn a_moved_layer_repaints_what_changed_after_the_move_where_it_was() {
+    use zgx::scene::Rect;
+    let mut ui = Ui::new(300., 300.);
+    let offset = ui.signal(0.);
+    let shown = ui.signal(true);
+    let read_shown = shown.clone();
+    let wide = ui.signal(false);
+    let read_wide = wide.clone();
+    let view = ui.mount(
+        scroll(offset.clone())
+            .w(200.)
+            .h(200.)
+            .child(div().h(100.))
+            .child(switch(
+                move || read_shown.get(),
+                |shown, _| match shown {
+                    true => div().w(60.).h(16.).bg(rgb(0xff2020)),
+                    false => div().h(16.),
+                },
+            ))
+            .child(
+                div()
+                    .h(20.)
+                    .reactive_style(move || {
+                        Styles::new().w(if read_wide.get() { 120. } else { 40. })
+                    })
+                    .bg(rgb(0x2020ff)),
+            )
+            .child(div().h(600.)),
+    );
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    ui.scene.borrow_mut().set_isolated(view.node(), true);
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    // Moved, then (a frame's later work) the lane goes and the bar narrows
+    // from where it was laid out.
+    wide.set(true);
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    offset.set(30.);
+    ui.prepare_frame();
+    shown.set(false);
+    wide.set(false);
+    ui.prepare_frame();
+    let damage = ui.scene.borrow_mut().flush().damage;
+    let covered = |painted: Rect| {
+        // Every point of it, to the pixel.
+        (0..painted.height as i32).all(|y| {
+            (0..painted.width as i32).all(|x| {
+                let pixel = Rect::new(painted.x + x as f32, painted.y + y as f32, 1., 1.);
+                damage.iter().any(|rect| rect.intersects(pixel))
+            })
+        })
+    };
+    assert!(
+        covered(Rect::new(0., 100., 60., 16.)),
+        "the lane: {damage:?}"
+    );
+    assert!(
+        covered(Rect::new(0., 116., 120., 20.)),
+        "the bar: {damage:?}"
+    );
+}
