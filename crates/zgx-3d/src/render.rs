@@ -66,26 +66,77 @@ struct FrameUniforms {
 /// weights.
 type Casting = (Mat4, Vec<(u64, Mat4, u32)>, Vec<Mat4>, Vec<[f32; 2]>);
 
-/// What sets a pipeline apart from the plain one (`Variant::default()`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Variant {
-    textured: bool,
-    skinned: bool,
+/// What sets a pipeline apart from the plain one (`Variant::default()`),
+/// as bits: a frame makes one for every mesh and compares and hashes them
+/// a run, and one number costs those least.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+struct Variant(u16);
+impl Variant {
+    /// It samples maps (or stand-ins).
+    const TEXTURED: u16 = 1 << 0;
+    /// Its joints place its vertices.
+    const SKINNED: u16 = 1 << 1;
     /// Lit by an environment.
-    lit: bool,
-    morphing: bool,
+    const LIT: u16 = 1 << 2;
+    /// Its morph targets blend it.
+    const MORPHING: u16 = 1 << 3;
     /// Its back faces draw.
-    two_sided: bool,
+    const TWO_SIDED: u16 = 1 << 4;
     /// Cut out by its base colour's alpha.
-    masked: bool,
+    const MASKED: u16 = 1 << 5;
     /// Its maps placed (`World::set_map_placement`).
-    placed: bool,
+    const PLACED: u16 = 1 << 6;
     /// Its geometry has vertex colours.
-    colored: bool,
+    const COLORED: u16 = 1 << 7;
     /// Light passes through it (`World::set_transmission`).
-    transmitting: bool,
+    const TRANSMITTING: u16 = 1 << 8;
     /// A clear coat over it (`World::set_clearcoat`).
-    coated: bool,
+    const COATED: u16 = 1 << 9;
+    /// It reflects as its specular says (`World::set_specular`).
+    const SPECULAR: u16 = 1 << 10;
+    // `Extras::kinds`' bits, shifted, are these (see `variant_of`).
+    const _KINDS: () = assert!(
+        Self::TRANSMITTING == crate::world::GLASS as u16 * Self::TRANSMITTING
+            && Self::COATED == crate::world::COAT as u16 * Self::TRANSMITTING
+            && Self::SPECULAR == crate::world::SPECULAR as u16 * Self::TRANSMITTING
+    );
+    /// It with `bit` on or off.
+    fn with(self, bit: u16, on: bool) -> Self {
+        Self(if on { self.0 | bit } else { self.0 & !bit })
+    }
+    fn textured(self) -> bool {
+        self.0 & Self::TEXTURED != 0
+    }
+    fn skinned(self) -> bool {
+        self.0 & Self::SKINNED != 0
+    }
+    fn lit(self) -> bool {
+        self.0 & Self::LIT != 0
+    }
+    fn morphing(self) -> bool {
+        self.0 & Self::MORPHING != 0
+    }
+    fn two_sided(self) -> bool {
+        self.0 & Self::TWO_SIDED != 0
+    }
+    fn masked(self) -> bool {
+        self.0 & Self::MASKED != 0
+    }
+    fn placed(self) -> bool {
+        self.0 & Self::PLACED != 0
+    }
+    fn colored(self) -> bool {
+        self.0 & Self::COLORED != 0
+    }
+    fn transmitting(self) -> bool {
+        self.0 & Self::TRANSMITTING != 0
+    }
+    fn coated(self) -> bool {
+        self.0 & Self::COATED != 0
+    }
+    fn specular(self) -> bool {
+        self.0 & Self::SPECULAR != 0
+    }
 }
 /// Hashes a `Variant` by its own bits: they're few and its, and the
 /// pipelines are looked up a run a frame.
@@ -106,37 +157,6 @@ impl std::hash::Hasher for VariantHasher {
     }
     fn write_u8(&mut self, bits: u8) {
         self.0 = u64::from(bits);
-    }
-}
-impl std::hash::Hash for Variant {
-    /// As one number: it keys the pipelines, looked up a run a frame, and
-    /// each field hashed on its own costs them all another write.
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        let Variant {
-            textured,
-            skinned,
-            lit,
-            morphing,
-            two_sided,
-            masked,
-            placed,
-            colored,
-            transmitting,
-            coated,
-        } = *self;
-        let fields = [
-            textured,
-            skinned,
-            lit,
-            morphing,
-            two_sided,
-            masked,
-            placed,
-            colored,
-            transmitting,
-            coated,
-        ];
-        state.write_u16(fields.iter().fold(0, |bits, &on| bits << 1 | u16::from(on)));
     }
 }
 /// Meshes drawn together: of one geometry, maps and variant.
@@ -594,25 +614,28 @@ impl Viewport for Renderer {
         // Runs of one geometry and texture, of one pass (opaque, then
         // translucent).
         let variant_of = |d: &crate::world::Drawn| {
-            // Its extras looked at once.
-            let (transmitting, coated) = d.extras.map_or((false, false), |e| {
-                (e.transmission.is_some(), e.clearcoat.is_some())
-            });
-            Variant {
-                // Light passing through it, or a coat, reads group 1: maps or
-                // stand-ins.
-                textured: transmitting || coated || d.maps.iter().any(Option::is_some),
-                skinned: skinned(d),
-                lit,
-                morphing: morphing(d),
-                two_sided: d.surface.double_sided,
-                // Cut by a base colour texture's alpha: without one, whole.
-                masked: d.surface.alpha_cutoff.is_some() && d.maps[0].is_some(),
-                placed: placed(d),
-                colored: d.geometry.colors().is_some(),
-                transmitting,
-                coated,
-            }
+            // What it has of light passing through, a coat and a specular,
+            // in one byte.
+            let kinds = d.extras.map_or(0, |e| e.kinds);
+            let bit = |on: bool, bit: u16| if on { bit } else { 0 };
+            Variant(
+                // Light passing through it, a coat or a specular reads group
+                // 1: maps or stand-ins.
+                bit(kinds != 0 || d.maps.iter().any(Option::is_some), Variant::TEXTURED)
+                    | bit(skinned(d), Variant::SKINNED)
+                    | bit(lit, Variant::LIT)
+                    | bit(morphing(d), Variant::MORPHING)
+                    | bit(d.surface.double_sided, Variant::TWO_SIDED)
+                    // Cut by a base colour texture's alpha: without one, whole.
+                    | bit(
+                        d.surface.alpha_cutoff.is_some() && d.maps[0].is_some(),
+                        Variant::MASKED,
+                    )
+                    | bit(placed(d), Variant::PLACED)
+                    | bit(d.geometry.colors().is_some(), Variant::COLORED)
+                    // `kinds`' bits, in their order.
+                    | (u16::from(kinds) * Variant::TRANSMITTING),
+            )
         };
         // Of one geometry and maps, a world without poses or surfaces has
         // one variant.
@@ -700,9 +723,7 @@ impl Viewport for Renderer {
             // Translucent meshes cast none.
             for run in runs.iter().filter(|run| !run.glass) {
                 let buffers = &gpu.geometries[&run.geometry];
-                let Variant {
-                    skinned, morphing, ..
-                } = run.variant;
+                let (skinned, morphing) = (run.variant.skinned(), run.variant.morphing());
                 let key = shadow_key(run.variant);
                 let (masked, placed) = (key & CUT_OUT != 0, key & PLACED != 0);
                 match gpu.shadow_variants.get(&key) {
@@ -765,7 +786,7 @@ impl Viewport for Renderer {
         // What is behind meshes light passes through: the others drawn
         // first into a picture of their own, made smaller and smaller for
         // rough surfaces to read blurred.
-        if gpu.behind.is_some() && runs.iter().any(|run| run.variant.transmitting) {
+        if gpu.behind.is_some() && runs.iter().any(|run| run.variant.transmitting()) {
             draw_behind(frame.encoder, gpu, runs, frame_bind, clear);
         }
         let mut pass = frame
@@ -887,52 +908,43 @@ const CUT_OUT: u8 = 4;
 const PLACED: u8 = 8;
 /// What sets `variant`'s shadow pipeline apart, as one number (looked up a
 /// run a frame): skinned, morphing, cut out (`CUT_OUT`) and, cut out,
-/// placed (`PLACED`) and coated, its maps bound as its mesh's. A mesh light
+/// placed (`PLACED`) and layered (a coat or specular), its maps bound as its
+/// mesh's. A mesh light
 /// passes through casts its whole shadow (its binding isn't a cut-out
 /// shadow's).
 #[inline(always)]
 fn shadow_key(variant: Variant) -> u8 {
-    let masked = variant.masked && !variant.transmitting;
+    let masked = variant.masked() && !variant.transmitting();
     let bit = |on: bool, bit: u8| if on { bit } else { 0 };
-    bit(variant.skinned, 1)
-        | bit(variant.morphing, 2)
+    bit(variant.skinned(), 1)
+        | bit(variant.morphing(), 2)
         | bit(masked, CUT_OUT)
-        | bit(masked && variant.placed, PLACED)
-        | bit(masked && variant.coated, 16)
+        | bit(masked && variant.placed(), PLACED)
+        | bit(masked && (variant.coated() || variant.specular()), 16)
 }
 /// A skinned, morphing or cut-out shadow's pipeline for `variant`'s meshes.
 /// Made once, rarely: out of the frame's code.
 #[cold]
 #[inline(never)]
 fn make_shadow_pipeline(gpu: &mut Gpu, device: &wgpu::Device, variant: Variant) {
-    let Variant {
-        skinned,
-        morphing,
-        masked,
-        placed,
-        transmitting,
-        coated,
-        ..
-    } = variant;
+    let (skinned, morphing) = (variant.skinned(), variant.morphing());
     let key = shadow_key(variant);
     // A mesh light passes through casts its whole shadow.
-    let masked = masked && !transmitting;
-    let placed = masked && placed;
-    let coated = masked && coated;
-    let variant = Variant {
-        textured: masked,
-        skinned,
-        morphing,
-        masked,
-        placed,
-        ..Variant::default()
-    };
+    let masked = variant.masked() && !variant.transmitting();
+    let placed = masked && variant.placed();
+    let layered = masked && (variant.coated() || variant.specular());
+    let variant = Variant::default()
+        .with(Variant::TEXTURED, masked)
+        .with(Variant::SKINNED, skinned)
+        .with(Variant::MORPHING, morphing)
+        .with(Variant::MASKED, masked)
+        .with(Variant::PLACED, placed);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("3D skinned, morphing or cut-out shadows"),
         source: wgpu::ShaderSource::Wgsl(wgsl(variant, 1).into()),
     });
     // A cut-out shadow binds its mesh's maps, as its mesh does.
-    let extent = if coated {
+    let extent = if layered {
         Some(Extent::Layered)
     } else if placed {
         Some(Extent::Placed)
@@ -964,18 +976,18 @@ fn make_main_pipelines(gpu: &mut Gpu, device: &wgpu::Device, variant: Variant) {
         label: Some("3D mesh variant"),
         source: wgpu::ShaderSource::Wgsl(wgsl(variant, gpu.samples).into()),
     });
-    let extent = if variant.transmitting {
+    let extent = if variant.transmitting() {
         Some(Extent::Glass)
-    } else if variant.coated {
+    } else if variant.coated() || variant.specular() {
         Some(Extent::Layered)
-    } else if variant.placed {
+    } else if variant.placed() {
         Some(Extent::Placed)
     } else {
-        variant.textured.then_some(Extent::Maps)
+        variant.textured().then_some(Extent::Maps)
     };
     make_layout(gpu, device, extent);
     let group0 = match &gpu.environment_layout {
-        Some((layout, _)) if variant.lit => layout,
+        Some((layout, _)) if variant.lit() => layout,
         _ => &gpu.layout,
     };
     let group1 = layout_of(gpu, extent);
@@ -985,7 +997,7 @@ fn make_main_pipelines(gpu: &mut Gpu, device: &wgpu::Device, variant: Variant) {
         Some(&gpu.palette_layout),
         Some(&gpu.morph_layout),
     ];
-    let count = match (variant.skinned, variant.morphing) {
+    let count = match (variant.skinned(), variant.morphing()) {
         (_, true) => 4,
         (true, false) => 3,
         (false, false) => 2,
@@ -1079,7 +1091,7 @@ fn draw_behind(
     let mut bound = Bound::default();
     for run in runs
         .iter()
-        .filter(|run| !run.glass && !run.variant.transmitting)
+        .filter(|run| !run.glass && !run.variant.transmitting())
     {
         draw_run(&mut pass, gpu, run, &mut bound);
     }
@@ -1093,12 +1105,12 @@ fn draw_behind(
 fn draw_run(pass: &mut wgpu::RenderPass<'_>, gpu: &Gpu, run: &Run, bound: &mut Bound) {
     let buffers = &gpu.geometries[&run.geometry];
     let maps = gpu.bindings.get(&run.maps).map(|(binding, _)| binding);
-    let skin = buffers.skin.as_ref().filter(|_| run.variant.skinned);
-    let morphs = buffers.morphs.as_ref().filter(|_| run.variant.morphing);
+    let skin = buffers.skin.as_ref().filter(|_| run.variant.skinned());
+    let morphs = buffers.morphs.as_ref().filter(|_| run.variant.morphing());
     let palette = gpu
         .palettes
         .as_ref()
-        .filter(|_| run.variant.skinned || run.variant.morphing);
+        .filter(|_| run.variant.skinned() || run.variant.morphing());
     match gpu.variants.get(&run.variant) {
         Some(pipelines) => {
             bound.pipeline(pass, &pipelines[usize::from(run.glass)]);
@@ -1109,14 +1121,12 @@ fn draw_run(pass: &mut wgpu::RenderPass<'_>, gpu: &Gpu, run: &Run, bound: &mut B
             if let Some(skin) = skin {
                 bound.vertices(pass, 2, skin);
             }
-            if let Some(uvs) = buffers.second_uvs.as_ref().filter(|_| run.variant.placed) {
-                let slot = 2 + u32::from(run.variant.skinned);
+            if let Some(uvs) = buffers.second_uvs.as_ref().filter(|_| run.variant.placed()) {
+                let slot = 2 + u32::from(run.variant.skinned());
                 bound.vertices(pass, slot, uvs);
             }
-            if let Some(colors) = buffers.colors.as_ref().filter(|_| run.variant.colored) {
-                let Variant {
-                    skinned, placed, ..
-                } = run.variant;
+            if let Some(colors) = buffers.colors.as_ref().filter(|_| run.variant.colored()) {
+                let (skinned, placed) = (run.variant.skinned(), run.variant.placed());
                 let slot = 2 + u32::from(skinned) + u32::from(placed);
                 bound.vertices(pass, slot, colors);
             }
@@ -1337,7 +1347,7 @@ fn map_set(d: &crate::world::Drawn) -> [u64; MAPS] {
     }
     // Light passing through or a coat binds group 1 with maps or without
     // (never 0).
-    if extras.transmission.is_some() || extras.clearcoat.is_some() {
+    if extras.layered() {
         // Mixed in whole (a bit set over it made two textures whose ids
         // differ in that bit alone one binding), and never all 0.
         maps[0] ^= layers_key(extras);
@@ -1350,8 +1360,9 @@ fn map_set(d: &crate::world::Drawn) -> [u64; MAPS] {
 /// Of a mesh's layer maps (`Extras::layer_maps`), how many are light
 /// passing through's; a clear coat's follow.
 const GLASS_MAPS: usize = 2;
-/// A number for how light passes through a mesh and its maps, and for its
-/// coat and its maps. Few meshes have either: out of `map_set`'s code.
+/// A number for how light passes through a mesh and its maps, for its coat
+/// and its maps, and for its specular. Few meshes have any: out of
+/// `map_set`'s code.
 #[cold]
 #[inline(never)]
 fn layers_key(extras: &crate::world::Extras) -> u64 {
@@ -1363,24 +1374,29 @@ fn layers_key(extras: &crate::world::Extras) -> u64 {
             .into_iter()
             .for_each(|n| mix(n.into()));
         for map in extras
-            .layer_maps
+            .layer_maps()
             .iter()
             .flat_map(|maps| &maps[..GLASS_MAPS])
         {
             mix(map.as_ref().map_or(0, crate::Texture::id));
         }
     }
-    if let Some(clearcoat) = &extras.clearcoat {
+    if let Some(clearcoat) = extras.clearcoat() {
         // Apart from a transmission's numbers.
         mix(0xc0a7);
         clearcoat.numbers().into_iter().for_each(|n| mix(n.into()));
         for map in extras
-            .layer_maps
+            .layer_maps()
             .iter()
             .flat_map(|maps| &maps[GLASS_MAPS..])
         {
             mix(map.as_ref().map_or(0, crate::Texture::id));
         }
+    }
+    if let Some(specular) = extras.specular() {
+        // Apart from both.
+        mix(0x5bec);
+        specular.numbers().into_iter().for_each(|n| mix(n.into()));
     }
     key
 }
@@ -1838,7 +1854,8 @@ const COLOR_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![15
 /// an environment-lit one's (its cube and diffuse light), `//U ` a placed
 /// one's (its maps' placements and second coordinates), `//C ` a colored
 /// one's (its vertex colours), `//G ` one light passes through's, `//L ` a
-/// coated one's, `//W ` either's (their numbers), `//K ` a
+/// coated one's, `//R ` one reflecting as its specular says and `//Q ` any
+/// other's, `//W ` any of those three's (their numbers), `//K ` a
 /// cut-out one's and `//N ` any other's, and `//A ` a multisampled one's
 /// (geometric specular anti-aliasing). (A cut-out or placed one is
 /// textured; a line with two prefixes is for a variant with both.) Only
@@ -1849,41 +1866,66 @@ const COLOR_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![15
 #[inline(never)]
 fn wgsl(variant: Variant, samples: u32) -> String {
     let on = |tag: u8| match tag {
-        b'T' => variant.textured,
-        b'S' => variant.skinned,
-        b'M' => variant.morphing,
-        b'P' => variant.skinned || variant.morphing,
-        b'E' => variant.lit,
-        b'U' => variant.placed,
-        b'C' => variant.colored,
-        b'G' => variant.transmitting,
-        b'L' => variant.coated,
-        b'W' => variant.transmitting || variant.coated,
-        b'K' => variant.masked,
-        b'N' => !variant.masked,
+        b'T' => variant.textured(),
+        b'S' => variant.skinned(),
+        b'M' => variant.morphing(),
+        b'P' => variant.skinned() || variant.morphing(),
+        b'E' => variant.lit(),
+        b'U' => variant.placed(),
+        b'C' => variant.colored(),
+        b'G' => variant.transmitting(),
+        b'L' => variant.coated(),
+        b'R' => variant.specular(),
+        b'Q' => !variant.specular(),
+        b'W' => variant.transmitting() || variant.coated() || variant.specular(),
+        b'K' => variant.masked(),
+        b'N' => !variant.masked(),
         b'A' => samples > 1,
         _ => false,
     };
-    // In one pass over the text, copying only what is kept (a pass each
-    // for the prefixes, the comments and the anti-aliasing copied it all
-    // three times).
+    // The kept chunks, copied whole.
+    let (text, chunks) = shader_chunks();
     let mut source = String::with_capacity(SHADER.len() / 2);
-    'lines: for line in SHADER.lines() {
-        let mut rest = line;
-        while let [b'/', b'/', tag, b' ', ..] = *rest.as_bytes() {
-            if !on(tag) {
-                continue 'lines;
-            }
-            rest = &rest[4..];
+    for (tags, range) in chunks {
+        if tags.iter().all(|&tag| tag == 0 || on(tag)) {
+            source.push_str(&text[range.clone()]);
         }
-        let code = rest.trim_ascii_start();
-        if code.is_empty() || code.starts_with("//") {
-            continue;
-        }
-        source.push_str(rest);
-        source.push('\n');
     }
     source
+}
+/// The shader's code, and its chunks by the prefixes they need (0s:
+/// none): runs of lines needing the same ones, comments and blank lines
+/// left out, as ranges of the code. Read once, with the first pipeline: a
+/// variant then copies its chunks whole instead of reading every byte of
+/// every line again. (One buffer and one list: two allocations.)
+type Chunks = (String, Vec<([u8; 3], std::ops::Range<usize>)>);
+fn shader_chunks() -> &'static Chunks {
+    static CHUNKS: std::sync::OnceLock<Chunks> = std::sync::OnceLock::new();
+    CHUNKS.get_or_init(|| {
+        let mut text = String::with_capacity(SHADER.len());
+        let mut chunks: Vec<([u8; 3], std::ops::Range<usize>)> = Vec::with_capacity(256);
+        for line in SHADER.lines() {
+            let (mut tags, mut count, mut rest) = ([0; 3], 0, line);
+            while let [b'/', b'/', tag, b' ', ..] = *rest.as_bytes() {
+                // (Three at most: more needs a wider index.)
+                tags[count] = tag;
+                count += 1;
+                rest = &rest[4..];
+            }
+            let code = rest.trim_ascii_start();
+            if code.is_empty() || code.starts_with("//") {
+                continue;
+            }
+            let start = text.len();
+            text.push_str(rest);
+            text.push('\n');
+            match chunks.last_mut() {
+                Some((same, range)) if *same == tags => range.end = text.len(),
+                _ => chunks.push((tags, start..text.len())),
+            }
+        }
+        (text, chunks)
+    })
 }
 /// Group 1 for `d`: its maps, against stand-ins where one is missing, and
 /// whatever else its pipeline binds. Made once a set of maps, rarely: out
@@ -1942,9 +1984,10 @@ fn make_binding(
         .extras
         .and_then(|e| e.transmission.as_ref())
         .zip(behind.as_ref());
-    let coat = d.extras.and_then(|e| e.clearcoat.as_ref());
+    let coat = d.extras.and_then(|e| e.clearcoat());
+    let specular = d.extras.and_then(|e| e.specular());
     let placement = d.extras.and_then(|e| e.placement()).filter(|_| placed(d));
-    let layered = glass.is_some() || coat.is_some();
+    let layered = glass.is_some() || coat.is_some() || specular.is_some();
     let rows = (placement.is_some() || layered).then(|| {
         let rows = placement.copied().unwrap_or_default().map(|p| p.rows());
         uniform("3D map placements", bytemuck::cast_slice(&rows))
@@ -1957,13 +2000,17 @@ fn make_binding(
             )
         });
         let c = coat.map_or([0.; 4], |c| [c.factor, c.roughness, 0., 0.]);
-        uniform("3D layers", bytemuck::cast_slice(&[a, b, c]))
+        let d = specular.map_or([0.; 4], |s| {
+            let [r, g, b] = s.f0();
+            [r, g, b, s.factor]
+        });
+        uniform("3D layers", bytemuck::cast_slice(&[a, b, c, d]))
     });
     // Its layers' maps, uploaded for this binding alone (it keeps them):
     // light passing through's if it does, a coat's if it has one.
     // (A mesh with none, most, looks at none.)
     let mut layer_maps: [Option<wgpu::TextureView>; LAYER_MAPS] = Default::default();
-    if let Some(maps) = d.extras.and_then(|e| e.layer_maps.as_deref()) {
+    if let Some(maps) = d.extras.and_then(|e| e.layer_maps()) {
         for (i, map) in maps.iter().enumerate() {
             let used = if i < GLASS_MAPS {
                 glass.is_some()
@@ -2138,21 +2185,21 @@ fn vertex_buffers(variant: Variant) -> Vec<wgpu::VertexBufferLayout<'static>> {
             attributes: &INSTANCE_ATTRIBUTES,
         },
     ];
-    if variant.skinned {
+    if variant.skinned() {
         buffers.push(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<crate::geometry::Influence>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &SKIN_ATTRIBUTES,
         });
     }
-    if variant.placed {
+    if variant.placed() {
         buffers.push(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<[f32; 2]>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &SECOND_UV_ATTRIBUTES,
         });
     }
-    if variant.colored {
+    if variant.colored() {
         buffers.push(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<[f32; 4]>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -2185,7 +2232,7 @@ fn shadow_pipeline(
             compilation_options: Default::default(),
             buffers: &vertex_buffers(variant),
         },
-        fragment: variant.masked.then(|| wgpu::FragmentState {
+        fragment: variant.masked().then(|| wgpu::FragmentState {
             module: shader,
             entry_point: Some("shadow_fragment"),
             compilation_options: Default::default(),
@@ -2251,7 +2298,7 @@ fn main_pipelines(
                 })],
             }),
             primitive: wgpu::PrimitiveState {
-                cull_mode: (!translucent && !variant.two_sided).then_some(wgpu::Face::Back),
+                cull_mode: (!translucent && !variant.two_sided()).then_some(wgpu::Face::Back),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -2549,10 +2596,12 @@ struct Frame {
 //W struct Layers {
 //W     // How much passes through, its index of refraction, thickness and
 //W     // attenuation distance; its attenuation colour; how much coat and
-//W     // how rough.
+//W     // how rough; how much a dielectric reflects facing it, by channel,
+//W     // and how much of that.
 //W     a: vec4<f32>,
 //W     b: vec4<f32>,
 //W     coat: vec4<f32>,
+//W     spec: vec4<f32>,
 //W }
 //W @group(1) @binding(7) var<uniform> layers: Layers;
 //G @group(1) @binding(8) var behind: texture_2d<f32>;
@@ -2734,6 +2783,22 @@ fn shade(base: vec3<f32>, metallic: f32, roughness: f32, n: vec3<f32>, v: vec3<f
     let diffuse = (1.0 - fresnel) * (1.0 - metallic) * base / PI;
     return (diffuse + specular) * radiance * n_l;
 }
+//R // `shade` for a dielectric reflecting as its specular says
+//R // (`layers.spec`): as much facing it as its index of refraction and
+//R // colour say, and that and its grazing reflection scaled by its factor.
+//R fn shade_specular(base: vec3<f32>, metallic: f32, roughness: f32, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {
+//R     let h = normalize(v + l);
+//R     let n_l = max(dot(n, l), 0.0);
+//R     let n_v = max(dot(n, v), 1e-4);
+//R     let n_h = max(dot(n, h), 0.0);
+//R     let a = roughness * roughness;
+//R     let f0 = mix(layers.spec.w * min(layers.spec.rgb, vec3(1.0)), base, metallic);
+//R     let f90 = mix(layers.spec.w, 1.0, metallic);
+//R     let fresnel = f0 + (f90 - f0) * pow(1.0 - max(dot(h, v), 0.0), 5.0);
+//R     let specular = fresnel * ggx(n_h, a) * smith(n_v, n_l, a) / (4.0 * n_v * max(n_l, 1e-4));
+//R     let diffuse = (1.0 - fresnel) * (1.0 - metallic) * base / PI;
+//R     return (diffuse + specular) * radiance * n_l;
+//R }
 fn neutral(color: vec3<f32>) -> vec3<f32> {
     let start = 0.76;
     let desaturation = 0.15;
@@ -2887,7 +2952,8 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
         if frame.params.w > 0.5 {
             sun *= sunlit(in.world, n);
         }
-        lit = shade(base, metallic, roughness, n, v, -frame.sun_direction.xyz, sun);
+//Q         lit = shade(base, metallic, roughness, n, v, -frame.sun_direction.xyz, sun);
+//R         lit = shade_specular(base, metallic, roughness, n, v, -frame.sun_direction.xyz, sun);
         // A coat's own highlights: glass's (a black dielectric's alone).
 //L         var coat_lit = shade(vec3(0.0), 0.0, coat_rough, coat_n, v, -frame.sun_direction.xyz, sun);
         for (var i = 0u; i < u32(frame.params.x); i++) {
@@ -2897,7 +2963,8 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
             let falloff = pow(clamp(1.0 - pow(distance / light[0].w, 4.0), 0.0, 1.0), 2.0) / max(distance * distance, 1e-4);
             // Within a spot's cone (all round: 1).
             let cone = clamp(dot(light[2].xyz, -to / distance) + light[2].w, 0.0, 1.0);
-            lit += shade(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
+//Q             lit += shade(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
+//R             lit += shade_specular(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
 //L             coat_lit += shade(vec3(0.0), 0.0, coat_rough, coat_n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
         }
         // Ambient light: the hemisphere seen by the surface for its diffuse
@@ -2906,10 +2973,12 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
         let ambient = mix(frame.ground.rgb, frame.sky.rgb, n.y * 0.5 + 0.5);
         let r = reflect(-v, n);
         let reflected = mix(frame.ground.rgb, frame.sky.rgb, r.y * 0.5 + 0.5);
-        let f0 = mix(vec3(0.04), base, metallic);
+//Q         let f0 = mix(vec3(0.04), base, metallic);
+//R         let f0 = mix(layers.spec.w * min(layers.spec.rgb, vec3(1.0)), base, metallic);
         let n_v = max(dot(n, v), 0.0);
         let rough = roughness * roughness;
-        let fresnel = f0 + (max(vec3(1.0 - rough), f0) - f0) * pow(1.0 - n_v, 5.0);
+//Q         let fresnel = f0 + (max(vec3(1.0 - rough), f0) - f0) * pow(1.0 - n_v, 5.0);
+//R         let fresnel = f0 + (max(vec3(1.0 - rough) * mix(layers.spec.w, 1.0, metallic), f0) - f0) * pow(1.0 - n_v, 5.0);
         var surround = ambient * base * (1.0 - metallic) * (1.0 - fresnel);
         surround += reflected * fresnel * (1.0 - 0.5 * rough);
         // Lit by an environment instead: its diffuse light, and its light
@@ -2985,13 +3054,13 @@ mod tests {
             wgsl(variant, 1)
         };
         let plain = source(|_| {});
-        let textured = source(|v| v.textured = true);
-        let skinned = source(|v| v.skinned = true);
-        let lit = source(|v| v.lit = true);
-        let morphing = source(|v| v.morphing = true);
+        let textured = source(|v| *v = v.with(Variant::TEXTURED, true));
+        let skinned = source(|v| *v = v.with(Variant::SKINNED, true));
+        let lit = source(|v| *v = v.with(Variant::LIT, true));
+        let morphing = source(|v| *v = v.with(Variant::MORPHING, true));
         let masked = source(|v| {
-            v.textured = true;
-            v.masked = true;
+            *v = v.with(Variant::TEXTURED, true);
+            *v = v.with(Variant::MASKED, true);
         });
         // The plain shader names no map, joints or environment's cube.
         for line in plain.lines() {
@@ -3022,25 +3091,31 @@ mod tests {
         assert!(morphing.contains("var<storage, read> palette"));
         assert!(masked.contains("discard;") && masked.contains("-> ShadowOut"));
         let placed = source(|v| {
-            v.textured = true;
-            v.placed = true;
+            *v = v.with(Variant::TEXTURED, true);
+            *v = v.with(Variant::PLACED, true);
         });
         assert!(placed.contains("var<uniform> placements"));
-        let colored = source(|v| v.colored = true);
+        let colored = source(|v| *v = v.with(Variant::COLORED, true));
         assert!(colored.contains("@location(15) vertex_color: vec4<f32>"));
         let glass = source(|v| {
-            v.textured = true;
-            v.transmitting = true;
+            *v = v.with(Variant::TEXTURED, true);
+            *v = v.with(Variant::TRANSMITTING, true);
         });
         assert!(glass.contains("var thickness_texture: texture_2d<f32>"));
         assert!(!textured.contains("thickness_texture"));
         let coated = source(|v| {
-            v.textured = true;
-            v.coated = true;
+            *v = v.with(Variant::TEXTURED, true);
+            *v = v.with(Variant::COATED, true);
         });
         assert!(coated.contains("var<uniform> layers: Layers"));
         assert!(coated.contains("coat_lit") && !coated.contains("behind"));
         assert!(glass.contains("var<uniform> layers: Layers") && !glass.contains("coat_lit"));
+        let specular = source(|v| {
+            *v = v.with(Variant::TEXTURED, true);
+            *v = v.with(Variant::SPECULAR, true);
+        });
+        assert!(specular.contains("lit = shade_specular(") && !specular.contains("lit = shade("));
+        assert!(textured.contains("lit = shade(") && !textured.contains("shade_specular"));
     }
 
     #[test]
@@ -3052,10 +3127,7 @@ mod tests {
 
     #[test]
     fn a_shader_keeps_its_code_alone() {
-        let skinned = Variant {
-            skinned: true,
-            ..Variant::default()
-        };
+        let skinned = Variant::default().with(Variant::SKINNED, true);
         let code = wgsl(skinned, 4);
         assert!(
             code.len() < SHADER.len() / 2,
