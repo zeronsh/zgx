@@ -50,6 +50,8 @@ mod rtl_scroll;
 mod size_calc;
 #[path = "../sticky.rs"]
 mod sticky;
+#[path = "../text_reach.rs"]
+mod text_reach;
 #[path = "../text_same_size.rs"]
 mod text_same_size;
 #[path = "../wrapped_text_in_capped_box.rs"]

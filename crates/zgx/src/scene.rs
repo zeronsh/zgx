@@ -2121,23 +2121,65 @@ impl TextSizeCache {
 /// final); one entry would evict the other and reshape the text each time.
 #[derive(Clone, Copy, Default)]
 struct TextSizes([Option<TextSize>; 3]);
-/// A wrap limit, the shaper revision it was measured under, and the size.
-type TextSize = (Option<f32>, u64, (f32, f32));
+/// A wrap limit, the shaper revision it was measured under (as a `u32`:
+/// it counts shapers installed), the width it holds to (`reach`), and the
+/// size.
+type TextSize = (Option<f32>, u32, f32, (f32, f32));
 impl TextSizes {
-    fn find(&self, limit: Option<f32>, revision: u64) -> Option<(f32, f32)> {
+    fn find(&self, limit: Option<f32>, revision: u32) -> Option<(f32, f32)> {
         self.0
             .iter()
             .flatten()
-            .find(|(cached, cached_revision, _)| *cached == limit && *cached_revision == revision)
-            .map(|(_, _, size)| *size)
+            .find(|(cached, cached_revision, _, _)| {
+                *cached == limit && *cached_revision == revision
+            })
+            .map(|(_, _, _, size)| *size)
     }
-    fn insert(&mut self, limit: Option<f32>, revision: u64, size: (f32, f32)) {
+    /// Whether it holds a size measured at a limit (wrapped), under this
+    /// shaper.
+    fn wrapped(&self, revision: u32) -> bool {
+        self.0
+            .iter()
+            .flatten()
+            .any(|(cached, cached_revision, _, _)| {
+                cached.is_some_and(|limit| limit > 0.) && *cached_revision == revision
+            })
+    }
+    /// A size measured at another limit whose lines break as they would at
+    /// `limit`: from its widest line's width up to its `reach`
+    /// (`Scene::set_font_text_reach_measurer`).
+    fn within(&self, limit: Option<f32>, revision: u32) -> Option<(f32, f32)> {
+        let limit = limit?;
+        self.0
+            .iter()
+            .flatten()
+            .find(|(cached, cached_revision, reach, size)| {
+                cached.is_some()
+                    && *cached_revision == revision
+                    && size.0 <= limit
+                    && limit < *reach
+            })
+            .map(|(_, _, _, size)| *size)
+    }
+    fn insert(&mut self, limit: Option<f32>, revision: u32, size: (f32, f32)) {
         self.0.rotate_right(1);
-        self.0[0] = Some((limit, revision, size));
+        self.0[0] = Some((limit, revision, 0., size));
     }
-    fn remember(cell: &TextSizeCache, limit: Option<f32>, revision: u64, size: (f32, f32)) {
+    fn remember(cell: &TextSizeCache, limit: Option<f32>, revision: u32, size: (f32, f32)) {
         let mut sizes = cell.get();
         sizes.insert(limit, revision, size);
+        cell.set(sizes);
+    }
+    /// `remember`, with the width up to which it holds (`within`).
+    fn remember_reach(
+        cell: &TextSizeCache,
+        limit: Option<f32>,
+        revision: u32,
+        (size, reach): ((f32, f32), f32),
+    ) {
+        let mut sizes = cell.get();
+        sizes.0.rotate_right(1);
+        sizes.0[0] = Some((limit, revision, reach, size));
         cell.set(sizes);
     }
 }
@@ -2843,6 +2885,14 @@ impl PaintItem<'_> {
 }
 type FontMeasurer =
     dyn Fn(&std::sync::Arc<str>, f32, Option<f32>, &crate::text_layout::FontStyle) -> (f32, f32);
+/// A plain text's size, and the width up to which its lines break as they
+/// do at the limit given (`Scene::set_font_text_reach_measurer`).
+type FontReach = dyn Fn(
+    &std::sync::Arc<str>,
+    f32,
+    Option<f32>,
+    &crate::text_layout::FontStyle,
+) -> ((f32, f32), f32);
 type FontMinContent =
     dyn Fn(&std::sync::Arc<str>, f32, &crate::text_layout::FontStyle) -> (f32, f32);
 type RichMinContent = dyn Fn(&crate::rich_text::RichText) -> (f32, f32);
@@ -2922,6 +2972,9 @@ pub struct Scene {
     text_shaper: Option<std::rc::Rc<dyn crate::text_layout::TextShaper>>,
     font_shaper: Option<std::rc::Rc<dyn crate::text_layout::FontTextShaper>>,
     font_measurer: Option<Box<FontMeasurer>>,
+    /// Wrapping plain text's measurement with the widths it holds for
+    /// (`set_font_text_reach_measurer`), where a host knows them.
+    font_reach: Option<Box<FontReach>>,
     /// Plain text's min-content size as `font_measurer` measures
     /// `min_content_lines`' copy, without shaping it (`leaf_size`).
     font_min_content: Option<Box<FontMinContent>>,
@@ -2929,7 +2982,7 @@ pub struct Scene {
     rich_min_content: Option<Box<RichMinContent>>,
     rich_measurer: crate::rich_text::TextMeasure,
     rich_shaper: Option<std::rc::Rc<crate::rich_text::RichShaper>>,
-    text_shaper_revision: u64,
+    text_shaper_revision: u32,
     pending_layout_nodes: usize,
     layout_revision: u64,
     layout_pass: u64,
@@ -3153,6 +3206,7 @@ impl Scene {
             text_shaper: None,
             font_shaper: None,
             font_measurer: None,
+            font_reach: None,
             font_min_content: None,
             rich_min_content: None,
             rich_measurer: Default::default(),
@@ -5564,6 +5618,34 @@ impl Scene {
             |shaper| shaper(rich, width),
         )
     }
+    /// Install wrapping plain text's measurement with the widths it holds
+    /// for: its size at a limit, and the width up to which (from its widest
+    /// line's) its lines break the same. Layout serves a width between from
+    /// that size, its lines not broken again (a window dragged a few points
+    /// wider or narrower). Measured as `set_font_text_measurer`'s, which it
+    /// is beside.
+    pub fn set_font_text_reach_measurer(
+        &mut self,
+        measure: impl Fn(
+            &std::sync::Arc<str>,
+            f32,
+            Option<f32>,
+            &crate::text_layout::FontStyle,
+        ) -> ((f32, f32), f32)
+        + 'static,
+    ) {
+        self.font_reach = Some(Box::new(measure));
+        self.text_shaper_revision = self.text_shaper_revision.wrapping_add(1);
+        let ids: Vec<_> = self
+            .paint_items()
+            .filter(|item| matches!(item.kind, NodeKind::Text { .. }))
+            .map(|item| item.id)
+            .collect();
+        for id in ids {
+            self.invalidate(id, PAINT);
+            self.invalidate_layout(id);
+        }
+    }
     /// Install measurement for plain text nodes, sized as the installed font
     /// shaper lays them out. Hosts measure from the text they draw from.
     pub fn set_font_text_measurer(
@@ -5641,7 +5723,7 @@ impl Scene {
     }
     /// Changes whenever either installed shaping callback is replaced.
     pub(crate) fn text_shaper_revision(&self) -> u64 {
-        self.text_shaper_revision
+        u64::from(self.text_shaper_revision)
     }
     /// Point (`x`, `y`) in the space `id` is laid out in (its `bounds`,
     /// translated) in the window's points: through its own and its
@@ -8669,7 +8751,7 @@ impl Scene {
             .as_array_of_cells()
             .iter()
             .filter_map(std::cell::Cell::get)
-            .find_map(|(measured, at, size)| {
+            .find_map(|(measured, at, _, size)| {
                 let same = at == revision
                     && match (limit, measured) {
                         (None, None) => true,
@@ -9784,6 +9866,40 @@ impl Scene {
         self.store_measurement(id, constraints, size, children);
         Some(size)
     }
+    /// Wrapping plain text `id`'s size at `limit`, measured with the widths
+    /// it holds for (`set_font_text_reach_measurer`): one measured at
+    /// another whose lines break the same serves (`TextSizes::within`).
+    #[cold]
+    #[inline(never)]
+    fn reach_size(
+        &self,
+        reach: &FontReach,
+        id: NodeId,
+        text: &Arc<str>,
+        font_size: f32,
+        limit: Option<f32>,
+        revision: u32,
+    ) -> (f32, f32) {
+        let sizes = &self.node(id).text_size;
+        let known = sizes.get();
+        if let Some(size) = known.within(limit, revision) {
+            return size;
+        }
+        let font = &self.node(id).font;
+        // Measured at no other limit, it is measured plainly: most texts are
+        // measured once, and the widths a size holds for cost more to know.
+        // Measured again at another (a window resized), they are known.
+        if !known.wrapped(revision)
+            && let Some(measure) = &self.font_measurer
+        {
+            let size = measure(text, font_size, limit, font);
+            TextSizes::remember(sizes, limit, revision, size);
+            return size;
+        }
+        let measured = reach(text, font_size, limit, font);
+        TextSizes::remember_reach(sizes, limit, revision, measured);
+        measured.0
+    }
     /// A leaf's own size: its text's at `available_w` (when it wraps), its
     /// image's pixels, or none. Reads the kind in place: cloning it took an
     /// atomic count on every measure of text, images and decorated paint.
@@ -9829,6 +9945,8 @@ impl Scene {
                             .unwrap()
                             .with_options(style.text_options);
                         self.rich_measurer.measure_mounted(&rich, limit)
+                    } else if let (Some(reach), Some(_)) = (&self.font_reach, limit) {
+                        return self.reach_size(reach, id, text, *font_size, limit, revision);
                     } else {
                         let font = &self.node(id).font;
                         match &self.font_measurer {
