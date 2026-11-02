@@ -98,8 +98,14 @@ SCENES = [
     ('mount', 'zgx-script', 'mount_bench', {}),
     # The rows it publishes, made beforehand for every update, are the
     # bench's own and uncounted (`gate_marks`: cachegrind's client requests),
-    # since 0.1.8; before, they were a quarter of the cell.
-    ('script-update', 'zgx-script', 'update_bench', {'TICKS': '200'}),
+    # since 0.1.8; before, they were a quarter of the cell. Its allocator
+    # keeps no fastbins (`mxfast=0`): with them, whether `malloc_consolidate`
+    # ran followed where the heap lay, and one binary counted 2.6 M (0.26%)
+    # apart across heap placements; without, 0.11 M, and a real allocation
+    # cost shows as before (one more allocation a node: +0.28 to +0.32%,
+    # where fastbins read +0.28 to +0.54%). Only here: mount spreads more
+    # without them (0.23% to 0.33%), the other cells about the same.
+    ('script-update', 'zgx-script', 'update_bench', {'TICKS': '200', 'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0'}),
     ('anime', 'zgx-script', 'anime_bench', {}),
     ('script-layout', 'zgx-script', 'script_layout_bench', {}),
     # Spans in Luau: read, lowered and mounted again each pass (plain, then
@@ -311,8 +317,11 @@ def environment(binary, env, checkout, placement=None):
     # (`same_run`): run again, the same binary counts the same.
     fixed = {k: os.environ[k] for k in ('PATH', 'HOME', 'ZGX_REAL_CLOCK') if k in os.environ}
     fixed.update(LD_PRELOAD=str(same_run()), ZGX_SAME_RUN_REPORT='1', XDG_CACHE_HOME=str(cache_of(binary)))
-    if placement:
-        fixed['GLIBC_TUNABLES'] = placement
+    # A scene's own glibc tunables (script-update's) hold under every placement.
+    tunables = ':'.join(t for t in (env.get('GLIBC_TUNABLES'), placement) if t)
+    if tunables:
+        fixed['GLIBC_TUNABLES'] = tunables
+    env = {k: v for k, v in env.items() if k != 'GLIBC_TUNABLES'}
     return {**fixed, **renamed_env({'ZGX_GATE': '1', 'ZGX_ASSISTIVE': '0', **scripts, **env})}
 
 
