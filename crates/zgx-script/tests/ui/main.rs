@@ -47,6 +47,8 @@ mod lazy_ui;
 mod list_edges;
 #[path = "../list_focus_scroll.rs"]
 mod list_focus_scroll;
+#[path = "../markdown_lazy.rs"]
+mod markdown_lazy;
 #[path = "../mentions.rs"]
 mod mentions;
 #[path = "../regions.rs"]
