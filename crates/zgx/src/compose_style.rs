@@ -1781,8 +1781,9 @@ fn apply_resolved(
     let mut scene = ui.scene.borrow_mut();
     scene.set_style(node, style.clone());
     // Most styles have nothing rare: one test for them, not one a field.
-    let rare = resolved.rare_set();
-    if rare.is_some() || scene.has_special_nodes() {
+    // Through a barrier, so the read at the end isn't merged with this one
+    // and kept live across all of a style's application (#1276).
+    if std::hint::black_box(resolved).rare_set().is_some() || scene.has_special_nodes() {
         // On what lays the children out: a scroll view's content.
         apply_rare(
             ui,
@@ -1916,7 +1917,7 @@ fn apply_resolved(
         scene.set_font(node, current.font.clone());
     }
     scene.set_kind(node, kind);
-    if let Some(rare) = rare {
+    if let Some(rare) = resolved.rare_set() {
         let cold = rare.cold.as_deref();
         if let Some(uniforms) = cold.and_then(|cold| cold.shader_uniforms.as_ref()) {
             scene.set_shader_uniforms(node, *uniforms);
