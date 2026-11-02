@@ -389,8 +389,10 @@ impl Scene {
         self.sync_cold(id);
         self.invalidate(id, PAINTED);
     }
-    /// Sample node `id`'s image, or its background image, as `rendering`
-    /// says (CSS's `image-rendering`): `Pixelated`, the nearest pixel.
+    /// Sample node `id`'s image, or its background image, and those of the
+    /// nodes in it, as `rendering` says (CSS's `image-rendering`, inherited
+    /// as CSS's is): `Pixelated`, the nearest pixel. (`Auto` takes back what
+    /// `id` said, not what a node around it says.)
     pub fn set_image_rendering(&mut self, id: NodeId, rendering: crate::image::ImageRendering) {
         let held = self
             .cold
@@ -408,6 +410,15 @@ impl Scene {
         };
         self.sync_cold(id);
         self.invalidate(id, PAINTED);
+        // The pictures in it take it too (an image view's own node is
+        // inside the box its style is on): drawn again.
+        let mut inside = self.children(id).to_vec();
+        while let Some(node) = inside.pop() {
+            if matches!(self.kind(node), NodeKind::Image(_)) {
+                self.invalidate(node, PAINTED);
+            }
+            inside.extend_from_slice(self.children(node));
+        }
     }
     /// Draw node `id`'s outline (`QuadStyle::outline`) dashed or dotted
     /// (CSS's `outline-style`), or solid (`BorderStyle::Solid`, the default).
@@ -469,12 +480,20 @@ impl Scene {
             .as_ref()
             .is_some_and(|cold| !cold.image_rendering.is_empty())
     }
-    /// How node `id`'s image is sampled (`set_image_rendering`).
+    /// How node `id`'s image is sampled (`set_image_rendering`): as it says,
+    /// else as the nearest node around it says. An image view's picture is
+    /// a node inside the box its style is on.
     pub fn image_rendering(&self, id: NodeId) -> crate::image::ImageRendering {
-        self.cold
+        let Some(cold) = self
+            .cold
             .as_ref()
-            .and_then(|cold| cold.image_rendering.get(&id))
-            .copied()
+            .filter(|cold| !cold.image_rendering.is_empty())
+        else {
+            return Default::default();
+        };
+        std::iter::once(id)
+            .chain(self.ancestors(id))
+            .find_map(|node| cold.image_rendering.get(&node).copied())
             .unwrap_or_default()
     }
     /// Whether any node's outline is dashed or dotted.

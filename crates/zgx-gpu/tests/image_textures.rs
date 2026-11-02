@@ -222,6 +222,60 @@ fn pixelated_images_take_the_nearest_pixel() {
     }
 }
 
+/// A script's picture (a kept file, decoded as drawn) drawn pixelated takes
+/// the nearest pixel too, once its pixels are decoded: a 4 by 4 checker at
+/// 64 by 64 is 16 hard squares (Zeron's lightbox at 300%). Said of the box
+/// around it, as an image view's style is (its picture a node inside):
+/// inherited, as CSS's `image-rendering` is.
+#[test]
+fn a_kept_file_drawn_pixelated_takes_the_nearest_pixel() {
+    use zgx::image::ImageRendering;
+    let mut png = Vec::new();
+    image::RgbaImage::from_fn(4, 4, |x, y| match (x + y) % 2 {
+        0 => image::Rgba([0, 0, 0, 255]),
+        _ => image::Rgba([255, 255, 255, 255]),
+    })
+    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+    .unwrap();
+    let greys = |rendering: ImageRendering| {
+        let picture = zgx_gpu::assets::decode_image_kept(Arc::from(png.clone())).unwrap();
+        let mut scene = Scene::new(64., 64.);
+        let sized = Style {
+            width: Some(64.),
+            height: Some(64.),
+            ..Default::default()
+        };
+        let around = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            sized.clone(),
+        );
+        scene.append(around, NodeKind::Image(picture), sized);
+        scene.set_image_rendering(around, rendering);
+        let mut gpu = GpuRenderer::new(64, 64).unwrap();
+        let damage = scene.flush().damage;
+        gpu.render(&scene, &damage).unwrap();
+        for _ in 0..500 {
+            if gpu.debug_cache_stats().image_textures == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(4));
+            if gpu.images_decoded() {
+                gpu.render(&scene, &[Rect::new(0., 0., 64., 64.)]).unwrap();
+            }
+        }
+        let pixels = gpu.readback().unwrap();
+        (0..64)
+            .map(|x| pixels[(8 * 64 + x) * 4])
+            .filter(|v| (8..248).contains(v))
+            .count()
+    };
+    let smooth = greys(ImageRendering::Auto);
+    assert!(smooth > 8, "smooth blends ({smooth} greys)");
+    let pixelated = greys(ImageRendering::Pixelated);
+    assert_eq!(pixelated, 0, "pixelated is black or white");
+}
+
 /// A page of images, every other one pixelated, draws in as many draws as
 /// the same page all smooth: each image samples its own texture in a draw
 /// of its own either way, the pixelated ones with a sampler of their own.
