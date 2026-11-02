@@ -1474,6 +1474,10 @@ struct LayerCache {
     used: u64,
     /// No longer a layer, kept for its pixels.
     parked: bool,
+    /// Drawn without something on its way (a picture decoding, a shader
+    /// fill compiling: `images_awaited`): not its content, so drawn again
+    /// rather than reused, whatever its revision says.
+    incomplete: bool,
     /// Where in the window all of it showed when last drawn (`shown`),
     /// while every frame since that damaged it also drew it: its pixels
     /// then differ from its content's only where the window's damage
@@ -3898,6 +3902,9 @@ pub struct GpuRenderer {
     /// A frame went without a kept file's pixels, decoding, or a shader
     /// fill's pipeline, compiling (`take_images_awaited`).
     images_awaited: bool,
+    /// The layer `paint_layer` just drew went without something
+    /// (`LayerCache::incomplete`).
+    layer_incomplete: bool,
     /// A kept file's pixels were uploaded (`take_images_uploaded`).
     images_uploaded: bool,
     /// Images' own textures (`upload_image`), by the frame each was last
@@ -4539,6 +4546,7 @@ impl GpuRenderer {
             background: Color(0, 0, 0, 0),
             images: FxHashMap::default(),
             images_awaited: false,
+            layer_incomplete: false,
             images_uploaded: false,
             image_drawn: FxHashMap::default(),
             image_frame: 0,
@@ -5516,6 +5524,7 @@ impl GpuRenderer {
         let frame = self.layer_frame;
         if let Some(cache) = self.layers.get_mut(&id)
             && cache.revision == revision
+            && !cache.incomplete
             && cache.step == step
             && cache.factor == factor.to_bits()
         {
@@ -5694,6 +5703,7 @@ impl GpuRenderer {
                     transformed,
                     used: frame,
                     watched: window,
+                    incomplete: std::mem::take(&mut self.layer_incomplete),
                     ..cache
                 },
             );
@@ -5807,6 +5817,7 @@ impl GpuRenderer {
                 parked: false,
                 watched: window,
                 content,
+                incomplete: std::mem::take(&mut self.layer_incomplete),
             },
         );
         Ok(())
@@ -5828,6 +5839,9 @@ impl GpuRenderer {
         fresh: bool,
     ) -> (wgpu::Texture, Result<GpuStats, GpuError>) {
         let view = texture.create_view(&Default::default());
+        // Whether this layer goes without something, apart from what the
+        // frame went without before it (`layer_incomplete`).
+        let awaited = std::mem::take(&mut self.images_awaited);
         let target = std::mem::replace(&mut self.target, texture);
         let old_view = std::mem::replace(&mut self.view, view);
         let old_size = (self.width, self.height);
@@ -5858,6 +5872,8 @@ impl GpuRenderer {
         self.scale = device_scale;
         self.background = background;
         self.fresh = was_fresh;
+        self.layer_incomplete = self.images_awaited;
+        self.images_awaited |= awaited;
         (texture, result)
     }
     /// How `item`, a layer in the window's own pass, shows there: its map
