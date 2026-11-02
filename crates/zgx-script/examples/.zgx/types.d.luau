@@ -1169,6 +1169,9 @@ export type LineJoin = "miter" | "round" | "bevel"
 export type LineOptions = { cap: LineCap?, join: LineJoin?, dash: { number }?, dash_offset: number?, [number]: never }
 -- `draw` strokes a fraction of the path (`0.5`) or a span of it
 -- (`{ start, end }`), as anime.js draws SVG lines.
+-- What a scroll view keeps clear (`scroll_padding`): points on every side,
+-- or by side.
+export type ScrollPadding = number | { top: number?, bottom: number?, left: number?, right: number? }
 export type MarkdownOptions = {
 	-- Names a text that grows (a streaming reply): parsed incrementally.
 	key: string?,
@@ -3753,8 +3756,9 @@ export type ScrollProps = {
 	overscroll: ("auto" | "contain")?,
 	-- What a focused control or a find keeps clear of scrolling into view
 	-- (CSS's scroll-padding): a composer or a bar floating over its edges.
-	-- Points: one number for every side, or { top, bottom, left, right }.
-	scroll_padding: (number | { top: number?, bottom: number?, left: number?, right: number? })?,
+	-- Points: one number for every side, or { top, bottom, left, right };
+	-- a state or a function saying it is followed (a composer growing).
+	scroll_padding: (ScrollPadding | State<ScrollPadding> | (() -> ScrollPadding))?,
 }
 -- `ui.text { "Count: {count}", text_size = 18 }`: the text first.
 export type TextProps = {
@@ -15230,8 +15234,9 @@ export type ListProps = {
 	overscroll: ("auto" | "contain")?,
 	-- What a focused control or a find keeps clear of scrolling into view
 	-- (CSS's scroll-padding): a composer or a bar floating over its edges.
-	-- Points: one number for every side, or { top, bottom, left, right }.
-	scroll_padding: (number | { top: number?, bottom: number?, left: number?, right: number? })?,
+	-- Points: one number for every side, or { top, bottom, left, right };
+	-- a state or a function saying it is followed (a composer growing).
+	scroll_padding: (ScrollPadding | State<ScrollPadding> | (() -> ScrollPadding))?,
 	-- Each row's own height instead, in order: a list, a state holding one
 	-- (a host's shared value costs the script nothing), or a function
 	-- returning one (tracked). The row count is its length.

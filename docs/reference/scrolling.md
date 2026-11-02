@@ -20,7 +20,7 @@ ui.list(props: ListProps) -> Node
 | `follow` | `boolean` | `false` | stays at the end while the content grows, until scrolled away from it (a transcript, a log) |
 | `scrollbar` | `boolean` | `false` | an interactive scrollbar over the trailing edge: drag it, click its track to page; overlay style (hidden until scrolling) where the system has overlay scrollbars |
 | `overscroll` | `"auto"` \| `"contain"` | `"auto"` | `"contain"`: a wheel or trackpad gesture that starts over it stays with it at its edges, momentum included, as CSS's `overscroll-behavior: contain`: the scroll views around it neither move nor stretch (a transcript inside a page). `"auto"` hands what it can't scroll on to them |
-| `scroll_padding` | `number` \| `{ top, bottom, left, right }` | `0` | points kept clear inside its edges as a focused control scrolls into view, as CSS's `scroll-padding`: what floats over them (a composer over the bottom, a title bar over the top) doesn't cover it. One number for every side; a side not given is 0 |
+| `scroll_padding` | `number` \| `{ top, bottom, left, right }` | `0` | points kept clear inside its edges as a focused control scrolls into view, as CSS's `scroll-padding`: what floats over them (a composer over the bottom, a title bar over the top) doesn't cover it. One number for every side; a side not given is 0. A state or a function saying it is followed: what floats over the edge growing (a composer to more lines) takes its room as it does |
 | `w`, `h` | `Length` | `320` by `240` when nothing else sizes it | a stretching parent, `grow`, `w`/`h` or `w_full` size it instead |
 | `gap`, `items`, `p`… | | | lay out the content as a column's (a row's for `scroll_x`) |
 | `overflow` | `Overflow` | `"hidden"` | |

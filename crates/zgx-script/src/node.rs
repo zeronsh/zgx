@@ -836,7 +836,7 @@ pub(crate) struct ListRare {
     /// `overscroll = "contain"`: a wheel over it stays with it.
     pub(crate) contain: bool,
     /// `scroll_padding`: kept clear as a row's control scrolls into view.
-    pub(crate) scroll_padding: Option<zgx::scene::Insets>,
+    pub(crate) scroll_padding: Option<ScrollPadding>,
 }
 
 /// `ui.list`'s `on_end`, called as its end comes within `distance` points.
@@ -892,7 +892,7 @@ pub(crate) enum Kind {
         /// `overscroll = "contain"`: a wheel over it stays with it.
         contain: bool,
         /// `scroll_padding`: kept clear as what it holds scrolls into view.
-        padding: Option<Box<zgx::scene::Insets>>,
+        padding: Option<Box<ScrollPadding>>,
     },
     Text(Text),
     /// `ui.markdown_view { text }`: markdown drawn, parsed as the text
@@ -3345,7 +3345,13 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
             }
         }
         "scroll_padding" => {
-            let padding = scroll_padding(lua, value)?;
+            // A state or a function saying it is read live: a composer
+            // growing takes its room with it.
+            let padding = match &value {
+                mlua::Value::Function(_) => ScrollPadding::Live(value),
+                _ if state_of(&value).is_some() => ScrollPadding::Live(value),
+                _ => ScrollPadding::Fixed(scroll_padding(lua, value)?),
+            };
             match &mut node.kind {
                 Kind::Scroll { padding: set, .. } => *set = Some(Box::new(padding)),
                 Kind::List { rare, .. } => {
@@ -6367,6 +6373,29 @@ pub(crate) fn retain(env: &Env, resource: Box<dyn Any>) {
         Some(scope) => scope.retained.borrow_mut().push(resource),
         None => env.retained.borrow_mut().push(resource),
     }
+}
+
+/// What `scroll_padding` keeps clear: as given, or what a state or a
+/// function says now (`scroll_padding_now`).
+#[derive(Clone)]
+pub(crate) enum ScrollPadding {
+    Fixed(zgx::scene::Insets),
+    Live(mlua::Value),
+}
+/// What a live `scroll_padding` says now (read in an effect, which follows
+/// it): a function called, a state read.
+pub(crate) fn scroll_padding_now(
+    vm: &crate::Vm,
+    source: &mlua::Value,
+) -> mlua::Result<zgx::scene::Insets> {
+    let value = match source {
+        mlua::Value::Function(f) => vm.call::<mlua::Value>(f, ())?,
+        other => match state_of(other) {
+            Some(state) => mlua::IntoLua::into_lua(state.get(), &vm.lua)?,
+            None => other.clone(),
+        },
+    };
+    scroll_padding(&vm.lua, value)
 }
 
 /// `scroll_padding = 8` (every side) or `{ top, bottom, left, right }`
