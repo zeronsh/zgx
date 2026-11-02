@@ -293,6 +293,13 @@ const CPU_GRAIN: Duration = Duration::from_micros(15_625);
 fn past_budget(wall: Duration, cpu: Duration, budget: Duration, grain: Duration) -> bool {
     wall > budget && cpu > budget + grain
 }
+/// CPU time the calling thread has used, as script budgets count it: what
+/// a test bounds a stopped script by, where wall time also counts what the
+/// machine gave others.
+#[doc(hidden)]
+pub fn thread_cpu_time() -> Duration {
+    thread_cpu()
+}
 /// CPU time this thread has used.
 #[cfg(unix)]
 fn thread_cpu() -> Duration {
