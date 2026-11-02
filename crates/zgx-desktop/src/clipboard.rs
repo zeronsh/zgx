@@ -117,6 +117,15 @@ impl Clipboard {
         }
     }
 
+    /// Put a PNG on the clipboard (Wayland's data worker; a web page's
+    /// copied image, `webkitgtk`'s bridge).
+    #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
+    pub(crate) fn set_png(&mut self, png: Vec<u8>) -> Result<()> {
+        match &mut self.backend {
+            Backend::Wayland(clipboard) => Ok(clipboard.store_image(png)?),
+            Backend::Native(_) => Err("the system's clipboard takes images itself".into()),
+        }
+    }
     /// The primary selection (X11, Wayland): the text last selected
     /// anywhere, which a middle click pastes.
     #[cfg(target_os = "linux")]

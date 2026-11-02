@@ -63,6 +63,12 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'F7') { post({ printing: true }); window.print(); }
   if (e.key === 'F8') for (const dot of document.querySelectorAll('.dot')) dot.style.background = 'rgb(0, 255, 0)';
   if (e.key === 'F9') document.getElementById('target').requestFullscreen();
+  if (e.key === 'F6') {
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 8;
+    const draw = canvas.getContext('2d'); draw.fillStyle = 'rgb(0, 0, 255)'; draw.fillRect(0, 0, 8, 8);
+    canvas.toBlob((png) => navigator.clipboard.write([new ClipboardItem({ 'image/png': png })])
+      .then(() => post({ copied: 'image' }), (error) => post({ copied: String(error) })));
+  }
 }, true);
 addEventListener('resize', () => post({ resized: innerHeight }));
 addEventListener('dragend', () => post({ dragend: true }));
