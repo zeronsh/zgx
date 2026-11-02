@@ -9,6 +9,8 @@
 //! holds the window for a screenshot (`WINDOW <n>`, `screencapture -l <n>`),
 //! then exits (non-zero on failure). `--zoom 1.25` zooms the window first:
 //! the same checks, in zgx's points, with AppKit's frames at the zoom.
+//! `--unaccelerated`: the page painted on the CPU (Linux;
+//! `WebViewOptions::accelerated`).
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 use std::{cell::RefCell, rc::Rc};
@@ -65,6 +67,7 @@ fn icon_button(label: &str) -> View {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let fixture = args.iter().any(|arg| arg == "--fixture");
+    let accelerated = !args.iter().any(|arg| arg == "--unaccelerated");
     let zoom = args
         .iter()
         .skip_while(|arg| *arg != "--zoom")
@@ -86,7 +89,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(zoom) = zoom {
                 cx.ui.set_zoom(zoom);
             }
-            let web = WebView::new(&cx.ui.runtime, WebViewOptions::default());
+            let options = WebViewOptions {
+                accelerated,
+                ..Default::default()
+            };
+            let web = WebView::new(&cx.ui.runtime, options);
             match &url {
                 Some(url) => web.load_url(url.clone()),
                 None => web.load_html(PAGE, Some("https://zgx.example/")),

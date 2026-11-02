@@ -533,9 +533,12 @@ needs a `tabindex` on it, which the page would see (its focus events,
 Unlike macOS:
 
 - Each frame the page draws is copied on the CPU: WebKit paints it into
-  zgx's surface, and zgx copies and uploads its damaged part
+  zgx's surface, and zgx copies and uploads its damaged parts
   ([measured](native-surfaces.md#what-a-linux-page-frame-costs)). Video and
-  WebGL pages cost more than on macOS.
+  WebGL pages cost more than on macOS. While WebKit composites (the
+  default), a frame is the whole page, whatever moved;
+  `WebViewOptions::accelerated` off paints the page on the CPU and copies
+  only what changed, without `backdrop-filter` or 3D perspective.
 - The page renders at the window's scale through its zoom, so
   `devicePixelRatio` is 1 at any scale.
 - A message posted to `window.webkit.messageHandlers.zgx` directly, rather

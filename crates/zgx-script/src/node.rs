@@ -372,6 +372,9 @@ fn web_options(table: &Table) -> mlua::Result<zgx::web_view::WebViewOptions> {
         new_windows: table
             .get::<Option<bool>>("new_windows")?
             .unwrap_or(defaults.new_windows),
+        accelerated: table
+            .get::<Option<bool>>("accelerated")?
+            .unwrap_or(defaults.accelerated),
         // Scripts and schemes are set from Rust, not from Luau.
         ..defaults
     })
@@ -5575,6 +5578,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 "user_agent",
                 "messages",
                 "new_windows",
+                "accelerated",
                 "on_navigate",
                 "on_load",
                 "on_title",
