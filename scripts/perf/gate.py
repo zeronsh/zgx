@@ -25,7 +25,10 @@ found as shapes the GPU draws, or rasterized where they cannot be. Each
 run has one environment, addresses not randomized, and a clock and hash
 seeds fixed (`same_run.c`, preloaded): run again, a binary counts the
 same instructions, where the clock alone moved mount and app-mail by
-tenths of a percent.
+tenths of a percent. Each binary is counted warm: run once uncounted
+first, with a cache directory of its own (`warm`, `cache_of`), so a cache
+written at a first launch is not charged to whichever scene runs first.
+A cold launch is the startup scene's to measure.
 
 With `ZGX_GATE_FUNCTIONS=DIR` (CI's perf job sets it), each cell that grew
 more than 0.01% (the largest ten, `ZGX_GATE_FUNCTIONS_MAX`) runs once more
@@ -281,11 +284,20 @@ def scripts_of(checkout):
     return to
 
 
-def count(binary, env, checkout=None, placement=None, out='/dev/null'):
-    """The run's instructions (and cachegrind's file of them by function in
-    `out`). A run that fails is the gate's failure, not the change's: under
-    cachegrind a script's time budget (`ZGX_GATE` lifts it in the benches)
-    or a missing GPU would otherwise look like a result."""
+def cache_of(binary):
+    """`binary`'s own cache directory (its `XDG_CACHE_HOME`): a cache written
+    at a first run (the system fonts', #1307) is each binary's, so the base
+    and the head never read or overwrite each other's files, and one scene's
+    binary never warms another's. The sides' directories are as long as each
+    other (gate-bin-base, gate-bin-head), as a path's length moves a count."""
+    return WORK / 'caches' / binary.parent.name / binary.name
+
+
+# The binaries run once already this gate run (`warm`).
+WARM = set()
+
+
+def environment(binary, env, checkout, placement=None):
     # A side's app scripts are its own: a binary cached from main was built
     # in the checkout a pull request runs in, where it would find the
     # head's (a script using what the base lacks would fail there).
@@ -295,14 +307,41 @@ def count(binary, env, checkout=None, placement=None, out='/dev/null'):
     # One environment, addresses not randomized, the clock and seeds fixed
     # (`same_run`): run again, the same binary counts the same.
     fixed = {k: os.environ[k] for k in ('PATH', 'HOME', 'ZGX_REAL_CLOCK') if k in os.environ}
-    fixed.update(LD_PRELOAD=str(same_run()), ZGX_SAME_RUN_REPORT='1')
+    fixed.update(LD_PRELOAD=str(same_run()), ZGX_SAME_RUN_REPORT='1', XDG_CACHE_HOME=str(cache_of(binary)))
     if placement:
         fixed['GLIBC_TUNABLES'] = placement
+    return {**fixed, **renamed_env({'ZGX_GATE': '1', 'ZGX_ASSISTIVE': '0', **scripts, **env})}
+
+
+def warm(binary, env, checkout):
+    """Runs `binary` once, natively and uncounted, before its first count: a
+    cache it writes at a first run then holds for every count of it, where
+    the first counted run paid the one-time miss (the font cache's, +0.85%
+    on heavy-both, the first scene) and every later scene read it warm.
+    Each side starts from an empty cache of its own (`cache_of`). How long a
+    cold launch takes is the startup scene's to measure, not a cell's."""
+    if binary in WARM:
+        return
+    cache = cache_of(binary)
+    shutil.rmtree(cache, ignore_errors=True)
+    cache.mkdir(parents=True)
+    result = subprocess.run([str(binary)], env=environment(binary, env, checkout), capture_output=True, text=True)
+    if result.returncode:
+        raise Infra(f'{binary.name}: its warm-up run failed\n{result.stdout[-1500:]}{result.stderr[-3000:]}')
+    WARM.add(binary)
+
+
+def count(binary, env, checkout=None, placement=None, out='/dev/null'):
+    """The run's instructions (and cachegrind's file of them by function in
+    `out`), the binary warmed first (`warm`). A run that fails is the gate's
+    failure, not the change's: under cachegrind a script's time budget
+    (`ZGX_GATE` lifts it in the benches) or a missing GPU would otherwise
+    look like a result."""
+    warm(binary, env, checkout)
     command = ['valgrind', '--tool=cachegrind', '--cache-sim=no', f'--cachegrind-out-file={out}', str(binary)]
     result = subprocess.run(
         ['setarch', '-R', *command] if shutil.which('setarch') else command,
-        env={**fixed, **renamed_env({'ZGX_GATE': '1', 'ZGX_ASSISTIVE': '0', **scripts, **env})},
-        capture_output=True, text=True)
+        env=environment(binary, env, checkout, placement), capture_output=True, text=True)
     found = re.search(r'I\s+refs:\s+([\d,]+)', result.stderr)
     if result.returncode or not found:
         why = 'a script hit its time budget' if 'time budget' in result.stdout + result.stderr else 'it failed'
