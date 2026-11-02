@@ -47,7 +47,7 @@ jobs:
         with:
           version: 0.16.0
       # The check's last step: each crate's new pub fields against its previous
-      # release (scripts/semver_defaults.py).
+      # release (scripts/semver_verdict.py).
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-semver-checks
