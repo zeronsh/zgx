@@ -411,8 +411,11 @@ jobs:
       # The soak (an app used for a while holds what it did), on Metal.
       - run: cargo test -p zgx-script --test soak --locked
       - run: cargo test -p zgx-run --test audit --locked
-      # The watchdog's budgets and memory limits, whose timing is each OS's.
-      - run: cargo test -p zgx-script --test state --locked -- script::runaway script::a_script_short_of_its_budget script::garbage_from_builtins script::copies_of_state script::a_script_keeping_nodes
+      # The watchdog's budgets and memory limits, whose timing is each OS's,
+      # one at a time: run together on the runner's three cores, five busy
+      # tests kept the watchdog's thread off a core 130 ms (a runaway
+      # stopped at 157 ms of CPU), as an app's few threads never do.
+      - run: cargo test -p zgx-script --test state --locked -- --test-threads=1 script::runaway script::a_script_short_of_its_budget script::garbage_from_builtins script::copies_of_state script::a_script_keeping_nodes
       - run: cargo test --workspace --doc --locked
       - name: Metal rendering and damage readback
         if: ${{ !cancelled() }}
@@ -484,8 +487,11 @@ jobs:
       # and the event loop's wake by an event handle (#478): Windows only.
       - run: cargo test -p zgx-desktop --test opaque_swap_chain --test proxy_wake --test early_context --locked
       - run: cargo test -p winit --lib --locked occlusion_area
-      # The watchdog's budgets and memory limits, whose timing is each OS's.
-      - run: cargo test -p zgx-script --test state --locked -- script::runaway script::a_script_short_of_its_budget script::garbage_from_builtins script::copies_of_state script::a_script_keeping_nodes
+      # The watchdog's budgets and memory limits, whose timing is each OS's,
+      # one at a time: run together on the runner's three cores, five busy
+      # tests kept the watchdog's thread off a core 130 ms (a runaway
+      # stopped at 157 ms of CPU), as an app's few threads never do.
+      - run: cargo test -p zgx-script --test state --locked -- --test-threads=1 script::runaway script::a_script_short_of_its_budget script::garbage_from_builtins script::copies_of_state script::a_script_keeping_nodes
       # The vendored accesskit_windows' tests of zgx's patches (UIA's
       # HeadingLevel, and a grid cell named by its text for Narrator;
       # vendor/accesskit_windows/ZGX_PATCH.md), alone: its other tests move

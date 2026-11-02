@@ -268,6 +268,10 @@ impl Deadline {
     pub(crate) fn due(&self) -> Instant {
         self.wall + self.budget
     }
+    /// The CPU time it has used.
+    pub(crate) fn cpu_used(&self) -> Duration {
+        thread_cpu().saturating_sub(self.cpu)
+    }
     pub(crate) fn exceeded(&self) -> bool {
         past_budget(
             self.wall.elapsed(),
@@ -293,6 +297,15 @@ const CPU_GRAIN: Duration = Duration::from_micros(15_625);
 fn past_budget(wall: Duration, cpu: Duration, budget: Duration, grain: Duration) -> bool {
     wall > budget && cpu > budget + grain
 }
+/// How the last call stopped for its time on this thread was stopped: how
+/// late the watchdog woke, how long the interrupt took after, and the CPU
+/// the call had used (what a test bounding the stop says when it fails).
+#[doc(hidden)]
+pub fn last_budget_stop() -> Option<interrupt::BudgetStop> {
+    interrupt::last_stop()
+}
+#[doc(hidden)]
+pub use interrupt::BudgetStop;
 /// CPU time the calling thread has used, as script budgets count it: what
 /// a test bounds a stopped script by, where wall time also counts what the
 /// machine gave others.

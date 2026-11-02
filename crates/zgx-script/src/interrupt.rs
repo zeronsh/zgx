@@ -150,6 +150,9 @@ pub(crate) struct Alarm {
     /// from `epoch`, with `FIRED` once the watchdog has set the interrupt
     /// for it; 0 while no call runs.
     due: AtomicU64,
+    /// When the watchdog last set the interrupt (nanoseconds from `epoch`):
+    /// how late it woke, for a stopped call's account (`BudgetStop`).
+    fired_at: AtomicU64,
 }
 /// Marks a due time the watchdog has set the interrupt for (`Alarm::due`;
 /// nanoseconds from `epoch` reach it after 292 years).
@@ -306,6 +309,9 @@ impl Watchdog {
                         Ordering::SeqCst,
                     );
                     if fired.is_ok() {
+                        alarm
+                            .fired_at
+                            .store(nanos(Instant::now()), Ordering::Relaxed);
                         alarm.set(true);
                     }
                 }
@@ -569,6 +575,7 @@ fn install_on(
     let alarm = Arc::new(Alarm {
         slot: AtomicPtr::new(slot.get()),
         due: AtomicU64::new(0),
+        fired_at: AtomicU64::new(0),
     });
     let watch = Rc::new(Watch {
         deadline,
@@ -593,6 +600,46 @@ fn install_on(
         watch,
         watchdog,
     }
+}
+
+/// How a call out of time was stopped: what a test that bounds it says
+/// when it fails (`zgx_script::last_budget_stop`).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BudgetStop {
+    /// How long after the call's wall budget (less `EARLY`) the watchdog
+    /// set its interrupt; `None` if it had not (the memory alarm had).
+    pub watchdog_late: Option<Duration>,
+    /// How long after that the check raised the error.
+    pub raised_after: Option<Duration>,
+    /// The CPU time the call had used then.
+    pub cpu: Duration,
+}
+thread_local! {
+    /// The first stop of the last call stopped on this thread.
+    static LAST_STOP: Cell<Option<(u64, BudgetStop)>> = const { Cell::new(None) };
+}
+/// The last call stopped for its time on this thread, as it was stopped.
+pub(crate) fn last_stop() -> Option<BudgetStop> {
+    LAST_STOP.with(|stop| stop.get().map(|(_, stop)| stop))
+}
+/// Keep the first stop of a call (a `pcall` catching the error meets it
+/// again, each time).
+#[cold]
+fn record_stop(alarm: &Alarm, deadline: &Deadline) {
+    let due = alarm.due.load(Ordering::Relaxed);
+    let fired_at = alarm.fired_at.load(Ordering::Relaxed);
+    let fired = due & FIRED != 0;
+    if LAST_STOP.with(|stop| stop.get().is_some_and(|(at, _)| at == due)) {
+        return;
+    }
+    let now = nanos(Instant::now());
+    let stop = BudgetStop {
+        watchdog_late: fired.then(|| Duration::from_nanos(fired_at.saturating_sub(due & !FIRED))),
+        raised_after: fired.then(|| Duration::from_nanos(now.saturating_sub(fired_at))),
+        cpu: deadline.cpu_used(),
+    };
+    LAST_STOP.with(|last| last.set(Some((due, stop))));
 }
 
 /// What a check finds the script should do.
@@ -708,7 +755,10 @@ unsafe fn check(state: *mut ffi::lua_State) -> Verdict {
         watch.set_memory_alarm();
     }
     match watch.deadline.get() {
-        Some(d) if d.exceeded() => Verdict::OutOfTime,
+        Some(d) if d.exceeded() => {
+            record_stop(&watch.alarm, &d);
+            Verdict::OutOfTime
+        }
         // Nothing to collect and the call not yet fired: until the watchdog
         // or the allocator sets it again, loops run without it. Fired (a
         // nested call or work off the clock may have moved the budget's end
