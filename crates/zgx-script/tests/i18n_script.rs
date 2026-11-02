@@ -423,3 +423,59 @@ fn the_windows_text_takes_the_locale_shown_as_its_language() {
         languages.0.borrow()
     );
 }
+
+/// A catalog the host loads (`ScriptHost::i18n`), from a folder of its
+/// choosing: the scripts' `ui.t` reads it with no `ui.i18n` of theirs, and
+/// an edit to it shows in place, without the scripts running again.
+#[test]
+fn a_catalog_the_host_loads_serves_the_scripts_and_follows_its_files() {
+    let path = app(
+        "host",
+        "local token = tostring({})\nreturn ui.column { ui.text { ui.t(\"greeting\", { name = \"Ada\" }), id = \"greeting\" }, ui.text { token, id = \"token\" } }\n",
+        &[],
+    );
+    let catalog = path.parent().unwrap().with_extension("catalog");
+    let _ = std::fs::remove_dir_all(&catalog);
+    std::fs::create_dir_all(&catalog).unwrap();
+    std::fs::write(catalog.join("en.json"), EN).unwrap();
+    let (app_path, dir) = (path.clone(), catalog.clone());
+    let mut h = Harness::new(|runtime| ScriptHost::new(runtime, app_path).i18n(dir, "en"));
+    h.settle();
+    assert_eq!(h.error(), None);
+    assert_eq!(h.text("greeting"), "Hello, Ada");
+    let token = h.text("token");
+    // An edit to the catalog: its message changes in place.
+    let en = catalog.join("en.json");
+    std::fs::write(&en, EN.replace("Hello", "Hi")).unwrap();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&en)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    assert!(h.host.reload_if_changed());
+    h.settle();
+    assert_eq!(h.text("greeting"), "Hi, Ada");
+    assert_eq!(h.text("token"), token, "the scripts didn't run again");
+    let _ = std::fs::remove_dir_all(&catalog);
+}
+
+#[test]
+fn a_catalog_folder_without_locale_files_warns() {
+    let path = app("host-empty", "return ui.text { \"x\" }\n", &[]);
+    let empty = path.parent().unwrap().with_extension("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let (app_path, dir) = (path.clone(), empty.clone());
+    let h = Harness::new(|runtime| ScriptHost::new(runtime, app_path).i18n(dir, "en"));
+    h.settle();
+    assert!(
+        h.host
+            .warnings()
+            .iter()
+            .any(|w| w.contains("ScriptHost::i18n: no locale files")),
+        "{:?}",
+        h.host.warnings()
+    );
+    let _ = std::fs::remove_dir_all(&empty);
+}

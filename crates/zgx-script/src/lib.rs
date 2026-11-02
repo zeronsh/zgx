@@ -1875,6 +1875,36 @@ impl ScriptHost {
         let package = (name.into().to_lowercase(), dir.into());
         self.configure(|inner| inner.packages.push(package))
     }
+    /// Loads the catalog of locale files in `dir` (`en.json`, `ar.json`,
+    /// …), its keys written in `source`, before any script runs: `ui.t` and
+    /// `ui.locale` work in the app's scripts and its plugins' as after
+    /// `ui.i18n { dir, source }`, with no script calling it. Watched as the
+    /// host hot-reloads: an edited locale file sets the messages whose text
+    /// changed, without reloading the scripts. A script's `ui.i18n` naming
+    /// the same directory and source keeps it; another replaces it. A
+    /// directory with no locale file warns (`ScriptHost::warnings`).
+    pub fn i18n(self, dir: impl Into<PathBuf>, source: &str) -> Self {
+        let dir = dir.into();
+        let dir = normalize(&dir.canonicalize().unwrap_or(dir));
+        let inner = &self.0;
+        if let Err(dir) = i18n::load_dir(
+            &inner.locales,
+            &inner.runtime,
+            inner.files,
+            dir,
+            source,
+            &inner.warnings,
+        ) {
+            warning(
+                Some(&inner.warnings),
+                format!(
+                    "ScriptHost::i18n: no locale files (<locale>.json) in {}",
+                    dir.display()
+                ),
+            );
+        }
+        self
+    }
     /// Adds a plugin from source held in memory.
     pub fn plugin(self, name: impl Into<String>, code: impl Into<String>) -> Self {
         let script = Script::Inline {
@@ -3017,6 +3047,7 @@ impl ScriptHost {
         let mut files: Vec<PathBuf> = self.stamps().into_iter().map(|(path, _)| path).collect();
         files.extend(self.0.assets.files());
         files.extend(zgx::theme::Themes::of(&self.0.runtime).files());
+        files.extend(self.0.locales.files());
         files
     }
     /// The directories whose every entry a reload depends on: the plugins',

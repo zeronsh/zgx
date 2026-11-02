@@ -35,6 +35,14 @@ impl Locales {
     pub(crate) fn handle(&self) -> Option<I18n> {
         self.set.borrow().as_ref().map(|set| set.i18n.clone())
     }
+    /// The catalog's locale files, which a watching host listens to.
+    pub(crate) fn files(&self) -> Vec<PathBuf> {
+        self.set
+            .borrow()
+            .iter()
+            .flat_map(|set| set.files.iter().map(|(path, _)| path.clone()))
+            .collect()
+    }
     /// Reads again the locale files edited since they were read; whether
     /// any were. What their new text changes shows in place, as theme
     /// files' does, without reloading the scripts.
@@ -272,15 +280,34 @@ fn load(lua: &Lua, set: &Rc<Locales>, files: Files, options: Option<Table>) -> m
             "ui.i18n's `dir` is inside the script's directory",
         ));
     }
-    // A reload asking for the same catalog keeps it, and so its
-    // signals: what changed in its files is read by the watcher.
+    load_dir(set, &env.runtime, files, dir, &source, &env.warnings).map_err(|dir| {
+        mlua::Error::runtime(format!(
+            "ui.i18n: no locale files (<locale>.json) in {}",
+            dir.strip_prefix(&base).unwrap_or(&dir).display()
+        ))
+    })?;
+    provide(lua, set)
+}
+
+/// Loads the catalog of the locale files in `dir`, its keys written in
+/// `source`, into `set` (`ui.i18n`, `ScriptHost::i18n`), or keeps the one
+/// loaded for them, and so its signals: what changed in its files is read
+/// by the watcher. `dir` back when it holds no locale file.
+pub(crate) fn load_dir(
+    set: &Locales,
+    runtime: &zgx::reactive::Runtime,
+    files: Files,
+    dir: PathBuf,
+    source: &str,
+    warnings: &crate::SharedWarnings,
+) -> Result<(), PathBuf> {
     if set
         .set
         .borrow()
         .as_ref()
         .is_some_and(|s| s.dir == dir && s.source == source)
     {
-        return provide(lua, set);
+        return Ok(());
     }
     let mut paths: Vec<PathBuf> = files
         .list(&dir)
@@ -289,13 +316,10 @@ fn load(lua: &Lua, set: &Rc<Locales>, files: Files, options: Option<Table>) -> m
         .collect();
     paths.sort();
     if paths.is_empty() {
-        return Err(mlua::Error::runtime(format!(
-            "ui.i18n: no locale files (<locale>.json) in {}",
-            dir.strip_prefix(&base).unwrap_or(&dir).display()
-        )));
+        return Err(dir);
     }
-    let i18n = I18n::new(&env.runtime, &source);
-    let warnings = env.warnings.clone();
+    let i18n = I18n::new(runtime, source);
+    let warnings = warnings.clone();
     let told = warnings.clone();
     i18n.on_issue(move |issue| {
         let detail = match issue.key.as_str() {
@@ -312,11 +336,11 @@ fn load(lua: &Lua, set: &Rc<Locales>, files: Files, options: Option<Table>) -> m
     *set.set.borrow_mut() = Some(Set {
         i18n,
         dir,
-        source,
+        source: source.to_owned(),
         files: stamps,
         warnings,
     });
-    provide(lua, set)
+    Ok(())
 }
 
 /// `ui.t` and `ui.locale`, for a script that called `ui.i18n`.
