@@ -69,6 +69,11 @@ wgpu = { version = "29.0.4", default-features = false, features = ["gles"] }
 [target.'cfg(not(any(windows, target_vendor = "apple")))'.dependencies]
 wgpu = { version = "29.0.4", default-features = false, features = ["vulkan"] }
 
+# fontconfig's configuration, read as fontdb reads it, for what the system
+# font cache watches (font_cache.rs); fontdb's own, already in the tree.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
+fontconfig-parser = { version = "0.5.8", default-features = false }
+
 # DXGI frame statistics for ZGX_PRESENT_LOG (dxgi.rs); the version wgpu-hal uses.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dwm", "Win32_System_Performance", "Win32_System_Threading"] }

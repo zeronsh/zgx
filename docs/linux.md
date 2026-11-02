@@ -212,6 +212,18 @@ container), text shapes to nothing and everything else draws; the first text
 says once on stderr why it does not show. Before, shaping panicked every
 frame and the window drew nothing. `no_fonts_smoke.py` runs the gallery
 with a fontconfig that lists only an empty directory.
+
+An app reads the system's fonts from a cache (`$XDG_CACHE_HOME/zgx/`, else
+`~/.cache/zgx/`). Otherwise fontdb parses fontconfig's configuration and opens
+every installed font at each launch: about 11.7 M instructions with 113
+fonts, against 0.46 M from the cache. The cache is used while these are
+unchanged:
+- the configuration files fontconfig read (and their directories);
+- the font directories they name;
+- the environment fontdb reads (`HOME`, `XDG_CONFIG_HOME`, `FONTCONFIG_FILE`).
+It also keeps the generic families fontconfig's aliases chose. A font file
+changed in place drops it for the next launch. Removing the file is always
+safe.
 On an X screen of 16 bits (some VNC servers, older setups) or 30 (deep
 colour), a window takes a TrueColor visual of 24 bits, or of 32 (the one
 compositing adds), rather than the screen's own (`x11_visual`): Mesa's Vulkan
