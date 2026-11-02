@@ -29,3 +29,14 @@ compared that way and now name the index type.
 The crate's 132 unit tests pass. zgx-terminal's
 `usize_compares_only_with_itself` compiles only while no crate in its graph
 implements a comparison of `usize` with another type.
+
+## Ptys opened one at a time (macOS)
+
+macOS's `openpty` isn't safe to call from two threads at once while ptys
+are in use: 16 threads opening, each passing a byte through its pty and
+closing it, failed about once in 4,000 calls with errno -6, and an
+engine-drawn terminal didn't start ("couldn't start: Unknown error: -6");
+one thread never failed in 7,200. `tty::open_pty` opens the pair behind a
+process-wide lock, and `tty::new` uses it. zgx-terminal's
+`ptys_opened_at_once_from_many_threads_all_open` failed 9 runs in 10
+without the lock, none with it. Version 0.26.1.

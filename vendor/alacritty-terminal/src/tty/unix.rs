@@ -201,10 +201,25 @@ fn default_shell_command(shell: &str, user: &str, home: &str) -> Command {
     login_command
 }
 
+/// zgx: ptys are opened one at a time. macOS's `openpty` isn't safe to call
+/// from two threads at once: run concurrently it failed about once in a few
+/// thousand calls with errno -6 (16 threads; never from one), and the
+/// terminal didn't start ("Unknown error: -6").
+static OPENPTY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// zgx: a pty's two sides (controller, then the child's), opened one pty
+/// at a time (`OPENPTY`).
+pub fn open_pty(window_size: WindowSize) -> Result<(OwnedFd, OwnedFd)> {
+    let _one = OPENPTY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pty = openpty(None, Some(&window_size.to_winsize()))?;
+    Ok((pty.controller, pty.user))
+}
+
 /// Create a new TTY and return a handle to interact with it.
 pub fn new(config: &Options, window_size: WindowSize, window_id: u64) -> Result<Pty> {
-    let pty = openpty(None, Some(&window_size.to_winsize()))?;
-    let (master, slave) = (pty.controller, pty.user);
+    let (master, slave) = open_pty(window_size)?;
     from_fd(config, window_id, master, slave)
 }
 
