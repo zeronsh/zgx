@@ -439,3 +439,154 @@ fn gradient_masks_show_the_box_through_the_gradient() {
         "middle {middle}, corner {corner}"
     );
 }
+/// A drop shadow (`Scene::set_drop_shadow`) follows what casts it by its
+/// alpha, not its box: an image opaque on its left half casts a shadow of
+/// that half alone, moved and in the shadow's colour; blurred, it softens
+/// past its edges; moved, it composites again without repainting the
+/// layer; removed, the frame is as it was.
+#[test]
+fn drop_shadows_follow_the_alpha_of_what_casts_them() {
+    let _gpu_fixture = gpu_fixture();
+    let half = Arc::new(
+        zgx::image::ImageData::new(
+            4,
+            1,
+            vec![
+                255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        )
+        .unwrap(),
+    );
+    for (direct, mut gpu) in renderers() {
+        let mut scene = scene();
+        let image = scene.append(
+            scene.root(),
+            NodeKind::Image(half.clone()),
+            Style {
+                width: Some(80.),
+                height: Some(40.),
+                ..Default::default()
+            },
+        );
+        scene.set_transform(image, Transform { x: 40., y: 20. });
+        let (_, before) = render(&mut gpu, &mut scene);
+        let green = Color(0, 255, 0, 255);
+        let shadow = |x: f32, y: f32, blur: f32| DropShadow {
+            offset: Transform { x, y },
+            blur,
+            color: green,
+        };
+        scene.set_drop_shadow(image, Some(shadow(0., 60., 0.)));
+        let (stats, p) = render(&mut gpu, &mut scene);
+        assert!(stats.effect_passes >= 1, "direct={direct}");
+        // The image as it was; under its opaque half, its shadow in green;
+        // under its clear half, nothing.
+        assert_eq!(pixel(&p, 50, 40), pixel(&before, 50, 40), "direct={direct}");
+        assert_eq!(pixel(&p, 50, 100), [0, 255, 0, 255], "direct={direct}");
+        assert_eq!(pixel(&p, 110, 100)[3], 0, "direct={direct}: past its alpha");
+        // Moved: composited again, the layer kept.
+        scene.set_drop_shadow(image, Some(shadow(0., 70., 0.)));
+        let (stats, p) = render(&mut gpu, &mut scene);
+        assert_eq!(stats.layer_repaints, 0, "direct={direct}");
+        assert_eq!(
+            pixel(&p, 50, 85)[3],
+            0,
+            "direct={direct}: gone from where it was"
+        );
+        assert_eq!(pixel(&p, 50, 110), [0, 255, 0, 255], "direct={direct}");
+        // Blurred: soft at its edge, spilling past it.
+        scene.set_drop_shadow(image, Some(shadow(0., 60., 4.)));
+        let (_, p) = render(&mut gpu, &mut scene);
+        let edge = pixel(&p, 80, 100)[3];
+        assert!((60..200).contains(&edge), "direct={direct}: edge {edge}");
+        assert!(pixel(&p, 84, 100)[3] > 0, "direct={direct}: spills");
+        // Gone: as before.
+        scene.set_drop_shadow(image, None);
+        let (_, p) = render(&mut gpu, &mut scene);
+        assert_eq!(p, before, "direct={direct}");
+    }
+}
+
+/// A drop-shadowed caster half out of its clip, then, in one frame, its
+/// child resized (its ink worked out again) and the caster moved wholly out
+/// of the clip: its shadow, still inside, still draws (the paint walk culls
+/// by ink, which reaches the shadow at every flush).
+#[test]
+fn a_shadow_inside_its_clip_draws_while_its_caster_leaves() {
+    let _gpu_fixture = gpu_fixture();
+    for (direct, mut gpu) in renderers() {
+        let mut scene = scene();
+        let clip = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                width: Some(100.),
+                height: Some(100.),
+                clip: true,
+                ..Default::default()
+            },
+        );
+        let caster = scene.append(
+            clip,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                width: Some(40.),
+                height: Some(40.),
+                ..Default::default()
+            },
+        );
+        let square = scene.append(
+            caster,
+            NodeKind::Rect(RED),
+            Style {
+                width: Some(40.),
+                height: Some(40.),
+                ..Default::default()
+            },
+        );
+        scene.set_transform(caster, Transform { x: 80., y: 10. });
+        scene.set_drop_shadow(
+            caster,
+            Some(DropShadow {
+                offset: Transform { x: -60., y: 0. },
+                blur: 0.,
+                color: Color(0, 255, 0, 255),
+            }),
+        );
+        let (_, p) = render(&mut gpu, &mut scene);
+        assert_eq!(
+            pixel(&p, 90, 20),
+            [255, 0, 0, 255],
+            "direct={direct}: half in"
+        );
+        assert_eq!(
+            pixel(&p, 30, 20),
+            [0, 255, 0, 255],
+            "direct={direct}: its shadow"
+        );
+        // One frame: the child smaller, the caster out of the clip.
+        scene.set_style(
+            square,
+            Style {
+                width: Some(30.),
+                height: Some(30.),
+                ..Default::default()
+            },
+        );
+        scene.set_transform(caster, Transform { x: 110., y: 10. });
+        let (_, p) = render(&mut gpu, &mut scene);
+        // The caster's square at 110..140 is clipped away; its shadow at
+        // 50..80 is inside.
+        assert_eq!(
+            pixel(&p, 65, 20),
+            [0, 255, 0, 255],
+            "direct={direct}: still drawn"
+        );
+        assert_eq!(
+            pixel(&p, 30, 20)[3],
+            0,
+            "direct={direct}: gone from where it was"
+        );
+        assert_eq!(pixel(&p, 105, 20)[3], 0, "direct={direct}: clipped");
+    }
+}

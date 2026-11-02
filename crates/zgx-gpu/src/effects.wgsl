@@ -13,6 +13,8 @@
 // `fade`: the slot's texels (x0, y0, x1, y1), outside which it is clear.
 // `shape`, `border.x` on: the mask texel at the quad's origin and its step
 // per slot texel; the content shows by its alpha, and not past its edges.
+// `border.yzw`, unless `border.y` is negative: a drop shadow's colour, which
+// the output takes, premultiplied by its alpha.
 struct Job { @location(0) rect:vec4<f32>, @location(1) uv:vec4<f32>, @location(2) color:vec4<f32>, @location(3) fade:vec4<f32>, @location(4) options:vec4<f32>, @location(5) shape:vec4<f32>, @location(6) border:vec4<f32> }
 struct Out { @builtin(position) position:vec4<f32>, @location(0) @interpolate(flat) rect:vec4<f32>, @location(1) @interpolate(flat) color:vec4<f32>, @location(2) @interpolate(flat) fade:vec4<f32>, @location(3) @interpolate(flat) options:vec4<f32>, @location(4) @interpolate(flat) shape:vec4<f32>, @location(5) @interpolate(flat) border:vec4<f32> }
 @group(0) @binding(1) var source:texture_2d<f32>;
@@ -67,5 +69,7 @@ fn inside(v:Out)->bool{return all(v.position.xy>=v.fade.xy)&&all(v.position.xy<v
   let dims=vec2<f32>(textureDimensions(mask));
   if all(m>=vec2(0.))&&all(m<dims){color*=textureLoad(mask,vec2<i32>(m),0).a;}else{color=vec4(0.);}
  }
+ // A drop shadow: its alpha in `border.yzw`'s colour.
+ if v.border.y>=0.{color=vec4(v.border.yzw*color.a,color.a);}
  return color;
 }
