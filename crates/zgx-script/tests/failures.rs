@@ -237,8 +237,8 @@ const GIF: &[u8] = &[
     0, 0, 0, 8, 15, 0, 1, 8, 28, 72, 176, 160, 193, 131, 8, 19, 42, 76, 24, 16, 0, 59,
 ];
 
-/// A GIF in `ui.image` (zgx-gpu's `gif` feature, on by default) shows: its
-/// first frame, sized as it is, no error.
+/// A GIF in `ui.image` (zgx-gpu's `gif` feature, on by default) shows,
+/// sized as its frames are, no error, and plays.
 #[test]
 fn a_gif_shows() {
     let dir = std::env::temp_dir().join(format!("zgx-image-gif-{}", std::process::id()));
@@ -267,4 +267,24 @@ return ui.column {
         (8., 8.),
         "as large as its pixels"
     );
+    // It plays: its frames (200 ms each) take turns.
+    let frame = |h: &mut Harness| {
+        let scene = h.ui.scene.borrow();
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            if let zgx::scene::NodeKind::Image(image) = scene.kind(n) {
+                return image.pixels().to_vec();
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        Vec::new()
+    };
+    let first = frame(&mut h);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while frame(&mut h) == first && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.settle();
+        h.frame();
+    }
+    assert_ne!(frame(&mut h), first, "the next frame shows");
 }

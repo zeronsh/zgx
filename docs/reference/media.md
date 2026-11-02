@@ -14,7 +14,7 @@ ui.shader(source: string, opts: { fps: number? }?) -> Shader
 
 ## image
 
-A PNG, JPEG or GIF (with zgx-gpu's `gif` feature, on by default: its first frame, still), decoded once per `src` and kept while a node shows it. Of those no node shows, the most recently shown are kept within the host's budget (`ScriptHost::image_cache`, 48 MiB by default), so a reload or a page shown again decodes nothing.
+A PNG, JPEG or GIF (with zgx-gpu's `gif` feature, on by default), decoded once per `src` and kept while a node shows it. A GIF plays, as Rust's `animated_image` does: paused while it's off screen, clipped away, faded out or the window isn't shown (no timer, nothing drawn), its last frame kept once a finite one ends, and still on its first frame while the system asks for reduced motion (`ui.prefers.reduced_motion`). Another `src` changes what plays, and a still stops it. A GIF whose frames fit 4 MiB decoded keeps them (a spinner costs nothing to play); a larger one keeps its file and decodes each frame as it comes, so however long it is it holds a few frames (a 400 by 300 GIF of 300 frames, 137 MiB decoded whole: 0.5 MiB held, under 3 MiB at its peak, about 1% of a core while it plays at 50 frames a second). Each frame repaints the picture's box alone. Of those no node shows, the most recently shown are kept within the host's budget (`ScriptHost::image_cache`, 48 MiB by default), so a reload or a page shown again decodes nothing.
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |

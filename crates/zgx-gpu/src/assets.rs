@@ -147,13 +147,14 @@ pub fn decode_image(bytes: &[u8]) -> Result<Arc<ImageData>, GpuError> {
                 .map_err(|e| GpuError(e.into()));
         }
         // A GIF through the `gif` crate (`image` reads none): its first
-        // frame, composited as `decode_gif` composites them all.
+        // frame, composited as `decode_gif` composites them all, carrying
+        // the rest, which an image view plays (`ImageData::animated`).
         Some(image::ImageFormat::Gif) if !cfg!(feature = "gif") => {
             return Err(GpuError("GIF images need zgx-gpu's `gif` feature".into()));
         }
         #[cfg(feature = "gif")]
         Some(image::ImageFormat::Gif) => {
-            return decode_gif(bytes).map(|animation| animation.frames()[0].image.clone());
+            return decode_gif(bytes).map(|animation| Arc::new(ImageData::animated(animation)));
         }
         _ => {}
     }
@@ -307,40 +308,134 @@ fn render_svg(_: &[u8], _: u32, _: u32, _: &mut tiny_skia::Pixmap) -> Result<(),
     Err(GpuError("SVG images need zgx-gpu's `svg` feature".into()))
 }
 
-/// Decode GIF frames once, compositing offsets and Keep/Background/Previous
-/// disposal into full straight-alpha frames. Background disposal is transparent,
-/// matching GUI image compositing rather than filling the window with GIF palette
-/// background. Absent looping extension plays once; finite repetitions add to the
-/// initial play. Zero-delay GIF frames use 100 ms; other delays floor at 10 ms.
+/// Decode a GIF's frames, compositing offsets and Keep/Background/Previous
+/// disposal into full straight-alpha frames. Background disposal is
+/// transparent, matching GUI image compositing rather than filling the
+/// window with GIF palette background. Absent looping extension plays once;
+/// finite repetitions add to the initial play. Zero-delay GIF frames use
+/// 100 ms; other delays floor at 10 ms.
+///
+/// Frames that fit `GIF_KEPT` between them are kept, decoded once. A larger
+/// GIF (long, or large) keeps its file and its first frame: the rest are
+/// decoded as they come (`Animation::streamed`), one frame and the canvas
+/// held, so a GIF of hundreds of megabytes of frames holds a few of them.
 #[cfg(feature = "gif")]
 pub fn decode_gif(bytes: &[u8]) -> Result<Arc<zgx::animation::Animation>, GpuError> {
-    use zgx::animation::{Animation, Frame, LoopCount};
+    decode_gif_shared(Arc::from(bytes))
+}
+/// The decoded frames a GIF keeps at most (`decode_gif`): past it, they
+/// stream. A small looping GIF (a spinner, an emoji) is decoded once and
+/// costs nothing to play; a long one costs a frame's decode as each comes.
+#[cfg(feature = "gif")]
+pub const GIF_KEPT: usize = 4 << 20;
+/// `decode_gif`, its file shared with the stream that decodes it as it plays.
+#[cfg(feature = "gif")]
+pub fn decode_gif_shared(bytes: Arc<[u8]>) -> Result<Arc<zgx::animation::Animation>, GpuError> {
+    decode_gif_keeping(bytes, GIF_KEPT)
+}
+/// `decode_gif_shared`, keeping decoded frames up to `keep` bytes between
+/// them (`GIF_KEPT`): for tests of either way.
+#[cfg(feature = "gif")]
+#[doc(hidden)]
+pub fn decode_gif_keeping(
+    bytes: Arc<[u8]>,
+    keep: usize,
+) -> Result<Arc<zgx::animation::Animation>, GpuError> {
+    use zgx::animation::{Animation, Frame};
     if bytes.len() > MAX_BYTES {
         return Err(GpuError("encoded GIF exceeds 64 MiB".into()));
     }
-    let mut options = gif::DecodeOptions::new();
-    options.set_color_output(gif::ColorOutput::RGBA);
-    options.check_frame_consistency(true);
-    options.set_memory_limit(gif::MemoryLimit::Bytes(
-        std::num::NonZeroU64::new(MAX_BYTES as u64).unwrap(),
-    ));
-    let mut decoder = options
-        .read_info(Cursor::new(bytes))
-        .map_err(|e| GpuError(e.to_string()))?;
-    let (width, height) = (u32::from(decoder.width()), u32::from(decoder.height()));
-    let length = u64::from(width) * u64::from(height) * 4;
-    if length == 0 || length > MAX_BYTES as u64 {
-        return Err(GpuError("GIF canvas exceeds 64 MiB".into()));
-    }
-    let mut canvas = vec![0u8; length as usize];
-    let mut frames = Vec::new();
-    while let Some(frame) = decoder
-        .read_next_frame()
-        .map_err(|e| GpuError(e.to_string()))?
-    {
-        if frames.len() >= 4096 || (frames.len() + 1) as u64 * length > MAX_BYTES as u64 {
-            return Err(GpuError("decoded GIF exceeds frame/64 MiB budget".into()));
+    let mut gif = GifFrames::new(bytes.clone())?;
+    let mut kept: Vec<Frame> = Vec::new();
+    let mut durations = Vec::new();
+    let mut first = None;
+    let mut keeping = true;
+    while let Some((image, duration)) = gif.next_frame()? {
+        if durations.len() >= 4096 {
+            return Err(GpuError("GIF exceeds 4096 frames".into()));
         }
+        durations.push(duration);
+        if first.is_none() {
+            first = Some(image.clone());
+        }
+        keeping &= (durations.len() as u64) * gif.length() <= keep as u64;
+        match keeping {
+            true => kept.push(Frame { image, duration }),
+            false => kept.clear(),
+        }
+    }
+    let first = first.ok_or_else(|| GpuError("GIF has no frames".into()))?;
+    let loops = gif.loops();
+    let animation = match keeping {
+        true => Animation::new(kept, loops),
+        false => Animation::streamed(
+            first,
+            durations,
+            loops,
+            Box::new(GifStream {
+                bytes,
+                frames: None,
+            }),
+        ),
+    };
+    animation.map(Arc::new).map_err(|e| GpuError(e.into()))
+}
+/// A GIF's frames in order, each composited over the canvas the last left.
+#[cfg(feature = "gif")]
+struct GifFrames {
+    decoder: gif::Decoder<Cursor<Arc<[u8]>>>,
+    width: u32,
+    height: u32,
+    canvas: Vec<u8>,
+}
+#[cfg(feature = "gif")]
+impl GifFrames {
+    fn new(bytes: Arc<[u8]>) -> Result<Self, GpuError> {
+        let mut options = gif::DecodeOptions::new();
+        options.set_color_output(gif::ColorOutput::RGBA);
+        options.check_frame_consistency(true);
+        options.set_memory_limit(gif::MemoryLimit::Bytes(
+            std::num::NonZeroU64::new(MAX_BYTES as u64).unwrap(),
+        ));
+        let decoder = options
+            .read_info(Cursor::new(bytes))
+            .map_err(|e| GpuError(e.to_string()))?;
+        let (width, height) = (u32::from(decoder.width()), u32::from(decoder.height()));
+        let length = u64::from(width) * u64::from(height) * 4;
+        if length == 0 || length > MAX_BYTES as u64 {
+            return Err(GpuError("GIF canvas exceeds 64 MiB".into()));
+        }
+        Ok(Self {
+            decoder,
+            width,
+            height,
+            canvas: vec![0u8; length as usize],
+        })
+    }
+    /// A frame's bytes.
+    fn length(&self) -> u64 {
+        self.canvas.len() as u64
+    }
+    fn loops(&self) -> zgx::animation::LoopCount {
+        use zgx::animation::LoopCount;
+        match self.decoder.repeat() {
+            gif::Repeat::Infinite => LoopCount::Infinite,
+            gif::Repeat::Finite(repeats) => {
+                LoopCount::Finite(std::num::NonZeroU32::new(u32::from(repeats) + 1).unwrap())
+            }
+        }
+    }
+    /// The next frame, composited, and how long it shows.
+    fn next_frame(&mut self) -> Result<Option<(Arc<ImageData>, std::time::Duration)>, GpuError> {
+        let width = self.width as usize;
+        let Some(frame) = self
+            .decoder
+            .read_next_frame()
+            .map_err(|e| GpuError(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let canvas = &mut self.canvas;
         let previous = (frame.dispose == gif::DisposalMethod::Previous).then(|| canvas.clone());
         let (fw, fh, left, top) = (
             usize::from(frame.width),
@@ -351,7 +446,7 @@ pub fn decode_gif(bytes: &[u8]) -> Result<Arc<zgx::animation::Animation>, GpuErr
         for y in 0..fh {
             for x in 0..fw {
                 let source = 4 * (y * fw + x);
-                let destination = 4 * ((top + y) * width as usize + left + x);
+                let destination = 4 * ((top + y) * width + left + x);
                 if frame.buffer[source + 3] > 0 {
                     canvas[destination..destination + 4]
                         .copy_from_slice(&frame.buffer[source..source + 4]);
@@ -359,39 +454,53 @@ pub fn decode_gif(bytes: &[u8]) -> Result<Arc<zgx::animation::Animation>, GpuErr
             }
         }
         let image = Arc::new(
-            ImageData::new(width, height, canvas.clone()).map_err(|e| GpuError(e.into()))?,
+            ImageData::new(self.width, self.height, canvas.clone())
+                .map_err(|e| GpuError(e.into()))?,
         );
         let delay = if frame.delay == 0 {
             100
         } else {
             u64::from(frame.delay) * 10
         };
-        frames.push(Frame {
-            image,
-            duration: std::time::Duration::from_millis(delay),
-        });
         match frame.dispose {
             gif::DisposalMethod::Background => {
                 for y in 0..fh {
-                    let start = 4 * ((top + y) * width as usize + left);
+                    let start = 4 * ((top + y) * width + left);
                     canvas[start..start + 4 * fw].fill(0);
                 }
             }
-            gif::DisposalMethod::Previous => canvas = previous.unwrap(),
+            gif::DisposalMethod::Previous => *canvas = previous.unwrap(),
             _ => {}
         }
+        Ok(Some((image, std::time::Duration::from_millis(delay))))
     }
-    let loops = match decoder.repeat() {
-        gif::Repeat::Infinite => LoopCount::Infinite,
-        gif::Repeat::Finite(repeats) => {
-            LoopCount::Finite(std::num::NonZeroU32::new(u32::from(repeats) + 1).unwrap())
-        }
-    };
-    Animation::new(frames, loops)
-        .map(Arc::new)
-        .map_err(|e| GpuError(e.into()))
 }
-/// Without the `gif` feature: an error naming it.
+/// A streamed GIF's frames (`Animation::streamed`), decoded from its file
+/// again from the start as it loops.
+#[cfg(feature = "gif")]
+struct GifStream {
+    bytes: Arc<[u8]>,
+    frames: Option<GifFrames>,
+}
+#[cfg(feature = "gif")]
+impl zgx::animation::FrameStream for GifStream {
+    fn restart(&mut self) -> Result<(), String> {
+        // The last decoder and canvas go first: not two of each at once.
+        self.frames = None;
+        self.frames = Some(GifFrames::new(self.bytes.clone()).map_err(|e| e.0)?);
+        Ok(())
+    }
+    fn next(&mut self) -> Option<Arc<ImageData>> {
+        if self.frames.is_none() {
+            self.restart().ok()?;
+        }
+        let frames = self.frames.as_mut()?;
+        frames.next_frame().ok().flatten().map(|(image, _)| image)
+    }
+    fn bytes(&self) -> usize {
+        self.bytes.len() + self.frames.as_ref().map_or(0, |f| f.canvas.len())
+    }
+}
 #[cfg(not(feature = "gif"))]
 pub fn decode_gif(_: &[u8]) -> Result<Arc<zgx::animation::Animation>, GpuError> {
     Err(GpuError("GIF images need zgx-gpu's `gif` feature".into()))
