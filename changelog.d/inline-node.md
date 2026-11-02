@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **A node in a paragraph's text**: `ui.span { node = …, w, h, baseline, text = … }` (Rust: `text_span(text).node(&InlineNode::new(view), w, h, baseline)`) puts a node in the line in place of the span's text, as a word of its own: its top `baseline` above the line's baseline, the line growing to hold it as a tall glyph's would, and `w`, `h` and `baseline` following a state reflow it in place. It is mounted once, a real child (it draws, takes clicks, can be a `ui.canvas`). The text is what it stands for: a selection takes the node whole, as one character, and copies (as plain text and HTML) the text in its place, and accessibility reads it, so inline math copies back as its TeX. Beneath it, `RichText::with_boxes` gives runs a box in the line, and `TextLayout::baseline` says where a line's baseline is.

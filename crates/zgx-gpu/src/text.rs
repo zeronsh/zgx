@@ -562,6 +562,15 @@ impl zgx::text_layout::TextLayout for ShapedText {
     fn size(&self) -> (f32, f32) {
         ShapedText::size(self)
     }
+    fn baseline(&self, byte_offset: usize) -> Option<f32> {
+        self.buffer.layout_runs().find_map(|run| {
+            let offset = self.line_offsets[run.line_i];
+            run.glyphs
+                .iter()
+                .any(|glyph| (offset + glyph.start..offset + glyph.end).contains(&byte_offset))
+                .then_some(run.line_y)
+        })
+    }
     fn hit_test(&self, x: f32, y: f32) -> usize {
         ShapedText::hit_test(self, x, y).map_or(0, |cursor| cursor.byte_index)
     }
@@ -1559,12 +1568,21 @@ pub(crate) fn truncated(
                 r
             })
             .collect();
+        // The boxes on what is kept.
+        let boxes: Vec<_> = (rich.boxes().iter())
+            .filter(|b| b.run < runs.len())
+            .cloned()
+            .collect();
         if ellipsis {
             let mut run = runs
                 .last()
                 .or(rich.runs().first())
                 .cloned()
                 .unwrap_or_default();
+            // After a box, the ellipsis keeps none of its room.
+            if boxes.last().is_some_and(|b| b.run + 1 == runs.len()) {
+                run.padding[0] = 0.;
+            }
             content.push('…');
             run.range = cut..content.len();
             run.background = None;
@@ -1584,7 +1602,9 @@ pub(crate) fn truncated(
             buffer.shape_until_scroll(fonts, false);
             return buffer;
         }
-        let truncated = zgx::rich_text::RichText::new(content, runs).unwrap();
+        let truncated = zgx::rich_text::RichText::new(content, runs)
+            .and_then(|truncated| truncated.with_boxes(boxes))
+            .unwrap();
         rich_buffer_raw(fonts, &truncated, width, None, ellipsis)
     };
     if options.overflow == TextOverflow::Clip {
@@ -1839,15 +1859,20 @@ pub(crate) fn rich_buffer_unshaped(
             && runs[end].font == run.font
             && runs[end].font_size == run.font_size
             && runs[end].range.start == runs[end - 1].range.end
-            // A padded run's room goes around it alone.
+            // A padded run's room goes around it alone, as a box's does.
             && run.padding[0] == 0.
             && runs[end].padding[0] == 0.
+            && rich.boxes().is_empty()
         {
             end += 1;
         }
         let mut attributes = attrs(&run.font, run.font_size.max(1.));
         if run.padding[0] > 0. {
             attributes = attributes.padding(run.padding[0] / run.font_size.max(1.));
+        }
+        if let Some(inline) = rich.inline_box(index) {
+            let em = run.font_size.max(1.);
+            attributes = attributes.inline_box(inline.above / em, inline.below / em);
         }
         let attributes = attributes
             .metrics(Metrics::new(
@@ -1896,6 +1921,54 @@ mod rich_tests {
             db.push_face_info(alias);
         }
         FontSystem::new_with_locale_and_db("en-US".into(), db)
+    }
+    /// A box in the line (an inline node's room) takes its padding across
+    /// and no glyph's, sits on the baseline, and grows its line to hold it
+    /// and the text about it; a box the text is taller than leaves the line
+    /// as the text has it.
+    #[test]
+    fn an_inline_box_keeps_its_room_on_the_baseline_and_grows_its_line() {
+        use zgx::{rich_text::InlineBox, text_layout::TextLayout};
+        let mut fonts = bundled_test_fonts();
+        let text = "where \u{2063} holds";
+        let at = "where ".len();
+        let end = at + '\u{2063}'.len_utf8();
+        let run = |range: Range<usize>, padding: f32| TextRun {
+            range,
+            font_size: 16.,
+            padding: [padding, 0.],
+            ..Default::default()
+        };
+        let plain = RichText::new(
+            text,
+            vec![run(0..at, 0.), run(at..end, 37.), run(end..text.len(), 0.)],
+        )
+        .unwrap();
+        let boxed = |above: f32, below: f32| {
+            let rich = plain.clone().with_boxes(vec![InlineBox {
+                run: 1,
+                above,
+                below,
+                text: "$x$".into(),
+            }]);
+            ShapedText::with_runs(&mut bundled_test_fonts(), &rich.unwrap(), None)
+        };
+        let flat = ShapedText::with_runs(&mut fonts, &plain, None);
+        let tall = boxed(40., 12.);
+        let room = tall.selection(at..end);
+        assert!((room[0].width - 74.).abs() < 0.01, "{room:?}");
+        let (_, height) = TextLayout::size(&tall);
+        let baseline = TextLayout::baseline(&tall, at).unwrap();
+        assert!(baseline >= 40. - 0.01, "{baseline} of {height}");
+        assert!(height - baseline >= 12. - 0.01, "{baseline} of {height}");
+        // The text about it fits as well: its own baseline is the box's.
+        assert_eq!(TextLayout::baseline(&tall, 0), Some(baseline));
+        let small = boxed(4., 2.);
+        assert_eq!(TextLayout::size(&small).1, TextLayout::size(&flat).1);
+        assert_eq!(
+            TextLayout::baseline(&small, at),
+            TextLayout::baseline(&flat, 0)
+        );
     }
     #[test]
     fn display_line_clamp_shapes_ellipsis_and_excludes_hidden_link_geometry() {

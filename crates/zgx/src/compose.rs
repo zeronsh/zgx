@@ -2062,7 +2062,9 @@ pub use crate::compose_context_menu::{ContextMenuEvent, ContextMenuSpan};
 /// Where anchored popovers and menus open (`View::placement`).
 pub use crate::compose_modal::ModalPlacement;
 pub use crate::compose_popover::{Edge as PlacementEdge, Placement, Side as PlacementSide};
-pub use crate::compose_rich::{RichTextView, SpanHover, SpanIcon, TextSpan, rich_text, text_span};
+pub use crate::compose_rich::{
+    InlineNode, RichTextView, SpanHover, SpanIcon, TextSpan, rich_text, text_span,
+};
 pub use crate::compose_tooltip::Tooltip;
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
 pub fn rich_text_signal(compute: impl FnMut() -> Vec<TextSpan> + 'static) -> View {
@@ -2566,6 +2568,22 @@ pub fn switch<K: PartialEq + Clone + 'static>(
             selected = Some(key);
         });
     })))
+}
+/// `view` mounted into `parent` from an effect (an inline node's), as
+/// `switch` mounts its view: untracked, and a panic leaves none of it.
+pub(crate) fn mount_untracked(
+    ui: &mut Ui,
+    parent: NodeId,
+    view: View,
+    environment: &Environment,
+) -> NodeId {
+    let runtime = ui.runtime.clone();
+    runtime.untracked(|| {
+        let mut transaction = MountTransaction::new(ui, parent);
+        let node = mount(ui, parent, view, environment.clone());
+        transaction.commit();
+        node
+    })
 }
 /// Keyed children retain their local state and subscriptions across reorder.
 /// Duplicate keys are rejected before mutating the mounted children.
@@ -3964,18 +3982,20 @@ fn paragraph_effect<const LOCATING: bool>(
         let mut runs = Vec::with_capacity(spans.len());
         let mut links = Vec::new();
         let mut icons = Vec::new();
+        let mut boxes = Vec::new();
         let mut spanned = Vec::new();
         for (index, mut span) in spans.into_iter().enumerate() {
-            if span.text.is_empty() {
+            // A node shows without text to stand for.
+            if span.text.is_empty() && span.extras.as_ref().is_none_or(|e| e.node.is_none()) {
                 continue;
             }
             let link = span.action.is_some() || span.href.is_some();
-            // Most spans have none of these: one test for all three.
-            let (hover, icon, menu) = match span.extras.take() {
-                None => (None, None, None),
+            // Most spans have none of these: one test for all four.
+            let (hover, icon, menu, node) = match span.extras.take() {
+                None => (None, None, None, None),
                 Some(extras) => {
                     let extras = *extras;
-                    (extras.hover, extras.icon, extras.menu)
+                    (extras.hover, extras.icon, extras.menu, extras.node)
                 }
             };
             let hover = hover.as_ref();
@@ -3994,6 +4014,35 @@ fn paragraph_effect<const LOCATING: bool>(
             if span.styles.has_tokens() {
                 crate::theme::resolve(&mut span.styles, &theme);
                 span.background = span.background.or(span.styles.background);
+            }
+            if let Some(node) = node {
+                let range = paragraph_node(
+                    &mut content,
+                    &mut runs,
+                    &mut boxes,
+                    &mut icons,
+                    &span,
+                    *node,
+                    &base,
+                    &theme,
+                );
+                if LOCATING {
+                    spanned.push(crate::compose_rich::Run {
+                        range: range.clone(),
+                        index,
+                        href: span.href.clone(),
+                    });
+                }
+                if link || menu.is_some() {
+                    links.push(crate::compose_rich::Link {
+                        range,
+                        action: span.action,
+                        href: span.href,
+                        styled_hover,
+                        menu,
+                    });
+                }
+                continue;
             }
             // An icon keeps its room before the text: a padded
             // placeholder run of its own.
@@ -4082,28 +4131,30 @@ fn paragraph_effect<const LOCATING: bool>(
                     font_size,
                     color,
                 });
-                icons.push(crate::compose_rich::InlineIcon {
-                    range,
-                    svg: match icon.tint {
-                        Some(crate::theme::Themed::Value(tint)) => {
-                            std::sync::Arc::new(icon.svg.tinted(tint))
-                        }
-                        Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
-                            icon.svg.tinted(
-                                theme
-                                    .get(token)
-                                    .color()
-                                    .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                icons.push(crate::compose_rich::Inline::Icon(
+                    crate::compose_rich::InlineIcon {
+                        range,
+                        svg: match icon.tint {
+                            Some(crate::theme::Themed::Value(tint)) => {
+                                std::sync::Arc::new(icon.svg.tinted(tint))
+                            }
+                            Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                                icon.svg.tinted(
+                                    theme
+                                        .get(token)
+                                        .color()
+                                        .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                                ),
                             ),
-                        ),
-                        None if icon.svg.follows_text_color() => {
-                            std::sync::Arc::new(icon.svg.tinted(color))
-                        }
-                        None => icon.svg,
+                            None if icon.svg.follows_text_color() => {
+                                std::sync::Arc::new(icon.svg.tinted(color))
+                            }
+                            None => icon.svg,
+                        },
+                        size: icon.size,
+                        inset: lead,
                     },
-                    size: icon.size,
-                    inset: lead,
-                });
+                ));
             }
             let text_end = content.len();
             runs.push(crate::rich_text::TextRun {
@@ -4153,9 +4204,12 @@ fn paragraph_effect<const LOCATING: bool>(
         if LOCATING && let Some(kept) = &locating {
             *kept.borrow_mut() = spanned;
         }
-        let rich = crate::rich_text::RichText::new(content.as_str(), runs)
+        let mut rich = crate::rich_text::RichText::new(content.as_str(), runs)
             .expect("normalized inline spans")
             .with_options(base.display);
+        if !boxes.is_empty() {
+            rich = rich.with_boxes(boxes).expect("boxes on their runs");
+        }
         // Recomputed but unchanged (its inputs animate for a sibling):
         // nothing to lay out, paint, describe or relabel.
         if content_state.with_untracked(|current| {
@@ -4179,11 +4233,11 @@ fn paragraph_effect<const LOCATING: bool>(
             let shown = scene.rich_with_languages(paragraph, rich.clone());
             scene.set_leaf_kind(paragraph, NodeKind::RichText { text: shown });
         }
-        // Icons' placeholders aren't text to read out.
+        // Icons' placeholders aren't text to read out; a node's text is.
         let content = if icons.is_empty() {
             content
         } else {
-            content.replace(crate::compose_rich::ICON_PLACEHOLDER, "")
+            spoken(&rich)
         };
         content_state.set(crate::compose_rich::Content { rich, links, icons });
         ui.semantics.borrow_mut().update(paragraph, |node| {
@@ -4194,6 +4248,77 @@ fn paragraph_effect<const LOCATING: bool>(
     }
 }
 
+/// A node span's room in the paragraph (`TextSpan::node`): a placeholder
+/// run padded to the node's width and the span's padding, a box on it as
+/// tall as the node, and the node to place there. Its range back. Apart:
+/// few spans hold a node.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn paragraph_node(
+    content: &mut String,
+    runs: &mut Vec<crate::rich_text::TextRun>,
+    boxes: &mut Vec<crate::rich_text::InlineBox>,
+    icons: &mut Vec<crate::compose_rich::Inline>,
+    span: &crate::compose_rich::TextSpan,
+    node: crate::compose_rich::SpanNode,
+    base: &crate::compose::Typography,
+    theme: &crate::theme::ThemeScope,
+) -> std::ops::Range<usize> {
+    let start = content.len();
+    content.push_str(crate::compose_rich::NODE_PLACEHOLDER);
+    let range = start..content.len();
+    boxes.push(crate::rich_text::InlineBox {
+        run: runs.len(),
+        above: node.baseline,
+        below: node.height - node.baseline,
+        text: span.text.clone(),
+    });
+    runs.push(crate::rich_text::TextRun {
+        background: span.background,
+        underline: None,
+        strikethrough: None,
+        padding: [node.width / 2. + span.padding[0], span.padding[1]],
+        radius: span.radius,
+        range: range.clone(),
+        font: base.font_in(Some(theme)),
+        font_size: span
+            .styles
+            .text_size
+            .get()
+            .unwrap_or_else(|| base.size_in(Some(theme))),
+        color: span
+            .styles
+            .text_color
+            .unwrap_or_else(|| base.color_in(Some(theme))),
+    });
+    icons.push(crate::compose_rich::Inline::Node(
+        crate::compose_rich::PlacedNode {
+            range: range.clone(),
+            node: node.node,
+            width: node.width,
+            height: node.height,
+            baseline: node.baseline,
+            inset: span.padding[0],
+        },
+    ));
+    range
+}
+/// A paragraph's text as read out: inline icons' placeholders left out, and
+/// an inline node's text in place of its own (as `semantic_offset` counts).
+#[inline(never)]
+fn spoken(rich: &crate::rich_text::RichText) -> String {
+    let text = rich.text();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for inline in rich.boxes() {
+        let place = &rich.runs()[inline.run].range;
+        out.push_str(&text[at..place.start].replace(crate::compose_rich::ICON_PLACEHOLDER, ""));
+        out.push_str(&inline.text);
+        at = place.end;
+    }
+    out.push_str(&text[at..].replace(crate::compose_rich::ICON_PLACEHOLDER, ""));
+    out
+}
 /// A paragraph of spans' content (`rich_text`): its runs, built again as
 /// they change, and its links' and icons' boxes. Out of line: few views
 /// are paragraphs, and `mount_element` stays as small as they need.
@@ -7395,7 +7520,7 @@ pub mod prelude {
         scrollbar, slider, submenu, switch, text, text_area, text_area_value, text_input,
         text_input_value, text_message, text_signal, variable_virtual_list, virtual_list,
     };
-    pub use super::{RichTextView, TextSpan, rich_text, rich_text_signal, text_span};
+    pub use super::{InlineNode, RichTextView, TextSpan, rich_text, rich_text_signal, text_span};
     pub use super::{SplitOptions, split};
     pub use super::{animated_image, animated_image_controlled, async_image, canvas, gpu_view};
     #[cfg(target_os = "macos")]

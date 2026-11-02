@@ -7378,7 +7378,13 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         followed: Vec<(&'static str, Ty, Owned)>,
         click: Option<Handler>,
         href: Option<Arc<str>>,
-        rare: Option<Rc<crate::node::SpanRare>>,
+        rare: Option<Box<Rare>>,
+    }
+    /// A span's rare options, and its node (`node = …`) lowered once: the
+    /// paragraph's own, however often its spans are built again.
+    struct Rare {
+        of: Rc<crate::node::SpanRare>,
+        node: Option<zgx::compose::InlineNode>,
     }
     #[derive(Clone, Copy)]
     struct SpanStyle {
@@ -7436,7 +7442,13 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 .collect(),
             click: s.click.clone(),
             href: s.href.clone(),
-            rare: s.rare.clone(),
+            rare: s.rare.as_ref().map(|of| {
+                Box::new(Rare {
+                    of: of.clone(),
+                    node: (of.node.as_ref())
+                        .map(|node| zgx::compose::InlineNode::new(lower(node, low))),
+                })
+            }),
         })
         .collect();
     let (vm, actions, low) = (vm.clone(), low.actions.clone(), low.clone());
@@ -7447,6 +7459,8 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 // Copied only for the few that follow: a span's own is read
                 // where it lies.
                 let mut own = None;
+                // A node's `w`, `h` and `baseline`, where they follow.
+                let mut sized = [None; 3];
                 // Tracked: a change builds the paragraph again.
                 for (name, ty, source) in &span.followed {
                     let (style, font) = own.get_or_insert_with(|| (span.style, span.font.clone()));
@@ -7470,6 +7484,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         "italic" => style.italic = on,
                         "underline" => style.underline = on,
                         "strike" => style.strike = on,
+                        "w" => sized[0] = number,
+                        "h" => sized[1] = number,
+                        "baseline" => sized[2] = number,
                         _ => {
                             if let Some(Lit::Str(name)) = lit {
                                 *font = Some(name);
@@ -7558,7 +7575,8 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                             .is_some_and(|v| v.as_boolean() == Some(true))
                     });
                 }
-                let rare = span.rare.as_deref();
+                let lowered = span.rare.as_deref();
+                let rare = lowered.map(|rare| &*rare.of);
                 if let Some(build) = rare.and_then(|rare| rare.menu.as_ref()) {
                     let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
                     out = out.context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
@@ -7584,10 +7602,34 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         tint,
                     });
                 }
+                if let Some(Rare {
+                    of,
+                    node: Some(node),
+                }) = lowered
+                {
+                    out = node_span(out, node, sized, of.node_size);
+                }
                 out
             })
             .collect()
     })
+}
+
+/// `span` holding `node` (`ui.span { node = …, w, h, baseline }`): its `w`
+/// and `h` (0 if not given), its top `baseline` above the line's baseline
+/// (`h` if not given: it stands on the baseline, as a picture does); those
+/// that follow (`sized`) over those given as numbers. Apart: few spans hold
+/// a node.
+#[inline(never)]
+fn node_span(
+    span: TextSpan,
+    node: &zgx::compose::InlineNode,
+    sized: [Option<f32>; 3],
+    given: [Option<f32>; 3],
+) -> TextSpan {
+    let [w, h, baseline] = [0, 1, 2].map(|i| sized[i].or(given[i]));
+    let h = h.unwrap_or(0.);
+    span.node(node, w.unwrap_or(0.), h, baseline.unwrap_or(h))
 }
 
 /// The translation and local transform a node's literals set, if any.

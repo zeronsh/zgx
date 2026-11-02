@@ -1222,6 +1222,12 @@ pub(crate) struct SpanRare {
     /// `context_menu = function(e) return { … } end`: its own menu (a
     /// link's in place of Open Link and Copy Link).
     pub menu: Option<Function>,
+    /// `node = …`: a node in the line in place of its text, which it stands
+    /// for (copied, read out).
+    pub node: Option<Rc<Node>>,
+    /// Its node's `w`, `h` and `baseline` as given as numbers (those given
+    /// a state or a function follow it).
+    pub node_size: [Option<f32>; 3],
 }
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = … } }`.
 #[derive(Clone)]
@@ -4291,6 +4297,9 @@ const SPAN_FOLLOWS: &[(&str, Ty)] = &[
     ("underline", Ty::Bool),
     ("strike", Ty::Bool),
     ("font", Ty::Str),
+    ("w", Ty::Num),
+    ("h", Ty::Num),
+    ("baseline", Ty::Num),
 ];
 
 /// `ui.span { "text", bold = true, color = "#f80", on_click = fn }`;
@@ -4299,6 +4308,14 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
     let (content, table) = match arg {
         mlua::Value::Table(t) => (t.get::<mlua::Value>(1)?, Some(t)),
         other => (other, None),
+    };
+    // A node's span names what it stands for as `text =`, or holds none.
+    let content = match (&content, &table) {
+        (mlua::Value::Nil, Some(t)) if t.contains_key("node")? => match t.get("text")? {
+            mlua::Value::Nil => mlua::Value::String(lua.create_string("")?),
+            text => text,
+        },
+        _ => content,
     };
     let literal = match &table {
         Some(t) => t.get::<Option<bool>>("literal")?.unwrap_or(literal),
@@ -4423,6 +4440,10 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                         tint: (!matches!(tint, Value::Nil)).then_some(tint),
                     });
                 }
+                b"node" => rare_mut(&mut span).node = Some(expect_node(given, "a span's `node`")?),
+                b"w" => rare_mut(&mut span).node_size[0] = number(given)?,
+                b"h" => rare_mut(&mut span).node_size[1] = number(given)?,
+                b"baseline" => rare_mut(&mut span).node_size[2] = number(given)?,
                 b"on_click" => span.click = Some(handler(given)?),
                 b"href" => span.href = Some(lua.unpack::<String>(given)?.into()),
                 b"context_menu" => match given {

@@ -84,6 +84,9 @@ struct Key {
 }
 impl Key {
     fn of(rich: &RichText, caret_row: bool) -> Self {
+        if !rich.boxes().is_empty() {
+            return Self::boxed(rich, caret_row);
+        }
         let mut spans: smallvec::SmallVec<[Span; 1]> = smallvec::SmallVec::new();
         for run in rich.runs() {
             match spans.last_mut() {
@@ -104,6 +107,29 @@ impl Key {
                 )),
             }
         }
+        Self {
+            text: rich.text_arc(),
+            spans,
+            caret_row,
+        }
+    }
+    /// `of` a text with boxes in its lines (`RichText::with_boxes`): a run
+    /// each span, a box's reach above and below the baseline written into
+    /// its span's line height and spacing, which shape nothing in a box's
+    /// run. Out of line: few texts hold one.
+    #[cold]
+    #[inline(never)]
+    fn boxed(rich: &RichText, caret_row: bool) -> Self {
+        let spans = (rich.runs().iter().enumerate())
+            .map(|(index, run)| {
+                let mut font = run.font.clone();
+                if let Some(inline) = rich.inline_box(index) {
+                    font.line_height = zgx::text_layout::LineHeight::px(inline.above);
+                    font.letter_spacing = zgx::text_layout::LetterSpacing::px(inline.below);
+                }
+                (run.range.clone(), font, run.font_size, run.padding[0])
+            })
+            .collect();
         Self {
             text: rich.text_arc(),
             spans,
@@ -1671,6 +1697,8 @@ impl TextCache {
                     run.font_size,
                 ),
                 _ if caret_row => return None,
+                // A box's line is cosmic-text's to lay out.
+                _ if !rich.boxes().is_empty() => return None,
                 runs => {
                     // As `rich_buffer_unshaped` merges them: adjacent runs
                     // of one font and size, each span's metrics and its

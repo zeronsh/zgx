@@ -4564,6 +4564,19 @@ export type SpanProps = {
 	-- A link (`on_click`) under the pointer: underlined, recoloured. With
 	-- it, the link isn't underlined at rest unless `underline` says so.
 	hover: { underline: boolean?, color: Color? }?,
+	-- A node in the line in place of the text, as a word of its own `w`
+	-- wide and `h` tall (0 if not given), its top `baseline` above the
+	-- line's baseline (`h`: standing on it, as a picture does); the line
+	-- grows to hold it. Mounted once, however often the paragraph is built
+	-- again. The text (`[1]`, or `text`) is what it stands for: a selection
+	-- takes the node whole, as one character, and copies the text in its
+	-- place; accessibility reads the text. Inline math, a mention's pill.
+	node: Node?,
+	w: Reactive<number>?,
+	h: Reactive<number>?,
+	baseline: Reactive<number>?,
+	-- What a `node` stands for, in place of `[1]`.
+	text: string?,
 	-- An icon before the text, in the line (a file chip's file type):
 	-- `src` (a file, `https://…`) or `code` (SVG markup), `size` square
 	-- (12), `gap` from the text (4), centred on the line; `tint` a colour,

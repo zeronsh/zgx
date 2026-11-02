@@ -1554,11 +1554,7 @@ impl Ui {
                 out.push_str(separator(&scene, before, part.node, before_size.min(size)));
             }
             let range = part.range.start.min(text.len())..part.range.end.min(text.len());
-            out.extend(
-                text[range]
-                    .chars()
-                    .filter(|c| *c != '\u{2060}' && *c != '\u{fffc}'),
-            );
+            push_copied(&mut out, &scene, part.node, &text, range);
             previous = Some((part.node, size));
         }
         for (_, row) in provided {
@@ -1911,10 +1907,14 @@ impl Ui {
                     );
                 }
                 NodeKind::RichText { text } => {
-                    for run in text.runs() {
+                    for (index, run) in text.runs().iter().enumerate() {
                         let start = run.range.start.max(part.range.start);
                         let end = run.range.end.min(part.range.end);
                         if start < end {
+                            // An inline node: the text it stands for.
+                            let shown = text
+                                .inline_box(index)
+                                .map_or(&text.text()[start..end], |inline| &*inline.text);
                             let href = links.and_then(|links| {
                                 links
                                     .iter()
@@ -1923,7 +1923,7 @@ impl Ui {
                             });
                             html_run(
                                 &mut out,
-                                &text.text()[start..end],
+                                shown,
                                 &run.font,
                                 href,
                                 // A link's colour is the link's.
@@ -2450,6 +2450,30 @@ pub(crate) fn text_of(scene: &Scene, id: NodeId) -> Option<Arc<str>> {
     }
 }
 
+/// `text[range]`, node `id`'s, as copied: inline icons' placeholders left
+/// out, and an inline node's (`RichText::with_boxes`) the text it stands for.
+fn push_copied(out: &mut String, scene: &Scene, id: NodeId, text: &str, range: Range<usize>) {
+    let clean = |out: &mut String, part: &str| {
+        out.extend(
+            part.chars()
+                .filter(|c| *c != '\u{2060}' && *c != '\u{fffc}'),
+        );
+    };
+    let mut at = range.start;
+    if let NodeKind::RichText { text: rich } = scene.kind(id) {
+        for inline in rich.boxes() {
+            let place = rich.runs()[inline.run].range.clone();
+            if place.end <= range.start || place.start >= range.end {
+                continue;
+            }
+            clean(out, &text[at..place.start.max(at)]);
+            out.push_str(&inline.text);
+            at = place.end;
+        }
+    }
+    clean(out, &text[at.min(range.end)..range.end]);
+}
+
 /// What goes between the text of `a` and of `b`, after it, in copied text,
 /// from the boxes that hold them side by side in their nearest shared
 /// ancestor (as CSS's margins set blocks apart): a tab between boxes on one
@@ -2485,16 +2509,24 @@ fn font_size(scene: &Scene, id: NodeId) -> f32 {
 }
 
 /// `offset` into `id`'s text as an offset into its semantic value, which
-/// leaves inline icons' placeholders out.
+/// leaves inline icons' placeholders out and has an inline node's text in
+/// place of its own.
 fn semantic_offset(scene: &Scene, id: NodeId, offset: usize) -> usize {
     match scene.kind(id) {
         NodeKind::RichText { text } => {
             let icon = crate::compose_rich::ICON_PLACEHOLDER;
-            offset
+            let mut semantic = offset
                 - text.text()[..offset.min(text.text().len())]
                     .matches(icon)
                     .count()
-                    * icon.len()
+                    * icon.len();
+            for inline in text.boxes() {
+                let place = &text.runs()[inline.run].range;
+                if place.end <= offset {
+                    semantic = semantic - place.len() + inline.text.len();
+                }
+            }
+            semantic
         }
         _ => offset,
     }
@@ -2507,6 +2539,8 @@ fn scene_offset(scene: &Scene, id: NodeId, semantic: usize) -> usize {
     };
     let icon = crate::compose_rich::ICON_PLACEHOLDER;
     let (mut seen, mut offset) = (0, 0);
+    let mut boxes = text.boxes().iter().peekable();
+    let rich = text;
     let text = text.text();
     while offset < text.len() {
         if text[offset..].starts_with(icon) {
@@ -2515,6 +2549,16 @@ fn scene_offset(scene: &Scene, id: NodeId, semantic: usize) -> usize {
         }
         if seen >= semantic {
             break;
+        }
+        // An inline node's text stands for its placeholder: past it whole.
+        while boxes
+            .next_if(|b| rich.runs()[b.run].range.end <= offset)
+            .is_some()
+        {}
+        if let Some(inline) = boxes.next_if(|b| rich.runs()[b.run].range.start == offset) {
+            seen += inline.text.len();
+            offset = rich.runs()[inline.run].range.end;
+            continue;
         }
         let step = text[offset..].chars().next().map_or(1, char::len_utf8);
         seen += step;
@@ -2699,12 +2743,6 @@ fn row_address(
 /// Row `row`'s text as `selected_text` takes it (its text nodes joined as
 /// a copy joins them), and where `point` lies in it.
 fn row_copy(scene: &Scene, row: NodeId, point: TextPoint) -> Option<(Rc<str>, usize)> {
-    let clean = |text: &str, out: &mut String| {
-        out.extend(
-            text.chars()
-                .filter(|c| *c != '\u{2060}' && *c != '\u{fffc}'),
-        );
-    };
     let (mut out, mut at) = (String::new(), None);
     let mut previous: Option<(NodeId, f32)> = None;
     let mut pending = vec![row];
@@ -2722,11 +2760,11 @@ fn row_copy(scene: &Scene, row: NodeId, point: TextPoint) -> Option<(Rc<str>, us
         }
         if id == point.node {
             let cut = point.offset.min(text.len());
-            clean(&text[..cut], &mut out);
+            push_copied(&mut out, scene, id, &text, 0..cut);
             at = Some(out.len());
-            clean(&text[cut..], &mut out);
+            push_copied(&mut out, scene, id, &text, cut..text.len());
         } else {
-            clean(&text, &mut out);
+            push_copied(&mut out, scene, id, &text, 0..text.len());
         }
         previous = Some((id, size));
     }

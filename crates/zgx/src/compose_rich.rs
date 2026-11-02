@@ -66,7 +66,29 @@ pub(crate) struct Run {
 pub(crate) struct Content {
     pub rich: Arc<crate::rich_text::RichText>,
     pub links: Vec<Link>,
-    pub icons: Vec<InlineIcon>,
+    /// Its icons and nodes, in text order: what is placed over the room
+    /// their placeholders keep.
+    pub icons: Vec<Inline>,
+}
+/// What is placed over a placeholder's room in the line (`Content::icons`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Inline {
+    Icon(InlineIcon),
+    Node(PlacedNode),
+}
+impl Inline {
+    fn icon(&self) -> Option<&InlineIcon> {
+        match self {
+            Self::Icon(icon) => Some(icon),
+            Self::Node(_) => None,
+        }
+    }
+    fn node(&self) -> Option<&PlacedNode> {
+        match self {
+            Self::Node(node) => Some(node),
+            Self::Icon(_) => None,
+        }
+    }
 }
 /// An icon in the text (`TextSpan::icon`): drawn over the room its
 /// placeholder run (`range`) keeps in the line.
@@ -78,6 +100,53 @@ pub(crate) struct InlineIcon {
     /// How far into the room it starts (the span's padding before it).
     pub inset: f32,
 }
+/// A view in a paragraph's text (`TextSpan::node`): made once, and mounted
+/// once, as the paragraph's own, however often the spans that hold it are
+/// built again (a span's `text_color` that follows a state). A paragraph
+/// shows it where a span holds it; one no span holds now stays mounted,
+/// hidden, its state kept for when one does again.
+#[derive(Clone)]
+pub struct InlineNode(Rc<RefCell<Option<View>>>);
+impl InlineNode {
+    /// `view`, to be held by a span (`TextSpan::node`).
+    pub fn new(view: impl Into<View>) -> Self {
+        Self(Rc::new(RefCell::new(Some(view.into()))))
+    }
+}
+impl std::fmt::Debug for InlineNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InlineNode")
+    }
+}
+impl PartialEq for InlineNode {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+/// A span's node (`TextSpan::node`): its size, and how far its top is above
+/// the baseline.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SpanNode {
+    pub node: InlineNode,
+    pub width: f32,
+    pub height: f32,
+    pub baseline: f32,
+}
+/// A node in the text (`TextSpan::node`): shown over the room its
+/// placeholder run (`range`) keeps in the line, `inset` into it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PlacedNode {
+    pub range: Range<usize>,
+    pub node: InlineNode,
+    pub width: f32,
+    pub height: f32,
+    pub baseline: f32,
+    pub inset: f32,
+}
+/// What keeps a node's room in the line: an invisible separator (U+2063:
+/// zero width, and it breaks as a letter does, so the node is a word of
+/// its own between spaces, kept with punctuation after it), padded.
+pub(crate) const NODE_PLACEHOLDER: &str = "\u{2063}";
 /// A span's leading icon: `size` square, `gap` before the text, tinted
 /// with `tint` (a colour or token) if set, else as the SVG says (one that
 /// follows the text colour takes the span's).
@@ -120,6 +189,8 @@ pub(crate) struct SpanExtras {
     pub hover: Option<SpanHover>,
     pub icon: Option<SpanIcon>,
     pub menu: Option<SpanMenu>,
+    /// Boxed: a span's extras are as small as most need.
+    pub node: Option<Box<SpanNode>>,
 }
 /// How a link span looks under the pointer (`TextSpan::hover`): CSS's
 /// `a:hover { text-decoration: underline }`.
@@ -152,6 +223,23 @@ impl TextSpan {
     /// that follows the text colour takes the span's.
     pub fn icon(mut self, icon: SpanIcon) -> Self {
         self.extras.get_or_insert_default().icon = Some(icon);
+        self
+    }
+    /// `node` in the line in place of the span's text, as a word of its
+    /// own `width` wide and `height` tall, its top `baseline` above the
+    /// line's baseline; the line grows to hold it, as for a tall glyph. The
+    /// text is what it stands for: a selection takes the node whole, as one
+    /// character, and copies the text in its place, and accessibility reads
+    /// the text. The span's padding goes around it, its background behind.
+    pub fn node(mut self, node: &InlineNode, width: f32, height: f32, baseline: f32) -> Self {
+        let finite = |value: f32| if value.is_finite() { value.max(0.) } else { 0. };
+        let height = finite(height);
+        self.extras.get_or_insert_default().node = Some(Box::new(SpanNode {
+            node: node.clone(),
+            width: finite(width),
+            height,
+            baseline: finite(baseline).min(height),
+        }));
         self
     }
     /// Restyled under the pointer, once it's a link (`on_click`), in place
@@ -644,6 +732,7 @@ pub(crate) fn mount_links(
     let platform: Option<Rc<crate::platform::PlatformService>> = environment.services.get();
     let environment = environment.clone();
     let mut mounted: Vec<Mounted> = Vec::new();
+    let mut nodes = Nodes::default();
     let mut geometry_key = None;
     let mut geometry: Vec<Vec<Rect>> = Vec::new();
     // Where the links go, as copied HTML writes them.
@@ -663,6 +752,23 @@ pub(crate) fn mount_links(
         };
         if !ui.scene.borrow().contains(owner) {
             return;
+        }
+        // Its nodes, if it holds any or did.
+        if !data.icons.is_empty() || !nodes.mounted.is_empty() {
+            place_nodes(
+                &mut ui,
+                owner,
+                paragraph,
+                &data,
+                bounds,
+                owner_bounds,
+                engine,
+                &environment,
+                &mut nodes,
+            );
+            if !ui.scene.borrow().contains(owner) {
+                return;
+            }
         }
         let now: Vec<_> = data
             .links
@@ -998,6 +1104,7 @@ pub(crate) fn mount_icons(
         if data.icons.is_empty() {
             return;
         }
+        let icons = || data.icons.iter().filter_map(Inline::icon);
         let key = (data.rich.clone(), bounds.width.to_bits(), engine);
         if geometry_key.as_ref() != Some(&key) {
             let scene = ui.scene.borrow();
@@ -1007,16 +1114,14 @@ pub(crate) fn mount_icons(
                 scene.shape_rich_text(&data.rich, Some(wrap)),
                 inset,
             );
-            rects = data
-                .icons
-                .iter()
+            rects = icons()
                 .map(|icon| layout.selection(icon.range.clone()).into_iter().next())
                 .collect();
             drop(scene);
             geometry_key = Some(key);
         }
         let padding = ui.scene.borrow().content_insets(owner);
-        for (index, (icon, rect)) in data.icons.iter().zip(rects.iter()).enumerate() {
+        for (index, (icon, rect)) in icons().zip(rects.iter()).enumerate() {
             let rect = rect.unwrap_or_default();
             // At the room's start, centred on the line; placed from the
             // owner's content box.
@@ -1046,5 +1151,111 @@ pub(crate) fn mount_icons(
                 }
             }
         }
+        // Fewer icons than inlines (nodes among them, placed apart).
+        while mounted.len() > rects.len() {
+            ui.remove(mounted.pop().unwrap());
+        }
     });
+}
+
+/// A paragraph's nodes (`TextSpan::node`) as mounted, each in a box of its
+/// own in the owner, kept by its links' effect (`mount_links`), which reads
+/// what placing them does. Empty for most paragraphs.
+#[derive(Default)]
+pub(crate) struct Nodes {
+    mounted: Vec<(InlineNode, crate::scene::NodeId)>,
+    /// As icons': their rooms and baselines, kept while the text and its
+    /// width are the same.
+    key: Option<(Arc<crate::rich_text::RichText>, u32, u64)>,
+    places: Vec<(crate::scene::Rect, Option<f32>)>,
+}
+
+/// Shows each inline node (`TextSpan::node`) over the room its placeholder
+/// keeps, on the line's baseline, following the paragraph's layout: each
+/// mounted once. One no span holds now is hidden, kept. Out of line: few
+/// paragraphs hold one.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn place_nodes(
+    ui: &mut crate::widgets::Ui,
+    owner: crate::scene::NodeId,
+    paragraph: crate::scene::NodeId,
+    data: &Content,
+    bounds: crate::scene::Rect,
+    owner_bounds: crate::scene::Rect,
+    engine: u64,
+    environment: &crate::compose::Environment,
+    nodes: &mut Nodes,
+) {
+    use crate::scene::{Layout, NodeKind, Style};
+    let placed = || data.icons.iter().filter_map(Inline::node);
+    let key = (data.rich.clone(), bounds.width.to_bits(), engine);
+    if placed().next().is_some() && nodes.key.as_ref() != Some(&key) {
+        let scene = ui.scene.borrow();
+        let (wrap, inset) = scene.text_wrap(paragraph, bounds.width);
+        let layout =
+            crate::text_layout::Inset::around(scene.shape_rich_text(&data.rich, Some(wrap)), inset);
+        nodes.places = placed()
+            .map(|node| {
+                let room = layout.selection(node.range.clone()).into_iter().next();
+                (room.unwrap_or_default(), layout.baseline(node.range.start))
+            })
+            .collect();
+        drop(scene);
+        nodes.key = Some(key);
+    }
+    // A node no span holds now: hidden, kept.
+    for (node, boxed) in &nodes.mounted {
+        if !placed().any(|placed| placed.node == *node) {
+            let mut scene = ui.scene.borrow_mut();
+            let mut style = scene.style(*boxed);
+            if style.layout_options.is_none() {
+                style.layout_options = Some(Arc::new(crate::layout::LayoutOptions {
+                    display: Some(crate::layout::Display::None),
+                    ..Default::default()
+                }));
+                scene.set_style(*boxed, style);
+            }
+        }
+    }
+    let padding = ui.scene.borrow().content_insets(owner);
+    for (placed, (room, baseline)) in placed().zip(nodes.places.iter()) {
+        // On the baseline (centred on the line if the shaper doesn't say
+        // where it is); placed from the owner's content box.
+        let top = match baseline {
+            Some(baseline) => baseline - placed.baseline,
+            None => room.y + (room.height - placed.height) / 2.,
+        };
+        let style = Style {
+            absolute: true,
+            width: Some(placed.width),
+            height: Some(placed.height),
+            margin: crate::scene::Insets {
+                left: bounds.x - owner_bounds.x + room.x + placed.inset - padding.left,
+                top: bounds.y - owner_bounds.y + top - padding.top,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        match nodes.mounted.iter().find(|(node, _)| *node == placed.node) {
+            Some((_, boxed)) => {
+                let mut scene = ui.scene.borrow_mut();
+                if scene.style(*boxed) != style {
+                    scene.set_style(*boxed, style);
+                }
+            }
+            None => {
+                let boxed =
+                    ui.scene
+                        .borrow_mut()
+                        .append(owner, NodeKind::Container(Layout::Column), style);
+                let view = placed.node.0.borrow_mut().take();
+                if let Some(view) = view {
+                    crate::compose::mount_untracked(ui, boxed, view, environment);
+                }
+                nodes.mounted.push((placed.node.clone(), boxed));
+            }
+        }
+    }
 }
