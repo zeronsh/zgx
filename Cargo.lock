@@ -5205,6 +5205,7 @@ version = "0.1.7"
 dependencies = [
  "block2 0.6.2",
  "bytemuck",
+ "fontconfig-parser",
  "gif",
  "hypher",
  "image",
