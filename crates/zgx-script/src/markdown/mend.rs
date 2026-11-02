@@ -34,18 +34,18 @@
 //! or marker-only content after an opener leaves the opener literal for a
 //! chunk until real content arrives.
 //!
-//! Cost: one pass over the text plus the returned allocation, and `None`
-//! (zero further work) whenever nothing hangs. Callers feed it only the last
-//! top-level block of the stream, so per-append work stays O(tail) — the same
-//! bound as the incremental reparse itself. remend re-scans the entire
-//! accumulated message every delta; feeding just the tail is what makes the
-//! port fit the incremental parser.
+//! Cost: callers feed it only the last top-level block of the stream, and a
+//! [`Mender`] keeps its scan of that block, so an append reads only its own
+//! bytes (and the step the block's end left open) before the returned
+//! allocation, and `None` (zero further work) whenever nothing hangs.
+//! remend re-scans the entire accumulated message every delta.
 
 /// Sentinel destination for a link whose URL is still streaming. The renderer
 /// styles it like any link but must not register it as clickable.
 pub const PENDING_LINK_URL: &str = "zgx:pending-link";
 
 /// One unclosed emphasis-family delimiter run (`*`, `_`, or `~~`).
+#[derive(Clone, Copy)]
 struct OpenDelim {
     ch: char,
     len: usize,
@@ -56,107 +56,204 @@ struct OpenDelim {
 
 /// Repair hanging inline markers in a streaming block's source. Returns
 /// `None` when the text needs no repair (the overwhelmingly common case).
+/// (The parser keeps a [`Mender`] for the block that grows.)
+#[cfg(test)]
 pub fn close_hanging(text: &str) -> Option<String> {
-    let cs: Vec<(usize, char)> = text.char_indices().collect();
-    let n = cs.len();
-    let at = |i: usize| cs.get(i).map(|&(_, c)| c);
+    Mender::default().close(text)
+}
 
-    let mut delims: Vec<OpenDelim> = Vec::new();
-    // Char indices of unmatched `[`.
-    let mut brackets: Vec<usize> = Vec::new();
-    // Open inline code span: (backtick run length, content char index).
-    let mut code: Option<(usize, usize)> = None;
-    // Char index of the last substantive character — content that justifies
-    // closing an opener (not whitespace, not a bare marker).
-    let mut last_content: Option<usize> = None;
-    // Char index of the `]` of a `](…` whose URL runs off the end.
-    let mut pending_url: Option<usize> = None;
+/// [`close_hanging`] for a block that grows: what it has scanned stays
+/// scanned, so each call reads only what came since (and the step the
+/// text's end left open). Every call's text extends the last one's; a
+/// block that changed otherwise starts a new `Mender`.
+#[derive(Clone, Default)]
+pub struct Mender {
+    /// Where the scan goes on, in chars and bytes: what is before it no
+    /// later text can change.
+    chars: usize,
+    bytes: usize,
+    /// The char before it, which the step there looks back at.
+    before: Option<char>,
+    delims: Vec<OpenDelim>,
+    /// Char indices of unmatched `[`.
+    brackets: Vec<usize>,
+    /// Open inline code span: (backtick run length, content char index).
+    code: Option<(usize, usize)>,
+    /// Char index of the last substantive character: content that
+    /// justifies closing an opener (not whitespace, not a bare marker).
+    last_content: Option<usize>,
+}
 
-    let mut i = 0;
-    while i < n {
-        let c = cs[i].1;
-        if code.is_none() && c == '\\' {
-            // Escaped char: both literal; the escapee still counts as content.
-            if i + 1 < n {
-                last_content = Some(i + 1);
-            }
-            i += 2;
-            continue;
+impl Mender {
+    /// The bytes of the text it has settled (each call reads past them).
+    #[cfg(test)]
+    pub fn settled(&self) -> usize {
+        self.bytes
+    }
+    /// `close_hanging(text)`, where `text` extends the last call's.
+    pub fn close(&mut self, text: &str) -> Option<String> {
+        if text.len() < self.bytes || !text.is_char_boundary(self.bytes) {
+            *self = Self::default();
         }
-        if c == '`' {
-            let run = run_len(&cs, i);
-            match code {
-                // A span closes only on a run of the opening length.
-                Some((open, _)) if run == open => code = None,
-                Some(_) => last_content = Some(i + run - 1),
-                None => code = Some((run, i + run)),
-            }
-            i += run;
-            continue;
-        }
-        if code.is_some() {
-            last_content = Some(i);
-            i += 1;
-            continue;
-        }
-        match c {
-            '*' | '_' | '~' => {
-                let run = run_len(&cs, i);
-                delim(&mut delims, &cs, c, run, i, &mut last_content);
-                i += run;
-            }
-            '[' => {
-                brackets.push(i);
-                i += 1;
-            }
-            ']' => {
-                if let Some(open) = brackets.pop() {
-                    // Emphasis opened inside a completed `[…]` and never
-                    // closed there stays literal — as the final parse will
-                    // decide too.
-                    delims.retain(|d| d.pos < open);
-                    if at(i + 1) == Some('(') {
-                        // Consume the URL through its balanced `)`.
-                        let mut j = i + 2;
-                        let mut depth = 0usize;
-                        loop {
-                            match at(j) {
-                                Some('(') => depth += 1,
-                                Some(')') if depth == 0 => break,
-                                Some(')') => depth -= 1,
-                                Some(_) => {}
-                                None => {
-                                    pending_url = Some(i);
-                                    break;
-                                }
-                            }
-                            j += 1;
-                        }
-                        if pending_url.is_some() {
-                            break;
-                        }
-                        last_content = Some(j);
-                        i = j + 1;
-                        continue;
-                    }
+        let base = self.chars;
+        // Only what this call reads: from where the scan goes on.
+        let cs: Vec<(usize, char)> = text[self.bytes..]
+            .char_indices()
+            .map(|(b, c)| (b + self.bytes, c))
+            .collect();
+        let n = base + cs.len();
+        let at = |i: usize| i.checked_sub(base).and_then(|k| cs.get(k)).map(|&(_, c)| c);
+        let mut delims = std::mem::take(&mut self.delims);
+        let mut brackets = std::mem::take(&mut self.brackets);
+        let mut code = self.code;
+        let mut last_content = self.last_content;
+        // Char index of the `]` of a `](…` whose URL runs off the end.
+        let mut pending_url: Option<usize> = None;
+        // The state before a step that reads to the text's end: such a step
+        // is the last, and more text can change what it decides.
+        let mut open: Option<Mender> = None;
+        let snapshot = |i: usize,
+                        delims: &Vec<OpenDelim>,
+                        brackets: &Vec<usize>,
+                        code: Option<(usize, usize)>,
+                        last_content: Option<usize>| Mender {
+            chars: i,
+            bytes: cs.get(i - base).map_or(text.len(), |&(b, _)| b),
+            before: if i == base { self.before } else { at(i - 1) },
+            delims: delims.clone(),
+            brackets: brackets.clone(),
+            code,
+            last_content,
+        };
+
+        let mut i = base;
+        while i < n {
+            let c = cs[i - base].1;
+            if code.is_none() && c == '\\' {
+                // Escaped char: both literal; the escapee still counts as content.
+                if i + 1 < n {
+                    last_content = Some(i + 1);
+                } else {
+                    open = Some(snapshot(i, &delims, &brackets, code, last_content));
                 }
-                last_content = Some(i);
-                i += 1;
+                i += 2;
+                continue;
             }
-            c if c.is_whitespace() => i += 1,
-            _ => {
+            if c == '`' {
+                let run = run_len(&cs[i - base..]);
+                if i + run == n {
+                    open = Some(snapshot(i, &delims, &brackets, code, last_content));
+                }
+                match code {
+                    // A span closes only on a run of the opening length.
+                    Some((open, _)) if run == open => code = None,
+                    Some(_) => last_content = Some(i + run - 1),
+                    None => code = Some((run, i + run)),
+                }
+                i += run;
+                continue;
+            }
+            if code.is_some() {
                 last_content = Some(i);
                 i += 1;
+                continue;
+            }
+            match c {
+                '*' | '_' | '~' => {
+                    let run = run_len(&cs[i - base..]);
+                    // Its run, and the char after it, decide it.
+                    if i + run == n {
+                        open = Some(snapshot(i, &delims, &brackets, code, last_content));
+                    }
+                    let prev = if i == base { self.before } else { at(i - 1) };
+                    delim(&mut delims, prev, at(i + run), c, run, i, &mut last_content);
+                    i += run;
+                }
+                '[' => {
+                    brackets.push(i);
+                    i += 1;
+                }
+                ']' => {
+                    if i + 1 == n {
+                        open = Some(snapshot(i, &delims, &brackets, code, last_content));
+                    }
+                    if let Some(&open_at) = brackets.last() {
+                        if at(i + 1) == Some('(') {
+                            // Consume the URL through its balanced `)`.
+                            let mut j = i + 2;
+                            let mut depth = 0usize;
+                            let closed = loop {
+                                match at(j) {
+                                    Some('(') => depth += 1,
+                                    Some(')') if depth == 0 => break true,
+                                    Some(')') => depth -= 1,
+                                    Some(_) => {}
+                                    None => break false,
+                                }
+                                j += 1;
+                            };
+                            if !closed {
+                                open = Some(snapshot(i, &delims, &brackets, code, last_content));
+                            }
+                            brackets.pop();
+                            // Emphasis opened inside a completed `[…]` and
+                            // never closed there stays literal, as the final
+                            // parse will decide too.
+                            delims.retain(|d| d.pos < open_at);
+                            if !closed {
+                                pending_url = Some(i);
+                                break;
+                            }
+                            last_content = Some(j);
+                            i = j + 1;
+                            continue;
+                        }
+                        brackets.pop();
+                        delims.retain(|d| d.pos < open_at);
+                    }
+                    last_content = Some(i);
+                    i += 1;
+                }
+                c if c.is_whitespace() => i += 1,
+                _ => {
+                    last_content = Some(i);
+                    i += 1;
+                }
             }
         }
-    }
 
-    // Text ends inside a link/image URL: drop the partial URL, keep the text.
-    if let Some(close) = pending_url {
-        let byte = cs[close].0;
-        return Some(format!("{}]({PENDING_LINK_URL})", &text[..byte]));
+        // Text ends inside a link/image URL: drop the partial URL, keep the text.
+        let result = if let Some(close) = pending_url {
+            let byte = cs[close - base].0;
+            Some(format!("{}]({PENDING_LINK_URL})", &text[..byte]))
+        } else {
+            mended(text, code, &delims, &brackets, last_content)
+        };
+        *self = match open {
+            Some(open) => open,
+            None => Mender {
+                chars: n,
+                bytes: text.len(),
+                before: cs.last().map(|&(_, c)| c).or(self.before),
+                delims,
+                brackets,
+                code,
+                last_content,
+            },
+        };
+        result
     }
+}
 
+/// The text with the closers the scan's end state asks for, and a
+/// half-typed setext underline broken; `None` if it needs neither.
+fn mended(
+    text: &str,
+    code: Option<(usize, usize)>,
+    delims: &[OpenDelim],
+    brackets: &[usize],
+    last_content: Option<usize>,
+) -> Option<String> {
     // Collect closers innermost-first (descending open position). A `[` open
     // splits the emphasis closers naturally: delimiters opened inside the
     // link text close before the `](…)`, ones opened before it close after.
@@ -166,7 +263,7 @@ pub fn close_hanging(text: &str) -> Option<String> {
     {
         pending.push((cpos, "`".repeat(ticks)));
     }
-    for d in &delims {
+    for d in delims {
         if last_content.is_some_and(|lc| lc >= d.pos) {
             pending.push((d.pos, d.ch.to_string().repeat(d.len)));
         }
@@ -205,18 +302,21 @@ pub fn close_hanging(text: &str) -> Option<String> {
     Some(format!("{}{closers}{}", &text[..end], &text[end..]))
 }
 
-fn run_len(cs: &[(usize, char)], i: usize) -> usize {
-    let c = cs[i].1;
-    cs[i..].iter().take_while(|&&(_, x)| x == c).count()
+/// The length of the run of the char `cs` starts with.
+fn run_len(cs: &[(usize, char)]) -> usize {
+    let c = cs[0].1;
+    cs.iter().take_while(|&&(_, x)| x == c).count()
 }
 
 /// Match or open one delimiter run. Closes against the innermost same-char
 /// opener (partially, for half-streamed closers like `**a*`); delimiters
 /// opened after a consumed opener were inside the closed span and stay
 /// literal, exactly as the final parse treats them.
+/// `prev` and `next`: the chars before and after the run.
 fn delim(
     delims: &mut Vec<OpenDelim>,
-    cs: &[(usize, char)],
+    prev: Option<char>,
+    next: Option<char>,
     c: char,
     run: usize,
     i: usize,
@@ -230,8 +330,6 @@ fn delim(
         *last_content = Some(end - 1);
         return;
     }
-    let prev = i.checked_sub(1).map(|p| cs[p].1);
-    let next = cs.get(end).map(|&(_, c)| c);
     let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
     // Intraword `_` never delimits (CommonMark); intraword single `*` is
     // treated the same, conservatively — `2*3` must not flash italic.
@@ -274,10 +372,16 @@ fn setext_partial(text: &str) -> bool {
     let trimmed = last.trim_start();
     let underline =
         |c: char| !trimmed.is_empty() && trimmed.len() <= 2 && trimmed.chars().all(|x| x == c);
+    // The line above, found from the end (as `lines().last()` reads it: a
+    // trailing break ends a line rather than starting an empty one).
+    let above = &text[..nl];
     (underline('-') || underline('='))
-        && text[..nl]
-            .lines()
-            .last()
+        && !above.is_empty()
+        && above
+            .strip_suffix('\n')
+            .unwrap_or(above)
+            .rsplit('\n')
+            .next()
             .is_some_and(|l| !l.trim().is_empty())
 }
 
@@ -409,5 +513,60 @@ mod tests {
         stays("-"); // no line above
         stays("\n-"); // empty line above
         mends("**b\n-", "**b**\n-\u{200B}"); // closers go above the underline
+    }
+
+    /// Markdown-ish pieces, markers and their neighbours among them.
+    const PIECES: [&str; 22] = [
+        "a", "word", " ", "\n", "*", "**", "_", "__", "~", "~~", "`", "``", "[", "]", "(", ")",
+        "](", "\\", "-", "=", "é", "2",
+    ];
+
+    /// A small deterministic generator: the same texts on every run.
+    struct Rng(u64);
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % n as u64) as usize
+        }
+    }
+
+    #[test]
+    fn mending_as_a_block_grows_is_mending_it_afresh() {
+        for seed in 1..=400u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let text: String = (0..rng.below(40) + 1)
+                .map(|_| PIECES[rng.below(PIECES.len())])
+                .collect();
+            let mut mender = Mender::default();
+            // Grown in chunks of a few bytes, each split on a char's edge.
+            let mut end = 0;
+            while end < text.len() {
+                end = (end + rng.below(6) + 1).min(text.len());
+                while !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                let grown = &text[..end];
+                assert_eq!(
+                    mender.close(grown),
+                    close_hanging(grown),
+                    "seed {seed}: {grown:?}"
+                );
+                assert!(mender.settled() <= end);
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_block_grown_a_token_at_a_time_reads_each_token() {
+        // A paragraph streaming: what is settled keeps up with it.
+        let mut mender = Mender::default();
+        let mut text = String::from("**bold");
+        for i in 0..500 {
+            text.push_str(&format!(" word{i}"));
+            assert_eq!(mender.close(&text), close_hanging(&text));
+            assert!(text.len() - mender.settled() <= 8, "{}", mender.settled());
+        }
     }
 }
