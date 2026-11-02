@@ -318,6 +318,29 @@ fn outlines_take_width_colour_and_offset() {
     );
 }
 
+/// `drop_shadow` gives a node a drop shadow, the box shadow's form; it
+/// paints as a layer while it has one.
+#[test]
+fn drop_shadows_reach_the_scene() {
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            ui.div { id = "cast", w = 20, h = 20, drop_shadow = { x = 2, y = 4, blur = 3, color = "#ff000080" } },
+            ui.div { id = "plain", w = 20, h = 20 } }"##,
+    );
+    h.ui.prepare_frame();
+    let (cast, plain) = (h.find("cast").unwrap(), h.find("plain").unwrap());
+    let scene = h.ui.scene.borrow();
+    let shadow = scene.drop_shadow(cast).copied().expect("a drop shadow");
+    // Its blur CSS's, the sigma half of it.
+    assert_eq!(
+        (shadow.offset.x, shadow.offset.y, shadow.blur),
+        (2., 4., 1.5)
+    );
+    assert_eq!(shadow.color, zgx::scene::Color(255, 0, 0, 128));
+    assert!(scene.is_layer(cast));
+    assert!(scene.drop_shadow(plain).is_none() && !scene.is_layer(plain));
+}
+
 /// `image_rendering = "pixelated"` reaches the scene; unsaid, smooth.
 #[test]
 fn image_rendering_reaches_the_scene() {
