@@ -853,6 +853,23 @@ impl Page {
                 })),
                 &mut token,
             );
+            // A page's full screen fills its node: the app hears, to grow it.
+            let page = on.clone();
+            let _ = view.add_ContainsFullScreenElementChanged(
+                &ContainsFullScreenElementChangedEventHandler::create(Box::new(
+                    move |sender, _| {
+                        let full =
+                            sender.is_some_and(|view| flag(|v| view.ContainsFullScreenElement(v)));
+                        page(&|page| {
+                            page.post(move |web| {
+                                web.update_state(|state| state.full_screen = full)
+                            });
+                        });
+                        Ok(())
+                    },
+                )),
+                &mut token,
+            );
             // As WebKit with no delegate for them: pages save no files and
             // get no permission (camera, location, notifications, the
             // clipboard) in the app's name.

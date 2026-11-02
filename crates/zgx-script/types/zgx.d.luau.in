@@ -1199,6 +1199,10 @@ declare extern type Web with
 	can_go_forward: boolean
 	focused: boolean
 	error: string?
+	-- An element of the page is full screen (its `requestFullscreen`): on
+	-- macOS in WebKit's window over the screen, elsewhere filling the page's
+	-- node, which an app grows to show it so.
+	full_screen: boolean
 	-- The pointer over the page, in points from its top left; nil outside.
 	-- (Over a page zgx hears no pointer moves: its nodes had their leave.)
 	pointer: { x: number, y: number }?
@@ -1211,6 +1215,8 @@ declare extern type Web with
 	function focus(self): ()
 	function blur(self): ()
 	function devtools(self): ()
+	-- End the page's full screen, as Escape does in a browser.
+	function exit_full_screen(self): ()
 	function zoom(self, zoom: number): ()
 	function run(self, js: string): ()
 	-- The script's value as Luau data (JSON's shape, whatever the page
