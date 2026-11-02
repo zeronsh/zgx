@@ -26,6 +26,9 @@ use zgx::{
     text::TextValue,
 };
 
+/// A remote source's failures in a row: when the last was, how many, why.
+type Failure = (std::time::Instant, u32, Rc<str>);
+
 /// Decoded images and SVGs by source. What a mounted node shows stays;
 /// of the rest, the most recently shown stay while they fit `budget`, so a
 /// reload or a page shown again is instant without every picture a run
@@ -49,10 +52,10 @@ pub(crate) struct Assets {
     /// Remote sources (`https://…`) by URL: fetched once, whoever shows
     /// them; what shows one follows its status (`LOADING`, `READY`, `FAILED`).
     remote: std::cell::RefCell<HashMap<String, zgx::reactive::Signal<u8>>>,
-    /// Failed remote sources: when, and how many times in a row. Asked
+    /// Failed remote sources: when, how many times in a row, why. Asked
     /// for again after a backoff, they're fetched again (as a browser
     /// retries a broken image when a new element shows it).
-    failed: std::cell::RefCell<HashMap<String, (std::time::Instant, u32)>>,
+    failed: std::cell::RefCell<HashMap<String, Failure>>,
     /// The host's tasks and transport, which remote sources go through.
     links: std::cell::RefCell<Option<(Rc<crate::timers::Timers>, crate::calls::SharedFetcher)>>,
     /// Images the host made (`ScriptHost::image`), as `host:<name>`
@@ -4392,6 +4395,17 @@ fn remote_ready(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> bool {
 /// Remote `src`'s status (`LOADING`, `READY`, `FAILED`), fetching it the
 /// first time. Tracked.
 fn remote_status(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> u8 {
+    remote_status_in(vm, &low.assets, &low.runtime, src, svg)
+}
+/// `remote_status`, given the assets and runtime (`ui.image_size` has no
+/// lowering).
+fn remote_status_in(
+    vm: &Rc<Vm>,
+    assets: &Rc<Assets>,
+    runtime: &zgx::reactive::Runtime,
+    src: &str,
+    svg: bool,
+) -> u8 {
     // A remote source is a request to the network: a plugin makes it only
     // if granted it, as `ui.fetch` (else an image's URL would carry out what
     // the plugin read).
@@ -4406,12 +4420,12 @@ fn remote_status(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> u8 {
         )));
         return FAILED;
     }
-    let existing = low.assets.remote.borrow().get(src).cloned();
+    let existing = assets.remote.borrow().get(src).cloned();
     let ready = match existing {
         Some(status) if status.get() != FAILED => return status.get(),
         Some(status) => {
             // 5 s, doubling each time in a row it fails, up to 5 minutes.
-            let failed = low.assets.failed.borrow().get(src).copied();
+            let failed = (assets.failed.borrow().get(src)).map(|(at, times, _)| (*at, *times));
             let wait = |times: u32| {
                 std::time::Duration::from_secs((5u64 << times.saturating_sub(1).min(6)).min(300))
             };
@@ -4422,15 +4436,15 @@ fn remote_status(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> u8 {
             status
         }
         None => {
-            let ready = low.runtime.signal(LOADING);
-            low.assets
+            let ready = runtime.signal(LOADING);
+            assets
                 .remote
                 .borrow_mut()
                 .insert(src.to_owned(), ready.clone());
             ready
         }
     };
-    let links = low.assets.links.borrow().clone();
+    let links = assets.links.borrow().clone();
     let fetch = links
         .as_ref()
         .and_then(|(_, fetcher)| fetcher.borrow().clone());
@@ -4451,10 +4465,10 @@ fn remote_status(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> u8 {
         body.clone(),
     );
     let (assets, vm, src, runtime) = (
-        low.assets.clone(),
+        assets.clone(),
         Rc::downgrade(vm),
         src.to_owned(),
-        low.runtime.clone(),
+        runtime.clone(),
     );
     let arriving = ready.clone();
     timers.spawn(async move {
@@ -4501,12 +4515,15 @@ fn remote_status(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> u8 {
                 let _ = vm;
                 eprintln!("zgx: {src} didn't load: {error}");
                 let now = std::time::Instant::now();
+                let why: Rc<str> = Rc::from(error.as_str());
                 assets
                     .failed
                     .borrow_mut()
                     .entry(src)
-                    .and_modify(|(at, times)| (*at, *times) = (now, *times + 1))
-                    .or_insert((now, 1));
+                    .and_modify(|(at, times, reason)| {
+                        (*at, *times, *reason) = (now, *times + 1, why.clone())
+                    })
+                    .or_insert((now, 1, why));
                 runtime.batch(|| arriving.set(FAILED));
                 return;
             }
@@ -4515,47 +4532,83 @@ fn remote_status(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> u8 {
     });
     ready.get()
 }
+/// `src`'s picture, if it has one to show: a picture that can't be (a file
+/// gone or not a picture, a remote one that failed) is logged and draws
+/// nothing, never the script's error (`try_load_image` says why).
 fn load_image(vm: &Rc<Vm>, low: &Lowering, src: &str) -> Option<Arc<ImageData>> {
+    try_load_image(vm, low, src).unwrap_or_else(|why| {
+        // (A remote one's failure was logged as it failed.)
+        if !is_remote(src) {
+            unshown(vm, why);
+        }
+        None
+    })
+}
+/// `src`'s picture (`None`: none yet, loading, or an empty `src`), or why
+/// it can't be shown: a file gone (a sent picture deleted, a kept copy
+/// pruned) or not a picture, or a remote one that failed. That is the
+/// file's or the network's doing, not the script's: `ui.image` shows its
+/// `fallback` and tells `on_error`.
+fn try_load_image(
+    vm: &Rc<Vm>,
+    low: &Lowering,
+    src: &str,
+) -> Result<Option<Arc<ImageData>>, String> {
+    try_load_image_in(vm, &low.assets, &low.runtime, src)
+}
+/// `try_load_image`, given the assets and runtime (`ui.image_size`).
+pub(crate) fn try_load_image_in(
+    vm: &Rc<Vm>,
+    assets: &Rc<Assets>,
+    runtime: &zgx::reactive::Runtime,
+    src: &str,
+) -> Result<Option<Arc<ImageData>>, String> {
     // The host's own images, followed as it replaces them.
     if src.starts_with("host:") {
-        low.assets.hosted(src, &low.runtime).get();
-        return low.assets.image(src);
+        assets.hosted(src, runtime).get();
+        return Ok(assets.image(src));
     }
-    if let Some(image) = low.assets.image(src) {
-        return Some(image);
+    if let Some(image) = assets.image(src) {
+        return Ok(Some(image));
     }
     if is_remote(src) {
-        remote_ready(vm, low, src, false);
-        return None;
+        if remote_status_in(vm, assets, runtime, src, false) == FAILED {
+            let why = assets.failed.borrow().get(src).map(|(.., why)| why.clone());
+            return Err(format!(
+                "{src} didn't load: {}",
+                why.as_deref().unwrap_or("refused")
+            ));
+        }
+        return Ok(None);
     }
     // No picture yet (the web's `src=""`): nothing to show, nothing wrong.
     if src.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let decoded = resolve_path(vm, src)
-        .and_then(|path| {
-            low.assets
-                .read(src, &path)
-                .map_err(|e| format!("{}: {e}", path.display()))
-                .map(|bytes| (path, bytes))
+    // A path the script may not reach (a plugin's outside its directory)
+    // is the script's doing: its error, as before.
+    let path = match resolve_path(vm, src) {
+        Ok(path) => path,
+        Err(refused) => {
+            vm.report(mlua::Error::runtime(refused));
+            return Ok(None);
+        }
+    };
+    let decoded = (assets.read(src, &path))
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| {
+            zgx_gpu::assets::decode_image_kept(Arc::from(bytes)).map_err(|e| e.to_string())
         })
-        .and_then(|(path, bytes)| {
-            zgx_gpu::assets::decode_image_kept(Arc::from(bytes))
-                .map_err(|e| format!("{}: {e}", path.display()))
-        });
+        .map_err(|e| format!("{}: {e}", path.display()));
     match decoded {
         Ok(image) => {
-            low.assets.keep_image(src.to_owned(), image.clone());
-            Some(image)
+            assets.keep_image(src.to_owned(), image.clone());
+            Ok(Some(image))
         }
-        Err(e) => {
-            let e = match literal_site(vm, src) {
-                Some(site) => format!("{site}: {e}"),
-                None => e,
-            };
-            vm.report(mlua::Error::runtime(e));
-            None
-        }
+        Err(e) => Err(match literal_site(vm, src) {
+            Some(site) => format!("{site}: {e}"),
+            None => e,
+        }),
     }
 }
 /// The script line naming `src` as a string (`app.luau:12`), for its load
@@ -4637,7 +4690,14 @@ fn load_svg(vm: &Rc<Vm>, low: &Lowering, src: &str) -> Arc<SvgData> {
             svg
         }
         Err(e) => {
-            vm.report(mlua::Error::runtime(e));
+            // As a picture's: the file's doing, warned of with the line.
+            unshown(
+                vm,
+                match literal_site(vm, src) {
+                    Some(site) => format!("{site}: {e}"),
+                    None => e,
+                },
+            );
             no_svg()
         }
     }
@@ -6157,6 +6217,7 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         label,
         src,
         fallback,
+        events,
     } = &node.kind
     else {
         unreachable!("lower_image takes images")
@@ -6180,18 +6241,32 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         Some(Lit::Str(mode)) if &*mode == "async" => Some(zgx::image::Decoding::Async),
         _ => None,
     };
+    // What it tells the script (`on_load`, `on_error`), once a `src`.
+    let told = Told::new(events.clone(), low);
     // The picture, as a view (made again each time it shows).
     let picture = {
         let (src, vm2, low2, label) = (resolve_owned(src), vm.clone(), low.clone(), label.clone());
+        let told = told.clone();
         move || {
             let (src, vm2, low2) = (src.clone(), vm2.clone(), low2.clone());
-            let (dither, characters) = (dither.clone(), characters.clone());
+            let (dither, characters, told) = (dither.clone(), characters.clone(), told.clone());
             image_signal(label.clone(), move || {
                 let image = match picture_of(&src, &vm2) {
-                    Some(Picture::Image(image)) => image,
-                    Some(Picture::Path(path)) => {
-                        load_image(&vm2, &low2, &path).unwrap_or_else(placeholder)
+                    Some(Picture::Image(image)) => {
+                        told.loaded(&vm2, Rc::from("bitmap"), &image);
+                        image
                     }
+                    Some(Picture::Path(path)) => match try_load_image(&vm2, &low2, &path) {
+                        Ok(Some(image)) => {
+                            told.loaded(&vm2, path, &image);
+                            image
+                        }
+                        Ok(None) => placeholder(),
+                        Err(why) => {
+                            told.failed(&vm2, path, why);
+                            placeholder()
+                        }
+                    },
                     None => placeholder(),
                 };
                 if let Some(decoding) = decoding {
@@ -6218,12 +6293,21 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         None => picture(),
         Some(fallback) => {
             // The picture once a remote one has arrived (a local one, or a
-            // bitmap, at once), else the fallback.
-            let (src, vm2, low2) = (resolve_owned(src), vm.clone(), low.clone());
+            // bitmap, at once), else the fallback: also for a file gone or
+            // not a picture.
+            let (src, vm2, low2, told) =
+                (resolve_owned(src), vm.clone(), low.clone(), told.clone());
             let shown = move || match picture_of(&src, &vm2) {
-                Some(Picture::Path(path)) if is_remote(&path) => {
-                    remote_status(&vm2, &low2, &path, false) == READY
-                }
+                Some(Picture::Path(path)) => match try_load_image(&vm2, &low2, &path) {
+                    Ok(Some(_)) => true,
+                    // An empty `src` shows nothing; a remote one, loading,
+                    // shows `fallback`.
+                    Ok(None) => !is_remote(&path),
+                    Err(why) => {
+                        told.failed(&vm2, path, why);
+                        false
+                    }
+                },
                 Some(_) => true,
                 None => false,
             };
@@ -6238,6 +6322,90 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         }
     };
     view.on_mount(move |handle| handle.retain(sweeper.sweeper()))
+}
+
+/// What a `ui.image` has told its script, so each `src` is told once: its
+/// size as it loads (`on_load { w, h }`, in the picture's pixels), or why it
+/// can't be shown (`on_error(why)`, else logged). Told on the host's next
+/// task, out of the computation that loaded it.
+#[derive(Clone)]
+struct Told(Rc<ToldInner>);
+struct ToldInner {
+    events: Option<Rc<crate::node::ImageEvents>>,
+    timers: Option<Rc<crate::timers::Timers>>,
+    /// The `src` last told of, and whether it loaded.
+    last: std::cell::RefCell<Option<(Rc<str>, bool)>>,
+}
+impl Told {
+    fn new(events: Option<Rc<crate::node::ImageEvents>>, low: &Lowering) -> Self {
+        let timers = (low.assets.links.borrow().as_ref()).map(|(timers, _)| timers.clone());
+        Self(Rc::new(ToldInner {
+            events,
+            timers,
+            last: Default::default(),
+        }))
+    }
+    /// Whether `src` is new to tell of (its outcome `loaded`).
+    fn first(&self, src: &Rc<str>, loaded: bool) -> bool {
+        let mut last = self.0.last.borrow_mut();
+        if last
+            .as_ref()
+            .is_some_and(|(at, was)| at == src && *was == loaded)
+        {
+            return false;
+        }
+        *last = Some((src.clone(), loaded));
+        true
+    }
+    fn loaded(&self, vm: &Rc<Vm>, src: Rc<str>, image: &ImageData) {
+        let Some(on_load) = self.0.events.as_ref().and_then(|e| e.on_load.clone()) else {
+            return;
+        };
+        if !self.first(&src, true) {
+            return;
+        }
+        let (w, h) = (image.width(), image.height());
+        self.later(vm, move |vm| {
+            let size = vm.lua.create_table()?;
+            size.raw_set("w", w)?;
+            size.raw_set("h", h)?;
+            vm.call::<()>(&on_load, size)
+        });
+    }
+    #[cold]
+    fn failed(&self, vm: &Rc<Vm>, src: Rc<str>, why: String) {
+        if !self.first(&src, false) {
+            return;
+        }
+        match self.0.events.as_ref().and_then(|e| e.on_error.clone()) {
+            Some(on_error) => self.later(vm, move |vm| vm.call::<()>(&on_error, why)),
+            // (A remote one's failure was logged as it failed.)
+            None if !is_remote(&src) => unshown(vm, why),
+            None => {}
+        }
+    }
+    fn later(&self, vm: &Rc<Vm>, call: impl FnOnce(&Vm) -> mlua::Result<()> + 'static) {
+        let Some(timers) = &self.0.timers else { return };
+        let vm = Rc::downgrade(vm);
+        timers.spawn(async move {
+            if let Some(vm) = vm.upgrade()
+                && let Err(e) = call(&vm)
+            {
+                vm.report(e);
+            }
+        });
+    }
+}
+
+/// A picture that can't be shown, no `on_error` hearing it: a warning, once,
+/// with the script line naming it (a mistyped path shows there), not an
+/// error: the file, not the script, is at fault, and an error would stop
+/// the window's reloads.
+#[cold]
+#[inline(never)]
+fn unshown(vm: &Vm, why: String) {
+    let warnings = (vm.lua.app_data_ref::<crate::node::Env>()).map(|env| env.warnings.clone());
+    crate::warning(warnings.as_ref(), why);
 }
 
 /// `view`, showing a cached picture (a box's `bg_image`): as it unmounts,

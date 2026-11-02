@@ -69,8 +69,11 @@ return ui.column {
     h.frame();
     assert_eq!(h.text("text"), "Still here");
     assert!(h.find("picture").is_some(), "its node keeps its place");
-    let error = h.error().expect("the image's error is reported");
-    assert!(error.contains("picture.png"), "{error}");
+    // The file's doing, not the script's: a warning, never an error (which
+    // would stop the window's reloads).
+    assert_eq!(h.error(), None);
+    let warnings = h.0.host.warnings().join("\n");
+    assert!(warnings.contains("picture.png"), "{warnings}");
 }
 
 /// A missing image is reported with the script line that named it, in
@@ -78,7 +81,7 @@ return ui.column {
 /// line runs.
 #[test]
 fn a_missing_image_names_the_line_that_asked_for_it() {
-    let error_of = |name: &str, files: &[(&str, &str)]| {
+    let warning_of = |name: &str, files: &[(&str, &str)]| {
         let dir =
             std::env::temp_dir().join(format!("zgx-image-site-{}-{name}", std::process::id()));
         for (file, code) in files {
@@ -89,9 +92,10 @@ fn a_missing_image_names_the_line_that_asked_for_it() {
         let path = dir.join("app.luau");
         let h = Harness::new(|runtime| zgx_script::ScriptHost::new(runtime, path));
         h.frame();
-        h.error().expect("the image's error is reported")
+        assert_eq!(h.error(), None);
+        h.0.host.warnings().join("\n")
     };
-    let error = error_of(
+    let error = warning_of(
         "bg",
         &[(
             "app.luau",
@@ -102,7 +106,7 @@ fn a_missing_image_names_the_line_that_asked_for_it() {
         error.contains("app.luau:3: ") && error.contains("no-such.png"),
         "{error}"
     );
-    let error = error_of(
+    let error = warning_of(
         "module",
         &[
             (
@@ -118,7 +122,7 @@ fn a_missing_image_names_the_line_that_asked_for_it() {
     assert!(error.contains("components/card.luau:2: "), "{error}");
     // Not a line of tools' files or declarations, which may name the
     // same text (and sort first).
-    let error = error_of(
+    let error = warning_of(
         "types",
         &[
             (".tool/notes.luau", "-- see \"gone.png\"\n"),
@@ -134,7 +138,7 @@ fn a_missing_image_names_the_line_that_asked_for_it() {
 
 /// An empty `src` is no picture yet, as the web's: an image, a
 /// background or an SVG shows nothing and is no error, and a missing file
-/// is still one once `src` names it.
+/// is warned of once `src` names it.
 #[test]
 fn an_empty_image_src_shows_nothing_and_is_no_error() {
     let mut h = Harness::inline(
@@ -154,6 +158,72 @@ return ui.column {
         .set_state("src", zgx_script::Value::Str("no/such/picture.png".into()))
         .unwrap();
     h.frame();
-    let error = h.error().expect("a missing file is still reported");
-    assert!(error.contains("picture.png"), "{error}");
+    assert_eq!(h.error(), None);
+    let warnings = h.0.host.warnings().join("\n");
+    assert!(warnings.contains("picture.png"), "{warnings}");
+}
+
+/// A 2×2 PNG.
+const PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6, 0,
+    0, 0, 114, 182, 13, 36, 0, 0, 0, 17, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240, 31, 132,
+    25, 96, 12, 0, 71, 202, 7, 249, 103, 89, 110, 183, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+    130,
+];
+
+/// A picture's file gone, or not a picture, is told to `on_error` (no
+/// warning then) and shows `fallback`; one that loads tells `on_load` its
+/// size, and `ui.image_size` reads it from the file's header, before
+/// anything draws it.
+#[test]
+fn an_image_tells_what_became_of_its_file() {
+    let dir = std::env::temp_dir().join(format!("zgx-image-told-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("shot.png"), PNG).unwrap();
+    std::fs::write(dir.join("notes.png"), b"not a picture").unwrap();
+    let app = dir.join("app.luau");
+    std::fs::write(
+        &app,
+        r#"
+local heard = ui.state("heard", "")
+local function hear(what: string)
+	heard:append(what .. ";")
+end
+local w, h = ui.image_size("shot.png")
+local none = ui.image_size("gone.png")
+hear(`size {w}x{h} {none}`)
+return ui.column {
+	ui.image {
+		src = "shot.png", w = 20, h = 20,
+		on_load = function(size) hear(`load {size.w}x{size.h}`) end,
+		on_error = function() hear("shot failed") end,
+	},
+	ui.image {
+		src = "gone.png", w = 20, h = 20,
+		on_error = function(why: string) hear(if why:find("gone.png") then "gone" else why) end,
+		fallback = ui.text { "Couldn't be shown", id = "fallback" },
+	},
+	ui.image {
+		src = "notes.png", w = 20, h = 20,
+		on_error = function() hear("not a picture") end,
+	},
+	ui.text { heard, id = "heard" },
+}
+"#,
+    )
+    .unwrap();
+    let mut h = Harness::new(|runtime| zgx_script::ScriptHost::new(runtime, app));
+    h.frame();
+    h.frame();
+    assert_eq!(h.error(), None);
+    assert!(h.find("fallback").is_some(), "a file gone shows `fallback`");
+    let heard = h.text("heard");
+    for what in ["size 2x2 nil", "load 2x2", "gone", "not a picture"] {
+        assert!(heard.contains(what), "{what}: {heard}");
+    }
+    assert!(!heard.contains("shot failed"), "{heard}");
+    // Each told once, and those told need no warning.
+    h.frame();
+    assert_eq!(h.text("heard").matches("load").count(), 1, "{heard}");
+    assert!(h.0.host.warnings().is_empty(), "{:?}", h.0.host.warnings());
 }

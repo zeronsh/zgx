@@ -120,6 +120,13 @@ pub(crate) struct Sweep {
     pub period: std::time::Duration,
     pub rate: f64,
 }
+/// What a `ui.image` tells its script: its picture's size once known
+/// (`on_load`), or why it can't be shown (`on_error`).
+pub(crate) struct ImageEvents {
+    pub on_load: Option<Function>,
+    pub on_error: Option<Function>,
+}
+
 /// A web view's page, controller and handlers.
 #[derive(Clone)]
 pub(crate) struct WebSpec {
@@ -894,8 +901,11 @@ pub(crate) enum Kind {
     Image {
         label: String,
         src: Source,
-        /// Shown in its place while a remote picture loads, and if it fails.
+        /// Shown in its place while a remote picture loads, and if it fails
+        /// (a remote one, or a file gone or not a picture).
         fallback: Option<Rc<Node>>,
+        /// `on_load` and `on_error`, if either is given.
+        events: Option<Rc<ImageEvents>>,
     },
     Svg {
         label: String,
@@ -4678,10 +4688,22 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         mlua::Value::Nil => None,
                         node => Some(expect_node(node, "`fallback`")?),
                     };
+                    let (on_load, on_error) = (
+                        table.get::<Option<Function>>("on_load")?,
+                        table.get::<Option<Function>>("on_error")?,
+                    );
+                    let events = (on_load.is_some() || on_error.is_some())
+                        .then(|| Rc::new(ImageEvents { on_load, on_error }));
+                    if events.is_some() {
+                        // Read here: not styles.
+                        table.raw_set("on_load", mlua::Value::Nil)?;
+                        table.raw_set("on_error", mlua::Value::Nil)?;
+                    }
                     Kind::Image {
                         label,
                         src,
                         fallback,
+                        events,
                     }
                 } else {
                     Kind::Svg { label, src }
@@ -4690,6 +4712,24 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             })?,
         )?;
     }
+    ui.set(
+        "image_size",
+        lua.create_function(|lua, src: String| {
+            // From its file's header, as `ui.image` keeps it until drawn: no
+            // pixels decoded. Nothing for a picture not there (yet: a remote
+            // one, asked for now, answers once it has arrived, to a function
+            // reading it again).
+            let env = env(lua)?;
+            let Some(vm) = env.vm.upgrade() else {
+                return Ok((None, None));
+            };
+            let image = crate::lower::try_load_image_in(&vm, &env.assets, &env.runtime, &src);
+            Ok(match image {
+                Ok(Some(image)) => (Some(image.width()), Some(image.height())),
+                _ => (None, None),
+            })
+        })?,
+    )?;
     ui.set(
         "canvas",
         lua.create_function(|lua, table: Table| {

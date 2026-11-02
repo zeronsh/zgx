@@ -5367,9 +5367,16 @@ export type ImageProps = {
 	src: Reactive<string> | Bitmap | Readable<Bitmap?> | (() -> Bitmap?),
 	-- For accessibility.
 	label: Label?,
-	-- Shown in its place while a remote picture loads and if it fails (an
-	-- avatar's initials).
+	-- Shown in its place while a remote picture loads and if it can't be
+	-- shown (an avatar's initials): a remote one failed, a file gone or not
+	-- a picture.
 	fallback: Node?,
+	-- Its picture's size in pixels, once known (a file's from its header,
+	-- before it draws; a remote one's once it has arrived): each `src` once.
+	on_load: ((size: { w: number, h: number }) -> ())?,
+	-- Why its picture can't be shown: a file gone or not a picture, a remote
+	-- one that failed. Never a script error; without `on_error`, a warning.
+	on_error: ((why: string) -> ())?,
 }
 -- One of `src` (a file) and `code` (SVG markup) is required.
 export type SvgProps = {
@@ -19421,6 +19428,11 @@ declare ui: {
 	span: (content: Text | SpanProps) -> Span,
 	rich: (props: RichProps) -> Node,
 	image: (props: ImageProps) -> Node,
+	-- A picture's size in pixels, read from its file's header (nothing is
+	-- decoded): `ui.image`'s `src`s. Nothing for one not there: a file gone
+	-- or not a picture, a remote one not yet arrived (asked for now: a
+	-- function reading it again answers once it has).
+	image_size: (src: string) -> (number?, number?),
 	svg: (props: SvgProps) -> Node,
 	canvas: (props: CanvasProps) -> Node,
 	-- A 3D scene: meshes, lights and a camera, drawn only when what they
