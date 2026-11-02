@@ -1,0 +1,38 @@
+# PROBE, not for merging: style_bench's per-line instruction counts on x86 at
+# v0.1.6 and v0.1.7, to find which lines of mount_style_with_intrinsic's
+# closure#10 run more (the x86-only style/animate/anime rise, #1276).
+name: probe-style
+on:
+  push:
+    branches: ['probe/style-x86-lines']
+jobs:
+  lines:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends valgrind cmake pkg-config fonts-dejavu-core libdbus-1-dev libfontconfig1-dev libwayland-dev libxcb1-dev libxkbcommon-dev libxrandr-dev
+      - name: count both sides
+        run: |
+          set -eu
+          mkdir -p out
+          cc -O2 -shared -fPIC -o out/same_run.so scripts/perf/same_run.c
+          for side in v016=e077e952f63030808a098ca54f3e69501e3271bd v017=b03245c4f; do
+            name=${side%%=*}; sha=${side#*=}
+            git worktree add -q --detach "../w-$name" "$sha"
+            ( cd "../w-$name" && CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=line-tables-only CARGO_TARGET_DIR="$PWD/../t-$name" \
+                cargo build --release --locked -q -p zgx --example style_bench )
+            ( cd /tmp && env -i PATH="$PATH" HOME="$HOME" LD_PRELOAD="$GITHUB_WORKSPACE/out/same_run.so" ZGX_GATE=1 ZGX_ASSISTIVE=0 \
+                setarch -R valgrind --tool=cachegrind --cache-sim=no --cachegrind-out-file="$GITHUB_WORKSPACE/out/$name.cg" \
+                "$GITHUB_WORKSPACE/../t-$name/release/examples/style_bench" > /dev/null 2> "$GITHUB_WORKSPACE/out/$name.err" )
+            grep -E 'I *refs' "out/$name.err" || true
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: style-lines
+          path: out/*.cg
