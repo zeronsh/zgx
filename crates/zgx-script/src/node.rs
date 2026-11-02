@@ -5727,7 +5727,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 shaders
                     .borrow_mut()
                     .entry(key.clone())
-                    .or_insert_with(|| zgx::decoration::FillShader::new(key.0.clone(), fps))
+                    .or_insert_with(|| {
+                        // Compiled from now, off the frame, so the first
+                        // frame drawing it need not wait for it.
+                        let shader = zgx::decoration::FillShader::new(key.0.clone(), fps);
+                        zgx_gpu::warm_fill_shader(&shader);
+                        shader
+                    })
                     .clone()
             });
             Ok(ShaderUd(shader))

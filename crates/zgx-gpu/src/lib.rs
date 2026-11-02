@@ -8,6 +8,7 @@ use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
 use zgx::scene::{Color, NodeId, NodeKind, Rect, Scene};
 
 mod bands;
+mod compile;
 #[cfg(all(windows, feature = "composition"))]
 mod composition;
 #[cfg(target_os = "macos")]
@@ -48,6 +49,7 @@ mod surface;
 mod trial_energy;
 mod upload;
 pub mod viewport;
+pub use compile::warm_fill_shader;
 pub use font_cache::set_desktop_sans_serif;
 pub use surface::PresentationStatus;
 /// The wgpu this renderer draws with, for GPU views (`viewport`): an app
@@ -3893,7 +3895,8 @@ pub struct GpuRenderer {
     /// Image textures: each bound for the quads, its size in bytes, and,
     /// where the CPU wrote its texels, the texture (see `render_direct`).
     images: FxHashMap<u64, ImageTexture>,
-    /// A frame went without a kept file's pixels, decoding (`take_images_awaited`).
+    /// A frame went without a kept file's pixels, decoding, or a shader
+    /// fill's pipeline, compiling (`take_images_awaited`).
     images_awaited: bool,
     /// A kept file's pixels were uploaded (`take_images_uploaded`).
     images_uploaded: bool,
@@ -3981,9 +3984,16 @@ pub struct GpuRenderer {
     effect_pipelines: Option<effects::EffectPipelines>,
     /// Slots the next `render_flat` draws before compositing them.
     effect_jobs: Vec<effects::Job>,
-    /// Shader fills' pipelines by shader id (`None`: it failed to compile),
-    /// and the shaders, for frames drawn with Metal directly.
-    fill_pipelines: FxHashMap<u64, Option<wgpu::RenderPipeline>>,
+    /// Shader fills' pipelines by shader id, compiling or compiled (`None`:
+    /// it failed to), and the shaders, for frames drawn with Metal directly.
+    fill_pipelines: FxHashMap<u64, compile::Compiled<wgpu::RenderPipeline>>,
+    /// How many fill shaders scripts had declared when this renderer last
+    /// started compiling them (`compile::declared_since`).
+    fills_declared: u64,
+    /// Whether, offscreen, a frame waits for a shader still compiling
+    /// (`prepare_fill`); a window's never does. (Tests of a window's frames
+    /// turn it off.)
+    offscreen_waits: bool,
     /// The image effects' pipeline (image_effects.wgsl), made when an image
     /// first draws with one.
     image_effect_pipeline: std::cell::OnceCell<wgpu::RenderPipeline>,
@@ -4554,6 +4564,8 @@ impl GpuRenderer {
             effect_pipelines: None,
             effect_jobs: Vec::new(),
             fill_pipelines: FxHashMap::default(),
+            fills_declared: 0,
+            offscreen_waits: true,
             filter_pipelines: FxHashMap::default(),
             blend_pipelines: FxHashMap::default(),
             blend_layouts: std::cell::OnceCell::new(),
@@ -4981,6 +4993,9 @@ impl GpuRenderer {
             }
         }
         let presented = std::mem::take(&mut self.present_stats);
+        if compile::declared() != self.fills_declared {
+            self.start_declared_fills();
+        }
         self.image_frame += 1;
         if self.image_frame == LAUNCH_FRAMES {
             // An app that never goes idle checks its font cache here, once.
@@ -5895,7 +5910,7 @@ impl GpuRenderer {
     /// effects', once compiled.
     fn fill_pipeline(&self, shading: Shading) -> Option<&wgpu::RenderPipeline> {
         match shading {
-            Shading::Fill(id) => self.fill_pipelines.get(&id)?.as_ref(),
+            Shading::Fill(id) => self.fill_pipelines.get(&id)?.get(),
             Shading::Filter(id) => self.filter_pipelines.get(&id)?.as_ref(),
             Shading::Blend => self.blend_pipelines.get(&BLEND_PLAIN)?.as_ref(),
             Shading::FilterBlend(id) => self.blend_pipelines.get(&id)?.as_ref(),
@@ -5920,29 +5935,57 @@ impl GpuRenderer {
             )
         });
     }
-    /// Compile `shader`'s pipeline if new; whether it can draw.
+    /// Whether `shader`'s fill can draw: its pipeline compiled, else started
+    /// compiling if new (`start_fill`). A window's frame goes on without
+    /// one still compiling, drawing the box's colour, and draws again once
+    /// it is (`images_awaited`); an offscreen renderer waits for it.
     fn prepare_fill(&mut self, shader: &Arc<zgx::decoration::FillShader>) -> bool {
-        if let Some(compiled) = self.fill_pipelines.get(&shader.id()) {
-            return compiled.is_some();
+        let wait = self.offscreen_waits && !self.presents();
+        if let Some(compiled) = self.fill_pipelines.get_mut(&shader.id()) {
+            return match compiled.ready(wait) {
+                Some(ready) => ready,
+                None => {
+                    self.images_awaited = true;
+                    false
+                }
+            };
         }
+        self.start_fill(shader);
+        self.prepare_fill(shader)
+    }
+    /// Start compiling `shader`'s fill off the frame, if not yet.
+    #[cold]
+    fn start_fill(&mut self, shader: &Arc<zgx::decoration::FillShader>) {
+        if self.fill_pipelines.contains_key(&shader.id()) {
+            return;
+        }
+        let (device, layout) = (self.device.clone(), self.context.inner.quad_layout.clone());
         let source = fill_source(shader.source());
-        let pipeline = fill_validates(&source).then(|| {
-            let module = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
+        let slot = compile::spawn(move || {
+            fill_validates(&source).then(|| {
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("shader fill"),
                     source: wgpu::ShaderSource::Wgsl(source.into()),
                 });
-            fill_pipeline(
-                &self.device,
-                &module,
-                &self.context.inner.quad_layout,
-                "zgx_fill",
-            )
+                fill_pipeline(&device, &module, &layout, "zgx_fill")
+            })
         });
         self.fill_shaders.insert(shader.id(), shader.clone());
-        self.fill_pipelines.insert(shader.id(), pipeline);
-        self.fill_pipelines[&shader.id()].is_some()
+        (self.fill_pipelines).insert(shader.id(), compile::Compiled::Pending(slot));
+        #[cfg(target_os = "macos")]
+        if let Some(Some(frame)) = self.metal_frame.get() {
+            frame.start_fill(shader);
+        }
+    }
+    /// Start compiling the fills scripts declared since the last frame
+    /// (`warm_fill_shader`), before anything draws them.
+    #[cold]
+    fn start_declared_fills(&mut self) {
+        if let Some(declared) = compile::declared_since(&mut self.fills_declared) {
+            for shader in &declared {
+                self.start_fill(shader);
+            }
+        }
     }
     /// Compile layer shader `shader`'s pipeline if new; whether it can draw.
     fn prepare_filter(&mut self, shader: &Arc<zgx::decoration::FillShader>) -> bool {
@@ -8891,7 +8934,9 @@ impl GpuRenderer {
                     self.metal_frame
                         .get_or_init(|| metal_frame::MetalFrame::new(&self.device, &self.queue).ok())
                         .as_ref()
-                        .is_some_and(|frame| frame.fills(shader))
+                        .is_some_and(|frame| {
+                            frame.fills(shader, self.offscreen_waits && !self.presents())
+                        })
                 }),
                 Shading::ImageEffect => self
                     .metal_frame
@@ -17033,6 +17078,112 @@ mod highlight_shape_tests {
 }
 
 #[cfg(test)]
+mod shader_compile_tests {
+    use super::*;
+    use zgx::decoration::{Background, Decoration, FillShader};
+    use zgx::scene::{Layout, QuadStyle, Style};
+
+    /// A 40-point box filled with `shader` over a red background colour.
+    fn filled(scene: &mut Scene, shader: &Arc<FillShader>) {
+        let kind = NodeKind::Quad(QuadStyle {
+            fill: Color(255, 0, 0, 255),
+            decoration: Some(Arc::new(Decoration {
+                background: Some(Background::Shader(shader.clone())),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        let style = Style {
+            width: Some(40.),
+            height: Some(40.),
+            ..Style::default()
+        };
+        scene.append(scene.root(), kind, style);
+    }
+    fn green() -> Arc<FillShader> {
+        FillShader::new(
+            "fn fill(input: FillInput) -> vec4<f32> { return vec4<f32>(0.0, 1.0, 0.0, 1.0); }",
+            None,
+        )
+    }
+    /// The box's middle pixel after a frame, and whether the frame went
+    /// without something still on its way.
+    fn frame(gpu: &mut GpuRenderer, scene: &mut Scene) -> ([u8; 4], bool) {
+        let report = scene.flush();
+        gpu.render(scene, &report.damage).unwrap();
+        let pixels = gpu.readback().unwrap();
+        let at = (20 * 64 + 20) * 4;
+        (pixels[at..at + 4].try_into().unwrap(), gpu.images_awaited)
+    }
+    fn compiled(gpu: &GpuRenderer, shader: &FillShader) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if gpu
+                .fill_pipelines
+                .get(&shader.id())
+                .is_some_and(|c| c.get().is_some())
+            {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
+    fn renderer() -> (GpuRenderer, Scene) {
+        let mut gpu = GpuRenderer::new(64, 64).unwrap();
+        // As a window's frames: they never wait for a compile.
+        gpu.offscreen_waits = false;
+        let mut scene = Scene::new(64., 64.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        (gpu, scene)
+    }
+
+    /// The frame that first meets a shader fill doesn't wait for its
+    /// pipeline: it draws the box's colour, says it went without, and the
+    /// fill draws once compiled.
+    #[test]
+    fn a_window_draws_on_while_a_fill_compiles() {
+        let (mut gpu, mut scene) = renderer();
+        let shader = green();
+        filled(&mut scene, &shader);
+        let (pixel, awaited) = frame(&mut gpu, &mut scene);
+        assert_eq!(pixel, [255, 0, 0, 255], "the box's colour meanwhile");
+        assert!(awaited, "a frame went without it");
+        assert!(compiled(&gpu, &shader));
+        // The host, woken, draws again (`images_decoded`).
+        assert!(gpu.images_decoded());
+        let (pixel, awaited) = frame(&mut gpu, &mut scene);
+        assert_eq!(pixel, [0, 255, 0, 255]);
+        assert!(!awaited);
+    }
+
+    /// A fill a script declared (`warm_fill_shader`) compiles from the next
+    /// frame on, before anything draws it: the first frame that does has it.
+    #[test]
+    fn a_declared_fill_is_compiled_before_it_draws() {
+        let (mut gpu, mut scene) = renderer();
+        let shader = green();
+        warm_fill_shader(&shader);
+        frame(&mut gpu, &mut scene);
+        assert!(compiled(&gpu, &shader));
+        filled(&mut scene, &shader);
+        let (pixel, awaited) = frame(&mut gpu, &mut scene);
+        assert_eq!(pixel, [0, 255, 0, 255]);
+        assert!(!awaited);
+    }
+
+    /// Offscreen, nothing wakes a host: a frame waits for the compile.
+    #[test]
+    fn offscreen_a_frame_waits_for_its_fill() {
+        let (mut gpu, mut scene) = renderer();
+        gpu.offscreen_waits = true;
+        let shader = green();
+        filled(&mut scene, &shader);
+        assert_eq!(frame(&mut gpu, &mut scene), ([0, 255, 0, 255], false));
+    }
+}
+
+#[cfg(test)]
 mod shader_retention_tests {
     use super::*;
     use zgx::decoration::{Background, Decoration, FillShader};
@@ -17076,10 +17227,11 @@ mod shader_retention_tests {
         // One shader the scene keeps all along.
         let held = fill(9);
         scene.append(scene.root(), filled(&held), sized(10.));
-        let mut gone = Vec::new();
+        let (mut gone, mut gone_fills) = (Vec::new(), Vec::new());
         for i in 0..4 {
             // A shader fill, and a layer shader blended over the backdrop.
             let shader = fill(i);
+            gone_fills.push(shader.id());
             gone.push(Arc::downgrade(&shader));
             let node = scene.append(scene.root(), filled(&shader), sized(40.));
             let layer = scene.append(
@@ -17110,9 +17262,12 @@ mod shader_retention_tests {
             .filter(|shader| shader.upgrade().is_some())
             .count();
         assert_eq!(alive, 0, "removed shaders kept alive");
-        assert_eq!(
-            gpu.fill_pipelines.len(),
-            1,
+        // (Of this test's: fills other tests declare compile here too.)
+        assert!(
+            gpu.fill_pipelines.contains_key(&held.id())
+                && !gone_fills
+                    .iter()
+                    .any(|id| gpu.fill_pipelines.contains_key(id)),
             "the held fill's pipeline alone"
         );
         assert!(gpu.fill_shaders.contains_key(&held.id()));

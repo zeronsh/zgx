@@ -11,7 +11,7 @@
 //! passes splitting the frame's pass, and so are layer effects' passes
 //! (effects.rs), ahead of it. Frames needing anything else take the wgpu
 //! path.
-use crate::{GpuError, Shading};
+use crate::{GpuError, Shading, compile::Compiled};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSString;
 use objc2_metal::{
@@ -24,6 +24,14 @@ use objc2_metal::{
 use wgpu::naga;
 
 type Pipeline = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
+
+/// A Metal object handed to the shader compiling thread, or back.
+struct Threaded<T>(T);
+// SAFETY: Only devices and render pipeline states cross: Metal's devices
+// are thread-safe, and a pipeline state is immutable once made.
+unsafe impl Send for Threaded<Retained<ProtocolObject<dyn MTLDevice>>> {}
+unsafe impl Send for Threaded<Pipeline> {}
+unsafe impl Sync for Threaded<Pipeline> {}
 pub(crate) type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
 pub(crate) type CommandBuffer = Retained<ProtocolObject<dyn MTLCommandBuffer>>;
 type Encoder = Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>;
@@ -51,8 +59,9 @@ pub(crate) struct MetalFrame {
     blur: std::cell::OnceCell<Option<Blur>>,
     /// Layer effects' pipelines (effects.wgsl), with the first effect.
     effects: std::cell::OnceCell<Option<Effects>>,
-    /// Shader fills' pipelines by shader id (`None`: it did not compile).
-    fills: std::cell::RefCell<std::collections::HashMap<u64, Option<Pipeline>>>,
+    /// Shader fills' pipelines by shader id, compiling or compiled (`None`:
+    /// it did not compile).
+    fills: std::cell::RefCell<std::collections::HashMap<u64, Compiled<Threaded<Pipeline>>>>,
     /// The image effects' pipeline (image_effects.wgsl), with the first
     /// image drawn with one (`None`: it did not compile).
     image_effects: std::cell::OnceCell<Option<Pipeline>>,
@@ -215,29 +224,46 @@ impl MetalFrame {
     }
 
     /// Whether `shader`'s fill can be drawn here: its pipeline, compiled
-    /// now from the same module as wgpu's (`crate::fill_source`) if new.
-    pub(crate) fn fills(&self, shader: &zgx::decoration::FillShader) -> bool {
-        if let Some(compiled) = self.fills.borrow().get(&shader.id()) {
-            return compiled.is_some();
+    /// from the same module as wgpu's (`crate::fill_source`). Not while it
+    /// compiles (started if new): the frame takes the wgpu path, which has
+    /// it by then (`GpuRenderer::prepare_fill`), unless it `wait`s for it
+    /// (offscreen).
+    pub(crate) fn fills(&self, shader: &zgx::decoration::FillShader, wait: bool) -> bool {
+        self.start_fill(shader);
+        let mut fills = self.fills.borrow_mut();
+        let compiled = fills.get_mut(&shader.id()).expect("started");
+        compiled.ready(wait).unwrap_or(false)
+    }
+
+    /// Start compiling `shader`'s fill off the frame (`crate::compile`), if
+    /// not yet.
+    pub(crate) fn start_fill(&self, shader: &zgx::decoration::FillShader) {
+        if self.fills.borrow().contains_key(&shader.id()) {
+            return;
         }
+        let device = Threaded(self.device.clone());
         let source = crate::fill_source(shader.source());
-        let pipeline = crate::fill_validates(&source)
-            .then(|| Library::new(&self.device, &source, Kind::Quads).ok())
-            .flatten()
-            .and_then(|library| {
-                library
-                    .pipeline(
-                        &self.device,
-                        "vs",
-                        "zgx_fill",
-                        MTLPixelFormat::BGRA8Unorm,
-                        Blend::Over,
-                    )
-                    .ok()
-            });
-        let ready = pipeline.is_some();
-        self.fills.borrow_mut().insert(shader.id(), pipeline);
-        ready
+        let slot = crate::compile::spawn(move || {
+            let device = &device.0;
+            crate::fill_validates(&source)
+                .then(|| Library::new(device, &source, Kind::Quads).ok())
+                .flatten()
+                .and_then(|library| {
+                    library
+                        .pipeline(
+                            device,
+                            "vs",
+                            "zgx_fill",
+                            MTLPixelFormat::BGRA8Unorm,
+                            Blend::Over,
+                        )
+                        .ok()
+                })
+                .map(Threaded)
+        });
+        self.fills
+            .borrow_mut()
+            .insert(shader.id(), Compiled::Pending(slot));
     }
 
     /// Keep only the fills `keep` names (`GpuRenderer::trim`).
@@ -463,8 +489,8 @@ impl MetalFrame {
                 .fills
                 .borrow()
                 .get(&id)
-                .cloned()
-                .flatten()
+                .and_then(Compiled::get)
+                .map(|pipeline| pipeline.0.clone())
                 .unwrap_or_else(|| self.full.clone()),
             Shading::ImageEffect => self
                 .image_effects
