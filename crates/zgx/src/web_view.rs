@@ -437,6 +437,9 @@ pub trait WebViewBackend {
     fn run(&self, command: WebViewCommand);
     /// The backend as `Any`, for the host to downcast.
     fn as_any(&self) -> &dyn Any;
+    /// Show the platform's print dialog for the page (see
+    /// [`WebView::print`]). One that can't prints nothing.
+    fn print(&self) {}
 }
 
 type Listener = Rc<RefCell<dyn FnMut(&WebViewEvent)>>;
@@ -778,6 +781,15 @@ impl WebView {
     /// Escape does in a browser.
     pub fn exit_full_screen(&self) {
         self.run_js("document.fullscreenElement && document.exitFullscreen()");
+    }
+    /// Print the page: the platform's print dialog for it, as the page's
+    /// own `window.print()` shows (a sheet on the window on macOS, WebView2's
+    /// print preview on Windows, GTK's print dialog on Linux). A page not
+    /// showing yet prints nothing.
+    pub fn print(&self) {
+        if let Some(backend) = self.backend() {
+            backend.print();
+        }
     }
     /// Open Web Inspector, when [`WebViewOptions::inspectable`].
     pub fn open_devtools(&self) {

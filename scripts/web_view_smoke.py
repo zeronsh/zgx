@@ -336,6 +336,37 @@ def file_checks(session):
     return files
 
 
+def print_checks(session):
+    """The app's print (Ctrl+P, reserved) and the page's `window.print()`
+    (F7): GTK's print dialog, transient for the app's window (GTK's own
+    choice, the page's offscreen window, leaves it anywhere), closed by
+    Escape."""
+    def dialog():
+        found = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Print$"], env=session.env,
+                               capture_output=True, text=True)
+        return found.stdout.split()[0] if found.returncode == 0 and found.stdout.strip() else None
+    done = []
+    for how, key in (("window.print()", "F7"), ("print", "ctrl+p")):
+        # The page's key, to the page: focus back in it after a dialog.
+        session.click(*COLOURS["page"][0])
+        session.key(key)
+        if key == "F7":
+            session.wait(lambda: any(m[0].get("printing") for m in session.messages()), "F7 never reached the page")
+        window = session.wait(dialog, f"{how} showed no print dialog", 30)
+        # The transient hint comes as the dialog shows.
+        def transient():
+            found = subprocess.run(["xprop", "-id", window, "WM_TRANSIENT_FOR"], env=session.env,
+                                   capture_output=True, text=True).stdout
+            match = re.search(r"window id # (0x[0-9a-f]+)", found)
+            return match and int(match.group(1), 16) == int(session.window)
+        session.wait(transient, f"{how}'s print dialog is not transient for the app's window", 10)
+        subprocess.run(["xdotool", "windowactivate", "--sync", window], env=session.env)
+        session.xdo("key", "Escape")
+        session.wait(lambda: not dialog(), f"{how}'s print dialog never closed", 10)
+        done.append(how)
+    return done
+
+
 def page_checks(session, ime, transparent=False, unaccelerated=False):
     session.wait(lambda: session.lines("EVAL "), "the page never loaded", 30)
     colours = dict(COLOURS)
@@ -423,6 +454,10 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     checks["full screen"] = True
     if not session.wayland:
         checks["file input"] = file_checks(session)
+    # After the damage check: a dialog closing activates the window again,
+    # which repaints the whole page once.
+    if not session.wayland:
+        checks["printed"] = print_checks(session)
     for _ in range(3):
         session.click(300, 300, 5)
     scrolled = session.wait(lambda: [m for m in session.messages() if "scrolled" in m[0]], "the wheel never scrolled the page")

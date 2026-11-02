@@ -436,6 +436,8 @@ struct Page {
     /// The page's images, by URL, so a dragged one's bytes come from
     /// WebKit (an authenticated page's too), not the network.
     images: RefCell<HashMap<String, Ptr>>,
+    /// The X11 window the page's box is in, 0 for none known.
+    window_xid: Cell<u64>,
 }
 
 /// Defines `window.zgx.postMessage(value)`: what it posts carries the
@@ -682,6 +684,7 @@ impl Gtk {
                 preedit: RefCell::new((String::new(), 0)),
                 options: Cell::new(null_mut()),
                 images: RefCell::new(HashMap::new()),
+                window_xid: Cell::new(0),
             });
             let data = Rc::as_ptr(&page) as Ptr;
             let handler = |f: *const ()| std::mem::transmute::<*const (), gtk::GCallback>(f);
@@ -749,6 +752,14 @@ impl Gtk {
                 view,
                 "web-process-terminated",
                 handler(on_terminated as *const ()),
+                data,
+                false,
+            );
+            connect(
+                api,
+                view,
+                "print",
+                handler(on_print as *const ()),
                 data,
                 false,
             );
@@ -1042,6 +1053,33 @@ impl Page {
         });
     }
     /// Deliver `delivery` with this page's controller, if it still has one.
+    /// GTK's print dialog for the page (`operation`, the page's own
+    /// `window.print()`, or a new one), transient for the app's X11 window
+    /// where the box is in one: GTK makes it transient for the page's
+    /// offscreen window, which no window manager sees, so it opened anywhere.
+    /// GTK runs the dialog in a loop of its own until it's answered.
+    fn print(&self, operation: Ptr) {
+        let api = gtk::api().expect("GTK runs");
+        // SAFETY: WebKit's print operation for this page's view, on GTK's
+        // thread; one made here is let go after its dialog.
+        unsafe {
+            let made = operation.is_null();
+            let operation = if made {
+                (api.webkit_print_operation_new)(self.view)
+            } else {
+                operation
+            };
+            let xid = self.window_xid.get();
+            if xid != 0 {
+                let data = Box::into_raw(Box::new((xid, 0_u32))) as Ptr;
+                (api.g_timeout_add_full)(200, 50, attach_print_dialog, data, None);
+            }
+            (api.webkit_print_operation_run_dialog)(operation, self.window);
+            if made {
+                (api.g_object_unref)(operation);
+            }
+        }
+    }
     fn post(&self, delivery: impl FnOnce(&WebView) + Send + 'static) {
         let id = self.id;
         deliver(move || {
@@ -1337,6 +1375,8 @@ impl Page {
                     self.key(true, keyval, 23, state, time);
                     self.key(false, keyval, 23, state, time);
                 }
+                Command::Window(xid) => self.window_xid.set(xid),
+                Command::Print => self.print(null_mut()),
                 Command::OpenDevtools => {
                     (api.webkit_web_inspector_show)((api.webkit_web_view_get_inspector)(view));
                 }
@@ -2232,6 +2272,54 @@ unsafe extern "C" fn on_file_chooser(_: Ptr, request: Ptr, data: Ptr) -> gtk::gb
     });
     1
 }
+/// The page's `window.print()`: GTK's print dialog, as `WebView::print`.
+unsafe extern "C" fn on_print(_: Ptr, operation: Ptr, data: Ptr) -> gtk::gboolean {
+    // SAFETY: GTK passes the page's print operation and this handler's page.
+    unsafe { page(data) }.print(operation);
+    1
+}
+/// Make GTK's print dialog, once it shows, transient for the app's X11
+/// window (`data`: the window and the tries so far, freed here). It looks
+/// every 50 ms for 5 s.
+unsafe extern "C" fn attach_print_dialog(data: Ptr) -> gtk::gboolean {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: the box `Page::print` made, on GTK's thread; the toplevels'
+    // list is GTK's, each a live window, freed after the walk.
+    unsafe {
+        let state = &mut *(data as *mut (u64, u32));
+        state.1 += 1;
+        let mut attached = false;
+        let list = (api.gtk_window_list_toplevels)();
+        let mut item = list;
+        while !item.is_null() {
+            let window = (*item).data;
+            item = (*item).next;
+            if string((api.g_type_name_from_instance)(window)) != "GtkPrintUnixDialog" {
+                continue;
+            }
+            let gdk = (api.gtk_widget_get_window)(window);
+            if gdk.is_null() {
+                continue;
+            }
+            if let Some(foreign) = api.gdk_x11_window_foreign_new_for_display {
+                let parent = foreign(
+                    (api.gdk_window_get_display)(gdk),
+                    state.0 as std::ffi::c_ulong,
+                );
+                if !parent.is_null() {
+                    (api.gdk_window_set_transient_for)(gdk, parent);
+                    attached = true;
+                }
+            }
+        }
+        (api.g_list_free)(list);
+        if attached || state.1 >= 100 {
+            drop(Box::from_raw(data as *mut (u64, u32)));
+            return 0;
+        }
+        1
+    }
+}
 /// A `<select>`'s popup: drawn by zgx (`option_menu`), as GTK's own would
 /// open off the page.
 unsafe extern "C" fn on_option_menu(
@@ -2855,6 +2943,10 @@ enum Command {
     },
     OpenDevtools,
     SetZoom(f64),
+    /// The X11 window the box is in (`UiPage::send_window`).
+    Window(u64),
+    /// `WebView::print`: GTK's print dialog for the page.
+    Print,
     /// The box's size in device pixels, and device pixels a point.
     Size {
         width: u32,
@@ -2993,8 +3085,22 @@ struct UiPage {
     /// with the first box, in its runtime).
     options: RefCell<Option<Rc<OptionMenu>>>,
     options_shown: RefCell<Option<zgx::reactive::Signal<u64>>>,
+    /// The X11 window the box is in, when it is in one (`page_views`).
+    window: RefCell<Option<WindowXid>>,
+    /// The X11 window GTK's side was last told of (`send_window`), 0 for none.
+    window_sent: Cell<u64>,
 }
+/// The X11 window of the window a box is in, for GTK's dialogs to be
+/// transient for (none on Wayland).
+pub(crate) type WindowXid = Rc<dyn Fn() -> Option<u64>>;
 impl UiPage {
+    /// Tell GTK's side the X11 window the box is in, for its dialogs.
+    fn send_window(&self) {
+        if let Some(xid) = self.window.borrow().as_ref().and_then(|window| window()) {
+            self.window_sent.set(xid);
+            self.send(Command::Window(xid));
+        }
+    }
     /// The page's accessible tree is at `path` on `bus`: the box embeds it,
     /// asking it again for each report (a reload leaves it where it was,
     /// but WebKit's socket may have taken it back).
@@ -3115,6 +3221,11 @@ impl UiPage {
     }
     /// Its box's input.
     fn input(&self, event: &mut EventContext) {
+        // The window may have come after the box mounted: GTK's side knows
+        // it before the page's own `window.print()`.
+        if self.window_sent.get() == 0 {
+            self.send_window();
+        }
         let state = modifier_state(event.pointer_modifiers());
         match event.event.clone() {
             InputEvent::PointerMove { .. }
@@ -3302,6 +3413,11 @@ impl WebViewBackend for GtkWebView {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn print(&self) {
+        // The window may have come since the box mounted.
+        self.0.send_window();
+        self.0.send(Command::Print);
+    }
 }
 impl Drop for GtkWebView {
     fn drop(&mut self) {
@@ -3366,6 +3482,8 @@ fn backend(
         clipboard,
         options: RefCell::new(None),
         options_shown: RefCell::new(None),
+        window: RefCell::new(None),
+        window_sent: Cell::new(0),
         embedding: RefCell::new(None),
         embeddings: Cell::new(0),
         handle: RefCell::new(None),
@@ -3400,12 +3518,16 @@ fn backend(
 
 /// The service making pages' boxes, where WebKitGTK runs (`None` where it
 /// can't: pages are placeholders there).
-pub(crate) fn page_views(clipboard: Rc<RefCell<Option<crate::clipboard::Clipboard>>>) -> PageViews {
+pub(crate) fn page_views(
+    clipboard: Rc<RefCell<Option<crate::clipboard::Clipboard>>>,
+    window: WindowXid,
+) -> PageViews {
     PageViews::new(move |web| {
         if !started() {
             return None;
         }
         let page = backend(web, clipboard.clone());
+        *page.window.borrow_mut() = Some(window.clone());
         Some(component(move |cx| {
             let shown = page
                 .options_shown
@@ -3429,6 +3551,7 @@ pub(crate) fn page_views(clipboard: Rc<RefCell<Option<crate::clipboard::Clipboar
                     if page.shown.replace(page.shown.get() + 1) == 0 {
                         page.send(Command::Shown(true));
                     }
+                    page.send_window();
                     handle.retain(Shown(page.clone(), handle.node()));
                 })
                 .child(

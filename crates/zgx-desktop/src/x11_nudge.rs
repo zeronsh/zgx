@@ -59,6 +59,12 @@ pub(crate) fn nudge(window: &Window) {
 /// Show `cursor`, another connection's cursor on the same X server (a web
 /// page's, GTK's), over `window`. winit doesn't know: the window's own cursor
 /// comes back by hiding and showing winit's.
+/// `window`'s X window, if it is an X11 window: what a web page's GTK
+/// dialogs are made transient for.
+#[cfg(feature = "webkitgtk")]
+pub(crate) fn xid(window: &Window) -> Option<u64> {
+    raw(window).map(|(_, _, xwindow)| xwindow)
+}
 #[cfg(feature = "webkitgtk")]
 pub(crate) fn define_cursor(window: &Window, cursor: xlib::Cursor) {
     let Some((x, display, xwindow)) = raw(window) else {

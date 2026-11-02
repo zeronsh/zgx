@@ -780,7 +780,14 @@ impl WindowContext {
         // Pages as images of WebKitGTK's (`web_view` asks it first).
         #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
         let view = zgx::compose::provide(
-            crate::native_host::webkitgtk::page_views(self.windows.clipboard.clone()),
+            crate::native_host::webkitgtk::page_views(self.windows.clipboard.clone(), {
+                let dialogs = self.dialogs.clone();
+                Rc::new(move || {
+                    dialogs
+                        .window()
+                        .and_then(|window| crate::x11_nudge::xid(&window))
+                })
+            }),
             view,
         );
         // Terminals zgx draws, where Ghostty doesn't.

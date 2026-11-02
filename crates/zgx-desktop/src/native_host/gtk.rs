@@ -37,6 +37,10 @@ macro_rules! api {
             pub g_signal_emit_by_name: unsafe extern "C" fn(Ptr, *const c_char, ...),
             /// `gdk_x11_cursor_get_xcursor(cursor)`: a GDK built with X11's.
             pub gdk_x11_cursor_get_xcursor: Option<unsafe extern "C" fn(Ptr) -> std::ffi::c_ulong>,
+            /// `gdk_x11_window_foreign_new_for_display(display, xid)`: the
+            /// same.
+            pub gdk_x11_window_foreign_new_for_display:
+                Option<unsafe extern "C" fn(Ptr, std::ffi::c_ulong) -> Ptr>,
             _libraries: Vec<Library>,
         }
         impl Api {
@@ -61,6 +65,11 @@ macro_rules! api {
                     g_object_new: find(&libraries, "g_object_new")?,
                     g_signal_emit_by_name: find(&libraries, "g_signal_emit_by_name")?,
                     gdk_x11_cursor_get_xcursor: find(&libraries, "gdk_x11_cursor_get_xcursor").ok(),
+                    gdk_x11_window_foreign_new_for_display: find(
+                        &libraries,
+                        "gdk_x11_window_foreign_new_for_display",
+                    )
+                    .ok(),
                     _libraries: libraries,
                 })
             }
@@ -75,6 +84,7 @@ api! {
     fn g_free(Ptr);
     fn g_strdup(*const c_char) -> *mut c_char;
     fn g_list_free(*mut GList);
+    fn g_type_name_from_instance(Ptr) -> *const c_char;
     fn g_bytes_new(*const c_void, usize) -> Ptr;
     fn g_bytes_get_data(Ptr, *mut usize) -> *const c_void;
     fn g_bytes_unref(Ptr);
@@ -111,6 +121,9 @@ api! {
     fn gtk_widget_draw(Ptr, Ptr);
     fn gtk_widget_grab_focus(Ptr);
     fn gtk_widget_get_window(Ptr) -> Ptr;
+    fn gtk_window_list_toplevels() -> *mut GList;
+    fn gdk_window_get_display(Ptr) -> Ptr;
+    fn gdk_window_set_transient_for(Ptr, Ptr);
     fn gtk_widget_realize(Ptr);
     fn gdk_offscreen_window_set_embedder(Ptr, Ptr);
     fn gdk_get_default_root_window() -> Ptr;
@@ -186,6 +199,8 @@ api! {
     fn webkit_file_chooser_request_get_select_multiple(Ptr) -> gboolean;
     fn webkit_file_chooser_request_select_files(Ptr, *const *const c_char);
     fn webkit_file_chooser_request_cancel(Ptr);
+    fn webkit_print_operation_new(Ptr) -> Ptr;
+    fn webkit_print_operation_run_dialog(Ptr, Ptr) -> c_int;
     fn webkit_download_cancel(Ptr);
     fn webkit_security_manager_register_uri_scheme_as_secure(Ptr, *const c_char);
     fn webkit_security_manager_register_uri_scheme_as_cors_enabled(Ptr, *const c_char);
