@@ -1370,7 +1370,7 @@ impl Ui {
         self.selection_state().borrow().gesture.is_some()
     }
     /// Whether window point `x`, `y` is on selected text.
-    fn on_selected_text(&self, x: f32, y: f32) -> bool {
+    pub(crate) fn on_selected_text(&self, x: f32, y: f32) -> bool {
         let shown = self.selection_state().borrow().shown.clone();
         let scene = self.scene.borrow();
         shown.iter().any(|part| {
@@ -2219,7 +2219,7 @@ pub(crate) fn context_menu(
     platform: Option<Rc<crate::platform::PlatformService>>,
 ) -> crate::compose_context_menu::ContextMenuBuilder {
     let weak = ui.downgrade();
-    Box::new(move |event| {
+    Box::new(move |event, _| {
         let Some(ui) = weak.upgrade() else {
             return Vec::new();
         };

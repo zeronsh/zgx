@@ -62,6 +62,7 @@ Panels start with 16 points of padding, the theme's surface color and rounded co
 - A menu takes focus to its first enabled item. Up and Down move (wrapping), Home and End jump, typing a letter finds an item by its label, Tab closes the menu and moves on.
 - Choosing an item closes its menu, and the menus it opened from, before its `on_click` runs, so the handler can open another dialog.
 - A submenu opens when the pointer moves onto its item, or with a click, Right or Enter (Left right to left, the way it opens); Left (Right) or Escape closes it alone. A long menu scrolls.
+- A span (`ui.span`) takes `context_menu` too, and a `ui.rich` paragraph's is told the run (`e.span`): see [Text](text.md).
 - The innermost node with a `context_menu` takes the secondary click; Shift+F10 or the Menu key opens it under what has focus. Terminals hand the right clicks their program does not use to the node, so a terminal's context menu opens over it.
 
 ## Example

@@ -391,6 +391,25 @@ impl UserData for Mounted {
             app.settle();
             Ok(())
         });
+        // The context button: at the target's middle, or at `{ x, y }` from
+        // its top left (a run in a paragraph).
+        methods.add_method(
+            "right_click",
+            |_, m, (target, at): (String, Option<mlua::Table>)| {
+                let mut app = m.app()?;
+                let (_, bounds) = Self::reach(&mut app, &target)?;
+                let point = match at {
+                    Some(at) => (
+                        bounds.x + at.get::<f32>("x")?,
+                        bounds.y + at.get::<f32>("y")?,
+                    ),
+                    None => crate::driver::middle(bounds),
+                };
+                crate::driver::right_click_at(&mut app.ui, point);
+                app.settle();
+                Ok(())
+            },
+        );
         methods.add_method("double_click", |_, m, target: String| {
             let mut app = m.app()?;
             let (_, bounds) = Self::reach(&mut app, &target)?;
@@ -541,6 +560,7 @@ impl UserData for Mounted {
             std::fs::read_to_string(m.files.path(&name)?).map_err(mlua::Error::external)
         });
         methods.add_method("clipboard", |_, m, ()| Ok(m.desktop().clipboard()));
+        methods.add_method("opened", |_, m, ()| Ok(m.desktop().opened()));
         methods.add_method("copy", |_, m, text: String| {
             m.desktop().copy(text);
             Ok(())

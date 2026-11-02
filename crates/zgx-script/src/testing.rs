@@ -62,6 +62,8 @@ pub struct FakeDesktop {
     badge: RefCell<Option<String>>,
     deny: std::cell::Cell<bool>,
     clicks: Clicks,
+    /// The links opened (`Platform::open_url`), in order.
+    opened: RefCell<Vec<String>>,
 }
 /// Notifications clicked, not yet heard, and who waits for the next.
 type Clicks = std::sync::Arc<
@@ -114,6 +116,10 @@ impl FakeDesktop {
     pub fn asked(&self) -> Vec<zgx::platform::FilePicker> {
         self.asked.borrow().clone()
     }
+    /// The links opened so far (a link's `href`, Open Link), in order.
+    pub fn opened(&self) -> Vec<String> {
+        self.opened.borrow().clone()
+    }
     /// The clipboard's text.
     pub fn clipboard(&self) -> String {
         self.clipboard.borrow().clone()
@@ -140,6 +146,10 @@ impl FakeDesktop {
     }
 }
 impl zgx::platform::Platform for FakeDesktop {
+    fn open_url(&self, url: &str) -> bool {
+        self.opened.borrow_mut().push(url.to_string());
+        true
+    }
     fn clipboard_files(&self) -> Vec<std::path::PathBuf> {
         self.files.borrow().clone()
     }

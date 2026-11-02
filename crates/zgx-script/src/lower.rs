@@ -3762,39 +3762,14 @@ fn styled(
     }
     if let Some(build) = node.events().context_menu.clone() {
         let (vm, low) = (vm.clone(), low.clone());
-        view = view.context_menu(move |e| {
-            let point = vm.lua.create_table().and_then(|t| {
-                t.set("x", e.x)?;
-                t.set("y", e.y)?;
-                t.set("local_x", e.local_x)?;
-                t.set("local_y", e.local_y)?;
-                Ok(t)
-            });
-            let items = point.and_then(|p| {
-                vm.runtime
-                    .clone()
-                    .batch(|| vm.call::<Option<mlua::Table>>(&build, p))
-            });
-            match items {
-                Ok(Some(items)) => items
-                    .sequence_values::<mlua::AnyUserData>()
-                    .filter_map(|item| {
-                        match item.and_then(|ud| ud.borrow::<NodeUd>().map(|n| n.0.clone())) {
-                            Ok(node) => Some(lower(&node, &low)),
-                            Err(error) => {
-                                vm.report(error);
-                                None
-                            }
-                        }
-                    })
-                    .collect(),
-                Ok(None) => Vec::new(),
-                Err(error) => {
-                    vm.report(error);
-                    Vec::new()
-                }
-            }
-        });
+        // A paragraph's is told the run it was asked on, and asked first
+        // on its links.
+        view = match node.kind {
+            Kind::Rich(_) => view.context_menu_with_span(move |e, span| {
+                context_menu_items(&vm, &low, &build, e, span)
+            }),
+            _ => view.context_menu(move |e| context_menu_items(&vm, &low, &build, e, None)),
+        };
     }
     // Listeners scripts add later (a draggable) receive the element's events.
     if let Some(element) = &element {
@@ -7152,6 +7127,56 @@ fn sticky_list<K: PartialEq + Clone + 'static>(
     )
 }
 
+/// What a script's `context_menu` returns at `e`, lowered: told the run
+/// of a paragraph it was asked on (`e.span`: its place among the
+/// paragraph's runs from 1, its `href` and its text).
+fn context_menu_items(
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+    build: &mlua::Function,
+    e: &zgx::compose::ContextMenuEvent,
+    span: Option<&zgx::compose::ContextMenuSpan>,
+) -> Vec<View> {
+    let point = vm.lua.create_table().and_then(|t| {
+        t.set("x", e.x)?;
+        t.set("y", e.y)?;
+        t.set("local_x", e.local_x)?;
+        t.set("local_y", e.local_y)?;
+        if let Some(span) = span {
+            let run = vm.lua.create_table()?;
+            run.set("index", span.index + 1)?;
+            run.set("href", span.href.as_deref())?;
+            run.set("text", &*span.text)?;
+            t.set("span", run)?;
+        }
+        Ok(t)
+    });
+    let items = point.and_then(|p| {
+        vm.runtime
+            .clone()
+            .batch(|| vm.call::<Option<mlua::Table>>(build, p))
+    });
+    match items {
+        Ok(Some(items)) => items
+            .sequence_values::<mlua::AnyUserData>()
+            .filter_map(|item| {
+                match item.and_then(|ud| ud.borrow::<NodeUd>().map(|n| n.0.clone())) {
+                    Ok(node) => Some(lower(&node, low)),
+                    Err(error) => {
+                        vm.report(error);
+                        None
+                    }
+                }
+            })
+            .collect(),
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            vm.report(error);
+            Vec::new()
+        }
+    }
+}
+
 fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     /// A span with its text and handler owned by the closure.
     struct OwnedSpan {
@@ -7162,7 +7187,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         followed: Vec<(&'static str, Ty, Owned)>,
         click: Option<Handler>,
         href: Option<Arc<str>>,
-        icon: Option<Box<crate::node::SpanIcon>>,
+        rare: Option<Rc<crate::node::SpanRare>>,
     }
     #[derive(Clone, Copy)]
     struct SpanStyle {
@@ -7220,7 +7245,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 .collect(),
             click: s.click.clone(),
             href: s.href.clone(),
-            icon: s.icon.clone(),
+            rare: s.rare.clone(),
         })
         .collect();
     let (vm, actions, low) = (vm.clone(), low.actions.clone(), low.clone());
@@ -7334,16 +7359,23 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 }
                 if let Some(handler) = &span.click {
                     let (handler, vm, actions) = (handler.clone(), vm.clone(), actions.clone());
-                    // Told the keys held, as an element's `on_click` is.
-                    out = out.on_click_with(move |held| {
+                    // Told the keys held, as an element's `on_click` is;
+                    // `true` back handled it, and its `href` stays shut.
+                    out = out.on_click_handled(move |held| {
                         let keys = modifiers_table(&vm.lua, held).ok();
-                        run(&handler, &vm, &actions, keys);
+                        run(&handler, &vm, &actions, keys)
+                            .is_some_and(|v| v.as_boolean() == Some(true))
                     });
+                }
+                let rare = span.rare.as_deref();
+                if let Some(build) = rare.and_then(|rare| rare.menu.as_ref()) {
+                    let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
+                    out = out.context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
                 }
                 if let Some(href) = &span.href {
                     out = out.href(href.clone());
                 }
-                if let Some(icon) = &span.icon {
+                if let Some(icon) = rare.and_then(|rare| rare.icon.as_ref()) {
                     // Tracked: a remote icon shows once it comes.
                     let data = load_svg(&vm, &low, &icon.src);
                     // `"currentColor"`: the span's text colour.
