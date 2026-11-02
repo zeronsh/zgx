@@ -744,6 +744,68 @@ def said(session, output, text, after=0):
 said.nudged = 0.
 
 
+class Buttons:
+    """The mouse button events AT-SPI's registry sends its listeners (Orca
+    among them), heard by a listener of ours on the same bus: as they come,
+    where Orca's debug log reaches its file in blocks."""
+    def __init__(self, env, output):
+        self.events = []
+        self.log = (output / "buttons.log").open("w")
+        self.process = subprocess.Popen([sys.executable, "-u", "-c", BUTTONS], env=env, stdout=subprocess.PIPE,
+                                        stderr=self.log, text=True)
+        def read():
+            for line in self.process.stdout:
+                self.log.write(line)
+                self.log.flush()
+                self.events.append(line.strip())
+        threading.Thread(target=read, daemon=True).start()
+        deadline = time.monotonic() + 10
+        while "READY" not in self.events:
+            if time.monotonic() > deadline or self.process.poll() is not None:
+                raise AssertionError("Orca not ready: no AT-SPI listener could join the registry; see buttons.log")
+            time.sleep(.05)
+
+    def count(self, kind):
+        return sum(event.endswith(kind) for event in self.events)
+
+    def click(self, session, x, y, timeout=3):
+        """Click at `x`, `y`, the button held until the registry reports
+        its press, and its release seen too: the registry reads the
+        pointer's buttons by polling it, so xdotool's click (a press and a
+        release at once) can come and go between two polls, and Orca then
+        never ties the caret it moved to a click, and says nothing. False
+        if the registry never reported the press."""
+        presses, releases = self.count("p"), self.count("r")
+        session.xdo("mousemove", "--window", session.window, x, y, "mousedown", 1)
+        deadline = time.monotonic() + timeout
+        while self.count("p") == presses and time.monotonic() < deadline:
+            time.sleep(.02)
+        pressed = self.count("p") > presses
+        session.xdo("mouseup", 1)
+        deadline = time.monotonic() + timeout
+        while pressed and self.count("r") == releases and time.monotonic() < deadline:
+            time.sleep(.02)
+        time.sleep(.5)
+        return pressed
+
+    def stop(self):
+        self.process.kill()
+        self.process.wait()
+        self.log.close()
+
+
+def orca_click(session, buttons, x, y, tries=3):
+    """A click Orca hears as one (`Buttons.click`), tried again while the
+    registry misses it: past `tries`, Orca isn't ready, and no check after
+    it would say why."""
+    for _ in range(tries):
+        if buttons.click(session, x, y):
+            return
+        buttons.log.write(f"MISSED a click at ({x}, {y})\n")
+    raise AssertionError(f"Orca not ready: AT-SPI's registry reported none of {tries} clicks at ({x}, {y}) "
+                         "to its listeners; see buttons.log and orca-debug.log")
+
+
 def orca_checks(session, env, output, checks):
     """The page's tree under its box, and what Orca reads of it."""
     tree = subprocess.run([sys.executable, "-c", TREE], env=env, capture_output=True, text=True, timeout=60)
@@ -752,19 +814,20 @@ def orca_checks(session, env, output, checks):
         raise AssertionError("the page's tree is not under its box; see tree.txt")
     checks["tree"] = tree.stdout.strip().splitlines()[0]
     checks["heading in the tree"] = "Probe heading"
+    buttons = Buttons(env, output)
+    try:
+        return read_page(session, output, buttons, checks)
+    finally:
+        buttons.stop()
+
+
+def read_page(session, output, buttons, checks):
+    """What Orca reads of the page: each click one the registry reported
+    (`orca_click`), so a missed heading is Orca's, not a lost click's."""
     # Orca reads a caret moved by a click only once it has the click's
-    # button from AT-SPI's registry; a registry that sends none fails every
-    # check below as a missed heading. Clicks on the app's own background
-    # first, until Orca has one.
-    def buttons():
-        path = output / "orca-debug.log"
-        return "EVENT MANAGER: mouse:button:" in (path.read_text(errors="replace") if path.exists() else "")
-    deadline = time.monotonic() + 20
-    while not buttons():
-        if time.monotonic() > deadline:
-            raise AssertionError("AT-SPI's registry reported no mouse buttons to Orca; see orca-debug.log")
-        session.click(700, 250)
-        time.sleep(2)
+    # button from AT-SPI's registry. A click on the app's own background
+    # first: Orca's first button event.
+    orca_click(session, buttons, 700, 250)
     checks["registry reports buttons"] = "mouse:button"
     # The page's plain background first (no field: Orca stays in browse
     # mode), below the heading: Orca reads where its caret lands, or its
@@ -776,8 +839,8 @@ def orca_checks(session, env, output, checks):
     # the app's script, which has none: then the heading's own text (Orca
     # reads the line its caret lands on), then the background again.
     for x, y in ((440, 340), (140, 250), (440, 340)):
-        session.click(x, y)
-        time.sleep(2)
+        orca_click(session, buttons, x, y)
+        time.sleep(1.5)
         if heading():
             break
         session.key("shift+h")
@@ -790,13 +853,27 @@ def orca_checks(session, env, output, checks):
     checks["heading"] = "Probe heading heading level 1."
     # The app's own button, then Tab into the page, as into a form: the
     # page's first field takes focus, and Orca names it (once, with no retry).
-    session.click(705, 55)
+    orca_click(session, buttons, 705, 55)
     session.wait(lambda: said(session, output, "Before page push button."), "Orca never read the app's button", 15)
     before = len(spoken(output))
     session.key("Tab")
     session.wait(lambda: said(session, output, "Probe field entry.", before), "Orca never named the field Tab reached", 15)
     checks["tabbed into the field"] = "Probe field entry."
     return checks
+
+
+# The registry's mouse button events (`mouse:button:1p`, `…:1r`), a line
+# each, once listening.
+BUTTONS = """
+import gi
+gi.require_version("Atspi", "2.0")
+from gi.repository import Atspi
+Atspi.init()
+listener = Atspi.EventListener.new(lambda event: print(event.type, flush=True))
+listener.register("mouse:button")
+print("READY", flush=True)
+Atspi.event_main()
+"""
 
 
 # Over the accessibility bus: the probe's box (an internal frame named Web
