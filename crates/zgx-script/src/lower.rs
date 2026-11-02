@@ -4389,6 +4389,11 @@ const FAILED: u8 = 2;
 /// Whether remote `src` is in the caches: the first ask fetches it (once,
 /// through the host's fetcher), decodes it off the main thread and caches
 /// it. Tracked: what asked shows it once it arrives.
+/// How long a remote source that failed `times` in a row waits before it is
+/// asked for again: 5 s, doubling each time, up to 5 minutes.
+fn backoff(times: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((5u64 << times.saturating_sub(1).min(6)).min(300))
+}
 fn remote_ready(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> bool {
     remote_status(vm, low, src, svg) == READY
 }
@@ -4424,12 +4429,8 @@ fn remote_status_in(
     let ready = match existing {
         Some(status) if status.get() != FAILED => return status.get(),
         Some(status) => {
-            // 5 s, doubling each time in a row it fails, up to 5 minutes.
             let failed = (assets.failed.borrow().get(src)).map(|(at, times, _)| (*at, *times));
-            let wait = |times: u32| {
-                std::time::Duration::from_secs((5u64 << times.saturating_sub(1).min(6)).min(300))
-            };
-            if failed.is_some_and(|(at, times)| at.elapsed() < wait(times)) {
+            if failed.is_some_and(|(at, times)| at.elapsed() < backoff(times)) {
                 return FAILED;
             }
             status.set(LOADING);
@@ -4471,6 +4472,7 @@ fn remote_status_in(
         runtime.clone(),
     );
     let arriving = ready.clone();
+    let again = timers.clone();
     timers.spawn(async move {
         let bytes = match future.await {
             Ok(response) if (200..300).contains(&response.status) => Ok(body.whole(response.body)),
@@ -4516,15 +4518,26 @@ fn remote_status_in(
                 eprintln!("zgx: {src} didn't load: {error}");
                 let now = std::time::Instant::now();
                 let why: Rc<str> = Rc::from(error.as_str());
-                assets
+                let times = assets
                     .failed
                     .borrow_mut()
                     .entry(src)
                     .and_modify(|(at, times, reason)| {
                         (*at, *times, *reason) = (now, *times + 1, why.clone())
                     })
-                    .or_insert((now, 1, why));
+                    .or_insert((now, 1, why))
+                    .1;
                 runtime.batch(|| arriving.set(FAILED));
+                // Asked for again once the backoff passes, by whatever still
+                // shows it: the status changes, so what read it reads it
+                // again (`remote_status` fetches it then). Nothing shows it:
+                // nothing reads it, and nothing is fetched.
+                again.spawn(async move {
+                    zgx::timer::sleep(backoff(times)).await;
+                    if arriving.with_untracked(|status| *status == FAILED) {
+                        runtime.batch(|| arriving.mutate(|_| true));
+                    }
+                });
                 return;
             }
         }
