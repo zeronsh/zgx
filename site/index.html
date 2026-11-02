@@ -609,7 +609,7 @@
 <section id="release" aria-labelledby="release-h"><h2 id="release-h">0.1.6 &#8594; 0.1.7</h2>
 <p class="scene-note">Instructions each scene of the CI gate runs (scripts/perf/gate.py: exact instruction counts under cachegrind, Linux arm64 (gate.md, the speed-of-light lane&#x27;s release run; x86 in gate-x86.md, from CI&#x27;s perf job on probe PR #1297); Luau scenes the median of 3 heap placements), 0.1.6 (<code>e077e952</code>) against 0.1.7 (<code>fbf1d5e2</code>): exact counts, not samples. 18 of 27 scenes run fewer.</p>
 <figure class="chart"><table><caption><span class="title">Instructions per scene</span> <span class="unit">million instructions</span> <span class="better">lower is better</span></caption><thead><tr><th scope="col">Scene</th><th scope="col">0.1.6</th><th scope="col">0.1.7</th><th scope="col">Change</th></tr></thead><tbody>
-<tr><th scope="row">script-update</th><td>1,404.6</td><td>1,314.1</td><td>&#8722;6.44%</td></tr>
+<tr><th scope="row">script-update</th><td>1,123.7</td><td>1,033.5</td><td>&#8722;8.03%</td></tr>
 <tr><th scope="row">lab-scroll</th><td>66.1</td><td>62.9</td><td>&#8722;4.73%</td></tr>
 <tr><th scope="row">heavy-scroll</th><td>75.2</td><td>74.8</td><td>&#8722;0.48%</td></tr>
 <tr><th scope="row">micro-state</th><td>56.1</td><td>55.9</td><td>&#8722;0.34%</td></tr>
@@ -637,6 +637,7 @@
 <tr><th scope="row">app-chat</th><td>46.4</td><td>46.5</td><td>+0.30%</td></tr>
 <tr><th scope="row">app-sketch</th><td>44.3</td><td>44.5</td><td>+0.40%</td></tr>
 </tbody></table></figure>
+<p class="scene-note"><strong>script-update changed:</strong> since 0.1.8 the cell leaves uncounted the rows its bench makes beforehand for every update (update_bench&#x27;s own data, 21% of the cell), which read as the engine&#x27;s work. Both releases are counted the new way: 1,123.7 M and 1,033.5 M on arm64, −8.0%, where the old way read 1,404.6 M and 1,314.1 M, −6.4% (x86: 1,168.1 M and 1,070.9 M, −8.3%, against −6.7%).</p>
 <p class="scene-note">The suite, this run against the last one published (<code>e077e95</code>, 2026-10-30), each cell&#8217;s median. The runs are in different sessions, and a session moves a whole run (see the caveats), so GPUI Fast is shown beside zgx (the rivals built again from suite sources unchanged since 0.1.6): the part of a change it shares is the session&#8217;s. Idle shows its values, which are near nothing.</p>
 <figure class="chart"><table><caption><span class="title">Change since the last run</span> <span class="unit">zgx, and GPUI Fast in brackets</span> <span class="better">lower is better</span></caption><thead><tr><th scope="col">Scene</th><th scope="col">CPU</th><th scope="col">GPU power</th><th scope="col">Memory</th><th scope="col">WindowServer CPU</th></tr></thead><tbody>
 <tr><th scope="row">Heavy dashboard, idle</th><td>0.00 &#8594; 0.00 <span class="range">(0.39 &#8594; 0.36)</span></td><td>&#8211;</td><td>53 &#8594; 53 <span class="range">(74 &#8594; 75)</span></td><td>0.21 &#8594; 0.53 <span class="range">(0.38 &#8594; 0.53)</span></td></tr>

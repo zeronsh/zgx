@@ -96,6 +96,9 @@ SCENES = [
     ('micro-vscroll-variable-luau', 'zgx-desktop', 'micro_luau_bench', {'SCENE': 'vscroll-variable', 'OPS': '300',
                                                                         'WARMUP': '50', 'RENDER': '0'}),
     ('mount', 'zgx-script', 'mount_bench', {}),
+    # The rows it publishes, made beforehand for every update, are the
+    # bench's own and uncounted (`gate_marks`: cachegrind's client requests),
+    # since 0.1.8; before, they were a quarter of the cell.
     ('script-update', 'zgx-script', 'update_bench', {'TICKS': '200'}),
     ('anime', 'zgx-script', 'anime_bench', {}),
     ('script-layout', 'zgx-script', 'script_layout_bench', {}),

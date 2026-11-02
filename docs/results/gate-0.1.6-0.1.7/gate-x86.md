@@ -16,7 +16,7 @@
 | micro-vscroll-fixed-luau | 61.2 M | 61.1 M | -0.16% (median of -0.162%, -0.161%, -0.127%) |
 | micro-vscroll-variable-luau | 125.7 M | 125.7 M | -0.03% (median of -0.029%, -0.047%, +0.007%; layout) |
 | mount | 302.5 M | 301.8 M | -0.17% (median of -0.214%, +0.039%, -0.171%; layout) |
-| script-update | 1435.4 M | 1339.4 M | -6.69% (median of -6.691%, -6.695%, -6.677%) |
+| script-update | 1168.1 M | 1070.9 M | -8.32% (median of -8.323%, -8.228%, -8.347%; counted without the bench's own data, as from 0.1.8, on probe PR #1316: the old way read 1435.4 M → 1339.4 M, -6.69%) |
 | anime | 3725.8 M | 3728.9 M | +0.08% (median of +0.081%, +0.142%, +0.077%) |
 | script-layout | 3018.4 M | 3019.1 M | +0.02% (median of +0.024%, +0.015%, +0.002%) |
 | spans-plain | (new) | 49.7 M | |
