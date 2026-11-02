@@ -690,6 +690,16 @@ fn chinese_text_on_macos_takes_the_systems_chinese_face_in_each_chinese() {
     // PingFang, which macOS 26 keeps outside the font directories, where it
     // is there; Heiti, in every macOS, otherwise.
     let pingfang = has(&fonts, "PingFang SC");
+    // Where PingFang has outlines swash draws: macOS 26's keeps them only in
+    // Apple's `hvgl` table, and the fork gives no font for it, so Heiti
+    // stands in (`a_face_without_outlines_to_draw_is_passed_by...`).
+    let drawable = pingfang
+        && (fonts.db().faces())
+            .filter(|face| face.families.iter().any(|(name, _)| name == "PingFang SC"))
+            .map(|face| face.id)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .any(|id| fonts.get_font(id, cosmic_text::Weight::NORMAL).is_some());
     let pingfang_kept = std::path::Path::new(
         "/System/Library/PrivateFrameworks/FontServices.framework/Resources/Reserved/PingFangUI.ttc",
     )
@@ -706,7 +716,7 @@ fn chinese_text_on_macos_takes_the_systems_chinese_face_in_each_chinese() {
         buffer.set_text("中文的句子。", &attrs, cosmic_text::Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut fonts, false);
         let found = drawn(&fonts, &buffer);
-        let expected = if pingfang {
+        let expected = if drawable {
             format!("PingFang {face}")
         } else if face == "SC" {
             "Heiti SC".into()
@@ -800,4 +810,39 @@ fn a_texts_lang_decides_its_han_fonts_over_its_kana_and_its_paragraphs() {
             .all(|f| TRADITIONAL_FONTS.contains(&f.as_str())),
         "{found:?}"
     );
+}
+
+/// Chinese text on macOS draws: its glyphs light pixels, in whichever face
+/// it took (macOS 26's PingFang, `hvgl` only, drew them blank).
+#[test]
+#[cfg(target_os = "macos")]
+fn chinese_text_on_macos_draws() {
+    use zgx::scene::Color;
+    let (width, height) = (400, 80);
+    let lit = |sample: &str| {
+        let mut gpu = zgx_gpu::GpuRenderer::new(width, height).unwrap();
+        let mut ui = Ui::new(width as f32, height as f32);
+        gpu.install_text(&mut ui.scene.borrow_mut());
+        ui.refresh_text_geometry();
+        ui.mount(
+            column()
+                .size(width as f32, height as f32)
+                .p(10.)
+                .text_color(Color(255, 255, 255, 255))
+                .text_size(32.)
+                .child(text(sample)),
+        );
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        let scene = ui.scene.borrow();
+        gpu.render(&scene, &damage).unwrap();
+        let pixels = gpu.readback().unwrap();
+        pixels.chunks(4).filter(|p| p[3] > 128).count()
+    };
+    // As Latin of as many characters does, near enough: a glyph each.
+    let latin = lit("Hello");
+    for sample in ["你好世界", "繁體中文"] {
+        let han = lit(sample);
+        assert!(han > latin, "{sample}: {han} pixels lit, Latin {latin}");
+    }
 }
