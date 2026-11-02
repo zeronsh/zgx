@@ -191,6 +191,15 @@ impl Font {
         if metrics.units_per_em == 0 {
             return None;
         }
+        // zgx patch: a face with no outlines swash can draw (macOS 26's
+        // PingFangUI, whose shapes are only in Apple's `hvgl` table) shapes,
+        // and draws every glyph blank: it is no font either, and fallback
+        // takes the next face that covers the text (Heiti, Hiragino). Asked
+        // once a face, as it loads.
+        if !has_drawable_outlines(&font_ref) {
+            log::debug!("{}: no outlines to draw", info.post_script_name);
+            return None;
+        }
 
         let monospace_fallback = if cfg!(feature = "monospace_fallback") {
             (|| {
@@ -288,6 +297,17 @@ impl Font {
             italic_or_oblique: info.style == Style::Italic || info.style == Style::Oblique,
         })
     }
+}
+
+/// zgx patch: the tables a glyph's image can come from, for swash: outlines
+/// (TrueType, CFF, CFF2), bitmaps (sbix, CBDT, EBDT) or color layers (COLR).
+const DRAWABLE: [&[u8; 4]; 7] = [b"glyf", b"CFF ", b"CFF2", b"sbix", b"CBDT", b"EBDT", b"COLR"];
+
+/// zgx patch: whether `font` has any of `DRAWABLE`.
+fn has_drawable_outlines(font: &FontRef<'_>) -> bool {
+    DRAWABLE
+        .iter()
+        .any(|tag| font.table_data(Tag::new(tag)).is_some())
 }
 
 #[cfg(test)]

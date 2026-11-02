@@ -310,6 +310,20 @@ in case the file moves. zgx-gpu's
 `chinese_text_on_macos_takes_the_systems_chinese_face_in_each_chinese`
 checks both.
 
+## Faces with nothing to draw
+
+A face whose glyphs have no outlines, bitmaps or color layers swash can draw
+(no `glyf`, `CFF `, `CFF2`, `sbix`, `CBDT`, `EBDT` or `COLR`) gives no
+`Font` (`Font::new_at` returns `None`, as it does for a face without units
+per em), so fallback takes the next face that covers its text. macOS 26.4's
+`PingFangUI.ttc`, the file `load_pingfang` loads, keeps its shapes only in
+Apple's `hvgl` table: from 22fb994f7 to zgx 0.1.7 every Chinese character
+shaped in it and drew blank. Now Heiti SC or TC, which the lists name after
+PingFang, draws Chinese there. The check is once a face, as it loads.
+zgx-gpu's `undrawable_fonts` test strips a font's `glyf` and checks its text
+falls to the next face; `chinese_text_on_macos_draws` checks Chinese lights
+pixels.
+
 ## A paragraph's words for a layout outside a line (zgx-cosmic-text 0.19.8)
 
 zgx-gpu lays out a paragraph that this crate shapes as one left-to-right span
