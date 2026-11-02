@@ -266,6 +266,16 @@ def inspector_checks(session):
     return checks
 
 
+def downloads(private):
+    """The session's downloads folder, by its XDG user directory: where
+    WebKit's own handling would save a page's download."""
+    folder = pathlib.Path(private, "downloads")
+    folder.mkdir(exist_ok=True)
+    pathlib.Path(private, "config").mkdir(exist_ok=True)
+    pathlib.Path(private, "config", "user-dirs.dirs").write_text(f'XDG_DOWNLOAD_DIR="{folder}"\n')
+    return folder
+
+
 def page_checks(session, ime, transparent=False):
     session.wait(lambda: session.lines("EVAL "), "the page never loaded", 30)
     colours = dict(COLOURS)
@@ -330,6 +340,15 @@ def page_checks(session, ime, transparent=False):
     session.key("Return")
     session.wait(lambda: any(m[0].get("chose") == "Beta" for m in session.messages()), "the select's popup never chose")
     checks["chose"] = "Beta"
+    # A link that downloads: refused, as macOS's and Windows's web views do
+    # with no handler of the app's, so nothing lands in the downloads folder.
+    session.click(530, 240)
+    session.wait(lambda: any(m[0].get("save") for m in session.messages()), "the download link's click never reached the page")
+    time.sleep(2)
+    saved = sorted(p.name for p in downloads(session.env["XDG_RUNTIME_DIR"]).iterdir())
+    if saved:
+        raise AssertionError(f"the page's download was saved: {saved}")
+    checks["download refused"] = True
     for _ in range(3):
         session.click(300, 300, 5)
     scrolled = session.wait(lambda: [m for m in session.messages() if "scrolled" in m[0]], "the wheel never scrolled the page")
@@ -631,6 +650,7 @@ def x11(args, output, private):
         if not select.select([xvfb.stdout], [], [], 30)[0]:
             raise RuntimeError("Xvfb startup timed out")
         env["DISPLAY"] = ":" + xvfb.stdout.readline().strip()
+        downloads(private)
         ime = None
         if args.ime or args.orca:
             with (output / "dbus.log").open("w") as log:
@@ -723,6 +743,7 @@ def wayland(args, output, private):
         if not select.select([xvfb.stdout], [], [], 30)[0]:
             raise RuntimeError("Xvfb startup timed out")
         env["DISPLAY"] = ":" + xvfb.stdout.readline().strip()
+        downloads(private)
         # A private session bus: Fcitx5 talks on it, and nothing else starts.
         bus_config = pathlib.Path(private, "dbus.conf")
         bus_config.write_text("<busconfig><type>session</type><listen>unix:tmpdir=" + private + "</listen><auth>EXTERNAL</auth>"

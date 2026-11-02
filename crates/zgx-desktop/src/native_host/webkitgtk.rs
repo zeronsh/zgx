@@ -275,6 +275,8 @@ struct Gtk {
     pages: RefCell<HashMap<u64, Rc<Page>>>,
     /// Profiles' contexts (the default context is WebKit's own).
     contexts: RefCell<HashMap<WebProfile, Ptr>>,
+    /// WebKit's default context refuses downloads (`refuse_downloads`).
+    default_refuses: Cell<bool>,
     /// Schemes registered with each context.
     schemes: RefCell<Vec<(Ptr, String)>>,
     /// Requests being served, by id, until answered.
@@ -388,10 +390,21 @@ fn nonce(id: u64) -> String {
 impl Gtk {
     fn context(&self, api: &Api, profile: &WebProfile) -> Ptr {
         // SAFETY (each WebKit call): constructors and getters on GTK's
-        // thread; the contexts are kept for the process's life.
+        // thread; the contexts are kept for the process's life. Each is
+        // made to refuse downloads once, as it's first used.
         match profile {
-            WebProfile::Default => unsafe { (api.webkit_web_context_get_default)() },
-            WebProfile::Ephemeral => unsafe { (api.webkit_web_context_new_ephemeral)() },
+            WebProfile::Default => unsafe {
+                let context = (api.webkit_web_context_get_default)();
+                if !self.default_refuses.replace(true) {
+                    refuse_downloads(api, context);
+                }
+                context
+            },
+            WebProfile::Ephemeral => unsafe {
+                let context = (api.webkit_web_context_new_ephemeral)();
+                refuse_downloads(api, context);
+                context
+            },
             WebProfile::Named(name) => *self
                 .contexts
                 .borrow_mut()
@@ -408,7 +421,10 @@ impl Gtk {
                             cache.as_ptr(),
                             std::ptr::null::<c_char>(),
                         );
-                        (api.webkit_web_context_new_with_website_data_manager)(manager)
+                        let context =
+                            (api.webkit_web_context_new_with_website_data_manager)(manager);
+                        refuse_downloads(api, context);
+                        context
                     }
                 }),
         }
@@ -1999,6 +2015,23 @@ unsafe extern "C" fn on_terminated(_: Ptr, _: c_int, data: Ptr) {
         });
         web.emit(WebViewEvent::ProcessTerminated);
     });
+}
+/// Pages save no files in the app's name, as macOS's and Windows's web
+/// views with no handler of the app's: each download a context starts (a
+/// `download` link, an attachment) is cancelled before it picks a file.
+///
+/// # Safety
+/// On GTK's thread, `context` a live `WebKitWebContext`.
+unsafe fn refuse_downloads(api: &Api, context: Ptr) {
+    unsafe extern "C" fn cancel(_: Ptr, download: Ptr, _: Ptr) {
+        // SAFETY: GTK passes the download it just started, on its thread.
+        unsafe { (gtk::api().expect("GTK runs").webkit_download_cancel)(download) };
+    }
+    // SAFETY: as the caller promises; `cancel` has the signal's signature.
+    unsafe {
+        let handler = std::mem::transmute::<*const (), gtk::GCallback>(cancel as *const ());
+        connect(api, context, "download-started", handler, null_mut(), false);
+    }
 }
 /// No context menu or full screen of WebKit's own: it would open a window
 /// of GTK's somewhere off the page.

@@ -181,6 +181,7 @@ api! {
     fn webkit_web_context_new_with_website_data_manager(Ptr) -> Ptr;
     fn webkit_web_context_register_uri_scheme(Ptr, *const c_char, unsafe extern "C" fn(Ptr, Ptr), Ptr, Option<unsafe extern "C" fn(Ptr)>);
     fn webkit_web_context_get_security_manager(Ptr) -> Ptr;
+    fn webkit_download_cancel(Ptr);
     fn webkit_security_manager_register_uri_scheme_as_secure(Ptr, *const c_char);
     fn webkit_security_manager_register_uri_scheme_as_cors_enabled(Ptr, *const c_char);
     fn webkit_user_content_manager_new() -> Ptr;
