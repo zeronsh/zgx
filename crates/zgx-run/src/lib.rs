@@ -364,6 +364,9 @@ pub fn run_hosting(
     if !script.is_file() {
         return Err(format!("{}: no such script", script.display()).into());
     }
+    // Its modules compile on a worker while AppKit, the GPU and the window
+    // are set up, not one by one on the main thread at each `require`.
+    zgx_script::compile_ahead(&script, &[]);
     let (config, app_host, window_config) = AppConfig::read(&script)?;
     let WindowConfig {
         frame_autosave,

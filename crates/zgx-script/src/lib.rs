@@ -1232,7 +1232,9 @@ fn require_module<const LENDING: bool>(
         }),
         Files::Disk => host
             .upgrade()
-            .and_then(|h| h.sources.compiled(&path, &code)),
+            .and_then(|h| h.sources.compiled(&path, &code))
+            // Compiled ahead while the app's window was made (`compile_ahead`).
+            .or_else(|| sources::prefetched(&code)),
         Files::Bundle(_) => None,
     };
     let loaded = match compiled.as_deref().and_then(sources::Compiled::bytecode) {
@@ -1287,6 +1289,49 @@ fn global_names(lua: &Lua) -> HashSet<String> {
 /// The tracker of `host`'s load, while it records its loads (`reloads`).
 fn tracking(host: &Rc<Inner>) -> Option<Rc<reloads::Tracker>> {
     reloads::of(host).and_then(|r| r.tracking())
+}
+
+/// Compile `script` (an app's `app.luau`, or its directory) and the modules
+/// it requires, on a worker thread, before a [`ScriptHost`] loads it: call
+/// it first thing, before the app's window is made, and the first load's
+/// `require`s find them compiled rather than compiling each on the main
+/// thread. `packages` are the packages the host will lend (`@name/…`), as
+/// `ScriptHost::package` takes them; `.luaurc` aliases are read. Call it
+/// again for another window's script: it joins the same session.
+///
+/// Only what the script reaches by `require` with a string literal is read
+/// (no tests, type files or unused modules), files of at most 1 MB.
+/// Compiled from the text, in memory, and used only for the very bytes
+/// `require` reads; no bytecode is written or read from a file. A file not
+/// ready in time compiles as it always has, and nothing waits for the
+/// worker; what no load used goes as the first load ends.
+pub fn compile_ahead(script: &std::path::Path, packages: &[(&str, &std::path::Path)]) {
+    let entry = if script.is_dir() {
+        script.join("app.luau")
+    } else {
+        script.to_owned()
+    };
+    let packages = packages
+        .iter()
+        .map(|(name, dir)| (name.to_string(), dir.to_path_buf()))
+        .collect();
+    sources::prefetch(&entry, packages);
+}
+
+/// What [`compile_ahead`] did: its latest session's files compiled, whether
+/// its worker is done, whether the session is still open (no load has ended
+/// since), `require`s that found their file compiled ahead (all sessions),
+/// and the compiled entries this thread holds from it. For tests.
+#[doc(hidden)]
+pub fn compile_ahead_counts() -> (usize, bool, bool, usize, usize) {
+    sources::ahead_counts()
+}
+
+/// Hold [`compile_ahead`]'s workers before their next file, or let them go.
+/// For tests: a `require` meanwhile compiles its own.
+#[doc(hidden)]
+pub fn compile_ahead_pause(paused: bool) {
+    sources::pause_prefetch(paused);
 }
 
 struct Loaded {
@@ -3260,6 +3305,8 @@ impl ScriptHost {
     }
 
     fn load(&self) -> Result<Loaded, String> {
+        // What `compile_ahead` compiled goes as this load ends.
+        let _ahead = sources::ReleaseAhead;
         if let Some(tracker) = tracking(&self.0) {
             tracker.begin(self.app_key());
         }
@@ -3668,9 +3715,11 @@ impl ScriptHost {
         // Building runs untracked: reading state while describing the tree
         // must not subscribe whatever is currently mounting.
         let compiled = match (files, script) {
-            (Files::Disk, Script::File(path) | Script::Plugin { path, .. }) => {
-                self.0.sources.compiled(path, &code)
-            }
+            (Files::Disk, Script::File(path) | Script::Plugin { path, .. }) => self
+                .0
+                .sources
+                .compiled(path, &code)
+                .or_else(|| sources::prefetched(&code)),
             _ => None,
         };
         let result = self.0.runtime.untracked(|| {
