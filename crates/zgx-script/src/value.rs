@@ -1125,6 +1125,29 @@ fn str_of(bytes: &[u8]) -> Rc<str> {
         Err(_) => String::from_utf8_lossy(bytes).into(),
     }
 }
+/// `text` added to `was` (`state:append`): a long string takes it where it
+/// ends, its chunks shared and the edit kept, so an editor bound to it
+/// applies the token alone; a string growing past a long one's size
+/// becomes one; nothing there, the text.
+fn appended(was: Option<&Value>, text: &str) -> mlua::Result<Value> {
+    Ok(match was {
+        Some(Value::Text(was)) => {
+            let mut long = was.clone();
+            long.append(text);
+            Value::Text(long)
+        }
+        Some(Value::Str(was)) if was.len() + text.len() > zgx::text::LONG => {
+            Value::Text(zgx::text::Text::new(&format!("{was}{text}")))
+        }
+        Some(Value::Str(was)) => Value::Str(format!("{was}{text}").into()),
+        None | Some(Value::Nil) => Value::Str(text.into()),
+        Some(_) => {
+            return Err(mlua::Error::runtime(
+                "state:append adds text to a string, and that is not one",
+            ));
+        }
+    })
+}
 fn long_string(bytes: &[u8]) -> Value {
     let string = String::from_utf8_lossy(bytes);
     RECENT_TEXT.with_borrow_mut(|recent| {
@@ -2150,25 +2173,29 @@ impl UserData for State {
             },
         );
         // `append(path, text)`: text added to the string at `path` (none
-        // there: the text), concatenated in Rust: a reply's token, without
-        // its text so far copied into the script and back.
+        // there: the text), in Rust: a reply's token, without its text so
+        // far copied into the script and back. A long string (`Value::Text`)
+        // takes it where it ends, its chunks shared, and keeps the edit: an
+        // editor bound to it applies the token alone. A string growing past
+        // a long one's size becomes one.
         methods.add_method(
             "append",
-            |lua, s, (path, text): (mlua::Value, mlua::LuaString)| {
-                let path = s.0.with_untracked(|old| path_in(lua, path, old))?;
-                let at = s.0.with_untracked(|old| old.at(&path).cloned());
-                let text = text.to_str()?;
-                let joined: Rc<str> = match &at {
-                    Some(Value::Str(was)) => format!("{was}{}", &*text).into(),
-                    None | Some(Value::Nil) => (&*text).into(),
-                    Some(_) => {
-                        return Err(fail(
-                            "append",
-                            "adds text to a string, and that is not one".into(),
-                        ));
-                    }
+            |lua, s, (first, text): (mlua::Value, Option<mlua::LuaString>)| {
+                // `append(text)`: to the state's own string.
+                let Some(text) = text else {
+                    let mlua::Value::String(text) = first else {
+                        return Err(fail("append", "takes the text to add".into()));
+                    };
+                    let was = s.0.with_untracked(Clone::clone);
+                    let joined = appended(Some(&was), &text.to_str()?)?;
+                    s.charge(lua, |_| joined.weight())?;
+                    s.write(lua, joined);
+                    return Ok(());
                 };
-                s.write_at(lua, &path, at.as_ref(), Value::Str(joined), "append")
+                let path = s.0.with_untracked(|old| path_in(lua, first, old))?;
+                let at = s.0.with_untracked(|old| old.at(&path).cloned());
+                let joined = appended(at.as_ref(), &text.to_str()?)?;
+                s.write_at(lua, &path, at.as_ref(), joined, "append")
             },
         );
         // A shallow merge: `patch({ a = 1, b = 2 })`.

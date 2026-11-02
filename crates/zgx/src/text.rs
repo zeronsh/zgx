@@ -4,7 +4,15 @@
 //! pointer (`Clone`), and a line or the line of a byte is found in
 //! `O(log n)`. An editor holding a long document, its layout and its
 //! semantics share one.
-use std::{borrow::Cow, ops::Range, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::VecDeque,
+    ops::Range,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 /// What a chunk is cut to (a long line lies across several).
 const CHUNK: usize = 8 * 1024;
@@ -40,6 +48,52 @@ struct Chunks {
     /// known without reading it (`Text::has_returns`): counted where it is
     /// made, and in the chunks an edit makes again.
     returns: usize,
+    /// Which text this is (`Text::id`): fresh when made and after every
+    /// edit, shared by its clones. 0 only for the empty text `Default`
+    /// makes, which every such text is.
+    id: u64,
+    /// Its last edits, the earliest first (`Text::edits_since`).
+    log: EditLog,
+}
+/// A fresh text id: never one made before in this process.
+fn fresh_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+/// One edit of a text (`Text::edits_since`): at `start`, the `old_len`
+/// bytes there became `inserted`, turning the text `before` into the next.
+#[derive(Clone, Debug)]
+pub(crate) struct TextDelta {
+    /// The id of the text it was made to.
+    pub(crate) before: u64,
+    pub(crate) start: usize,
+    pub(crate) old_len: usize,
+    pub(crate) inserted: Arc<str>,
+}
+/// A text's last edits: at most `LOG_EDITS` of them, holding at most
+/// `LOG_BYTES` inserted, the earliest dropped first. An edit inserting more
+/// than that empties it: what was before can't be followed past it.
+#[derive(Clone, Debug, Default)]
+struct EditLog {
+    edits: VecDeque<TextDelta>,
+    bytes: usize,
+}
+const LOG_EDITS: usize = 16;
+const LOG_BYTES: usize = 64 * 1024;
+impl EditLog {
+    fn record(&mut self, edit: TextDelta) {
+        if edit.inserted.len() > LOG_BYTES {
+            self.edits.clear();
+            self.bytes = 0;
+            return;
+        }
+        self.bytes += edit.inserted.len();
+        self.edits.push_back(edit);
+        while self.edits.len() > LOG_EDITS || self.bytes > LOG_BYTES {
+            let dropped = self.edits.pop_front().expect("over a bound, not empty");
+            self.bytes -= dropped.inserted.len();
+        }
+    }
 }
 impl Chunks {
     /// The sums of what comes before each chunk, from `from` on.
@@ -95,6 +149,7 @@ impl Text {
         let mut chunks = Chunks {
             chunks: cut(text),
             returns: text.matches('\r').count(),
+            id: fresh_id(),
             ..Default::default()
         };
         chunks.sum(0);
@@ -115,6 +170,23 @@ impl Text {
     /// How many lines it has (one more than its line breaks).
     pub fn line_count(&self) -> usize {
         self.0.breaks.last().unwrap_or(&0) + 1
+    }
+    /// Which text this is: the same number for it and its clones, a new one
+    /// for each text made or edited.
+    pub(crate) fn id(&self) -> u64 {
+        self.0.id
+    }
+    /// The edits that made this text from the one `id` names, earliest
+    /// first, if its log reaches back to it: none for this text itself,
+    /// `None` for a text it doesn't follow (its log dropped it, or it
+    /// never was).
+    pub(crate) fn edits_since(&self, id: u64) -> Option<impl Iterator<Item = &TextDelta>> {
+        let edits = &self.0.log.edits;
+        let from = match id == self.0.id {
+            true => edits.len(),
+            false => edits.iter().position(|edit| edit.before == id)?,
+        };
+        Some(edits.range(from..))
     }
     /// Whether `other` is this same text (a clone of it), not just equal.
     pub fn ptr_eq(&self, other: &Text) -> bool {
@@ -316,6 +388,19 @@ impl Text {
             chunks.chunks.retain(|chunk| !chunk.text.is_empty());
         }
         chunks.sum(first.min(chunks.chunks.len().saturating_sub(1)));
+        // Another text now, following the one it was.
+        let before = std::mem::replace(&mut chunks.id, fresh_id());
+        chunks.log.record(TextDelta {
+            before,
+            start,
+            old_len: end - start,
+            inserted: with.into(),
+        });
+    }
+    /// `with` added at the end, as `replace_range` would put it there.
+    pub fn append(&mut self, with: &str) {
+        let end = self.len();
+        self.replace_range(end..end, with);
     }
 }
 impl Text {
@@ -587,6 +672,76 @@ impl std::fmt::Display for TextValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// (start, old length, inserted) of the edits since `id`.
+    fn since(text: &Text, id: u64) -> Option<Vec<(usize, usize, String)>> {
+        Some(
+            text.edits_since(id)?
+                .map(|e| (e.start, e.old_len, e.inserted.to_string()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_text_and_its_clones_share_an_id_and_each_edit_makes_another() {
+        let a = Text::new("hello");
+        let b = a.clone();
+        assert_eq!(a.id(), b.id());
+        let mut c = a.clone();
+        c.append(" world");
+        assert_ne!(c.id(), a.id());
+        assert_eq!(a.to_cow(), "hello", "the original is as it was");
+        assert_ne!(Text::new("hello").id(), a.id(), "an equal text is another");
+    }
+
+    #[test]
+    fn a_text_lists_the_edits_since_one_it_follows() {
+        let start = Text::new("ab");
+        let mut text = start.clone();
+        text.append("c");
+        let middle = text.id();
+        text.replace_range(0..1, "A");
+        assert_eq!(
+            since(&text, start.id()),
+            Some(vec![(2, 0, "c".into()), (0, 1, "A".into())])
+        );
+        assert_eq!(since(&text, middle), Some(vec![(0, 1, "A".into())]));
+        assert_eq!(since(&text, text.id()), Some(vec![]));
+        assert_eq!(
+            since(&text, Text::new("ab").id()),
+            None,
+            "not one it follows"
+        );
+    }
+
+    #[test]
+    fn a_texts_log_keeps_its_last_edits_within_its_bounds() {
+        let start = Text::new("");
+        let mut text = start.clone();
+        let mut ids = vec![start.id()];
+        for i in 0..20 {
+            text.append(&i.to_string());
+            ids.push(text.id());
+        }
+        // Sixteen edits back, and no further.
+        assert_eq!(since(&text, ids[4]).map(|e| e.len()), Some(16));
+        assert_eq!(since(&text, ids[3]), None);
+        // An insert past the bytes kept leaves nothing to follow across it.
+        let before = text.id();
+        text.append(&"x".repeat(LOG_BYTES + 1));
+        assert_eq!(since(&text, before), None);
+        text.append("y");
+        assert_eq!(since(&text, ids[20]), None);
+        // Inserts within it drop the earliest to fit.
+        let mut text = Text::new("");
+        let first = text.id();
+        text.append(&"a".repeat(LOG_BYTES / 2));
+        let second = text.id();
+        text.append(&"b".repeat(LOG_BYTES / 2));
+        text.append("c");
+        assert_eq!(since(&text, first), None, "the earliest dropped to fit");
+        assert_eq!(since(&text, second).map(|e| e.len()), Some(2));
+    }
 
     /// A 2-, 3- and 4-byte character at every byte around where chunks are
     /// cut (the last quarter's start, a chunk's end, the next chunk's),

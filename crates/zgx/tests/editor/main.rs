@@ -24,6 +24,8 @@ mod editor_caret_width;
 mod editor_code;
 #[path = "../editor_context_menu.rs"]
 mod editor_context_menu;
+#[path = "../editor_external_edits.rs"]
+mod editor_external_edits;
 #[path = "../editor_hints.rs"]
 mod editor_hints;
 #[path = "../editor_ingress_normalization.rs"]
@@ -50,6 +52,8 @@ mod editor_selection_theme;
 mod editor_shape_reuse;
 #[path = "../editor_spans.rs"]
 mod editor_spans;
+#[path = "../editor_streamed_value.rs"]
+mod editor_streamed_value;
 #[path = "../editor_streaming_history.rs"]
 mod editor_streaming_history;
 #[path = "../editor_text_drag.rs"]

@@ -156,10 +156,22 @@ impl EditorValue {
             self.track();
             return (false, None);
         }
+        // A return the value ends with (a stream's token "...\r") shows as
+        // a break, but is not written back as one: the next token may be
+        // the "\n" that makes it one break with it.
+        let pending = std::cell::Cell::new(false);
         let flat = |current: &str| {
             let canonical = normalize_text(current, multiline);
             let changed = editor.borrow_mut().set_text_ref(canonical.as_ref());
             match canonical {
+                std::borrow::Cow::Owned(_)
+                    if multiline
+                        && current.ends_with('\r')
+                        && !current[..current.len() - 1].contains('\r') =>
+                {
+                    pending.set(true);
+                    (changed, None)
+                }
                 std::borrow::Cow::Owned(canonical) => (changed, Some(canonical)),
                 std::borrow::Cow::Borrowed(_) => (changed, None),
             }
@@ -169,17 +181,46 @@ impl EditorValue {
             EditorValue::Text(value) => value.with(|current| match current {
                 TextValue::Flat(current) => flat(current),
                 TextValue::Long(text) if !is_canonical(text, multiline) => flat(&text.to_cow()),
-                TextValue::Long(_) => (editor.borrow_mut().set_value(current), None),
+                TextValue::Long(text) => (follow(&mut editor.borrow_mut(), text, current), None),
             }),
         };
         // Only a value already canonical holds the editor's text.
-        if canonical.is_none() {
+        if canonical.is_none() && !pending.get() {
             let mut editor = editor.borrow_mut();
             let revision = editor.revision();
             editor.set_bound(version, revision);
         }
         (changed, canonical)
     }
+}
+/// A canonical long `text` into `editor`: the edits that made it from the
+/// one the editor last took, applied where they are (`apply_external`),
+/// when its log reaches back to that one; else taken whole (`set_value`).
+/// A token streamed into a long document then costs the token, not the
+/// document. Its edits are canonical as it is.
+fn follow(editor: &mut TextEditor, text: &Text, current: &TextValue) -> bool {
+    let edits = editor.taken().and_then(|id| text.edits_since(id));
+    let Some(edits) = edits else {
+        return editor.set_value(current);
+    };
+    let edits: smallvec::SmallVec<[_; 2]> = edits.collect();
+    // One insert (a token): the step recorded, the value's text held, the
+    // editor's own not edited first only to be dropped.
+    if let [edit] = edits[..]
+        && edit.old_len == 0
+        && editor.insert_shared(edit.start, &edit.inserted, text)
+    {
+        editor.set_taken(text.id());
+        return true;
+    }
+    let mut changed = false;
+    for edit in edits {
+        changed |= editor.apply_external(edit.start..edit.start + edit.old_len, &edit.inserted);
+    }
+    // One text for both, as taking it whole would leave them.
+    editor.share(text);
+    editor.set_taken(text.id());
+    changed
 }
 /// Whether a long text needs no `normalize_text`, from the counts its
 /// chunks keep: a keystroke in a long document no longer reads all of it.
