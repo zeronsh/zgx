@@ -15,7 +15,7 @@ use cosmic_text::{Align, AttrsList, FontSystem, LayoutLine, ShapeGlyph, ShapeWor
 use rustc_hash::{FxHashMap, FxHasher};
 use std::{
     hash::{Hash, Hasher},
-    rc::Rc,
+    sync::Arc,
 };
 use zgx::text_layout::{FontFeatures, FontStyle};
 
@@ -33,7 +33,8 @@ pub(super) struct Shape {
 
 /// A plain paragraph's words: where each starts, and its shape.
 pub(super) struct Words {
-    pub words: Vec<(usize, Rc<Shape>)>,
+    // Shared by `Arc`: a `TextCache` is `Send` and `Sync`, as before words.
+    pub words: Vec<(usize, Arc<Shape>)>,
     pub font_size: f32,
     align: Option<Align>,
     /// Laid out at this wrap width (`lay_out`), into `lines`.
@@ -61,7 +62,7 @@ type Font = (FontStyle, u32, Option<(u32, usize)>);
 pub(super) struct WordCache {
     /// Each style and size words are shaped in, with its attributes.
     fonts: Vec<(Font, AttrsList)>,
-    shapes: FxHashMap<u64, (u32, Box<str>, Rc<Shape>)>,
+    shapes: FxHashMap<u64, (u32, Box<str>, Arc<Shape>)>,
     bytes: usize,
 }
 
@@ -85,7 +86,7 @@ impl WordCache {
     /// age, may still hold it), and memory goes back to what is shown.
     pub fn sweep(&mut self) {
         self.shapes
-            .retain(|_, (_, _, shape)| Rc::strong_count(shape) > 1);
+            .retain(|_, (_, _, shape)| Arc::strong_count(shape) > 1);
         self.bytes = self
             .shapes
             .values()
@@ -193,7 +194,7 @@ impl WordCache {
                         spare.push(kept);
                         return None;
                     }
-                    let shape = Rc::new(Shape {
+                    let shape = Arc::new(Shape {
                         width: shaped.width(size),
                         blank: shaped.blank,
                         glyphs: shaped.glyphs.into_boxed_slice(),
