@@ -8,6 +8,8 @@ mod composition_read_only;
 mod composition_virtual_keyboard;
 #[path = "../editor_accessible_selection.rs"]
 mod editor_accessible_selection;
+#[path = "../editor_answer_history.rs"]
+mod editor_answer_history;
 #[path = "../editor_autocorrect.rs"]
 mod editor_autocorrect;
 #[path = "../editor_autoscroll.rs"]
