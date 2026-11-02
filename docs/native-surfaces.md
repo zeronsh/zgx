@@ -36,6 +36,7 @@ A web view (`zgx::web_view`, `ui.webview`) is the platform's own page, laid out 
 | Drags out of the page | the platform's | the platform's | zgx's: links, images (their bytes) and text, to zgx's targets and other apps |
 | Files dropped on it, drags within it | the platform's | the platform's | no |
 | Downloads | none saved (no download delegate) | none saved (each cancelled) | none saved (each cancelled) |
+| Context menu (a right click) | WebKit's | WebView2's | WebKit's items for what's clicked (a link, an image, media, a selection, a field, the page) as a zgx menu where the click was; spelling, font and media-control items left out |
 | Script dialogs (`alert`, `confirm`, `prompt`) | alert sheets on the window, the page's origin under the message | WebView2's dialogs | WebKit's, drawn in the page |
 | Full screen (`requestFullscreen`) | WebKit's window over the screen | the element fills the node | the element fills the node |
 | File inputs (`<input type=file>`) | the window's file dialog, a sheet | WebView2's picker | the window's file dialog (the desktop portal's, or zenity's) |

@@ -433,6 +433,8 @@ struct Page {
     preedit: RefCell<(String, u32)>,
     /// The `<select>` popup showing, a reference held.
     options: Cell<Ptr>,
+    /// The page's context menu showing (as a zgx menu, `on_context_menu`).
+    context: RefCell<Option<ContextMenu>>,
     /// The page's images, by URL, so a dragged one's bytes come from
     /// WebKit (an authenticated page's too), not the network.
     images: RefCell<HashMap<String, Ptr>>,
@@ -681,6 +683,7 @@ impl Gtk {
                 cursor: Cell::new(null_mut()),
                 preedit: RefCell::new((String::new(), 0)),
                 options: Cell::new(null_mut()),
+                context: RefCell::new(None),
                 images: RefCell::new(HashMap::new()),
             });
             let data = Rc::as_ptr(&page) as Ptr;
@@ -1647,13 +1650,21 @@ impl Page {
             check_clipboard();
         }
     }
-    /// The page's `<select>` popup: `Some(item)` chosen, or closed.
+    /// The page's `<select>` popup, or its context menu: `Some(item)`
+    /// chosen, or closed.
     fn choose(&self, item: Option<u32>) {
+        let api = gtk::api().expect("GTK runs");
+        let context = self.context.borrow_mut().take();
+        if let Some(menu) = context {
+            if let Some(&action) = item.and_then(|item| menu.actions.get(item as usize)) {
+                self.context_action(action, &menu);
+            }
+            return;
+        }
         let menu = self.options.replace(null_mut());
         if menu.is_null() {
             return;
         }
-        let api = gtk::api().expect("GTK runs");
         // SAFETY: the option menu this page holds a reference to, on GTK's
         // thread: an item WebKit listed, then closed and released.
         unsafe {
@@ -1671,6 +1682,69 @@ impl Page {
             }
             (api.webkit_option_menu_close)(menu);
             (api.g_object_unref)(menu);
+        }
+    }
+    /// Do context menu `action` (WebKit's stock action) as WebKit would, by
+    /// its public calls: its own actions answer only the menu it shows.
+    fn context_action(&self, action: c_int, menu: &ContextMenu) {
+        let api = gtk::api().expect("GTK runs");
+        let view = self.view;
+        let copy = |text: &str| {
+            // SAFETY: GTK's clipboard on its thread, the text copied in.
+            unsafe {
+                let clipboard = (api.gtk_clipboard_get_for_display)(
+                    (api.gdk_display_get_default)(),
+                    gtk::GDK_SELECTION_CLIPBOARD,
+                );
+                (api.gtk_clipboard_set_text)(clipboard, c(text).as_ptr(), -1);
+            }
+            check_clipboard();
+        };
+        let open_new = |url: &str| {
+            if self.new_windows {
+                let url = url.to_owned();
+                self.post(move |web| web.emit(WebViewEvent::NewWindowRequested { url }));
+            }
+        };
+        // SAFETY: WebKit's calls on this page's live view, on GTK's thread.
+        unsafe {
+            let edit = |command: &std::ffi::CStr| {
+                (api.webkit_web_view_execute_editing_command)(view, command.as_ptr());
+                check_clipboard();
+            };
+            match action {
+                1 => (api.webkit_web_view_load_uri)(view, c(&menu.link).as_ptr()),
+                2 => open_new(&menu.link),
+                3 => drop((api.webkit_web_view_download_uri)(
+                    view,
+                    c(&menu.link).as_ptr(),
+                )),
+                4 => copy(&menu.link),
+                5 => open_new(&menu.image),
+                6 => drop((api.webkit_web_view_download_uri)(
+                    view,
+                    c(&menu.image).as_ptr(),
+                )),
+                8 => copy(&menu.image),
+                10 => (api.webkit_web_view_go_back)(view),
+                11 => (api.webkit_web_view_go_forward)(view),
+                12 => (api.webkit_web_view_stop_loading)(view),
+                13 => (api.webkit_web_view_reload)(view),
+                14 => edit(c"Copy"),
+                15 => edit(c"Cut"),
+                16 => edit(c"Paste"),
+                17 => edit(c"Delete"),
+                18 => edit(c"SelectAll"),
+                31 => (api.webkit_web_inspector_show)((api.webkit_web_view_get_inspector)(view)),
+                32 | 33 => open_new(&menu.media),
+                34 | 35 => copy(&menu.media),
+                42 | 43 => drop((api.webkit_web_view_download_uri)(
+                    view,
+                    c(&menu.media).as_ptr(),
+                )),
+                45 => edit(c"PasteAsPlainText"),
+                _ => {}
+            }
         }
     }
     fn ime(&self, ime: Ime) {
@@ -2184,10 +2258,98 @@ unsafe fn refuse_downloads(api: &Api, context: Ptr) {
         connect(api, context, "download-started", handler, null_mut(), false);
     }
 }
-/// No context menu of WebKit's own: it would open a window of GTK's
-/// somewhere off the page.
-unsafe extern "C" fn on_context_menu(_: Ptr, _: Ptr, _: Ptr, _: Ptr, _: Ptr) -> gtk::gboolean {
+/// `ZGX_WEB_MENU=1` prints each context menu's items on stderr, as
+/// `WEB_MENU Open Link|Copy Link Address|…` (what `web_view_smoke.py` reads).
+/// The page's context menu (a right click, the menu key): WebKit's items,
+/// for its page and what's under the pointer (a link, an image, a
+/// selection, a field), as a zgx menu where the pointer is: GTK's own would
+/// open off the page. The item chosen is done by WebKit's public calls
+/// (`Page::context_action`): WebKit's own actions answer only a menu it
+/// shows itself. Submenus (input methods, spelling) are left out.
+unsafe extern "C" fn on_context_menu(
+    _: Ptr,
+    menu: Ptr,
+    event: *const gtk::GdkEventButton,
+    hit: Ptr,
+    data: Ptr,
+) -> gtk::gboolean {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: GTK passes the menu, the event that asked for it, what's
+    // under the pointer and this handler's page, on its thread; all read now.
+    unsafe {
+        let page = page(data);
+        page.choose(None);
+        let (mut items, mut actions) = (Vec::new(), Vec::new());
+        let mut item = (api.webkit_context_menu_get_items)(menu);
+        while !item.is_null() {
+            let entry = (*item).data;
+            item = (*item).next;
+            let stock = (api.webkit_context_menu_item_get_stock_action)(entry);
+            let action = (api.webkit_context_menu_item_get_action)(entry);
+            if (api.webkit_context_menu_item_is_separator)(entry) != 0
+                || !(api.webkit_context_menu_item_get_submenu)(entry).is_null()
+                || action.is_null()
+                || !CONTEXT_ACTIONS.contains(&stock)
+            {
+                continue;
+            }
+            items.push(OptionItem {
+                // GTK's mnemonic marks off: "_Copy" reads "Copy".
+                label: string((api.gtk_action_get_label)(action)).replace('_', ""),
+                group: false,
+                enabled: (api.gtk_action_get_sensitive)(action) != 0,
+                selected: false,
+            });
+            actions.push(stock);
+        }
+        if items.is_empty() {
+            return 1;
+        }
+        if zgx::env::var_os("ZGX_WEB_MENU").is_some_and(|v| v != "0") {
+            let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+            eprintln!("WEB_MENU {}", labels.join("|"));
+        }
+        let uri = |get: unsafe extern "C" fn(Ptr) -> *const c_char| {
+            if hit.is_null() {
+                String::new()
+            } else {
+                string(get(hit))
+            }
+        };
+        *page.context.borrow_mut() = Some(ContextMenu {
+            actions,
+            link: uri(api.webkit_hit_test_result_get_link_uri),
+            image: uri(api.webkit_hit_test_result_get_image_uri),
+            media: uri(api.webkit_hit_test_result_get_media_uri),
+        });
+        // Where the click was, in the view's pixels (a key: its top left).
+        let at = if !event.is_null() && (*event).type_ == gtk::GDK_BUTTON_PRESS {
+            ((*event).x as f32, (*event).y as f32, 1., 1.)
+        } else {
+            (0., 0., 1., 1.)
+        };
+        let id = page.id;
+        deliver(move || {
+            if let Some(page) = ui_page(id) {
+                page.show_options(Some(OptionMenu { items, at }));
+            }
+        });
+    }
     1
+}
+/// The stock actions zgx's context menu does (`Page::context_action`):
+/// WebKit's others (media controls, spelling, fonts, copying an image's
+/// pixels) are left out.
+const CONTEXT_ACTIONS: [c_int; 24] = [
+    1, 2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 31, 32, 33, 34, 35, 42, 43, 45,
+];
+/// A context menu showing: its items' stock actions, in order, and what
+/// the pointer was over.
+struct ContextMenu {
+    actions: Vec<c_int>,
+    link: String,
+    image: String,
+    media: String,
 }
 /// A file input (`<input type=file>`): the window's own file dialog
 /// (`WebView::choose_files`, the desktop portal's), not GTK's, which would

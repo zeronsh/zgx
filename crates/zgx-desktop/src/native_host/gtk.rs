@@ -197,6 +197,18 @@ api! {
     fn webkit_user_script_new(*const c_char, c_int, c_int, *const *const c_char, *const *const c_char) -> Ptr;
     fn webkit_user_script_unref(Ptr);
     fn webkit_web_view_get_settings(Ptr) -> Ptr;
+    fn webkit_context_menu_get_items(Ptr) -> *mut GList;
+    fn webkit_context_menu_item_is_separator(Ptr) -> gboolean;
+    fn webkit_context_menu_item_get_submenu(Ptr) -> Ptr;
+    fn webkit_context_menu_item_get_stock_action(Ptr) -> c_int;
+    fn webkit_context_menu_item_get_action(Ptr) -> Ptr;
+    fn gtk_action_get_label(Ptr) -> *const c_char;
+    fn gtk_action_get_sensitive(Ptr) -> gboolean;
+    fn webkit_hit_test_result_get_link_uri(Ptr) -> *const c_char;
+    fn webkit_hit_test_result_get_image_uri(Ptr) -> *const c_char;
+    fn webkit_hit_test_result_get_media_uri(Ptr) -> *const c_char;
+    fn webkit_web_view_execute_editing_command(Ptr, *const c_char);
+    fn webkit_web_view_download_uri(Ptr, *const c_char) -> Ptr;
     fn webkit_settings_set_enable_developer_extras(Ptr, gboolean);
     fn webkit_settings_set_user_agent(Ptr, *const c_char);
     fn webkit_settings_set_hardware_acceleration_policy(Ptr, c_int);

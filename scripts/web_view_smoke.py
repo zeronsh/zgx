@@ -400,6 +400,7 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     session.key("Return")
     session.wait(lambda: any(m[0].get("chose") == "Beta" for m in session.messages()), "the select's popup never chose")
     checks["chose"] = "Beta"
+    checks["context menu"] = context_menu_checks(session)
     # A link that downloads: refused, as macOS's and Windows's web views do
     # with no handler of the app's, so nothing lands in the downloads folder.
     session.click(530, 240)
@@ -476,6 +477,23 @@ def cursor_checks(session):
     finally:
         x11.XCloseDisplay(display)
     return {label: c["name"] or f"{c['size'][0]}x{c['size'][1]} image" for label, c in found.items()}
+
+
+def context_menu_checks(session):
+    """A right click on the page's link: WebKit's menu for it, as a zgx
+    menu, whose Copy Link Location copies the link's address."""
+    before = len(session.lines("WEB_MENU "))
+    session.click(70, 290, 3)
+    menu = session.wait(lambda: session.lines("WEB_MENU ")[before:], "a right click showed no context menu")[0].split("|")
+    if "Copy Link Location" not in menu:
+        raise AssertionError(f"the link's context menu: {menu}")
+    time.sleep(.5)
+    # The menu opens on its first item.
+    for _ in range(menu.index("Copy Link Location")):
+        session.key("Down")
+    session.key("Return")
+    session.wait(lambda: session.clipboard() == "https://example.com/dragged", "Copy Link Location copied nothing")
+    return menu
 
 
 def drag_checks(session):
@@ -727,6 +745,7 @@ def x11(args, output, private):
             raise RuntimeError("Xvfb startup timed out")
         env["DISPLAY"] = ":" + xvfb.stdout.readline().strip()
         downloads(private)
+        env["ZGX_WEB_MENU"] = "1"
         ime = None
         if args.ime or args.orca:
             with (output / "dbus.log").open("w") as log:
@@ -823,6 +842,7 @@ def wayland(args, output, private):
             raise RuntimeError("Xvfb startup timed out")
         env["DISPLAY"] = ":" + xvfb.stdout.readline().strip()
         downloads(private)
+        env["ZGX_WEB_MENU"] = "1"
         # A private session bus: Fcitx5 talks on it, and nothing else starts.
         bus_config = pathlib.Path(private, "dbus.conf")
         bus_config.write_text("<busconfig><type>session</type><listen>unix:tmpdir=" + private + "</listen><auth>EXTERNAL</auth>"
