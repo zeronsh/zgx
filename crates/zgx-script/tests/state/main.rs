@@ -57,6 +57,8 @@ mod script;
 mod socket;
 #[path = "../state.rs"]
 mod state;
+#[path = "../streamed_append.rs"]
+mod streamed_append;
 #[path = "../streaming.rs"]
 mod streaming;
 #[path = "../ui_errors.rs"]
