@@ -754,6 +754,46 @@ fn run_fixture(
                     .is_some_and(|r| !r.hidden && framed(r.frame, bounds("page"))),
                 format!("{shown:?}"),
             );
+            // Full screen: the page's own request (WebKit's window over
+            // the screen), seen in its state; then exited, the page back in
+            // its node.
+            web.run_js("document.querySelector('.stripes').requestFullscreen()");
+            let mut entered = false;
+            for _ in 0..80 {
+                sleep(50).await;
+                if web.state().with_untracked(|state| state.full_screen) {
+                    entered = true;
+                    break;
+                }
+            }
+            check(
+                "a page's full screen shows in its state",
+                entered,
+                format!("full_screen={entered}"),
+            );
+            sleep(1500).await;
+            web.exit_full_screen();
+            let mut left = false;
+            for _ in 0..80 {
+                sleep(50).await;
+                if !web.state().with_untracked(|state| state.full_screen) {
+                    left = true;
+                    break;
+                }
+            }
+            sleep(1500).await;
+            let back = diagnostics
+                .natives()
+                .iter()
+                .find(|r| r.node == page)
+                .cloned();
+            check(
+                "exiting full screen puts the page back in its node",
+                left && back
+                    .as_ref()
+                    .is_some_and(|r| !r.hidden && framed(r.frame, bounds("page"))),
+                format!("left={left} {back:?}"),
+            );
             println!("FIXTURE {} failures", failures);
             println!("LAYERS\n{}", diagnostics.layer_tree());
             window.close();

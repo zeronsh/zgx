@@ -376,6 +376,16 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     checks["download refused"] = True
     if unaccelerated:
         checks["uploads what changed"] = damage_checks(session)
+    # Full screen: F9 asks the page's green target for it, which fills
+    # the box and reaches the app's state; Ctrl+E (the app's
+    # `exit_full_screen`) ends it, the page as it was.
+    session.key("F9")
+    session.wait(lambda: session.lines("FULL_SCREEN ")[-1:] == ["true"], "the page's full screen never reached its state")
+    session.wait(lambda: near(session.grab()(*COLOURS["page"][0]), (0, 255, 0)), "the full-screen target never filled the box")
+    session.key("ctrl+e")
+    session.wait(lambda: session.lines("FULL_SCREEN ")[-1:] == ["false"], "the page never left full screen")
+    session.wait(lambda: near(session.grab()(*COLOURS["page"][0]), COLOURS["page"][1]), "the page never came back from full screen")
+    checks["full screen"] = True
     for _ in range(3):
         session.click(300, 300, 5)
     scrolled = session.wait(lambda: [m for m in session.messages() if "scrolled" in m[0]], "the wheel never scrolled the page")

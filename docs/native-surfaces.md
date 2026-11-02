@@ -37,6 +37,7 @@ A web view (`zgx::web_view`, `ui.webview`) is the platform's own page, laid out 
 | Files dropped on it, drags within it | the platform's | the platform's | no |
 | Downloads | none saved (no download delegate) | none saved (each cancelled) | none saved (each cancelled) |
 | Script dialogs (`alert`, `confirm`, `prompt`) | alert sheets on the window, the page's origin under the message | WebView2's dialogs | WebKit's, drawn in the page |
+| Full screen (`requestFullscreen`) | WebKit's window over the screen | the element fills the node | the element fills the node |
 | Missing engine | — | placeholder | placeholder (the library is opened as the first page shows) |
 
 Linux's choice: Wayland cannot embed another client's surface, an X11 child window can't be faded or rounded smoothly or covered by translucent zgx content, and WPE WebKit isn't packaged on Ubuntu 24.04; drawing offscreen behaves the same on X11 and Wayland. See [the Linux notes](linux.md#web-views).

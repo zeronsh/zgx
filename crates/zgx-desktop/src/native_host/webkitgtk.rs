@@ -772,7 +772,15 @@ impl Gtk {
                 api,
                 view,
                 "enter-fullscreen",
-                handler(on_refuse as *const ()),
+                handler(on_full_screen as *const ()),
+                data,
+                false,
+            );
+            connect(
+                api,
+                view,
+                "leave-fullscreen",
+                handler(on_full_screen_left as *const ()),
                 data,
                 false,
             );
@@ -2168,8 +2176,8 @@ unsafe fn refuse_downloads(api: &Api, context: Ptr) {
         connect(api, context, "download-started", handler, null_mut(), false);
     }
 }
-/// No context menu or full screen of WebKit's own: it would open a window
-/// of GTK's somewhere off the page.
+/// No context menu of WebKit's own: it would open a window of GTK's
+/// somewhere off the page.
 unsafe extern "C" fn on_context_menu(_: Ptr, _: Ptr, _: Ptr, _: Ptr, _: Ptr) -> gtk::gboolean {
     1
 }
@@ -2307,7 +2315,18 @@ unsafe fn on_clipboard(clipboard: Ptr) {
     // SAFETY: as the caller promises.
     unsafe { (api.gtk_clipboard_request_text)(clipboard, read, null_mut()) };
 }
-unsafe extern "C" fn on_refuse(_: Ptr, _: Ptr) -> gtk::gboolean {
+/// An element of the page went full screen (`requestFullscreen`): it
+/// fills the page's box, and the app hears (`WebViewState::full_screen`) to
+/// grow it. GTK's window, off the screen, stays as it is.
+unsafe extern "C" fn on_full_screen(_: Ptr, data: Ptr) -> gtk::gboolean {
+    // SAFETY: GTK passes this handler's page.
+    unsafe { page(data) }.post(|web| web.update_state(|state| state.full_screen = true));
+    1
+}
+/// The page's element left full screen.
+unsafe extern "C" fn on_full_screen_left(_: Ptr, data: Ptr) -> gtk::gboolean {
+    // SAFETY: as `on_full_screen`.
+    unsafe { page(data) }.post(|web| web.update_state(|state| state.full_screen = false));
     1
 }
 unsafe extern "C" fn on_message(_: Ptr, result: Ptr, data: Ptr) {

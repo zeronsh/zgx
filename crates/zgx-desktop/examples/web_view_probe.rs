@@ -17,7 +17,9 @@
 //! heard: clicks, typing, compositions, keys, choices, scrolling) and `ACTION <name>`
 //! for each of the app's shortcuts that fired: Ctrl+J (the page takes it),
 //! Ctrl+K (the page leaves it alone) and Ctrl+L (reserved: the page never
-//! hears it). Ctrl+I (reserved) opens Web Inspector; `--large-page` makes the
+//! hears it). F9 asks the page for its green target full screen (it fills
+//! the box; `FULL_SCREEN <bool>` prints as the state changes) and Ctrl+E
+//! (reserved) exits it. Ctrl+I (reserved) opens Web Inspector; `--large-page` makes the
 //! page's box 900 × 650.
 //!
 //! `--media URL`: the page at URL instead (the smoke's video and audio).
@@ -56,6 +58,7 @@ document.addEventListener('keydown', (e) => {
   post({ key: e.key, code: e.code, ctrl: e.ctrlKey });
   if (e.ctrlKey && e.key === 'j') e.preventDefault();
   if (e.key === 'F8') for (const dot of document.querySelectorAll('.dot')) dot.style.background = 'rgb(0, 255, 0)';
+  if (e.key === 'F9') document.getElementById('target').requestFullscreen();
 }, true);
 addEventListener('resize', () => post({ resized: innerHeight }));
 addEventListener('dragend', () => post({ dragend: true }));
@@ -181,6 +184,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if action.0 == "i" {
                         inspect.open_devtools();
                     }
+                    if action.0 == "e" {
+                        inspect.exit_full_screen();
+                    }
                     event.prevent_default();
                 }
             });
@@ -201,10 +207,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .bind(bind("j"))
                     .bind(bind("k"))
                     .bind(bind("l").reserved())
-                    .bind(bind("i").reserved()),
+                    .bind(bind("i").reserved())
+                    .bind(bind("e").reserved()),
             );
+            // `FULL_SCREEN <bool>` as the page's full screen changes.
+            let full_screen = {
+                let web = web.clone();
+                let shown = std::cell::Cell::new(false);
+                cx.ui.runtime.effect(move || {
+                    let full = web.state().with(|state| state.full_screen);
+                    if shown.replace(full) != full {
+                        println!("FULL_SCREEN {full}");
+                    }
+                })
+            };
             cx.tasks.spawn(async move {
-                let _keep = (events, keymap, web);
+                let _keep = (events, keymap, web, full_screen);
                 std::future::pending::<()>().await;
             });
         })

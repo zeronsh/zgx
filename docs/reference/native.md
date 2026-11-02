@@ -42,7 +42,7 @@ ui.command(opts: CommandOptions) -> ()
 | `on_error` | `(url: string, err: string) -> ()` | none | a navigation failed, or the page's process ended (`url` empty) |
 | `on_new_window` | `(url: string) -> ()` | none | |
 
-A `Web` controller's `url`, `title`, `loading`, `progress`, `can_go_back`, `can_go_forward`, `focused`, `error` and `pointer` (`{ x, y }` in points while the pointer is over the page, else nil) are tracked like state: a text or computed reading them follows the page. Its methods: `load(url)`, `html(html, base_url?)`, `back()`, `forward()`, `reload()`, `stop()`, `focus()`, `blur()`, `devtools()`, `zoom(z)`, `run(js)`, `eval(js, function(value, err) … end)` (the script's value as Luau data, or nil and the error), and `close()`.
+A `Web` controller's `url`, `title`, `loading`, `progress`, `can_go_back`, `can_go_forward`, `focused`, `error`, `full_screen` (an element of the page is full screen: on macOS in WebKit's window over the screen, on Windows and Linux filling the node, which an app grows to show it so) and `pointer` (`{ x, y }` in points while the pointer is over the page, else nil) are tracked like state: a text or computed reading them follows the page. Its methods: `load(url)`, `html(html, base_url?)`, `back()`, `forward()`, `reload()`, `stop()`, `focus()`, `blur()`, `devtools()`, `exit_full_screen()`, `zoom(z)`, `run(js)`, `eval(js, function(value, err) … end)` (the script's value as Luau data, or nil and the error), and `close()`.
 
 ## Terminal options
 

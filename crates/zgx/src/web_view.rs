@@ -303,6 +303,12 @@ pub struct WebViewState {
     pub focused: bool,
     /// The last navigation's failure, until the next starts.
     pub error: Option<String>,
+    /// An element of the page is full screen (the page's
+    /// `requestFullscreen`), until it exits ([`WebView::exit_full_screen`]
+    /// or the page's own). On macOS WebKit shows it in a window of its own
+    /// over the screen; on Windows and Linux it fills the page's box, which
+    /// an app grows (or makes its window full screen) to show it so.
+    pub full_screen: bool,
 }
 
 /// What happened in a page, as the platform reports it (see
@@ -690,6 +696,11 @@ impl WebView {
     /// Take keyboard focus back from the page (to the window's zgx content).
     pub fn blur(&self) {
         self.run(WebViewCommand::Focus(false));
+    }
+    /// End the page's full screen (see [`WebViewState::full_screen`]), as
+    /// Escape does in a browser.
+    pub fn exit_full_screen(&self) {
+        self.run_js("document.fullscreenElement && document.exitFullscreen()");
     }
     /// Open Web Inspector, when [`WebViewOptions::inspectable`].
     pub fn open_devtools(&self) {

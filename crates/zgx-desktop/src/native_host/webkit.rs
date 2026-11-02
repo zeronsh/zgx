@@ -120,6 +120,22 @@ fn page_dialog(
     });
     alert.beginSheetModalForWindow_completionHandler(&window, Some(&done));
 }
+/// `fullscreenState`, observed where WKWebView has it (macOS 13).
+fn full_screen_key(view: &WKWebView) -> Option<&'static &'static str> {
+    // SAFETY: `respondsToSelector:` on the main thread.
+    let has: bool = unsafe { msg_send![view, respondsToSelector: sel!(fullscreenState)] };
+    has.then_some(&"fullscreenState")
+}
+/// An element of the page is full screen, or going to be.
+fn full_screen(view: &WKWebView) -> bool {
+    if full_screen_key(view).is_none() {
+        return false;
+    }
+    // SAFETY: WKWebView's `fullscreenState` (an NSInteger) where it has it.
+    let state: isize = unsafe { msg_send![view, fullscreenState] };
+    // Entering or in, not exiting or out.
+    state == 1 || state == 2
+}
 /// The pages back and forward from the current one, nearest first.
 fn history(
     view: &WKWebView,
@@ -564,6 +580,7 @@ impl Observer {
             )
         };
         let lists = history.then(|| self::history(&view));
+        let full_screen = full_screen(&view);
         self.post(move |web| {
             let (old_url, old_title) = web
                 .state()
@@ -577,6 +594,7 @@ impl Observer {
                 state.progress = progress;
                 state.can_go_back = back;
                 state.can_go_forward = forward;
+                state.full_screen = full_screen;
                 if let Some((back_list, forward_list)) = lists {
                     state.back_list = back_list;
                     state.forward_list = forward_list;
@@ -816,6 +834,14 @@ impl MacWebView {
         // content controller its message handler (removed in `Drop`).
         let view = unsafe {
             let configuration = WKWebViewConfiguration::new(mtm);
+            // A page's `requestFullscreen`: WebKit's own full-screen window
+            // (macOS 12.3; off before, as WKWebView's default).
+            let preferences = configuration.preferences();
+            let fullscreen: bool =
+                msg_send![&*preferences, respondsToSelector: sel!(setElementFullscreenEnabled:)];
+            if fullscreen {
+                preferences.setElementFullscreenEnabled(true);
+            }
             configuration.setWebsiteDataStore(&data_store(&options.profile, mtm));
             for (handler, server) in handlers.iter().zip(&schemes) {
                 configuration.setURLSchemeHandler_forURLScheme(
@@ -867,7 +893,7 @@ impl MacWebView {
             view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*observer)));
             view.setUIDelegate(Some(ProtocolObject::from_ref(&*observer)));
             view.setAllowsBackForwardNavigationGestures(true);
-            for key in OBSERVED {
+            for key in OBSERVED.iter().chain(full_screen_key(&view)) {
                 view.addObserver_forKeyPath_options_context(
                     &observer,
                     &NSString::from_str(key),
@@ -1098,7 +1124,7 @@ impl Drop for MacWebView {
                         .map(|view| -> &objc2_app_kit::NSResponder { view }),
                 );
             }
-            for key in OBSERVED {
+            for key in OBSERVED.iter().chain(full_screen_key(&self.view)) {
                 self.view
                     .removeObserver_forKeyPath(&self.observer, &NSString::from_str(key));
             }

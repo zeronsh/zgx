@@ -231,6 +231,9 @@ impl UserData for WebUd {
         fields.add_field_method_get("can_go_forward", |_, w| Ok(w.0.can_go_forward()));
         fields.add_field_method_get("focused", |_, w| Ok(w.0.focused()));
         fields.add_field_method_get("error", |_, w| Ok(w.0.state().get().error));
+        fields.add_field_method_get("full_screen", |_, w| {
+            Ok(w.0.state().with(|state| state.full_screen))
+        });
         // `{ x, y }` in points from the page's top left, or nil outside it.
         fields.add_field_method_get("pointer", |lua, w| {
             w.0.pointer()
@@ -254,6 +257,10 @@ impl UserData for WebUd {
         });
         methods.add_method("back", |_, w, ()| {
             w.0.go_back();
+            Ok(())
+        });
+        methods.add_method("exit_full_screen", |_, w, ()| {
+            w.0.exit_full_screen();
             Ok(())
         });
         // The page ends now (not when the script's handles are collected,
