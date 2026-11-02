@@ -101,6 +101,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, opens: Rc<Opens>, plugin: bool) -> 
                     "ui.on_open is the app's: a plugin is not handed the files the system opens",
                 ));
             }
+            crate::reloads::top_level(lua, "ui.on_open");
             let vm = crate::node::env(lua)?.vm.clone();
             opens.handlers.borrow_mut().push((vm, handler));
             Ok(())

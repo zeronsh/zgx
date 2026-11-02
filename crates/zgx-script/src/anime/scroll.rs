@@ -99,6 +99,7 @@ const SYNC: usize = 3;
 
 /// `anime.onScroll(params)`.
 pub(crate) fn on_scroll(lua: &Lua, params: Option<Table>) -> mlua::Result<ScrollUd> {
+    crate::reloads::top_level(lua, "anime.onScroll");
     let params = match params {
         Some(p) => p,
         None => lua.create_table()?,

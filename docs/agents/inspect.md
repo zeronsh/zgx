@@ -235,6 +235,23 @@ A tape can move the pointer as well as the wheel, for an interaction a script pl
 
 `replay '#divider' drag.tape --repeat 5` then answers the same summary for each run, and the spread across them. Recordings hold wheel input only.
 
+## What a reload would keep
+
+A hot reload loads every script and module again and mounts the interface anew. While the app watches its files (`zgx-run`, a live-reloading host), each load records its modules: what each requires, and what its top level registers that outlives the call. Each reload then says what a reload keeping the modules a save didn't change would have done:
+
+```sh
+zgx inspect reloads
+```
+
+```text
+what each reload would have kept (nothing is kept yet: every reload loads everything again)
+#1 full: no record of the last load (it ran before the host watched its files) (changed theme.luau)
+#2 partial: app.luau, ds/button.luau, screens/chat.luau run again, 167 kept (changed ds/button.luau)
+#3 full: net/client.luau calls ui.task at its top level, which nothing yet carries over (changed net/client.luau)
+```
+
+`partial` names the modules that would run again (those that changed, and what requires them up to the app's script, which always runs again) and how many would be kept. `full` says why everything would load again: plugins are loaded, a file that changed isn't a module (an image, a new file), or a module that would run again sets a global or starts something at its top level that nothing carries over yet (a task, an animation, an `on_open` handler, actions, a router). Nothing is kept yet; this is the record that decides when it will be. A host that never watches its files records nothing.
+
 ## Switches: one app, two paths
 
 A change measured across a rebuild and a relaunch compares two windows as much as two builds. The engine's fast paths can instead be switched off and on in the running app, and the same replay measured each way:
@@ -250,7 +267,7 @@ zgx inspect switch scroll_copy on
 
 ## As MCP tools
 
-`zgx inspect mcp` serves the same commands as MCP tools on stdio (`zgx_windows`, `zgx_tree`, `zgx_node`, `zgx_find`, `zgx_state`, `zgx_set_state`, `zgx_click`, `zgx_type`, `zgx_key`, `zgx_scroll`, `zgx_command`, `zgx_errors`, `zgx_lint`, `zgx_frames`, `zgx_mark`, `zgx_switch`, `zgx_search`, `zgx_snapshot`, `zgx_record`, `zgx_replay`, `zgx_wait`, `zgx_sleep`, `zgx_apps`), each answering the text the CLI prints, with `isError` when it failed. Every tool takes an optional `app` (a pid) for when several apps run, and an optional `window` (an id from `zgx_windows`, or an item's key) for another of the app's windows.
+`zgx inspect mcp` serves the same commands as MCP tools on stdio (`zgx_windows`, `zgx_tree`, `zgx_node`, `zgx_find`, `zgx_state`, `zgx_set_state`, `zgx_click`, `zgx_type`, `zgx_key`, `zgx_scroll`, `zgx_command`, `zgx_errors`, `zgx_lint`, `zgx_frames`, `zgx_mark`, `zgx_reloads`, `zgx_switch`, `zgx_search`, `zgx_snapshot`, `zgx_record`, `zgx_replay`, `zgx_wait`, `zgx_sleep`, `zgx_apps`), each answering the text the CLI prints, with `isError` when it failed. Every tool takes an optional `app` (a pid) for when several apps run, and an optional `window` (an id from `zgx_windows`, or an item's key) for another of the app's windows.
 
 ```sh
 claude mcp add zgx -- zgx inspect mcp      # Claude Code; any MCP client runs the same command

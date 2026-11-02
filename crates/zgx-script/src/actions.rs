@@ -15,6 +15,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, actions: Actions, app: bool) -> mlu
     ui.set(
         "actions",
         lua.create_function(move |lua, table: Table| {
+            crate::reloads::top_level(lua, "ui.actions");
             if !app {
                 return Err(mlua::Error::runtime(
                     "ui.actions: only the app's script defines actions; a plugin calls them \

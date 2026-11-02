@@ -72,6 +72,7 @@ mod node;
 mod opens;
 mod paged;
 mod persist;
+mod reloads;
 mod reorder;
 mod router;
 mod routes;
@@ -109,7 +110,7 @@ pub use windows::{Window, WindowExtras};
 use mlua::Lua;
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
     time::{Duration, Instant, SystemTime},
@@ -1172,6 +1173,15 @@ fn require_module<const LENDING: bool>(
     } else {
         files
     };
+    // While the host watches its files: who requires what (`reloads`).
+    let tracker = if LENDING || !reloads::recording() {
+        None
+    } else {
+        host.upgrade().and_then(|host| tracking(&host))
+    };
+    if let Some(tracker) = &tracker {
+        tracker.required(&path);
+    }
     match modules.borrow().get(&path) {
         Some(Some(value)) => return Ok(value.clone()),
         Some(None) => return Err(fail("a require cycle".into())),
@@ -1229,7 +1239,21 @@ fn require_module<const LENDING: bool>(
         Some(bytecode) => lua.load(bytecode).set_mode(mlua::chunk::ChunkMode::Binary),
         None => files.chunk(lua.load(code)),
     };
-    let value = match loaded.set_name(format!("@{chunk}")).eval::<mlua::Value>() {
+    // Its top level's registrations are its own, and so are the globals it
+    // sets (the sandbox's one table: every chunk's).
+    let globals_before = tracker.as_ref().map(|tracker| {
+        tracker.enter(&path);
+        global_names(lua)
+    });
+    let evaluated = loaded.set_name(format!("@{chunk}")).eval::<mlua::Value>();
+    if let (Some(tracker), Some(before)) = (&tracker, globals_before) {
+        let set = global_names(lua)
+            .into_iter()
+            .filter(|name| !before.contains(name))
+            .collect();
+        tracker.leave(set);
+    }
+    let value = match evaluated {
         Ok(mlua::Value::Nil) => mlua::Value::Boolean(true),
         Ok(value) => value,
         Err(e) => {
@@ -1241,6 +1265,30 @@ fn require_module<const LENDING: bool>(
     Ok(value)
 }
 
+/// `path` as `require` keys the modules it ran: canonical (a temporary
+/// folder's `/var` is `/private/var` on macOS), or as written once the file
+/// is gone.
+fn module_key(path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| normalize(path))
+}
+
+/// The names a VM's scripts have set as globals (the sandbox's table holds
+/// only those; the libraries are behind it).
+fn global_names(lua: &Lua) -> HashSet<String> {
+    lua.globals()
+        .pairs::<mlua::Value, mlua::Value>()
+        .filter_map(|pair| match pair.ok()?.0 {
+            mlua::Value::String(name) => Some(name.to_string_lossy()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The tracker of `host`'s load, while it records its loads (`reloads`).
+fn tracking(host: &Rc<Inner>) -> Option<Rc<reloads::Tracker>> {
+    reloads::of(host).and_then(|r| r.tracking())
+}
+
 struct Loaded {
     _vms: Vec<Rc<Vm>>,
     /// The scripts' `ui.on_mount`s outside components, run as the app's
@@ -1250,6 +1298,23 @@ struct Loaded {
     broken: Vec<String>,
     root: Rc<node::Node>,
     lowering: Rc<lower::Lowering>,
+}
+
+/// A reload as `ScriptHost::reload_report` says it: what keeping the
+/// modules a save didn't change would have done (#1369, phase a1).
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReloadReport {
+    /// Which reload, counting from the host's first while watching.
+    pub number: u64,
+    /// The files whose bytes changed.
+    pub changed: Vec<PathBuf>,
+    /// `"partial"`: the modules in `ran` run again, `kept` kept; `"full"`:
+    /// everything loads again, for `why`.
+    pub path: &'static str,
+    pub ran: Vec<PathBuf>,
+    pub kept: usize,
+    pub why: Option<String>,
 }
 
 /// A plugin's contribution at the app's elements, as
@@ -2739,6 +2804,10 @@ impl ScriptHost {
             *self.0.stamps.borrow_mut() = stamps;
             return themes;
         }
+        // What a reload keeping what didn't change would have done.
+        if reloads::of(&self.0).is_some_and(|r| r.on.get()) {
+            self.judge_reload(&stamps, assets);
+        }
         // What a reload mounts can panic, and `watch` calls this: a panic
         // shows as a script error does, and the next save is still heard.
         if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.reload()))
@@ -2754,6 +2823,77 @@ impl ScriptHost {
                 .set(Some(format!("The reload panicked: {message}")));
         }
         true
+    }
+    /// Records what keeping the modules a save didn't change would have done
+    /// with this reload (`reloads`): the files whose bytes changed, against
+    /// the last load's modules.
+    fn judge_reload(&self, stamps: &[(PathBuf, Option<SystemTime>)], assets: bool) {
+        let loaded = self.0.stamps.borrow();
+        let before: HashMap<&std::path::Path, Option<SystemTime>> =
+            loaded.iter().map(|(p, t)| (p.as_path(), *t)).collect();
+        let mut changed: Vec<PathBuf> = stamps
+            .iter()
+            .filter(|(path, time)| {
+                before.get(path.as_path()) != Some(time)
+                    && !self.0.sources.as_loaded(&[path.as_path()])
+            })
+            .map(|(path, _)| module_key(path))
+            .collect();
+        // A file the last load read and this one no longer finds.
+        let now: HashSet<&std::path::Path> = stamps.iter().map(|(p, _)| p.as_path()).collect();
+        changed.extend(
+            loaded
+                .iter()
+                .filter(|(p, _)| !now.contains(p.as_path()))
+                .map(|(p, _)| module_key(p)),
+        );
+        if assets {
+            changed.push(PathBuf::from("(an image or SVG file it shows)"));
+        }
+        drop(loaded);
+        if let Some(reloads) = reloads::of(&self.0) {
+            reloads.judge(self.app_key().as_deref(), changed);
+        }
+    }
+    /// The app script's path as `require` keys modules (`module_key`).
+    fn app_key(&self) -> Option<PathBuf> {
+        match &self.0.app {
+            Script::File(path) => Some(module_key(path)),
+            _ => None,
+        }
+    }
+    /// The app script's folder, where its modules' paths start.
+    #[doc(hidden)]
+    pub fn app_dir(&self) -> Option<PathBuf> {
+        self.app_key()
+            .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+    }
+    /// What each reload since the host began watching would have kept
+    /// (#1369's first phase: nothing is kept yet): its number, the files
+    /// that changed, and the path a reload keeping what didn't change would
+    /// have taken (`partial`, the modules run again and how many kept) or
+    /// why everything loads again (`full`). For `zgx inspect reloads`.
+    #[doc(hidden)]
+    pub fn reload_report(&self) -> Vec<ReloadReport> {
+        reloads::of(&self.0)
+            .map(|r| r.history())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| {
+                let (path, ran, kept, why) = match r.verdict {
+                    reloads::Verdict::Partial { ran, kept } => ("partial", ran, kept, None),
+                    reloads::Verdict::Full(why) => ("full", Vec::new(), 0, Some(why)),
+                };
+                ReloadReport {
+                    number: r.number,
+                    changed: r.changed,
+                    path,
+                    ran,
+                    kept,
+                    why,
+                }
+            })
+            .collect()
     }
     /// The script files a hot-reloading host keeps compiled, and how many
     /// it has compiled since it began hot-reloading (for tests: a reload
@@ -2794,6 +2934,10 @@ impl ScriptHost {
     /// `check_on_reload`) when luau-lsp is installed and nothing chose
     /// otherwise.
     pub fn watch(&self, every: Duration) -> impl std::future::Future<Output = ()> + 'static {
+        // From the next load on, loads record their modules: what a reload
+        // would keep (`zgx inspect reloads`). A host that never watches
+        // records nothing.
+        reloads::start(&self.0);
         if self.0.check.get().is_none()
             && cfg!(debug_assertions)
             && check::find_luau_lsp().is_some()
@@ -3081,6 +3225,9 @@ impl ScriptHost {
     }
 
     fn load(&self) -> Result<Loaded, String> {
+        if let Some(tracker) = tracking(&self.0) {
+            tracker.begin(self.app_key());
+        }
         self.0.required.borrow_mut().clear();
         self.0.overrides.borrow_mut().clear();
         let mut vms = Vec::new();
@@ -3154,6 +3301,10 @@ impl ScriptHost {
         // an error, not nothing.
         if let Some(hooks) = lowering.hooks.as_deref() {
             lower::no_siblings(hooks, &root, &lowering, "the app's root");
+        }
+        // What the next reload is judged by: this load's modules.
+        if let Some(reloads) = reloads::of(&self.0) {
+            reloads.loaded(!self.0.plugins.is_empty() || !managed.is_empty());
         }
         Ok(Loaded {
             _vms: vms,
@@ -3375,6 +3526,10 @@ impl ScriptHost {
             meter: plugin.then(|| meter::Meter::new(&lua, memory, watch)),
             assets: self.0.assets.clone(),
         });
+        // A plugin always loads again in full: nothing of it recorded.
+        if !plugin && let Some(tracker) = tracking(&self.0) {
+            lua.set_app_data(reloads::Tracked(tracker));
+        }
         node::install(&lua).map_err(fail)?;
         let ui: mlua::Table = lua.globals().get("ui").map_err(fail)?;
         // Each module made the first time a script names it (`lazy`).

@@ -360,6 +360,7 @@ pub(crate) fn install(
                 };
                 let notification = zgx::platform::Notification::new(title, body).tag(tag.clone());
                 if let Some(on_click) = opts.get::<Option<mlua::Function>>("on_click")? {
+                    crate::reloads::top_level(lua, "ui.notify's on_click");
                     clicks.borrow_mut().insert(tag, on_click);
                     if !listening.replace(true) {
                         listen(lua, shared.clone(), clicks.clone())?;

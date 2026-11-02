@@ -135,6 +135,7 @@ pub(crate) fn animate(
     targets_value: mlua::Value,
     params: Table,
 ) -> mlua::Result<ClipUd> {
+    crate::reloads::top_level(lua, "anime.animate");
     let ctx = ctx(lua)?;
     scoped(&ctx.engine, &params, None)?;
     // Milliseconds, unless the script set `engine.timeUnit = "s"`.
@@ -215,6 +216,7 @@ fn link_scroll(engine: &Rc<Engine>, clip: &Rc<Clip>, params: &Table) -> mlua::Re
 }
 
 fn timeline(lua: &Lua, params: Option<Table>) -> mlua::Result<ClipUd> {
+    crate::reloads::top_level(lua, "anime.createTimeline");
     let ctx = ctx(lua)?;
     let params = match params {
         Some(p) => p,
@@ -254,6 +256,7 @@ fn timeline(lua: &Lua, params: Option<Table>) -> mlua::Result<ClipUd> {
 }
 
 fn timer(lua: &Lua, params: Option<Table>) -> mlua::Result<ClipUd> {
+    crate::reloads::top_level(lua, "anime.createTimer");
     let ctx = ctx(lua)?;
     let params = match params {
         Some(p) => p,

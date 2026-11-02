@@ -1162,6 +1162,7 @@ pub(crate) fn install(
     ui.set(
         "task",
         lua.create_function(|lua, (f, args): (Function, MultiValue)| {
+            crate::reloads::top_level(lua, "ui.task");
             let vm = env(lua)?
                 .vm
                 .upgrade()
