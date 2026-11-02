@@ -158,6 +158,16 @@ impl ShapeRunCache {
         self.cache.insert(key, (self.age, glyphs));
     }
 
+    /// zgx patch: let go of the words not looked up in the last `keep`
+    /// sweeps, as `trim` does but at once, without its period, and without
+    /// shrinking the table (a host shaping on fills it again). For a host
+    /// with no renderer to trim it (zgx-gpu's `TextServices`).
+    pub fn sweep(&mut self, keep: u64) {
+        self.age += 1;
+        let age = self.age;
+        self.cache.retain(|_key, (used, _glyphs)| *used + keep >= age);
+    }
+
     /// Remove everything: the fonts the runs were shaped with changed.
     ///
     /// zgx patch: `trim` sweeps only every `TRIM_PERIOD` ages, so it cannot

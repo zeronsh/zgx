@@ -15227,11 +15227,26 @@ impl TextServices {
     pub fn text_system(&self) -> Rc<RefCell<FontSystem>> {
         self.fonts.clone()
     }
+    /// The text it has prepared (a renderer's `text_cache`).
+    pub fn text_cache(&self) -> Rc<RefCell<prepared::TextCache>> {
+        self.cache.clone()
+    }
     /// Shape and measure `scene`'s text with these, as a renderer would.
+    /// With no renderer to trim the words it shapes as it draws, the text
+    /// cache sweeps them as they grow (`TextCache`); what it holds prepared
+    /// stays until [`TextServices::release_unused`] or its budget.
     pub fn install(&self, scene: &mut Scene) {
         install_text(scene, &self.fonts, &self.cache);
     }
+    /// Let go of all the text it holds prepared and every word it shaped:
+    /// a headless host returns to its baseline at once (after a batch).
+    /// Text still shown is shaped again when it is next laid out.
+    pub fn release_unused(&self) {
+        self.cache.borrow_mut().clear();
+        self.fonts.borrow_mut().shape_run_cache.clear();
+    }
 }
+
 /// Install text services sharing `shared_fonts` and `shared_cache` on `scene`.
 fn install_text(
     scene: &mut Scene,
