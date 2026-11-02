@@ -87,18 +87,31 @@ def main():
                 xdo("key", "--clearmodifiers", *keys)
                 time.sleep(.12)
 
-            def snapshot(stage, focused=None):
+            def report_now(stage):
                 before = len([line for line in (args.output / "application.log").read_text().splitlines() if line.startswith("MEASURED ")])
                 key("r")
                 deadline = time.monotonic() + 5
                 while True:
                     reports = [json.loads(line[len("MEASURED "):]) for line in (args.output / "application.log").read_text().splitlines() if line.startswith("MEASURED ")]
                     if len(reports) > before:
-                        report = reports[-1]
-                        break
+                        return reports[-1]
                     if time.monotonic() >= deadline or app.poll() is not None:
                         raise AssertionError("missing native snapshot: " + stage)
                     time.sleep(.05)
+
+            def snapshot(stage, focused=None, settle=False):
+                report = report_now(stage)
+                # A wheel or key scroll eases: a report taken while it runs
+                # is a frame of it. The stage's model is where it comes to
+                # rest, two reports a frame or more apart agreeing.
+                deadline = time.monotonic() + 5
+                while settle:
+                    time.sleep(.1)
+                    again = report_now(stage)
+                    if again["offset"] == report["offset"] and again["rows"] == report["rows"]:
+                        break
+                    assert time.monotonic() < deadline, ("scroll never settled", stage, report, again)
+                    report = again
                 lx, ly, width, height = report["list"]
                 cx, cy, cw, ch = lx + 8, ly + 8, width - 16, height - 16
                 assert 0 <= report["offset"] <= max(0, report["extent"] - ch), (stage, report)
@@ -170,12 +183,12 @@ def main():
             xdo("mousemove", "--window", window, 150, 150, "click", "--repeat", 5, "--delay", 25, 5)
             xdo("mousemove", "--window", window, 740, 10)
             time.sleep(.2)
-            wheeled = snapshot("wheel")
+            wheeled = snapshot("wheel", settle=True)
             assert wheeled["offset"] > resized["offset"]
             key("Home")
-            snapshot("home", 0)
+            snapshot("home", 0, settle=True)
             key("End")
-            snapshot("end", 99_999)
+            snapshot("end", 99_999, settle=True)
             key("Escape")
             app.wait(timeout=5)
             assert app.returncode == 0
