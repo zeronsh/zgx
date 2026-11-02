@@ -555,6 +555,7 @@ impl GpuRenderer {
                 used: self.layer_frame,
                 parked: false,
                 watched: None,
+                incomplete: false,
             },
         );
         self.band_keys.push((key, view.clone()));
