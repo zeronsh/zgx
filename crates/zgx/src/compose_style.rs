@@ -1967,6 +1967,10 @@ fn apply_rare(
         }
         scene.set_text_shadows(node, cold.and_then(|cold| cold.text_shadows.clone()));
         scene.set_drop_shadow(node, cold.and_then(|cold| cold.drop_shadow()));
+        scene.set_image_slice(
+            node,
+            cold.and_then(|cold| cold.image_slice.as_deref().copied()),
+        );
         scene.set_image_rendering(
             node,
             cold.and_then(|cold| cold.image_rendering)
