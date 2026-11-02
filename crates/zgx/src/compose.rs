@@ -741,7 +741,10 @@ impl View {
     /// changing layout. Use `image_signal` and `ImageData::transformed` for a
     /// reactive matrix. This method requires an image view.
     pub fn with_transformation(mut self, transformation: crate::affine::Affine) -> Self {
-        if let Some(animated) = self.rare.as_mut().and_then(|r| r.animation.as_mut()) {
+        // (A streamed animation keeps no frames to transform: drawn as it is.)
+        if let Some(animated) = (self.rare.as_mut().and_then(|r| r.animation.as_mut()))
+            .filter(|animated| !animated.animation.is_streamed())
+        {
             let frames = animated
                 .animation
                 .frames()
@@ -4598,9 +4601,28 @@ fn open_element(
             let intrinsic_write = intrinsic.clone();
             let data = ui.signal(None);
             let data_write = data.clone();
+            // A source carrying an animation (`ImageData::animated`, a GIF's
+            // still) plays it, set up the first time one comes: still
+            // pictures pay for nothing more (`animation::follow`).
+            let runner = environment.services.get::<TaskRunner>();
+            let weak = ui.downgrade();
+            let mut plays = None;
             ui.bind(root, move || {
                 let next = source();
                 intrinsic_write.set((next.width() as f32, next.height() as f32));
+                if (next.animation().is_some() || plays.is_some())
+                    && animation::follow(
+                        &mut plays,
+                        runner.as_deref(),
+                        &weak,
+                        root,
+                        &data_write,
+                        next.animation().cloned(),
+                    )
+                {
+                    // What plays already: its frame stays.
+                    return;
+                }
                 data_write.set(Some(next));
             });
             image_source = Some(data);

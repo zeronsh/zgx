@@ -128,6 +128,10 @@ harness = false
 name = "gif"
 required-features = ["gif"]
 
+[[test]]
+name = "gif_memory"
+required-features = ["gif"]
+
 # A counting global allocator: a process of its own.
 [[test]]
 name = "decode_peak"

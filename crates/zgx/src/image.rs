@@ -41,15 +41,37 @@ struct Pixels {
     /// (out of line) gave every drop of a node's kind a cleanup path, +0.1%
     /// on scenes that show no image.
     kept: std::mem::ManuallyDrop<Option<Kept>>,
+    /// The animation an animated still (`ImageData::animated`) is the first
+    /// frame of: here, behind the pixels' `Arc` (`drop_animation`), not a
+    /// field of `ImageData`, whose drop glue every style's drop inlines.
+    animation: std::mem::ManuallyDrop<Option<Arc<crate::animation::Animation>>>,
 }
 impl Drop for Pixels {
     fn drop(&mut self) {
         drop_kept(&mut self.kept);
+        if self.animation.is_some() {
+            // Through a pointer the optimizer can't see into: an animation
+            // holds frames, which hold pixels, so a direct call closed a
+            // cycle of drops (`Pixels`, `Animation`, `ImageData`) LLVM can't
+            // prove doesn't unwind, and every drop of an image, a
+            // decoration, a style or a node's kind grew a cleanup path
+            // (+0.37% on the style cell, which shows no image). A call
+            // through a C function pointer can't unwind.
+            let drop: extern "C" fn(&mut _) = std::hint::black_box(drop_animation);
+            drop(&mut self.animation);
+        }
     }
 }
 extern "C" fn drop_kept(kept: &mut std::mem::ManuallyDrop<Option<Kept>>) {
     // SAFETY: once, from `Pixels::drop`; nothing reads it after.
     unsafe { std::mem::ManuallyDrop::drop(kept) }
+}
+/// An animated still's animation, dropped as `Pixels::drop` says.
+extern "C" fn drop_animation(
+    animation: &mut std::mem::ManuallyDrop<Option<Arc<crate::animation::Animation>>>,
+) {
+    // SAFETY: once, from `Pixels::drop`; nothing reads it after.
+    unsafe { std::mem::ManuallyDrop::drop(animation) }
 }
 /// When a kept file decodes as it is first drawn (HTML's `decoding`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -182,6 +204,7 @@ impl ImageData {
             pixels: Arc::new(Pixels {
                 decoded: pixels,
                 kept: std::mem::ManuallyDrop::new(None),
+                animation: std::mem::ManuallyDrop::new(None),
             }),
             transform: crate::affine::Affine::IDENTITY,
             effect: ImageEffect::Plain,
@@ -198,6 +221,7 @@ impl ImageData {
             pixels: Arc::new(Pixels {
                 decoded: Arc::from(&[][..]),
                 kept: std::mem::ManuallyDrop::new(None),
+                animation: std::mem::ManuallyDrop::new(None),
             }),
             transform: crate::affine::Affine::IDENTITY,
             effect: ImageEffect::Plain,
@@ -263,6 +287,31 @@ impl ImageData {
             effect: self.effect,
             gpu: self.gpu,
         }
+    }
+    /// `animation`'s first frame, which an image view showing it plays as
+    /// `compose::animated_image` does (a GIF's, from a script's `ui.image`):
+    /// its pixels and their GPU identity, shared. A still alone for one of
+    /// a single frame.
+    pub fn animated(animation: Arc<crate::animation::Animation>) -> Self {
+        let first = animation.frames()[0].image.clone();
+        let mut still = first.transformed(first.transform);
+        still.effect = first.effect;
+        if animation.len() < 2 {
+            return still;
+        }
+        // Pixels of its own, holding the animation (the first frame's can't:
+        // the animation holds it), sharing the first frame's buffer and GPU
+        // identity.
+        still.pixels = Arc::new(Pixels {
+            decoded: first.pixels.decoded.clone(),
+            kept: std::mem::ManuallyDrop::new(None),
+            animation: std::mem::ManuallyDrop::new(Some(animation)),
+        });
+        still
+    }
+    /// The animation this is the first frame of (`animated`).
+    pub fn animation(&self) -> Option<&Arc<crate::animation::Animation>> {
+        self.pixels.animation.as_ref()
     }
     /// Share decoded pixels and GPU upload identity, drawn dithered as Zeron
     /// dithers its wallpapers: in dots `dot` points square, on the screen's
@@ -393,6 +442,7 @@ impl ImageData {
                 failed: std::sync::atomic::AtomicBool::new(false),
                 pinned: std::sync::OnceLock::new(),
             })),
+            animation: std::mem::ManuallyDrop::new(None),
         });
         registry().push(Arc::downgrade(&pixels));
         Ok(Self {
@@ -409,10 +459,12 @@ impl ImageData {
     /// file's bytes (what it decodes is held a while, `decoded_bytes`). The
     /// same whenever asked, for budgets that add and take it away.
     pub fn bytes(&self) -> usize {
-        match &*self.pixels.kept {
+        let own = match &*self.pixels.kept {
             Some(kept) => kept.encoded.len(),
             None => self.pixels.decoded.len(),
-        }
+        };
+        // An animation's still: its other frames, or its stream, too.
+        own + (self.pixels.animation.as_ref()).map_or(0, |animation| animation.bytes())
     }
     /// Its pixels, straight, shared (`pixels`, by count).
     pub fn pixels_arc(&self) -> Arc<[u8]> {
