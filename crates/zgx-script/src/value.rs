@@ -286,7 +286,9 @@ impl Value {
                     .then(|| was.iter().map(|v| id_of(v).map(|id| (id, v))).collect())
                     .flatten();
                 let mut unchanged = new.len() == was.len();
-                let items: Vec<Value> = new
+                // Straight into the shared slice: one allocation, not a
+                // vector's and then a copy of it.
+                let items: Rc<[Value]> = new
                     .iter()
                     .enumerate()
                     .map(|(i, item)| {
@@ -305,7 +307,7 @@ impl Value {
                 if unchanged {
                     old.clone()
                 } else {
-                    Value::List(items.into())
+                    Value::List(items)
                 }
             }
             (Value::Map(new), Value::Map(was)) => {
@@ -317,7 +319,7 @@ impl Value {
                 // Both sorted by key: walk them together.
                 let mut unchanged = new.len() == was.len();
                 let mut at = 0;
-                let fields: Vec<(Rc<str>, Value)> = new
+                let fields: Rc<[(Rc<str>, Value)]> = new
                     .iter()
                     .map(|(key, value)| {
                         // Most often the same keys: equal is told first.
@@ -340,7 +342,7 @@ impl Value {
                 if unchanged {
                     old.clone()
                 } else {
-                    Value::Map(fields.into())
+                    Value::Map(fields)
                 }
             }
             (new, old) if new == *old => old.clone(),
