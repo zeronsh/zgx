@@ -74,6 +74,7 @@ accesskit = "0.24.1"
 # tests read through it too.
 accesskit_consumer = "0.38.0"
 unicode-segmentation = "1.12"
+rustc-hash = "2.1"
 accesskit_winit = "0.33.2"
 rfd = "=0.17.2"
 open = "=5.4.4"
