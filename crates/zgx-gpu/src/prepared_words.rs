@@ -127,9 +127,16 @@ impl WordCache {
     /// `plain_words`, each word inside one run), at `font_size` and aligned
     /// as `base` says (its buffer's): in one of `spare`'s, the lists of
     /// texts dropped, where it has one.
+    ///
+    /// `grew`: the words of a paragraph in the same runs that `text` starts
+    /// with (a stream's last state), and where they hold to
+    /// (`Words::resume_at`): those before are taken, and only the rest of
+    /// `text` is read, its words looked up and shaped. With the words, how
+    /// many were taken so.
     // Boxed: an entry holds its words boxed (it stays small), and a spare
     // goes back into one without being boxed again.
-    #[allow(clippy::vec_box)]
+    #[allow(clippy::vec_box, clippy::too_many_arguments)]
+    #[inline(always)]
     pub fn words(
         &mut self,
         fonts: &mut FontSystem,
@@ -138,19 +145,35 @@ impl WordCache {
         base: &FontStyle,
         font_size: f32,
         spare: &mut Vec<Box<Words>>,
-    ) -> Option<Box<Words>> {
+        grew: Option<(&Words, usize)>,
+    ) -> Option<(Box<Words>, usize)> {
         if runs.iter().any(|run| !qualifies(run.font)) {
             return None;
         }
         let size = font_size.max(1.);
         let ids: smallvec::SmallVec<[u32; 4]> = runs.iter().map(|run| self.font(run)).collect();
         let mut ranges: smallvec::SmallVec<[(usize, usize, bool); 16]> = smallvec::SmallVec::new();
-        // (`plain_line` was asked first: `TextCache::words_of`.)
-        if !cosmic_text::line_words(text, |range, blank| {
-            ranges.push((range.start, range.end, blank));
-        }) {
-            return None;
-        }
+        // (`plain_line` was asked first: `TextCache::words_of`.) Read from
+        // where the words it grew from stop holding.
+        let taken = match grew {
+            None => {
+                if !cosmic_text::line_words(text, |range, blank| {
+                    ranges.push((range.start, range.end, blank));
+                }) {
+                    return None;
+                }
+                &[][..]
+            }
+            Some((grew, at)) => {
+                let from = grew.words[at].0;
+                if !cosmic_text::line_words(&text[from..], |range, blank| {
+                    ranges.push((from + range.start, from + range.end, blank));
+                }) {
+                    return None;
+                }
+                &grew.words[..at]
+            }
+        };
         let mut kept = spare.pop().unwrap_or_else(|| {
             Box::new(Words {
                 words: Vec::new(),
@@ -162,7 +185,12 @@ impl WordCache {
         });
         let words = &mut kept.words;
         words.clear();
-        words.reserve(ranges.len());
+        // Room for all of it at once: reserved after the words taken, it
+        // would grow by doubling, and keep what it does not use.
+        words.reserve(taken.len() + ranges.len());
+        if !taken.is_empty() {
+            words.extend_from_slice(taken);
+        }
         let mut run = 0;
         for (start, end, blank) in ranges {
             while runs[run].end <= start {
@@ -214,7 +242,7 @@ impl WordCache {
         kept.font_size = size;
         kept.align = crate::text::alignment(base);
         kept.laid = None;
-        Some(kept)
+        Some((kept, taken.len()))
     }
 }
 
@@ -222,6 +250,25 @@ impl WordCache {
 type At = (usize, usize);
 
 impl Words {
+    /// The word of these, `text`'s (or a text `text` starts with), from
+    /// which a text continuing `text` is read again: the last after spaces
+    /// that follow a letter or digit. Before it, its words, and where its
+    /// lines may break, are the same whatever follows (a line may break
+    /// after spaces; the rules that look back across them start from
+    /// punctuation, which this leaves out). Its index, after the first.
+    pub fn resume_at(&self, text: &str) -> Option<usize> {
+        let bytes = text.as_bytes();
+        // Only the last few: one an append extends, and what follows it.
+        let first = self.words.len().saturating_sub(8).max(1);
+        (first..self.words.len()).rev().find(|&at| {
+            let (start, shape) = &self.words[at];
+            let mut space = *start;
+            while space > 0 && bytes[space - 1] == b' ' {
+                space -= 1;
+            }
+            !shape.blank && space < *start && space > 0 && bytes[space - 1].is_ascii_alphanumeric()
+        })
+    }
     /// Its glyphs' widths, as `Compact` keeps them.
     fn advances(&self, word: usize) -> impl Iterator<Item = f32> + '_ {
         let size = self.font_size;
