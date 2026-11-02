@@ -9,11 +9,23 @@ fills its node, edge to edge.
 
     cargo build -p zgx-desktop --features webview2 --example web_view
     python scripts/windows_webview_smoke.py target/debug/examples/web_view.exe
+
+`--no-foreground` sends no input, for a desktop another window may hold:
+the example's `--control` commands on stdin find in the page (and
+WebView2's browser keys read back off, `ZGX_WEB_SETTINGS`), and have the
+page's own script start its download, with no handler, one cancelling and
+one saving. Then the real Ctrl+F, a case of its own: BLOCKED, not failed,
+when a system overlay (a notification, Start) holds the foreground for 60 s.
+`ZGX_WEB_SETTINGS=1` has the app also print each permission WebView2 asks
+for and each download it starts (`WEB_PERMISSION`, `WEB_DOWNLOAD_STARTING`).
+A page's own click that starts no download fails the run; the app opening
+the file itself (`open-download`) then only lets the handler's checks run.
 """
 import argparse
 import os
 import pathlib
 import subprocess
+import ctypes
 import tempfile
 import threading
 import time
@@ -54,16 +66,129 @@ def differs(a, b, box):
     return changed / len(points)
 
 
+def overlay_in_front(pid):
+    """The class and title of a system overlay (a notification, Start,
+    search: a `Windows.UI.Core.CoreWindow`) of another process holding the
+    foreground, or None."""
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd or hwnd in win.windows_of(pid):
+        return None
+    name = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, name, 256)
+    if name.value != "Windows.UI.Core.CoreWindow":
+        return None
+    return f"{name.value} {win.title(hwnd)!r}"
+
+
+def controlled(proc, window, lines, heard, save_dir):
+    """The cases `--no-foreground` drives through the example's stdin."""
+    def send(command):
+        proc.stdin.write(command + "\n")
+        proc.stdin.flush()
+
+    wait_for(lambda: heard("WEB_SETTINGS browser_keys="), "WebView2's settings read back")
+    assert heard("WEB_SETTINGS browser_keys=false"), [l for l in lines if l.startswith("WEB_SETTINGS")]
+    print("ok: WebView2's browser keys read back off")
+
+    send("find Hello")
+    wait_for(lambda: heard("FIND Hello "), "the app's find")
+    assert heard("FIND Hello found=true"), [l for l in lines if l.startswith("FIND")]
+    send("find nowhere-in-the-page")
+    wait_for(lambda: heard("FIND nowhere-in-the-page "), "the app's second find")
+    assert heard("FIND nowhere-in-the-page found=false"), [l for l in lines if l.startswith("FIND")]
+    print("ok: the app's find finds the heading's word, and not a word the page hasn't")
+
+    downloads = pathlib.Path(os.environ["USERPROFILE"], "Downloads")
+    listing = lambda: set(os.listdir(downloads)) if downloads.is_dir() else set()
+    before = listing()
+    count = lambda prefix: sum(line.startswith(prefix) for line in lines)
+    # Cases whose download only the app's own open started: the page's
+    # click starting none is the bug a user hits, so the run fails at the
+    # end, after the handler's checks ran on the app's download.
+    unclicked = []
+
+    def download(case, fresh=True):
+        """Start the page's download: its script clicks its link, or, if
+        WebView2 starts none from that within 5 s (a click with no gesture
+        behind it), the app opens the file itself. Which, as `case` ran.
+        `fresh`: the page reloaded first, as Chromium holds back a page's
+        further downloads (its count starts again with a navigation)."""
+        if fresh:
+            loaded = count("FINISHED ")
+            send("reload")
+            wait_for(lambda: count("FINISHED ") > loaded, f"the page to reload ({case})", 20)
+        started = count("WEB_DOWNLOAD_STARTING")
+        send("save-link")
+        deadline = time.monotonic() + 5
+        while count("WEB_DOWNLOAD_STARTING") == started and time.monotonic() < deadline:
+            time.sleep(0.05)
+        how = "the page's click"
+        if count("WEB_DOWNLOAD_STARTING") == started:
+            how = "the app's open (the page's click started none)"
+            unclicked.append(case)
+            send("open-download")
+            wait_for(lambda: count("WEB_DOWNLOAD_STARTING") > started, f"WebView2 to start the download ({case})")
+        print(f"note: {case}: the download came from {how}")
+
+    # No handler: WebView2 starts the download, and zgx cancels it.
+    download("no handler", fresh=False)
+    time.sleep(2.0)
+    assert not heard("DOWNLOAD "), "a download reached a handler the app never set"
+    assert listing() == before and not any(save_dir.iterdir()), "a download with no handler was saved"
+    print("ok: with no handler the page's download saves nothing")
+    send("downloads cancel")
+    wait_for(lambda: heard("DOWNLOADS cancelled"), "the cancelling handler")
+    download("cancelled")
+    wait_for(lambda: heard("DOWNLOAD_CANCELLED "), "the handler to hear the download")
+    time.sleep(2.0)
+    assert listing() == before and not any(save_dir.iterdir()), "a cancelled download was saved"
+    print("ok: a download the handler cancels saves nothing")
+    send("downloads save")
+    wait_for(lambda: heard("DOWNLOADS on"), "the saving handler")
+    asked = count("DOWNLOAD ")
+    download("saved")
+    wait_for(lambda: count("DOWNLOAD ") > asked, "the handler to hear the download")
+    name = [line for line in lines if line.startswith("DOWNLOAD ")][-1].split(" ")[1]
+    wait_for(lambda: heard("DOWNLOAD_STATUS Finished"), "the app's download to finish", 20)
+    saved = save_dir / name
+    assert saved.read_text() == "saved by the app", saved
+    assert listing() == before, "the app's download also landed in Downloads"
+    print(f"ok: the handler's download saves where it says ({name}), and only there")
+    return unclicked
+
+
+def key_case(proc, window, lines, at):
+    """Ctrl+F from the keyboard, the one case that needs the foreground."""
+    deadline = time.monotonic() + 60
+    while (held := overlay_in_front(proc.pid)) and time.monotonic() < deadline:
+        time.sleep(0.5)
+    if held:
+        print(f"BLOCKED: Ctrl+F from the keyboard: {held} held the foreground for 60 s; no input sent")
+        return
+    found = lambda: sum(line.startswith("FIND Hello found=true") for line in lines)
+    before = found()
+    win.activate(window)
+    win.click(window, *at(150, 298))
+    win.key("ctrl+f")
+    wait_for(lambda: found() > before, "the app's find after Ctrl+F in the page")
+    print("ok: Ctrl+F in the page reaches the app, and its find finds the heading")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=pathlib.Path)
     parser.add_argument("--shots", type=pathlib.Path, help="save captures here")
+    parser.add_argument("--no-foreground", action="store_true",
+                        help="send no input: drive the page through the example's stdin")
     args = parser.parse_args()
     lines = []
     save_dir = pathlib.Path(tempfile.mkdtemp(prefix="zgx-downloads-"))
+    command = [str(args.binary.resolve())] + (["--control"] if args.no_foreground else [])
     proc = subprocess.Popen(
-        [str(args.binary.resolve())], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        env=dict(os.environ, ZGX_EXAMPLE_SAVE_DIR=str(save_dir)),
+        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        stdin=subprocess.PIPE if args.no_foreground else None,
+        env=dict(os.environ, ZGX_EXAMPLE_SAVE_DIR=str(save_dir), ZGX_WEB_SETTINGS="1"),
     )
     threading.Thread(target=lambda: lines.extend(proc.stdout), daemon=True).start()
     heard = lambda prefix: any(line.startswith(prefix) for line in lines)
@@ -77,8 +202,21 @@ def main():
 
     try:
         window = win.wait_window(proc)
-        win.activate(window)
         scale = win.dpi(window) / 96
+        if args.no_foreground:
+            at = lambda x, y: (round(x * scale), round(y * scale))
+            wait_for(lambda: heard("FINISHED https://zgx.example/"), "the page to load", 30)
+            wait_for(lambda: heard("TITLE zgx web view"), "the page's title")
+            print("ok: the page loaded and its title reached the state")
+            unclicked = controlled(proc, window, lines, heard, save_dir)
+            key_case(proc, window, lines, at)
+            if unclicked:
+                raise AssertionError(
+                    "the page's own click on its download link started no download in WebView2 "
+                    f"({', '.join(unclicked)}); the handler's checks ran on the app's own open")
+            print("webview smoke (no foreground) passed")
+            return
+        win.activate(window)
         at = lambda x, y: (round(x * scale), round(y * scale))
         box = lambda l, t, r, b: (*at(l, t), *at(r, b))
 

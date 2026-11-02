@@ -10,7 +10,11 @@
 //! then exits (non-zero on failure). `--zoom 1.25` zooms the window first:
 //! the same checks, in zgx's points, with AppKit's frames at the zoom.
 //! `--unaccelerated`: the page painted on the CPU (Linux;
-//! `WebViewOptions::accelerated`).
+//! `WebViewOptions::accelerated`). `--control`: commands read a line each
+//! from stdin, so a probe can drive the page with no input sent:
+//! `find <text>` (prints `FIND`), `save-link` (the page's script clicks its
+//! download link), `open-download` (the app opens the same file itself), `reload` and `downloads save` or `downloads cancel` (the app's
+//! download handler, as Ctrl+D sets it, or one cancelling each).
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 use std::{cell::RefCell, rc::Rc};
@@ -22,6 +26,8 @@ use zgx::{
 };
 use zgx_desktop::{Application, MenuAction, WindowOptions};
 
+/// The page's download link's file, for `--control`'s `open-download`.
+const SAVED_FILE: &str = "data:application/octet-stream;base64,c2F2ZWQgYnkgdGhlIGFwcA==";
 const PAGE: &str = r#"<!doctype html>
 <html><head><meta charset="utf-8"><title>zgx web view</title>
 <style>
@@ -159,6 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let fixture = args.iter().any(|arg| arg == "--fixture");
     let accelerated = !args.iter().any(|arg| arg == "--unaccelerated");
+    let controlled = args.iter().any(|arg| arg == "--control");
     let zoom = args
         .iter()
         .skip_while(|arg| *arg != "--zoom")
@@ -379,9 +386,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     && let InputEvent::Action(action) = &event.event
                     && action.downcast_ref::<MenuAction>().is_some_and(|action| action.0 == "find")
                 {
-                    finder.find("Hello", Default::default(), |found| {
-                        println!("FIND Hello found={} matches={:?}", found.found, found.matches)
-                    });
+                    find(&finder, "Hello");
                     event.prevent_default();
                 }
             });
@@ -391,15 +396,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     && let InputEvent::Action(action) = &event.event
                     && action.downcast_ref::<MenuAction>().is_some_and(|action| action.0 == "downloads")
                 {
-                    let folder = std::env::var_os("ZGX_EXAMPLE_SAVE_DIR")
-                        .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
-                    downloads.set_download_handler(move |request, responder| {
-                        println!("DOWNLOAD {} {}", request.name, request.mime);
-                        responder.save_to(folder.join(&request.name), |status| {
-                            println!("DOWNLOAD_STATUS {status:?}")
-                        });
-                    });
-                    println!("DOWNLOADS on");
+                    handle_downloads(&downloads, true);
                     event.prevent_default();
                 }
             });
@@ -428,6 +425,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             let keep = Rc::new(RefCell::new(Some((subscription, keymap))));
             cx.on_closed(move || drop(keep.borrow_mut().take()));
+            if controlled {
+                follow_commands(cx, web.clone());
+            }
             if fixture {
                 run_fixture(
                     cx,
@@ -443,6 +443,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         })
+}
+
+/// Find `text` in the page, printing `FIND <text> found=… matches=…`.
+fn find(web: &WebView, text: &str) {
+    let shown = text.to_owned();
+    web.find(text, Default::default(), move |found| {
+        println!(
+            "FIND {shown} found={} matches={:?}",
+            found.found, found.matches
+        )
+    });
+}
+
+/// The app's download handler: each download saved into
+/// `ZGX_EXAMPLE_SAVE_DIR` (a temporary folder without it), printing
+/// `DOWNLOAD <name> <type>` and `DOWNLOAD_STATUS …`, or, unless `save`,
+/// each cancelled (`DOWNLOAD_CANCELLED <name>`).
+fn handle_downloads(web: &WebView, save: bool) {
+    let folder = std::env::var_os("ZGX_EXAMPLE_SAVE_DIR")
+        .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+    web.set_download_handler(move |request, responder| {
+        println!("DOWNLOAD {} {}", request.name, request.mime);
+        if save {
+            responder.save_to(folder.join(&request.name), |status| {
+                println!("DOWNLOAD_STATUS {status:?}")
+            });
+        } else {
+            println!("DOWNLOAD_CANCELLED {}", request.name);
+            responder.cancel();
+        }
+    });
+    println!("DOWNLOADS {}", if save { "on" } else { "cancelled" });
+}
+
+/// `--control`: a command a line from stdin (see the module documentation),
+/// read on a thread of its own and carried out on the UI thread.
+fn follow_commands(cx: &mut zgx_desktop::WindowContext, web: WebView) {
+    let (send, commands) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines().map_while(Result::ok) {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    cx.tasks.spawn(async move {
+        loop {
+            zgx::timer::sleep(std::time::Duration::from_millis(50)).await;
+            while let Ok(line) = commands.try_recv() {
+                let (command, rest) = line.split_once(' ').unwrap_or((line.as_str(), ""));
+                match command {
+                    "find" => find(&web, rest),
+                    "save-link" => web.run_js("document.getElementById('save').click()"),
+                    // The same file, opened by the app (a browser's own
+                    // navigation, no page script): a download WebView2
+                    // starts with no gesture to ask for.
+                    "open-download" => web.load_url(SAVED_FILE),
+                    "reload" => web.reload(),
+                    "downloads" => handle_downloads(&web, rest == "save"),
+                    _ => println!("CONTROL unknown: {line}"),
+                }
+            }
+        }
+    });
 }
 
 /// What the fixture reads and drives besides the window and the page.
