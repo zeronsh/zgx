@@ -214,6 +214,14 @@ zgx inspect --json frames since=start until=end summary=true
 phases at p95: layout 5.10 ms, text 1.22 ms, update 0.61 ms, paint 0.40 ms, encode 0.20 ms
 ```
 
+Each frame also says what layout measured afresh (a node whose size wasn't kept from before) and where that time went: how many, their time together, and the costliest by their own time, their children's apart, named as the script made them:
+
+```text
+  layout: 14 measured afresh, 5120 µs; costliest: @88 #chat (column screens/chat.luau:41) 5120 µs (own 3010 µs), @97 (markdown_view components/transcript.luau:32) 2040 µs (own 1980 µs)
+```
+
+The summary adds them up over the interaction (`layout`: `measured`, `micros`, and the `top` nodes by their own time with how many frames each was measured in): an empty page re-laid out on every width change, or a transcript measured again on every move, shows there by name. Taking a kept measurement costs nothing to count and isn't counted; while nothing traces, a fresh measure pays one relaxed load for this.
+
 The JSON gives the work's `p50`, `p90`, `p95`, `p99`, `max` and `mean` (`work_ms`), the input events (`events`) and each one's share of the frame it came in (`per_event_ms`: a drag's moves, one a frame, cost what their frames did), and each phase's spread and total, the costliest at p95 first (`phases`). Each frame of `frames` says the input it took (`2 input events`; `events` in its JSON). A command's own fields can be given as `key=value` words (`frames n=300`, `mark name=drag`), and a field that takes a number refuses anything else rather than falling back to its default.
 
 A tape can move the pointer as well as the wheel, for an interaction a script plays the same way each time: `pointer`, where from the target's centre in points (across, down), and `down`, `moved` or `up` (the primary button). Each event comes at its time, so a move a frame apart lands in a frame of its own, through the window's own input path:

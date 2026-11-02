@@ -9169,6 +9169,8 @@ impl Scene {
     /// `measured`, when nothing kept serves.
     /// A contents or zoomed node goes to `measure_special`.
     fn measure_uncached(&mut self, id: NodeId, constraints: Constraints) -> (f32, f32) {
+        // Timed for devtools' layout attribution while they trace.
+        let _traced = crate::profile::layout_span(id);
         // Checked by `measured`, its one caller.
         let node = self.tree_node(id);
         // Not `laid_out` here: joined to this test it's a mask on every

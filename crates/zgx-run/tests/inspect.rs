@@ -583,6 +583,62 @@ fn frames_sum_up_an_interaction_between_two_marks() {
     );
 }
 
+/// Layout's fresh measures, frame by frame and over an interaction: how
+/// many, and the subtrees whose own measuring cost most, named as the
+/// script made them.
+#[test]
+fn frames_attribute_layout_to_the_subtrees_measured_afresh() {
+    let _log = FRAME_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut app, session) = app();
+    app.frame();
+    text(&ask(&app, &session, r#"{"cmd":"mark","name":"before"}"#));
+    // The second click shows "Many": new nodes, measured afresh.
+    for _ in 0..2 {
+        app.click("add");
+        app.frame();
+    }
+    text(&ask(&app, &session, r#"{"cmd":"mark","name":"after"}"#));
+    let listed = ask(
+        &app,
+        &session,
+        r#"{"cmd":"frames","since":"before","until":"after"}"#,
+    );
+    let said = text(&listed);
+    assert!(said.contains("measured afresh"), "{said}");
+    let frames = listed.field("data").unwrap().list();
+    let measuring: Vec<&Value> = frames
+        .iter()
+        .filter_map(|f| f.field("layout"))
+        .filter(|l| l.field("measured").and_then(Value::as_f64).unwrap() > 0.)
+        .collect();
+    assert!(!measuring.is_empty(), "{said}");
+    for layout in &measuring {
+        let top = layout.field("top").unwrap().list();
+        assert!(!top.is_empty());
+        for m in top.iter() {
+            let what = m.field("what").map(Value::to_string).unwrap();
+            assert!(what.starts_with('@'), "{what}");
+            let own = m.field("self_micros").and_then(Value::as_f64).unwrap();
+            assert!(own <= m.field("micros").and_then(Value::as_f64).unwrap());
+        }
+    }
+    let summary = ask(
+        &app,
+        &session,
+        r#"{"cmd":"frames","since":"before","until":"after","summary":true}"#,
+    );
+    let layout = summary.field("data").unwrap().field("layout").unwrap();
+    let total: f64 = measuring
+        .iter()
+        .map(|l| l.field("measured").and_then(Value::as_f64).unwrap())
+        .sum();
+    assert_eq!(
+        layout.field("measured").and_then(Value::as_f64),
+        Some(total)
+    );
+    assert!(!layout.field("top").unwrap().list().is_empty());
+}
+
 #[test]
 fn memory_says_what_holds_it_a_line_each() {
     let (app, session) = app();
