@@ -644,8 +644,9 @@ fn element_options_are_typed_on_their_constructors() {
                     keys.retain(|k| k != "code");
                 }
                 if name == "svg" {
-                    // Likewise, only an image has a `fallback`.
-                    keys.retain(|k| k != "fallback");
+                    // Likewise, only an image has a `fallback`, and tells
+                    // what became of its picture.
+                    keys.retain(|k| !["fallback", "on_load", "on_error"].contains(&k.as_str()));
                 }
                 if name == "calendar" {
                     // Read with date_picker's: only its button writes a date.

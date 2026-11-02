@@ -249,6 +249,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "shader",
     "layer_shader",
     "bitmap",
+    "image_size",
     "raw",
     "tween",
     "spring",

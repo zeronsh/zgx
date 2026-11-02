@@ -19,7 +19,9 @@ A PNG or JPEG, decoded once per `src` and kept while a node shows it. Of those n
 | Option | Type | Default | |
 | --- | --- | --- | --- |
 | `src` | `Reactive<string>`, or a `Bitmap` | required | a path (from the script's directory) or an absolute one; `"host:<name>"`, an image the app made (`ScriptHost::image`), following each one it replaces it with; a `Bitmap` shown as it is (`ui.bitmap`, a pasted image from `ui.clipboard.read_image()`); a state or function (of a path or a `Bitmap`) swaps the image |
-| `fallback` | `Node` | none | shown in the image's place while a remote one (`https://…`) loads, and if it fails (a failed picture is logged, not a script error): an avatar's initials |
+| `fallback` | `Node` | none | shown in the image's place while a remote one (`https://…`) loads, and if it can't be shown (a remote one failed, a file gone or not a picture: never a script error): an avatar's initials |
+| `on_load` | `function(size: { w, h })` | none | its picture's size in pixels, once known: a file's from its header, before it draws (nothing decoded); a remote one's once it has arrived. Once per `src` |
+| `on_error` | `function(why: string)` | none | why its picture can't be shown: a file gone (a sent picture deleted, a kept copy pruned) or not a picture, a remote one that failed (`"… didn't load: HTTP 503"`). Without it, a warning (`ScriptHost::warnings`), with the script line naming the file |
 | `fit` | `"fill" \| "contain" \| "cover" \| "none" \| "scale_down"` | `"fill"` | how the pixels fill the box (CSS `object-fit`) |
 | `image_rendering` | `"auto" \| "pixelated"` | `"auto"` | how its pixels are sampled drawn larger or smaller (CSS's `image-rendering`): `"pixelated"`, each point the nearest pixel, its edges hard: pixel art, a magnified screenshot, a QR code |
 | `slice` | `{ top, right, bottom, left }` | none | the image drawn in nine pieces (a nine-patch, CSS's `border-image` with `fill`): insets into its pixels cut corners, edges and a middle, drawn as many points in from the box's edges; corners keep their size, edges stretch along their side, the middle both ways: a button's or a bubble's frame at any size. Edges wider than the box shrink together |
@@ -164,7 +166,8 @@ return ui.column {
 
 ## Gotchas
 
-- `ui.image` needs `src`; `code` is the SVG's (an image with only `code` fails to load). A missing or undecodable file shows the error in the window, at the script line naming it, and an empty image. An empty `src` (`""`, a picture not chosen yet) shows nothing and is no error, as the web's is, for images, SVGs and `bg_image`.
+- `ui.image` needs `src`; `code` is the SVG's (an image with only `code` fails to load). A missing or undecodable file is the file's doing, not the script's: it draws nothing (or the image's `fallback`), is told to `on_error`, and is otherwise a warning at the script line naming it, never an error, which would stop the window's reloads. So for SVGs and `bg_image`. An empty `src` (`""`, a picture not chosen yet) shows nothing and is no error, as the web's is, for images, SVGs and `bg_image`.
+- `ui.image_size(src)` gives a picture's size in pixels from its file's header, without decoding it, to hold its place at its final size before it draws: `local w, h = ui.image_size("shot.png")`. Nothing for a file gone or not a picture, or a remote one not yet arrived (asked for then: a function reading it again answers once it has).
 - Images and SVGs are decoded once per `src` and shared by every node showing it. Ones no node shows stay only while they fit the image cache's budget, the most recently shown first. A host that watches its scripts (`ScriptHost::watch`) also watches these files: saving an edited image reloads the scripts, state kept, and they show the new one.
 - An image is as large as its pixels in points unless sized; give it a `w` and `h` (or `aspect` and one of them).
 - `draw` runs again only for its size and the state it read; reading state through `peek` (or outside `draw`) does not redraw it. Keep it cheap: it runs in the script for every change it follows.

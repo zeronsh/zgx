@@ -614,6 +614,53 @@ fn remote_images_show_their_fallback_until_they_come_and_if_they_fail() {
     );
 }
 
+/// A remote picture tells `on_load` its size once it has arrived, or
+/// `on_error` why it didn't.
+#[test]
+fn remote_images_tell_whether_they_came() {
+    let mut h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"local heard = ui.state("heard", "")
+            return ui.column {
+                ui.image { src = "https://img.test/ok.png", w = 20, h = 20,
+                    on_load = function(size) heard:append(`load {size.w}x{size.h};`) end },
+                ui.image { src = "https://img.test/gone.png", w = 20, h = 20,
+                    on_error = function(why: string) heard:append(`error {why};`) end,
+                    fallback = ui.text { "WL" } },
+                ui.text { heard, id = "heard" },
+            }"#,
+        );
+        host.fetcher(move |request: zgx_script::Request| async move {
+            zgx::timer::sleep(Duration::from_millis(2)).await;
+            Ok(zgx_script::Response {
+                status: if request.url.ends_with("gone.png") {
+                    503
+                } else {
+                    200
+                },
+                headers: vec![],
+                body: PNG.to_vec(),
+            })
+        });
+        host
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while h.text("heard").matches(';').count() < 2 && Instant::now() < deadline {
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let heard = h.text("heard");
+    assert!(heard.contains("load 2x2;"), "{heard}");
+    assert!(
+        heard.contains("error https://img.test/gone.png didn't load: HTTP 503;"),
+        "{heard}"
+    );
+    assert_eq!(h.host.error().get(), None);
+}
+
 #[test]
 fn a_failed_remote_image_is_fetched_again_when_shown_after_a_backoff() {
     let fetched = std::rc::Rc::new(std::cell::Cell::new(0));
