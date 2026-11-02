@@ -147,7 +147,12 @@ enum Press {
 }
 
 impl EngineTerminal {
-    fn new(term: &Terminal, runtime: Runtime, runner: TaskRunner) -> std::io::Result<Self> {
+    fn new(
+        term: &Terminal,
+        runtime: Runtime,
+        runner: TaskRunner,
+        platform: Option<Rc<PlatformService>>,
+    ) -> std::io::Result<Self> {
         let options = term.options();
         let font = paint::font();
         let engine = Rc::new(Engine {
@@ -157,7 +162,9 @@ impl EngineTerminal {
             task: RefCell::new(None),
             runner: RefCell::new(runner),
             wake: Arc::new(Mutex::new(None)),
-            platform: RefCell::new(None),
+            // Before the session starts: what it reads first (a program asking
+            // for the clipboard at once) is answered through it.
+            platform: RefCell::new(platform),
             rows: RefCell::new(Vec::new()),
             lines: RefCell::new(Vec::new()),
             scrolled: runtime.signal(0),
@@ -1400,6 +1407,7 @@ impl Drop for EngineTerminal {
 pub fn terminal_view(term: &Terminal) -> View {
     let term = term.clone();
     component(move |cx| {
+        let platform = cx.try_service::<PlatformService>();
         let engine = match term.backend() {
             Some(backend) => {
                 let engine = backend
@@ -1407,6 +1415,9 @@ pub fn terminal_view(term: &Terminal) -> View {
                     .downcast_ref::<EngineTerminal>()
                     .map(|engine| engine.0.clone());
                 if let (Some(engine), Some(runner)) = (&engine, cx.try_service::<TaskRunner>()) {
+                    if let Some(platform) = &platform {
+                        *engine.platform.borrow_mut() = Some(platform.clone());
+                    }
                     *engine.runner.borrow_mut() = (*runner).clone();
                     engine.listen();
                 }
@@ -1414,9 +1425,9 @@ pub fn terminal_view(term: &Terminal) -> View {
             }
             None if term.is_closed() => None,
             None => {
-                let started = cx
-                    .try_service::<TaskRunner>()
-                    .map(|runner| EngineTerminal::new(&term, cx.runtime(), (*runner).clone()));
+                let started = cx.try_service::<TaskRunner>().map(|runner| {
+                    EngineTerminal::new(&term, cx.runtime(), (*runner).clone(), platform.clone())
+                });
                 match started {
                     Some(Ok(engine)) => {
                         let shared = engine.0.clone();
@@ -1433,9 +1444,6 @@ pub fn terminal_view(term: &Terminal) -> View {
         let Some(engine) = engine else {
             return message("Terminal".into());
         };
-        if let Some(platform) = cx.try_service::<PlatformService>() {
-            *engine.platform.borrow_mut() = Some(platform);
-        }
         if let Some(frames) = cx.try_service::<zgx::frame::FrameClock>() {
             *engine.frames.borrow_mut() = Some((*frames).clone());
         }
