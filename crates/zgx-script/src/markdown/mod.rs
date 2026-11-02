@@ -74,6 +74,9 @@ pub struct Incremental {
     full_only: bool,
     /// Bytes parsed by the last update: an append's work is its tail's.
     last_parse_bytes: usize,
+    /// The last top-level block's mending so far, and where that block
+    /// starts: an append to it scans only what came.
+    mender: Option<(usize, mend::Mender)>,
 }
 
 /// A top-level element: where it starts, and the blocks it made (one, or
@@ -116,6 +119,7 @@ impl Incremental {
         }
     }
     fn reset(&mut self, text: &str) {
+        self.mender = None;
         self.source = text.to_string();
         self.full_only = has_link_defs(text);
         self.tops = parse_at(text, 0, &self.options);
@@ -168,10 +172,17 @@ impl Incremental {
         // inline tail to mend.
         let kind = last.blocks.first().and_then(|b| b.field("t")).cloned();
         if matches!(&kind, Some(Value::Str(t)) if matches!(&**t, "code" | "hr" | "table")) {
+            self.mender = None;
             return;
         }
         let start = last.start;
-        let Some(mended) = mend::close_hanging(&self.source[start..]) else {
+        // The same block grown (the source only grows between resets):
+        // its mending goes on from where it stopped.
+        let mender = match &mut self.mender {
+            Some((at, mender)) if *at == start => mender,
+            slot => &mut slot.insert((start, mend::Mender::default())).1,
+        };
+        let Some(mended) = mender.close(&self.source[start..]) else {
             return;
         };
         self.last_parse_bytes += mended.len();
