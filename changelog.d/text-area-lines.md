@@ -1,4 +1,0 @@
----
-section: performance
----
-- **A text area shapes only the line an edit changed, at any length** (zgx): a text area under 64 KiB was laid out whole on every change. Its caret layout shaped every line again, so a token streamed into a 16 KB reply cost 20.5 M instructions (1.16 ms) in a shaped window. A text area of more than one line is now laid out a line at a time, as long documents were (one line is shaped whole either way). A change's text is derived from the last one by a one-chunk edit, and a bound text's line-ending check reads it a block at a time. A token now costs 96 K instructions at 16 KB and 82 K at 1 KB (3.7 M before), in line with 73 K at 128 KB. Shown a line at a time, a text area keeps its placeholder, its ranges for input methods (`EditorHandle::text_area`) and the geometry assistive technology reads of each character (`Semantics::set_text_lines`). A line height under a point is kept as it is, no longer rounded up to one.
