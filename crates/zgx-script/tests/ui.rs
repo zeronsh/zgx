@@ -377,6 +377,40 @@ fn image_rendering_reaches_the_scene() {
     assert_eq!(scene.image_rendering(smooth), ImageRendering::Auto);
 }
 
+/// So on a `ui.image`: the node drawing its picture samples it nearest,
+/// whatever wraps it (a `fallback`'s switch).
+#[test]
+fn a_pixelated_image_draws_its_picture_pixelated() {
+    use zgx::image::ImageRendering;
+    use zgx::scene::NodeKind;
+    let mut h = Harness::inline(
+        r##"local bits = ui.bitmap(2, 2, function(x, y) return (x + y) % 2 end)
+        return ui.column {
+            ui.image { id = "plain", src = bits, w = 20, h = 20, image_rendering = "pixelated" },
+            ui.image { id = "falls", src = bits, w = 20, h = 20, image_rendering = "pixelated",
+                fallback = ui.text { "-" } } }"##,
+    );
+    h.ui.prepare_frame();
+    for id in ["plain", "falls"] {
+        let top = h.find(id).unwrap();
+        let scene = h.ui.scene.borrow();
+        let mut stack = vec![top];
+        let mut drawn = None;
+        while let Some(n) = stack.pop() {
+            match scene.kind(n) {
+                NodeKind::Image(_) => drawn = Some(n),
+                _ => stack.extend(scene.children(n).iter().copied()),
+            }
+        }
+        let drawn = drawn.expect("its picture's node");
+        assert_eq!(
+            scene.image_rendering(drawn),
+            ImageRendering::Pixelated,
+            "{id}"
+        );
+    }
+}
+
 /// `border_style = "dotted"` dots the border; `outline_style` and
 /// `outline_dash` break the outline.
 #[test]
