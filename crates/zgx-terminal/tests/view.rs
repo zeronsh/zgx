@@ -200,6 +200,41 @@ fn the_process_in_front_is_named_again_after_it_execs_another() {
 
 #[cfg(unix)]
 #[test]
+fn the_process_in_front_is_named_after_its_session_moves_to_another_window() {
+    let mut app = Harness::new();
+    let term = Terminal::new(
+        &app.ui.runtime,
+        // `ready` once echo is off: what is typed from then isn't echoed.
+        session("stty -echo; echo ready; read x; exec cat"),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer.clone(),
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.until("the shell ready", |app| {
+        app.shows("ready") && term.process() == "sh"
+    });
+    term.input("\r");
+    term.input("hello\r");
+    // cat's output read: a check is due, on this window's tasks.
+    app.until("cat's output", |app| app.shows("hello"));
+    // The view shows in another window, and the first window's tasks
+    // never run again, as when it closes.
+    let first = std::mem::replace(
+        &mut app.executor,
+        Rc::new(RefCell::new(LocalExecutor::new())),
+    );
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    drop(first);
+    app.until("cat in front", |_| term.process() == "cat");
+}
+
+#[cfg(unix)]
+#[test]
 fn a_quiet_command_typed_at_a_shell_is_named_in_front() {
     let mut app = Harness::new();
     // An interactive shell (job control: a command takes the front), and
