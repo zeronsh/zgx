@@ -81,7 +81,8 @@ pub(crate) enum PopupInput {
 
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{
-    PopupHost, content_origin, enabled, popup_screens, server_move, warm, window_at, window_number,
+    PopupHost, content_origin, enabled, popup_backdrops, popup_screens, server_move, warm,
+    window_at, window_number,
 };
 
 /// One line of a memory report for the popups' renderers, however a
@@ -553,6 +554,15 @@ mod macos {
             self
         }
         /// Its box: the panel's, and the arrow's.
+        /// Its box (arrow and all) and corner radius, -1 when its arrow's
+        /// mask shapes it (`popup_backdrops`).
+        fn report(&self) -> (Rect, f32) {
+            let radius = match self.arrow {
+                Some(_) => -1.,
+                None => self.radius,
+            };
+            (self.bounds(), radius)
+        }
         fn bounds(&self) -> Rect {
             let mut bounds = self.rect;
             for (x, y) in self.arrow.into_iter().flatten() {
@@ -866,6 +876,10 @@ mod macos {
         static POOL_PANELS: RefCell<Vec<Panel>> = const { RefCell::new(Vec::new()) };
         /// Windows showing popups, by window number, and their hosts.
         static PARENTS: RefCell<Vec<(isize, Sink)>> =
+            const { RefCell::new(Vec::new()) };
+        /// What AppKit's material shows behind each translucent popup panel,
+        /// by its parent's window number and host (`popup_backdrops`).
+        static MATERIALS: RefCell<Vec<(isize, Sink, Backdrops)>> =
             const { RefCell::new(Vec::new()) };
         /// Panels showing drag previews, by window number: the pointer is
         /// over what is under them (`window_at`).
@@ -1498,6 +1512,16 @@ mod macos {
                     panel.window.invalidateShadow();
                 }
             }
+            let backdrops: Vec<(Rect, f32)> = (self.shown.iter())
+                .filter_map(|(_, panel)| panel.material.as_ref().map(Material::report))
+                .collect();
+            MATERIALS.with(|materials| {
+                let mut materials = materials.borrow_mut();
+                materials.retain(|(window, ..)| *window != number);
+                if !backdrops.is_empty() {
+                    materials.push((number, self.send.clone(), backdrops));
+                }
+            });
             Ok(())
         }
         /// Move the drag preview's panel to where `drag` puts it, drawing
@@ -1596,6 +1620,15 @@ mod macos {
             for (_, panel) in self.shown.drain(..) {
                 release(panel);
             }
+            self.forget_materials();
+        }
+        /// None of its panels shows a material any more.
+        fn forget_materials(&self) {
+            let _ = MATERIALS.try_with(|materials| {
+                materials
+                    .borrow_mut()
+                    .retain(|(_, send, _)| !Rc::ptr_eq(send, &self.send));
+            });
         }
     }
     impl Drop for PopupHost {
@@ -1611,7 +1644,22 @@ mod macos {
                     .borrow_mut()
                     .retain(|(_, send)| !Rc::ptr_eq(send, &self.send));
             });
+            self.forget_materials();
         }
+    }
+    /// Each popup panel's material box and corner radius (`Material::report`).
+    type Backdrops = Vec<(Rect, f32)>;
+    /// The materials window `number`'s popup panels show behind them (a
+    /// popup's backdrop, in a window of its own): each one's box in the
+    /// window's coordinates and its corner radius (-1: a popover's arrow
+    /// shapes it), as last placed.
+    pub(crate) fn popup_backdrops(number: isize) -> Vec<(Rect, f32)> {
+        MATERIALS.with(|materials| {
+            (materials.borrow().iter())
+                .filter(|(window, ..)| *window == number)
+                .flat_map(|(_, _, backdrops)| backdrops.iter().copied())
+                .collect()
+        })
     }
 
     #[cfg(test)]
@@ -1647,6 +1695,21 @@ mod macos {
             assert!(material(chip(), true).is_none());
             // Opaque: nothing shows behind it.
             assert!(material(chip().blur(24.).bg(rgb(0x202020)), true).is_none());
+        }
+
+        /// What a popup's material reports as its window's backdrop
+        /// (`popup_backdrops`): its rounded box; a popover's arrow, a mask,
+        /// reports -1 as a masked backdrop layer does.
+        #[test]
+        fn a_popups_material_reports_its_box_and_corner_radius() {
+            let mut blurred = material(chip().blur(24.), true).expect("a material");
+            assert_eq!(blurred.report(), (blurred.rect, 8.));
+            let (x, y, w, h) = (blurred.rect.x, blurred.rect.y, 120., 28.);
+            blurred.arrow = Some([(x + 50., y), (x + 60., y - 10.), (x + 70., y)]);
+            let (bounds, radius) = blurred.report();
+            assert_eq!(radius, -1.);
+            assert_eq!((bounds.y, bounds.height), (y - 10., h + 10.));
+            assert_eq!(bounds.width, w);
         }
 
         #[test]

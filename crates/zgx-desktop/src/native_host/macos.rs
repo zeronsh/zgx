@@ -1522,6 +1522,26 @@ pub struct BackdropReport {
     /// The blur's radius, as its filter holds it.
     pub blur: Option<f64>,
 }
+/// The materials behind the popup windows over `parent`'s window, as
+/// `BackdropReport`s (`NativeDiagnostics::backdrops`).
+fn popup_backdrops(parent: &NSView) -> Vec<BackdropReport> {
+    let Some(window) = parent.window() else {
+        return Vec::new();
+    };
+    crate::popup_window::popup_backdrops(window.windowNumber())
+        .into_iter()
+        .map(|(frame, radius)| BackdropReport {
+            hidden: false,
+            frame,
+            alpha: 1.,
+            corner_radius: radius as f64,
+            masks: Vec::new(),
+            index: usize::MAX,
+            class: "NSVisualEffectView".into(),
+            blur: None,
+        })
+        .collect()
+}
 fn masks_of(cuts: &[Retained<CutView>], zoom: f32) -> Vec<(Rect, f64)> {
     cuts.iter()
         .filter_map(|cut| {
@@ -1577,7 +1597,10 @@ impl NativeDiagnostics {
         })
         .unwrap_or_default()
     }
-    /// Each backdrop blur the window shows.
+    /// Each backdrop blur the window shows, and AppKit's material behind
+    /// each translucent popup it shows in a window of its own (a menu past
+    /// its edge): class `NSVisualEffectView`, above all of the window's
+    /// (`index` `usize::MAX`).
     pub fn backdrops(&self) -> Vec<BackdropReport> {
         self.with(|shared| {
             let parent = shared.parent.as_ref().unwrap();
@@ -1622,6 +1645,7 @@ impl NativeDiagnostics {
                         blur,
                     }
                 })
+                .chain(popup_backdrops(parent))
                 .collect()
         })
         .unwrap_or_default()
