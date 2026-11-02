@@ -257,6 +257,7 @@ api! {
     fn webkit_web_view_evaluate_javascript(Ptr, *const c_char, isize, *const c_char, *const c_char, Ptr, Option<unsafe extern "C" fn(Ptr, Ptr, Ptr)>, Ptr);
     fn webkit_web_view_evaluate_javascript_finish(Ptr, Ptr, *mut *mut GError) -> Ptr;
     fn webkit_web_view_set_zoom_level(Ptr, f64);
+    fn webkit_web_view_get_zoom_level(Ptr) -> f64;
     fn webkit_web_view_get_inspector(Ptr) -> Ptr;
     fn webkit_web_inspector_show(Ptr);
     fn webkit_web_inspector_detach(Ptr);

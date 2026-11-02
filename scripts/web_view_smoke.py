@@ -367,6 +367,56 @@ def print_checks(session):
     return done
 
 
+def drop_checks(session):
+    """Drags into the page, as a browser's: the page's card dragged onto
+    its zone drops there with the data the page gave it; on X11, a file
+    another app drags onto the zone drops as a `File`."""
+    def dropped(after):
+        return [m[0] for m in session.messages() if "dropped" in m[0]][after:]
+    session.xdo("mousemove", "--window", session.window, 515, 310)
+    session.xdo("mousedown", "1")
+    for x, y in ((520, 320), (510, 340), (495, 355), (490, 365)):
+        session.xdo("mousemove", "--window", session.window, x, y)
+        time.sleep(.15)
+    time.sleep(.3)
+    session.xdo("mouseup", "1")
+    first = session.wait(lambda: dropped(0), "the card never dropped on the zone")[0]
+    if first["dropped"] != "card-1":
+        raise AssertionError(f"the zone took {first}")
+    checks = {"card": first["dropped"]}
+    if session.wayland:
+        return checks
+    # A file from another app (GTK's drag source, `native_file_source.py`).
+    path = session.output.resolve() / "dropped.txt"
+    path.write_text("dropped into the page\n")
+    source = subprocess.Popen([sys.executable, str(pathlib.Path(__file__).with_name("native_file_source.py")), str(path)],
+                              env=session.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        def source_window():
+            found = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^zgx file source$"], env=session.env,
+                                   capture_output=True, text=True)
+            return found.stdout.split()[0] if found.returncode == 0 and found.stdout.strip() else None
+        window = session.wait(source_window, "the file source never opened", 10)
+        # Beside the probe, clear of it.
+        session.xdo("windowmove", window, 900, 100)
+        time.sleep(.5)
+        session.xdo("mousemove", "--window", window, 80, 60)
+        session.xdo("mousedown", "1")
+        for x, y in ((110, 60), (160, 90), (60, 160)):
+            session.xdo("mousemove", "--window", window, x, y)
+            time.sleep(.15)
+        session.xdo("mousemove", "--window", session.window, 490, 365)
+        time.sleep(.6)
+        session.xdo("mouseup", "1")
+        second = session.wait(lambda: dropped(1), "the file never dropped on the zone", 15)[0]
+        if second["dropped_files"] != [["dropped.txt", "text/plain", path.stat().st_size]]:
+            raise AssertionError(f"the zone took {second}")
+        checks["file"] = second["dropped_files"][0]
+    finally:
+        stop(source)
+    return checks
+
+
 def page_checks(session, ime, transparent=False, unaccelerated=False):
     session.wait(lambda: session.lines("EVAL "), "the page never loaded", 30)
     colours = dict(COLOURS)
@@ -394,6 +444,7 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     if not session.wayland:
         checks["cursors"] = cursor_checks(session)
     checks["dragged out"] = drag_checks(session)
+    checks["dropped in"] = drop_checks(session)
     session.click(160, 180)
     click = session.wait(lambda: [m for m in session.messages() if "click" in m[0]], "the click never reached the page")[0]
     if click[0]["click"] != [100, 40] or click[1] != "https://probe.zgx.test" or not click[2]:
