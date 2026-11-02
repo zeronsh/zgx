@@ -263,6 +263,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     ui.set(
         "router",
         lua.create_function(|lua, spec: mlua::Value| {
+            crate::reloads::top_level(lua, "ui.router");
             let router = made(lua)?.call::<Table>(spec.clone())?;
             if let mlua::Value::Table(spec) = spec {
                 let routers = match lua.named_registry_value::<Table>(ROUTERS) {

@@ -1111,6 +1111,66 @@ impl Session {
                 };
                 Ok::<_, String>((text, data))
             })(),
+            "reloads" => {
+                let reports = self.0.host.reload_report();
+                if reports.is_empty() {
+                    return Reply::Now(ok(
+                        "no reloads recorded: the host records them while it watches its \
+                         files, from the load after it began"
+                            .into(),
+                        Value::List(Vec::new().into()),
+                    ));
+                }
+                // Paths as the app names them: beside its script.
+                let base = self.0.host.app_dir();
+                let shown = |path: &std::path::Path| -> String {
+                    base.as_deref()
+                        .and_then(|base| path.strip_prefix(base).ok())
+                        .unwrap_or(path)
+                        .display()
+                        .to_string()
+                };
+                let mut lines = vec![
+                    "what each reload would have kept (nothing is kept yet: every reload \
+                     loads everything again)"
+                        .to_string(),
+                ];
+                let mut data = Vec::new();
+                for r in &reports {
+                    let changed: Vec<String> = r.changed.iter().map(|p| shown(p)).collect();
+                    let ran: Vec<String> = r.ran.iter().map(|p| shown(p)).collect();
+                    lines.push(match &r.why {
+                        None => format!(
+                            "#{} partial: {} run again, {} kept (changed {})",
+                            r.number,
+                            ran.join(", "),
+                            r.kept,
+                            changed.join(", ")
+                        ),
+                        Some(why) => {
+                            format!("#{} full: {why} (changed {})", r.number, changed.join(", "))
+                        }
+                    });
+                    let list = |items: &[String]| {
+                        Value::List(
+                            items
+                                .iter()
+                                .map(|s| Value::from(s.as_str()))
+                                .collect::<Vec<_>>()
+                                .into(),
+                        )
+                    };
+                    data.push(Value::record([
+                        ("number", Value::Num(r.number as f64)),
+                        ("path", Value::from(r.path)),
+                        ("changed", list(&changed)),
+                        ("ran", list(&ran)),
+                        ("kept", Value::Num(r.kept as f64)),
+                        ("why", r.why.as_deref().map_or(Value::Nil, Value::from)),
+                    ]));
+                }
+                return Reply::Now(ok(lines.join("\n"), Value::List(data.into())));
+            }
             "mark" => {
                 let name = text("name").unwrap_or_else(|| "mark".into());
                 let after = zgx::trace::frame_index();

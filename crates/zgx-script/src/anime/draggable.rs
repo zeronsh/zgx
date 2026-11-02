@@ -488,6 +488,7 @@ pub(crate) fn create(
     params: Option<Table>,
 ) -> mlua::Result<DraggableUd> {
     let env = crate::node::env(lua)?;
+    crate::reloads::top_level(lua, "anime.createDraggable");
     let engine = env.engine.clone();
     let owner = env.vm.clone();
     drop(env);

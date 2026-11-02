@@ -443,6 +443,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   contributions        each plugin's targets: where, live matches, error (JSON)
   elements             named elements by the context they read, for plugins (JSON)
   frames [n] [--runs N] [--all] [--since MARK|FRAME] [--until MARK|FRAME] [--summary] [--keep N]
+  reloads              what each hot reload would have kept (#1369)
   mark [name]          switch [name] [on|off]
   wait <target> [--text T] [--gone] [--timeout MS]
   snapshot <target> [--width PX] [--out file.png]
@@ -894,6 +895,12 @@ const TOOLS: &[Tool] = &[
             ("keep", "number", false),
         ],
         "The last frames that did anything: each phase's time (update, layout, text, paint, present…), the GPU's own time, the states written, the runs they caused and their costs (the costliest `runs`, default 5, or `all`), and the engine's notes on why (a scroll repainted rather than copied, a wait for a later refresh). `since` a mark (zgx_mark) or a frame number reads what followed, `until` another stops there (an interaction between two marks); `summary` answers what those frames cost together instead: their count and pacing, the work's median, p90, p95, p99 and most, the input events they took and the work per event (a drag's moves), and each phase's spread. Each frame says its input events. `keep` sets how many frames are kept (default 480). Warns first when the window isn't presenting.",
+    ),
+    (
+        "zgx_reloads",
+        "reloads",
+        &[],
+        "What each hot reload since the app began watching its files would have kept, were reloads to keep the modules a save didn't change (nothing is kept yet: every reload loads everything again): the files that changed, then `partial` with the modules that would run again (what changed and what requires it) and how many would be kept, or `full` and why (a plugin, a global set or a task started at a module's top level, a file that isn't a module). A line each, then the same as JSON.",
     ),
     (
         "zgx_mark",
