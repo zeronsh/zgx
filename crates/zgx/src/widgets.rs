@@ -1551,6 +1551,9 @@ pub(crate) struct UiStorage {
     observed_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
     observed_bounds: RefCell<crate::scene::NodeMap<Signal<Rect>>>,
     observed_visibility: RefCell<crate::scene::NodeMap<Signal<bool>>>,
+    /// Scroll views' insets kept clear scrolling into view
+    /// (`set_scroll_padding`).
+    scroll_padding: RefCell<crate::scene::NodeMap<crate::scene::Insets>>,
     /// Run once after the next frame preparation's layout.
     after_layout: RefCell<Vec<Box<dyn FnOnce()>>>,
     /// Run after every layout pass that changes the layout, by owning node.
@@ -1816,6 +1819,7 @@ impl Ui {
             observed_sizes: RefCell::default(),
             observed_bounds: RefCell::default(),
             observed_visibility: RefCell::default(),
+            scroll_padding: RefCell::default(),
             after_layout: RefCell::new(Vec::new()),
             layout_listeners: RefCell::default(),
             containers: RefCell::default(),
@@ -3263,6 +3267,52 @@ impl Ui {
         // Whether the host draws the caret, now that it is laid out.
         crate::caret_blink::settle(self);
         Ok(())
+    }
+    /// Keep `padding` clear inside scroll view `viewport` (its root) when
+    /// something scrolls into view there (focus, find, `scroll_into_view`),
+    /// as CSS's `scroll-padding`: a bar floating over its edge (a composer
+    /// at its bottom) covers that much. Zero insets remove it.
+    pub fn set_scroll_padding(&self, viewport: NodeId, padding: crate::scene::Insets) {
+        // The node scrolling its content: `viewport`, or the one inside it
+        // (an element's scroll keeps a viewport within its box).
+        let viewport = {
+            let scene = self.scene.borrow();
+            let scrolls = |id: NodeId| {
+                scene.contains(id)
+                    && scene
+                        .children(id)
+                        .iter()
+                        .any(|child| scene.is_scroll_content(*child))
+            };
+            match scrolls(viewport) {
+                true => viewport,
+                false => scene
+                    .children(viewport)
+                    .iter()
+                    .copied()
+                    .find(|child| scrolls(*child))
+                    .unwrap_or(viewport),
+            }
+        };
+        let mut paddings = self.storage.scroll_padding.borrow_mut();
+        if padding == crate::scene::Insets::default() {
+            paddings.remove(&viewport);
+            return;
+        }
+        // Those of removed views go as more are set: none holds one alive.
+        if paddings.len() >= 16 && paddings.len().is_power_of_two() {
+            let scene = self.scene.borrow();
+            paddings.retain(|id, _| scene.contains(*id));
+        }
+        paddings.insert(viewport, padding);
+    }
+    /// What `set_scroll_padding` keeps clear in `viewport`.
+    pub(crate) fn scroll_padding(&self, viewport: NodeId) -> crate::scene::Insets {
+        let paddings = self.storage.scroll_padding.borrow();
+        match paddings.is_empty() {
+            true => crate::scene::Insets::default(),
+            false => paddings.get(&viewport).copied().unwrap_or_default(),
+        }
     }
     /// Go on past layout that doesn't settle, rather than return
     /// [`LayoutFeedbackError`]: the layout stands as the last pass left it,

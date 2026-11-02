@@ -381,8 +381,27 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
             let wheel_offset = offset.clone();
             let wheel_size = size.clone();
             let wheel_extent = extent.clone();
+            let weak = ui.downgrade();
             ui.on_event(root, false, move |cx| {
                 if cx.phase == EventPhase::Capture || cx.default_prevented() {
+                    return;
+                }
+                // Focus moving to a row's control (Tab past the rows in
+                // view, onto one built ahead of them): scrolled to it.
+                // A list with keyboard navigation places its focused row
+                // itself (`Navigation`).
+                if matches!(cx.event, InputEvent::Focus)
+                    && cx.target != root
+                    && !keyboard_navigation
+                {
+                    crate::compose::reveal_in_list(
+                        &weak,
+                        cx.target,
+                        viewport,
+                        &wheel_offset,
+                        &wheel_extent,
+                        &wheel_size,
+                    );
                     return;
                 }
                 if let InputEvent::Scroll { delta_y, .. } = cx.event {

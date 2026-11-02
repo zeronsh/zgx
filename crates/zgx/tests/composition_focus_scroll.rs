@@ -157,3 +157,41 @@ fn redirected_focus_does_not_reveal_stale_event_target() {
     assert_eq!(ui.input.focused(), Some(first));
     assert_eq!(offset.get(), 0.);
 }
+
+#[test]
+fn focus_keeps_the_scroll_padding_clear() {
+    // A composer 30 points tall floats over the view's bottom: a control
+    // tabbed to comes in above it, and one above the view below a 20-point
+    // bar over its top.
+    let mut ui = Ui::new(400., 300.);
+    let offset = ui.signal(0.);
+    let view = ui.mount(
+        scroll(offset.clone())
+            .w(200.)
+            .h(100.)
+            .scroll_padding(zgx::scene::Insets {
+                top: 20.,
+                bottom: 30.,
+                ..Default::default()
+            })
+            .children((0..6).map(|n| button().h(40.).id(n.to_string()))),
+    );
+    // 0..40 and 40..80 show above 70 (100 less 30); 80..120 doesn't.
+    tab(&mut ui, false);
+    tab(&mut ui, false);
+    assert_eq!(offset.get(), 10.);
+    tab(&mut ui, false);
+    assert_eq!(ui.input.focused(), view.find("2"));
+    assert_eq!(offset.get(), 50.);
+    // Back to the first: at 20, below the bar, as far as the view goes.
+    tab(&mut ui, true);
+    tab(&mut ui, true);
+    assert_eq!(ui.input.focused(), view.find("0"));
+    assert_eq!(offset.get(), 0.);
+    // A control the view shows whole, under the bar: down to 20.
+    offset.set(30.);
+    ui.prepare_frame();
+    tab(&mut ui, false);
+    assert_eq!(ui.input.focused(), view.find("1"));
+    assert_eq!(offset.get(), 20.);
+}

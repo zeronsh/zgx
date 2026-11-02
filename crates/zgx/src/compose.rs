@@ -1425,6 +1425,17 @@ impl View {
         self.mounted.push(Box::new(f));
         self
     }
+    /// For a scroll view (`scroll`, `scroll_x`): keep `padding` clear inside
+    /// it when something scrolls into view there (a focused control, a find
+    /// match), as CSS's `scroll-padding`: what floats over its edges (a
+    /// composer at its bottom, a title bar at its top) covers that much.
+    pub fn scroll_padding(self, padding: crate::scene::Insets) -> Self {
+        self.on_mount(move |handle| {
+            if let Some(ui) = handle.ui.upgrade() {
+                ui.set_scroll_padding(handle.node, padding);
+            }
+        })
+    }
     /// Make this view a container its descendants' queries
     /// (`View::when_container`) read, as CSS's `container-type: size`.
     pub fn container(mut self) -> Self {
@@ -2856,8 +2867,26 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
             let wheel_offset = offset.clone();
             let wheel_size = size.clone();
             let wheel_extent = extent.clone();
+            let weak = ui.downgrade();
             ui.on_event(root, false, move |cx| {
                 if cx.phase == EventPhase::Capture || cx.default_prevented() {
+                    return;
+                }
+                // Focus moving to a row's control: scrolled to it.
+                // A list with keyboard navigation places its focused row
+                // itself (`Navigation`).
+                if matches!(cx.event, InputEvent::Focus)
+                    && cx.target != root
+                    && !keyboard_navigation
+                {
+                    reveal_in_list(
+                        &weak,
+                        cx.target,
+                        viewport,
+                        &wheel_offset,
+                        &wheel_extent,
+                        &wheel_size,
+                    );
                     return;
                 }
                 if let InputEvent::Scroll { delta_y, .. } = cx.event {
@@ -2865,10 +2894,11 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     if !delta_y.is_finite() || crate::zoom::wheel_zooms() {
                         return;
                     }
+                    // Read untracked: a handler runs outside any effect.
                     let before = wheel_offset.get();
-                    let after = (before + delta_y)
-                        .max(0.0)
-                        .min((wheel_extent.get() - wheel_size.get().1).max(0.0));
+                    let limit = wheel_extent.with_untracked(|extent| *extent)
+                        - wheel_size.with_untracked(|size| size.1);
+                    let after = (before + delta_y).max(0.0).min(limit.max(0.0));
                     if before != after {
                         wheel_offset.set(after);
                         cx.scrolled(false);
@@ -5640,6 +5670,88 @@ impl ListStretch {
         );
     }
 }
+/// How far scroll view `viewport` (the node holding its content) moves its
+/// content along its axis so focused `target` inside shows: the least
+/// (CSS's `nearest`), the view's `scroll_padding` kept clear; 0 where it
+/// shows, or spans the view. None if either is gone.
+pub(crate) fn focus_movement(
+    ui: &Ui,
+    target: NodeId,
+    viewport: NodeId,
+    horizontal: bool,
+) -> Option<f64> {
+    let padding = ui.scroll_padding(viewport);
+    let scene = ui.scene.borrow();
+    if !scene.contains(target) || !scene.contains(viewport) {
+        return None;
+    }
+    let target = scene.bounds(target);
+    let visible = scene.bounds(viewport);
+    let (target_start, target_size, visible_start, visible_size) = if horizontal {
+        let size = (visible.width - padding.left - padding.right).max(0.);
+        (target.x, target.width, visible.x + padding.left, size)
+    } else {
+        let size = (visible.height - padding.top - padding.bottom).max(0.);
+        (target.y, target.height, visible.y + padding.top, size)
+    };
+    let start_delta = target_start as f64 - visible_start as f64;
+    let end_delta =
+        target_start as f64 + target_size as f64 - visible_start as f64 - visible_size as f64;
+    Some(if start_delta < 0. && end_delta > 0. {
+        0. // Oversized targets already spanning the viewport stay put.
+    } else if start_delta < 0. {
+        if target_size > visible_size {
+            end_delta
+        } else {
+            start_delta
+        }
+    } else if end_delta > 0. {
+        if target_size > visible_size {
+            start_delta
+        } else {
+            end_delta
+        }
+    } else {
+        0.
+    })
+}
+/// A list's `Focus` handler: its offset moved so focused `target` (a
+/// control in a row) shows in `viewport`, its extent and size bounding it.
+/// Not under `focus_in_place`, nor where focus moved on. Out of the list's
+/// event handler, which every wheel step runs.
+#[cold]
+#[inline(never)]
+pub(crate) fn reveal_in_list(
+    weak: &crate::widgets::WeakUi,
+    target: NodeId,
+    viewport: NodeId,
+    offset: &Signal<f32>,
+    extent: &Signal<f32>,
+    size: &Signal<(f32, f32)>,
+) {
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    if !ui.input.focus_scrolls() {
+        return;
+    }
+    // Laid out first: a row just built has no place yet.
+    ui.prepare_frame();
+    if ui.input.focused() != Some(target) {
+        return;
+    }
+    let Some(movement) = focus_movement(&ui, target, viewport, false) else {
+        return;
+    };
+    if movement != 0. {
+        let limit =
+            (extent.with_untracked(|extent| *extent) - size.with_untracked(|size| size.1)).max(0.0);
+        let position = (offset.get() as f64 + movement).clamp(0., limit as f64) as f32;
+        offset.set(position);
+        // Placed there now, for a scroll view around the list to see.
+        ui.prepare_frame();
+    }
+}
 #[allow(clippy::too_many_arguments)]
 fn mount_scroll(
     ui: &mut Ui,
@@ -5710,6 +5822,9 @@ fn mount_scroll(
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            if !ui.input.focus_scrolls() {
+                return;
+            }
             // Direct focus calls need the same settled allocation as native input.
             // World bounds include transforms immediately, so an outer scroller
             // observes the translation applied by an inner bubbling handler.
@@ -5718,39 +5833,8 @@ fn mount_scroll(
             if ui.input.focused() != Some(cx.target) {
                 return;
             }
-            let movement = {
-                let scene = ui.scene.borrow();
-                if !scene.contains(cx.target) || !scene.contains(viewport) {
-                    return;
-                }
-                let target = scene.bounds(cx.target);
-                let visible = scene.bounds(viewport);
-                let (target_start, target_size, visible_start, visible_size) = if horizontal {
-                    (target.x, target.width, visible.x, visible.width)
-                } else {
-                    (target.y, target.height, visible.y, visible.height)
-                };
-                let start_delta = target_start as f64 - visible_start as f64;
-                let end_delta = target_start as f64 + target_size as f64
-                    - visible_start as f64
-                    - visible_size as f64;
-                if start_delta < 0. && end_delta > 0. {
-                    0. // Oversized targets already spanning the viewport stay put.
-                } else if start_delta < 0. {
-                    if target_size > visible_size {
-                        end_delta
-                    } else {
-                        start_delta
-                    }
-                } else if end_delta > 0. {
-                    if target_size > visible_size {
-                        start_delta
-                    } else {
-                        end_delta
-                    }
-                } else {
-                    0.
-                }
+            let Some(movement) = focus_movement(&ui, cx.target, viewport, horizontal) else {
+                return;
             };
             let limit =
                 (main_size(wheel_extent.get()) as f64 - main_size(wheel_size.get()) as f64).max(0.);
@@ -7101,8 +7185,14 @@ impl NodeHandle {
         true
     }
     /// Move keyboard focus to the node, or to the first focusable node inside
-    /// it (a field's editor). False when nothing there can take focus.
+    /// it (a field's editor), scrolled into view in the scroll views holding
+    /// it. False when nothing there can take focus.
     pub fn focus(&self) -> bool {
+        self.focus_with(true)
+    }
+    /// `focus`, `scroll` false leaving the scroll views holding it where they
+    /// are (as the web's `preventScroll`).
+    pub fn focus_with(&self, scroll: bool) -> bool {
         let Some(ui) = self.ui.upgrade() else {
             return false;
         };
@@ -7112,7 +7202,12 @@ impl NodeHandle {
             if !ui.scene.borrow().contains(node) || !ui.scene.borrow().layout_visible(node) {
                 continue;
             }
-            if ui.input.focused() == Some(node) || ui.input.focus(&ui.scene, Some(node)) {
+            if ui.input.focused() == Some(node)
+                || match scroll {
+                    true => ui.input.focus(&ui.scene, Some(node)),
+                    false => ui.input.focus_in_place(&ui.scene, Some(node)),
+                }
+            {
                 return true;
             }
             pending.extend(ui.scene.borrow().children(node).iter().rev().copied());

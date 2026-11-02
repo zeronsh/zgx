@@ -2513,6 +2513,7 @@ fn kind_view(
             follow,
             scrollbar,
             contain,
+            padding,
         } => {
             let offset = match offset {
                 Some(offset) => bridge(need(&mut cx), offset, number, |x| Value::Num(x as f64)),
@@ -2531,6 +2532,10 @@ fn kind_view(
                 view.overscroll_contain()
             } else {
                 view
+            };
+            let view = match padding {
+                Some(padding) => view.scroll_padding(**padding),
+                None => view,
             };
             if *scrollbar {
                 view.scrollbar(true)
@@ -6476,6 +6481,9 @@ fn list_edges(mut list: View, rare: &crate::node::ListRare, vm: &Rc<Vm>) -> View
     }
     if rare.contain {
         list = list.overscroll_contain();
+    }
+    if let Some(padding) = rare.scroll_padding {
+        list = list.scroll_padding(padding);
     }
     if let Some(at_end) = &rare.at_end {
         let at_end = at_end.clone();
