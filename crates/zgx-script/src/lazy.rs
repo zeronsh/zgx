@@ -64,6 +64,17 @@ impl Lazy {
     }
 }
 
+/// Whether `name` is a global zgx makes the first time a script reads it
+/// (`anime`): what reading it sets is zgx's, not the script's.
+pub(crate) fn is_global(lua: &Lua, name: &str) -> bool {
+    lua.app_data_ref::<Lazy>().is_some_and(|lazy| {
+        lazy.0
+            .borrow()
+            .iter()
+            .any(|m| m.global && m.names.contains(&name))
+    })
+}
+
 /// `table`'s string keys (checking what a module made, in debug builds).
 fn keys(table: &Table) -> std::collections::BTreeSet<String> {
     table

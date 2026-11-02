@@ -4487,6 +4487,8 @@ pub(crate) fn install_plugins(lua: &Lua, ui: &Table) -> mlua::Result<()> {
             let env = env(lua)?;
             let replaced = module_override(&env, &table)?;
             env.overrides.borrow_mut().push(replaced);
+            drop(env);
+            crate::reloads::per_load(lua, "ui.override");
             Ok(())
         })?,
     )?;
@@ -4505,10 +4507,14 @@ pub(crate) fn install_plugins(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                         )));
                     }
                     env.contributions.borrow_mut().push((slot, owner, node));
+                    drop(env);
+                    crate::reloads::per_load(lua, "ui.contribute");
                 }
                 (mlua::Value::Table(table), None) => {
                     let hook = hook_contribution(&env, &table, owner)?;
                     env.hooks.borrow_mut().push(hook);
+                    drop(env);
+                    crate::reloads::per_load(lua, "ui.contribute");
                 }
                 _ => {
                     return Err(mlua::Error::runtime(
@@ -4526,6 +4532,8 @@ pub(crate) fn install_plugins(lua: &Lua, ui: &Table) -> mlua::Result<()> {
             let env = env(lua)?;
             let hook = hook_filter(&env, &table, env.owner.clone())?;
             env.hooks.borrow_mut().push(hook);
+            drop(env);
+            crate::reloads::per_load(lua, "ui.filter");
             Ok(())
         })?,
     )?;
@@ -5643,6 +5651,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(scope) => scope.mounted.borrow_mut().push(f),
                 None => env.mounted.borrow_mut().push(f),
             }
+            drop(env);
+            crate::reloads::per_load(lua, "ui.on_mount");
             Ok(())
         })?,
     )?;
@@ -6399,8 +6409,28 @@ pub(crate) fn retain(env: &Env, resource: Box<dyn Any>) {
     };
     match &*scope {
         Some(scope) => scope.retained.borrow_mut().push(resource),
+        // While its host records its loads, the module running owns it.
+        None if crate::reloads::recording() => retain_in_module(env, resource),
         None => env.retained.borrow_mut().push(resource),
     }
+}
+/// `resource`, made at a top level while its host records its loads: the
+/// module running owns it (a partial reload drops it as that module runs
+/// again), else the script does. Out of line: `retain` keeps its shape.
+#[cold]
+#[inline(never)]
+fn retain_in_module(env: &Env, resource: Box<dyn Any>) {
+    let resource = match env.vm.upgrade() {
+        Some(vm) => match vm.lua.app_data_ref::<crate::reloads::Tracked>() {
+            Some(tracked) => match tracked.retain(resource) {
+                Ok(()) => return,
+                Err(resource) => resource,
+            },
+            None => resource,
+        },
+        None => resource,
+    };
+    env.retained.borrow_mut().push(resource)
 }
 
 /// What `scroll_padding` keeps clear: as given, or what a state or a

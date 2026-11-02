@@ -1131,25 +1131,32 @@ impl Session {
                         .to_string()
                 };
                 let mut lines = vec![
-                    "what each reload would have kept (nothing is kept yet: every reload \
-                     loads everything again)"
+                    "each reload's path: partial (the app's VM kept, what changed and what \
+                     requires it run again) or full (everything loads again), and why"
                         .to_string(),
                 ];
                 let mut data = Vec::new();
                 for r in &reports {
                     let changed: Vec<String> = r.changed.iter().map(|p| shown(p)).collect();
                     let ran: Vec<String> = r.ran.iter().map(|p| shown(p)).collect();
+                    // A reload the host asked for names no file.
+                    let files = match changed.is_empty() {
+                        true => String::new(),
+                        false => format!(" (changed {})", changed.join(", ")),
+                    };
                     lines.push(match &r.why {
                         None => format!(
-                            "#{} partial: {} run again, {} kept (changed {})",
+                            "#{} partial{}: {} run again, {} kept{files}",
                             r.number,
+                            if r.taken {
+                                ""
+                            } else {
+                                " (not taken: ZGX_RELOAD=partial takes it)"
+                            },
                             ran.join(", "),
                             r.kept,
-                            changed.join(", ")
                         ),
-                        Some(why) => {
-                            format!("#{} full: {why} (changed {})", r.number, changed.join(", "))
-                        }
+                        Some(why) => format!("#{} full: {why}{files}", r.number),
                     });
                     let list = |items: &[String]| {
                         Value::List(
@@ -1167,6 +1174,7 @@ impl Session {
                         ("ran", list(&ran)),
                         ("kept", Value::Num(r.kept as f64)),
                         ("why", r.why.as_deref().map_or(Value::Nil, Value::from)),
+                        ("taken", Value::Bool(r.taken)),
                     ]));
                 }
                 return Reply::Now(ok(lines.join("\n"), Value::List(data.into())));

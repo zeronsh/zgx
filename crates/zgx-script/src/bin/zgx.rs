@@ -443,7 +443,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   contributions        each plugin's targets: where, live matches, error (JSON)
   elements             named elements by the context they read, for plugins (JSON)
   frames [n] [--runs N] [--all] [--since MARK|FRAME] [--until MARK|FRAME] [--summary] [--keep N]
-  reloads              what each hot reload would have kept (#1369)
+  reloads              each hot reload's path, partial or full, and why
   mark [name]          switch [name] [on|off]
   wait <target> [--text T] [--gone] [--timeout MS]
   snapshot <target> [--width PX] [--out file.png]
@@ -900,7 +900,7 @@ const TOOLS: &[Tool] = &[
         "zgx_reloads",
         "reloads",
         &[],
-        "What each hot reload since the app began watching its files would have kept, were reloads to keep the modules a save didn't change (nothing is kept yet: every reload loads everything again): the files that changed, then `partial` with the modules that would run again (what changed and what requires it) and how many would be kept, or `full` and why (a plugin, a global set or a task started at a module's top level, a file that isn't a module). A line each, then the same as JSON.",
+        "Each hot reload since the app began watching its files: the files that changed, then `partial` (the app's VM kept: the modules that ran again, what changed and what requires it, and how many were kept) or `full` (everything loaded again) and why; a partial reload is taken only with ZGX_RELOAD=partial in the app's environment, else it's what the reload would have done (a plugin, a global set or a task started at a module's top level, a command or on_mount a kept module declares, a file that isn't a module, a template swapped whole, a failed reload). A line each, then the same as JSON.",
     ),
     (
         "zgx_mark",

@@ -1,13 +1,18 @@
-//! What a reload would keep (#1369, phase a1: a shadow of it). While a host
-//! watches its files, each load records its modules: what each requires,
-//! the globals its top level sets, and what it starts there that a kept
-//! virtual machine couldn't carry over yet (`top_level`). Before the next load
-//! replaces that record, the reload says what a reload keeping the modules a
-//! save didn't change would have done, and why (`zgx inspect reloads`).
-//! Nothing is kept yet: every reload still loads everything again.
+//! What a reload keeps (#1369). While a host watches its files, each load
+//! records its modules: what each requires, the globals its top level sets,
+//! what it starts there that a kept virtual machine couldn't carry over yet
+//! (`top_level`), and what it declares for each load (`per_load`). Before
+//! the next load, the reload decides from that record (`judge`): keep the
+//! app's virtual machine and the modules a save didn't change, running
+//! again only what changed and what requires it (a partial reload), or load
+//! everything again, and why (`zgx inspect reloads`).
 //!
-//! A host that never watches records nothing.
+//! Until it's proven on real apps a reload keeps nothing unless asked
+//! (`ZGX_RELOAD=partial`, `ScriptHost::reload_partially`): otherwise every
+//! reload loads everything again, and the record says what it would have
+//! kept. A host that never watches records nothing.
 use std::{
+    any::Any,
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
@@ -51,6 +56,9 @@ pub(crate) fn start(host: &Rc<crate::Inner>) -> Rc<Reloads> {
     }
     let reloads = Rc::new(Reloads::default());
     reloads.on.set(true);
+    reloads
+        .keep
+        .set(zgx::env::var("ZGX_RELOAD").is_ok_and(|v| v == "partial"));
     HOSTS.with_borrow_mut(|hosts| {
         // Hosts gone: their records go with them.
         hosts.retain(|(h, _)| h.strong_count() > 0);
@@ -59,18 +67,96 @@ pub(crate) fn start(host: &Rc<crate::Inner>) -> Rc<Reloads> {
     reloads
 }
 
-/// The tracker of a VM whose loads are recorded (its app data).
-pub(crate) struct Tracked(pub Rc<Tracker>);
+/// The app's require cache: each module's path and what it returned
+/// (`None` while it runs).
+pub(crate) type Cache = Rc<RefCell<HashMap<PathBuf, Option<mlua::Value>>>>;
+
+/// What a VM whose loads are recorded keeps for a partial reload (its app
+/// data): the tracker, its require cache, and what each module's top level
+/// made to last as long as it (an effect, a timer: `crate::node::retain`),
+/// which goes when the module runs again.
+pub(crate) struct Tracked {
+    pub tracker: Rc<Tracker>,
+    pub cache: RefCell<Option<Cache>>,
+    owned: RefCell<HashMap<PathBuf, Vec<Box<dyn Any>>>>,
+}
+
+/// The modules' resources set aside while they run again (`Tracked::set_aside`).
+pub(crate) type SetAside = Vec<(PathBuf, Vec<Box<dyn Any>>)>;
+
+impl Tracked {
+    pub fn new(tracker: Rc<Tracker>) -> Self {
+        Self {
+            tracker,
+            cache: RefCell::default(),
+            owned: RefCell::default(),
+        }
+    }
+    /// Keeps `resource` as long as the module whose top level is running,
+    /// or hands it back when none is.
+    pub fn retain(&self, resource: Box<dyn Any>) -> Result<(), Box<dyn Any>> {
+        match self.tracker.current() {
+            Some(module) => {
+                self.owned
+                    .borrow_mut()
+                    .entry(module)
+                    .or_default()
+                    .push(resource);
+                Ok(())
+            }
+            None => Err(resource),
+        }
+    }
+    /// What `modules` made, out of the way of their next run: dropped once
+    /// it succeeds, put back if it fails (`put_back`).
+    pub fn set_aside(&self, modules: &[PathBuf]) -> SetAside {
+        let mut owned = self.owned.borrow_mut();
+        modules
+            .iter()
+            .filter_map(|m| owned.remove(m).map(|r| (m.clone(), r)))
+            .collect()
+    }
+    /// A partial reload failed: what `modules` made as they ran again goes,
+    /// and what they made before comes back.
+    pub fn put_back(&self, modules: &[PathBuf], aside: SetAside) {
+        let made: Vec<_> = {
+            let mut owned = self.owned.borrow_mut();
+            modules.iter().filter_map(|m| owned.remove(m)).collect()
+        };
+        // Dropped outside the borrow: a cleanup may retain again.
+        drop(made);
+        self.owned.borrow_mut().extend(aside);
+    }
+}
 
 /// `api`, called at a top level (no component building, no effect running),
 /// started something nothing carries over to a kept VM yet (a task, an
 /// animation, an `on_open` handler, actions, a router): recorded for the
 /// module running, while its host records its loads. Otherwise one
 /// thread-local read.
+#[inline]
 pub(crate) fn top_level(lua: &mlua::Lua, api: &'static str) {
-    if !RECORDING.get() {
-        return;
+    if RECORDING.get() {
+        record_top_level(lua, api, false);
     }
+}
+
+/// `api`, called at a top level, declared something for this load alone (a
+/// command, a window, a contribution, an `on_mount`): what a module kept
+/// wouldn't declare again. Otherwise one thread-local read.
+#[inline]
+pub(crate) fn per_load(lua: &mlua::Lua, api: &'static str) {
+    if RECORDING.get() {
+        record_top_level(lua, api, true);
+    }
+}
+
+/// `api` was called while its host records its loads: the module running
+/// recorded it, if at a top level (no component building, no effect
+/// running). Out of line: its callers keep their shape.
+#[cold]
+#[inline(never)]
+fn record_top_level(lua: &mlua::Lua, api: &'static str, per_load: bool) {
     let Some(tracked) = lua.app_data_ref::<Tracked>() else {
         return;
     };
@@ -78,7 +164,7 @@ pub(crate) fn top_level(lua: &mlua::Lua, api: &'static str) {
         return;
     };
     if env.scope.borrow().is_none() && env.runtime.running().is_none() {
-        tracked.0.registered(api);
+        tracked.tracker.registered(api, per_load);
     }
 }
 
@@ -91,6 +177,9 @@ pub(crate) struct Module {
     pub unmanaged: Vec<&'static str>,
     /// Globals its top level set (the sandbox's one table, every chunk's).
     pub globals: Vec<String>,
+    /// What its top level declared for each load (a command, a window, an
+    /// `on_mount`), once each: kept, it wouldn't declare it again.
+    pub per_load: Vec<&'static str>,
 }
 
 /// A load's record, as it happens.
@@ -111,6 +200,28 @@ impl Tracker {
         if let Some(app) = &app {
             self.modules.borrow_mut().entry(app.clone()).or_default();
         }
+        *self.app.borrow_mut() = app;
+    }
+    /// A partial load of `app` begins: the modules that `ran` names run
+    /// again and are recorded anew, the others' records kept from `last`.
+    pub fn begin_kept(
+        &self,
+        app: Option<PathBuf>,
+        last: &HashMap<PathBuf, Module>,
+        ran: &[PathBuf],
+    ) {
+        self.stack.borrow_mut().clear();
+        let mut modules = self.modules.borrow_mut();
+        modules.clear();
+        modules.extend(
+            last.iter()
+                .filter(|(path, _)| !ran.contains(path))
+                .map(|(path, module)| (path.clone(), module.clone())),
+        );
+        for path in ran {
+            modules.insert(path.clone(), Module::default());
+        }
+        drop(modules);
         *self.app.borrow_mut() = app;
     }
     /// The module running now: the innermost required, else the app's.
@@ -151,15 +262,21 @@ impl Tracker {
                 .extend(globals);
         }
     }
-    /// The module running started `api` at its top level (`top_level`).
-    pub fn registered(&self, api: &'static str) {
+    /// The module running started `api` at its top level (`top_level`), or
+    /// declared it for this load (`per_load`).
+    pub fn registered(&self, api: &'static str, per_load: bool) {
         let Some(module) = self.current() else {
             return;
         };
         let mut modules = self.modules.borrow_mut();
-        let unmanaged = &mut modules.entry(module).or_default().unmanaged;
-        if !unmanaged.contains(&api) {
-            unmanaged.push(api);
+        let module = modules.entry(module).or_default();
+        let list = if per_load {
+            &mut module.per_load
+        } else {
+            &mut module.unmanaged
+        };
+        if !list.contains(&api) {
+            list.push(api);
         }
     }
     /// What this load recorded.
@@ -186,6 +303,9 @@ pub(crate) struct Reload {
     /// The files that changed, as this load found them.
     pub changed: Vec<PathBuf>,
     pub verdict: Verdict,
+    /// Whether a partial verdict was taken; else it is what the reload
+    /// would have done (no `ZGX_RELOAD=partial`, or another script loaded).
+    pub taken: bool,
 }
 
 /// A host's tracking: on while it watches, and its last reloads.
@@ -193,6 +313,10 @@ pub(crate) struct Reload {
 pub(crate) struct Reloads {
     /// Whether loads are recorded (`ScriptHost::watch`).
     pub on: Cell<bool>,
+    /// Whether a partial verdict is taken (`ZGX_RELOAD=partial`).
+    pub keep: Cell<bool>,
+    /// A partial reload failed: the next one loads everything again.
+    pub failed: Cell<bool>,
     pub tracker: Rc<Tracker>,
     /// The last load's record: what a reload is judged against.
     last: RefCell<Option<HashMap<PathBuf, Module>>>,
@@ -215,16 +339,50 @@ impl Reloads {
         if self.on.get() {
             *self.last.borrow_mut() = Some(self.tracker.modules());
             self.plugins.set(plugins);
+            self.failed.set(false);
         }
     }
-    /// A reload of `changed` begins: what keeping would have done.
-    pub fn judge(&self, app: Option<&Path>, changed: Vec<PathBuf>) {
-        let verdict = judge(
-            self.last.borrow().as_ref(),
-            self.plugins.get(),
-            app,
-            &changed,
+    /// The host asked for a reload (`ScriptHost::reload`: plugins set, a
+    /// template switched): everything loads again, recorded.
+    pub fn asked(&self) {
+        self.record(
+            Vec::new(),
+            Verdict::Full("the host asked for it (ScriptHost::reload)".into()),
+            false,
         );
+    }
+    /// The last load's record.
+    pub fn last(&self) -> Option<HashMap<PathBuf, Module>> {
+        self.last.borrow().clone()
+    }
+    /// A reload of `changed` begins: the modules to run again, if it keeps
+    /// the others (`can_keep`: the app's VM alone is loaded and can), else
+    /// none: it loads everything again.
+    pub fn judge(
+        &self,
+        app: Option<&Path>,
+        changed: Vec<PathBuf>,
+        can_keep: bool,
+    ) -> Option<Vec<PathBuf>> {
+        let verdict = if self.failed.get() {
+            Verdict::Full("the last reload failed partway: this one loads everything again".into())
+        } else {
+            judge(
+                self.last.borrow().as_ref(),
+                self.plugins.get(),
+                app,
+                &changed,
+            )
+        };
+        let taken = can_keep && self.keep.get() && matches!(verdict, Verdict::Partial { .. });
+        let ran = match (&verdict, taken) {
+            (Verdict::Partial { ran, .. }, true) => Some(ran.clone()),
+            _ => None,
+        };
+        self.record(changed, verdict, taken);
+        ran
+    }
+    fn record(&self, changed: Vec<PathBuf>, verdict: Verdict, taken: bool) {
         let number = self.count.get() + 1;
         self.count.set(number);
         let mut history = self.history.borrow_mut();
@@ -232,6 +390,7 @@ impl Reloads {
             number,
             changed,
             verdict,
+            taken,
         });
         while history.len() > KEPT {
             history.pop_front();
@@ -283,10 +442,15 @@ fn judge(
         queue.extend(dependents.get(path).into_iter().flatten().copied());
     }
     // The app's script runs again every time: what it makes is the tree.
+    if let Some(app) = app
+        && modules.contains_key(app)
+        && !seen.contains(app)
+    {
+        ran.push(app);
+        seen.insert(app);
+    }
+    // What runs again starts nothing it can't stop, and sets no global.
     for path in &ran {
-        if Some(*path) == app {
-            continue;
-        }
         let module = &modules[*path];
         if let Some(global) = module.globals.first() {
             return Verdict::Full(format!(
@@ -300,6 +464,23 @@ fn judge(
                 path.display()
             ));
         }
+    }
+    // A whole tree changing (a template swapped): nothing to keep.
+    if ran.len() == modules.len() && modules.len() > 1 {
+        return Verdict::Full("every module changed or requires one that did".into());
+    }
+    // What's kept declared nothing a load alone keeps.
+    let mut kept: Vec<_> = modules
+        .iter()
+        .filter(|(path, _)| !seen.contains(path.as_path()))
+        .collect();
+    kept.sort_by(|a, b| a.0.cmp(b.0));
+    if let Some((path, module)) = kept.iter().find(|(_, m)| !m.per_load.is_empty()) {
+        return Verdict::Full(format!(
+            "{} declares {} at its top level: kept, it wouldn't declare it again",
+            path.display(),
+            module.per_load[0]
+        ));
     }
     let mut ran: Vec<PathBuf> = ran.into_iter().map(Path::to_path_buf).collect();
     ran.sort();
@@ -404,14 +585,14 @@ mod tests {
         tracker.begin(Some("app".into()));
         tracker.required(Path::new("a"));
         tracker.enter(Path::new("a"));
-        tracker.registered("anime.animate");
+        tracker.registered("anime.animate", false);
         tracker.required(Path::new("b"));
         tracker.enter(Path::new("b"));
-        tracker.registered("ui.task");
-        tracker.registered("ui.task");
+        tracker.registered("ui.task", false);
+        tracker.registered("ui.task", false);
         tracker.leave(vec!["G".into()]);
         tracker.leave(Vec::new());
-        tracker.registered("ui.router");
+        tracker.registered("ui.router", false);
         let modules = tracker.modules();
         assert_eq!(modules[Path::new("app")].requires, [PathBuf::from("a")]);
         assert_eq!(modules[Path::new("a")].requires, [PathBuf::from("b")]);
