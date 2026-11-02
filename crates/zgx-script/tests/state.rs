@@ -603,12 +603,43 @@ fn timers_fire_on_their_clock_and_stop() {
         ui.after(15, function() after:set(1) end)
         return ui.column { ui.text { "{n} {after}", id = "out" } }"#,
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
-    while std::time::Instant::now() < deadline {
-        h.settle();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    h.frames(24);
     assert_eq!(h.text("out"), "3 1", "every stopped at 3, after fired once");
+}
+
+/// A test's timers keep its time, which its frames advance: one fires
+/// between the frames it falls between, however long the test takes, never
+/// mid-step on the wall clock. `ui.after(0)` runs on the next frame.
+#[test]
+fn timers_keep_a_tests_time_not_the_wall_clock() {
+    let mut h = Harness::inline(
+        r#"local log = ui.state("log", "")
+        local function say(s) log:set(log:peek() .. s .. " ") end
+        ui.command { id = "arm", run = function()
+            ui.after(0, function() say("next") end)
+            ui.after(30, function() say("30") end)
+            ui.every(10, function() say("every") return log:peek():len() < 40 end)
+        end }
+        return ui.column { ui.text { "{log}", id = "log" } }"#,
+    );
+    h.host.run_command("arm");
+    // A slow step: the wall clock passes every timer, the test's time none.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    h.settle();
+    assert_eq!(h.text("log"), "", "nothing fires mid-step");
+    assert!(h.clock.wants_frame(), "`ui.after(0)` asks for a frame");
+    h.frame();
+    assert_eq!(h.text("log"), "every next ", "the frame at 16.7 ms");
+    assert!(
+        !h.clock.wants_frame(),
+        "and only one: an idle window sleeps"
+    );
+    h.frame();
+    assert_eq!(
+        h.text("log"),
+        "every next every 30 every ",
+        "at 20, 30 and 33.3 ms"
+    );
 }
 
 /// Items converted for scripts per `set_key` on one row of a list of `n`
