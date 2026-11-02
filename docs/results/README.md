@@ -30,10 +30,10 @@ Medians, zgx / GPUI Fast / MyGo / Rune (vlist: zgx / zgx in Luau / GPUI Fast / M
 - **The font cache:** the system font cache sits at one path for every version, `~/Library/Caches/zgx/system-fonts`, and 0.1.7 bumped its format. So alternating releases rebuild it for each other, about 300 M a launch. Measure startup with each binary in a block of its own.
 
 [`gate-0.1.6-0.1.7`](gate-0.1.6-0.1.7/) holds the release gate's exact counts: v0.1.6 (`e077e952`) against the 0.1.7 freeze (`fbf1d5e2`) on arm64 (`gate.md`), and against the tag `b03245c4`, which adds only version numbers, on x86 (`gate-x86.md`, from CI's perf job on probe PR #1297):
-- **Script updates:** 6.4% fewer instructions, the lab's scroll 4.7%, and the other core cells −0.01 to −0.48%.
+- **Script updates:** 8.0% fewer instructions, counted without update_bench's own data as the gate does from 0.1.8 (6.4% counted the old way); the lab's scroll 4.7%, and the other core cells −0.01 to −0.48%.
 - **Textured 3D:** a frame is 63% fewer instructions, on a bench overlaid on both sides.
 - **The example apps:** 0.06 to 0.40% more, followed up in #1276.
-- **x86:** the same picture. Script updates are 6.7% fewer and the lab's scroll 4.9%. `style` reads +0.22% from inlining that arm64 doesn't show, and `animate` and `anime` read +0.12% and +0.08%.
+- **x86:** the same picture. Script updates are 8.3% fewer counted the new way (6.7% the old way) and the lab's scroll 4.9%. `style` reads +0.22% from inlining that arm64 doesn't show, and `animate` and `anime` read +0.12% and +0.08%.
 
 # macOS suite (2026-10-30): 0.1.6, every scene on `e077e95`
 

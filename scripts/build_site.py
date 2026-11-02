@@ -578,6 +578,10 @@ def release_section(release, e):
         out.append(f'<tr><th scope="row">{e(name)}</th><td>{fmt(a, 1)}</td><td>{fmt(b, 1)}</td>'
                    f'<td>{f"{change * 100:+.2f}%".replace("-", "&#8722;")}</td></tr>')
     out.append('</tbody></table></figure>')
+    # A cell measured differently from the gate's earlier releases: both
+    # columns are counted the new way, and the page says what changed.
+    for name, why in gate.get('redefined', {}).items():
+        out.append(f'<p class="scene-note"><strong>{e(name)} changed:</strong> {e(why)}</p>')
     previous = release['previous_commit']
     out.append(f'<p class="scene-note">The suite, this run against the last one published (<code>{e(previous[:7])}</code>, '
                f'{e(release["previous_date"])}), each cell&#8217;s median. The runs are in different sessions, and a session '

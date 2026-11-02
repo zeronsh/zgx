@@ -16,7 +16,7 @@
   "change: the gate's own, from unrounded counts"
  ],
  "notes": {
-  "script-update": "a script's state update costs 6.4% less",
+  "script-update": "a script's state update costs 8.0% less (6.4% counted the old way, with the bench's own data)",
   "app-sketch": "the apps rose 0.06 to 0.40%: z ordering (#1070), percent bases (#1116) and an editor conversion (#1020); followed up in #1276",
   "3d": "textured 3D (not a row: v0.1.6 has no bench): a frame 8.81 → 3.25 M instructions (−63%), the whole bench −56%, loading +4.8%"
  },
@@ -92,9 +92,9 @@
    -0.0016
   ],
   "script-update": [
-   1404.6,
-   1314.1,
-   -0.0644
+   1123.7,
+   1033.5,
+   -0.08032
   ],
   "anime": [
    2948.1,
@@ -156,5 +156,8 @@
    80.9,
    0.0015
   ]
+ },
+ "redefined": {
+  "script-update": "since 0.1.8 the cell leaves uncounted the rows its bench makes beforehand for every update (update_bench's own data, 21% of the cell), which read as the engine's work. Both releases are counted the new way: 1,123.7 M and 1,033.5 M on arm64, −8.0%, where the old way read 1,404.6 M and 1,314.1 M, −6.4% (x86: 1,168.1 M and 1,070.9 M, −8.3%, against −6.7%)."
  }
 }

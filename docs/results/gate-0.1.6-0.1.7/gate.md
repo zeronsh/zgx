@@ -16,7 +16,7 @@
 | micro-vscroll-fixed-luau | 60.7 M | 60.6 M | -0.17% (median of -0.169%, -0.176%, -0.169% under 3 heap placements) |
 | micro-vscroll-variable-luau | 124.2 M | 124.1 M | -0.09% (median of -0.100%, -0.083%, -0.090% under 3 heap placements) |
 | mount | 297.1 M | 296.6 M | -0.16% (median of -0.166%, -0.157%, -0.123% under 3 heap placements) |
-| script-update | 1,404.6 M | 1,314.1 M | -6.44% (median of -6.443%, -6.439%, -6.448% under 3 heap placements) |
+| script-update | 1,123.7 M | 1,033.5 M | -8.03% (median of -8.032%, -7.842%, -8.035% under 3 heap placements; counted without the bench's own data, as from 0.1.8: the old way read 1,404.6 M → 1,314.1 M, -6.44%) |
 | anime | 2,948.1 M | 2,947.8 M | -0.01% |
 | script-layout | 2,817.6 M | 2,817.8 M | +0.01% |
 | list-state | 819.5 M | 819.6 M | +0.01% (median of +0.014%, -0.114%, +0.026% under 3 heap placements; layout) |
