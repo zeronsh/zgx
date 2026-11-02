@@ -236,7 +236,7 @@ return ui.column {
 }
 ```
 
-- Call `ui.i18n` before `ui.t`: a message needs its catalog (`ui.t` before it is an error saying so).
+- Call `ui.i18n` before `ui.t`: a message needs its catalog (`ui.t` before it is an error saying so). A host can load it instead, before any script runs, from a folder it chooses: `ScriptHost::new(runtime, path).i18n(dir, "en")`. The app's scripts and its plugins' then call `ui.t` with no `ui.i18n` of their own, and an edit to a locale file shows in place without reloading them.
 - `ui.t(key, args)` is a message: accepted wherever text is (a child, `ui.text`, `placeholder`), it is formatted in Rust when its locale, its file or a state its arguments read changes, never per frame, and only the texts showing a changed message update. Arguments are numbers, strings, states or functions (called, tracked, when it formats). `msg:get()` gives its text now, in a handler or a computed (which follows it); `msg:key()` its key.
 - `ui.locale:set("ar")` asks for a locale; `ui.locale:set(nil)` follows the system's preferred languages again. `ui.locale.current` is the one shown (tracked): the one asked for, or preferred, as the app has it, through its parents (`pt-BR`, then `pt`) and then the source.
 - A key the locale lacks falls back through its parents to the source locale, then shows the key itself; an argument the message names but wasn't given shows as `{name}`. Each is told once, to stderr and `ScriptHost::warnings()`, as are messages that don't parse (with their file, line and column: the rest of the file loads).
