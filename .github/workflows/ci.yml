@@ -72,15 +72,27 @@ jobs:
           key: apt-${{ runner.arch }}-${{ steps.apt-key.outputs.month }}-${{ hashFiles('.github/linux-packages.txt') }}
           # A changed package list still starts from the last month's .debs.
           restore-keys: apt-${{ runner.arch }}-
-      # A stalled mirror fails fast and retries rather than holding the job.
+      # A stalled mirror fails fast and retries rather than holding the job;
+      # the whole install is tried three times before the job gives up.
       - name: Linux packages
-        timeout-minutes: 10
+        id: linux-packages
+        timeout-minutes: 15
         run: |
           sudo rm -f /var/lib/man-db/auto-update
           if [ -d ~/apt-archives ]; then sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/; fi
           apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
-          sudo apt-get update -qq $apt
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $apt $(grep -v '^#' .github/linux-packages.txt)
+          for attempt in 1 2 3; do
+            if sudo apt-get update -qq $apt &&
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $apt $(grep -v '^#' .github/linux-packages.txt); then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::apt-get couldn't install .github/linux-packages.txt in three tries"
+              exit 1
+            fi
+            echo "::warning::apt-get failed (try $attempt of 3); trying again"
+            sleep 20
+          done
           mkdir -p ~/apt-archives && cp /var/cache/apt/archives/*.deb ~/apt-archives/
       - uses: actions/cache/save@v4
         if: steps.apt-cache.outputs.cache-hit != 'true'
@@ -165,18 +177,36 @@ jobs:
       # runs until the script changes.
       - uses: actions/cache@v4
         id: vulkan-loader
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' }}
         with:
           path: ~/zgx-vulkan-loader/build/loader
           key: vulkan-loader-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build_vulkan_loader.sh') }}
       - name: Build private patched Vulkan loader
-        if: ${{ !cancelled() && steps.vulkan-loader.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' && steps.vulkan-loader.outputs.cache-hit != 'true' }}
         run: scripts/build_vulkan_loader.sh ~/zgx-vulkan-loader
       - name: Use the private Vulkan loader
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' }}
         run: printf 'LD_LIBRARY_PATH=%s/zgx-vulkan-loader/build/loader\n' "$HOME" >> "$GITHUB_ENV"
+      # The GPU tests below draw on lavapipe, Mesa's software Vulkan. Without
+      # it every one of them panics ("No suitable graphics adapter found"),
+      # which hides the cause: say it once, here. They run after an earlier
+      # failure (a test, clippy), not after a missing install.
+      - name: The software Vulkan adapter
+        id: adapter
+        if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' }}
+        run: |
+          if ! ls /usr/share/vulkan/icd.d/lvp_icd.*.json >/dev/null 2>&1; then
+            echo "::error::lavapipe's ICD (mesa-vulkan-drivers) isn't installed: /usr/share/vulkan/icd.d has $(ls /usr/share/vulkan/icd.d 2>&1 | tr '\n' ' ')"
+            exit 1
+          fi
+          if ! vulkaninfo --summary > "$RUNNER_TEMP/vulkaninfo.txt" 2>&1 || ! grep -q llvmpipe "$RUNNER_TEMP/vulkaninfo.txt"; then
+            cat "$RUNNER_TEMP/vulkaninfo.txt"
+            echo "::error::the Vulkan loader (LD_LIBRARY_PATH=$LD_LIBRARY_PATH) finds no llvmpipe device"
+            exit 1
+          fi
+          grep -E 'deviceName|driverName|apiVersion' "$RUNNER_TEMP/vulkaninfo.txt" | head -6
       - name: Vulkan rendering and damage readback
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.adapter.outcome == 'success' }}
         env:
           XDG_RUNTIME_DIR: /tmp
         run: |
@@ -185,7 +215,7 @@ jobs:
       # Its pixel tests pass without drawing where there's no GPU: here they
       # must have one (lavapipe).
       - name: 3D rendering
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.adapter.outcome == 'success' }}
         env:
           XDG_RUNTIME_DIR: /tmp
           ZGX_REQUIRE_GPU: "1"
@@ -193,11 +223,11 @@ jobs:
       # The test binaries built above aren't run again: their room goes to
       # the probes' fixtures, about 13 GB of examples.
       - name: Room for the fixtures
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' }}
         run: find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.so' -delete
       - name: Build native fixtures
         id: native-fixtures
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' }}
         # The examples the probes run, not every example (the test step
         # already compiled every one, as a test).
         run: |

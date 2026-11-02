@@ -31,6 +31,7 @@ python3-gi
 python3-pil
 sway
 swaybg
+vulkan-tools
 weston
 wl-clipboard
 x11-utils
