@@ -689,9 +689,13 @@ impl TextEditor {
             self.history_limit,
             self.history_bytes,
         );
+        // A document loaded leaves nothing to undo, nor to redo: a redo
+        // step kept for an answer would apply to text that is gone.
         if std::mem::take(&mut self.loading) {
             self.undo.clear();
             self.undo_bytes = 0;
+            self.redo.clear();
+            self.redo_bytes = 0;
         }
         if std::mem::take(&mut self.answering) {
             self.fold_answer();
@@ -710,11 +714,13 @@ impl TextEditor {
         if self.undone
             && let Some(redo) = self.redo.pop_back()
         {
-            // Offsets of older steps hold only if the text kept its length.
-            if answer.deleted.len() != answer.inserted.len() {
-                self.undo.clear();
-                self.undo_bytes = 0;
-            }
+            // Older steps undo into the text the undone step left, which
+            // the answer has changed: their offsets, and what they expect
+            // there, no longer hold (keeping the text's length is not
+            // enough: the answer can change what they would undo, or where
+            // its characters start).
+            self.undo.clear();
+            self.undo_bytes = 0;
             self.redo_bytes -= redo.bytes();
             let joined = Edit::joined(redo.inverted(), answer, &text).inverted();
             self.redo_bytes += joined.bytes();
