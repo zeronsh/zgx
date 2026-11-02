@@ -35,11 +35,12 @@
 #    return-type or literal change breaks without semver-checks seeing it
 #    (zgx-desktop 0.1.3 calls `zoom::wheel`; zgx-script 0.1.6 built
 #    zgx-components' `TabsOptions` field by field).
-# 5. cargo semver-checks of each against its previous release adds a pub
-#    field only to structs with Default (scripts/semver_defaults.py): an
-#    app's literal of one without it has no way to keep compiling
-#    (zgx-script's `Line` and `Window` at 0.1.7's first freeze). Its other
-#    lints are left to the release's rulings (docs/releasing.md). Needs
+# 5. cargo semver-checks of each against its previous release finds nothing
+#    the release hasn't accepted (scripts/semver_verdict.py): a pub field
+#    added to a struct with Default, or what scripts/semver_allowed.txt
+#    rules acceptable for this version, with its reason. Anything else fails
+#    (zgx-script's `Line` and `Window` at 0.1.7's first freeze, zgx-gpu's
+#    `TextCache` no longer Send at 0.1.8's pre-flight). Needs
 #    cargo-semver-checks.
 # Before them: changelog.d/'s entries are well formed, and none is left out
 # of a CHANGELOG.md that has this version's section (scripts/changelog.py);
@@ -263,7 +264,7 @@ while read -r crate previous _; do
     cargo check --manifest-path "$compat/Cargo.toml" --target-dir "$target" < /dev/null
     echo "$crate $previous builds against this release's crates"
 done < "$target/previous.txt"
-echo "== new public fields only on structs with Default (cargo semver-checks)"
+echo "== semver: only what this release accepts (cargo semver-checks)"
 if ! cargo semver-checks --version >/dev/null 2>&1; then
     echo "cargo-semver-checks is needed: cargo install cargo-semver-checks --locked" >&2
     exit 1
@@ -294,4 +295,4 @@ while read -r crate previous current had; do
     fi
     echo "$crate against $previous: $(grep -m1 'Summary' "$semver/$crate.log" | sed 's/^ *Summary *//')"
 done < "$target/previous.txt"
-"$python" scripts/semver_defaults.py "$semver"/*.log
+"$python" scripts/semver_verdict.py --release "$zgx" "$semver"/*.log

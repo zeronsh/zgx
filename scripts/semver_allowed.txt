@@ -1,0 +1,9 @@
+# semver-checks findings a release accepted, each a ruling of that release
+# with its reason (scripts/semver_verdict.py, docs/releasing.md):
+#
+#     release | crate | lint | item | reason
+#
+# `item` is text from the item's line in semver-checks' "Failed in:" list
+# (its location left out: paths differ between machines). An entry counts
+# only for the release it names. A new pub field on a struct with Default
+# needs none: the script accepts it, given its migrate note.
