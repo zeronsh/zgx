@@ -17004,3 +17004,35 @@ mod shader_retention_tests {
         assert!(gpu.readback().unwrap() == fresh.readback().unwrap());
     }
 }
+
+#[cfg(test)]
+mod thread_safety_tests {
+    fn send_sync<T: Send + Sync>() {}
+
+    /// What could move between threads, or be shared by them, still can: a
+    /// type that stops being `Send` or `Sync` breaks the programs that move
+    /// it, which a patch release may not (word shapes are shared by `Arc`).
+    #[test]
+    fn its_thread_safe_types_stay_send_and_sync() {
+        send_sync::<crate::prepared::TextCache>();
+        send_sync::<crate::prepared::Laid<'static>>();
+        #[cfg(target_os = "macos")]
+        send_sync::<crate::Caret>();
+        send_sync::<crate::GpuError>();
+        send_sync::<crate::GpuStats>();
+        send_sync::<crate::DebugCacheStats>();
+        send_sync::<crate::ShaderCacheCounts>();
+        send_sync::<crate::PendingGpuContext>();
+        send_sync::<crate::PresentationStatus>();
+        send_sync::<crate::text::FontData>();
+        send_sync::<crate::text::TextCursor>();
+        send_sync::<crate::text::ShapedText>();
+        send_sync::<crate::text::CpuTextRaster>();
+        send_sync::<crate::text::RichDecoration>();
+        send_sync::<crate::canvas::Raster>();
+        send_sync::<crate::canvas::CanvasCache>();
+        send_sync::<crate::canvas::HeadlessCanvases>();
+        send_sync::<crate::svg::SvgCache>();
+        send_sync::<crate::viewport::ViewportFrame<'static>>();
+    }
+}
