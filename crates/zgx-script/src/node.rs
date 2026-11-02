@@ -5597,8 +5597,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     );
                 }
                 let vm = env.vm.clone();
-                let period = crate::duration_ms(&format!("ui.{name}"), ms)?
-                    .max(std::time::Duration::from_millis(1));
+                // `ui.after(0)` waits for the next frame; `ui.every` ticks no
+                // faster than every millisecond.
+                let period = crate::duration_ms(&format!("ui.{name}"), ms)?;
+                let period = match repeat {
+                    true => period.max(std::time::Duration::from_millis(1)),
+                    false => period,
+                };
                 let stop = env.timers.start(period, repeat, move || {
                     let Some(vm) = vm.upgrade() else { return false };
                     match vm.call::<Option<bool>>(&f, ()) {

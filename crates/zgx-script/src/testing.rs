@@ -325,6 +325,8 @@ impl TestApp {
                 error.set(Some(issue.to_string()));
             }
         });
+        // Timers keep the test's time: its frames advance it.
+        host.0.timers.use_test_clock();
         host.expose_classes();
         host.reload().map_err(|error| error.to_string())?;
         let executor = Rc::new(RefCell::new(LocalExecutor::new()));
@@ -431,7 +433,9 @@ impl TestApp {
     pub fn settle(&self) {
         while self.executor.borrow_mut().tick() > 0 {}
     }
-    /// Deliver one 60 Hz display frame and lay out, as a window does.
+    /// Deliver one 60 Hz display frame and lay out, as a window does. The
+    /// timers due by its time fire first: a test's time moves only here
+    /// (and in `wait_until`), never on the wall clock mid-step.
     pub fn frame(&self) {
         // After the last frame delivered, by this app or a window sharing
         // its clock.
@@ -439,6 +443,7 @@ impl TestApp {
         let index = self.frame.get().max(last) + 1;
         self.frame.set(index);
         let interval = Duration::from_secs_f64(1. / 60.);
+        self.run_timers(interval * index as u32);
         self.clock.deliver(Frame {
             index,
             time: self.start + interval * index as u32,
@@ -449,6 +454,12 @@ impl TestApp {
         self.settle();
         // The frame is done, as a renderer's present ends one.
         zgx::profile::frame();
+    }
+    /// Advance the timers' time to `to` since the start, firing each timer
+    /// due by then at its own time, in order, as a window's would between
+    /// two frames.
+    fn run_timers(&self, to: Duration) {
+        self.host.0.timers.run_test_timers(to, || self.settle());
     }
     /// `n` frames: an animation's worth.
     pub fn frames(&self, n: usize) {
@@ -461,6 +472,7 @@ impl TestApp {
     pub fn wait_until(&mut self, mut done: impl FnMut(&mut Self) -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
+            self.run_timers(self.start.elapsed());
             self.settle();
             self.ui.prepare_frame();
             if done(self) {

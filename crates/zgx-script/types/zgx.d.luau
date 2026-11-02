@@ -19599,7 +19599,8 @@ declare ui: {
 	-- returning false stops it. Returns a function that stops it. It lives as
 	-- long as what made it: a component, a builder, or the script.
 	every: (ms: number, fn: () -> ...unknown) -> () -> (),
-	-- Call `fn` once, after `ms` milliseconds; returns a function that cancels it.
+	-- Call `fn` once, after `ms` milliseconds (0: on the next frame); returns a
+	-- function that cancels it.
 	after: (ms: number, fn: () -> ()) -> () -> (),
 	column: (props: ContainerProps?) -> Node,
 	row: (props: ContainerProps?) -> Node,
