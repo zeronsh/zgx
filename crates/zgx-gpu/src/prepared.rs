@@ -516,6 +516,117 @@ impl Compact {
         }
         (widest, height)
     }
+    /// `size`, with the widths it holds for: its size, and the width up to
+    /// which (from its widest line's) its lines break as they do here, or 0
+    /// if it does not know one (`TextCache::measure_plain_reach`).
+    fn size_reach(&self, slab: &Slab, width: Option<f32>, line_height: f32) -> ((f32, f32), f32) {
+        let (all_words, glyphs) = slab.of(self);
+        let limit = crate::text::wrap_width(width).unwrap_or(f32::INFINITY);
+        let (mut widest, mut height) = (0_f32, 0_f32);
+        // Its line breaks' decisions, each a comparison with `limit`: the
+        // most that fit (at least this wide) and the least that did not (any
+        // narrower than it), between which every one is the same.
+        let (mut fit, mut beyond) = (0_f32, f32::INFINITY);
+        for (spans, empty) in &self.lines {
+            let spans = &self.spans[spans.start as usize..spans.end as usize];
+            let mut line = Visual::default();
+            let mut any = false;
+            let mut push = |line: &mut Visual| {
+                if line.nonempty {
+                    widest = widest.max(line.w);
+                    height += line.height.unwrap_or(line_height);
+                    any = true;
+                }
+                *line = Visual::default();
+            };
+            for span in spans {
+                let offset = span.start as usize;
+                let words = &all_words[offset..span.end as usize];
+                // Where the words not yet added start: (word, glyph).
+                let mut fitting = (0, 0);
+                let mut range_width = 0_f32;
+                let mut before_last_blank = 0_f32;
+                for (i, packed) in words.iter().enumerate() {
+                    let word = Word::of(packed);
+                    // What it asks (a blank, only that the line so far fit).
+                    let asks = match word.blank {
+                        true => line.w + range_width,
+                        false => line.w + (range_width + word.width),
+                    };
+                    if line.w + (range_width + word.width) <= limit
+                        || (word.blank && line.w + range_width <= limit)
+                    {
+                        fit = fit.max(asks);
+                        if word.blank {
+                            before_last_blank = range_width;
+                        }
+                        range_width += word.width;
+                    } else if word.width > limit {
+                        beyond = beyond.min(asks).min(word.width);
+                        // Too wide for any line: finish the line, then break
+                        // the word between glyphs.
+                        if range_width > 0. {
+                            line.add(words, fitting, (i, 0), range_width);
+                            push(&mut line);
+                            range_width = 0.;
+                            fitting = (i, 0);
+                        }
+                        let advances = Self::advances(all_words, glyphs, offset + i);
+                        for (glyph, advance) in advances.iter().enumerate() {
+                            let advance = f32::from_bits(*advance);
+                            let asks = line.w + (range_width + advance);
+                            if asks <= limit {
+                                fit = fit.max(asks);
+                                range_width += advance;
+                            } else {
+                                beyond = beyond.min(asks);
+                                line.add(words, fitting, (i, glyph), range_width);
+                                push(&mut line);
+                                range_width = advance;
+                                fitting = (i, glyph);
+                            }
+                        }
+                    } else {
+                        beyond = beyond.min(asks);
+                        fit = fit.max(word.width);
+                        if range_width > 0. {
+                            // A blank before the break is left out.
+                            if i > 0 && Word::of(&words[i - 1]).blank {
+                                line.add(words, fitting, (i - 1, 0), before_last_blank);
+                            } else {
+                                line.add(words, fitting, (i, 0), range_width);
+                            }
+                        }
+                        push(&mut line);
+                        if word.blank {
+                            range_width = 0.;
+                            fitting = (i + 1, 0);
+                        } else {
+                            range_width = word.width;
+                            fitting = (i, 0);
+                        }
+                    }
+                }
+                line.add(words, fitting, (words.len(), 0), range_width);
+            }
+            push(&mut line);
+            if !any {
+                height += empty.unwrap_or(line_height);
+            }
+        }
+        // As a width (`wrap_width` adds to it), short of the least that did
+        // not fit by a margin: a width near it is measured, not served. None
+        // where a fit went past the widest line (in rounding).
+        let reach = match width {
+            Some(_) if fit <= widest && beyond.is_finite() => {
+                let reach = beyond - 1e-3;
+                reach - reach.abs() * 1e-6 - 1e-6
+            }
+            Some(_) if fit <= widest => f32::INFINITY,
+            _ => 0.,
+        };
+        ((widest, height), reach)
+    }
 }
 
 /// Every compact's words and glyph advances, in chunks of a fixed size
@@ -1141,6 +1252,41 @@ impl TextCache {
         }
         let hash = self.plain_entry(fonts, text, font_size, font, Need::Measure);
         self.sized(fonts, hash, width)
+    }
+    /// `measure_plain`, with the widths it holds for: from its widest
+    /// line's (its width) to the one returned, its lines break as they do at
+    /// `width` (0: none known). A width between is the same size, its lines
+    /// not broken again (a window dragged wider or narrower a few points).
+    pub fn measure_plain_reach(
+        &mut self,
+        fonts: &mut FontSystem,
+        text: &Arc<str>,
+        font_size: f32,
+        font: &FontStyle,
+        width: Option<f32>,
+    ) -> ((f32, f32), f32) {
+        if width.is_none() || !Self::handles_plain(text, font_size) {
+            return (self.measure_plain(fonts, text, font_size, font, width), 0.);
+        }
+        let hash = self.plain_entry(fonts, text, font_size, font, Need::Measure);
+        let entry = self.entries.get_mut(&hash).expect("prepared");
+        // A width it was measured at is its size again, as `sized` keeps it
+        // (no reach: a width a host asks for again is not a drag's).
+        if let Some((_, size)) = entry.sizes.iter().find(|(w, _)| *w == width) {
+            let size = *size;
+            self.evict(hash);
+            return (size, 0.);
+        }
+        let Some(compact) = &entry.compact else {
+            return (self.sized(fonts, hash, width), 0.);
+        };
+        let reach = compact.size_reach(&self.slab, width, entry.metrics.line_height);
+        if entry.sizes.len() == SIZES {
+            entry.sizes.remove(0);
+        }
+        entry.sizes.push((width, reach.0));
+        self.evict(hash);
+        reach
     }
     /// `rich`'s min-content size, CSS's: as `rich.min_content_lines()`
     /// measures unwrapped, worked out from the words `rich` was shaped
@@ -2468,6 +2614,84 @@ mod tests {
             }
             assert!(cache.taken > 0, "grown from its words (in runs: {runs})");
         }
+    }
+
+    /// A wrapping text's size holds from its widest line's width to its
+    /// reach (`measure_plain_reach`), as broken again there: at the widest
+    /// line's width exactly, its lines break as they did, and a ULP under it
+    /// they break again; up to the reach they hold, and within its margin
+    /// past it the next word joins a line. Words, doubled and trailing
+    /// spaces, and a word broken between its glyphs.
+    #[test]
+    fn a_width_within_its_reach_breaks_its_lines_as_it_did() {
+        let mut fonts = FontSystem::new();
+        let font = FontStyle::default();
+        let texts = [
+            "The window narrows a few points at a time while the text wraps.",
+            "doubled  spaces   and trailing ones   ",
+            "short words then averyveryverylongwordthatmustbreakbetweenitsglyphs and more",
+        ];
+        let mut cache = TextCache::default();
+        let mut fresh = |text: &Arc<str>, width: f32| {
+            TextCache::default().measure_plain(&mut fonts, text, 14., &font, Some(width))
+        };
+        let mut pinned = 0;
+        for text in texts {
+            let text: Arc<str> = text.into();
+            let mut width = 40_f32;
+            while width < 600. {
+                let mut fonts = FontSystem::new();
+                let (size, reach) =
+                    cache.measure_plain_reach(&mut fonts, &text, 14., &font, Some(width));
+                assert_eq!(size, fresh(&text, width), "{text:?} at {width}");
+                assert!(reach == 0. || width < reach, "{width} under {reach}");
+                if reach > 0. {
+                    // The widest line's width: as it was. Under it, by the
+                    // room a wrap width is given (`wrap_width`, 1e-3) and a
+                    // rounding's worth, its lines break again.
+                    // (A line's trailing blanks may run past its width, and a
+                    // line ending in them holds under its width too: pinned
+                    // where lines end in words.)
+                    assert_eq!(
+                        fresh(&text, size.0),
+                        size,
+                        "{text:?} at its widest {}",
+                        size.0
+                    );
+                    if size.0 <= width && !text.contains("  ") {
+                        let broken = (0..=40)
+                            .map(|step| size.0 - step as f32 * 5e-5)
+                            .find(|at| fresh(&text, *at) != size);
+                        assert!(
+                            broken.is_some_and(|at| at >= size.0 - 1.2e-3),
+                            "{text:?} under {}: {broken:?}",
+                            size.0
+                        );
+                    }
+                    // Between: as it was.
+                    let mut at = size.0;
+                    while at < reach.min(size.0 + 400.) {
+                        assert_eq!(fresh(&text, at), size, "{text:?} at {at}, reach {reach}");
+                        at += 1.7;
+                    }
+                    // Past the reach, within its margin, a word joins.
+                    if reach.is_finite() {
+                        assert_eq!(
+                            fresh(&text, reach.next_down()),
+                            size,
+                            "{text:?} under its reach"
+                        );
+                        let joined = (0..=40)
+                            .map(|step| reach + step as f32 * 5e-5)
+                            .find(|at| fresh(&text, *at) != size);
+                        assert!(joined.is_some(), "{text:?}: nothing joins past {reach}");
+                        pinned += 1;
+                    }
+                }
+                width += 23.;
+            }
+        }
+        assert!(pinned > 10, "{pinned} reaches pinned");
     }
 
     #[test]

@@ -15717,6 +15717,15 @@ fn install_text(
             .borrow_mut()
             .measure_plain(&mut fonts.borrow_mut(), text, size, font, width)
     });
+    // Wrapping plain text, with the widths its lines break the same at: a
+    // window resized a few points serves them without breaking them again.
+    let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
+    scene.set_font_text_reach_measurer(move |text, size, width, font| {
+        let _span = zgx::profile::nested(zgx::profile::Phase::Text);
+        cache
+            .borrow_mut()
+            .measure_plain_reach(&mut fonts.borrow_mut(), text, size, font, width)
+    });
     // Plain text's min-content size, from the words it was shaped into.
     let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
     scene.set_font_min_content_measurer(move |text, size, font| {
