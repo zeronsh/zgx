@@ -1809,6 +1809,8 @@ struct Local {
 /// What few scenes have, by node; each entry goes with its node.
 #[derive(Default)]
 struct ColdMaps {
+    /// Diagnostic only: #1239's drop_shadows map's size, nothing in it.
+    _pad: [u64; 4],
     /// Track lists of grids that have them (`set_grid_template`): none kept
     /// for a list no node has any more.
     grid_templates: NodeMap<Arc<crate::grid_tracks::GridTemplate>>,
