@@ -103,9 +103,12 @@ class VirtualPointer:
         time.sleep(.05)
         self.button(False, button)
 
-    def swipe(self, dy=0., dx=0., frames=12, hz=120.):
+    def swipe(self, dy=0., dx=0., frames=12, hz=120., rest=0.):
         """Two fingers scrolling `dx`, `dy` (Wayland's sense: positive
-        scrolls down) each of `frames` frames, then lifting: axis stop."""
+        scrolls down) each of `frames` frames, then lifting: axis stop.
+        `rest` seconds still before the lift: lifted at rest, it doesn't
+        coast (a fling needs speed at the lift), so where it stops doesn't
+        depend on timing."""
         for _ in range(frames):
             self._send(self.pointer, AXIS_SOURCE, struct.pack("<I", FINGER))
             if dy:
@@ -114,6 +117,7 @@ class VirtualPointer:
                 self._send(self.pointer, AXIS, struct.pack("<II", self._now(), HORIZONTAL) + _fixed(dx))
             self._send(self.pointer, FRAME)
             time.sleep(1. / hz)
+        time.sleep(rest)
         # The lift: a stop on each axis that scrolled (wlroots holds every
         # axis event of a frame to one source).
         self._send(self.pointer, AXIS_SOURCE, struct.pack("<I", FINGER))
