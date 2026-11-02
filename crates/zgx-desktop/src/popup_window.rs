@@ -499,7 +499,7 @@ mod macos {
             let panel = if preview {
                 root
             } else {
-                *scene.children(root).first()?
+                panel_of(scene, root)?
             };
             let (NodeKind::Quad(quad) | NodeKind::Panel { quad, .. }) = scene.kind(panel) else {
                 return None;
@@ -581,15 +581,39 @@ mod macos {
     /// window shows, would outline the whole soft shadow (on macOS 26 a
     /// dark rim round it) besides the panel's own.
     fn window_shadow(scene: &Scene, root: NodeId) -> bool {
-        let Some(panel) = scene.children(root).first() else {
+        let Some(panel) = panel_of(scene, root) else {
             return true;
         };
-        match scene.kind(*panel) {
+        match scene.kind(panel) {
             NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
                 quad.shadows().iter().all(|shadow| shadow.color.3 == 0)
             }
             _ => true,
         }
+    }
+    /// Popup `root`'s panel: what it holds, or, through boxes that paint
+    /// nothing and hold one thing (a node tooltip's clear layer and the
+    /// column it fades), the one they hold: a hover card is its own panel,
+    /// its shadow and its translucent fill seen as a menu's are.
+    fn panel_of(scene: &Scene, root: NodeId) -> Option<NodeId> {
+        let mut panel = *scene.children(root).first()?;
+        for _ in 0..4 {
+            let clear = match scene.kind(panel) {
+                NodeKind::Container(_) => true,
+                NodeKind::Quad(quad) => {
+                    quad.fill.3 == 0
+                        && quad.border_width == 0.
+                        && (quad.decoration.as_ref()).is_none_or(|d| d.background.is_none())
+                        && quad.shadows().iter().all(|shadow| shadow.color.3 == 0)
+                }
+                _ => false,
+            };
+            match scene.children(panel) {
+                [only] if clear => panel = *only,
+                _ => break,
+            }
+        }
+        Some(panel)
     }
     /// A mask of `material`'s shape (its rounded box and arrow), the size of
     /// its bounds, top-down.
@@ -1739,6 +1763,43 @@ mod macos {
             let material = material(shadowed(0x00000099), false).expect("a material");
             assert_eq!(material.bounds(), material.rect);
             assert_eq!((material.rect.width, material.rect.height), (120., 28.));
+        }
+
+        /// A node tooltip's panel is its clear layer holding the column it
+        /// fades, holding the card: the card is the panel, its shadow its
+        /// own (no window server rim round the shadow's reach) and its
+        /// translucent fill over AppKit's material, cut to its corners.
+        #[test]
+        fn a_tooltips_card_through_its_clear_layer_is_the_panel() {
+            use zgx::scene::{BoxShadow, Transform};
+            let card = || {
+                chip().shadow(BoxShadow {
+                    color: rgba(0x00000066),
+                    offset: Transform { x: 0., y: 20. },
+                    blur_radius: 56.,
+                    spread: 0.,
+                })
+            };
+            let tooltip =
+                |card: View| div().child(div().layer().child(column().opacity(0.9).child(card)));
+            let mut ui = Ui::new(400., 300.);
+            let handle = ui.mount(tooltip(card()));
+            ui.prepare_frame();
+            assert!(!window_shadow(&ui.scene.borrow(), handle.node()));
+            let found = material(tooltip(card()), false).expect("the card's material");
+            assert_eq!(
+                (found.rect.width, found.rect.height, found.radius),
+                (120., 28., 8.)
+            );
+            // A card without a shadow of its own: the window server's.
+            let mut ui = Ui::new(400., 300.);
+            let handle = ui.mount(tooltip(chip()));
+            ui.prepare_frame();
+            assert!(window_shadow(&ui.scene.borrow(), handle.node()));
+            // A layer that paints (a fill of its own) is the panel itself.
+            let painted = div().child(div().bg(rgba(0xffffff20)).rounded(4.).child(card()));
+            let found = material(painted, false).expect("its own material");
+            assert_eq!(found.radius, 4.);
         }
 
         #[test]
