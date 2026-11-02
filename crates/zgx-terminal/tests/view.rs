@@ -615,6 +615,30 @@ fn a_selection_is_the_primary_and_a_middle_click_pastes_it() {
     });
 }
 
+/// A program's first output reaches the app's clipboard: the platform is
+/// the session's before it is first read, which can be as it starts (on a
+/// busy machine, the program had written before the view gave the
+/// terminal its platform, and its copy or its question went unanswered).
+#[cfg(unix)]
+#[test]
+fn a_programs_first_output_copies_to_the_clipboard() {
+    let mut app = Harness::new();
+    let selections = Rc::new(Selections::default());
+    let platform = zgx::platform::PlatformService(selections.clone());
+    // OSC 52: copy "secret" (c2VjcmV0), first thing.
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(r#"printf '\033]52;c;c2VjcmV0\007'; exec sleep 30"#),
+    );
+    app.mount(provide(
+        platform,
+        zgx_terminal::terminal_view(&term).w(600.).h(300.),
+    ));
+    app.until("the copy", |_| {
+        selections.clipboard.borrow().as_deref() == Some("secret")
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn a_program_reads_the_clipboard_when_the_app_allows_it() {
