@@ -207,6 +207,9 @@ struct Watchdog {
     /// When it next wakes by itself (nanoseconds from `epoch`; `u64::MAX`
     /// while parked for good): a call due before then wakes it.
     sleep_until: AtomicU64,
+    /// How many times it has woken (tests: an idle app wakes it no more).
+    #[cfg(test)]
+    wakes: AtomicU64,
 }
 /// How long before a call's budget passes the watchdog sets its interrupt:
 /// a thread's timed wake-up can come late by a few milliseconds (the system
@@ -227,10 +230,15 @@ impl Watchdog {
             alarms: Mutex::new(Vec::new()),
             thread: OnceLock::new(),
             sleep_until: AtomicU64::new(u64::MAX),
+            #[cfg(test)]
+            wakes: AtomicU64::new(0),
         }));
         let thread = std::thread::Builder::new()
             .name("zgx script watchdog".into())
-            .spawn(move || watchdog.run())
+            .spawn(move || {
+                prompt_wakes();
+                watchdog.run()
+            })
             .expect("the script watchdog thread");
         let _ = watchdog.thread.set(thread.thread().clone());
         watchdog
@@ -247,6 +255,8 @@ impl Watchdog {
     }
     fn run(&self) {
         loop {
+            #[cfg(test)]
+            self.wakes.fetch_add(1, Ordering::SeqCst);
             let next = self.scan();
             self.sleep_until.store(next, Ordering::SeqCst);
             // A call due before then, published while scanning, is seen
@@ -255,11 +265,16 @@ impl Watchdog {
                 continue;
             }
             match next {
-                u64::MAX => std::thread::park(),
+                // No call running: no timer left set (one a call ended
+                // before it fired would wake it once more for nothing).
+                u64::MAX => {
+                    disarm();
+                    std::thread::park()
+                }
                 next => {
                     let now = nanos(Instant::now());
                     if next > now {
-                        std::thread::park_timeout(Duration::from_nanos(next - now));
+                        sleep_for(Duration::from_nanos(next - now));
                     }
                 }
             }
@@ -309,6 +324,145 @@ impl Watchdog {
             .min()
             .unwrap_or(u64::MAX)
     }
+}
+
+/// The watchdog's thread asks to be run promptly as its waits end: a
+/// runaway script runs until it wakes, the interface waiting. It sleeps
+/// nearly always, so this costs nothing while no call runs.
+fn prompt_wakes() {
+    // macOS: the interactive class, as the main thread's.
+    #[cfg(target_os = "macos")]
+    // SAFETY: sets the calling thread's own QoS class; no pointers.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+    // Linux: no timer slack (50 µs by default, more for a background
+    // process), for this thread alone.
+    #[cfg(target_os = "linux")]
+    // SAFETY: `PR_SET_TIMERSLACK` takes the slack in nanoseconds; no
+    // pointers.
+    unsafe {
+        libc::prctl(libc::PR_SET_TIMERSLACK, 1 as libc::c_ulong);
+    }
+    // Windows: ahead of the app's other threads when its wait ends.
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThread() -> *mut c_void;
+            fn SetThreadPriority(thread: *mut c_void, priority: i32) -> i32;
+        }
+        /// `THREAD_PRIORITY_HIGHEST` (`processthreadsapi.h`).
+        const HIGHEST: i32 = 2;
+        // SAFETY: a pseudo handle to this thread, and a priority level.
+        unsafe { SetThreadPriority(GetCurrentThread(), HIGHEST) };
+    }
+}
+
+/// The watchdog's timed wait: until `wait` has passed, or something
+/// unparks it sooner (a call due before then, `Watchdog::wake_by`).
+#[cfg(not(target_os = "macos"))]
+fn sleep_for(wait: Duration) {
+    std::thread::park_timeout(wait);
+}
+/// No timer set for the watchdog (`park_timeout` leaves none).
+#[cfg(not(target_os = "macos"))]
+fn disarm() {}
+#[cfg(target_os = "macos")]
+thread_local! {
+    /// The watchdog thread's strict timer (`sleep_for`; null until its
+    /// first timed wait).
+    static TIMER: std::cell::Cell<*mut c_void> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+/// The watchdog's timer set to never fire, as it parks with no call
+/// running: an idle app has no timer set, and the system coalesces its
+/// wake-ups as it likes.
+#[cfg(target_os = "macos")]
+fn disarm() {
+    unsafe extern "C" {
+        fn dispatch_source_set_timer(source: *mut c_void, start: u64, interval: u64, leeway: u64);
+    }
+    TIMER.with(|timer| {
+        if !timer.get().is_null() {
+            // SAFETY: the watchdog's timer, alive for good; `u64::MAX`
+            // (`DISPATCH_TIME_FOREVER`) as its start never fires it.
+            unsafe { dispatch_source_set_timer(timer.get(), u64::MAX, u64::MAX, 0) };
+        }
+    });
+}
+/// The watchdog's timed wait on macOS: a strict dispatch timer unparks it.
+/// A parked thread's own timed wait is coalesced with the system's other
+/// timers, and in a process the system has put in the background (an
+/// occluded app under App Nap, a launchd job) it came back 117 to 197 ms
+/// late for 25 ms, letting a runaway script run that much past its
+/// budget. A strict timer (`DISPATCH_TIMER_STRICT`) is not coalesced: it
+/// came back within 2 ms there. One timer, made on the first wait and
+/// set again for each; one firing after the thread woke for another
+/// reason only makes it scan once more.
+#[cfg(target_os = "macos")]
+fn sleep_for(wait: Duration) {
+    type Object = *mut c_void;
+    #[link(name = "System", kind = "dylib")]
+    unsafe extern "C" {
+        static _dispatch_source_type_timer: c_void;
+        fn dispatch_get_global_queue(identifier: isize, flags: usize) -> Object;
+        fn dispatch_source_create(
+            kind: *const c_void,
+            handle: usize,
+            mask: usize,
+            queue: Object,
+        ) -> Object;
+        fn dispatch_source_set_timer(source: Object, start: u64, interval: u64, leeway: u64);
+        fn dispatch_set_context(object: Object, context: *mut c_void);
+        fn dispatch_source_set_event_handler_f(source: Object, handler: extern "C" fn(*mut c_void));
+        fn dispatch_resume(object: Object);
+        fn dispatch_time(when: u64, delta: i64) -> u64;
+    }
+    /// `DISPATCH_TIMER_STRICT` (`<dispatch/source.h>`).
+    const STRICT: usize = 1;
+    /// `DISPATCH_TIME_FOREVER`: never, and no repeat.
+    const FOREVER: u64 = u64::MAX;
+    /// `QOS_CLASS_USER_INTERACTIVE`, the queue its handler runs on.
+    const INTERACTIVE: isize = 0x21;
+    extern "C" fn fire(context: *mut c_void) {
+        // SAFETY: the context is the watchdog's thread, leaked as the
+        // timer was made (it lives as long as the process, as the
+        // watchdog does).
+        let thread = unsafe { &*context.cast::<std::thread::Thread>() };
+        thread.unpark();
+    }
+    TIMER.with(|timer| {
+        if timer.get().is_null() {
+            let thread: &'static std::thread::Thread = Box::leak(Box::new(std::thread::current()));
+            // SAFETY: libdispatch's documented calls: a global queue, a
+            // timer source on it (`_dispatch_source_type_timer` is what
+            // `DISPATCH_SOURCE_TYPE_TIMER` names), its context the thread
+            // above, its handler `fire`, started unset (never firing)
+            // before it is resumed, as a new source must be.
+            unsafe {
+                let queue = dispatch_get_global_queue(INTERACTIVE, 0);
+                let source = dispatch_source_create(
+                    std::ptr::addr_of!(_dispatch_source_type_timer),
+                    0,
+                    STRICT,
+                    queue,
+                );
+                if source.is_null() {
+                    return std::thread::park_timeout(wait);
+                }
+                dispatch_set_context(source, std::ptr::from_ref(thread).cast_mut().cast());
+                dispatch_source_set_event_handler_f(source, fire);
+                dispatch_source_set_timer(source, FOREVER, FOREVER, 0);
+                dispatch_resume(source);
+                timer.set(source);
+            }
+        }
+        let delta = i64::try_from(wait.as_nanos()).unwrap_or(i64::MAX);
+        // SAFETY: the timer made above, alive for good; set to fire once,
+        // `wait` from now, with no leeway.
+        unsafe { dispatch_source_set_timer(timer.get(), dispatch_time(0, delta), FOREVER, 0) };
+        std::thread::park();
+    });
 }
 
 thread_local! {
@@ -650,6 +804,38 @@ mod tests {
         installed.publish(Some(soon.due()));
         installed.publish(None);
         settled(&|until| until == u64::MAX);
+    }
+
+    /// An idle app's watchdog wakes no more: parked with no call running,
+    /// it has no timer left set (one a call ended before it fired, on
+    /// macOS a strict one, would wake it once more for nothing).
+    #[test]
+    fn an_idle_watchdog_has_no_timer_left_to_wake_it() {
+        let lua = Lua::new();
+        let deadline: Rc<Cell<Option<Deadline>>> = Rc::default();
+        let watchdog = Watchdog::spawn();
+        let installed = install_on(watchdog, &lua, deadline, 0);
+        let settled = |want: &dyn Fn(u64) -> bool| {
+            let start = Instant::now();
+            while !want(watchdog.sleep_until.load(Ordering::SeqCst)) {
+                assert!(start.elapsed() < Duration::from_secs(5), "never settled");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        // A call sets its timer, 200 ms on (less `EARLY`)...
+        let call = Deadline::start(Duration::from_millis(205));
+        installed.publish(Some(call.due()));
+        settled(&|until| until != u64::MAX);
+        // ...and a call due sooner wakes it, but ends before it looks: it
+        // finds none running and parks for good.
+        installed.publish(Some(Deadline::start(Duration::ZERO).due()));
+        installed.publish(None);
+        settled(&|until| until == u64::MAX);
+        std::thread::sleep(Duration::from_millis(20));
+        let wakes = watchdog.wakes.load(Ordering::SeqCst);
+        // Past the first call's time: nothing woke it.
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(watchdog.wakes.load(Ordering::SeqCst), wakes, "woken idle");
     }
 
     /// A call past its budget has its interrupt set once: the watchdog
