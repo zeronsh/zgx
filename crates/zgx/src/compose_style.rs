@@ -1975,7 +1975,13 @@ fn apply_rare(
             node,
             cold.and_then(|cold| cold.outline_style).unwrap_or_default(),
         );
-        scene.set_mask_gradient(node, cold.and_then(|cold| cold.mask_gradient.clone()));
+        scene.set_mask_gradient(node, cold.and_then(|cold| cold.mask_gradient().cloned()));
+        let gradient = cold.and_then(|cold| cold.text_gradient().cloned());
+        if gradient.is_some() || scene.has_text_gradients() {
+            // On a box (a decorated text's, `mount_element`), held for its
+            // text, which takes it at the flush (`Scene::set_text_gradient`).
+            scene.set_text_gradient(node, gradient);
+        }
     }
     if let Some(direction) = rare.direction {
         scene.set_direction(node, Some(direction));
