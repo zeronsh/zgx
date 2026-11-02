@@ -21,7 +21,7 @@ And four forks, as zgx's own crates, published first:
 | `zgx-harfrust` | harfrust 0.5.2 | a variable font's glyph advances worked out once for its instance, not for every run shaped | `vendor/harfrust/ZGX_PATCH.md` |
 | `zgx-cosmic-text` | cosmic-text 0.19.0 | text shaping that streams without rebuilding every word's key; shapes with `zgx-harfrust`; a word cache that empties at once, for a font replaced while the app runs (0.19.3), and says what it holds (0.19.4); words that break with a hyphen (0.19.5); keycaps in color and every bidi caret place (0.19.6); a monospaced family's face kept (0.19.7); a paragraph's words for a layout outside a line, and a text's language for its Han fonts (0.19.8) | `vendor/cosmic-text/ZGX_PATCH.md` |
 | `zgx-taffy` | taffy 0.9.0 | auto margins that keep a flex line's gaps; a node whose display changes lays its children out afresh (0.9.1) | `vendor/taffy/ZGX_PATCH.md` |
-| `zgx-alacritty-terminal` | alacritty_terminal 0.26.0 | no comparisons of `usize` and `i32` with its grid indices from the primitive's side, which broke type inference in any crate linking it (an app turning on `terminal`) | `vendor/alacritty-terminal/ZGX_PATCH.md` |
+| `zgx-alacritty-terminal` | alacritty_terminal 0.26.0 | no comparisons of `usize` and `i32` with its grid indices from the primitive's side, which broke type inference in any crate linking it (an app turning on `terminal`); ptys opened one at a time, as macOS's `openpty` isn't safe to call concurrently (0.26.1) | `vendor/alacritty-terminal/ZGX_PATCH.md` |
 | `zgx-zune-jpeg` | zune-jpeg 0.5.15 | DCT-scaled decoding: a JPEG decoded at 1/2, 1/4 or 1/8 of its size, so a photo shown small never decodes at full size | `vendor/zune-jpeg/ZGX_PATCH.md` |
 | `zgx-mlua` | mlua 0.12.2 | table walks and userdata without a copy per key; Luau 744's bytecode (version 13) loading, which mlua-sys 0.13 takes for text; Luau's free pages given back to the system at idle (0.12.6); a table read from the stack as itself (0.12.7) | `vendor/mlua/ZGX_PATCH.md` |
 
@@ -74,7 +74,7 @@ It never publishes. It doesn't run on pull requests: CI's time is unchanged. Loc
 
 Not automated, on purpose: publishing needs a crates.io token, and is done by hand, in this order, each after the release check passes on the tag:
 
-1. The forks that changed since they were last published, their versions bumped, `zgx-harfrust` before `zgx-cosmic-text` (which depends on it): `cargo publish --manifest-path vendor/harfrust/Cargo.toml`, `vendor/cosmic-text`, `vendor/taffy`, `vendor/mlua --features luau`, `vendor/zune-jpeg`.
+1. The forks that changed since they were last published, their versions bumped, `zgx-harfrust` before `zgx-cosmic-text` (which depends on it): `cargo publish --manifest-path vendor/harfrust/Cargo.toml`, `vendor/cosmic-text`, `vendor/taffy`, `vendor/mlua --features luau`, `vendor/zune-jpeg`, `vendor/alacritty-terminal`.
 2. The workspace: `cargo publish --workspace --locked` (it orders the crates itself).
 
 `cargo publish --workspace` can stop part way with cargo's own error "no packages ready to publish but … remain in plan … awaiting confirmation" (cargo 1.96, at 0.1.0 and again at 0.1.2, each time after `zgx-gpu`; 0.1.1 went through): what it uploaded is published (check crates.io), and the rest publish one at a time in dependency order, each once the one before is in the index (`curl https://index.crates.io/zg/x-/zgx-gpu`): `cargo publish -p zgx-script --locked`, then `zgx-terminal` (before the desktop host, which depends on it), then `zgx-desktop`, then `zgx-run`.

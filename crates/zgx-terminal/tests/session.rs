@@ -288,6 +288,53 @@ fn shows_prefix(term: &Term, prefix: &str) -> bool {
         .any(|row| row.trim_start().starts_with(prefix))
 }
 
+/// Ptys opened at once from many threads all open: macOS's `openpty` isn't
+/// safe to call concurrently (16 threads failed about once in 4,000 calls,
+/// errno -6, and a terminal didn't start: "Unknown error: -6"), so the fork
+/// opens one at a time.
+#[cfg(unix)]
+#[test]
+fn ptys_opened_at_once_from_many_threads_all_open() {
+    use zgx_terminal::alacritty_terminal::{event::WindowSize, tty};
+    let size = WindowSize {
+        num_lines: 24,
+        num_cols: 80,
+        cell_width: 8,
+        cell_height: 16,
+    };
+    let threads: Vec<_> = (0..16)
+        .map(|_| {
+            std::thread::spawn(move || {
+                (0..600)
+                    .filter_map(|_| match tty::open_pty(size) {
+                        // Used as a terminal is, then closed: a byte through it.
+                        Ok((controller, child)) => {
+                            use std::io::{Read, Write};
+                            let (mut controller, mut child) =
+                                (std::fs::File::from(controller), std::fs::File::from(child));
+                            child.write_all(b"z").ok()?;
+                            let mut byte = [0];
+                            controller.read_exact(&mut byte).ok()?;
+                            None
+                        }
+                        Err(error) => Some(error.to_string()),
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let failed: Vec<String> = threads
+        .into_iter()
+        .flat_map(|thread| thread.join().unwrap())
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "{} of 9600 didn't open: {:?}",
+        failed.len(),
+        &failed[..failed.len().min(3)]
+    );
+}
+
 /// What an app links this crate with still infers its comparisons of
 /// `usize` and `i32`: no crate in the graph compares them with a type of its
 /// own (alacritty_terminal did, from the primitive's side; our fork doesn't).
