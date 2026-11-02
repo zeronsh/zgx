@@ -28,11 +28,18 @@ jobs:
             ( cd "../w-$name" && CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=line-tables-only CARGO_TARGET_DIR="$PWD/../t-$name" \
                 cargo build --release --locked -q -p zgx --example style_bench )
             ( cd /tmp && env -i PATH="$PATH" HOME="$HOME" LD_PRELOAD="$GITHUB_WORKSPACE/out/same_run.so" ZGX_GATE=1 ZGX_ASSISTIVE=0 \
-                setarch -R valgrind --tool=cachegrind --cache-sim=no --cachegrind-out-file="$GITHUB_WORKSPACE/out/$name.cg" \
+                setarch -R valgrind --tool=cachegrind --cache-sim=no --dump-instr=yes --cachegrind-out-file="$GITHUB_WORKSPACE/out/$name.cg" \
                 "$GITHUB_WORKSPACE/../t-$name/release/examples/style_bench" > /dev/null 2> "$GITHUB_WORKSPACE/out/$name.err" )
             grep -E 'I *refs' "out/$name.err" || true
+            bin="$GITHUB_WORKSPACE/../t-$name/release/examples/style_bench"
+            sym=$(nm -C "$bin" | grep -F 'mount_style_with_intrinsic::{closure#10}' | grep -v drop_glue | grep -v bind_marked | awk '{print $1}' | head -1)
+            nm "$bin" | grep -i " t " | awk -v a="$sym" 'BEGIN{} {print}' > /dev/null
+            objdump -d --no-show-raw-insn -C "$bin" | awk '/^[0-9a-f]+ <.*mount_style_with_intrinsic::\{closure#10\}>:$/{p=1} p&&/^$/{p=0} p' > "out/$name.closure10.s"
+            wc -l "out/$name.closure10.s"
           done
       - uses: actions/upload-artifact@v4
         with:
           name: style-lines
-          path: out/*.cg
+          path: |
+            out/*.cg
+            out/*.s
