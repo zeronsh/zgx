@@ -187,6 +187,8 @@ export const sets = [
         description: 'List the windows the app declares and act in one by its id or an item’s key: --window on every command and MCP tool.' },
       { slug: 'gestures', src: 'docs/agents/inspect.md', title: 'Record and replay gestures', sections: ['Gestures'], unwrap: true,
         description: 'Record a trackpad gesture once, replay it through the window’s own input path, and read how its frames landed.' },
+      { slug: 'interactions', src: 'docs/agents/inspect.md', title: 'An interaction as a whole', sections: ['An interaction as a whole'], unwrap: true,
+        description: 'What a drag, a fling or a run of keystrokes cost together: percentiles, cost per input event, layout by subtree; pointer tapes for scripted drags.' },
       { slug: 'switches', src: 'docs/agents/inspect.md', title: 'Switches', sections: ['Switches'], unwrap: true,
         description: 'Switch the engine’s fast paths off and on in the running app, to compare both ways in one window.' },
       { slug: 'mcp', src: 'docs/agents/inspect.md', title: 'MCP server', sections: ['As MCP tools'], unwrap: true,

@@ -3602,6 +3602,7 @@ impl Ui {
     ) -> Result<crate::input::DispatchResult, LayoutFeedbackError> {
         self.try_prepare_frame()?;
         let _span = crate::profile::span(crate::profile::Phase::Input);
+        crate::profile::input_event();
         let after = (
             crate::selection::SelectionEvent::of(&event, Default::default()),
             crate::scroll_keys::ScrollKey::of(&event),
@@ -3640,6 +3641,7 @@ impl Ui {
     ) -> Result<crate::input::DispatchResult, LayoutFeedbackError> {
         self.try_prepare_frame()?;
         let _span = crate::profile::span(crate::profile::Phase::Input);
+        crate::profile::input_event();
         let after = (
             crate::selection::SelectionEvent::of(&event, modifiers),
             crate::scroll_keys::ScrollKey::of(&event),

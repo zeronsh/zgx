@@ -14,6 +14,18 @@
 //! 0.000 pixel 0 -2.5 started
 //! 8.312 pixel 0 -6.75 moved
 //! ```
+//!
+//! A tape may also move the pointer, for an interaction a script plays
+//! across frames (a drag's moves, each in a frame of its own): `pointer`,
+//! where it is from the target's centre in points, across and down, and
+//! `down` (the primary button pressed there), `moved` or `up`. Recordings
+//! hold wheel input only.
+//!
+//! ```text
+//! 0 pointer 0 0 down
+//! 8.3 pointer 4 0 moved
+//! 16.7 pointer 8 0 up
+//! ```
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -29,8 +41,29 @@ pub(crate) struct Entry {
     pub after: Duration,
     /// Pixel motion in points (`true`), or wheel lines.
     pub pixels: bool,
+    /// The wheel's motion, or the pointer's place from the target's centre.
     pub delta: (f32, f32),
     pub phase: TouchPhase,
+    /// A pointer event (`delta` its place), not the wheel's.
+    pub pointer: Option<Press>,
+}
+
+/// What a tape's pointer event does where it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Press {
+    /// The primary button goes down.
+    Down,
+    Moved,
+    /// The primary button comes up.
+    Up,
+}
+
+/// A tape's event due, as the platform would report it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Due {
+    Wheel(MouseScrollDelta, TouchPhase),
+    /// The pointer at a place in the window, in points.
+    Pointer((f32, f32), Press),
 }
 
 fn phase_name(phase: TouchPhase) -> &'static str {
@@ -46,6 +79,20 @@ fn phase_name(phase: TouchPhase) -> &'static str {
 pub(crate) fn format(entries: &[Entry]) -> String {
     let mut out = String::from(HEADER);
     for e in entries {
+        if let Some(press) = e.pointer {
+            out.push_str(&format!(
+                "\n{:.3} pointer {} {} {}",
+                e.after.as_secs_f64() * 1e3,
+                e.delta.0,
+                e.delta.1,
+                match press {
+                    Press::Down => "down",
+                    Press::Moved => "moved",
+                    Press::Up => "up",
+                }
+            ));
+            continue;
+        }
         out.push_str(&format!(
             "\n{:.3} {} {} {} {}",
             e.after.as_secs_f64() * 1e3,
@@ -69,7 +116,8 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Entry>, String> {
         }
         let bad = || {
             format!(
-                "tape line {}: `{line}` is not `ms pixel|lines dx dy phase`",
+                "tape line {}: `{line}` is not `ms pixel|lines dx dy phase` or `ms pointer x y \
+                 down|moved|up`",
                 i + 1
             )
         };
@@ -84,10 +132,18 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Entry>, String> {
         };
         let pixels = match kind {
             "pixel" => true,
-            "lines" => false,
+            "lines" | "pointer" => false,
             _ => return Err(bad()),
         };
+        let pointer = match (kind, phase) {
+            ("pointer", "down") => Some(Press::Down),
+            ("pointer", "moved") => Some(Press::Moved),
+            ("pointer", "up") => Some(Press::Up),
+            ("pointer", _) => return Err(bad()),
+            _ => None,
+        };
         let phase = match phase {
+            _ if pointer.is_some() => TouchPhase::Moved,
             "started" => TouchPhase::Started,
             "moved" => TouchPhase::Moved,
             "ended" => TouchPhase::Ended,
@@ -106,6 +162,7 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Entry>, String> {
             pixels,
             delta: (dx, dy),
             phase,
+            pointer,
         });
     }
     if entries.is_empty() {
@@ -161,6 +218,7 @@ impl Tape {
             pixels,
             delta,
             phase,
+            pointer: None,
         });
     }
     /// Play `entries` from `now`, at `at`; whatever was playing stops.
@@ -173,11 +231,15 @@ impl Tape {
         self.playing.front().map(|(at, _)| *at)
     }
     /// The next event due by `now`, as the platform would report it.
-    pub fn due(&mut self, now: Instant, scale: f64) -> Option<(MouseScrollDelta, TouchPhase)> {
+    pub fn due(&mut self, now: Instant, scale: f64) -> Option<Due> {
         if self.playing.front().is_none_or(|(at, _)| *at > now) {
             return None;
         }
         let (_, e) = self.playing.pop_front()?;
+        if let Some(press) = e.pointer {
+            let at = (self.at.0 + e.delta.0, self.at.1 + e.delta.1);
+            return Some(Due::Pointer(at, press));
+        }
         let delta = if e.pixels {
             MouseScrollDelta::PixelDelta(
                 winit::dpi::LogicalPosition::new(e.delta.0 as f64, e.delta.1 as f64)
@@ -186,7 +248,7 @@ impl Tape {
         } else {
             MouseScrollDelta::LineDelta(e.delta.0, e.delta.1)
         };
-        Some((delta, e.phase))
+        Some(Due::Wheel(delta, e.phase))
     }
 }
 
@@ -230,7 +292,7 @@ mod tests {
         // At another scale: the same points.
         assert_eq!(
             tape.due(start, 1.),
-            Some((
+            Some(Due::Wheel(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(0., -2.5)),
                 TouchPhase::Started
             ))
@@ -238,14 +300,17 @@ mod tests {
         assert_eq!(tape.due(ms(7), 1.), None, "not due yet");
         assert_eq!(
             tape.due(ms(8), 1.),
-            Some((
+            Some(Due::Wheel(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.5, -6.75)),
                 TouchPhase::Moved
             ))
         );
         assert_eq!(
             tape.due(ms(40), 1.),
-            Some((MouseScrollDelta::LineDelta(0., -1.), TouchPhase::Moved))
+            Some(Due::Wheel(
+                MouseScrollDelta::LineDelta(0., -1.),
+                TouchPhase::Moved
+            ))
         );
         assert_eq!(tape.deadline(), None, "played");
         assert_eq!(tape.stop(), Err("not recording".into()));
@@ -266,5 +331,34 @@ mod tests {
         );
         assert!(parse("0 pixel 0 NaN moved").is_err());
         assert!(parse("0 drag 0 1 moved").is_err());
+        assert!(parse("0 pointer 0 1 started").is_err());
+    }
+
+    #[test]
+    fn a_tape_moves_the_pointer_from_the_targets_centre() {
+        let start = Instant::now();
+        let text = "0 pointer 0 0 down\n8 pointer 4.5 -1 moved\n16 pointer 9 -2 up\n";
+        let entries = parse(text).unwrap();
+        assert_eq!(
+            format(&entries),
+            "# zgx wheel tape 1\n0.000 pointer 0 0 down\n8.000 pointer 4.5 -1 moved\n16.000 pointer 9 -2 up\n"
+        );
+        let mut tape = Tape::default();
+        tape.play(start, entries, (100., 50.));
+        let ms = |n: u64| start + Duration::from_millis(n);
+        assert_eq!(
+            tape.due(start, 2.),
+            Some(Due::Pointer((100., 50.), Press::Down))
+        );
+        assert_eq!(tape.due(ms(7), 2.), None, "not due yet");
+        assert_eq!(
+            tape.due(ms(8), 2.),
+            Some(Due::Pointer((104.5, 49.), Press::Moved))
+        );
+        assert_eq!(
+            tape.due(ms(16), 2.),
+            Some(Due::Pointer((109., 48.), Press::Up))
+        );
+        assert_eq!(tape.deadline(), None, "played");
     }
 }

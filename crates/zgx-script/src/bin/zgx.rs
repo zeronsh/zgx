@@ -442,7 +442,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   errors               lint
   contributions        each plugin's targets: where, live matches, error (JSON)
   elements             named elements by the context they read, for plugins (JSON)
-  frames [n] [--runs N] [--all] [--since MARK|FRAME] [--keep N]
+  frames [n] [--runs N] [--all] [--since MARK|FRAME] [--until MARK|FRAME] [--summary] [--keep N]
   mark [name]          switch [name] [on|off]
   wait <target> [--text T] [--gone] [--timeout MS]
   snapshot <target> [--width PX] [--out file.png]
@@ -495,7 +495,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 println!("{INSPECT_USAGE}");
                 return ExitCode::SUCCESS;
             }
-            "--all" | "--full" | "--gone" | "--next" | "--prev" | "--close" => {
+            "--all" | "--full" | "--gone" | "--next" | "--prev" | "--close" | "--summary" => {
                 flags.push((arg[2..].to_string(), None))
             }
             "--out" => match args.next() {
@@ -506,7 +506,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 }
             },
             "--depth" | "--budget" | "--text" | "--timeout" | "--width" | "--runs" | "--since"
-            | "--keep" | "--repeat" | "--every" => {
+            | "--until" | "--keep" | "--repeat" | "--every" => {
                 flags.push((arg[2..].to_string(), args.next()));
             }
             _ => words.push(arg),
@@ -515,6 +515,30 @@ fn inspect(args: Vec<String>) -> ExitCode {
     let Some(cmd) = words.first().cloned() else {
         eprintln!("{INSPECT_USAGE}");
         return ExitCode::from(2);
+    };
+    // The command's own fields (its MCP tool's arguments): a `key=value`
+    // word naming one is that field, as `--key value` is (`frames n=300`,
+    // `mark name=drag`); any other word stays where it is.
+    let declared: Vec<Arg> = TOOLS
+        .iter()
+        .filter(|tool| tool.1 == cmd)
+        .flat_map(|tool| tool.2.iter().copied())
+        .collect();
+    let words: Vec<String> = {
+        let mut kept = Vec::new();
+        for word in words {
+            match word.split_once('=') {
+                Some((key, value))
+                    if declared
+                        .iter()
+                        .any(|arg| arg.0 == key || (key == "timeout" && arg.0 == "timeout_ms")) =>
+                {
+                    flags.push((key.to_string(), Some(value.to_string())));
+                }
+                _ => kept.push(word),
+            }
+        }
+        kept
     };
     if cmd == "mcp" {
         return mcp();
@@ -606,8 +630,12 @@ fn inspect(args: Vec<String>) -> ExitCode {
         } else {
             name
         };
+        let boolean = declared
+            .iter()
+            .any(|arg| arg.0 == key && arg.1 == "boolean");
         let value = match value {
             None => Value::Bool(true),
+            Some(v) if boolean && (v == "true" || v == "false") => Value::Bool(v == "true"),
             Some(v) => v
                 .parse::<f64>()
                 .map(Value::Num)
@@ -625,6 +653,16 @@ fn inspect(args: Vec<String>) -> ExitCode {
             _ => (k, v),
         })
         .collect();
+    // A field the command takes as a number, given as something else, is a
+    // mistake to say, not a default to fall back on.
+    for (key, value) in &fields {
+        if let Value::Str(text) = value
+            && declared.iter().any(|arg| arg.0 == key && arg.1 == "number")
+        {
+            eprintln!("zgx inspect: {cmd}: `{key}` takes a number, not `{text}`");
+            return ExitCode::from(2);
+        }
+    }
     let request = if cmd == "raw" {
         match arg(1).and_then(|r| Value::from_json(&r)) {
             Some(r) => r,
@@ -851,9 +889,11 @@ const TOOLS: &[Tool] = &[
             ("runs", "number", false),
             ("all", "boolean", false),
             ("since", "string", false),
+            ("until", "string", false),
+            ("summary", "boolean", false),
             ("keep", "number", false),
         ],
-        "The last frames that did anything: each phase's time (update, layout, text, paint, present…), the GPU's own time, the states written, the runs they caused and their costs (the costliest `runs`, default 5, or `all`), and the engine's notes on why (a scroll repainted rather than copied, a wait for a later refresh). `since` a mark (zgx_mark) or a frame number reads what followed; `keep` sets how many frames are kept (default 480). Warns first when the window isn't presenting.",
+        "The last frames that did anything: each phase's time (update, layout, text, paint, present…), the GPU's own time, the states written, the runs they caused and their costs (the costliest `runs`, default 5, or `all`), and the engine's notes on why (a scroll repainted rather than copied, a wait for a later refresh). `since` a mark (zgx_mark) or a frame number reads what followed, `until` another stops there (an interaction between two marks); `summary` answers what those frames cost together instead: their count and pacing, the work's median, p90, p95, p99 and most, the input events they took and the work per event (a drag's moves), and each phase's spread. Each frame says its input events. `keep` sets how many frames are kept (default 480). Warns first when the window isn't presenting.",
     ),
     (
         "zgx_mark",
@@ -899,7 +939,7 @@ const TOOLS: &[Tool] = &[
             ("repeat", "number", false),
             ("every", "number", false),
         ],
-        "Play a recorded wheel tape (a file) back at a node, through the window's own input path: answers the frames' pacing and work. `repeat` plays it several times and gives the spread; `every` (ms) spreads its motion over events that far apart, for a tape recorded while the window fell behind. Refused while the window isn't presenting (hidden or covered).",
+        "Play a tape (a file: recorded wheel input, or written pointer moves for a drag, a frame apart) back at a node, through the window's own input path: answers the frames' pacing, the work's percentiles, the input events and the work per event. `repeat` plays it several times and gives the spread; `every` (ms) spreads its motion over events that far apart, for a tape recorded while the window fell behind. Refused while the window isn't presenting (hidden or covered).",
     ),
     (
         "zgx_sleep",

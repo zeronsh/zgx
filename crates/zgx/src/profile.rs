@@ -219,6 +219,14 @@ pub fn note(why: impl FnOnce() -> String) {
     let _ = why;
 }
 
+/// An input event was dispatched, for devtools' trace of the frame taking it
+/// (an interaction's cost per event). One relaxed load unless tracing.
+#[inline]
+pub fn input_event() {
+    #[cfg(feature = "trace")]
+    crate::trace::input();
+}
+
 /// How long the GPU itself ran the frame being drawn, for devtools' trace of
 /// it (`present` also counts waiting for the window server and the display).
 #[inline]

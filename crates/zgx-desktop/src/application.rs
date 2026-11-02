@@ -5308,15 +5308,40 @@ impl Host {
                 let due = tape.due(std::time::Instant::now(), self.scale_factor);
                 due.map(|due| (due, tape.at))
             };
-            let Some(((delta, phase), at)) = due else {
+            let Some((due, at)) = due else {
                 break;
             };
-            self.cursor = at;
-            self.window_event(WindowEvent::MouseWheel {
-                device_id: winit::event::DeviceId::dummy(),
-                delta,
-                phase,
-            })?;
+            match due {
+                crate::wheel_tape::Due::Wheel(delta, phase) => {
+                    self.cursor = at;
+                    self.window_event(WindowEvent::MouseWheel {
+                        device_id: winit::event::DeviceId::dummy(),
+                        delta,
+                        phase,
+                    })?;
+                }
+                // A scripted pointer: moved there, then pressed or released,
+                // as the platform reports a hand's.
+                crate::wheel_tape::Due::Pointer((x, y), press) => {
+                    let position = LogicalPosition::new(x, y).to_physical(self.scale_factor);
+                    self.window_event(WindowEvent::CursorMoved {
+                        device_id: winit::event::DeviceId::dummy(),
+                        position,
+                    })?;
+                    let state = match press {
+                        crate::wheel_tape::Press::Down => Some(ElementState::Pressed),
+                        crate::wheel_tape::Press::Up => Some(ElementState::Released),
+                        crate::wheel_tape::Press::Moved => None,
+                    };
+                    if let Some(state) = state {
+                        self.window_event(WindowEvent::MouseInput {
+                            device_id: winit::event::DeviceId::dummy(),
+                            state,
+                            button: winit::event::MouseButton::Left,
+                        })?;
+                    }
+                }
+            }
         }
         if self.scroll.pending() {
             // Each refresh applies the motion due by then; with no refreshes
@@ -8516,6 +8541,7 @@ mod tests {
             factory: WindowFactory,
             scrolled: Option<f32>,
             step: f32,
+            clicks: u32,
         }
         impl ApplicationHandler<Event> for Probe {
             fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -8526,9 +8552,44 @@ mod tests {
                 let mut host = Host::new(options, self.factory.allocate(), self.factory.clone());
                 host.create_window(event_loop).unwrap();
                 let offset = host.context.ui.signal(0_f32);
-                host.context
-                    .render(scroll(offset.clone()).w(300.).h(200.).child(div().h(5000.)));
+                let clicks = host.context.ui.signal(0_u32);
+                let counted = clicks.clone();
+                let shown = host.context.render(
+                    column()
+                        .child(scroll(offset.clone()).w(300.).h(200.).child(div().h(5000.)))
+                        .child(button().id("pressed").size(80., 30.).on_click(move || {
+                            counted.update(|n| *n += 1);
+                        })),
+                );
                 host.context.ui.prepare_frame();
+                // A pointer tape: pressed and released on the button, a frame
+                // apart, through the same path as a hand's. The probe's
+                // window shows nothing (no window manager maps it here), and
+                // a window that can't draw ends a press: draw it regardless,
+                // as a shown one would.
+                host.draw_hidden = true;
+                let tape = "0 pointer 0 0 down\n8.3 pointer 1 0 moved\n16.6 pointer 1 0 up\n";
+                let button = shown.find("pressed").expect("the button");
+                let b = host.context.ui.scene.borrow().transformed_bounds(button);
+                host.context
+                    .ui
+                    .wheel_tape(zgx::widgets::WheelTape::Play {
+                        tape: tape.into(),
+                        at: (b.x + b.width / 2., b.y + b.height / 2.),
+                    })
+                    .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while host.wheel_tape.borrow().deadline().is_some() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the pointer tape never finished"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    host.update().unwrap();
+                }
+                host.context.ui.prepare_frame();
+                let pressed = clicks.get();
+                host.draw_hidden = false;
                 // A two-finger motion: pixels (points), then wheel lines.
                 let tape = "# zgx wheel tape 1\n\
                     0 pixel 0 -12.5 moved\n\
@@ -8556,6 +8617,7 @@ mod tests {
                 host.context.ui.prepare_frame();
                 self.scrolled = Some(offset.get());
                 self.step = crate::scrollers::wheel_step(host.context.viewport.get()).1;
+                self.clicks = pressed;
                 host.suspend();
                 event_loop.exit();
             }
@@ -8588,6 +8650,7 @@ mod tests {
             factory,
             scrolled: None,
             step: 0.,
+            clicks: 0,
         };
         event_loop.run_app(&mut probe).unwrap();
         // Every event arrived as the platform's would: 40 points of motion
@@ -8599,6 +8662,7 @@ mod tests {
             "{scrolled} vs {}",
             40. + step
         );
+        assert_eq!(probe.clicks, 1, "the pointer tape pressed the button once");
     }
 
     #[cfg(target_os = "linux")]
