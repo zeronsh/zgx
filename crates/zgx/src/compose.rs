@@ -5863,7 +5863,11 @@ fn mount_scroll(
         content_style.flex_shrink = 0.;
         scene.set_style(content, content_style);
         let rtl = rtl_of(&scene);
-        scene.set_transform(content, translation(position + stretch.get(), rtl));
+        // Fitting (resized, or its content shrank), it can't scroll and
+        // shows no stretch: whatever a gesture left goes as it ends
+        // (`elastic`).
+        let stretch = if limit > 0. { stretch.get() } else { 0. };
+        scene.set_transform(content, translation(position + stretch, rtl));
     });
 }
 #[cfg(target_os = "macos")]

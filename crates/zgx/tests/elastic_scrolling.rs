@@ -233,3 +233,133 @@ fn a_spring_back_steps_every_refresh_of_the_display() {
     let next = ui.next_interaction_deadline().expect("a step after");
     assert_eq!(next.duration_since(start), Duration::from_micros(8_333));
 }
+
+/// A list released past its end, and before its spring settles another
+/// view taken by a gesture (sideways, over a horizontal scroller): each
+/// springs back on its own. Only the gesture's latest view did; the list
+/// kept its stretch for good, shifted with nothing below it.
+#[test]
+fn a_view_another_gesture_takes_over_from_still_springs_back() {
+    let mut ui = Ui::new(300., 200.);
+    ui.set_elastic_scrolling(true);
+    let (down, across) = (ui.signal(0.), ui.signal(0.));
+    let root = ui.mount(
+        column()
+            .child(scroll(down.clone()).w(200.).h(100.).child(div().h(400.)))
+            .child(
+                scroll_x(across.clone())
+                    .w(200.)
+                    .h(100.)
+                    .child(div().w(400.).h(100.)),
+            ),
+    );
+    ui.prepare_frame();
+    let (list, strip) = {
+        let scene = ui.scene.borrow();
+        let column = scene.children(root.node());
+        (column[0], column[1])
+    };
+    let (list, strip) = (content(&ui, list), content(&ui, strip));
+    // The list, pulled past its start and let go: it starts back.
+    phase(&mut ui, ScrollGesture::Began);
+    scroll_by(&mut ui, -40.);
+    assert!(shift(&ui, list, &down) > 0., "stretched");
+    phase(&mut ui, ScrollGesture::Ended);
+    // Within its spring, a sideways gesture over the strip stretches that.
+    phase(&mut ui, ScrollGesture::Began);
+    ui.dispatch(InputEvent::Scroll {
+        x: 50.,
+        y: 150.,
+        delta_x: -40.,
+        delta_y: 0.,
+    });
+    ui.prepare_frame();
+    let strip_shift = ui.scene.borrow().transform(strip).x + across.get();
+    assert!(strip_shift > 0., "the strip stretched: {strip_shift}");
+    phase(&mut ui, ScrollGesture::Ended);
+    // Both settle.
+    while let Some(next) = ui.next_interaction_deadline() {
+        ui.advance_interactions(next + Duration::from_secs(1))
+            .unwrap();
+        ui.prepare_frame();
+    }
+    assert_eq!(shift(&ui, list, &down), 0., "the list is back");
+    assert_eq!(
+        ui.scene.borrow().transform(strip).x + across.get(),
+        0.,
+        "the strip is back"
+    );
+    assert_eq!(ui.next_interaction_deadline(), None);
+}
+
+/// Stretched, then made to fit (its window grew past its content) with the
+/// fingers still down: it can't scroll, so it shows no stretch, and none is
+/// left once the gesture ends.
+#[test]
+fn a_view_made_to_fit_mid_stretch_lets_go_of_it() {
+    let mut ui = Ui::new(300., 100.);
+    ui.set_elastic_scrolling(true);
+    let offset = ui.signal(0.);
+    let view = ui.mount(scroll(offset.clone()).w(200.).h_full().child(div().h(300.)));
+    ui.prepare_frame();
+    let content = content(&ui, view.node());
+    phase(&mut ui, ScrollGesture::Began);
+    scroll_by(&mut ui, -40.);
+    assert!(shift(&ui, content, &offset) > 0., "stretched");
+    // The window grows taller than the content.
+    ui.scene.borrow_mut().resize(300., 400.);
+    ui.prepare_frame();
+    assert_eq!(
+        shift(&ui, content, &offset),
+        0.,
+        "fitting, no stretch shows"
+    );
+    phase(&mut ui, ScrollGesture::Ended);
+    while let Some(next) = ui.next_interaction_deadline() {
+        ui.advance_interactions(next + Duration::from_secs(1))
+            .unwrap();
+        ui.prepare_frame();
+    }
+    // Shrunk again so it scrolls: nothing of the old stretch comes back.
+    ui.scene.borrow_mut().resize(300., 100.);
+    ui.prepare_frame();
+    assert_eq!(shift(&ui, content, &offset), 0., "no stretch left over");
+    assert_eq!(ui.next_interaction_deadline(), None);
+}
+
+/// Scrolled to its end, then its content shrinks or its viewport grows: the
+/// offset comes back within what it can scroll now, faded overflow or not,
+/// so nothing shows shifted up with empty space below.
+#[test]
+fn an_offset_past_a_new_range_comes_back_within_it() {
+    for fade in [false, true] {
+        let mut ui = Ui::new(300., 100.);
+        let (offset, rows) = (ui.signal(0.), ui.signal(40_usize));
+        let list = rows.clone();
+        let view = ui.mount(
+            scroll(offset.clone())
+                .w(200.)
+                .h_full()
+                .fade_overflow(fade)
+                .child(column().child(keyed(
+                    move || (0..list.get()).collect::<Vec<_>>(),
+                    |_, _| div().h(20.),
+                ))),
+        );
+        ui.prepare_frame();
+        let content = content(&ui, view.node());
+        offset.set(f32::MAX);
+        ui.prepare_frame();
+        assert_eq!(offset.get(), 700., "at its end: 800 of rows in 100");
+        // Fewer rows: 300 tall, 200 to scroll.
+        rows.set(15);
+        ui.prepare_frame();
+        assert_eq!(offset.get(), 200., "fade {fade}: within the new range");
+        assert_eq!(ui.scene.borrow().transform(content).y, -200.);
+        // A taller window: everything fits.
+        ui.scene.borrow_mut().resize(300., 400.);
+        ui.prepare_frame();
+        assert_eq!(offset.get(), 0., "fade {fade}: fits, at its start");
+        assert_eq!(ui.scene.borrow().transform(content).y, 0.);
+    }
+}
