@@ -110,6 +110,27 @@ impl Key {
             caret_row,
         }
     }
+    /// Whether this is `older` grown at its end, its text known to start
+    /// with `older`'s (`TextCache::extended_by`): its spans are `older`'s
+    /// but that its last one goes on (or more follow it), and it keeps a
+    /// caret row as `older` does.
+    fn extends(&self, older: &Key) -> bool {
+        let Some(((range, font, size, padding), before)) = older.spans.split_last() else {
+            return false;
+        };
+        self.caret_row == older.caret_row
+            && self.text.len() > older.text.len()
+            && self.spans.len() >= older.spans.len()
+            && self.spans[..before.len()] == *before
+            && {
+                let (now, now_font, now_size, now_padding) = &self.spans[before.len()];
+                now.start == range.start
+                    && now.end >= range.end
+                    && now_font == font
+                    && now_size == size
+                    && now_padding == padding
+            }
+    }
     fn hash(&self) -> u64 {
         let mut hasher = FxHasher::default();
         self.text.hash(&mut hasher);
@@ -308,20 +329,69 @@ impl Compact {
     }
     /// `of` for a paragraph laid out from its words (`words::Words`): one
     /// line of one span, its words already found to set one line height.
-    fn of_words(plain: &words::Words, slab: &mut Slab) -> Self {
+    /// `grew`: the compact of the paragraph `plain` took its first words
+    /// from, and how many it took (`WordCache::words`): their packed words
+    /// and advances are copied, not packed again.
+    // In `entry`, its one caller, as it was.
+    #[inline(always)]
+    fn of_words(plain: &words::Words, slab: &mut Slab, grew: Option<(&Compact, usize)>) -> Self {
         let font_size = plain.font_size;
         let words = plain.words.len();
-        let glyphs: usize = plain.words.iter().map(|(_, word)| word.glyphs.len()).sum();
+        // The words taken, packed as they were: how many, their glyphs,
+        // and where they are (copied within the slab, not out of it).
+        let taken = grew.filter(|(_, taken)| *taken > 0).map(|(grew, taken)| {
+            let glyphs = Word::of(&slab.of(grew).0[taken]).glyphs as usize;
+            (
+                taken,
+                glyphs,
+                grew.chunk as usize,
+                grew.start as usize,
+                grew.words as usize,
+            )
+        });
+        let (skip, first) = taken.map_or((0, 0), |(skip, first, ..)| (skip, first));
+        let glyphs: usize = first
+            + plain.words[skip..]
+                .iter()
+                .map(|(_, word)| word.glyphs.len())
+                .sum::<usize>();
         let length = 3 * words + glyphs;
         let index = slab.room(length);
-        let chunk = slab.chunks[index].as_mut().expect("live chunk");
-        let end = chunk.data.len();
+        let end = slab.chunks[index].as_ref().expect("live chunk").data.len();
         let start = if length == 0 { 0 } else { end };
-        chunk.data.resize(end + length, 0);
+        slab.chunks[index]
+            .as_mut()
+            .expect("live chunk")
+            .data
+            .resize(end + length, 0);
+        if let Some((skip, first, from, at, of)) = taken {
+            // Its packed words, then its advances: from where they lie.
+            let pieces = [(at, end, 3 * skip), (at + 3 * of, end + 3 * words, first)];
+            if from == index {
+                let data = &mut slab.chunks[index].as_mut().expect("live chunk").data;
+                for (source, target, length) in pieces {
+                    data.copy_within(source..source + length, target);
+                }
+            } else {
+                let (low, high) = slab.chunks.split_at_mut(from.max(index));
+                let (source, target) = match from < index {
+                    true => (&low[from], &mut high[0]),
+                    false => (&high[0], &mut low[index]),
+                };
+                let (source, target) = (
+                    &source.as_ref().expect("live chunk").data,
+                    &mut target.as_mut().expect("live chunk").data,
+                );
+                for (at, to, length) in pieces {
+                    target[to..to + length].copy_from_slice(&source[at..at + length]);
+                }
+            }
+        }
+        let chunk = slab.chunks[index].as_mut().expect("live chunk");
         let (packed, advances) = chunk.data[end..].split_at_mut(3 * words);
         let (packed, _) = packed.as_chunks_mut::<3>();
-        let mut glyph_at = 0;
-        for (packed, (_, word)) in packed.iter_mut().zip(&plain.words) {
+        let mut glyph_at = first;
+        for (packed, (_, word)) in packed[skip..].iter_mut().zip(&plain.words[skip..]) {
             let first = glyph_at as u32;
             for glyph in &word.glyphs {
                 advances[glyph_at] = glyph.width(font_size).to_bits();
@@ -875,6 +945,9 @@ impl<'a> Laid<'a> {
 /// Prepared rich texts, shared by layout measurement and the renderer.
 #[derive(Default)]
 pub struct TextCache {
+    /// Words taken from the paragraphs others grew from, all told.
+    #[cfg(test)]
+    taken: usize,
     entries: FxHashMap<u64, Entry>,
     recent: VecDeque<u64>,
     clock: u64,
@@ -1307,16 +1380,57 @@ impl TextCache {
             return hash;
         }
         let known = cached.is_some();
+        // Only a text that is not short can grow from or supersede another
+        // (`SUPERSEDED`).
+        let long = key.text.len() > SUPERSEDED;
+        self.prepare(fonts, source, caret_row, need, key, hash, known, long)
+    }
+    /// `entry` for a text not prepared as it is needed (`known`: its
+    /// measurements kept): shaped, from its words or a line. `long`: it is
+    /// not short, and may grow from a recent text or supersede it.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn prepare(
+        &mut self,
+        fonts: &mut FontSystem,
+        source: Source<'_>,
+        caret_row: bool,
+        need: Need,
+        key: Key,
+        hash: u64,
+        known: bool,
+        long: bool,
+    ) -> u64 {
         self.shaped += 1;
         if self.sweep_due {
             self.sweep_words(fonts);
         }
+        // The recent texts it extends, which it supersedes (a stream's
+        // earlier states), found once: what it grows from is among them.
+        let extended = match long {
+            true => self.extended_by(&key.text),
+            false => smallvec::SmallVec::new(),
+        };
         // A paragraph cosmic-text shapes as one span: from its words,
-        // without a line built around them.
-        if let Some((plain, base)) = self.words_of(fonts, source, caret_row) {
-            return self.prepared_words(key, hash, known, plain, base, need);
+        // without a line built around them; a stream's, from the words of
+        // the paragraph it grew from (`grew_from`).
+        let grew = match long && !known {
+            true => self.grew_from(&key, &extended),
+            false => None,
+        };
+        if let Some((plain, base, taken)) = self.words_of(fonts, source, caret_row, grew) {
+            return self.prepared_words(
+                key,
+                hash,
+                known,
+                plain,
+                base,
+                need,
+                (grew, taken),
+                &extended,
+            );
         }
-        let (lines, metrics) = self.shape(fonts, source, caret_row);
+        let (lines, metrics) = self.shape(fonts, source, caret_row, &extended);
         if known {
             // Evicted lines, shaped again for drawing; measurements stay.
             let entry = self.entries.get_mut(&hash).expect("cached");
@@ -1368,12 +1482,16 @@ impl TextCache {
     /// (`words::WordCache::words`), in its runs as `shape` would make its
     /// buffer's spans; with the font its buffer takes its metrics and
     /// alignment from.
+    // In each `prepare` (as it was in `entry`): called apart, its source and
+    // the words it makes would be moved about for every new text.
+    #[inline(always)]
     fn words_of<'s>(
         &mut self,
         fonts: &mut FontSystem,
         source: Source<'s>,
         caret_row: bool,
-    ) -> Option<(Box<words::Words>, &'s FontStyle)> {
+        grew: Option<u64>,
+    ) -> Option<(Box<words::Words>, &'s FontStyle, usize)> {
         // Most text that doesn't qualify is turned away by its bytes alone
         // (a line break): before anything is done with its runs.
         if !cosmic_text::plain_line(source.text()) {
@@ -1447,14 +1565,54 @@ impl TextCache {
                 }
             },
         };
-        let words = self
-            .words
-            .words(fonts, text, &runs, base, size, &mut self.spare_words)?;
-        Some((words, base))
+        // The words of the paragraph it grew from, to where they hold.
+        let grew = grew
+            .and_then(|grew| self.entries.get(&grew))
+            .and_then(|grew| {
+                let words = grew.words.as_deref()?;
+                Some((words, words.resume_at(&grew.key.text)?))
+            });
+        let (words, taken) =
+            self.words
+                .words(fonts, text, &runs, base, size, &mut self.spare_words, grew)?;
+        Some((words, base, taken))
+    }
+    /// Of the recent texts `key`'s extends (`extended_by`), the paragraph
+    /// kept with its words that it grew from (`Key::extends`): a stream's
+    /// last state, its words taken as far as they hold.
+    fn grew_from(&self, key: &Key, extended: &[u64]) -> Option<u64> {
+        extended.iter().rev().copied().find(|recent| {
+            self.entries.get(recent).is_some_and(|entry| {
+                entry.words.is_some() && entry.compact.is_some() && key.extends(&entry.key)
+            })
+        })
+    }
+    /// The recent texts `text` starts with, shorter and not short: a
+    /// stream's earlier states, which go as it is prepared
+    /// (`drop_superseded`). Short texts (labels, where "1" and "12" can both
+    /// show) stay.
+    fn extended_by(&self, text: &str) -> smallvec::SmallVec<[u64; RECENT]> {
+        self.recent
+            .iter()
+            .copied()
+            .filter(|recent| {
+                self.entries.get(recent).is_some_and(|entry| {
+                    let old = entry.key.text.as_bytes();
+                    // Their first eight bytes as one word first: most texts
+                    // differ there, without a comparison called.
+                    old.len() >= SUPERSEDED
+                        && old.len() < text.len()
+                        && old[..8] == text.as_bytes()[..8]
+                        && text.starts_with(&*entry.key.text)
+                })
+            })
+            .collect()
     }
     /// `entry` for plain text laid out from its words, `plain`: measured
     /// from them, and keeping them to lay out unless only measured
     /// (`Need::Detached`). `known`: its measurements kept, its words not.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
     fn prepared_words(
         &mut self,
         key: Key,
@@ -1463,10 +1621,11 @@ impl TextCache {
         plain: Box<words::Words>,
         font: &FontStyle,
         need: Need,
+        (grew, taken): (Option<u64>, usize),
+        extended: &[u64],
     ) -> u64 {
         let size = plain.font_size;
         let metrics = Metrics::new(size, font.line_height.resolve(size));
-        let text = key.text.clone();
         if known {
             let entry = self.entries.get_mut(&hash).expect("cached");
             entry.words = Some(plain);
@@ -1474,7 +1633,15 @@ impl TextCache {
             entry.used = self.clock;
             self.shaped_bytes += entry.shaped_bytes();
         } else {
-            let compact = Compact::of_words(&plain, &mut self.slab);
+            let grew = grew
+                .filter(|_| taken > 0)
+                .and_then(|grew| self.entries.get(&grew))
+                .and_then(|grew| Some((grew.compact.as_ref()?, taken)));
+            #[cfg(test)]
+            {
+                self.taken += taken;
+            }
+            let compact = Compact::of_words(&plain, &mut self.slab, grew);
             let detached = need == Need::Detached;
             let words = if detached {
                 self.recycle_words(Some(plain));
@@ -1506,7 +1673,7 @@ impl TextCache {
         }
         // As `entry` keeps a shaped text: among the recent, and what it
         // supersedes gone.
-        self.drop_superseded(&text, metrics);
+        self.drop_superseded(extended, metrics, Some(hash));
         self.recent.retain(|recent| *recent != hash);
         self.recent.push_back(hash);
         if self.recent.len() > RECENT {
@@ -1523,6 +1690,7 @@ impl TextCache {
         fonts: &mut FontSystem,
         source: Source<'_>,
         caret_row: bool,
+        extended: &[u64],
     ) -> (Vec<BufferLine>, Metrics) {
         // `ShapedText::with_runs` adds an unshaped row for an editor's caret
         // after a final line break, which its size leaves out: so is it here.
@@ -1612,31 +1780,24 @@ impl TextCache {
                 }
             }
         }
-        self.drop_superseded(text, metrics);
+        self.drop_superseded(extended, metrics, None);
         (lines, metrics)
     }
-    /// A recent text `text` extends is a stream's previous state: it goes.
-    /// Short texts (labels, where "1" and "12" can both show) stay.
-    fn drop_superseded(&mut self, text: &str, metrics: Metrics) {
-        if text.len() <= SUPERSEDED {
-            return;
-        }
-        let extended: smallvec::SmallVec<[u64; RECENT]> = self
-            .recent
-            .iter()
-            .copied()
-            .filter(|recent| {
-                self.entries.get(recent).is_some_and(|entry| {
-                    entry.metrics == metrics
-                        && entry.key.text.len() >= SUPERSEDED
-                        && entry.key.text.len() < text.len()
-                        && text.starts_with(&*entry.key.text)
-                })
-            })
-            .collect();
-        for hash in extended {
-            let entry = self.remove(hash);
-            self.retire(entry);
+    /// The recent texts a text extends (`extended_by`) are a stream's
+    /// previous states: those in its metrics go, as it is prepared (`new`,
+    /// once it is in the cache, under the hash it went in by). One gone
+    /// already (a donor of its lines) is passed over.
+    fn drop_superseded(&mut self, extended: &[u64], metrics: Metrics, new: Option<u64>) {
+        for &hash in extended {
+            if Some(hash) != new
+                && self
+                    .entries
+                    .get(&hash)
+                    .is_some_and(|entry| entry.metrics == metrics)
+            {
+                let entry = self.remove(hash);
+                self.retire(entry);
+            }
         }
     }
     fn remove(&mut self, hash: u64) -> Entry {
@@ -2227,6 +2388,88 @@ mod tests {
         assert_eq!(cache.measure(&mut fonts, &two, Some(120.)), expected);
     }
 
+    /// A paragraph streamed in, a word or a character at a time, is laid
+    /// out and measured from the words of the one it grew from as it would
+    /// be prepared afresh: whatever is appended (a word, the rest of one,
+    /// punctuation, spaces), plain or in runs that grow or follow. Only the
+    /// words after the last that holds (a space after a letter or digit)
+    /// are read again.
+    #[test]
+    fn a_paragraph_grown_from_its_words_is_the_paragraph_made_afresh() {
+        let mut fonts = FontSystem::new();
+        let glyphs = |runs: LayoutRunIter<'_>| -> Vec<_> {
+            runs.map(|run| {
+                let glyphs: Vec<_> = run
+                    .glyphs
+                    .iter()
+                    .map(|g| (g.glyph_id, g.start..g.end, g.x.to_bits(), g.w.to_bits()))
+                    .collect();
+                let geometry = [run.line_y, run.line_top, run.line_height, run.line_w];
+                (run.line_i, glyphs, geometry.map(f32::to_bits))
+            })
+            .collect()
+        };
+        let bold = FontStyle {
+            weight: 700,
+            ..FontStyle::default()
+        };
+        let pieces = [
+            "Tokens",
+            " stream",
+            " into",
+            " one",
+            " para",
+            "graph",
+            ",",
+            " which",
+            " grows",
+            " (every",
+            " frame)",
+            "  and",
+            " \"quoted\"",
+            " 3.14",
+            "x",
+            " ok",
+            " ",
+            " end",
+            ".",
+        ];
+        for runs in [false, true] {
+            let mut cache = TextCache::default();
+            let mut text = String::new();
+
+            for piece in pieces.iter().cycle().take(4 * pieces.len()) {
+                text.push_str(piece);
+                // In runs: plain to the last word, which is bold.
+                let rich = if runs {
+                    let cut = text.rfind(' ').map_or(0, |at| at + 1);
+                    let mut spans = vec![(text.len(), bold.clone(), 14.)];
+                    if cut == text.len() {
+                        spans = vec![(text.len(), FontStyle::default(), 14.)];
+                    } else if cut > 0 {
+                        spans.insert(0, (cut, FontStyle::default(), 14.));
+                    }
+                    rich(&text, &spans)
+                } else {
+                    rich(&text, &[(text.len(), FontStyle::default(), 14.)])
+                };
+                for width in [None, Some(240.), Some(60.)] {
+                    let mut fresh = TextCache::default();
+                    let expected = glyphs(fresh.layout(&mut fonts, &rich, width).runs(None));
+                    let laid = cache.layout(&mut fonts, &rich, width);
+                    assert_eq!(glyphs(laid.runs(None)), expected, "{text:?} at {width:?}");
+
+                    assert_eq!(
+                        cache.measure(&mut fonts, &rich, width),
+                        fresh.measure(&mut fonts, &rich, width),
+                        "{text:?} measured at {width:?}"
+                    );
+                }
+            }
+            assert!(cache.taken > 0, "grown from its words (in runs: {runs})");
+        }
+    }
+
     #[test]
     fn streaming_keeps_only_the_latest_state() {
         let mut fonts = FontSystem::new();
@@ -2680,7 +2923,8 @@ mod tests {
                 span: None,
             }];
             cache
-                .words(&mut fonts, text, &runs, &font, 14., &mut spare)
+                .words(&mut fonts, text, &runs, &font, 14., &mut spare, None)
+                .map(|(words, _)| words)
                 .unwrap()
         };
         let held = words(&mut cache, "kept words");
