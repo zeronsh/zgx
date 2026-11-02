@@ -1550,6 +1550,9 @@ pub(crate) struct UiStorage {
     /// frame settles (`switch_keeping_focus`): the new subtree's root, and
     /// where focus was.
     refocus_trail: RefCell<Option<Box<(NodeId, FocusTrail)>>>,
+    /// Tab going on into a list's row, while the key is handled
+    /// (`tab_into_next_row`).
+    row_focus: Cell<Option<RowFocus>>,
     content_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
     /// Nodes' laid-out sizes (`observe_size`): read only when layout runs.
     observed_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
@@ -1820,6 +1823,7 @@ impl Ui {
             unsettled: Cell::new(None),
             refocus: Cell::new(None),
             refocus_trail: RefCell::new(None),
+            row_focus: Cell::new(None),
             content_sizes: RefCell::default(),
             observed_sizes: RefCell::default(),
             observed_bounds: RefCell::default(),
@@ -1849,7 +1853,16 @@ impl Ui {
             document_listeners: RefCell::new(Vec::new()),
         });
         storage.input.set_semantics(&storage.semantics);
-        Self::from_storage(storage)
+        let ui = Self::from_storage(storage);
+        // Tab out of a list's row goes on to the row next to it, built if
+        // the list hasn't yet (`tab_into_next_row`).
+        let weak = ui.downgrade();
+        ui.input
+            .set_tab_hook(Rc::new(move |focused, backward, next| {
+                weak.upgrade()
+                    .is_some_and(|ui| ui.tab_into_next_row(focused, backward, next))
+            }));
+        ui
     }
     pub(crate) fn from_storage(storage: Rc<UiStorage>) -> Self {
         Self {
@@ -3452,6 +3465,237 @@ impl Ui {
             self.storage.refocus.set(None);
             self.input.focus(&self.scene, Some(node));
         }
+    }
+    /// Tab from `focused` would go to `next`, out of the list `focused` is
+    /// in a row of: if the list has a row on that side it hasn't built (or
+    /// has, past what Tab sees), it is shown and, once built, its first
+    /// control (its last, backward) takes focus, as a page's Tab goes on
+    /// down a list it holds whole. Whether it took the move.
+    #[cold]
+    #[inline(never)]
+    fn tab_into_next_row(&self, focused: NodeId, backward: bool, next: Option<NodeId>) -> bool {
+        let scene = self.scene.borrow();
+        // A list whose rows are one Tab stop (the keyboard's, arrows
+        // within: a focus group) is left by Tab, as it means to be.
+        if self.input.group_of(&scene, focused).is_some() {
+            return false;
+        }
+        let lists = self.storage.list_rows.borrow();
+        // The row focus is in, and its list.
+        let mut at = focused;
+        let (list, row, index) = loop {
+            let content = match scene.parent(at) {
+                Some(content) => content,
+                None => {
+                    drop((scene, lists));
+                    return self.tab_into_list(focused, backward, next);
+                }
+            };
+            let list = scene
+                .parent(content)
+                .and_then(|viewport| scene.parent(viewport));
+            if let Some(list) = list
+                && let Some(index) = lists.get(&list)
+            {
+                break (list, at, index.clone());
+            }
+            at = content;
+        };
+        // Tab stays in the list: as ever.
+        if next.is_some_and(|next| {
+            let mut up = Some(next);
+            while let Some(id) = up {
+                if id == list {
+                    return true;
+                }
+                up = scene.parent(id);
+            }
+            false
+        }) {
+            return false;
+        }
+        let top = scene.transform(row).y;
+        // (The lookup rounds half a point in, as find in page reads it.)
+        let Some(here) = index(top) else {
+            return false;
+        };
+        let probe = match backward {
+            true => top - 1.,
+            false => top + scene.layout_box(row).height + 1.,
+        };
+        let Some(there) = index(probe).filter(|there| *there != here) else {
+            drop((scene, lists));
+            return self.tab_into_list(focused, backward, next);
+        };
+        drop((scene, lists));
+        self.tab_to_row(list, there, backward, next)
+    }
+    /// Tab from `focused`, outside the list `next` is in a row of, would
+    /// enter it at a built row: it enters at the list's first row (its last,
+    /// backward), shown and built if it isn't, as a page's Tab enters a
+    /// list it holds whole. Whether it took the move.
+    #[cold]
+    #[inline(never)]
+    fn tab_into_list(&self, focused: NodeId, backward: bool, next: Option<NodeId>) -> bool {
+        let Some(next) = next else {
+            return false;
+        };
+        let scene = self.scene.borrow();
+        // Rows that are one Tab stop (a focus group) are entered as ever.
+        if self.input.group_of(&scene, next).is_some() {
+            return false;
+        }
+        let lists = self.storage.list_rows.borrow();
+        // The row Tab would enter at, and its list.
+        let mut at = next;
+        let (list, content, row, index) = loop {
+            let Some(content) = scene.parent(at) else {
+                return false;
+            };
+            let list = scene
+                .parent(content)
+                .and_then(|viewport| scene.parent(viewport));
+            if let Some(list) = list
+                && let Some(index) = lists.get(&list)
+            {
+                break (list, content, at, index.clone());
+            }
+            at = content;
+        };
+        // From inside the same list: not an entry.
+        let mut up = Some(focused);
+        while let Some(id) = up {
+            if id == list {
+                return false;
+            }
+            up = scene.parent(id);
+        }
+        let end = match backward {
+            true => scene.layout_box(content).height - 1.,
+            false => 0.,
+        };
+        let (Some(here), Some(end)) = (index(scene.transform(row).y), index(end.max(0.))) else {
+            return false;
+        };
+        if here == end {
+            return false;
+        }
+        drop((scene, lists));
+        self.tab_to_row(list, end, backward, Some(next))
+    }
+    /// Focus row `row` of `list` with this key: shown, built and laid out
+    /// now, then its first control (its last, backward); else where Tab
+    /// went otherwise.
+    fn tab_to_row(&self, list: NodeId, row: usize, backward: bool, next: Option<NodeId>) -> bool {
+        self.storage.row_focus.set(Some(RowFocus {
+            list,
+            row,
+            backward,
+            otherwise: next,
+        }));
+        // Shown and laid out now: a row it builds takes focus with this
+        // key, not a frame later.
+        self.reveal_row(list, row);
+        self.prepare_frame();
+        if self.storage.row_focus.get().is_some() {
+            self.focus_built_row();
+        }
+        // Not focused with this key (the row not built, or nothing in it
+        // focused): Tab goes where it went, never held where it was.
+        if let Some(wanted) = self.storage.row_focus.take() {
+            self.input.focus(&self.scene, wanted.otherwise);
+        }
+        true
+    }
+    fn reveal_row(&self, list: NodeId, row: usize) {
+        if let Some(reveal) = self.storage.list_reveals.borrow().get(&list) {
+            let serial = reveal.with_untracked(|r| r.0).wrapping_add(1);
+            reveal.set((serial, row, crate::compose::RowAlign::Nearest));
+        }
+    }
+    /// Focus what `tab_into_next_row` asked for, once its row is built: its
+    /// first focusable node, its last backward; a row with none, the next
+    /// one that way; past the list's last row, where Tab went otherwise.
+    #[cold]
+    #[inline(never)]
+    fn focus_built_row(&self) {
+        let Some(mut wanted) = self.storage.row_focus.take() else {
+            return;
+        };
+        // A few rows with nothing to focus at once, then the rest as built.
+        for _ in 0..8 {
+            let step = {
+                let scene = self.scene.borrow();
+                if !scene.contains(wanted.list) {
+                    return;
+                }
+                let lists = self.storage.list_rows.borrow();
+                let Some(index) = lists.get(&wanted.list).cloned() else {
+                    return;
+                };
+                let content = scene
+                    .children(wanted.list)
+                    .first()
+                    .and_then(|viewport| scene.children(*viewport).first().copied());
+                let built = content.and_then(|content| {
+                    scene
+                        .children(content)
+                        .iter()
+                        .copied()
+                        .find(|r| index(scene.transform(*r).y) == Some(wanted.row))
+                });
+                match built {
+                    None => None,
+                    Some(built) => {
+                        // Its focusable nodes in document order.
+                        let mut focusable = Vec::new();
+                        let mut stack = vec![built];
+                        while let Some(node) = stack.pop() {
+                            if self.input.options(node).is_some_and(|o| o.focusable)
+                                && self.input.enabled(&scene, node)
+                            {
+                                focusable.push(node);
+                            }
+                            stack.extend(scene.children(node).iter().rev().copied());
+                        }
+                        let chosen = match wanted.backward {
+                            true => focusable.last().copied(),
+                            false => focusable.first().copied(),
+                        };
+                        // None in it: the row after it that way, if any.
+                        let top = scene.transform(built).y;
+                        let probe = match wanted.backward {
+                            true => top - 1.,
+                            false => top + scene.layout_box(built).height + 1.,
+                        };
+                        let beyond = index(probe).filter(|r| *r != wanted.row);
+                        Some((chosen, beyond))
+                    }
+                }
+            };
+            match step {
+                // Not built: left to `tab_into_next_row`, which goes on.
+                None => {
+                    self.storage.row_focus.set(Some(wanted));
+                    return;
+                }
+                Some((Some(node), _)) => {
+                    self.input.focus(&self.scene, Some(node));
+                    return;
+                }
+                Some((None, Some(beyond))) => {
+                    wanted.row = beyond;
+                    self.reveal_row(wanted.list, beyond);
+                    self.prepare_frame();
+                }
+                // The list's end that way: where Tab went otherwise.
+                Some((None, None)) => {
+                    self.input.focus(&self.scene, wanted.otherwise);
+                    return;
+                }
+            }
+        }
+        self.storage.row_focus.set(Some(wanted));
     }
     /// The node at `step`'s place in its list's row: `Err(list)` if the
     /// list holds no such row built.
@@ -7996,4 +8240,14 @@ fn follow_path(scene: &crate::scene::Scene, root: NodeId, path: &[u32]) -> Optio
         at = *scene.children(at).get(*index as usize)?;
     }
     Some(at)
+}
+/// Tab going on into a list's row it is building (`Ui::tab_into_next_row`).
+#[derive(Clone, Copy)]
+struct RowFocus {
+    list: NodeId,
+    row: usize,
+    /// Shift+Tab: the row's last control takes focus, else its first.
+    backward: bool,
+    /// Where Tab would have gone: past the list's last row that way.
+    otherwise: Option<NodeId>,
 }

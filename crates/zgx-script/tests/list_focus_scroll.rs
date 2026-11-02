@@ -80,12 +80,15 @@ fn tabbing_back_through_a_list_scrolls_each_row_into_view_clear_of_its_padding()
         rows.push(row.expect("a row's control"));
     }
     // Back through the rows one by one, each built as the list came to it.
+    // Entered at the last row, as from below a list held whole.
     assert!(
-        rows.windows(2).all(|pair| pair[1] == pair[0] - 1),
+        rows[0] == 200 && rows.windows(2).all(|pair| pair[1] == pair[0] - 1),
         "{rows:?}"
     );
+    // (Rows measured as they come in move the estimate above them, so the
+    // offset moves less than the rows passed.)
     let now: f32 = h.text("offset").parse().unwrap();
-    assert!(now < end - 1_000., "the offset followed: {now} from {end}");
+    assert!(now < end - 500., "the offset followed: {now} from {end}");
     // And forward again: each row comes in at the bottom, above the
     // composer, not under it.
     let mut at_bottom = 0;

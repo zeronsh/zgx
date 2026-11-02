@@ -536,6 +536,9 @@ pub struct NodeInput {
     pub tab_index: i32,
 }
 type Callback = Rc<RefCell<dyn FnMut(&mut EventContext)>>;
+/// `set_tab_hook`'s: the focused node, whether backward, and where Tab
+/// would go; true if it takes the move.
+pub(crate) type TabHook = Rc<dyn Fn(NodeId, bool, Option<NodeId>) -> bool>;
 struct Entry {
     token: u64,
     callback: Callback,
@@ -662,6 +665,9 @@ struct State {
     disabled_observers: crate::scene::NodeMap<Signal<bool>>,
     next: u64,
     focused: Option<NodeId>,
+    /// Asked before Tab moves focus (`set_tab_hook`): whether it takes the
+    /// move itself (a list building the row the move goes to).
+    tab_hook: Option<TabHook>,
     /// Focus moving without scrolling into view (`focus_in_place`).
     in_place: bool,
     captured: Option<NodeId>,
@@ -1006,6 +1012,12 @@ impl InputDispatcher {
             at = scene.parent(id);
         }
         false
+    }
+    /// Asked before Tab moves focus from where it is to where it would go:
+    /// true takes the move (the `Ui`'s, for a list whose next row isn't
+    /// built yet).
+    pub(crate) fn set_tab_hook(&self, hook: TabHook) {
+        self.state.borrow_mut().tab_hook = Some(hook);
     }
     /// Route a typed action from focus through its enabled ancestors.
     pub fn dispatch_action(
@@ -1864,7 +1876,7 @@ impl InputDispatcher {
             }
         }
     }
-    fn enabled(&self, scene: &Scene, mut node: NodeId) -> bool {
+    pub(crate) fn enabled(&self, scene: &Scene, mut node: NodeId) -> bool {
         if !scene.layout_visible(node) {
             return false;
         }
@@ -2153,7 +2165,7 @@ impl InputDispatcher {
         }
     }
     /// The innermost focus group holding `id` (not `id` itself).
-    fn group_of(&self, scene: &Scene, id: NodeId) -> Option<NodeId> {
+    pub(crate) fn group_of(&self, scene: &Scene, id: NodeId) -> Option<NodeId> {
         let s = self.state.borrow();
         if s.groups.is_empty() || !scene.contains(id) {
             return None;
@@ -2779,7 +2791,14 @@ impl InputDispatcher {
                     ..
                 } if !modifiers.alt && !modifiers.meta => {
                     let next = self.next_focus(&scene.borrow(), modifiers.shift);
-                    self.focus(scene, next);
+                    let hook = self.state.borrow().tab_hook.clone();
+                    let taken = match (hook, self.focused()) {
+                        (Some(hook), Some(focused)) => hook(focused, modifiers.shift, next),
+                        _ => false,
+                    };
+                    if !taken {
+                        self.focus(scene, next);
+                    }
                     prevented = true;
                 }
                 InputEvent::KeyDown {

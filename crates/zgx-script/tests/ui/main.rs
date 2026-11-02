@@ -51,6 +51,8 @@ mod list_edges;
 mod list_focus_scroll;
 #[path = "../list_in_easing_box.rs"]
 mod list_in_easing_box;
+#[path = "../list_tab_rows.rs"]
+mod list_tab_rows;
 #[path = "../markdown_lazy.rs"]
 mod markdown_lazy;
 #[path = "../mentions.rs"]
