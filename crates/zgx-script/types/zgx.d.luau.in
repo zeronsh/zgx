@@ -1150,6 +1150,12 @@ export type MarkdownOptions = {
 	breaks: boolean?,
 	-- Repository paths (`src/main.rs:12`) are files: runs with `f`.
 	paths: boolean?,
+	-- With `key`: a text this long (true: 4 KB; or bytes) landing whole
+	-- comes back at once, its blocks not parsed yet `{ t = "pending" }`,
+	-- and is parsed over frames, the end first.
+	lazy: (boolean | number)?,
+	-- With `lazy`: parse block `first` (from 1) before the others.
+	first: number?,
 }
 -- A run of a block's text: `x`, and whether it is bold (`b`), italic
 -- (`i`), code (`c`), struck (`s`), a link (`a`, where to), a repository
@@ -1168,6 +1174,10 @@ export type MarkdownBlock =
 	| { t: "hr" }
 	| { t: "table", head: { { MarkdownRun } }, rows: { { { MarkdownRun } } } }
 	| { t: "img", src: string, alt: string }
+	-- A block `lazy` has not parsed yet: what it is by its first line
+	-- (`hint`), its lines and its bytes in the text (`from`, `to`, as
+	-- `string.sub` takes them).
+	| { t: "pending", hint: "p" | "h" | "code" | "list" | "quote" | "table" | "hr", lines: number, from: number, to: number }
 
 export type StrokeOptions = Merge<LineOptions, { draw: Pair? }>
 -- What a canvas's `draw(c, w, h)` paints with.

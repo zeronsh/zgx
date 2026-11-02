@@ -80,15 +80,29 @@ pub struct Incremental {
     /// The long text (`Value::Text`) the source is, by its id (`Text::id`;
     /// 0 for none): its next version is followed by what it inserted.
     taken: u64,
+    /// A text landing whole, parsed over time (`set_text_lazy`): top-level
+    /// elements below this one may be pending, the next looked for from
+    /// here down; 0 for none. (In the struct's padding: a parser that never
+    /// parses lazily is the size it was.)
+    pending_below: u32,
 }
 
 /// A top-level element: where it starts, and the blocks it made (one, or
-/// none for raw HTML).
+/// none for raw HTML). One not parsed yet has its stand-in
+/// (`pending_block`).
 #[derive(Clone)]
 struct Top {
     start: usize,
     blocks: Vec<Value>,
 }
+impl Top {
+    fn pending(&self) -> bool {
+        matches!(&self.blocks[..], [block]
+            if matches!(block.field("t"), Some(Value::Str(t)) if &**t == PENDING))
+    }
+}
+/// A stand-in block's `t`.
+const PENDING: &str = "pending";
 
 impl Incremental {
     /// A parser for markdown rendered with `options`, with no text yet.
@@ -164,7 +178,121 @@ impl Incremental {
         self.set_text(&text.to_cow());
         self.taken = text.id();
     }
+    /// [`set_text`](Self::set_text), except that a text of `threshold`
+    /// bytes or more that is not an append (one landing whole) is only
+    /// scanned: each top-level element is a block `{ t = "pending", hint,
+    /// lines, from, to }` (what it is by its first token, its lines, its
+    /// bytes, 1-based and inclusive) until
+    /// [`parse_pending`](Self::parse_pending) parses it, the last first. The last element is
+    /// parsed at once; an append goes on as ever, the pending ones before it
+    /// staying pending.
+    pub fn set_text_lazy(&mut self, text: &str, threshold: usize) {
+        // (From nothing, the text lands whole.)
+        let extends = !self.source.is_empty()
+            && text.len() >= self.source.len()
+            && text.starts_with(self.source.as_str());
+        if extends || text.len() < threshold || has_link_defs(text) {
+            return self.set_text(text);
+        }
+        self.taken = 0;
+        self.mender = None;
+        self.source = text.to_string();
+        self.full_only = false;
+        self.tops = scan_tops(text);
+        for at in 0..self.tops.len() {
+            // What it is, if it makes a block (raw HTML doesn't).
+            if let Some(Value::Str(hint)) = self.tops[at].blocks.first().cloned() {
+                let (from, to) = self.top_range(at);
+                self.tops[at].blocks = vec![pending_block(text, from, to, hint)];
+            }
+        }
+        self.pending_below = u32::try_from(self.tops.len()).unwrap_or(u32::MAX);
+        self.last_parse_bytes = text.len();
+        // The end, which shows first and which an append mends.
+        if let Some(last) = self.tops.len().checked_sub(1) {
+            self.parse_top(last);
+        }
+        self.remend();
+    }
+    /// Whether [`set_text_lazy`](Self::set_text_lazy) left blocks
+    /// unparsed.
+    pub fn has_pending(&self) -> bool {
+        self.pending_below > 0
+    }
+    /// Whether block `index` (of [`blocks`](Self::blocks)) is a stand-in
+    /// not parsed yet.
+    pub fn block_pending(&self, index: usize) -> bool {
+        self.top_of(index).is_some_and(|at| self.tops[at].pending())
+    }
+    /// The top-level element block `index` (of [`blocks`](Self::blocks)) is
+    /// in.
+    fn top_of(&self, index: usize) -> Option<usize> {
+        let mut seen = 0;
+        self.tops.iter().position(|top| {
+            seen += top.blocks.len();
+            seen > index
+        })
+    }
+    /// Parse pending top-level elements, block `first` (of
+    /// [`blocks`](Self::blocks), a search found something in it) before the
+    /// others, then from the end down, until `budget` bytes of them are
+    /// parsed: whether any remain.
+    pub fn parse_pending(&mut self, budget: usize, first: Option<usize>) -> bool {
+        let mut spent = 0;
+        let mut first = first
+            .and_then(|index| self.top_of(index))
+            .filter(|&at| self.tops[at].pending());
+        while self.pending_below > 0 && spent < budget {
+            let at = match first.take() {
+                Some(at) => at,
+                None => {
+                    let below = (self.pending_below as usize).min(self.tops.len());
+                    let Some(at) = self.tops[..below].iter().rposition(Top::pending) else {
+                        self.pending_below = 0;
+                        break;
+                    };
+                    self.pending_below = at as u32 + 1;
+                    at
+                }
+            };
+            let (from, to) = self.top_range(at);
+            spent += to - from;
+            if !self.parse_top(at) {
+                // Not one element alone after all: the whole text, as ever.
+                let text = std::mem::take(&mut self.source);
+                self.reset(&text);
+                return false;
+            }
+        }
+        self.pending_below > 0
+    }
+    /// The bytes of top-level element `at`: from its line's start to the
+    /// next one's.
+    fn top_range(&self, at: usize) -> (usize, usize) {
+        let line = |at: usize| self.source[..at].rfind('\n').map_or(0, |i| i + 1);
+        let from = line(self.tops[at].start);
+        let to = match self.tops.get(at + 1) {
+            Some(next) => line(next.start),
+            None => self.source.len(),
+        };
+        (from, to.max(from))
+    }
+    /// Parse pending element `at` alone: false if its bytes don't make one
+    /// element by themselves.
+    fn parse_top(&mut self, at: usize) -> bool {
+        if !self.tops[at].pending() {
+            return true;
+        }
+        let (from, to) = self.top_range(at);
+        let mut parsed = parse_at(&self.source[from..to], from, &self.options);
+        if parsed.len() != 1 || parsed[0].blocks.len() > 1 {
+            return false;
+        }
+        self.tops[at].blocks = std::mem::take(&mut parsed[0].blocks);
+        true
+    }
     fn reset(&mut self, text: &str) {
+        self.pending_below = 0;
         self.mender = None;
         self.source = text.to_string();
         self.full_only = has_link_defs(text);
@@ -207,6 +335,10 @@ impl Incremental {
         }
         self.tops.truncate(at);
         self.tops.extend(tail);
+        // Pending ones are above the tail parsed again.
+        if self.pending_below > 0 {
+            self.pending_below = self.pending_below.min(at as u32);
+        }
         self.remend();
     }
     /// Mend hanging inline markers in the last top-level block, the only
@@ -279,6 +411,26 @@ pub(crate) fn script(
         Some(t) => t.get("key")?,
         None => None,
     };
+    // `lazy = true` (4 KB) or a byte count: a keyed text that long landing
+    // whole is parsed over frames, the end first (`set_text_lazy`).
+    let lazy = match &opts {
+        Some(t) => match t.get::<mlua::Value>("lazy")? {
+            mlua::Value::Boolean(true) => Some(LAZY_FROM),
+            mlua::Value::Integer(n) => Some(n.max(0) as usize),
+            mlua::Value::Number(n) if n.is_finite() => Some(n.max(0.) as usize),
+            mlua::Value::Nil | mlua::Value::Boolean(false) => None,
+            _ => {
+                return Err(mlua::Error::runtime(
+                    "ui.markdown `lazy` is true or a byte count",
+                ));
+            }
+        },
+        None => None,
+    };
+    let first: Option<usize> = match &opts {
+        Some(t) => t.get::<Option<usize>>("first")?,
+        None => None,
+    };
     // (The VM registers its cache when it starts: `install`.)
     let Some(parsed) = lua.app_data_ref::<Parsed>() else {
         return Ok(Value::List(parse(&text, &options).into()));
@@ -292,9 +444,21 @@ pub(crate) fn script(
                 streams.insert(key.clone(), (flags, Incremental::new(options)));
             }
             let (_, stream) = streams.get_mut(&key).expect("inserted above");
-            stream.set_text(&text);
+            match lazy {
+                Some(threshold) => stream.set_text_lazy(&text, threshold),
+                None => stream.set_text(&text),
+            }
+            let pending = stream.has_pending();
             let blocks = Value::List(stream.blocks().into());
-            touch(&mut parsed.stream_order.borrow_mut(), key, &mut streams);
+            touch(
+                &mut parsed.stream_order.borrow_mut(),
+                key.clone(),
+                &mut streams,
+            );
+            drop(streams);
+            if pending {
+                follow_lazy(lua, key, first.and_then(|i| i.checked_sub(1)))?;
+            }
             blocks
         }
         None => {
@@ -312,6 +476,108 @@ pub(crate) fn script(
         }
     })
 }
+
+/// A stream with blocks pending: the ticker parsing them over frames, and
+/// the state that says they moved on, which the caller (a computed) reads to
+/// run again as they come.
+struct Ticker {
+    /// Its VM (`Rc::as_ptr`) and stream.
+    vm: *const crate::Vm,
+    key: String,
+    progress: zgx::reactive::Signal<u64>,
+    /// The block to parse before the others (`first`, from 0).
+    first: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+    _stop: crate::timers::Stop,
+}
+thread_local! {
+    /// The streams parsing lazily, of every VM on the thread: none (and no
+    /// room held) once they are done.
+    static TICKERS: std::cell::RefCell<Vec<Ticker>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Stream `key` has blocks pending: follow them (the caller runs again as
+/// they come in), ticking them in over frames, `first` before the others.
+fn follow_lazy(lua: &mlua::Lua, key: String, first: Option<usize>) -> mlua::Result<()> {
+    let env = crate::node::env(lua)?;
+    let vm_ptr = env.vm.as_ptr();
+    let found = TICKERS.with_borrow(|tickers| {
+        tickers
+            .iter()
+            .find(|t| t.vm == vm_ptr && t.key == key)
+            .map(|t| {
+                if first.is_some() {
+                    t.first.set(first);
+                }
+                t.progress.get();
+            })
+            .is_some()
+    });
+    if found {
+        return Ok(());
+    }
+    let progress = env.runtime.signal(0_u64);
+    progress.get();
+    let asked = std::rc::Rc::new(std::cell::Cell::new(first));
+    let (vm, tick, stream_key, wanted) =
+        (env.vm.clone(), progress.clone(), key.clone(), asked.clone());
+    let mut ticks = 0_u32;
+    let stop = env.timers.start(LAZY_TICK, true, move || {
+        let done = |tick: &zgx::reactive::Signal<u64>| {
+            // Let go: no room held for the next.
+            TICKERS.with_borrow_mut(|tickers| {
+                tickers.retain(|t| !(t.vm == vm.as_ptr() && t.key == stream_key));
+                if tickers.is_empty() {
+                    *tickers = Vec::new();
+                }
+            });
+            tick.set(tick.with_untracked(|n| n.wrapping_add(1)));
+            false
+        };
+        let Some(live) = vm.upgrade() else {
+            return done(&tick);
+        };
+        let Some(parsed) = live.lua.app_data_ref::<Parsed>() else {
+            return done(&tick);
+        };
+        let first = wanted.take();
+        let (more, asked) = match parsed.streams.borrow_mut().get_mut(&stream_key) {
+            Some((_, stream)) => {
+                let more = stream.parse_pending(LAZY_BUDGET, first);
+                (more, first.is_some_and(|i| !stream.block_pending(i)))
+            }
+            None => (false, false),
+        };
+        drop(parsed);
+        if !more {
+            return done(&tick);
+        }
+        ticks += 1;
+        // Told when the blocks nearest the end are in (what shows first)
+        // and when a block asked for is (and, above, when all are): each
+        // telling builds the list's tables again, so not every tick.
+        if ticks == 1 || asked {
+            tick.set(tick.with_untracked(|n| n.wrapping_add(1)));
+        }
+        true
+    });
+    TICKERS.with_borrow_mut(|tickers| {
+        tickers.push(Ticker {
+            vm: vm_ptr,
+            key,
+            progress,
+            first: asked,
+            _stop: stop,
+        })
+    });
+    Ok(())
+}
+
+/// `lazy = true`'s threshold: shorter texts parse at once.
+const LAZY_FROM: usize = 4096;
+/// Bytes a lazy text's ticker parses a tick, and how often it ticks: a
+/// frame's share, about a frame apart.
+const LAZY_BUDGET: usize = 8192;
+const LAZY_TICK: std::time::Duration = std::time::Duration::from_millis(8);
 
 /// Give a new VM its parsed markdown.
 pub(crate) fn install(lua: &mlua::Lua) {
@@ -348,6 +614,35 @@ fn touch(order: &mut std::collections::VecDeque<String>, key: String, streams: &
     }
 }
 
+/// `text`'s top-level elements, each with what it is by its first
+/// token (`p`, `h`, `code`, `list`, `quote`, `table`, `hr`) as its one
+/// block's stand-in, found with the parser's events alone (what makes the
+/// blocks is most of a parse); raw HTML, which makes none, not pending.
+fn scan_tops(text: &str) -> Vec<Top> {
+    parse_or_scan(text, 0, &Options::default(), true)
+}
+
+/// The stand-in for a top-level element not parsed yet.
+fn pending_block(text: &str, from: usize, to: usize, hint: Rc<str>) -> Value {
+    let own = text[from..to].trim_end();
+    let num = |n: usize| Value::Num(n as f64);
+    map(vec![
+        ("t", Value::Str(Rc::from(PENDING))),
+        ("hint", Value::Str(hint)),
+        ("lines", num(own.lines().count().max(1))),
+        ("from", num(from + 1)),
+        ("to", num(from + own.len())),
+    ])
+}
+
+fn parser_flags() -> pulldown_cmark::Options {
+    let mut flags = pulldown_cmark::Options::empty();
+    flags.insert(pulldown_cmark::Options::ENABLE_TABLES);
+    flags.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
+    flags.insert(pulldown_cmark::Options::ENABLE_TASKLISTS);
+    flags
+}
+
 /// Link reference definition lines (`[label]: destination`, up to three
 /// spaces in), conservatively.
 fn has_link_defs(text: &str) -> bool {
@@ -360,10 +655,13 @@ fn has_link_defs(text: &str) -> bool {
 /// `text` (which starts at `offset` in the whole) parsed into its top-level
 /// elements.
 fn parse_at(text: &str, offset: usize, options: &Options) -> Vec<Top> {
-    let mut flags = pulldown_cmark::Options::empty();
-    flags.insert(pulldown_cmark::Options::ENABLE_TABLES);
-    flags.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
-    flags.insert(pulldown_cmark::Options::ENABLE_TASKLISTS);
+    parse_or_scan(text, offset, options, false)
+}
+/// `parse_at`, or with `scan` its top-level elements alone (`scan_tops`):
+/// one loop over the parser's events, so the parser's iterator has the one
+/// caller it is inlined into.
+fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool) -> Vec<Top> {
+    let flags = parser_flags();
     let mut builder = Builder {
         frames: vec![Frame::Blocks(Vec::new())],
         runs: Vec::new(),
@@ -386,15 +684,34 @@ fn parse_at(text: &str, offset: usize, options: &Options) -> Vec<Top> {
         let closes = matches!(event, Event::End(_));
         if depth == 0 {
             start = range.start;
+            if scan {
+                let hint = match &event {
+                    Event::Start(Tag::Paragraph) => Some("p"),
+                    Event::Start(Tag::Heading { .. }) => Some("h"),
+                    Event::Start(Tag::CodeBlock(_)) => Some("code"),
+                    Event::Start(Tag::List(_)) => Some("list"),
+                    Event::Start(Tag::BlockQuote(_)) => Some("quote"),
+                    Event::Start(Tag::Table(_)) => Some("table"),
+                    Event::Rule => Some("hr"),
+                    _ => None,
+                };
+                // What it is stands in until `set_text_lazy` makes its block.
+                tops.push(Top {
+                    start: offset + start,
+                    blocks: hint.map(|h| Value::Str(Rc::from(h))).into_iter().collect(),
+                });
+            }
         }
-        builder.event(event);
+        if !scan {
+            builder.event(event);
+        }
         if opens {
             depth += 1;
         } else if closes {
             depth = depth.saturating_sub(1);
         }
         // A top-level element is done: what it made is its blocks.
-        if depth == 0 {
+        if depth == 0 && !scan {
             let blocks = match builder.frames.first_mut() {
                 Some(Frame::Blocks(blocks)) => std::mem::take(blocks),
                 _ => Vec::new(),
@@ -1453,5 +1770,133 @@ mod tests {
             Some(&Value::from(PENDING_LINK_URL)),
             "a link going nowhere yet"
         );
+    }
+
+    /// A long reply: every kind of top-level element, raw HTML among them.
+    fn long_reply() -> String {
+        let mut text = String::new();
+        for n in 0..180 {
+            text.push_str(&match n % 9 {
+                0 => format!("## Part {n}\n\n"),
+                1 => format!("A paragraph {n} with **bold**, `code` and a [link](https://example.com/{n}).\nIt runs on a second line.\n\n"),
+                2 => "- one\n- two\n\n  more of two\n- three\n\n".to_string(),
+                3 => "```rust\nfn main() {\n\n    println!(\"hi\");\n}\n```\n\n".to_string(),
+                4 => "> quoted, *then*\n> more\n\n".to_string(),
+                5 => "| a | b |\n|---|---|\n| 1 | 2 |\n\n".to_string(),
+                6 => "---\n\n".to_string(),
+                7 => "<div>raw</div>\n\n".to_string(),
+                _ => format!("1. first {n}\n2. second\n\n"),
+            });
+        }
+        text
+    }
+    fn pending_count(stream: &Incremental) -> usize {
+        stream
+            .blocks()
+            .iter()
+            .filter(|b| b.field("t") == Some(&Value::from("pending")))
+            .count()
+    }
+    fn lazy(text: &str) -> Incremental {
+        let mut stream = Incremental::new(plain());
+        stream.set_text_lazy(text, 4096);
+        stream
+    }
+    fn field<'a>(block: &'a Value, name: &str) -> Option<&'a Value> {
+        block.field(name)
+    }
+
+    #[test]
+    fn a_long_text_landing_whole_is_its_blocks_pending_then_the_same_blocks() {
+        let text = long_reply();
+        assert!(text.len() > 4096);
+        let eager = parse(&text, &plain());
+        let mut stream = lazy(&text);
+        let first = stream.blocks();
+        // One entry a block, from the start: the count is known at once.
+        assert_eq!(first.len(), eager.len());
+        assert!(pending_count(&stream) > 0);
+        // The end parsed at once; the rest stand-ins saying where they are.
+        assert_eq!(first.last(), eager.last());
+        for (got, want) in first.iter().zip(&eager) {
+            if field(got, "t") != Some(&Value::from("pending")) {
+                assert_eq!(got, want);
+                continue;
+            }
+            let num = |name| match field(got, name) {
+                Some(Value::Num(n)) => *n as usize,
+                other => panic!("{name}: {other:?}"),
+            };
+            let (from, to) = (num("from"), num("to"));
+            let own = &text[from - 1..to];
+            assert_eq!(own, own.trim(), "its bytes, trimmed");
+            assert_eq!(num("lines"), own.lines().count());
+            let hint = match field(want, "t") {
+                Some(Value::Str(t)) => match &**t {
+                    "ul" | "ol" => "list",
+                    "quote" => "quote",
+                    t => t,
+                }
+                .to_string(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(field(got, "hint"), Some(&Value::from(hint.as_str())));
+        }
+        // Tail first: a little budget parses the last pending ones.
+        let pending_before = pending_count(&stream);
+        assert!(stream.parse_pending(1, None));
+        assert_eq!(pending_count(&stream), pending_before - 1);
+        let after = stream.blocks();
+        let last_pending = first
+            .iter()
+            .rposition(|b| field(b, "t") == Some(&Value::from("pending")))
+            .unwrap();
+        assert_eq!(after[last_pending], eager[last_pending]);
+        // Blocks parsed before are the same tables.
+        assert!(same(after.last().unwrap(), first.last().unwrap()));
+        while stream.parse_pending(4096, None) {}
+        assert_eq!(pending_count(&stream), 0);
+        let done = stream.blocks();
+        assert_eq!(done, eager);
+        assert!(same(&done[last_pending], &after[last_pending]));
+    }
+
+    #[test]
+    fn a_block_asked_for_is_parsed_first() {
+        let text = long_reply();
+        let eager = parse(&text, &plain());
+        let mut stream = lazy(&text);
+        stream.parse_pending(1, Some(3));
+        assert_eq!(stream.blocks()[3], eager[3]);
+        assert_eq!(
+            field(&stream.blocks()[2], "t"),
+            Some(&Value::from("pending"))
+        );
+    }
+
+    #[test]
+    fn an_append_to_a_lazy_text_goes_on_as_ever() {
+        let text = long_reply();
+        let mut stream = lazy(&text);
+        let count = stream.blocks().len();
+        let longer = format!("{text}And **then** some more.");
+        stream.set_text_lazy(&longer, 4096);
+        // The append parsed only its end; the pending stay pending.
+        assert!(stream.last_parse_bytes() < 1000);
+        assert!(pending_count(&stream) > 0);
+        assert_eq!(stream.blocks().len(), count + 1);
+        while stream.parse_pending(4096, None) {}
+        assert_eq!(stream.blocks(), parse(&longer, &plain()));
+    }
+
+    #[test]
+    fn short_texts_and_link_definitions_parse_at_once() {
+        let mut stream = Incremental::new(plain());
+        stream.set_text_lazy("A short **reply**.", 4096);
+        assert_eq!(pending_count(&stream), 0);
+        let text = format!("{}[a]: https://example.com\n", long_reply());
+        stream.set_text_lazy(&text, 4096);
+        assert_eq!(pending_count(&stream), 0);
+        assert_eq!(stream.blocks(), parse(&text, &plain()));
     }
 }
