@@ -809,6 +809,17 @@ impl Runtime {
             .push((id, value.clone() as Rc<dyn Any>));
         value
     }
+    /// The runtime's value of type `T`, if something made it
+    /// ([`Runtime::extension`]); none is made.
+    pub(crate) fn existing_extension<T: 'static>(&self) -> Option<Rc<T>> {
+        let id = TypeId::of::<T>();
+        self.inner
+            .extensions
+            .borrow()
+            .iter()
+            .find(|(key, _)| *key == id)
+            .map(|(_, value)| value.clone().downcast().expect("extension type"))
+    }
     /// A handle that does not keep the runtime alive.
     pub fn downgrade(&self) -> WeakRuntime {
         WeakRuntime(Rc::downgrade(&self.inner))

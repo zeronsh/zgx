@@ -879,3 +879,22 @@ fn standard_tokens_are_typed() {
         );
     }
 }
+
+/// What the engine keeps and a script reads (`ui.prefers`, `ui.modifiers`)
+/// is a `ReadOnlyState`, whose `get` a strict script can call: `Readable`'s
+/// `self: never` (any state fits a property) makes `:get()` unreachable.
+#[test]
+fn engine_kept_states_are_read_only_states_a_script_can_call() {
+    for field in [
+        "reduced_motion",
+        "more_contrast",
+        "reduced_transparency",
+        "shift",
+        "control",
+        "alt",
+        "meta",
+    ] {
+        let declared = format!("\t\t{field}: ReadOnlyState<boolean>,");
+        assert!(DEFS.contains(&declared), "{field} is a ReadOnlyState");
+    }
+}

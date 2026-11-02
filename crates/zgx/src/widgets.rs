@@ -1855,6 +1855,13 @@ impl Ui {
             storage,
         }
     }
+    /// The modifier keys held now, as a state: reading it in an effect or a
+    /// binding re-runs it as one goes down or up, a modifier alone included
+    /// (Command held to show shortcut hints). Cleared as the window loses
+    /// focus. Until something asks for it the host writes nothing.
+    pub fn modifiers(&self) -> Signal<crate::input::Modifiers> {
+        crate::input::held_modifiers(&self.runtime)
+    }
     /// The runtime's themes: switch, load and register themes, declare app
     /// tokens (see [`crate::theme`]).
     pub fn theme(&self) -> &Rc<Themes> {

@@ -325,7 +325,10 @@ editor changes, with two model-level regressions supplementing native evidence.
 
 [Held-key focus transfer](platform-validation/held-keys/README.md) verifies that
 synthetic X11 key presses/releases cannot type or activate controls, while actual
-subsequent input works. [Live Wayland scaling](platform-validation/dpi-transition/README.md)
+subsequent input works. The held-modifiers probe (`scripts/held_modifiers_smoke.py`)
+presses Super and Shift alone with XTEST and checks that `Ui::modifiers` reports each
+going down and up. It then holds Super while the window is minimized, and checks that
+losing focus clears it. [Live Wayland scaling](platform-validation/dpi-transition/README.md)
 checks 1×→2×→1× with native protocol events, fixed physical surface size, correct
 logical viewports and caret coordinates, actual pointer edits, and exactly doubled
 editor pixels at 2×. The application cannot fall back to X11 in that test.

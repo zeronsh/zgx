@@ -25,6 +25,8 @@ mod file_drop;
 mod grid_areas;
 #[path = "../grid_tracks.rs"]
 mod grid_tracks;
+#[path = "../held_modifiers.rs"]
+mod held_modifiers;
 #[path = "../hit_target.rs"]
 mod hit_target;
 #[path = "../i18n_script.rs"]
