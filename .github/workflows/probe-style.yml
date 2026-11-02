@@ -1,14 +1,13 @@
-# PROBE, not for merging: style_bench's per-line instruction counts on x86 at
-# v0.1.6 and v0.1.7, to find which lines of mount_style_with_intrinsic's
-# closure#10 run more (the x86-only style/animate/anime rise, #1276).
+# PROBE, not for merging: style_bench's x86 count of mount_style_with_intrinsic's
+# closure#10 at v0.1.6, each candidate commit and v0.1.7 (#1276).
 name: probe-style
 on:
   push:
     branches: ['probe/style-x86-lines']
 jobs:
-  lines:
+  chain:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -17,27 +16,23 @@ jobs:
       - run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends valgrind cmake pkg-config fonts-dejavu-core libdbus-1-dev libfontconfig1-dev libwayland-dev libxcb1-dev libxkbcommon-dev libxrandr-dev
-      - name: count both sides
+      - name: count each commit
         run: |
           set -eux
           mkdir -p out
           cc -O2 -shared -fPIC -o out/same_run.so scripts/perf/same_run.c
-          for side in v016=e077e952f63030808a098ca54f3e69501e3271bd v017=b03245c4f; do
-            name=${side%%=*}; sha=${side#*=}
-            git worktree add -q --detach "../w-$name" "$sha"
-            ( cd "../w-$name" && CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=line-tables-only CARGO_TARGET_DIR="$PWD/../t-$name" \
-                cargo build --release --locked -p zgx --example style_bench )
+          git worktree add -q --detach ../w e077e952f63030808a098ca54f3e69501e3271bd
+          for sha in e077e952f b0215c5e6 ef010f113 230aeeab7 0b3397636 b03245c4f; do
+            ( cd ../w && git checkout -q --detach "$sha" && CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_TARGET_DIR="$PWD/../t" \
+                cargo build --release --locked -q -p zgx --example style_bench )
             ( cd /tmp && env -i PATH="$PATH" HOME="$HOME" LD_PRELOAD="$GITHUB_WORKSPACE/out/same_run.so" ZGX_GATE=1 ZGX_ASSISTIVE=0 \
-                setarch -R valgrind --tool=callgrind --dump-instr=yes --dump-line=no --callgrind-out-file="$GITHUB_WORKSPACE/out/$name.cg" \
-                "$GITHUB_WORKSPACE/../t-$name/release/examples/style_bench" > /dev/null 2> "$GITHUB_WORKSPACE/out/$name.err" )
-            grep -E 'I *refs' "out/$name.err" || true
-            bin="$GITHUB_WORKSPACE/../t-$name/release/examples/style_bench"
-            objdump -d --no-show-raw-insn -C "$bin" | awk '/^[0-9a-f]+ <.*mount_style_with_intrinsic::\{closure#10\}>:$/{p=1} p&&/^$/{p=0} p' > "out/$name.closure10.s"
-            wc -l "out/$name.closure10.s" || true
+                setarch -R valgrind --tool=cachegrind --cache-sim=no --cachegrind-out-file="$GITHUB_WORKSPACE/out/$sha.cg" \
+                "$GITHUB_WORKSPACE/../t/release/examples/style_bench" > /dev/null 2> "$GITHUB_WORKSPACE/out/$sha.err" )
+            total=$(grep -E 'I *refs' "out/$sha.err" | tr -d , | awk '{print $NF}')
+            c10=$(cg_annotate --threshold=100 "out/$sha.cg" | grep -F 'mount_style_with_intrinsic::{closure#10}' | grep -v -e drop_glue -e bind_marked | head -1 | awk '{print $1}' | tr -d ,)
+            echo "RESULT $sha total=$total closure10=$c10" | tee -a out/results.txt
           done
       - uses: actions/upload-artifact@v4
         with:
-          name: style-lines
-          path: |
-            out/*.cg
-            out/*.s
+          name: style-chain
+          path: out/results.txt
