@@ -104,6 +104,11 @@ name = "luau_pages"
 path = "tests/luau_pages.rs"
 
 [[test]]
+# Its own process: what `compile_ahead` compiled is the process's.
+name = "compile_ahead"
+path = "tests/compile_ahead.rs"
+
+[[test]]
 name = "anime"
 path = "tests/anime/main.rs"
 
