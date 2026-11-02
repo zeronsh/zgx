@@ -248,6 +248,81 @@ fn watch_pointer() {
     std::mem::forget(monitor);
 }
 
+thread_local! {
+    /// Whether `watch_modifiers` installed its monitor.
+    static WATCHING_MODIFIERS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether `Ui::modifiers` follows the monitor (`watch_modifiers`), not
+/// winit: once native views are in the process, winit's report can be a
+/// key's that a page passed back, after the change it described.
+pub(crate) fn modifiers_watched() -> bool {
+    WATCHING_MODIFIERS.with(Cell::get)
+}
+
+/// Follow the modifier keys whatever holds the keyboard (once per process,
+/// as native views first show): AppKit sends `flagsChanged:` to the key
+/// window's first responder, so while a page or a terminal has keyboard
+/// focus winit hears no modifier change. And a key a page hands back
+/// (one it didn't take) reaches winit with the modifiers it was pressed
+/// with, which winit reports as a change after the fact: Command left held.
+/// A local monitor sees each `flagsChanged:` before it is sent, whoever it
+/// goes to, and takes nothing from it; from then on it alone writes
+/// `Ui::modifiers`.
+fn watch_modifiers() {
+    if WATCHING_MODIFIERS.replace(true) {
+        return;
+    }
+    let block = block2::RcBlock::new(
+        |event: std::ptr::NonNull<objc2_app_kit::NSEvent>| -> *mut objc2_app_kit::NSEvent {
+            // SAFETY: AppKit passes a valid event for the handler's duration.
+            modifiers_changed(unsafe { event.as_ref() });
+            event.as_ptr()
+        },
+    );
+    // The monitor lives as long as the app.
+    // SAFETY: the handler returns the event it was given (valid, or AppKit
+    // would not have passed it); its only caller, `Surfaces::new`, checked
+    // it runs on the main thread, where AppKit calls the handler.
+    let monitor = unsafe {
+        objc2_app_kit::NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+            objc2_app_kit::NSEventMask::FlagsChanged,
+            &block,
+        )
+    };
+    std::mem::forget(monitor);
+}
+
+/// The modifier keys changed in a window with native views, whatever holds
+/// its keyboard: `Ui::modifiers` follows (`zgx::input::set_held_modifiers`).
+fn modifiers_changed(event: &objc2_app_kit::NSEvent) {
+    use objc2_app_kit::NSEventModifierFlags as Flags;
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(window) = event.window(mtm).filter(|window| window.isKeyWindow()) else {
+        return;
+    };
+    let Some(content) = window.contentView() else {
+        return;
+    };
+    let Some(router) = router_of(&content) else {
+        return;
+    };
+    let flags = event.modifierFlags();
+    let held = zgx::input::Modifiers {
+        shift: flags.contains(Flags::Shift),
+        control: flags.contains(Flags::Control),
+        alt: flags.contains(Flags::Option),
+        meta: flags.contains(Flags::Command),
+    };
+    zgx::native_view::post(move || {
+        if let Some(runtime) = router.runtime.upgrade() {
+            zgx::input::set_held_modifiers(&runtime, held);
+        }
+    });
+}
+
 /// A mouse move in a window with native views that zgx's view will not
 /// hear: route it as the host routes the moves it does hear. `monitored`:
 /// AppKit's (not a diagnostic's), heard only by the key window.
@@ -381,6 +456,9 @@ pub(crate) struct Router {
     pub unheard: Cell<Option<(f32, f32)>>,
     /// The window's zoom (`Ui::zoom`): AppKit's points are zgx's times it.
     pub zoom: Cell<f32>,
+    /// Where the modifier keys a native view's focus hides from winit go
+    /// (`Ui::modifiers`).
+    pub runtime: zgx::reactive::WeakRuntime,
 }
 impl Router {
     /// The pointer moved to window point `(x, y)`: what zgx hears.
@@ -910,6 +988,7 @@ impl Surfaces {
             unsafe { Retained::retain(handle.ns_view.as_ptr().cast()) }.ok_or("no content view")?;
         let parent_key = Retained::as_ptr(&parent) as usize;
         watch_pointer();
+        watch_modifiers();
         let overlay_root = CALayer::new();
         no_actions(&overlay_root);
         let overlay_host = CALayer::new();

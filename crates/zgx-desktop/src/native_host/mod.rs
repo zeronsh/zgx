@@ -23,6 +23,8 @@ pub(crate) use ghostty::processes_changed;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
+pub(crate) use macos::modifiers_watched;
+#[cfg(target_os = "macos")]
 mod webkit;
 #[cfg(all(windows, feature = "webview2"))]
 mod webview2;
@@ -101,6 +103,10 @@ pub(crate) struct NativeHost {
         allow(dead_code)
     )]
     input: zgx::input::InputDispatcher,
+    /// The window's runtime, for the modifier keys a page's focus hides
+    /// from winit (macOS's `Router::runtime`).
+    #[cfg(target_os = "macos")]
+    runtime: zgx::reactive::WeakRuntime,
     _waker: zgx::native_view::WakerGuard,
     /// Wakes the window when WebKitGTK's thread has something for it.
     #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
@@ -145,6 +151,8 @@ impl NativeHost {
             pending: false,
             scene: Rc::downgrade(&ui.scene),
             input: ui.input.clone(),
+            #[cfg(target_os = "macos")]
+            runtime: ui.runtime.downgrade(),
             #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
             _pages_waker: webkitgtk::add_waker(wake.clone()),
             _waker: zgx::native_view::set_waker(move || wake()),
@@ -292,6 +300,8 @@ impl NativeHost {
                 #[cfg(target_os = "macos")]
                 unheard: Default::default(),
                 zoom: std::cell::Cell::new(1.),
+                #[cfg(target_os = "macos")]
+                runtime: self.runtime.clone(),
             };
             #[cfg(target_os = "macos")]
             let surfaces = macos::Surfaces::new(window, router);
