@@ -571,34 +571,38 @@ pub(crate) fn install(
     }
     let meta = lua.create_table()?;
     // `zoom` and `zoomable` made as a script first reads them: a script that
-    // never does makes neither.
-    if !plugin {
-        let shared = shared.clone();
-        meta.set(
-            "__index",
-            lua.create_function(move |_, (window, key): (Table, mlua::Value)| {
-                let name = key.as_string().map(|key| key.to_string_lossy());
-                let state = match name.as_deref() {
-                    Some("zoom") => shared.state(ZOOM, Value::Num(1.)),
-                    Some("zoomable") => shared.state(ZOOMABLE, Value::Bool(true)),
-                    Some("visible") => shared.state(VISIBLE, Value::Bool(true)),
-                    // Read-only: the window's, as the system says.
-                    Some(read @ ("active" | "shown" | "size")) => {
-                        let state = State::new(match read {
-                            "active" => shared.state(ACTIVE, Value::Bool(true)),
-                            "shown" => shared.state(SHOWN, Value::Bool(true)),
-                            _ => shared.state(SIZE, size(0., 0.)),
-                        });
-                        window.raw_set(key.clone(), ReadState(state, read.into()))?;
-                        return window.raw_get::<mlua::Value>(key);
-                    }
-                    _ => return Ok(mlua::Value::Nil),
-                };
+    // never does makes neither. A plugin reads the size of the window it
+    // draws in (a picture fitted to it), and nothing else here: the rest
+    // is the app's.
+    let shared = shared.clone();
+    meta.set(
+        "__index",
+        lua.create_function(move |_, (window, key): (Table, mlua::Value)| {
+            let name = key.as_string().map(|key| key.to_string_lossy());
+            let state = match name.as_deref() {
+                Some("size") => None,
+                _ if plugin => return Ok(mlua::Value::Nil),
+                Some("zoom") => Some(shared.state(ZOOM, Value::Num(1.))),
+                Some("zoomable") => Some(shared.state(ZOOMABLE, Value::Bool(true))),
+                Some("visible") => Some(shared.state(VISIBLE, Value::Bool(true))),
+                Some("active" | "shown") => None,
+                _ => return Ok(mlua::Value::Nil),
+            };
+            if let Some(state) = state {
                 window.raw_set(key.clone(), State::new(state))?;
-                window.raw_get::<mlua::Value>(key)
-            })?,
-        )?;
-    }
+                return window.raw_get::<mlua::Value>(key);
+            }
+            // Read-only: the window's, as the system says.
+            let read = name.as_deref().unwrap_or_default();
+            let state = State::new(match read {
+                "active" => shared.state(ACTIVE, Value::Bool(true)),
+                "shown" => shared.state(SHOWN, Value::Bool(true)),
+                _ => shared.state(SIZE, size(0., 0.)),
+            });
+            window.raw_set(key.clone(), ReadState(state, read.into()))?;
+            window.raw_get::<mlua::Value>(key)
+        })?,
+    )?;
     meta.set(
         "__call",
         lua.create_function(move |lua, (_, table): (Table, Table)| {

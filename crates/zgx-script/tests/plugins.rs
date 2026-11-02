@@ -514,6 +514,50 @@ ui.contribute("bar", ui.text {
 }
 
 #[test]
+fn a_plugin_reads_the_window_size_and_nothing_else_of_the_window() {
+    // A picture fitted to the window (a lightbox) needs its size; the
+    // window's other states are the app's.
+    let entry = plugin(
+        "pictures",
+        r#"
+ui.contribute("bar", ui.column {
+    ui.text { id = "got", function()
+        local size = ui.window.size:get()
+        return `{size.width}x{size.height} {ui.window.zoom == nil} {ui.window.active == nil} {ui.window.titlebar_area == nil}`
+    end },
+    ui.button { id = "set", w = 20, h = 20, on_click = function()
+        ui.window.size:set({ width = 1, height = 1 })
+    end },
+})
+"#,
+    );
+    let mut h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", APP);
+        host.set_plugins(vec![Plugin {
+            name: "pictures".into(),
+            entry,
+            grants: vec![],
+        }]);
+        host
+    });
+    let viewport = h.ui.runtime.signal((960_f32, 720_f32));
+    h.host.window_size(viewport.clone());
+    h.frames(1);
+    assert_eq!(h.text("got"), "960x720 true true true");
+    viewport.set((640., 480.));
+    h.frames(1);
+    assert_eq!(h.text("got"), "640x480 true true true");
+    assert_eq!(h.error(), None);
+    // Read-only, as the app's is.
+    h.click("set");
+    assert!(
+        h.error().is_some_and(|e| e.contains("size")),
+        "{:?}",
+        h.error()
+    );
+}
+
+#[test]
 fn a_plugins_state_counts_against_its_memory_limit() {
     // A state's value lives in Rust, outside the VM: without counting it,
     // a plugin making state after state held as much as it liked.
