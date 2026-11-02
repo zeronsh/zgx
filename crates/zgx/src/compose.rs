@@ -1026,6 +1026,14 @@ impl View {
     }
     /// Add `children` after the existing children, in order.
     pub fn children(mut self, children: impl IntoIterator<Item = View>) -> Self {
+        let children = children.into_iter();
+        // Exactly as many as there are when it is known: a growing vector
+        // starts at four views (2.5 KB) where most containers have one.
+        if let (0, (low, Some(high))) = (self.children.capacity(), children.size_hint())
+            && low == high
+        {
+            self.children.reserve_exact(low);
+        }
         self.children.extend(children);
         self
     }
