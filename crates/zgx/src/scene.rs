@@ -11006,6 +11006,10 @@ impl Scene {
                     serial: 0,
                 }),
                 None => {
+                    // What was damaged in it since it moved (a node gone, a
+                    // box laid out again) was taken where the content is
+                    // now, but painted where it was: there too.
+                    self.damage_before_move(id, clip, dx, dy);
                     // Everything the content painted, at both positions.
                     let now = self.node(id).transform;
                     self.node_mut(id).transform = from;
@@ -11050,6 +11054,36 @@ impl Scene {
                 self.add_damage(rect);
             }
             self.moves.push(scroll);
+        }
+    }
+    /// For scroll content `id` that moved by `dx`, `dy` this frame and repaints
+    /// rather than copies: this frame's damage inside its view (`clip`, or the
+    /// viewport), also where it lay before the move. Damage taken after the
+    /// move (a removed node's, a relaid box's old place) is where the content
+    /// is now, and its pixels are where it was; the move itself repaints only
+    /// what the content still holds. Under a transformed ancestor the move's
+    /// distance in the window is not `dx`, `dy`: the view repaints.
+    #[cold]
+    #[inline(never)]
+    fn damage_before_move(&mut self, id: NodeId, clip: Option<Rect>, dx: f32, dy: f32) {
+        if self.damage.is_empty() || self.damage_is_full() {
+            return;
+        }
+        let clip = clip.unwrap_or(self.viewport);
+        if self.transformed > 0 && self.ancestors(id).any(|node| self.node(node).transformed()) {
+            self.add_damage(clip);
+            return;
+        }
+        // (Wherever it was taken: after a jump past the view, a node gone
+        // was damaged outside it, and painted in it.)
+        let before: Vec<Rect> = (self.damage.iter())
+            .filter_map(|rect| {
+                rect.translated(Transform { x: -dx, y: -dy })
+                    .intersection(clip)
+            })
+            .collect();
+        for rect in before {
+            self.add_damage(rect);
         }
     }
     /// Isolates this subtree into an offscreen group. Opacity then applies once to
