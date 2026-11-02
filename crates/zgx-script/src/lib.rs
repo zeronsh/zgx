@@ -3582,6 +3582,7 @@ fn collect_fully(lua: &mlua::Lua) {
 /// pictures no node shows (the image cache keeps up to its budget of them
 /// while the app is in use, so a page shown again is instant).
 fn trim_idle(inner: &Inner) {
+    value::forget_streamed_edits();
     collect_garbage(inner);
     mlua::release_free_pages();
     inner.assets.trim();

@@ -201,6 +201,20 @@ impl Text {
         let inserts = edits.clone().all(|edit| edit.old_len == 0);
         inserts.then(|| edits.map(|edit| (edit.start, &*edit.inserted)))
     }
+    /// Drops the edits it keeps for its readers ([`Text::inserts_since`])
+    /// once a stream into it has stopped, staying the same text (its
+    /// [`id`](Text::id)): a reader that took it goes on from here, and one
+    /// that took an earlier text reads it whole. Only while nothing else
+    /// holds it (a clone keeps them); whether it dropped any.
+    pub fn forget_edits(&mut self) -> bool {
+        match Arc::get_mut(&mut self.0) {
+            Some(chunks) if !chunks.log.edits.is_empty() => {
+                chunks.log = EditLog::default();
+                true
+            }
+            _ => false,
+        }
+    }
     /// Whether `other` is this same text (a clone of it), not just equal.
     pub fn ptr_eq(&self, other: &Text) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -754,6 +768,22 @@ mod tests {
             text.inserts_since(Text::new("x").id()).is_none(),
             "not followed"
         );
+    }
+
+    #[test]
+    fn a_text_forgets_its_edits_staying_itself_unless_shared() {
+        let start = Text::new("ab");
+        let mut text = start.clone();
+        text.append("c");
+        let id = text.id();
+        let held = text.clone();
+        assert!(!text.forget_edits(), "a clone keeps them");
+        drop(held);
+        assert!(text.forget_edits());
+        assert_eq!(text.id(), id, "the same text");
+        assert_eq!(text.inserts_since(id).unwrap().count(), 0);
+        assert!(text.inserts_since(start.id()).is_none(), "read whole");
+        assert!(!text.forget_edits(), "none left");
     }
 
     #[test]

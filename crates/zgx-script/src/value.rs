@@ -1127,6 +1127,52 @@ fn str_of(bytes: &[u8]) -> Rc<str> {
         Err(_) => String::from_utf8_lossy(bytes).into(),
     }
 }
+thread_local! {
+    /// States a long text was appended to since the host last went idle:
+    /// the edits each keeps for its readers, dropped then
+    /// (`forget_streamed_edits`).
+    static STREAMED: RefCell<Vec<Signal<Value>>> = const { RefCell::new(Vec::new()) };
+}
+/// `state` holds a long text that was appended to.
+fn streamed(state: &Signal<Value>) {
+    STREAMED.with_borrow_mut(|streamed| {
+        if !streamed.iter().any(|s| s.ptr_eq(state)) {
+            streamed.push(state.clone());
+        }
+    });
+}
+/// Drops the edits the long texts streamed into keep for their readers,
+/// as their host goes idle: what read them has, and a stream stopped
+/// holds nothing for one that hasn't. Nothing is told: each is the same
+/// text.
+pub(crate) fn forget_streamed_edits() {
+    for state in STREAMED.take() {
+        state.mutate(|value| {
+            if let Value::Text(text) = value {
+                text.forget_edits();
+            }
+            false
+        });
+    }
+}
+/// `was` then `text`, made where it is kept: one copy of each, where a
+/// `String` turned into an `Rc<str>` copies the whole again (an append
+/// never costs more than setting the joined text would).
+fn joined(was: &str, text: &str) -> Rc<str> {
+    let mut bytes = Rc::<[u8]>::new_uninit_slice(was.len() + text.len());
+    let slot = Rc::get_mut(&mut bytes).expect("just made");
+    // SAFETY: `slot` has room for both, which don't overlap it, and every
+    // byte of it is written before it is read.
+    let bytes = unsafe {
+        let at = slot.as_mut_ptr().cast::<u8>();
+        std::ptr::copy_nonoverlapping(was.as_ptr(), at, was.len());
+        std::ptr::copy_nonoverlapping(text.as_ptr(), at.add(was.len()), text.len());
+        bytes.assume_init()
+    };
+    // SAFETY: two strings one after the other are UTF-8, and `str` has
+    // `[u8]`'s layout.
+    unsafe { Rc::from_raw(Rc::into_raw(bytes) as *const str) }
+}
 /// `text` added to `was` (`state:append`): a long string takes it where it
 /// ends, its chunks shared and the edit kept, so an editor bound to it
 /// applies the token alone; a string growing past a long one's size
@@ -1141,7 +1187,7 @@ fn appended(was: Option<&Value>, text: &str) -> mlua::Result<Value> {
         Some(Value::Str(was)) if was.len() + text.len() > zgx::text::LONG => {
             Value::Text(zgx::text::Text::new(&format!("{was}{text}")))
         }
-        Some(Value::Str(was)) => Value::Str(format!("{was}{text}").into()),
+        Some(Value::Str(was)) => Value::Str(joined(was, text)),
         None | Some(Value::Nil) => Value::Str(text.into()),
         Some(_) => {
             return Err(mlua::Error::runtime(
@@ -1999,7 +2045,11 @@ impl Shared {
             .0
             .with_untracked(|was| appended(Some(was), text))
             .map_err(|error| error.to_string())?;
+        let long = matches!(next, Value::Text(_));
         self.0.set(next);
+        if long {
+            streamed(&self.0);
+        }
         Ok(())
     }
 }
@@ -2203,7 +2253,11 @@ impl UserData for State {
                     let was = s.0.with_untracked(Clone::clone);
                     let joined = appended(Some(&was), &text.to_str()?)?;
                     s.charge(lua, |_| joined.weight())?;
+                    let long = matches!(joined, Value::Text(_));
                     s.write(lua, joined);
+                    if long {
+                        streamed(&s.0);
+                    }
                     return Ok(());
                 };
                 let path = s.0.with_untracked(|old| path_in(lua, first, old))?;
