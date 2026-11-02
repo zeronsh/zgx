@@ -24,9 +24,12 @@
 //! hears it). F9 asks the page for its green target full screen (it fills
 //! the box; `FULL_SCREEN <bool>` prints as the state changes) and Ctrl+E
 //! (reserved) exits it. Ctrl+P (reserved) prints the page, and F7 has the
-//! page call `window.print()`. Ctrl+I (reserved) opens Web Inspector; Ctrl+F
-//! finds "Probe" and Ctrl+G a word the page hasn't, each printing `FIND
-//! <text> found=… matches=…`; `--large-page` makes the page's box 900 × 650.
+//! page call `window.print()`. Ctrl+D (reserved) has the app save the
+//! page's downloads into `ZGX_PROBE_SAVE_DIR`, printing `DOWNLOAD <name>
+//! <type> <url>` and `DOWNLOAD_STATUS …`; until then the app has no handler,
+//! and none is saved. Ctrl+I (reserved) opens Web Inspector; Ctrl+F finds
+//! "Probe" and Ctrl+G a word the page hasn't, each printing `FIND <text>
+//! found=… matches=…`; `--large-page` makes the page's box 900 × 650.
 //!
 //! `--media URL`: the page at URL instead (the smoke's video and audio).
 //! `--unaccelerated`: the page painted on the CPU
@@ -230,6 +233,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )
                         });
                     }
+                    // Ctrl+D: the app saves the page's downloads, into
+                    // `ZGX_PROBE_SAVE_DIR`, telling each and how it goes.
+                    if action.0 == "d" {
+                        let folder = std::env::var_os("ZGX_PROBE_SAVE_DIR")
+                            .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+                        inspect.set_download_handler(move |request, responder| {
+                            println!("DOWNLOAD {} {} {}", request.name, request.mime, request.url);
+                            responder.save_to(folder.join(&request.name), |status| {
+                                println!("DOWNLOAD_STATUS {status:?}")
+                            });
+                        });
+                        println!("DOWNLOADS on");
+                    }
                     event.prevent_default();
                 }
             });
@@ -254,7 +270,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .bind(bind("e").reserved())
                     .bind(bind("p").reserved())
                     .bind(bind("f").reserved())
-                    .bind(bind("g").reserved()),
+                    .bind(bind("g").reserved())
+                    .bind(bind("d").reserved()),
             );
             // `FULL_SCREEN <bool>` as the page's full screen changes.
             let full_screen = {

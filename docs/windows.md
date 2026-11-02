@@ -581,8 +581,10 @@ Unlike macOS:
   `https://zgx-file.invalid/` along with the files of its folder (WebView2
   asks the app for no `file:` request), so its origin is that host.
 
-As with WebKit without delegates for them, pages save no downloads and get no
-permission (camera, microphone, location, notifications, clipboard reads).
+As with WebKit without delegates for them, pages get no permission (camera,
+microphone, location, notifications, clipboard reads). A download is the app's
+(`WebView::set_download_handler`): saved where it says, with WebView2's
+download bar hidden, or cancelled, as with no handler.
 
 WebView2's browser keys are off (`AreBrowserAcceleratorKeysEnabled`): Ctrl+F,
 F3, Ctrl+P, Ctrl+R, F5, zoom, Alt+arrows and F12 reach the page, and the

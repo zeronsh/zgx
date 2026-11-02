@@ -19,11 +19,12 @@ use objc2_foundation::{
     NSURL, NSURLRequest, NSUUID,
 };
 use objc2_web_kit::{
-    WKFrameInfo, WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
-    WKNavigationType, WKOpenPanelParameters, WKScriptMessage, WKScriptMessageHandler, WKUIDelegate,
-    WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController, WKUserScript,
-    WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
-    WKWindowFeatures,
+    WKDownload, WKDownloadDelegate, WKFrameInfo, WKNavigation, WKNavigationAction,
+    WKNavigationActionPolicy, WKNavigationDelegate, WKNavigationResponse,
+    WKNavigationResponsePolicy, WKNavigationType, WKOpenPanelParameters, WKScriptMessage,
+    WKScriptMessageHandler, WKUIDelegate, WKURLSchemeHandler, WKURLSchemeTask,
+    WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebView,
+    WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -240,6 +241,15 @@ pub(crate) struct ObserverState {
     web: WeakWebView,
     view: RefCell<Weak<WKWebView>>,
     new_windows: bool,
+    /// The page's downloads the app is saving: each download, its
+    /// progress (observed), and what hears how it goes.
+    downloads: RefCell<Vec<Saving>>,
+}
+/// A download the app saves.
+pub(crate) struct Saving {
+    download: Retained<WKDownload>,
+    progress: Retained<objc2_foundation::NSProgress>,
+    status: zgx::web_view::DownloadStatusFn,
 }
 
 // SAFETY: an NSObject subclass, main-thread only (WebKit calls its delegates
@@ -260,7 +270,22 @@ define_class!(
     unsafe impl NSObjectProtocol for Observer {}
     impl Observer {
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
-        fn observe(&self, key: Option<&NSString>, _object: Option<&AnyObject>, _change: Option<&NSDictionary<NSKeyValueChangeKey, AnyObject>>, _context: *mut c_void) {
+        fn observe(&self, key: Option<&NSString>, object: Option<&AnyObject>, _change: Option<&NSDictionary<NSKeyValueChangeKey, AnyObject>>, _context: *mut c_void) {
+            // A saved download's progress (WebKit updates it on the main
+            // thread, as its messages come).
+            if key.is_some_and(|key| key.to_string() == "completedUnitCount") {
+                let mut downloads = self.ivars().downloads.borrow_mut();
+                if let Some(saving) = downloads.iter_mut().find(|saving| {
+                    object.is_some_and(|object| std::ptr::eq(object, Retained::as_ptr(&saving.progress).cast()))
+                }) {
+                    let (received, total) = (saving.progress.completedUnitCount(), saving.progress.totalUnitCount());
+                    (saving.status)(zgx::web_view::DownloadStatus::Progress {
+                        received: received.max(0) as u64,
+                        total: (total > 0).then_some(total as u64),
+                    });
+                }
+                return;
+            }
             // Progress and loading change many times a load; history does not.
             let history = key.is_none_or(|key| {
                 let key = key.to_string();
@@ -296,7 +321,47 @@ define_class!(
                 }
             };
             let allowed = self.ivars().web.upgrade().is_none_or(|web| web.allows(&request));
-            decision.call((if allowed { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel },));
+            // A `download` link becomes a download (macOS 11.3), which the
+            // app saves or not (`WKDownloadDelegate` below).
+            // SAFETY: `respondsToSelector:`, then the getter where it exists.
+            let download = unsafe {
+                let has: bool = msg_send![action, respondsToSelector: sel!(shouldPerformDownload)];
+                has && action.shouldPerformDownload()
+            };
+            decision.call((match (allowed, download) {
+                (false, _) => WKNavigationActionPolicy::Cancel,
+                (true, true) => WKNavigationActionPolicy::Download,
+                (true, false) => WKNavigationActionPolicy::Allow,
+            },));
+        }
+        /// A response the page can't show, or an attachment: a download.
+        #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
+        fn response_policy(&self, _view: &WKWebView, response: &WKNavigationResponse, decision: &block2::DynBlock<dyn Fn(WKNavigationResponsePolicy)>) {
+            // SAFETY: getters of the response WebKit passes for this call.
+            let download = unsafe {
+                let attachment = response
+                    .response()
+                    .downcast::<NSHTTPURLResponse>()
+                    .ok()
+                    .and_then(|http| http.valueForHTTPHeaderField(&NSString::from_str("Content-Disposition")))
+                    .is_some_and(|value| value.to_string().trim_start().to_ascii_lowercase().starts_with("attachment"));
+                !response.canShowMIMEType() || attachment
+            };
+            decision.call((if download {
+                WKNavigationResponsePolicy::Download
+            } else {
+                WKNavigationResponsePolicy::Allow
+            },));
+        }
+        #[unsafe(method(webView:navigationAction:didBecomeDownload:))]
+        fn action_download(&self, _view: &WKWebView, _action: &WKNavigationAction, download: &WKDownload) {
+            // SAFETY: the download WebKit passes; it holds its delegate unretained, and `MacWebView` keeps the observer.
+            unsafe { download.setDelegate(Some(ProtocolObject::from_ref(self))) };
+        }
+        #[unsafe(method(webView:navigationResponse:didBecomeDownload:))]
+        fn response_download(&self, _view: &WKWebView, _response: &WKNavigationResponse, download: &WKDownload) {
+            // SAFETY: as `action_download`.
+            unsafe { download.setDelegate(Some(ProtocolObject::from_ref(self))) };
         }
         #[unsafe(method(webView:didStartProvisionalNavigation:))]
         fn start(&self, view: &WKWebView, _navigation: Option<&WKNavigation>) {
@@ -395,6 +460,68 @@ define_class!(
             match self.ivars().web.upgrade() {
                 Some(web) => web.choose_files(multiple, folder, answer),
                 None => answer(None),
+            }
+        }
+    }
+    unsafe impl WKDownloadDelegate for Observer {
+        /// Where to save it: the app's answer (`WebView::download`), now or
+        /// later; nil cancels it, as with no handler.
+        #[unsafe(method(download:decideDestinationUsingResponse:suggestedFilename:completionHandler:))]
+        fn destination(&self, download: &WKDownload, response: &objc2_foundation::NSURLResponse, name: &NSString, completion: &block2::DynBlock<dyn Fn(*mut NSURL)>) {
+            let completion = completion.copy();
+            // SAFETY: getters of the download and response WebKit passes.
+            let request = unsafe {
+                zgx::web_view::DownloadRequest::new(
+                    download
+                        .originalRequest()
+                        .and_then(|request| request.URL())
+                        .and_then(|url| url.absoluteString())
+                        .map(|url| url.to_string())
+                        .unwrap_or_default(),
+                    name.to_string(),
+                    response.MIMEType().map(|mime| mime.to_string()).unwrap_or_default(),
+                )
+            };
+            let Some(web) = self.ivars().web.upgrade() else {
+                completion.call((std::ptr::null_mut(),));
+                return;
+            };
+            let observer = self.retain();
+            let download = download.retain();
+            web.download(
+                request,
+                zgx::web_view::DownloadResponder::new(move |answer| {
+                    let Some((path, status)) = answer else {
+                        completion.call((std::ptr::null_mut(),));
+                        return;
+                    };
+                    // SAFETY: the download's progress, observed by the
+                    // observer, which stops before it lets the download go.
+                    unsafe {
+                        let progress = objc2_foundation::NSProgressReporting::progress(&*download);
+                        progress.addObserver_forKeyPath_options_context(
+                            &observer,
+                            &NSString::from_str("completedUnitCount"),
+                            NSKeyValueObservingOptions::empty(),
+                            std::ptr::null_mut(),
+                        );
+                        observer.ivars().downloads.borrow_mut().push(Saving { download, progress, status });
+                    }
+                    let url = path.to_str().map(|path| NSURL::fileURLWithPath(&NSString::from_str(path)));
+                    completion.call((url.as_ref().map_or(std::ptr::null_mut(), |url| Retained::as_ptr(url).cast_mut()),));
+                }),
+            );
+        }
+        #[unsafe(method(downloadDidFinish:))]
+        fn download_finished(&self, download: &WKDownload) {
+            if let Some(mut saving) = self.saved(download) {
+                (saving.status)(zgx::web_view::DownloadStatus::Finished);
+            }
+        }
+        #[unsafe(method(download:didFailWithError:resumeData:))]
+        fn download_failed(&self, download: &WKDownload, error: &NSError, _resume: Option<&NSData>) {
+            if let Some(mut saving) = self.saved(download) {
+                (saving.status)(zgx::web_view::DownloadStatus::Failed(error.localizedDescription().to_string()));
             }
         }
     }
@@ -599,11 +726,27 @@ fn finish_scheme_task(id: u64, response: Option<SchemeResponse>) {
 }
 
 impl Observer {
+    /// The download `download` ended: no longer observed, out of the list.
+    fn saved(&self, download: &WKDownload) -> Option<Saving> {
+        let mut downloads = self.ivars().downloads.borrow_mut();
+        let at = downloads
+            .iter()
+            .position(|saving| std::ptr::eq(&*saving.download, download))?;
+        let saving = downloads.remove(at);
+        // SAFETY: the observation `destination` added, on the main thread.
+        unsafe {
+            saving
+                .progress
+                .removeObserver_forKeyPath(self, &NSString::from_str("completedUnitCount"))
+        };
+        Some(saving)
+    }
     fn new(web: &WebView, mtm: MainThreadMarker) -> Retained<Self> {
         let object = mtm.alloc().set_ivars(ObserverState {
             web: web.downgrade(),
             view: RefCell::new(Weak::default()),
             new_windows: web.options().new_windows,
+            downloads: RefCell::new(Vec::new()),
         });
         // SAFETY: NSObject's `init`, on a fresh allocation with its ivars set.
         unsafe { msg_send![super(object), init] }

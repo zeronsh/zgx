@@ -270,6 +270,13 @@ def inspector_checks(session):
     return checks
 
 
+def save_folder(private):
+    """Where the probe's download handler saves (`ZGX_PROBE_SAVE_DIR`)."""
+    folder = pathlib.Path(private, "saved")
+    folder.mkdir(exist_ok=True)
+    return str(folder)
+
+
 def downloads(private):
     """The session's downloads folder, by its XDG user directory: where
     WebKit's own handling would save a page's download."""
@@ -494,6 +501,19 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     if saved:
         raise AssertionError(f"the page's download was saved: {saved}")
     checks["download refused"] = True
+    # With the app's handler (Ctrl+D), the same link saves where the app
+    # says, and only there.
+    session.key("ctrl+d")
+    session.wait(lambda: session.lines("DOWNLOADS on"), "the app's download handler never came on")
+    session.click(530, 240)
+    session.wait(lambda: "Finished" in session.lines("DOWNLOAD_STATUS "), "the app's download never finished")
+    saved = pathlib.Path(session.env["ZGX_PROBE_SAVE_DIR"], "zgx-saved.txt")
+    asked = session.lines("DOWNLOAD ")
+    if not saved.exists() or saved.read_text() != "saved" or not asked or not asked[0].startswith("zgx-saved.txt text/plain"):
+        raise AssertionError(f"the app's download: asked {asked}, saved {saved.exists() and saved.read_text()!r}")
+    if any(downloads(session.env["XDG_RUNTIME_DIR"]).iterdir()):
+        raise AssertionError("a download landed in the downloads folder")
+    checks["download saved by the app"] = asked[0]
     if unaccelerated:
         checks["uploads what changed"] = damage_checks(session)
     # Full screen: F9 asks the page's green target for it, which fills
@@ -944,6 +964,7 @@ def x11(args, output, private):
         env["DISPLAY"] = ":" + xvfb.stdout.readline().strip()
         downloads(private)
         env["ZGX_WEB_MENU"] = "1"
+        env["ZGX_PROBE_SAVE_DIR"] = save_folder(private)
         ime = None
         if args.ime or args.orca:
             with (output / "dbus.log").open("w") as log:
@@ -1041,6 +1062,7 @@ def wayland(args, output, private):
         env["DISPLAY"] = ":" + xvfb.stdout.readline().strip()
         downloads(private)
         env["ZGX_WEB_MENU"] = "1"
+        env["ZGX_PROBE_SAVE_DIR"] = save_folder(private)
         # A private session bus: Fcitx5 talks on it, and nothing else starts.
         bus_config = pathlib.Path(private, "dbus.conf")
         bus_config.write_text("<busconfig><type>session</type><listen>unix:tmpdir=" + private + "</listen><auth>EXTERNAL</auth>"

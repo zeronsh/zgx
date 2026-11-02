@@ -215,6 +215,12 @@ api! {
     fn webkit_find_controller_search_previous(Ptr);
     fn webkit_find_controller_search_finish(Ptr);
     fn webkit_download_cancel(Ptr);
+    fn webkit_download_get_web_view(Ptr) -> Ptr;
+    fn webkit_download_get_request(Ptr) -> Ptr;
+    fn webkit_download_get_response(Ptr) -> Ptr;
+    fn webkit_download_set_destination(Ptr, *const c_char);
+    fn webkit_uri_response_get_content_length(Ptr) -> u64;
+    fn g_filename_to_uri(*const c_char, *const c_char, *mut *mut GError) -> *mut c_char;
     fn webkit_security_manager_register_uri_scheme_as_secure(Ptr, *const c_char);
     fn webkit_security_manager_register_uri_scheme_as_cors_enabled(Ptr, *const c_char);
     fn webkit_user_content_manager_new() -> Ptr;

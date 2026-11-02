@@ -2397,6 +2397,30 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
         }
         (None, None) => web_view(&web),
     };
+    // The page's downloads, the script's to save or not; none saved without
+    // it (`WebView::set_download_handler`).
+    let view = match spec.on_download.clone() {
+        Some(on_download) => {
+            let (web, vm) = (web.clone(), Rc::downgrade(vm));
+            view.on_mount(move |_| {
+                let vm = vm.clone();
+                web.set_download_handler(move |request, responder| {
+                    let Some(vm) = vm.upgrade() else { return };
+                    let download = crate::io::DownloadUd::new(request, responder);
+                    vm.runtime.clone().batch(|| {
+                        let called = vm
+                            .lua
+                            .create_userdata(download)
+                            .and_then(|d| vm.call::<()>(&on_download, d));
+                        if let Err(e) = called {
+                            vm.report(e);
+                        }
+                    });
+                });
+            })
+        }
+        None => view,
+    };
     let handlers = [
         spec.on_navigate.clone(),
         spec.on_load.clone(),
