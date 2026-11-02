@@ -2176,8 +2176,10 @@ fn hooked_root(
         Built::Component => adds_beside(hooks, &node, low),
         // In place, its additions enter and leave with it: the region and
         // the entry lay out flat over it (`Scene::flat_item`), and as it
-        // leaves it is kept where it lay (`pin_in_place`).
-        Built::Presence => adds_beside(hooks, &node, low),
+        // leaves it is kept where it lay (`pin_in_place`). A replacement
+        // too: held so, the root is a child as any other, which plugins
+        // replace (or filter) where it is built, each branch anew.
+        Built::Presence => !hooks.at(&node, true, low).is_empty(),
     };
     // A root that is a component, a presence or a branching region gets
     // what `hooked_lower` gives it among children: as in place, it's one.

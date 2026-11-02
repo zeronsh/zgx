@@ -2,13 +2,16 @@
 //! `ui.switch`'s, or a component's root. The additions are siblings in the
 //! parent's flow, come and go with the branch, and read what the root
 //! provides, live. Beside a presence's content they enter and leave with
-//! it. Where a root can't have siblings (the app's, a window's), the
+//! it, and so does a replacement of it, at any depth. Where a root can't have siblings (the app's, a window's), the
 //! contribution reports an error.
 mod common;
 use common::Harness;
-use zgx_script::{Plugin, ScriptHost};
+use zgx_script::{Capability, Plugin, ScriptHost};
 
 fn with(test: &str, app: &'static str, code: &str) -> Harness {
+    with_grants(test, app, code, vec![])
+}
+fn with_grants(test: &str, app: &'static str, code: &str, grants: Vec<Capability>) -> Harness {
     let dir = std::env::temp_dir().join(format!("zgx-branches-{}-{test}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("init.luau");
@@ -18,7 +21,7 @@ fn with(test: &str, app: &'static str, code: &str) -> Harness {
         host.set_plugins(vec![Plugin {
             name: "marks".into(),
             entry,
-            grants: vec![],
+            grants,
         }]);
         host
     })
@@ -210,6 +213,55 @@ fn beside_a_presences_content_it_enters_and_leaves_with_it() {
     let (b, x) = (rects_of(&now, "b")[0], rects_of(&now, "x")[0]);
     assert_eq!(x.x, b.x + b.width + 10.);
     assert_eq!(h.host.contributions()[0].matches, 1);
+}
+
+#[test]
+fn a_presences_content_replaced_enters_and_leaves_replaced() {
+    // Replaced where the branch builds it: each branch's root anew, the
+    // replacement in the row's flow.
+    let mut h = with_grants(
+        "presence-replace",
+        PAGES,
+        r##"ui.contribute { target = "#header", replace = ui.text { "swapped" } }"##,
+        vec![Capability::Override("*".into())],
+    );
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    assert_eq!(h.host.contributions()[0].error, None);
+    assert_eq!(h.texts(), ["before", "swapped", "after"]);
+    let at = placed(&mut h);
+    let (before, swapped) = (rects_of(&at, "before")[0], rects_of(&at, "swapped")[0]);
+    assert_eq!(swapped.x, before.x + before.width + 10.);
+    assert!(h.host.run_command("next"));
+    let mut frames = 0;
+    while rects_of(&placed(&mut h), "swapped").len() > 1 {
+        h.frame();
+        frames += 1;
+        assert!(frames < 30, "the exit ends");
+    }
+    assert_eq!(h.texts(), ["before", "swapped", "after"]);
+    assert_eq!(h.host.contributions()[0].matches, 1);
+}
+
+#[test]
+fn a_root_two_presences_deep_is_replaced() {
+    let mut h = with_grants(
+        "nested-replace",
+        r##"
+local outer = ui.state("outer", "a")
+local inner = ui.state("inner", "x")
+return ui.column {
+    ui.presence(outer, function()
+        return ui.div { ui.presence(inner, function(i) return ui.div { id = "slot", ui.text { i } } end) }
+    end),
+}
+"##,
+        r##"ui.contribute { target = "#slot", replace = ui.text { "the plugin's" } }"##,
+        vec![Capability::Override("*".into())],
+    );
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    assert_eq!(h.texts(), ["the plugin's"]);
 }
 
 /// Without plugins, what leaves stays exactly where it was on every frame
