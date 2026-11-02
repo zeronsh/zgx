@@ -5108,7 +5108,7 @@ impl GpuRenderer {
             let layers = &self.layers;
             atlas
                 .slots
-                .retain(|id, _| layers.get(id).is_some_and(|cache| !cache.parked));
+                .retain(|(id, _), _| layers.get(id).is_some_and(|cache| !cache.parked));
             // Unwanted a while, the atlas goes; the next effect makes another.
             if atlas.slots.is_empty() && frame - atlas.used >= LAYER_PARK_FRAMES {
                 self.effects = None;
@@ -7185,8 +7185,16 @@ impl GpuRenderer {
                 // Blurred or masked: composited from its effect slot.
                 let effect = (item.isolated
                     && (item.effects.filter_blur > 0. || scene.mask(item.id).is_some()))
-                .then(|| self.effect_slot(item.id))
+                .then(|| self.effect_slot(item.id, effects::Purpose::Content))
                 .flatten();
+                // And its drop shadow, from its own slot.
+                let shadow = match item.isolated && scene.has_drop_shadows() {
+                    true => scene
+                        .drop_shadow(item.id)
+                        .copied()
+                        .zip(self.effect_slot(item.id, effects::Purpose::Shadow).copied()),
+                    false => None,
+                };
                 if !damage.iter().any(|d| {
                     d.intersects(clip)
                         && d.intersects(if item.isolated {
@@ -7198,6 +7206,11 @@ impl GpuRenderer {
                                 b.height,
                             );
                             let b = effect.map_or(b, |slot| b.expand(slot.spread));
+                            let b = shadow.map_or(b, |(shadow, slot)| {
+                                let o = shadow.offset;
+                                let moved = Rect::new(b.x + o.x, b.y + o.y, b.width, b.height);
+                                b.union(moved.expand(slot.spread))
+                            });
                             matrix.map_or(b, |matrix| matrix.bounds(b))
                         } else if let NodeKind::Quad(style) | NodeKind::Panel { quad: style, .. } =
                             item.kind
@@ -7278,6 +7291,41 @@ impl GpuRenderer {
                             0.,
                         ],
                     });
+                    // Its drop shadow under it: its quad moved, from the
+                    // shadow's slot.
+                    let start = match (shadow, &self.effects) {
+                        (Some((cast, slot)), Some(atlas)) => {
+                            let layer_quad = quads.pop().expect("pushed above");
+                            let o = cast.offset;
+                            let moved = Rect::new(
+                                bounds.x + o.x,
+                                bounds.y + o.y,
+                                bounds.width,
+                                bounds.height,
+                            );
+                            let (rect, uv) = slot.composite(moved, atlas.size());
+                            let alpha = f32::from(cast.color.3) / 255.;
+                            quads.push(Quad {
+                                rect: [rect.x, rect.y, rect.width, rect.height],
+                                uv,
+                                color: [1., 1., 1., item.effects.opacity * alpha],
+                                mask: [layer_quad.mask[0], 0., 0., 0.],
+                                ..layer_quad
+                            });
+                            draws.push(Draw {
+                                shading: Shading::Full,
+                                start,
+                                end: start + 1,
+                                clip,
+                                bounds: quad_bounds(&quads[start as usize..]),
+                                source: TextureSource::Image(effects::EFFECT_ATLAS),
+                                blur: None,
+                            });
+                            quads.push(layer_quad);
+                            start + 1
+                        }
+                        _ => start,
+                    };
                     draws.push(Draw {
                         shading: match (&filter, blend) {
                             (Some((shader, _)), Some(_)) => Shading::FilterBlend(shader.id()),

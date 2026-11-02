@@ -1862,6 +1862,8 @@ struct ColdMaps {
     /// Gradient masks (`set_mask_gradient`), each with the size its mask
     /// image was last made at.
     mask_gradients: NodeMap<(crate::decoration::Gradient, (f32, f32))>,
+    /// Drop shadows (`set_drop_shadow`).
+    drop_shadows: NodeMap<DropShadow>,
 }
 /// A node painted outside its parent's fade (`Scene::set_outside_fade`).
 #[derive(Clone, Copy, Debug)]
@@ -2055,13 +2057,14 @@ impl Node {
     fn effect_layer(&self) -> bool {
         self.filtered() || self.layered
     }
-    /// Works `layered` out again after its mask, layer shader, blend or
-    /// text gradient (`filled`, `Scene::set_text_gradient`) changes.
-    fn relayer(&mut self, filled: bool) {
+    /// Works `layered` out again after its mask, layer shader, blend, text
+    /// gradient or drop shadow (`extra`: either, `Scene::set_text_gradient`,
+    /// `Scene::set_drop_shadow`) changes.
+    fn relayer(&mut self, extra: bool) {
         self.layered = self.image_mask.is_some()
             || self.layer_shaded()
             || self.blend != BlendMode::Normal
-            || filled;
+            || extra;
     }
     fn set_local(&mut self, transform: LocalTransform) {
         match &mut self.local {
@@ -3652,7 +3655,7 @@ impl Scene {
             Some(parent) if id != root => self.context_in_popup(parent, root),
             _ => (self.held_translation(root), Some(UNCLIPPED), None),
         };
-        let (_, bounds, clip, placement) = self.descend(self.node(id), transform, clip, placement);
+        let (_, bounds, clip, placement) = self.descend(id, transform, clip, placement);
         (bounds, clip, placement)
     }
     /// `context`, within popup `root`'s subtree (see `placed_in_popup`).
@@ -3666,7 +3669,7 @@ impl Scene {
             Some(parent) if id != root => self.context_in_popup(parent, root),
             _ => (self.held_translation(root), Some(UNCLIPPED), None),
         };
-        let (transform, _, clip, placement) = self.descend(node, transform, clip, placement);
+        let (transform, _, clip, placement) = self.descend(id, transform, clip, placement);
         (transform, clip, placement)
     }
     /// The translations of `id`'s ancestors, summed.
@@ -3716,7 +3719,7 @@ impl Scene {
             Some(parent) => self.context(parent),
             None => (Transform::default(), Some(self.viewport), None),
         };
-        let (_, bounds, clip, placement) = self.descend(self.node(id), transform, clip, placement);
+        let (_, bounds, clip, placement) = self.descend(id, transform, clip, placement);
         (bounds, clip, placement)
     }
     /// `id`'s scale, rotation, skew and origin.
@@ -3888,10 +3891,10 @@ impl Scene {
         // A mask only hides: what it reveals or hides lies within what the
         // subtree paints anyway.
         self.damage_subtree(id);
-        let filled = self.text_gradient(id).is_some();
+        let extra = self.text_gradient(id).is_some() || self.drop_shadow(id).is_some();
         let node = self.node_mut(id);
         node.image_mask = mask.map(Box::new);
-        node.relayer(filled);
+        node.relayer(extra);
         if node.image_mask.is_some() && !std::mem::replace(&mut node.promoted, true) {
             self.promoted_count += 1;
         }
@@ -3909,10 +3912,10 @@ impl Scene {
             return;
         }
         self.damage_subtree(id);
-        let filled = self.text_gradient(id).is_some();
+        let extra = self.text_gradient(id).is_some() || self.drop_shadow(id).is_some();
         let node = self.node_mut(id);
         node.blend = mode;
-        node.relayer(filled);
+        node.relayer(extra);
         if mode != BlendMode::Normal && !std::mem::replace(&mut node.promoted, true) {
             self.promoted_count += 1;
         }
@@ -3974,10 +3977,10 @@ impl Scene {
         } else {
             self.layer_shaders.insert(id, layer);
         }
-        let filled = self.text_gradient(id).is_some();
+        let extra = self.text_gradient(id).is_some() || self.drop_shadow(id).is_some();
         let node = self.node_mut(id);
         node.paint_flags = node.paint_flags.with(shaded, node.corners_clip());
-        node.relayer(filled);
+        node.relayer(extra);
         if shaded && !std::mem::replace(&mut node.promoted, true) {
             self.promoted_count += 1;
         }
@@ -6506,6 +6509,7 @@ impl Scene {
                 || cold.contained.contains_key(&id)
                 || cold.mask_gradients.contains_key(&id)
                 || cold.text_gradients.contains_key(&id)
+                || cold.drop_shadows.contains_key(&id)
         }) || self.has_own_text_shadows(id);
         self.set_special(id, COLD, cold);
     }
@@ -6903,6 +6907,31 @@ impl Scene {
             maps.text_gradients = fills;
         }
     }
+    /// Each drop-shadowed node's ink (`set_drop_shadow`) worked out anew
+    /// where it was invalidated, then reached out to its shadow's, deepest
+    /// first: its ancestors, invalidated with it, take that as they're
+    /// worked out. Here rather than in `ink`, which runs for every node and
+    /// stays as it is.
+    #[cold]
+    #[inline(never)]
+    fn ink_drop_shadows(&mut self) {
+        let Some(cold) = &self.cold else { return };
+        let mut shadowed: Vec<(usize, NodeId, DropShadow)> = (cold.drop_shadows.iter())
+            .filter(|(id, _)| self.contains(**id))
+            .map(|(id, shadow)| {
+                let depth = std::iter::successors(Some(*id), |n| self.node(*n).parent).count();
+                (depth, *id, *shadow)
+            })
+            .collect();
+        shadowed.sort_by_key(|s| std::cmp::Reverse(s.0));
+        for (_, id, shadow) in shadowed {
+            if self.node(id).bounds_valid.get() & INK_VALID != 0 {
+                continue;
+            }
+            let ink = self.ink(id).map(|ink| ink.union(shadow.ink(ink)));
+            self.node(id).ink.set(ink);
+        }
+    }
     /// Move each sticky node to where its scroll view's position puts it,
     /// now that layout has placed everything. After the content's own
     /// move: the node's old place is damaged where a copy of the content
@@ -7017,6 +7046,9 @@ impl Scene {
             maps.contained.remove(&id);
             maps.mask_gradients.remove(&id);
             maps.text_gradients.remove(&id);
+            if maps.drop_shadows.remove(&id).is_some() {
+                self.filtered.set(self.filtered.get() - 1);
+            }
         }
     }
     /// Hit `id` and what it holds where an animation is taking it, not
@@ -8217,8 +8249,7 @@ impl Scene {
                 return;
             }
         }
-        let (transform, bounds, clip, placement) =
-            self.descend(node, parent, parent_clip, placement);
+        let (transform, bounds, clip, placement) = self.descend(id, parent, parent_clip, placement);
         // Inside a layer it starts, nothing cuts its own paint.
         let own = match self.paints_past_clip(id) {
             true if node.transformed() || node.filtered() => None,
@@ -8240,17 +8271,23 @@ impl Scene {
     /// placement, leaving only the node's own clip inside.
     fn descend(
         &self,
-        node: &Node,
+        id: NodeId,
         parent: Transform,
         parent_clip: Option<Rect>,
         placement: Option<Placement>,
     ) -> (Transform, Rect, Option<Rect>, Option<Placement>) {
+        let node = self.node(id);
+        // A drop shadow spreads what its layer paints too (`set_drop_shadow`).
+        let shadow = match node.layered && self.has_drop_shadows() {
+            true => self.drop_shadow(id),
+            false => None,
+        };
         let transform = Transform {
             x: parent.x + node.transform.x,
             y: parent.y + node.transform.y,
         };
         let bounds = node.bounds.translated(transform);
-        if !node.transformed() && !node.filtered() {
+        if !node.transformed() && !node.filtered() && shadow.is_none() {
             let clip = if clip_axes(&node.style) != (false, false) {
                 clipped_bounds(parent_clip, bounds, &node.style)
             } else {
@@ -8266,6 +8303,13 @@ impl Scene {
             true => filter_spread(node.effects.filter_blur) * stretch(matrix),
             false => 0.,
         };
+        // (Its furthest offset and its blur's reach, every way at once.)
+        let spread = spread
+            + shadow.map_or(0., |shadow| {
+                let reach =
+                    shadow.offset.x.abs().max(shadow.offset.y.abs()) + filter_spread(shadow.blur);
+                reach * stretch(matrix)
+            });
         let placement = match placement {
             None => Placement {
                 matrix,
@@ -8295,7 +8339,7 @@ impl Scene {
             Some(parent) => self.context(parent),
             None => (Transform::default(), Some(self.viewport), None),
         };
-        let (transform, _, clip, placement) = self.descend(node, transform, clip, placement);
+        let (transform, _, clip, placement) = self.descend(id, transform, clip, placement);
         (transform, clip, placement)
     }
     /// If `id` is shown, its world translation including its own and the
@@ -10381,6 +10425,9 @@ impl Scene {
         {
             self.place_mask_gradients();
         }
+        if self.has_drop_shadows() {
+            self.ink_drop_shadows();
+        }
         let _span = crate::profile::span(crate::profile::Phase::Damage);
         report.layout_nodes = std::mem::take(&mut self.pending_layout_nodes);
         let dirty = std::mem::take(&mut self.dirty);
@@ -10853,6 +10900,10 @@ impl Scene {
                 let nested = self
                     .layer_bounds(item.id)
                     .expand(filter_spread(item.effects.filter_blur));
+                // And its drop shadow's.
+                let nested = self
+                    .drop_shadow(item.id)
+                    .map_or(nested, |shadow| nested.union(shadow.ink(nested)));
                 match item.projective() {
                     Some(matrix) if matrix.affine().is_none() => {
                         // In perspective, nearly at the eye, it reaches far
@@ -13986,7 +14037,7 @@ mod nonfinite_transform_tests {
 mod advanced_layout;
 #[path = "scene_select.rs"]
 mod select;
-pub use select::{HighlightPiece, TextHighlight, TextLeaf, TextMark, TextShadow};
+pub use select::{DropShadow, HighlightPiece, TextHighlight, TextLeaf, TextMark, TextShadow};
 #[path = "scene_view.rs"]
 mod view;
 pub use view::{CanvasView, GridFill, GridMark};
@@ -15314,6 +15365,102 @@ mod local_transform_tests {
         scene.flush();
         assert!(scene.text_gradient_image(id).is_none());
         assert!(!scene.is_layer(id));
+    }
+    /// Text with a gradient and a drop shadow is a layer while it has
+    /// either: removing one, in either order, leaves it one for the other.
+    #[test]
+    fn gradient_text_and_its_drop_shadow_each_keep_it_a_layer() {
+        use crate::canvas::GradientStop;
+        use crate::decoration::Gradient;
+        let gradient = || {
+            let stops: Arc<[GradientStop]> = vec![
+                GradientStop {
+                    offset: 0.,
+                    color: Color(255, 0, 0, 255),
+                },
+                GradientStop {
+                    offset: 1.,
+                    color: Color(0, 0, 255, 255),
+                },
+            ]
+            .into();
+            Some(Gradient::Linear { angle: 0., stops })
+        };
+        let shadow = || {
+            Some(DropShadow {
+                offset: Transform { x: 2., y: 2. },
+                blur: 1.,
+                color: Color(0, 0, 0, 128),
+            })
+        };
+        for shadow_first in [false, true] {
+            let mut scene = Scene::new(200., 100.);
+            let id = scene.append(
+                scene.root(),
+                NodeKind::Text {
+                    text: "Count 1".into(),
+                    color: Color(255, 255, 255, 255),
+                    font_size: 14.,
+                },
+                fixed(40., 20.),
+            );
+            scene.set_text_gradient(id, gradient());
+            scene.set_drop_shadow(id, shadow());
+            scene.flush();
+            assert!(scene.is_layer(id));
+            match shadow_first {
+                true => scene.set_drop_shadow(id, None),
+                false => scene.set_text_gradient(id, None),
+            }
+            scene.flush();
+            assert!(
+                scene.is_layer(id),
+                "one left (shadow first: {shadow_first})"
+            );
+            match shadow_first {
+                true => scene.set_text_gradient(id, None),
+                false => scene.set_drop_shadow(id, None),
+            }
+            scene.flush();
+            assert!(
+                !scene.is_layer(id),
+                "neither (shadow first: {shadow_first})"
+            );
+        }
+    }
+    /// A drop-shadowed node's ink, and its parent's, reach out to its
+    /// shadow after a flush (so the paint walk keeps a shadow whose caster
+    /// is clipped away); the shadow gone, back to the box.
+    #[test]
+    fn drop_shadows_reach_the_ink() {
+        let (mut scene, id) = placed(40., 20.);
+        scene.flush();
+        let parent = scene.node(id).parent.unwrap();
+        let plain = scene.ink(id).unwrap();
+        let shadow = DropShadow {
+            offset: Transform { x: 30., y: 50. },
+            blur: 2.,
+            color: Color(0, 0, 0, 255),
+        };
+        scene.set_drop_shadow(id, Some(shadow));
+        scene.flush();
+        let ink = scene.ink(id).unwrap();
+        assert!(
+            ink.y + ink.height >= plain.y + plain.height + 50. + 6.,
+            "{ink:?}"
+        );
+        assert!(
+            ink.x + ink.width >= plain.x + plain.width + 30. + 6.,
+            "{ink:?}"
+        );
+        let held = scene.ink(parent).unwrap();
+        assert!(
+            held.y + held.height >= ink.y + ink.height,
+            "its parent's: {held:?}"
+        );
+        scene.set_drop_shadow(id, None);
+        scene.flush();
+        assert_eq!(scene.ink(id), Some(plain));
     }
     #[test]
     fn masks_promote_and_move_by_compositing_alone() {

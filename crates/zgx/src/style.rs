@@ -745,35 +745,42 @@ pub(crate) struct ColdStyles {
     pub(crate) image_rendering: Option<crate::image::ImageRendering>,
     /// `Styled::outline_style`.
     pub(crate) outline_style: Option<crate::decoration::BorderStyle>,
-    /// `Styled::mask_gradient` and `text_gradient`.
-    pub(crate) gradients: Option<std::sync::Arc<StyleGradients>>,
+    /// `Styled::mask_gradient`, `text_gradient` and `drop_shadow`.
+    pub(crate) layers: Option<std::sync::Arc<LayerStyles>>,
     /// `Styled::w_calc` and the like.
     pub(crate) size_calcs: Option<std::sync::Arc<crate::size_calc::SizeCalcs>>,
     /// `Styled::text_balance`.
     pub(crate) text_balance: Option<bool>,
 }
-/// `ColdStyles`' gradients, behind one pointer: inline, each would make
-/// every `ColdStyles` 40 bytes larger to copy and compare, and allocate it a
-/// size class up, in apps with neither.
+/// What in `ColdStyles` paints a node as a layer (its gradients and drop
+/// shadow), behind one pointer: inline, each would make every `ColdStyles`
+/// larger to copy and compare, and allocate it a size class up, in apps with
+/// none of them.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct StyleGradients {
+pub(crate) struct LayerStyles {
     /// `Styled::mask_gradient`.
     pub(crate) mask: Option<crate::decoration::Gradient>,
     /// `Styled::text_gradient`.
     pub(crate) text: Option<crate::decoration::Gradient>,
+    /// `Styled::drop_shadow`.
+    pub(crate) drop_shadow: Option<crate::scene::DropShadow>,
 }
 impl ColdStyles {
-    /// Its gradients, to set one.
-    fn gradients_mut(&mut self) -> &mut StyleGradients {
-        std::sync::Arc::make_mut(self.gradients.get_or_insert_default())
+    /// What paints it as a layer, to set one.
+    fn layers_mut(&mut self) -> &mut LayerStyles {
+        std::sync::Arc::make_mut(self.layers.get_or_insert_default())
     }
     /// `Styled::mask_gradient`.
     pub(crate) fn mask_gradient(&self) -> Option<&crate::decoration::Gradient> {
-        self.gradients.as_ref()?.mask.as_ref()
+        self.layers.as_ref()?.mask.as_ref()
     }
     /// `Styled::text_gradient`.
     pub(crate) fn text_gradient(&self) -> Option<&crate::decoration::Gradient> {
-        self.gradients.as_ref()?.text.as_ref()
+        self.layers.as_ref()?.text.as_ref()
+    }
+    /// `Styled::drop_shadow`.
+    pub(crate) fn drop_shadow(&self) -> Option<crate::scene::DropShadow> {
+        self.layers.as_ref()?.drop_shadow
     }
 }
 /// How an image sits in its box: `Styled::object_fit` and `object_position`.
@@ -971,13 +978,16 @@ impl RareStyles {
             if theirs.outline_style.is_some() {
                 mine.outline_style = theirs.outline_style;
             }
-            if let Some(theirs) = &theirs.gradients {
-                let mine = std::sync::Arc::make_mut(mine.gradients.get_or_insert_default());
+            if let Some(theirs) = &theirs.layers {
+                let mine = std::sync::Arc::make_mut(mine.layers.get_or_insert_default());
                 if theirs.mask.is_some() {
                     mine.mask = theirs.mask.clone();
                 }
                 if theirs.text.is_some() {
                     mine.text = theirs.text.clone();
+                }
+                if theirs.drop_shadow.is_some() {
+                    mine.drop_shadow = theirs.drop_shadow;
                 }
             }
             if theirs.z.is_some() {
@@ -1985,6 +1995,23 @@ pub trait Styled: Sized {
             .text_shadows = Some(shadows.into());
         self
     }
+    /// A shadow of what the view and its subtree paint, by their alpha rather
+    /// than the box (CSS's `filter: drop-shadow`): moved by `x`, `y`, blurred
+    /// by a Gaussian of sigma `blur` points and in `color`. The view paints
+    /// as a cached layer; the shadow is that layer's, blurred once.
+    fn drop_shadow(mut self, x: f32, y: f32, blur: f32, color: Color) -> Self {
+        self.styles_mut()
+            .rare_mut()
+            .cold
+            .get_or_insert_default()
+            .layers_mut()
+            .drop_shadow = Some(crate::scene::DropShadow {
+            offset: crate::scene::Transform { x, y },
+            blur: blur.max(0.),
+            color,
+        });
+        self
+    }
     /// Set centered image fitting within its padded content box. Not inherited.
     fn object_fit(mut self, fit: ObjectFit) -> Self {
         self.styles_mut()
@@ -2556,7 +2583,7 @@ pub trait Styled: Sized {
             .rare_mut()
             .cold
             .get_or_insert_default()
-            .gradients_mut()
+            .layers_mut()
             .mask = Some(gradient);
         self
     }
@@ -2568,7 +2595,7 @@ pub trait Styled: Sized {
             .rare_mut()
             .cold
             .get_or_insert_default()
-            .gradients_mut()
+            .layers_mut()
             .text = Some(gradient);
         self
     }
