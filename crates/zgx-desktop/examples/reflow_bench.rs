@@ -4,6 +4,10 @@
 //! The window is resized `REFLOW_STEPS` (150) times, one every
 //! `REFLOW_INTERVAL_MS` (33), then the app quits.
 //!
+//! Row text wraps, broken again as the width changes; `REFLOW_WRAP=0` keeps
+//! it on one line (measured once, served from cache), as the scene was
+//! before: layout's own row work alone.
+//!
 //! `REFLOW_MODE`:
 //! - `drag` (the default): 1100 points narrowing by 3 a step, every frame a
 //!   width layout hasn't seen, as a person dragging the window's edge.
@@ -41,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         setting("REFLOW_INTERVAL_MS", 33),
     );
     let alternate = std::env::var("REFLOW_MODE").is_ok_and(|mode| mode == "alternate");
+    let wrap = setting("REFLOW_WRAP", 1) != 0;
     Application::new()
         .window(WindowOptions {
             title: "reflow bench".into(),
@@ -61,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "+ let value_{f}_{l} = compute(input, options).map(|x| x * {l}).unwrap_or_default(); // a long line that wraps as the window narrows"
                             ))
                             .text_size(12.)
+                            .text_wrap(wrap)
                             .flex_grow(1.)
                             .flex_shrink(1.)
                             .min_w(0.),
