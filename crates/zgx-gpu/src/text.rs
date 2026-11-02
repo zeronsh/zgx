@@ -1,6 +1,25 @@
 //! Reusable shaped text geometry for editor hit testing, carets and bidi selections.
 pub use cosmic_text::Affinity;
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
+
+/// `key`'s glyph image: swash's, or for a face whose shapes swash can't
+/// draw (macOS 26's PingFang, `hvgl` only) Core Text's. Asked only where
+/// swash gave none: a glyph cache miss with nothing to show.
+pub(crate) fn glyph_image(
+    swash: &mut cosmic_text::SwashCache,
+    fonts: &mut FontSystem,
+    key: cosmic_text::CacheKey,
+) -> Option<cosmic_text::SwashImage> {
+    let image = swash.get_image_uncached(fonts, key);
+    #[cfg(target_os = "macos")]
+    if image
+        .as_ref()
+        .is_none_or(|image| image.placement.width == 0 || image.placement.height == 0)
+    {
+        return crate::core_text_glyphs::glyph_image(fonts, key).or(image);
+    }
+    image
+}
 use std::{ops::Range, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 use zgx::scene::Rect;
@@ -807,7 +826,7 @@ impl CpuTextRaster {
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let p = glyph.physical((0., 0.), 1.);
-                if let Some(image) = self.swash.get_image_uncached(&mut self.fonts, p.cache_key) {
+                if let Some(image) = glyph_image(&mut self.swash, &mut self.fonts, p.cache_key) {
                     images.push((
                         p.x,
                         p.y + run.line_y as i32,
@@ -838,9 +857,8 @@ impl CpuTextRaster {
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let physical = glyph.physical((0., 0.), 1.);
-                if let Some(image) = self
-                    .swash
-                    .get_image_uncached(&mut self.fonts, physical.cache_key)
+                if let Some(image) =
+                    glyph_image(&mut self.swash, &mut self.fonts, physical.cache_key)
                 {
                     images.push((physical.x, physical.y + run.line_y as i32, image));
                 }

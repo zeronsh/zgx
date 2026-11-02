@@ -10,6 +10,8 @@ use zgx::scene::{Color, NodeId, NodeKind, Rect, Scene};
 mod bands;
 #[cfg(all(windows, feature = "composition"))]
 mod composition;
+#[cfg(target_os = "macos")]
+mod core_text_glyphs;
 #[cfg(d3d11)]
 mod d3d11_frame;
 #[cfg(windows)]
@@ -21,6 +23,9 @@ mod font_cache;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub mod iosurface;
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use core_text_glyphs::core_text_glyph;
 #[cfg(target_os = "macos")]
 mod layer_present;
 #[cfg(target_os = "macos")]
@@ -11493,9 +11498,7 @@ impl GpuRenderer {
             self.warn("more than 8192 glyphs in a frame: the rest aren't drawn");
             return Ok(None);
         }
-        let Some(image) = self
-            .swash
-            .get_image_uncached(&mut self.fonts.borrow_mut(), key)
+        let Some(image) = text::glyph_image(&mut self.swash, &mut self.fonts.borrow_mut(), key)
         else {
             self.entries.insert(AtlasKey::from(key), None);
             return Ok(None);
@@ -11776,9 +11779,7 @@ impl GpuRenderer {
         if let Some(entry) = self.blurred.as_ref().and_then(|b| b.glyphs.get(&slot)) {
             return Ok(*entry);
         }
-        let image = self
-            .swash
-            .get_image_uncached(&mut self.fonts.borrow_mut(), key);
+        let image = text::glyph_image(&mut self.swash, &mut self.fonts.borrow_mut(), key);
         let Some(image) = image.filter(|i| i.placement.width > 0 && i.placement.height > 0) else {
             self.blurred
                 .get_or_insert_default()

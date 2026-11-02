@@ -324,6 +324,12 @@ zgx-gpu's `undrawable_fonts` test strips a font's `glyf` and checks its text
 falls to the next face; `chinese_text_on_macos_draws` checks Chinese lights
 pixels.
 
+On macOS an `hvgl` face is a font, flagged `needs_platform_outlines`: zgx-gpu
+draws its glyphs through Core Text (`core_text_glyphs`) where swash gives
+none, at the weight they were shaped at (PingFang is one variable face,
+Medium by default). There Chinese draws in PingFang itself again; elsewhere
+`hvgl` faces are passed by as above.
+
 ## A paragraph's words for a layout outside a line (zgx-cosmic-text 0.19.8)
 
 zgx-gpu lays out a paragraph that this crate shapes as one left-to-right span

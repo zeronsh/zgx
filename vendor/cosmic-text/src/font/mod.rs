@@ -57,6 +57,9 @@ pub struct Font {
     pub(crate) italic_or_oblique: bool,
     /// zgx: whether it has an optical size axis (`opsz`).
     optical: bool,
+    /// zgx: whether its glyphs' shapes are only in a table swash can't draw
+    /// (Apple's `hvgl`), for the platform's rasterizer.
+    platform_outlines: bool,
 }
 
 impl fmt::Debug for Font {
@@ -100,6 +103,13 @@ impl Font {
     /// and advances follow the size.
     pub fn has_optical(&self) -> bool {
         self.optical
+    }
+
+    /// zgx: whether its glyphs' shapes are only where swash can't draw them
+    /// (Apple's `hvgl`, macOS 26's PingFang): zgx-gpu draws them through Core
+    /// Text. Only on macOS; elsewhere such a face gives no font.
+    pub fn needs_platform_outlines(&self) -> bool {
+        self.platform_outlines
     }
 
     /// zgx: whether it has color glyphs (`COLR`, `CBDT` or `sbix`), as an
@@ -194,9 +204,14 @@ impl Font {
         // zgx patch: a face with no outlines swash can draw (macOS 26's
         // PingFangUI, whose shapes are only in Apple's `hvgl` table) shapes,
         // and draws every glyph blank: it is no font either, and fallback
-        // takes the next face that covers the text (Heiti, Hiragino). Asked
-        // once a face, as it loads.
-        if !has_drawable_outlines(&font_ref) {
+        // takes the next face that covers the text (Heiti, Hiragino). On
+        // macOS an `hvgl` face is one: zgx-gpu draws its glyphs through Core
+        // Text (`platform_outlines`). Asked once a face, as it loads.
+        let drawable = has_drawable_outlines(&font_ref);
+        let platform_outlines = !drawable
+            && cfg!(target_os = "macos")
+            && font_ref.table_data(Tag::new(b"hvgl")).is_some();
+        if !drawable && !platform_outlines {
             log::debug!("{}: no outlines to draw", info.post_script_name);
             return None;
         }
@@ -265,6 +280,7 @@ impl Font {
         Some(Self {
             id: info.id,
             optical: has_optical,
+            platform_outlines,
             monospace_fallback,
             #[cfg(feature = "swash")]
             swash: {
