@@ -312,11 +312,49 @@ fn row_style(width: f32, height: f32, measured: bool) -> crate::scene::Style {
         }
     }
 }
-/// The row a list was last asked to show (`reveal`), read out of line: the
-/// pass inlining it compiles differently (x86 per-pass cost rises).
+/// For a list that keeps its place, where its anchor row is now if rows
+/// were added or removed above it: as many rows on, if its key is there.
+/// (Out of line, as is `keep_anchor_key`: a list that doesn't keep its
+/// place, most, runs its pass as it did before.)
 #[inline(never)]
-fn asked_reveal(reveal: &Signal<(u64, usize, RowAlign)>) -> (u64, usize, RowAlign) {
-    reveal.get()
+fn anchor_moved<K: PartialEq>(
+    anchor: Option<&Anchor>,
+    anchor_key: Option<&K>,
+    revision: u64,
+    requested: f32,
+    heights: &VariableHeights,
+    key: &mut impl FnMut(usize) -> K,
+) -> Option<usize> {
+    let (previous, anchor_key) = (anchor?, anchor_key?);
+    if previous.revision == revision || requested != previous.position {
+        return None;
+    }
+    let length = heights.index.borrow().count();
+    let shifted = previous.index as i64 + length as i64 - previous.length as i64;
+    (length != previous.length
+        && (0..length as i64).contains(&shifted)
+        && *anchor_key == key(shifted as usize))
+    .then_some(shifted as usize)
+}
+/// The key of the row `next` anchors on, for a list that keeps its place:
+/// the last pass's while the row is the same (most passes), else the row's
+/// among those shown (`keys`), which run in order from the first.
+#[inline(never)]
+fn keep_anchor_key<K: Clone, T>(
+    anchor: Option<&Anchor>,
+    next: &Anchor,
+    anchor_key: &mut Option<K>,
+    keys: &[(K, usize, T, T)],
+) {
+    let same = anchor
+        .is_some_and(|previous| previous.index == next.index && previous.length == next.length);
+    if !(same && anchor_key.is_some()) {
+        *anchor_key = (|| {
+            let first = keys.first()?.1;
+            let (key, index, ..) = keys.get(next.index.checked_sub(first)?)?;
+            (*index == next.index).then(|| key.clone())
+        })();
+    }
 }
 fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
     offset: Signal<f32>,
@@ -489,19 +527,16 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 // Rows added or removed above the anchor row: it is as many
                 // rows on, and the view stays on it if its key is there
                 // (asked before the index is borrowed: `key` is the app's).
-                let moved = match (&anchor, &anchor_key) {
-                    (Some(previous), Some(anchor_key))
-                        if previous.revision != revision && requested == previous.position =>
-                    {
-                        let length = heights.index.borrow().count();
-                        let shifted =
-                            previous.index as i64 + length as i64 - previous.length as i64;
-                        (length != previous.length
-                            && (0..length as i64).contains(&shifted)
-                            && *anchor_key == key(shifted as usize))
-                        .then_some(shifted as usize)
-                    }
-                    _ => None,
+                let moved = match keeps_place {
+                    true => anchor_moved(
+                        anchor.as_ref(),
+                        anchor_key.as_ref(),
+                        revision,
+                        requested,
+                        &heights,
+                        &mut key,
+                    ),
+                    false => None,
                 };
                 let pending_target = pending_reveal
                     .filter(|(_, _, expected, focus, _)| {
@@ -514,7 +549,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 let request = navigation
                     .as_ref()
                     .map(|navigation| navigation.request.get());
-                let (serial, row, align) = asked_reveal(&reveal);
+                let (serial, row, align) = reveal.get();
                 let asked = (serial != handled_reveal).then_some((row, align, false));
                 handled_reveal = serial;
                 let (length, total, position, target, geometry, next_anchor) = {
@@ -700,23 +735,11 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     }
                     anchor
                 });
-                // Its row's key, kept by a list that keeps its place: the
-                // last pass's while the row is the same (most passes), else
-                // the row's among those shown, which run in order from the
-                // first. (A key left from an anchor since dropped is never
-                // read: `moved` asks for an anchor, and the next anchor
-                // gets its own.)
+                // Its row's key, kept by a list that keeps its place. (A key
+                // left from an anchor since dropped is never read: `moved`
+                // asks for an anchor, and the next anchor gets its own.)
                 if keeps_place && let Some(next) = &next_anchor {
-                    let same = anchor.as_ref().is_some_and(|previous| {
-                        previous.index == next.index && previous.length == next.length
-                    });
-                    if !(same && anchor_key.is_some()) {
-                        anchor_key = (|| {
-                            let first = keys.first()?.1;
-                            let (key, index, ..) = keys.get(next.index.checked_sub(first)?)?;
-                            (*index == next.index).then(|| key.clone())
-                        })();
-                    }
+                    keep_anchor_key(anchor.as_ref(), next, &mut anchor_key, &keys);
                 }
                 let Some(mut ui) = weak.upgrade() else {
                     return;
