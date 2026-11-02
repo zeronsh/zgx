@@ -9005,6 +9005,11 @@ impl Scene {
             _ => Vec::new(),
         };
         children.clear();
+        // As many placements as children, at once: a vector growing from
+        // four reallocates through a long list and wastes three of a row's.
+        if layout.is_some() && children.capacity() == 0 {
+            children.reserve_exact(self.children_raw(self.tree_node(id)).len());
+        }
         let (mut width, mut height) = match layout {
             None => self.leaf_size(id, &style, available_w),
             // An empty box (a bar, a swatch, a spacer): its padding and size,

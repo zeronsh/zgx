@@ -1162,46 +1162,44 @@ fn lower_node(node: &Rc<Node>, low: &Rc<Lowering>) -> View {
 /// theme. Apart from `lower`, whose frame stays live while the node's
 /// children lower (debug builds give each view a stack slot of its own).
 #[cfg_attr(debug_assertions, inline(never))]
-fn decorated(view: View, node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
+fn decorated(mut view: View, node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
+    // Each changes the view only when it applies: a view moved through a
+    // `match` arm that leaves it as it was is 632 bytes copied for nothing.
     // Labelled for the layout inspector while it records.
-    let view = match (&node.source, low.inspector.borrow().as_ref()) {
-        (Some(source), Some(inspector)) if inspector.recording() => {
-            let (inspector, source, name) = (inspector.clone(), source.clone(), node.label());
-            view.on_mount(move |handle| inspector.label(handle.node(), name, Some(source)))
-        }
-        _ => view,
-    };
-    let view = match node.tooltip.as_deref() {
-        Some(
-            tip @ crate::node::Tooltip {
-                content: Some(_), ..
-            },
-        ) => tooltip(view, tip, low),
-        _ => view,
-    };
-    let view = match &node.theme {
-        None => view,
-        Some(spec) => themed(spec, vm, view),
-    };
-    match &node.provide {
-        None => view,
-        // Its values over what its ancestors were given, for the
-        // components and rows built under it (`ui.use_context`).
-        Some(own) => {
-            let own = own.clone();
-            zgx::compose::provide_with(
-                move |cx| {
-                    let mut all = cx
-                        .try_service::<crate::node::Provided>()
-                        .map(|above| above.0.clone())
-                        .unwrap_or_default();
-                    all.extend(own.iter().cloned());
-                    crate::node::Provided(all)
-                },
-                view,
-            )
-        }
+    if let (Some(source), Some(inspector)) = (&node.source, low.inspector.borrow().as_ref())
+        && inspector.recording()
+    {
+        let (inspector, source, name) = (inspector.clone(), source.clone(), node.label());
+        view = view.on_mount(move |handle| inspector.label(handle.node(), name, Some(source)));
     }
+    if let Some(
+        tip @ crate::node::Tooltip {
+            content: Some(_), ..
+        },
+    ) = node.tooltip.as_deref()
+    {
+        view = tooltip(view, tip, low);
+    }
+    if let Some(spec) = &node.theme {
+        view = themed(spec, vm, view);
+    }
+    // Its values over what its ancestors were given, for the components
+    // and rows built under it (`ui.use_context`).
+    if let Some(own) = &node.provide {
+        let own = own.clone();
+        view = zgx::compose::provide_with(
+            move |cx| {
+                let mut all = cx
+                    .try_service::<crate::node::Provided>()
+                    .map(|above| above.0.clone())
+                    .unwrap_or_default();
+                all.extend(own.iter().cloned());
+                crate::node::Provided(all)
+            },
+            view,
+        );
+    }
+    view
 }
 
 /// `anchor` with its tooltip: zgx's own (`View::tooltip`), its content the
@@ -1760,7 +1758,16 @@ impl EachRow {
         if live {
             Rc::from(name)
         } else {
-            Rc::from(format!("{name}@{}", self.generation))
+            // One allocation, the name's: written on the stack first.
+            let mut buf = [0u8; 64];
+            let mut at = Cursor(&mut buf, 0);
+            match std::fmt::Write::write_fmt(&mut at, format_args!("{name}@{}", self.generation)) {
+                Ok(()) => {
+                    let len = at.1;
+                    Rc::from(std::str::from_utf8(&buf[..len]).unwrap_or_default())
+                }
+                Err(_) => Rc::from(format!("{name}@{}", self.generation)),
+            }
         }
     }
     /// Its item changed: a row built again (a new generation).
@@ -1769,6 +1776,30 @@ impl EachRow {
         self.generation += 1;
         self.identity = self.identity_of(name, false);
     }
+}
+/// Text written into a buffer as far as it fits (`EachRow::identity_of`).
+struct Cursor<'a>(&'a mut [u8], usize);
+impl std::fmt::Write for Cursor<'_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let end = self.1 + s.len();
+        let to = self.0.get_mut(self.1..end).ok_or(std::fmt::Error)?;
+        to.copy_from_slice(s.as_bytes());
+        self.1 = end;
+        Ok(())
+    }
+}
+/// Whether `value` displays as `text`, compared as it is written: no
+/// string made for a key that has not changed.
+fn displays_as(value: &Value, text: &str) -> bool {
+    struct Rest<'a>(&'a str);
+    impl std::fmt::Write for Rest<'_> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.0 = self.0.strip_prefix(s).ok_or(std::fmt::Error)?;
+            Ok(())
+        }
+    }
+    let mut rest = Rest(text);
+    std::fmt::Write::write_fmt(&mut rest, format_args!("{value}")).is_ok() && rest.0.is_empty()
 }
 /// A `ui.each`'s rows by name.
 type Rows = ContentMap<Rc<str>, EachRow>;
@@ -1814,12 +1845,9 @@ impl LastPass {
             if same(now, then) {
                 continue;
             }
-            let k = match vm.call::<Value>(key, now.clone()) {
-                Ok(k) => k.to_string(),
-                Err(_) => return None,
-            };
-            if k != self.keys[i] {
-                return None;
+            match vm.call::<Value>(key, now.clone()) {
+                Ok(k) if displays_as(&k, &self.keys[i]) => {}
+                _ => return None,
             }
             changed.push(i);
         }
@@ -3328,11 +3356,13 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
         match &low.hooks {
             None => {
                 view = view.children(node.children.iter().map(|child| {
-                    let view = lower(child, low);
-                    match &flow {
-                        Some(flow) if child.kind.flows() => apply_all(view, flow),
-                        _ => view,
+                    let mut view = lower(child, low);
+                    if let Some(flow) = &flow
+                        && child.kind.flows()
+                    {
+                        apply_in(view.styles_mut(), flow);
                     }
+                    view
                 }));
             }
             // What plugins add at an element is its sibling, or in its place.
@@ -3433,7 +3463,7 @@ fn styled(
             _ => None,
         }));
     }
-    view = apply_all(view, &statics);
+    apply_in(view.styles_mut(), &statics);
     // A background image: over `bg`, under the border and children, cut by
     // the corners. It goes in the node's one reactive style, after anything
     // animated, so an animated `bg` keeps it.
@@ -7471,9 +7501,12 @@ fn is_transform(prop: Prop) -> bool {
 /// Applies literal styles; translation and the local transform collect
 /// their parts first, so each is set once.
 fn apply_all<S: Styled>(mut s: S, lits: &[(Prop, Lit)]) -> S {
-    // Through its styles: a view moved in and out of each setter is a
-    // kilobyte copied twice.
-    let styles = s.styles_mut();
+    apply_in(s.styles_mut(), lits);
+    s
+}
+/// `apply_all` in place: a view moved in and out of each setter, or of
+/// this, is 632 bytes copied twice.
+fn apply_in(styles: &mut Styles, lits: &[(Prop, Lit)]) {
     for (prop, lit) in lits {
         if !is_transform(*prop) {
             apply(&mut *styles, *prop, lit);
@@ -7496,13 +7529,25 @@ fn apply_all<S: Styled>(mut s: S, lits: &[(Prop, Lit)]) -> S {
         styles.rounded_corners(c);
     }
     let (translate, local) = literal_transform(lits);
+    if translate.is_some() || local.is_some() {
+        transformed(styles, translate, local);
+    }
+}
+#[cold]
+#[inline(never)]
+fn transformed(
+    styles: &mut Styles,
+    translate: Option<(f32, f32)>,
+    local: Option<crate::transform::LocalTransform>,
+) {
+    let mut s = std::mem::replace(styles, Styles::new());
     if let Some((x, y)) = translate {
         s = s.translate(x, y);
     }
     if let Some(local) = local {
         s = crate::transform::style(s, local);
     }
-    s
+    *styles = s;
 }
 
 fn align(v: &str) -> Align {
@@ -8353,4 +8398,34 @@ fn active_descendant(view: View, active: &Source, vm: &Rc<Vm>) -> View {
         Some(Lit::Str(id)) => Some(id.to_string()),
         _ => None,
     })
+}
+
+#[cfg(test)]
+#[test]
+fn a_rows_identity_and_key_read_as_formatted() {
+    let row = |generation| EachRow {
+        last: Value::Nil,
+        generation,
+        identity: Rc::from(""),
+        item: None,
+        seen: false,
+    };
+    let long = "k".repeat(80);
+    for (name, generation) in [("7", 0), ("row", u64::MAX), (long.as_str(), 3), ("é", 12)] {
+        let made = row(generation).identity_of(name, false);
+        assert_eq!(&*made, format!("{name}@{generation}"));
+        assert_eq!(&*row(generation).identity_of(name, true), name);
+    }
+    for (value, text) in [
+        (Value::Num(3.), "3"),
+        (Value::Num(-2.5), "-2.5"),
+        (Value::Str("a".into()), "a"),
+        (Value::Bool(true), "true"),
+    ] {
+        assert!(displays_as(&value, text), "{text}");
+        assert_eq!(text, value.to_string());
+        assert!(!displays_as(&value, &format!("{text}0")));
+        assert!(!displays_as(&value, &text[..text.len() - 1]));
+        assert!(!displays_as(&value, "x"));
+    }
 }
