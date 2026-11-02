@@ -118,7 +118,8 @@ fn redecode(bytes: &[u8]) -> Result<Arc<[u8]>, String> {
         .map(|image| image.pixels_arc())
         .map_err(|e| e.0)
 }
-/// Decode PNG/JPEG into immutable, straight-alpha RGBA8. No filesystem/network access.
+/// Decode PNG/JPEG (or a GIF's first frame) into immutable, straight-alpha
+/// RGBA8. No filesystem/network access.
 ///
 /// The image is decoded into its final buffer, allocated once: 8-bit RGB,
 /// grey and grey-with-alpha images decode into its front and widen to RGBA
@@ -144,6 +145,15 @@ pub fn decode_image(bytes: &[u8]) -> Result<Arc<ImageData>, GpuError> {
             return ImageData::new(width, height, rgba)
                 .map(Arc::new)
                 .map_err(|e| GpuError(e.into()));
+        }
+        // A GIF through the `gif` crate (`image` reads none): its first
+        // frame, composited as `decode_gif` composites them all.
+        Some(image::ImageFormat::Gif) if !cfg!(feature = "gif") => {
+            return Err(GpuError("GIF images need zgx-gpu's `gif` feature".into()));
+        }
+        #[cfg(feature = "gif")]
+        Some(image::ImageFormat::Gif) => {
+            return decode_gif(bytes).map(|animation| animation.frames()[0].image.clone());
         }
         _ => {}
     }
