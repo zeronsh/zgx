@@ -13,7 +13,7 @@ pub(crate) fn context_menu(
     platform: Option<Rc<PlatformService>>,
     ui: WeakUi,
 ) -> crate::compose_context_menu::ContextMenuBuilder {
-    Box::new(move |_| {
+    Box::new(move |_, _| {
         // A password field's text never leaves it: `copy` gives nothing.
         let copyable = !editor.copy().is_empty();
         let editable = !editor.is_read_only();

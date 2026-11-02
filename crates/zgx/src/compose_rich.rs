@@ -6,9 +6,10 @@ use crate::{
     text_layout::{FontFamily, LetterSpacing, LineHeight},
 };
 use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc};
-/// A link's click, told the keys held (a ⌘-click).
+/// A link's click, told the keys held (a ⌘-click): `true` back handled
+/// it, and its `href` doesn't open.
 #[derive(Clone)]
-pub(crate) struct InlineAction(Rc<RefCell<dyn FnMut(crate::input::Modifiers)>>);
+pub(crate) struct InlineAction(Rc<RefCell<dyn FnMut(crate::input::Modifiers) -> bool>>);
 impl std::fmt::Debug for InlineAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("InlineAction")
@@ -19,6 +20,22 @@ impl PartialEq for InlineAction {
         Rc::ptr_eq(&self.0, &other.0)
     }
 }
+/// A span's own context menu (`TextSpan::context_menu`).
+#[derive(Clone)]
+pub(crate) struct SpanMenu(Rc<RefCell<MenuBuild>>);
+type MenuBuild = dyn FnMut(&crate::compose::ContextMenuEvent) -> Vec<View>;
+impl std::fmt::Debug for SpanMenu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SpanMenu")
+    }
+}
+impl PartialEq for SpanMenu {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+/// A span with a box of its own over its text: a link (`on_click`,
+/// `href`), or a run with its own context menu.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Link {
     pub range: Range<usize>,
@@ -28,6 +45,22 @@ pub(crate) struct Link {
     pub href: Option<Arc<str>>,
     /// It restyles under the pointer, so no hover ring.
     pub styled_hover: bool,
+    /// Its own context menu, in place of a link's.
+    pub menu: Option<SpanMenu>,
+}
+impl Link {
+    /// A link, not a run with only a menu: focusable, with a ring.
+    fn is_link(&self) -> bool {
+        self.action.is_some() || self.href.is_some()
+    }
+}
+/// A run of the paragraph, for a menu told which was asked on: where it
+/// is in the text, its place among the spans, and its link.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Run {
+    pub range: Range<usize>,
+    pub index: usize,
+    pub href: Option<Arc<str>>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Content {
@@ -77,8 +110,16 @@ pub struct TextSpan {
     pub(crate) strikethrough: Option<crate::rich_text::Decoration>,
     pub(crate) padding: [f32; 2],
     pub(crate) radius: f32,
-    pub(crate) hover: Option<SpanHover>,
-    pub(crate) icon: Option<SpanIcon>,
+    /// What few spans have (a hover style, an icon, a menu), apart: most
+    /// carry none.
+    pub(crate) extras: Option<Box<SpanExtras>>,
+}
+/// A span's options few set (`TextSpan::extras`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SpanExtras {
+    pub hover: Option<SpanHover>,
+    pub icon: Option<SpanIcon>,
+    pub menu: Option<SpanMenu>,
 }
 /// How a link span looks under the pointer (`TextSpan::hover`): CSS's
 /// `a:hover { text-decoration: underline }`.
@@ -102,8 +143,7 @@ pub fn text_span(text: impl Into<Arc<str>>) -> TextSpan {
         strikethrough: None,
         padding: [0.; 2],
         radius: 0.,
-        hover: None,
-        icon: None,
+        extras: None,
     }
 }
 impl TextSpan {
@@ -111,14 +151,14 @@ impl TextSpan {
     /// `size` square, centred on the line, `gap` from the text. An icon
     /// that follows the text colour takes the span's.
     pub fn icon(mut self, icon: SpanIcon) -> Self {
-        self.icon = Some(icon);
+        self.extras.get_or_insert_default().icon = Some(icon);
         self
     }
     /// Restyled under the pointer, once it's a link (`on_click`), in place
     /// of the pointer's focus-ring outline. Not underlined at rest unless
     /// asked (`underline`).
     pub fn hover(mut self, hover: SpanHover) -> Self {
-        self.hover = Some(hover);
+        self.extras.get_or_insert_default().hover = Some(hover);
         self
     }
     /// Room around the span (`x` before and after it, taking space in the
@@ -142,10 +182,33 @@ impl TextSpan {
     /// elsewhere), or a middle click, which passes as one, as browsers open
     /// a link in the background.
     pub fn on_click_with(
+        self,
+        mut callback: impl FnMut(crate::input::Modifiers) + 'static,
+    ) -> Self {
+        self.on_click_handled(move |held| {
+            callback(held);
+            false
+        })
+    }
+    /// `on_click_with`, which says whether it handled the click: `true`
+    /// back keeps its `href` from opening (an app that opens its own links
+    /// in a pane of its own, or asks first).
+    pub fn on_click_handled(
         mut self,
-        callback: impl FnMut(crate::input::Modifiers) + 'static,
+        callback: impl FnMut(crate::input::Modifiers) -> bool + 'static,
     ) -> Self {
         self.action = Some(InlineAction(Rc::new(RefCell::new(callback))));
+        self
+    }
+    /// A context menu of the span's own, as `View::context_menu`'s: on a
+    /// link it replaces Open Link and Copy Link. A press inside the text
+    /// selected shows the selection's menu still; none back lets it through
+    /// to the paragraph's.
+    pub fn context_menu(
+        mut self,
+        build: impl FnMut(&crate::compose::ContextMenuEvent) -> Vec<View> + 'static,
+    ) -> Self {
+        self.extras.get_or_insert_default().menu = Some(SpanMenu(Rc::new(RefCell::new(build))));
         self
     }
     /// A link to `url`: a click (after `on_click`'s, if it has one) opens it
@@ -337,51 +400,197 @@ impl From<RichTextView> for View {
     }
 }
 
-/// What a link does: its action, and where it goes.
-type LinkTarget = (Option<InlineAction>, Option<Arc<str>>);
-/// Link `node`'s context menu: Open Link and Copy Link for its `href` (none
-/// without one, so the press goes on to what it is in).
+/// What a span's box does: its action, where it goes, and its own menu.
+#[derive(Clone, Default)]
+struct LinkTarget {
+    action: Option<InlineAction>,
+    href: Option<Arc<str>>,
+    menu: Option<SpanMenu>,
+}
+impl LinkTarget {
+    fn of(link: &Link) -> Self {
+        Self {
+            action: link.action.clone(),
+            href: link.href.clone(),
+            menu: link.menu.clone(),
+        }
+    }
+}
+/// Open Link (a web or mail link) and Copy Link for `url`.
+pub(crate) fn link_items(
+    url: Arc<str>,
+    platform: Option<Rc<crate::platform::PlatformService>>,
+) -> Vec<View> {
+    let (open, copy) = (platform.clone(), platform);
+    let opened = url.clone();
+    let mut items = Vec::new();
+    if opens(&url) {
+        items.push(
+            crate::compose::menu_item("Open Link")
+                .id("link-open")
+                .on_click(move || {
+                    if let Some(platform) = &open {
+                        platform.0.open_url(&opened);
+                    }
+                }),
+        );
+    }
+    items.push(
+        crate::compose::menu_item("Copy Link")
+            .id("link-copy")
+            .on_click(move || {
+                if let Some(platform) = &copy {
+                    platform.0.set_clipboard_text(url.to_string());
+                }
+            }),
+    );
+    items
+}
+/// Span box `node`'s context menu: none inside the text selected (the
+/// selection's own shows), else the span's own (`TextSpan::context_menu`),
+/// else, unless the paragraph's menu takes its links (`deferred`), Open
+/// Link and Copy Link for its `href`. None lets the press through to what
+/// it is in.
 fn mount_link_menu(
     ui: &mut crate::widgets::Ui,
     node: crate::scene::NodeId,
     link: Rc<RefCell<LinkTarget>>,
     platform: Option<Rc<crate::platform::PlatformService>>,
+    deferred: bool,
     environment: crate::compose::Environment,
 ) {
+    let weak = ui.downgrade();
     crate::compose_context_menu::mount(
         ui,
         node,
-        Box::new(move |_| {
-            let Some(url) = link.borrow().1.clone() else {
+        Box::new(move |event, _| {
+            if weak
+                .upgrade()
+                .is_some_and(|ui| ui.on_selected_text(event.x, event.y))
+            {
                 return Vec::new();
-            };
-            let (open, copy) = (platform.clone(), platform.clone());
-            let opened = url.clone();
-            let mut items = Vec::new();
-            if opens(&url) {
-                items.push(
-                    crate::compose::menu_item("Open Link")
-                        .id("link-open")
-                        .on_click(move || {
-                            if let Some(platform) = &open {
-                                platform.0.open_url(&opened);
-                            }
-                        }),
-                );
             }
-            items.extend([crate::compose::menu_item("Copy Link")
-                .id("link-copy")
-                .on_click(move || {
-                    if let Some(platform) = &copy {
-                        platform.0.set_clipboard_text(url.to_string());
-                    }
-                })]);
-            items
+            let (menu, href) = {
+                let link = link.borrow();
+                (link.menu.clone(), link.href.clone())
+            };
+            if let Some(menu) = menu {
+                return (menu.0.borrow_mut())(event);
+            }
+            match href {
+                Some(url) if !deferred => link_items(url, platform.clone()),
+                _ => Vec::new(),
+            }
         }),
         None,
         false,
         environment,
     );
+}
+thread_local! {
+    /// The paragraphs whose menu is told the run, by the node the menu is
+    /// on (`View::context_menu_with_span`): each held by its paragraph.
+    static LOCATORS: std::cell::RefCell<Vec<(crate::scene::NodeId, std::rc::Weak<SpanLocator>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+/// `locator`, for the menu on `node`, held as long as `node` is.
+pub(crate) fn register_locator(
+    ui: &mut crate::widgets::Ui,
+    node: crate::scene::NodeId,
+    locator: SpanLocator,
+) -> Rc<SpanLocator> {
+    let locator = Rc::new(locator);
+    ui.retain(node, locator.clone());
+    LOCATORS.with_borrow_mut(|locators| {
+        locators.retain(|(_, held)| held.strong_count() > 0);
+        locators.push((node, Rc::downgrade(&locator)));
+    });
+    locator
+}
+/// The run of the paragraph whose menu is on `node` that a press at `x`,
+/// `y` (or a key on `target`) asked for, if `node` is one.
+pub(crate) fn locate_for(
+    ui: &crate::widgets::Ui,
+    node: crate::scene::NodeId,
+    target: crate::scene::NodeId,
+    x: f32,
+    y: f32,
+) -> Option<crate::compose::ContextMenuSpan> {
+    let locator = LOCATORS.with_borrow(|locators| {
+        locators
+            .iter()
+            .filter(|(at, _)| *at == node)
+            .find_map(|(_, held)| held.upgrade())
+    })?;
+    locator.locate(ui, target, x, y)
+}
+/// Finds the run a paragraph's menu was asked on (`View::context_menu_with_span`):
+/// the span whose box the press or key reached, or the run under the point.
+#[derive(Clone)]
+pub(crate) struct SpanLocator {
+    pub paragraph: crate::scene::NodeId,
+    pub content: crate::reactive::Signal<Content>,
+    /// Each link's box, as `Content::links` lists them.
+    pub boxes: Rc<RefCell<Vec<crate::scene::NodeId>>>,
+    /// Every run of the paragraph, as it was last built.
+    pub runs: Rc<RefCell<Vec<Run>>>,
+}
+impl SpanLocator {
+    pub(crate) fn locate(
+        &self,
+        ui: &crate::widgets::Ui,
+        target: crate::scene::NodeId,
+        x: f32,
+        y: f32,
+    ) -> Option<crate::compose::ContextMenuSpan> {
+        let content = self.content.with_untracked(Content::clone);
+        let runs = self.runs.borrow();
+        let text = content.rich.text();
+        let span = |index: usize, href: Option<Arc<str>>, range: Range<usize>| {
+            Some(crate::compose::ContextMenuSpan {
+                index,
+                href,
+                text: text.get(range)?.into(),
+            })
+        };
+        let scene = ui.scene.borrow();
+        // A link's box (or a fragment of it), from the pointer or the keyboard.
+        let boxes = self.boxes.borrow();
+        if scene.contains(target)
+            && let Some(i) = std::iter::once(target)
+                .chain(scene.ancestors(target))
+                .find_map(|id| boxes.iter().position(|b| *b == id))
+            && let Some(link) = content.links.get(i)
+            && let Some(run) = runs.iter().find(|run| run.range == link.range)
+        {
+            return span(run.index, link.href.clone(), link.range.clone());
+        }
+        // Else the run under the point, if it is on one's text.
+        if !scene.contains(self.paragraph) {
+            return None;
+        }
+        let (local_x, local_y) = scene.local_point(self.paragraph, x, y);
+        let bounds = scene.bounds(self.paragraph);
+        let (wrap, inset) = scene.text_wrap(self.paragraph, bounds.width);
+        let layout = crate::text_layout::Inset::around(
+            scene.shape_rich_text(&content.rich, Some(wrap)),
+            inset,
+        );
+        let at = layout.hit_test(local_x, local_y);
+        // At a run's end the offset is the next one's start too: the one
+        // whose text the point is on.
+        let run = runs.iter().find(|run| {
+            run.range.start <= at
+                && at <= run.range.end
+                && layout.selection(run.range.clone()).iter().any(|r| {
+                    local_x >= r.x
+                        && local_x < r.x + r.width
+                        && local_y >= r.y
+                        && local_y < r.y + r.height
+                })
+        })?;
+        span(run.index, run.href.clone(), run.range.clone())
+    }
 }
 
 /// Whether a link opens through the system's handler: web and mail links
@@ -400,7 +609,11 @@ pub(crate) fn mount_links(
     content: crate::reactive::Signal<Content>,
     hovered: crate::reactive::Signal<Option<usize>>,
     environment: &crate::compose::Environment,
+    // Each link's box, kept for a paragraph whose menu takes its links
+    // (`SpanLocator`).
+    boxes: Option<Rc<RefCell<Vec<crate::scene::NodeId>>>>,
 ) {
+    let deferred = boxes.is_some();
     use crate::{
         input::{EventPhase, InputEvent, Modifiers, PointerButton},
         scene::{Layout, NodeId, NodeKind, QuadStyle, Rect, Style},
@@ -414,8 +627,11 @@ pub(crate) fn mount_links(
         /// Focused and showing it (`:focus-visible`).
         focus: Rc<Cell<bool>>,
         hover: Rc<Cell<bool>>,
-        /// Its Open Link and Copy Link menu is mounted.
+        /// Its context menu is mounted.
         menu: bool,
+        /// A link's pointer and keys are heard (not for a run with only a
+        /// menu).
+        events: bool,
         /// Restyled under the pointer: no ring for hover.
         styled: Rc<Cell<bool>>,
     }
@@ -498,6 +714,9 @@ pub(crate) fn mount_links(
         }
         while mounted.len() > data.links.len() {
             let old = mounted.pop().unwrap();
+            if let Some(boxes) = &boxes {
+                boxes.borrow_mut().pop();
+            }
             ui.remove(old.node);
             if !ui.scene.borrow().contains(owner) {
                 return;
@@ -513,33 +732,49 @@ pub(crate) fn mount_links(
                         ..Default::default()
                     },
                 );
+                if let Some(boxes) = &boxes {
+                    boxes.borrow_mut().push(node);
+                }
+                mounted.push(Mounted {
+                    node,
+                    fragments: Rc::new(RefCell::new(Vec::new())),
+                    action: Rc::new(RefCell::new(LinkTarget::of(link))),
+                    focus: Rc::new(Cell::new(false)),
+                    hover: Rc::new(Cell::new(false)),
+                    styled: Rc::new(Cell::new(link.styled_hover)),
+                    menu: false,
+                    events: false,
+                });
+            }
+            let entry = &mut mounted[index];
+            // A link's hand, ring and keys, once it is one.
+            if !entry.events && link.is_link() {
+                entry.events = true;
+                let node = entry.node;
                 // A browser's link hand, over each of its fragments too.
                 ui.scene
                     .borrow_mut()
                     .set_cursor(node, Some(crate::cursor::Cursor::Pointer));
-                let fragments = Rc::new(RefCell::new(Vec::new()));
-                let action = Rc::new(RefCell::new((link.action.clone(), link.href.clone())));
-                let focus = Rc::new(Cell::new(false));
-                let hover = Rc::new(Cell::new(false));
-                let styled = Rc::new(Cell::new(link.styled_hover));
                 let (nodes, callback, focused, hovered, restyled, under) = (
-                    fragments.clone(),
-                    action.clone(),
-                    focus.clone(),
-                    hover.clone(),
-                    styled.clone(),
+                    entry.fragments.clone(),
+                    entry.action.clone(),
+                    entry.focus.clone(),
+                    entry.hover.clone(),
+                    entry.styled.clone(),
                     hovered.clone(),
                 );
                 let weak = ui.downgrade();
                 let ring = theme.clone();
                 let open = platform.clone();
                 // A click's: its own action with the keys held, then its
-                // `href` opened.
+                // `href` opened, unless the action handled it.
                 let activate = move |link: &LinkTarget, held| {
-                    if let Some(action) = &link.0 {
-                        (action.0.borrow_mut())(held);
-                    }
-                    if let (Some(url), Some(platform)) = (&link.1, &open)
+                    let handled = link
+                        .action
+                        .as_ref()
+                        .is_some_and(|action| (action.0.borrow_mut())(held));
+                    if !handled
+                        && let (Some(url), Some(platform)) = (&link.href, &open)
                         && opens(url)
                     {
                         platform.0.open_url(url);
@@ -648,40 +883,32 @@ pub(crate) fn mount_links(
                         }
                     }
                 });
-                mounted.push(Mounted {
-                    node,
-                    fragments,
-                    action,
-                    focus,
-                    hover,
-                    styled,
-                    menu: false,
-                });
             }
-            let entry = &mut mounted[index];
             entry.styled.set(link.styled_hover);
-            let old = entry
-                .action
-                .replace((link.action.clone(), link.href.clone()));
+            let old = entry.action.replace(LinkTarget::of(link));
             drop(old);
             if !ui.scene.borrow().contains(owner) {
                 return;
             }
-            // Its context menu, once it has an `href` to open or copy.
-            if !entry.menu && link.href.is_some() {
+            // Its context menu, once it has an `href` to open or copy, or a
+            // menu of its own.
+            if !entry.menu && (link.href.is_some() || link.menu.is_some()) {
                 entry.menu = true;
                 mount_link_menu(
                     &mut ui,
                     entry.node,
                     entry.action.clone(),
                     platform.clone(),
+                    deferred,
                     environment.clone(),
                 );
             }
-            ui.semantics.borrow_mut().set(
-                entry.node,
-                SemanticNode::new(Role::Link, &data.rich.text()[link.range.clone()]),
-            );
+            if link.is_link() {
+                ui.semantics.borrow_mut().set(
+                    entry.node,
+                    SemanticNode::new(Role::Link, &data.rich.text()[link.range.clone()]),
+                );
+            }
             let rects = &geometry[index];
             let first = rects.first().copied().unwrap_or_default();
             let mut style = ui.scene.borrow().style(entry.node);

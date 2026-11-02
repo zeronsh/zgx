@@ -910,3 +910,110 @@ return ui.column {
     assert_eq!(code, Some(0), "{output}");
     assert!(output.contains("2 passed"), "{output}");
 }
+
+#[test]
+fn a_spans_context_menu_and_click_and_the_paragraphs_menu_told_the_span() {
+    let dir = app(
+        "span-menus",
+        &[(
+            "spans.test.luau",
+            r##"
+test("a span's own menu replaces the link's", function()
+    local app = mount()
+    app:right_click('role:link "Docs"')
+    expect(app:has('"Docs menu"')).to_be(true)
+    expect(app:has('"Copy Link"')).to_be(false)
+end)
+test("a link without one keeps Open Link and Copy Link", function()
+    local app = mount()
+    app:right_click('role:link "Plain"')
+    expect(app:has('"Open Link"')).to_be(true)
+    expect(app:has('"Copy Link"')).to_be(true)
+end)
+test("inside a selection, the selection's menu shows", function()
+    local app = mount()
+    app:click("#intro")
+    app:key("cmd+a")
+    app:right_click('role:link "Docs"')
+    expect(app:has('"Docs menu"')).to_be(false)
+    expect(app:has('"Select All"')).to_be(true)
+end)
+test("the keyboard opens a focused link's menu", function()
+    local app = mount()
+    app:key("Tab")
+    app:key("shift+f10")
+    expect(app:has('"Docs menu"')).to_be(true)
+end)
+test("a click that returns true keeps the href shut", function()
+    local app = mount()
+    app:click('role:link "Own"')
+    expect(app:state("clicks")).to_be(1)
+    expect(#app:opened()).to_be(0)
+    app:click('role:link "Plain"')
+    expect(app:opened()[1]).to_be("https://example.com/plain")
+end)
+test("the paragraph's menu is told the run", function()
+    local app = mount()
+    app:right_click('role:link "Link"')
+    expect(app:state("asked")).to_be("2 https://example.com/link Link")
+    expect(app:has('"Paragraph menu"')).to_be(true)
+    app:key("Escape")
+    app:right_click("#whole", { x = 4, y = 6 })
+    expect(app:state("asked")).to_be("1 none Run one ")
+end)
+test("a link the paragraph's menu passes on keeps its own", function()
+    local app = mount()
+    app:right_click('role:link "Other"')
+    expect(app:has('"Copy Link"')).to_be(true)
+    expect(app:has('"Paragraph menu"')).to_be(false)
+end)
+"##,
+        )],
+    );
+    std::fs::write(
+        dir.join("app.luau"),
+        r##"local clicks = ui.state("clicks", 0)
+local asked = ui.state("asked", "")
+return ui.column {
+    w = 600, p = 20, gap = 20, selectable = true,
+    ui.text { id = "intro", "Intro" },
+    ui.rich {
+        id = "para", w = 560,
+        "Before ",
+        ui.span { "Docs", href = "https://example.com/docs", context_menu = function()
+            return { ui.menu_item { "Docs menu" } }
+        end },
+        " middle ",
+        ui.span { "Plain", href = "https://example.com/plain" },
+        " and ",
+        ui.span { "Own", href = "https://example.com/own", on_click = function()
+            clicks:set(clicks:peek() + 1)
+            return true
+        end },
+        " end",
+    },
+    ui.rich {
+        id = "whole", w = 560, selectable = false,
+        context_menu = function(e)
+            local span = e.span
+            if span then
+                asked:set(`{span.index} {span.href or "none"} {span.text}`)
+                if span.text == "Other" then
+                    return nil
+                end
+            end
+            return { ui.menu_item { "Paragraph menu" } }
+        end,
+        "Run one ",
+        ui.span { "Link", href = "https://example.com/link" },
+        " run two ",
+        ui.span { "Other", href = "https://example.com/other" },
+    },
+}
+"##,
+    )
+    .unwrap();
+    let (code, text) = run(&dir, &[]);
+    assert_eq!(code, Some(0), "{text}");
+    std::fs::remove_dir_all(dir).unwrap();
+}

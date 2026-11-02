@@ -77,10 +77,35 @@ Any [property](properties.md); these are the text ones (they also set the defaul
 | `underline_style` | `"solid"`, `"double"`, `"dotted"`, `"dashed"`, `"wavy"` | `"solid"` | how the underline is drawn (CSS's `text-decoration-style`): `"wavy"` marks a spelling mistake or a diagnostic. The software raster draws them all solid |
 | `underline_color` | `Color` | the text's | its colour, or a token (`"$danger"`) |
 | `underline_thickness` | `number` | `1` | its thickness, in points. Any of these three underlines the span |
-| `on_click` | `ClickHandler \| Handler \| Action` | none | a click on the run (a link, underlined), told the keys held (`{ shift, ctrl, alt, meta }`); a middle click passes as a ⌘-click (Control elsewhere), as a browser opens a background tab |
+| `on_click` | `ClickHandler \| Handler \| Action` | none | a click on the run (a link, underlined), told the keys held (`{ shift, ctrl, alt, meta }`); a middle click passes as a ⌘-click (Control elsewhere), as a browser opens a background tab. Returning `true` handled it, as `on_key`'s does: its `href` doesn't open (an app opening its links in a pane of its own, or asking first) |
 | `href` | `string` | none | where the run links (`"https://…"`): a link, underlined, with the pointing hand; a click (after `on_click`'s) opens it with the system's handler if it is a web or mail link (`http:`, `https:`, `mailto:`; other schemes don't open), and its context menu has Open Link (those only) and Copy Link |
 | `hover` | `{ underline: boolean?, color: Color? }` | none | a link's look under the pointer (CSS's `a:hover`); with it, the link isn't underlined at rest unless `underline` says so |
+| `context_menu` | `(e: PointerEvent) -> { Node }?` | none | the run's own context menu, as an element's (a secondary click, control-click on macOS, or Shift+F10 or the Menu key on a focused link): on a link it replaces Open Link and Copy Link. A click inside the text selected shows the selection's menu (Copy, Select All) instead; returning nil lets it through to the paragraph's. A run with only a menu stays text: no link, no focus, no pointing hand |
 | `icon` | `{ src?, code?, size?, gap?, tint? }` | none | an icon before the text, in the line (a file chip's file type): `src` (a file, `https://…`) or `code` (SVG markup), `size` square (12), `gap` from the text (4), centred on the line; `tint` a colour, or `"currentColor"` for the span's |
+
+A paragraph's own `context_menu` (on `ui.rich`) is told the run it was asked on: `e.span` is `{ index, href, text }`, the run's place among the paragraph's runs from 1, where it links, and its text, or nil off the runs. It is asked first on its links that have no menu of their own, so one function serves a whole paragraph; returning nil for a link shows that link's Open Link and Copy Link.
+
+```lua
+local pane = ui.state("pane", "")
+return ui.rich {
+	context_menu = function(e)
+		local href = e.span and e.span.href
+		if href then
+			return {
+				ui.menu_item {
+					"Open in a pane",
+					on_click = function()
+						pane:set(href)
+					end,
+				},
+			}
+		end
+		return nil
+	end,
+	"See ",
+	ui.span { "the guide", href = "https://example.com/guide" },
+}
+```
 
 ## Example
 

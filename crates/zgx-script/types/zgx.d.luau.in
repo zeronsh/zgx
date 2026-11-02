@@ -2317,12 +2317,18 @@ export type SpanProps = {
 		tint: Color?,
 	}?,
 	-- A click (and a middle click, which passes as a ⌘-click) on the run,
-	-- a link: told the keys held.
+	-- a link: told the keys held. Returning `true` handled it: its `href`
+	-- doesn't open.
 	on_click: (ClickHandler | Handler | Action)?,
 	-- Where it links (`"https://…"`): a link, underlined, whose click opens
 	-- it with the system's handler (after `on_click`'s), and whose context
 	-- menu opens or copies it.
 	href: string?,
+	-- The run's own context menu, as an element's: on a link, in place of
+	-- Open Link and Copy Link. Inside the text selected, the selection's
+	-- menu shows instead; returning nil lets the click through to the
+	-- paragraph's.
+	context_menu: ((e: PointerEvent) -> ...{ Node }?)?,
 	-- Its text as it is, not a template (see TextProps).
 	literal: boolean?,
 	-- Room around it: across (before and after it, taking space in the
@@ -2334,7 +2340,17 @@ export type SpanProps = {
 }
 -- Runs: spans, strings, functions, or span options. `literal`: the runs'
 -- strings as they are (a span's own `literal` wins).
-export type RichProps = Merge<Props, { [number]: Span | Text | SpanProps, literal: boolean? }>
+-- The run a paragraph's `context_menu` was asked on (`e.span`): its place
+-- among the paragraph's runs from 1, where it links, and its text.
+export type SpanTarget = { index: number, href: string?, text: string }
+export type RichProps = Merge<Props, {
+	[number]: Span | Text | SpanProps,
+	literal: boolean?,
+	-- As an element's, told the run under the click or the focused link
+	-- (`e.span`, nil off the runs). Asked first on its links: nil back for
+	-- one shows its Open Link and Copy Link.
+	context_menu: ((e: PointerEvent & { span: SpanTarget? }) -> ...{ Node }?)?,
+}>
 export type ImageProps = Merge<Props, {
 	-- PNG or JPEG, relative to the script; `https://…` (through the
 	-- host's fetcher); `host:<name>` (an image the app made); or a

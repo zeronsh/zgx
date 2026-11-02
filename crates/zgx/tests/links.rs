@@ -304,3 +304,164 @@ fn a_link_follows_enter_as_it_goes_down_and_not_space() {
     key(&mut ui, Key::Enter, false);
     assert_eq!(*clicks.borrow(), 1);
 }
+
+#[test]
+fn a_spans_own_menu_opens_where_it_is_asked_and_a_run_with_only_one_is_no_link() {
+    let host = Rc::new(Host::default());
+    let mut ui = Ui::new(400., 120.);
+    let view = ui.mount(provide(
+        zgx::platform::PlatformService(host.clone()),
+        rich_text()
+            .id("para")
+            .text_size(16.)
+            .child(text_span("Note").context_menu(|_| vec![menu_item("Note menu").id("note")]))
+            .child(text_span(" and "))
+            .child(
+                text_span("docs")
+                    .href("https://example.org/docs")
+                    .context_menu(|_| vec![menu_item("Docs menu").id("docs")]),
+            )
+            .into(),
+    ));
+    ui.prepare_frame();
+    let links = links(&ui);
+    assert_eq!(links.len(), 1, "a run with only a menu is no link");
+    // At the pointer, on the run's text.
+    let para = ui.scene.borrow().bounds(view.find("para").unwrap());
+    let (x, y) = (para.x + 6., para.y + 8.);
+    let button = PointerButton::Secondary;
+    ui.dispatch(InputEvent::PointerDown { x, y, button });
+    ui.dispatch(InputEvent::PointerUp { x, y, button });
+    ui.prepare_frame();
+    let note = view.find("note").expect("the run's own menu");
+    let at = ui.scene.borrow().bounds(note);
+    assert!(
+        at.x >= x - 1. && at.x < x + 24. && at.y >= y - 1. && at.y < y + 24.,
+        "at the pointer: {at:?} for {x},{y}"
+    );
+    assert!(view.find("link-copy").is_none());
+    ui.dispatch(InputEvent::KeyDown {
+        key: Key::Escape,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    ui.prepare_frame();
+    // From the keyboard, a focused link's: under it, at its start.
+    assert!(ui.input.focus(&ui.scene, Some(links[0])));
+    ui.dispatch(InputEvent::KeyDown {
+        key: Key::Function(10),
+        modifiers: Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+        repeat: false,
+    });
+    ui.prepare_frame();
+    let docs = view
+        .find("docs")
+        .expect("the link's own menu, in place of its link menu");
+    assert!(view.find("link-copy").is_none());
+    let (link, at) = {
+        let scene = ui.scene.borrow();
+        (scene.bounds(links[0]), scene.bounds(docs))
+    };
+    assert!(
+        (at.x - link.x).abs() < 24. && at.y >= link.y + link.height - 1.,
+        "under the link: {at:?} for {link:?}"
+    );
+}
+
+#[test]
+fn a_click_that_says_it_handled_itself_keeps_the_href_shut() {
+    let host = Rc::new(Host::default());
+    let mut ui = Ui::new(300., 100.);
+    ui.mount(provide(
+        zgx::platform::PlatformService(host.clone()),
+        rich_text()
+            .text_size(16.)
+            .child(
+                text_span("mine")
+                    .href("https://example.org/mine")
+                    .on_click_handled(|_| true),
+            )
+            .child(text_span(" or "))
+            .child(
+                text_span("theirs")
+                    .href("https://example.org/theirs")
+                    .on_click_handled(|_| false),
+            )
+            .into(),
+    ));
+    ui.prepare_frame();
+    let links = links(&ui);
+    click(
+        &mut ui,
+        links[0],
+        PointerButton::Primary,
+        Modifiers::default(),
+    );
+    ui.input
+        .dispatch_to(&ui.scene, links[0], InputEvent::Activate);
+    assert!(host.opened.borrow().is_empty(), "handled: not opened");
+    click(
+        &mut ui,
+        links[1],
+        PointerButton::Primary,
+        Modifiers::default(),
+    );
+    assert_eq!(*host.opened.borrow(), ["https://example.org/theirs"]);
+}
+
+#[test]
+fn a_paragraphs_menu_told_the_span_hears_its_links_and_passes_them_on() {
+    let host = Rc::new(Host::default());
+    let told = Rc::new(RefCell::new(Vec::new()));
+    let seen = told.clone();
+    let mut ui = Ui::new(400., 100.);
+    let view = ui.mount(provide(
+        zgx::platform::PlatformService(host.clone()),
+        View::from(
+            rich_text()
+                .text_size(16.)
+                .child(text_span("Read "))
+                .child(text_span("this").href("https://example.org/this"))
+                .child(text_span(" not "))
+                .child(text_span("that").href("https://example.org/that")),
+        )
+        .context_menu_with_span(move |_, span| {
+            let span = span.cloned();
+            seen.borrow_mut().push(span.clone());
+            match span {
+                Some(span) if &*span.text == "that" => Vec::new(),
+                _ => vec![menu_item("Mine").id("mine")],
+            }
+        }),
+    ));
+    ui.prepare_frame();
+    let links = links(&ui);
+    click(
+        &mut ui,
+        links[0],
+        PointerButton::Secondary,
+        Modifiers::default(),
+    );
+    let span = told.borrow()[0].clone().expect("told the span");
+    assert_eq!((span.index, &*span.text), (1, "this"));
+    assert_eq!(span.href.as_deref(), Some("https://example.org/this"));
+    assert!(view.find("mine").is_some() && view.find("link-copy").is_none());
+    // Nothing back for a link: its own Open Link and Copy Link.
+    ui.dispatch(InputEvent::KeyDown {
+        key: Key::Escape,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    ui.prepare_frame();
+    click(
+        &mut ui,
+        links[1],
+        PointerButton::Secondary,
+        Modifiers::default(),
+    );
+    assert_eq!(told.borrow()[1].as_ref().unwrap().index, 3);
+    assert!(view.find("link-copy").is_some());
+}

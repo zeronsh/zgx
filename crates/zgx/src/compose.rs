@@ -484,6 +484,9 @@ pub(crate) struct Rare {
     keymap: crate::actions::Keymap,
     pub(crate) drag_preview: Option<crate::compose_drag::PreviewBuilder>,
     pub(crate) context_menu: Option<crate::compose_context_menu::ContextMenuBuilder>,
+    /// `context_menu_with_span`: a paragraph's menu is told the run, and
+    /// asked first on its links.
+    pub(crate) context_menu_spans: bool,
     /// Boxed: a `Styles` is 432 bytes, and every view carries this field
     /// through each builder call.
     pub(crate) context_menu_style: Option<Box<Styles>>,
@@ -587,6 +590,7 @@ impl Rare {
         }
         if self.context_menu.is_some() {
             inner.context_menu = self.context_menu;
+            inner.context_menu_spans = self.context_menu_spans;
         }
         if self.context_menu_style.is_some() {
             inner.context_menu_style = self.context_menu_style;
@@ -2043,7 +2047,7 @@ pub fn text_signal(compute: impl FnMut() -> String + 'static) -> View {
 pub fn text_message(message: crate::i18n::Message) -> View {
     text_signal(move || message.get())
 }
-pub use crate::compose_context_menu::ContextMenuEvent;
+pub use crate::compose_context_menu::{ContextMenuEvent, ContextMenuSpan};
 /// Where anchored popovers and menus open (`View::placement`).
 pub use crate::compose_modal::ModalPlacement;
 pub use crate::compose_popover::{Edge as PlacementEdge, Placement, Side as PlacementSide};
@@ -3905,6 +3909,347 @@ fn widget_style(pick: impl FnOnce(&WidgetStyles) -> &Styles) -> Styles {
     thread_local! { static STYLES: WidgetStyles = WidgetStyles::new(); }
     STYLES.with(|styles| pick(styles).clone())
 }
+/// A paragraph's effect (`mount_rich`): its spans, built again into its
+/// runs, links and icons as they change. `LOCATING`: it keeps every run
+/// for a menu told which was asked on (`locating`); built apart, so a
+/// paragraph without one does none of that work.
+#[allow(clippy::too_many_arguments)]
+fn paragraph_effect<const LOCATING: bool>(
+    root: NodeId,
+    paragraph: NodeId,
+    mut compute: Box<dyn FnMut() -> Vec<crate::compose_rich::TextSpan>>,
+    typography: Signal<crate::compose::Typography>,
+    theme: std::rc::Rc<crate::theme::ThemeScope>,
+    hovered: Signal<Option<usize>>,
+    weak: crate::widgets::WeakUi,
+    content_state: Signal<crate::compose_rich::Content>,
+    locating: Option<std::rc::Rc<std::cell::RefCell<Vec<crate::compose_rich::Run>>>>,
+) -> impl FnMut() + 'static {
+    move || {
+        let base = typography.get();
+        let spans = compute();
+        let hovered = hovered.get();
+        // Room for what it holds, made once: most spans add one run.
+        let mut content = String::with_capacity(spans.iter().map(|span| span.text.len()).sum());
+        let mut runs = Vec::with_capacity(spans.len());
+        let mut links = Vec::new();
+        let mut icons = Vec::new();
+        let mut spanned = Vec::new();
+        for (index, mut span) in spans.into_iter().enumerate() {
+            if span.text.is_empty() {
+                continue;
+            }
+            let link = span.action.is_some() || span.href.is_some();
+            // Most spans have none of these: one test for all three.
+            let (hover, icon, menu) = match span.extras.take() {
+                None => (None, None, None),
+                Some(extras) => {
+                    let extras = *extras;
+                    (extras.hover, extras.icon, extras.menu)
+                }
+            };
+            let hover = hover.as_ref();
+            let styled_hover = hover.is_some();
+            if link && !styled_hover {
+                span.underline.get_or_insert_with(Default::default);
+            }
+            if let Some(hover) = hover.filter(|_| link && hovered == Some(links.len())) {
+                if let Some(underline) = hover.underline {
+                    span.underline = Some(underline);
+                }
+                if let Some(color) = hover.text_color {
+                    span.styles = std::mem::take(&mut span.styles).text_color(color);
+                }
+            }
+            if span.styles.has_tokens() {
+                crate::theme::resolve(&mut span.styles, &theme);
+                span.background = span.background.or(span.styles.background);
+            }
+            // An icon keeps its room before the text: a padded
+            // placeholder run of its own.
+            let icon_at = icon.is_some().then(|| {
+                let at = content.len();
+                content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
+                at..content.len()
+            });
+            let start = content.len();
+            content.push_str(&span.text);
+            if LOCATING {
+                spanned.push(crate::compose_rich::Run {
+                    range: start..content.len(),
+                    index,
+                    href: span.href.clone(),
+                });
+            }
+            if link || menu.is_some() {
+                links.push(crate::compose_rich::Link {
+                    range: start..content.len(),
+                    action: span.action,
+                    href: span.href,
+                    styled_hover,
+                    menu,
+                });
+            }
+            let mut font = base.font_in(Some(&theme));
+            let rare = span.styles.rare();
+            let (fallbacks, features, spacing) = (
+                rare.font_fallbacks.clone(),
+                rare.font_features.clone(),
+                rare.letter_spacing,
+            );
+            if let Some(value) = fallbacks {
+                font.fallbacks = value;
+            }
+            if let Some(value) = features {
+                let inherited = std::mem::replace(&mut font.features, value);
+                if inherited.han() != 0 || font.features.han() != 0 {
+                    font.features = inherited.layered(&font.features);
+                }
+            }
+            if let Some(value) = span.styles.font_family.clone() {
+                font.family = value;
+            }
+            if let Some(value) = span.styles.font_weight {
+                font.weight = value;
+            }
+            if let Some(value) = span.styles.overflow().italic {
+                font.italic = value;
+            }
+            if let Some(value) = span.styles.line_height {
+                font.line_height = value;
+            }
+            if let Some(value) = spacing {
+                font.letter_spacing = value;
+            }
+            // An underlined paragraph underlines its runs (CSS's
+            // `text-decoration` reaches inline children).
+            let inherited = font.underline.map(|u| {
+                let line = crate::rich_text::Decoration::default();
+                u.offset().map_or(line, |offset| line.offset(offset))
+            });
+            let font_size = span
+                .styles
+                .text_size
+                .get()
+                .unwrap_or_else(|| base.size_in(Some(&theme)));
+            let color = span
+                .styles
+                .text_color
+                .unwrap_or_else(|| base.color_in(Some(&theme)));
+            // With an icon, the span's padding goes around both: its
+            // room takes the padding before, a placeholder after the
+            // text the padding after.
+            let lead = if icon.is_some() { span.padding[0] } else { 0. };
+            if let (Some(range), Some(icon)) = (icon_at, icon) {
+                runs.push(crate::rich_text::TextRun {
+                    background: span.background,
+                    underline: None,
+                    strikethrough: None,
+                    padding: [(lead + icon.size + icon.gap) / 2., span.padding[1]],
+                    radius: span.radius,
+                    range: range.clone(),
+                    font: font.clone(),
+                    font_size,
+                    color,
+                });
+                icons.push(crate::compose_rich::InlineIcon {
+                    range,
+                    svg: match icon.tint {
+                        Some(crate::theme::Themed::Value(tint)) => {
+                            std::sync::Arc::new(icon.svg.tinted(tint))
+                        }
+                        Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                            icon.svg.tinted(
+                                theme
+                                    .get(token)
+                                    .color()
+                                    .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                            ),
+                        ),
+                        None if icon.svg.follows_text_color() => {
+                            std::sync::Arc::new(icon.svg.tinted(color))
+                        }
+                        None => icon.svg,
+                    },
+                    size: icon.size,
+                    inset: lead,
+                });
+            }
+            let text_end = content.len();
+            runs.push(crate::rich_text::TextRun {
+                background: span.background,
+                underline: {
+                    let underline = span.underline.or(inherited);
+                    match span.underline_color {
+                        None => underline,
+                        Some(crate::theme::Themed::Value(tint)) => underline.map(|d| d.color(tint)),
+                        Some(crate::theme::Themed::Token(token)) => underline.map(|d| {
+                            d.color(
+                                theme
+                                    .get(token)
+                                    .color()
+                                    .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                            )
+                        }),
+                    }
+                },
+                strikethrough: span.strikethrough,
+                padding: if lead > 0. {
+                    [0., span.padding[1]]
+                } else {
+                    span.padding
+                },
+                radius: span.radius,
+                range: start..text_end,
+                font: font.clone(),
+                font_size,
+                color,
+            });
+            if lead > 0. {
+                content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
+                runs.push(crate::rich_text::TextRun {
+                    background: span.background,
+                    underline: None,
+                    strikethrough: None,
+                    padding: [lead / 2., span.padding[1]],
+                    radius: span.radius,
+                    range: text_end..content.len(),
+                    font,
+                    font_size,
+                    color,
+                });
+            }
+        }
+        if LOCATING && let Some(kept) = &locating {
+            *kept.borrow_mut() = spanned;
+        }
+        let rich = crate::rich_text::RichText::new(content.as_str(), runs)
+            .expect("normalized inline spans")
+            .with_options(base.display);
+        // Recomputed but unchanged (its inputs animate for a sibling):
+        // nothing to lay out, paint, describe or relabel.
+        if content_state.with_untracked(|current| {
+            *current.rich == rich && current.links == links && current.icons == icons
+        }) {
+            return;
+        }
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if !ui.scene.borrow().contains(root) {
+            return;
+        }
+        let rich = std::sync::Arc::new(rich);
+        {
+            let mut scene = ui.scene.borrow_mut();
+            let mut style = scene.style(paragraph);
+            style.text_wrap = base.wrap;
+            scene.set_style(paragraph, style);
+            // The language each run's text is in, where any node says.
+            let shown = scene.rich_with_languages(paragraph, rich.clone());
+            scene.set_kind(paragraph, NodeKind::RichText { text: shown });
+        }
+        // Icons' placeholders aren't text to read out.
+        let content = if icons.is_empty() {
+            content
+        } else {
+            content.replace(crate::compose_rich::ICON_PLACEHOLDER, "")
+        };
+        content_state.set(crate::compose_rich::Content { rich, links, icons });
+        ui.semantics.borrow_mut().update(paragraph, |node| {
+            node.label = content.clone();
+            node.value = Some(content);
+        });
+        update_button_labels(&ui, root);
+    }
+}
+
+/// A paragraph of spans' content (`rich_text`): its runs, built again as
+/// they change, and its links' and icons' boxes. Out of line: few views
+/// are paragraphs, and `mount_element` stays as small as they need.
+#[inline(never)]
+fn mount_rich(
+    ui: &mut Ui,
+    root: NodeId,
+    paragraph: NodeId,
+    compute: Box<dyn FnMut() -> Vec<crate::compose_rich::TextSpan>>,
+    environment: &Environment,
+    spans: bool,
+) {
+    // A paragraph whose menu is told the run (`context_menu_with_span`):
+    // what finds it, by the node the menu is on, and every run kept.
+    let span_locator = spans.then(|| {
+        let locator = crate::compose_rich::SpanLocator {
+            paragraph,
+            content: ui.signal(crate::compose_rich::Content {
+                rich: std::sync::Arc::new(crate::rich_text::RichText::new("", Vec::new()).unwrap()),
+                links: Vec::new(),
+                icons: Vec::new(),
+            }),
+            boxes: Default::default(),
+            runs: Default::default(),
+        };
+        crate::compose_rich::register_locator(ui, root, locator)
+    });
+    let locating = span_locator.as_ref().map(|locator| locator.runs.clone());
+    let (content_state, boxes) = match &span_locator {
+        Some(locator) => (locator.content.clone(), Some(locator.boxes.clone())),
+        None => (
+            ui.signal(crate::compose_rich::Content {
+                rich: std::sync::Arc::new(crate::rich_text::RichText::new("", Vec::new()).unwrap()),
+                links: Vec::new(),
+                icons: Vec::new(),
+            }),
+            None,
+        ),
+    };
+    // The link under the pointer, restyled if it has a hover style.
+    let hovered = ui.signal(None::<usize>);
+    crate::compose_rich::mount_links(
+        ui,
+        root,
+        paragraph,
+        content_state.clone(),
+        hovered.clone(),
+        environment,
+        boxes,
+    );
+    crate::compose_rich::mount_icons(ui, root, paragraph, content_state.clone());
+    let weak = ui.downgrade();
+    let typography = environment.typography.clone();
+    let theme = environment.theme.clone();
+    match locating {
+        Some(kept) => ui.bind(
+            root,
+            paragraph_effect::<true>(
+                root,
+                paragraph,
+                compute,
+                typography,
+                theme,
+                hovered,
+                weak,
+                content_state,
+                Some(kept),
+            ),
+        ),
+        None => ui.bind(
+            root,
+            paragraph_effect::<false>(
+                root,
+                paragraph,
+                compute,
+                typography,
+                theme,
+                hovered,
+                weak,
+                content_state,
+                None,
+            ),
+        ),
+    }
+}
+
 fn mount_element(
     ui: &mut Ui,
     parent: NodeId,
@@ -4626,251 +4971,15 @@ fn open_element(
         image_fit.clone(),
         Some(environment.theme.clone()),
     );
-    if let Some(mut compute) = rich_compute {
-        let paragraph = rich_paragraph.unwrap();
-        let content_state = ui.signal(crate::compose_rich::Content {
-            rich: std::sync::Arc::new(crate::rich_text::RichText::new("", Vec::new()).unwrap()),
-            links: Vec::new(),
-            icons: Vec::new(),
-        });
-        // The link under the pointer, restyled if it has a hover style.
-        let hovered = ui.signal(None::<usize>);
-        crate::compose_rich::mount_links(
+    if let Some(compute) = rich_compute {
+        mount_rich(
             ui,
             root,
-            paragraph,
-            content_state.clone(),
-            hovered.clone(),
+            rich_paragraph.unwrap(),
+            compute,
             &environment,
+            rare.as_deref().is_some_and(|r| r.context_menu_spans),
         );
-        crate::compose_rich::mount_icons(ui, root, paragraph, content_state.clone());
-        let weak = ui.downgrade();
-        let typography = environment.typography.clone();
-        let theme = environment.theme.clone();
-        ui.bind(root, move || {
-            let base = typography.get();
-            let spans = compute();
-            let hovered = hovered.get();
-            let mut content = String::new();
-            let mut runs = Vec::new();
-            let mut links = Vec::new();
-            let mut icons = Vec::new();
-            for mut span in spans {
-                if span.text.is_empty() {
-                    continue;
-                }
-                let link = span.action.is_some() || span.href.is_some();
-                if link && span.hover.is_none() {
-                    span.underline.get_or_insert_with(Default::default);
-                }
-                if let Some(hover) = span
-                    .hover
-                    .as_ref()
-                    .filter(|_| link && hovered == Some(links.len()))
-                {
-                    if let Some(underline) = hover.underline {
-                        span.underline = Some(underline);
-                    }
-                    if let Some(color) = hover.text_color {
-                        span.styles = std::mem::take(&mut span.styles).text_color(color);
-                    }
-                }
-                if span.styles.has_tokens() {
-                    crate::theme::resolve(&mut span.styles, &theme);
-                    span.background = span.background.or(span.styles.background);
-                }
-                // An icon keeps its room before the text: a padded
-                // placeholder run of its own.
-                let icon_at = span.icon.is_some().then(|| {
-                    let at = content.len();
-                    content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
-                    at..content.len()
-                });
-                let start = content.len();
-                content.push_str(&span.text);
-                if link {
-                    links.push(crate::compose_rich::Link {
-                        range: start..content.len(),
-                        action: span.action,
-                        href: span.href,
-                        styled_hover: span.hover.is_some(),
-                    });
-                }
-                let mut font = base.font_in(Some(&theme));
-                let rare = span.styles.rare();
-                let (fallbacks, features, spacing) = (
-                    rare.font_fallbacks.clone(),
-                    rare.font_features.clone(),
-                    rare.letter_spacing,
-                );
-                if let Some(value) = fallbacks {
-                    font.fallbacks = value;
-                }
-                if let Some(value) = features {
-                    let inherited = std::mem::replace(&mut font.features, value);
-                    if inherited.han() != 0 || font.features.han() != 0 {
-                        font.features = inherited.layered(&font.features);
-                    }
-                }
-                if let Some(value) = span.styles.font_family.clone() {
-                    font.family = value;
-                }
-                if let Some(value) = span.styles.font_weight {
-                    font.weight = value;
-                }
-                if let Some(value) = span.styles.overflow().italic {
-                    font.italic = value;
-                }
-                if let Some(value) = span.styles.line_height {
-                    font.line_height = value;
-                }
-                if let Some(value) = spacing {
-                    font.letter_spacing = value;
-                }
-                // An underlined paragraph underlines its runs (CSS's
-                // `text-decoration` reaches inline children).
-                let inherited = font.underline.map(|u| {
-                    let line = crate::rich_text::Decoration::default();
-                    u.offset().map_or(line, |offset| line.offset(offset))
-                });
-                let font_size = span
-                    .styles
-                    .text_size
-                    .get()
-                    .unwrap_or_else(|| base.size_in(Some(&theme)));
-                let color = span
-                    .styles
-                    .text_color
-                    .unwrap_or_else(|| base.color_in(Some(&theme)));
-                // With an icon, the span's padding goes around both: its
-                // room takes the padding before, a placeholder after the
-                // text the padding after.
-                let lead = if span.icon.is_some() {
-                    span.padding[0]
-                } else {
-                    0.
-                };
-                if let (Some(range), Some(icon)) = (icon_at, span.icon.take()) {
-                    runs.push(crate::rich_text::TextRun {
-                        background: span.background,
-                        underline: None,
-                        strikethrough: None,
-                        padding: [(lead + icon.size + icon.gap) / 2., span.padding[1]],
-                        radius: span.radius,
-                        range: range.clone(),
-                        font: font.clone(),
-                        font_size,
-                        color,
-                    });
-                    icons.push(crate::compose_rich::InlineIcon {
-                        range,
-                        svg: match icon.tint {
-                            Some(crate::theme::Themed::Value(tint)) => {
-                                std::sync::Arc::new(icon.svg.tinted(tint))
-                            }
-                            Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
-                                icon.svg.tinted(
-                                    theme
-                                        .get(token)
-                                        .color()
-                                        .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
-                                ),
-                            ),
-                            None if icon.svg.follows_text_color() => {
-                                std::sync::Arc::new(icon.svg.tinted(color))
-                            }
-                            None => icon.svg,
-                        },
-                        size: icon.size,
-                        inset: lead,
-                    });
-                }
-                let text_end = content.len();
-                runs.push(crate::rich_text::TextRun {
-                    background: span.background,
-                    underline: {
-                        let underline = span.underline.or(inherited);
-                        match span.underline_color {
-                            None => underline,
-                            Some(crate::theme::Themed::Value(tint)) => {
-                                underline.map(|d| d.color(tint))
-                            }
-                            Some(crate::theme::Themed::Token(token)) => underline.map(|d| {
-                                d.color(
-                                    theme
-                                        .get(token)
-                                        .color()
-                                        .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
-                                )
-                            }),
-                        }
-                    },
-                    strikethrough: span.strikethrough,
-                    padding: if lead > 0. {
-                        [0., span.padding[1]]
-                    } else {
-                        span.padding
-                    },
-                    radius: span.radius,
-                    range: start..text_end,
-                    font: font.clone(),
-                    font_size,
-                    color,
-                });
-                if lead > 0. {
-                    content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
-                    runs.push(crate::rich_text::TextRun {
-                        background: span.background,
-                        underline: None,
-                        strikethrough: None,
-                        padding: [lead / 2., span.padding[1]],
-                        radius: span.radius,
-                        range: text_end..content.len(),
-                        font,
-                        font_size,
-                        color,
-                    });
-                }
-            }
-            let rich = crate::rich_text::RichText::new(content.as_str(), runs)
-                .expect("normalized inline spans")
-                .with_options(base.display);
-            // Recomputed but unchanged (its inputs animate for a sibling):
-            // nothing to lay out, paint, describe or relabel.
-            if content_state.with_untracked(|current| {
-                *current.rich == rich && current.links == links && current.icons == icons
-            }) {
-                return;
-            }
-            let Some(ui) = weak.upgrade() else {
-                return;
-            };
-            if !ui.scene.borrow().contains(root) {
-                return;
-            }
-            let rich = std::sync::Arc::new(rich);
-            {
-                let mut scene = ui.scene.borrow_mut();
-                let mut style = scene.style(paragraph);
-                style.text_wrap = base.wrap;
-                scene.set_style(paragraph, style);
-                // The language each run's text is in, where any node says.
-                let shown = scene.rich_with_languages(paragraph, rich.clone());
-                scene.set_kind(paragraph, NodeKind::RichText { text: shown });
-            }
-            // Icons' placeholders aren't text to read out.
-            let content = if icons.is_empty() {
-                content
-            } else {
-                content.replace(crate::compose_rich::ICON_PLACEHOLDER, "")
-            };
-            content_state.set(crate::compose_rich::Content { rich, links, icons });
-            ui.semantics.borrow_mut().update(paragraph, |node| {
-                node.label = content.clone();
-                node.value = Some(content);
-            });
-            update_button_labels(&ui, root);
-        });
     }
     if let Some(mut source) = svg_compute {
         let child = ui.container(

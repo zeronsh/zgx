@@ -4524,12 +4524,18 @@ export type SpanProps = {
 		tint: Color?,
 	}?,
 	-- A click (and a middle click, which passes as a ⌘-click) on the run,
-	-- a link: told the keys held.
+	-- a link: told the keys held. Returning `true` handled it: its `href`
+	-- doesn't open.
 	on_click: (ClickHandler | Handler | Action)?,
 	-- Where it links (`"https://…"`): a link, underlined, whose click opens
 	-- it with the system's handler (after `on_click`'s), and whose context
 	-- menu opens or copies it.
 	href: string?,
+	-- The run's own context menu, as an element's: on a link, in place of
+	-- Open Link and Copy Link. Inside the text selected, the selection's
+	-- menu shows instead; returning nil lets the click through to the
+	-- paragraph's.
+	context_menu: ((e: PointerEvent) -> ...{ Node }?)?,
 	-- Its text as it is, not a template (see TextProps).
 	literal: boolean?,
 	-- Room around it: across (before and after it, taking space in the
@@ -4541,6 +4547,9 @@ export type SpanProps = {
 }
 -- Runs: spans, strings, functions, or span options. `literal`: the runs'
 -- strings as they are (a span's own `literal` wins).
+-- The run a paragraph's `context_menu` was asked on (`e.span`): its place
+-- among the paragraph's runs from 1, where it links, and its text.
+export type SpanTarget = { index: number, href: string?, text: string }
 export type RichProps = {
 	-- Size and position.
 	w: Props_w,
@@ -4911,10 +4920,6 @@ export type RichProps = {
 	-- delay (0.5 s by default), or Space was pressed. Open what it stands
 	-- for (show a tab); return `false` to decline. Once per stay.
 	on_drag_spring: Props_on_drag_spring,
-	-- A secondary click (control-click on macOS) shows the returned
-	-- `menu_item`s, `submenu`s and separators as a menu at the pointer;
-	-- returning nil (or nothing) shows none.
-	context_menu: Props_context_menu,
 	-- The context menu panel's look: bg, rounded, p, gap, backdrop_blur,
 	-- border, shadow, w, …
 	context_menu_style: Props_context_menu_style,
@@ -4923,6 +4928,10 @@ export type RichProps = {
 	context_menu_below: Props_context_menu_below,
 	[number]: Span | Text | SpanProps,
 	literal: boolean?,
+	-- As an element's, told the run under the click or the focused link
+	-- (`e.span`, nil off the runs). Asked first on its links: nil back for
+	-- one shows its Open Link and Copy Link.
+	context_menu: ((e: PointerEvent & { span: SpanTarget? }) -> ...{ Node }?)?,
 }
 export type ImageProps = {
 	-- Size and position.

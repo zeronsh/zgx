@@ -9,6 +9,9 @@ declare extern type TestApp with
 	function click(self, target: string): ()
 	-- Twice, as a double click.
 	function double_click(self, target: string): ()
+	-- The context button, at the target's middle or at `{ x, y }` from its
+	-- top left (a run in a paragraph).
+	function right_click(self, target: string, at: { x: number, y: number }?): ()
 	-- Click the target (a field), then type `text` into it.
 	function type(self, target: string, text: string): ()
 	-- Click the target (a field) and replace its whole text with `text`, as
@@ -42,6 +45,8 @@ declare extern type TestApp with
 	-- in as `name`.
 	function copy_file(self, from: string, name: string): ()
 	function read_file(self, name: string): string
+	-- The links opened so far (an `href` clicked, Open Link), in order.
+	function opened(self): { string }
 	-- The clipboard's text, and text put on it as another app copies it.
 	function clipboard(self): string
 	function copy(self, text: string): ()

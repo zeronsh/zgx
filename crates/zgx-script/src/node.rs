@@ -1189,9 +1189,25 @@ pub(crate) struct Span {
     pub underline_thickness: Option<f32>,
     /// A link's look under the pointer: underlined, and its colour.
     pub hover: Option<(bool, Option<Themed<Color>>)>,
+    /// What few spans have (an icon, a menu), apart: most spans carry none.
+    pub rare: Option<Rc<SpanRare>>,
+}
+/// `span`'s rare options, made as the first is set. Out of line: most
+/// spans set none.
+#[cold]
+#[inline(never)]
+fn rare_mut(span: &mut Span) -> &mut SpanRare {
+    let rare = span.rare.get_or_insert_with(Rc::default);
+    Rc::get_mut(rare).expect("held by the span being made alone")
+}
+/// A span's options few set (`Span::rare`).
+#[derive(Default)]
+pub(crate) struct SpanRare {
     /// An icon before the text, in the line.
-    /// Boxed: few spans have one, and every span is copied as it is made.
-    pub icon: Option<Box<SpanIcon>>,
+    pub icon: Option<SpanIcon>,
+    /// `context_menu = function(e) return { … } end`: its own menu (a
+    /// link's in place of Open Link and Copy Link).
+    pub menu: Option<Function>,
 }
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = … } }`.
 #[derive(Clone)]
@@ -4282,7 +4298,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
         underline_color: None,
         underline_thickness: None,
         hover: None,
-        icon: None,
+        rare: None,
     };
     if let Some(t) = table {
         // One walk over what it holds: most spans set one or two options of
@@ -4373,15 +4389,19 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                         }
                     };
                     let tint = icon.get::<Value>("tint")?;
-                    span.icon = Some(Box::new(SpanIcon {
+                    rare_mut(&mut span).icon = Some(SpanIcon {
                         src,
                         size: icon.get::<Option<f32>>("size")?.unwrap_or(12.),
                         gap: icon.get::<Option<f32>>("gap")?.unwrap_or(4.),
                         tint: (!matches!(tint, Value::Nil)).then_some(tint),
-                    }));
+                    });
                 }
                 b"on_click" => span.click = Some(handler(given)?),
                 b"href" => span.href = Some(lua.unpack::<String>(given)?.into()),
+                b"context_menu" => match given {
+                    mlua::Value::Function(f) => rare_mut(&mut span).menu = Some(f),
+                    _ => return Err(mlua::Error::runtime("context_menu takes a function")),
+                },
                 _ => {}
             }
             Ok(())
