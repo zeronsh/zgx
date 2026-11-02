@@ -244,6 +244,52 @@ impl Clearcoat {
         [self.factor.to_bits(), self.roughness.to_bits()]
     }
 }
+/// How a dielectric mesh reflects (`World::set_specular`): how much of its
+/// reflection there is, tinted how, and its index of refraction, which
+/// sets how much a dielectric reflects facing it (glTF's
+/// `KHR_materials_specular` and `KHR_materials_ior`). A metal's reflection
+/// is its colour's, whatever this says.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Specular {
+    pub(crate) factor: f32,
+    pub(crate) color: [f32; 3],
+    pub(crate) ior: f32,
+}
+impl Specular {
+    /// `factor` (0 to 1) of a dielectric's reflection, untinted, at glass's
+    /// index of refraction (1.5): 1 reflects as any mesh does.
+    pub fn new(factor: f32) -> Self {
+        Self {
+            factor: factor.clamp(0., 1.),
+            color: [1.; 3],
+            ior: 1.5,
+        }
+    }
+    /// Its reflection tinted by `color` (linear; over 1 reflects more, to
+    /// all of the light).
+    pub fn color(mut self, color: [f32; 3]) -> Self {
+        self.color = color.map(|c| c.max(0.));
+        self
+    }
+    /// Its index of refraction: how much it reflects facing it (water
+    /// 1.33 a little less than glass's 1.5, diamond 2.4 much more).
+    pub fn ior(mut self, ior: f32) -> Self {
+        self.ior = ior.max(1.);
+        self
+    }
+    /// How much it reflects facing it, by channel, before its factor
+    /// (above 1 where its colour is: the shader clamps).
+    pub(crate) fn f0(&self) -> [f32; 3] {
+        let f0 = ((self.ior - 1.) / (self.ior + 1.)).powi(2);
+        self.color.map(|c| c * f0)
+    }
+    /// Its numbers, for a binding to be found by.
+    pub(crate) fn numbers(&self) -> [u32; 5] {
+        let [r, g, b] = self.color.map(f32::to_bits);
+        [self.factor.to_bits(), r, g, b, self.ior.to_bits()]
+    }
+}
 /// A point light's cone (`World::set_spot`): it shines along `direction`,
 /// fully within `inner` radians of it, fading to nothing at `outer`.
 #[non_exhaustive]
@@ -382,7 +428,8 @@ pub(crate) struct Inner {
     /// What few meshes have: their maps' placements
     /// (`World::set_map_placement`), transmission
     /// (`World::set_transmission`) and its maps and clear coat
-    /// (`World::set_clearcoat`), by index, with the generation they were
+    /// (`World::set_clearcoat`) and specular (`World::set_specular`), by
+    /// index, with the generation they were
     /// set for. One table, so a mesh's frame looks once.
     extras: ByIndex<(u32, Extras)>,
     /// Meshes' surfaces (`World::set_double_sided`, `set_alpha_cutoff`), by
@@ -466,16 +513,65 @@ pub(crate) struct Extras {
     /// Its maps' placements: all as they are if it has none.
     placements: Placements,
     pub(crate) transmission: Option<Transmission>,
-    pub(crate) clearcoat: Option<Clearcoat>,
-    /// Its layers' maps, `Map::Transmission`'s on.
-    /// (Boxed, made with the first: few meshes have any, and every mesh
-    /// in this table would carry their room.)
-    pub(crate) layer_maps: Option<Box<LayerMaps>>,
+    /// Its rarer layers. (Boxed, made with the first: fewer meshes still
+    /// have one, and every mesh in this table would carry their room.)
+    layers: Option<Box<Layers>>,
+    /// Which of light passing through (`GLASS`), a coat (`COAT`) and a
+    /// specular (`SPECULAR`) it has, kept as they change: a frame asks of
+    /// every mesh, and one byte is cheaper to ask than the three.
+    pub(crate) kinds: u8,
+}
+/// `Extras::kinds`' bits.
+pub(crate) const GLASS: u8 = 1;
+pub(crate) const COAT: u8 = 2;
+pub(crate) const SPECULAR: u8 = 4;
+/// A mesh's rarer layers (`Extras::layers`).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Layers {
+    clearcoat: Option<Clearcoat>,
+    specular: Option<Specular>,
+    /// Its layers' maps, light passing through's included.
+    maps: LayerMaps,
 }
 impl Extras {
     /// Its maps' placements, if any is set.
     pub(crate) fn placement(&self) -> Option<&Placements> {
         (self.placements != Placements::default()).then_some(&self.placements)
+    }
+    /// Its clear coat, if it has one.
+    pub(crate) fn clearcoat(&self) -> Option<&Clearcoat> {
+        self.layers.as_ref()?.clearcoat.as_ref()
+    }
+    /// How it reflects, if not as any mesh does.
+    pub(crate) fn specular(&self) -> Option<&Specular> {
+        self.layers.as_ref()?.specular.as_ref()
+    }
+    /// Its layers' maps, if any is set.
+    pub(crate) fn layer_maps(&self) -> Option<&LayerMaps> {
+        self.layers.as_deref().map(|layers| &layers.maps)
+    }
+    /// Whether it binds its layers' numbers: light passes through it, or
+    /// it has a coat or a specular.
+    pub(crate) fn layered(&self) -> bool {
+        self.kinds != 0
+    }
+    /// Its `kinds` as its layers now are.
+    fn refresh_kinds(&mut self) {
+        let layers = self.layers.as_deref();
+        let bit = |on: bool, bit: u8| if on { bit } else { 0 };
+        self.kinds = bit(self.transmission.is_some(), GLASS)
+            | bit(layers.is_some_and(|l| l.clearcoat.is_some()), COAT)
+            | bit(layers.is_some_and(|l| l.specular.is_some()), SPECULAR);
+    }
+    /// `f` applied to its layers, made if it has none and dropped if
+    /// nothing is left in them.
+    fn change_layers<T>(&mut self, f: impl FnOnce(&mut Layers) -> T) -> T {
+        let layers = self.layers.get_or_insert_default();
+        let changed = f(layers);
+        if **layers == Layers::default() {
+            self.layers = None;
+        }
+        changed
     }
 }
 /// A mesh's maps' placements, by `Map::ALL`'s order.
@@ -670,21 +766,18 @@ impl Inner {
     fn set_layer_map(&mut self, id: ObjectId, i: usize, texture: Option<crate::Texture>) -> bool {
         let id_of = texture.as_ref().map(crate::Texture::id);
         let extras = self.extras_mut(id.index, id.generation);
-        let maps = extras.layer_maps.get_or_insert_default();
-        let before = std::mem::replace(&mut maps[i], texture);
-        if maps.iter().all(Option::is_none) {
-            extras.layer_maps = None;
-        }
+        let before = extras.change_layers(|l| std::mem::replace(&mut l.maps[i], texture));
         self.tidy_extras(id.index);
         before.as_ref().map(crate::Texture::id) != id_of
     }
     /// Its extras dropped if nothing is left in them.
+    /// (And its `kinds` brought up to date.)
     fn tidy_extras(&mut self, index: u32) {
-        if self
-            .extras
-            .get(&index)
-            .is_some_and(|(_, e)| *e == Extras::default())
-        {
+        let Some((_, extras)) = self.extras.get_mut(&index) else {
+            return;
+        };
+        extras.refresh_kinds();
+        if *extras == Extras::default() {
             self.extras.remove(&index);
         }
     }
@@ -1043,7 +1136,7 @@ impl World {
         inner.live(id.index, id.generation)?;
         if let Some(i) = map.layer() {
             let extras = inner.extras(id.index as usize, id.generation)?;
-            return extras.layer_maps.as_ref()?[i].clone();
+            return extras.layer_maps()?[i].clone();
         }
         inner.maps(id.index as usize, id.generation)[map as usize].cloned()
     }
@@ -1254,7 +1347,7 @@ impl World {
                 return false;
             }
             let extras = inner.extras_mut(id.index, id.generation);
-            let before = std::mem::replace(&mut extras.clearcoat, clearcoat);
+            let before = extras.change_layers(|l| std::mem::replace(&mut l.clearcoat, clearcoat));
             inner.tidy_extras(id.index);
             before != clearcoat
         });
@@ -1263,7 +1356,34 @@ impl World {
     pub fn clearcoat(&self, id: ObjectId) -> Option<Clearcoat> {
         let inner = self.inner.borrow();
         inner.live(id.index, id.generation)?;
-        inner.extras(id.index as usize, id.generation)?.clearcoat
+        inner
+            .extras(id.index as usize, id.generation)?
+            .clearcoat()
+            .copied()
+    }
+    /// How object `id` reflects as a dielectric (`None`: as any mesh does,
+    /// as most). One reflecting otherwise draws with a pipeline of its own;
+    /// others pay nothing.
+    pub fn set_specular(&self, id: ObjectId, specular: Option<Specular>) {
+        let specular = specular.filter(|s| *s != Specular::new(1.));
+        self.change(|inner| {
+            if inner.live(id.index, id.generation).is_none() {
+                return false;
+            }
+            let extras = inner.extras_mut(id.index, id.generation);
+            let before = extras.change_layers(|l| std::mem::replace(&mut l.specular, specular));
+            inner.tidy_extras(id.index);
+            before != specular
+        });
+    }
+    /// How object `id` reflects, if not as any mesh does.
+    pub fn specular(&self, id: ObjectId) -> Option<Specular> {
+        let inner = self.inner.borrow();
+        inner.live(id.index, id.generation)?;
+        inner
+            .extras(id.index as usize, id.generation)?
+            .specular()
+            .copied()
     }
     /// Whether object `id`'s back faces draw too, lit as their other side
     /// is (a leaf, a sheet, an open shell). Off by default: a closed shape

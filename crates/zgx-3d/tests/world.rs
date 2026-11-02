@@ -630,6 +630,53 @@ fn glass_meshes_alike_but_for_their_textures_draw_their_own() {
 }
 
 #[test]
+fn a_specular_sets_how_a_dielectric_reflects() {
+    // Black and fairly smooth, the sun behind the camera: all it shows is
+    // its reflection.
+    let (world, square) = one(facing_square(), Material::rgb(0x000000).with(0., 0.3));
+    world.add_light(Light::Directional {
+        direction: vec3(0., 0., -1.),
+        color: [1., 1., 1.],
+        intensity: 0.5,
+    });
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let centre = |window: &mut Window| {
+        window.draw();
+        window.pixel(50, 50)
+    };
+    let plain = centre(&mut window);
+    assert!(plain[0] > 60, "a highlight: {plain:?}");
+    // As any mesh reflects: as before, and stored as none.
+    world.set_specular(square, Some(Specular::new(1.)));
+    assert_eq!(world.specular(square), None);
+    assert_eq!(centre(&mut window), plain);
+    // None of it: no highlight.
+    world.set_specular(square, Some(Specular::new(0.)));
+    assert_eq!(world.specular(square), Some(Specular::new(0.)));
+    let none = centre(&mut window);
+    assert!(none[0] < 10, "{none:?}");
+    // Tinted red: red (desaturated a little by the tone mapping, as
+    // bright as it is).
+    world.set_specular(square, Some(Specular::new(1.).color([1., 0., 0.])));
+    let red = centre(&mut window);
+    assert!(
+        i32::from(red[0]) > i32::from(red[1]) + 60 && red[1] == red[2],
+        "{red:?}"
+    );
+    // Diamond's index of refraction: brighter than glass's.
+    world.set_specular(square, Some(Specular::new(1.).ior(2.4)));
+    let diamond = centre(&mut window);
+    assert!(
+        i32::from(diamond[0]) > i32::from(plain[0]) + 20,
+        "{diamond:?} {plain:?}"
+    );
+    world.set_specular(square, None);
+    assert_eq!(centre(&mut window), plain);
+}
+
+#[test]
 fn a_clear_coat_shines_over_a_rough_surface() {
     // Black chalk, the sun behind the camera: all but no highlight.
     let (world, square) = one(facing_square(), Material::rgb(0x000000).with(0., 1.));

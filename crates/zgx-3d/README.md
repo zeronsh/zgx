@@ -43,6 +43,10 @@ What a world takes beyond meshes and lights, each costing nothing until used:
   `Map::Clearcoat`, `Map::ClearcoatRoughness` and `Map::ClearcoatNormal` vary it
   across the mesh. glTF models bring theirs (`KHR_materials_clearcoat`, with its
   textures).
+- **Specular**: `World::set_specular(id, Some(Specular::new(1.).color([1., 0.8, 0.5]).ior(1.7)))`
+  sets how much a dielectric reflects, tinted how, by its index of refraction
+  (a metal reflects its colour whatever it says). glTF models bring theirs
+  (`KHR_materials_specular`'s factor and colour, `KHR_materials_ior`).
 - **Lights that follow objects, and spots**: `World::set_light_parent(light, Some(id))`
   carries a light with an object, and `World::set_spot(light, Some(Spot::new(direction,
   inner, outer)))` makes a point light a spot. A frame shades with the eight point

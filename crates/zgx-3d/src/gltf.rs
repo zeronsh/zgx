@@ -103,8 +103,12 @@ struct ModelSkin {
 type Maps = [Option<Texture>; MODEL_MAPS.len()];
 /// Where they sit on it, in the same order.
 type Placements = [MapPlacement; crate::texture::MAPS];
-/// How light passes through a material, and its clear coat.
-type Layers = (Option<crate::Transmission>, Option<crate::Clearcoat>);
+/// How light passes through a material, its clear coat and its specular.
+type Layers = (
+    Option<crate::Transmission>,
+    Option<crate::Clearcoat>,
+    Option<crate::Specular>,
+);
 /// A material, read.
 type Look = (Material, Maps, Surface, Placements, Layers);
 /// A primitive, read.
@@ -184,7 +188,7 @@ impl Model {
                 });
                 let placements: Placements =
                     std::array::from_fn(|i| map_placement(&doc, value, MAP_TEXTURES[i]));
-                let layers = (transmission(value), clearcoat(value));
+                let layers = (transmission(value), clearcoat(value), specular(value));
                 (material(value), maps, surface(value), placements, layers)
             })
             .collect::<Vec<_>>();
@@ -376,7 +380,9 @@ impl World {
             if let Some(&camera) = node.camera.and_then(|c| model.cameras.get(c)) {
                 cameras.push((id, camera));
             }
-            for (geometry, material, maps, surface, placements, (through, coat)) in &node.meshes {
+            for (geometry, material, maps, surface, placements, (through, coat, specular)) in
+                &node.meshes
+            {
                 let mesh = self.add(Object::mesh(geometry.clone(), *material).child_of(id));
                 if surface.double_sided {
                     self.set_double_sided(mesh, true);
@@ -389,6 +395,9 @@ impl World {
                 }
                 if coat.is_some() {
                     self.set_clearcoat(mesh, *coat);
+                }
+                if specular.is_some() {
+                    self.set_specular(mesh, *specular);
                 }
                 for (map, texture) in MODEL_MAPS.into_iter().zip(maps) {
                     if texture.is_some() {
@@ -719,6 +728,31 @@ fn clearcoat(value: &Value) -> Option<crate::Clearcoat> {
     let roughness = number("clearcoatRoughnessFactor").unwrap_or(0.);
     Some(crate::Clearcoat::new(factor).roughness(roughness))
 }
+/// How a material reflects as a dielectric: `KHR_materials_specular`'s
+/// factor and colour (not yet its textures) and `KHR_materials_ior`'s index
+/// of refraction. `None` without either.
+fn specular(value: &Value) -> Option<crate::Specular> {
+    let extensions = value.get("extensions")?;
+    let (specular, ior) = (
+        extensions.get("KHR_materials_specular"),
+        extensions.get("KHR_materials_ior"),
+    );
+    if specular.is_none() && ior.is_none() {
+        return None;
+    }
+    let number = |at: Option<&Value>, key: &str| {
+        let v = at?.get(key)?.as_f64()?;
+        v.is_finite().then_some(v as f32)
+    };
+    let mut read = crate::Specular::new(number(specular, "specularFactor").unwrap_or(1.));
+    if let Some(color) = floats::<3>(specular.and_then(|s| s.get("specularColorFactor"))) {
+        read = read.color(color);
+    }
+    if let Some(ior) = number(ior, "ior") {
+        read = read.ior(ior);
+    }
+    Some(read)
+}
 fn surface(value: &Value) -> Surface {
     let masked = value.get("alphaMode").and_then(Value::as_str) == Some("MASK");
     let cutoff = value
@@ -1033,7 +1067,7 @@ impl Reader<'_> {
                         Maps::default(),
                         Surface::default(),
                         Placements::default(),
-                        (None, None),
+                        (None, None, None),
                     )
                 });
             let mut geometry =
@@ -2139,6 +2173,35 @@ mod tests {
         let placed = world.place_model(&model);
         let mesh = placed.meshes[0][0];
         assert_eq!(world.transmission(mesh), Some(crate::Transmission::new(1.)));
+    }
+
+    #[test]
+    fn a_specular_is_read_with_the_index_of_refraction() {
+        let read = |extensions: Value| {
+            let (doc, bin) = square(json!([{ "mesh": 0 }]), |doc| {
+                doc["materials"][0]["extensions"] = extensions;
+            });
+            let model = Model::from_bytes(&glb_of(&doc, &bin)).unwrap();
+            let world = World::new();
+            let mesh = world.place_model(&model).meshes[0][0];
+            world.specular(mesh)
+        };
+        let both = read(json!({
+            "KHR_materials_specular": {
+                "specularFactor": 0.5,
+                "specularColorFactor": [1.0, 0.5, 0.25],
+            },
+            "KHR_materials_ior": { "ior": 1.33 },
+        }));
+        let expected = crate::Specular::new(0.5).color([1., 0.5, 0.25]).ior(1.33);
+        assert_eq!(both, Some(expected));
+        // An index alone sets how much it reflects.
+        let ior = read(json!({ "KHR_materials_ior": { "ior": 2.0 } }));
+        assert_eq!(ior, Some(crate::Specular::new(1.).ior(2.)));
+        // Their defaults are any mesh's: none.
+        assert_eq!(read(json!({ "KHR_materials_specular": {} })), None);
+        assert_eq!(read(json!({ "KHR_materials_ior": { "ior": 1.5 } })), None);
+        assert_eq!(read(json!({})), None);
     }
 
     #[test]
