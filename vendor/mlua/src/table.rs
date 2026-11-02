@@ -1710,6 +1710,20 @@ impl<'a> StackValue<'a> {
         unsafe { ffi::lua_topointer(self.lua.state(), self.index) }
     }
 
+    /// zgx patch: a string's atom (`lua_tostringatom`), what the VM's
+    /// `useratom` callback gave it, asked once per string and kept in it:
+    /// the same for the same text whatever the heap's layout. `None` for
+    /// other values; -1 for every string while no callback is set.
+    pub fn atom(&self) -> Option<i32> {
+        self.bytes?;
+        let mut atom = -1;
+        // SAFETY: as `to_pointer`: the slot at `index` in the callback's own
+        // frame holds this string. The callback, which the VM's owner sets
+        // through `lua_callbacks`, runs once per string and must not raise.
+        unsafe { ffi::lua_tostringatom(self.lua.state(), self.index, &mut atom) };
+        Some(atom)
+    }
+
     /// The value, owned (a reference for strings, tables, functions and
     /// userdata, as any [`Value`]).
     pub fn to_value(&self) -> Result<Value> {

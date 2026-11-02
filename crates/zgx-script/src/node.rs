@@ -1443,6 +1443,8 @@ macro_rules! props {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub(crate) enum Prop { $($variant),* }
         impl Prop {
+            /// Every property, in order: a property's atom indexes it.
+            const ALL: &'static [Prop] = &[$(Prop::$variant),*];
             pub(crate) fn parse(name: &str) -> Option<Self> {
                 match name { $($name => Some(Prop::$variant),)* _ => None }
             }
@@ -3455,30 +3457,47 @@ fn set_handler(
     Ok(None)
 }
 
-/// Style keys a script has used, by the address of their (interned) Lua
-/// string: one met before is its `Prop` without reading or matching the
-/// name again. Each entry holds its string, so the address is not reused
-/// while it is here, and there are at most as many as there are props.
-#[derive(Default)]
-pub(crate) struct StyleKeys(
-    RefCell<std::collections::HashMap<usize, (mlua::LuaString, Prop), BuildAddressHasher>>,
-);
-type BuildAddressHasher = std::hash::BuildHasherDefault<AddressHasher>;
-#[derive(Default)]
-struct AddressHasher(u64);
-impl std::hash::Hasher for AddressHasher {
-    fn finish(&self) -> u64 {
-        // Aligned addresses end in zeros: fold the high bits down.
-        self.0 ^ (self.0 >> 32)
+/// A table key's property, found by the key string's atom: the VM's
+/// `useratom` callback (`style_atoms`) names a string's property the first
+/// time one is asked of it, and Luau keeps it in the string. Looked up by
+/// the string's address instead, a key's hash probe cost what the heap's
+/// layout made it cost: an atom costs the same whatever the layout.
+fn style_key(name: &str) -> Option<Prop> {
+    // As `fill_from`'s walk would: widget fields are read by their widgets.
+    Prop::parse(name).filter(|_| !WIDGET_FIELDS.contains(&name))
+}
+impl Prop {
+    /// The property `style_key` gave a string as its atom.
+    fn of_atom(atom: i32) -> Option<Prop> {
+        usize::try_from(atom)
+            .ok()
+            .and_then(|at| Prop::ALL.get(at))
+            .copied()
     }
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3);
-        }
-    }
-    fn write_usize(&mut self, address: usize) {
-        self.0 = (address as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    }
+}
+unsafe extern "C-unwind" fn prop_atom(
+    _: *mut mlua::ffi::lua_State,
+    text: *const std::ffi::c_char,
+    len: usize,
+) -> i16 {
+    // SAFETY: Luau passes the string's `len` bytes, live for the call.
+    let bytes = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), len) };
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(style_key)
+        .map_or(-1, |prop| prop as i16)
+}
+/// Names the VM's strings by their properties (`style_key`): set before any
+/// script runs, so no string is asked its atom without it.
+pub(crate) fn style_atoms(lua: &Lua) {
+    // SAFETY: `exec_raw` hands the closure the VM's state, valid while it
+    // runs; `lua_callbacks` points into the VM's global state, where the
+    // callback stays for the VM's life. `prop_atom` never raises.
+    let _ = unsafe {
+        lua.exec_raw::<()>((), |state| {
+            (*mlua::ffi::lua_callbacks(state)).useratom = Some(prop_atom);
+        })
+    };
 }
 
 /// Fills a node's properties, pseudo-states, handlers and children.
@@ -3531,7 +3550,6 @@ fn fill_from(
     // One walk over the table: properties as they come, children kept to
     // put in order after.
     let mut items = Vec::new();
-    let keys = lua.app_data_ref::<StyleKeys>();
     let lint = Some(lint);
     // Keys are read where they lie on the stack (a string key's identity
     // finds its property): no reference is made for them.
@@ -3546,11 +3564,7 @@ fn fill_from(
             }
             return Ok(());
         }
-        let address = borrowed.to_pointer() as usize;
-        let known = keys
-            .as_ref()
-            .and_then(|keys| keys.0.borrow().get(&address).map(|(_, prop)| *prop));
-        if let Some(prop) = known {
+        if let Some(prop) = borrowed.atom().and_then(Prop::of_atom) {
             // Literal colours and numbers are read where they lie, without
             // making intermediate values. Everything else uses the general
             // conversion and its errors, as an unfamiliar key does.
@@ -4019,11 +4033,6 @@ fn fill_from(
                 let Some(prop) = Prop::parse(name) else {
                     return late_field(lua, node, name, value);
                 };
-                if let Some(keys) = &keys {
-                    // The key kept alive while its address names it.
-                    let string = borrowed.get::<mlua::LuaString>()?;
-                    keys.0.borrow_mut().insert(address, (string, prop));
-                }
                 node.props
                     .push((prop, source_linted(lua, prop.ty(), name, value, lint)?));
             }
@@ -4433,7 +4442,7 @@ pub(crate) fn install_plugins(lua: &Lua, ui: &Table) -> mlua::Result<()> {
 }
 
 pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
-    lua.set_app_data(StyleKeys::default());
+    style_atoms(lua);
     let ui = lua.create_table()?;
     let container = |kind: fn() -> Kind| {
         lua.create_function(move |lua, table: Option<Table>| {
@@ -6294,11 +6303,11 @@ mod tests {
         );
     }
 
-    /// A known style key keeps the same numeric bits and fallback errors
-    /// as a key read for the first time.
+    /// A style key read by its atom keeps the same numeric bits and fallback
+    /// errors as one read by its name (a VM with no `style_atoms`).
     #[test]
-    fn cached_numeric_style_keys_keep_values_and_errors() {
-        use super::{Kind, Lit, Node, Prop, Source, StyleKeys, fill_from};
+    fn style_keys_by_atom_keep_values_and_errors() {
+        use super::{Kind, Lit, Node, Prop, Source, fill_from};
         fn read(lua: &mlua::Lua, table: &mlua::Table) -> Result<Vec<u32>, String> {
             let mut node = Node::new(Default::default(), Kind::Div);
             fill_from(lua, &mut node, table, None, crate::DesignLint::Off)
@@ -6314,37 +6323,121 @@ mod tests {
                 other => panic!("unexpected literal: {other:?}"),
             })
         }
-        let lua = mlua::Lua::new();
-        let mut values: Vec<mlua::Value> = [
-            0.,
-            -0.,
-            1.5,
-            -3.25,
-            f64::MIN_POSITIVE,
-            f64::MAX,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            f64::from_bits(0x7ff8_1234_5678_0000),
-            (1_u64 << 53) as f64,
-        ]
-        .into_iter()
-        .map(mlua::Value::Number)
-        .collect();
-        values.extend([mlua::Value::Boolean(false), mlua::Value::Boolean(true)]);
-        for text in ["12", "25%", "auto", "not a number"] {
-            values.push(mlua::Value::String(lua.create_string(text).unwrap()));
+        fn values(lua: &mlua::Lua) -> Vec<mlua::Value> {
+            let mut values: Vec<mlua::Value> = [
+                0.,
+                -0.,
+                1.5,
+                -3.25,
+                f64::MIN_POSITIVE,
+                f64::MAX,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::from_bits(0x7ff8_1234_5678_0000),
+                (1_u64 << 53) as f64,
+            ]
+            .into_iter()
+            .map(mlua::Value::Number)
+            .collect();
+            values.extend([mlua::Value::Boolean(false), mlua::Value::Boolean(true)]);
+            for text in ["12", "25%", "auto", "not a number"] {
+                values.push(mlua::Value::String(lua.create_string(text).unwrap()));
+            }
+            values.push(mlua::Value::Table(
+                lua.create_sequence_from([2., 3.]).unwrap(),
+            ));
+            values
         }
-        values.push(mlua::Value::Table(
-            lua.create_sequence_from([2., 3.]).unwrap(),
-        ));
+        let (by_name, by_atom) = (mlua::Lua::new(), mlua::Lua::new());
+        super::style_atoms(&by_atom);
+        let (named, atoms) = (values(&by_name), values(&by_atom));
         for prop in [Prop::W, Prop::Opacity, Prop::Origin] {
-            for value in &values {
-                lua.set_app_data(StyleKeys::default());
-                let table = lua.create_table().unwrap();
-                table.raw_set(prop.name(), value.clone()).unwrap();
-                let first = read(&lua, &table);
-                let cached = read(&lua, &table);
-                assert_eq!(cached, first, "{} = {value:?}", prop.name());
+            for (a, b) in named.iter().zip(&atoms) {
+                let read_in = |lua: &mlua::Lua, value: &mlua::Value| {
+                    let table = lua.create_table().unwrap();
+                    table.raw_set(prop.name(), value.clone()).unwrap();
+                    // Twice: the second asks the string its kept atom.
+                    (read(lua, &table), read(lua, &table))
+                };
+                let (first, again) = read_in(&by_atom, b);
+                assert_eq!(first, again, "{} = {b:?}", prop.name());
+                assert_eq!(read_in(&by_name, a).0, first, "{} = {a:?}", prop.name());
+            }
+        }
+    }
+    /// Every key reads alike by its atom and by its name: each property,
+    /// each widget field (no property, though `size` names one) and keys
+    /// that are neither, with values of each kind.
+    #[test]
+    fn every_key_reads_alike_by_atom_and_by_name() {
+        use super::{Kind, Node, Prop, Source, WIDGET_FIELDS, fill_from};
+        fn read(lua: &mlua::Lua, key: &str, value: &mlua::Value) -> String {
+            let table = lua.create_table().unwrap();
+            table.raw_set(key, value.clone()).unwrap();
+            let mut node = Node::new(Default::default(), Kind::Div);
+            match fill_from(lua, &mut node, &table, None, crate::DesignLint::Off) {
+                Ok(()) => format!(
+                    "{:?}",
+                    node.props
+                        .iter()
+                        .map(|(prop, source)| match source {
+                            Source::Lit(lit) => (*prop, Some(lit.clone())),
+                            _ => (*prop, None),
+                        })
+                        .collect::<Vec<_>>()
+                ),
+                Err(e) => e.to_string(),
+            }
+        }
+        fn values(lua: &mlua::Lua) -> Vec<mlua::Value> {
+            let mut values = vec![
+                mlua::Value::Number(4.),
+                mlua::Value::Number(0.5),
+                mlua::Value::Boolean(true),
+            ];
+            for text in ["#336699", "12", "center", "$accent"] {
+                values.push(mlua::Value::String(lua.create_string(text).unwrap()));
+            }
+            values.push(mlua::Value::Table(
+                lua.create_sequence_from([2., 3.]).unwrap(),
+            ));
+            values
+        }
+        let (by_name, by_atom) = (mlua::Lua::new(), mlua::Lua::new());
+        super::style_atoms(&by_atom);
+        // The key's atom names its property where the callback is set, and
+        // nothing where it is not.
+        let atom_of = |lua: &mlua::Lua, key: &str| {
+            let table = lua.create_table().unwrap();
+            table.raw_set(key, 1).unwrap();
+            let mut atom = None;
+            table
+                .for_each_borrowed(|key, _| {
+                    atom = key.atom();
+                    Ok(())
+                })
+                .unwrap();
+            atom
+        };
+        assert_eq!(
+            atom_of(&by_atom, "px").and_then(Prop::of_atom),
+            Some(Prop::Px)
+        );
+        assert_eq!(atom_of(&by_atom, "size"), Some(-1));
+        assert_eq!(atom_of(&by_name, "px"), Some(-1));
+        let (named, atoms) = (values(&by_name), values(&by_atom));
+        let keys = Prop::ALL
+            .iter()
+            .map(|prop| prop.name())
+            .chain(WIDGET_FIELDS.iter().copied())
+            .chain(["no_such_key", "w ", "W"]);
+        for key in keys {
+            for (a, b) in named.iter().zip(&atoms) {
+                assert_eq!(
+                    read(&by_atom, key, b),
+                    read(&by_name, key, a),
+                    "{key} = {a:?}"
+                );
             }
         }
     }

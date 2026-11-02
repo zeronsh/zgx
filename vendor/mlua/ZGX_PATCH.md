@@ -55,8 +55,14 @@ about a third was mlua's handling of values rather than zgx's work:
    `self` here; the call and the formatting code around the check cost each
    call ~29 instructions (research B9). No check changed.
 
+4. **`StackValue::atom`** (`src/table.rs`): a borrowed string's atom
+   (`lua_tostringatom`), what the VM's `useratom` callback gave it, asked
+   once per string and kept in it. A key looked up by its address cost
+   what the heap's layout made its hash probe cost: the atom costs the
+   same whatever the layout.
+
 zgx-script uses both in `node.rs`: `fill_from` walks a node's properties
-with `for_each_borrowed` (a key's identity finds its property; a colour
+with `for_each_borrowed` (a key's atom names its property; a colour
 written out is parsed where it lies; a child node is read without a
 reference), and every node is made with `create_userdata_relaxed`.
 
