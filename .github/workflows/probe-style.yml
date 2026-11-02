@@ -22,7 +22,7 @@ jobs:
           mkdir -p out
           cc -O2 -shared -fPIC -o out/same_run.so scripts/perf/same_run.c
           git worktree add -q --detach ../w e077e952f63030808a098ca54f3e69501e3271bd
-          for sha in b62df3943 fead9fca9; do
+          for sha in b62df3943 bf4827ca0 f9539e0da; do
             ( cd ../w && git checkout -q --detach "$sha" && CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_TARGET_DIR="$PWD/../t" \
                 cargo build --release --locked -q -p zgx --example style_bench )
             ( cd /tmp && env -i PATH="$PATH" HOME="$HOME" LD_PRELOAD="$GITHUB_WORKSPACE/out/same_run.so" ZGX_GATE=1 ZGX_ASSISTIVE=0 \
