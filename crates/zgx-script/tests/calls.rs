@@ -614,6 +614,53 @@ fn remote_images_show_their_fallback_until_they_come_and_if_they_fail() {
     );
 }
 
+/// A remote picture that failed is asked for again by itself once the
+/// backoff passes, while a node shows it: nothing else need ask.
+#[test]
+fn a_failed_remote_image_is_asked_for_again_while_it_is_shown() {
+    let fetched = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = fetched.clone();
+    let mut h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.column {
+                ui.image { src = "https://img.test/busy.png", w = 20, h = 20,
+                    fallback = ui.text { "WL", id = "initials" } },
+            }"#,
+        );
+        host.fetcher(move |_| {
+            count.set(count.get() + 1);
+            let first = count.get() == 1;
+            async move {
+                zgx::timer::sleep(Duration::from_millis(2)).await;
+                Ok(zgx_script::Response {
+                    status: if first { 503 } else { 200 },
+                    headers: vec![],
+                    body: PNG.to_vec(),
+                })
+            }
+        });
+        host
+    });
+    for _ in 0..30 {
+        h.settle();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(fetched.get(), 1);
+    assert!(h.find("initials").is_some(), "the fallback when it failed");
+    // Past the first backoff (5 s), with nothing shown again or changed.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while h.find("initials").is_some() && Instant::now() < deadline {
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(h.find("initials").is_none(), "the picture, asked for again");
+    assert_eq!(fetched.get(), 2);
+    assert_eq!(h.host.error().get(), None);
+}
+
 /// A remote picture tells `on_load` its size once it has arrived, or
 /// `on_error` why it didn't.
 #[test]
