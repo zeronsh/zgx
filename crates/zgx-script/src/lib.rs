@@ -269,8 +269,29 @@ impl Deadline {
         self.wall + self.budget
     }
     pub(crate) fn exceeded(&self) -> bool {
-        self.wall.elapsed() > self.budget && thread_cpu().saturating_sub(self.cpu) > self.budget
+        past_budget(
+            self.wall.elapsed(),
+            thread_cpu().saturating_sub(self.cpu),
+            self.budget,
+            CPU_GRAIN,
+        )
     }
+}
+/// How coarse the thread's CPU clock is (`thread_cpu`): exact on Unix; a
+/// scheduler tick on Windows, whose CPU time moves a tick at a time.
+#[cfg(not(windows))]
+const CPU_GRAIN: Duration = Duration::ZERO;
+#[cfg(windows)]
+const CPU_GRAIN: Duration = Duration::from_micros(15_625);
+/// Whether a call that has run `wall` and used `cpu` (as the thread's CPU
+/// clock reads it, `grain` at a time) is past `budget`. Two readings a
+/// grain apart can differ by up to a grain more than the CPU time between
+/// them (25 ms read as two 15.6 ms ticks), so the CPU time counts as past
+/// only beyond a grain over: a script is never stopped short of its
+/// budget, and a runaway one stops up to a grain late.
+#[inline]
+fn past_budget(wall: Duration, cpu: Duration, budget: Duration, grain: Duration) -> bool {
+    wall > budget && cpu > budget + grain
 }
 /// CPU time this thread has used.
 #[cfg(unix)]
@@ -288,8 +309,9 @@ fn thread_cpu() -> Duration {
     }
 }
 /// CPU time this thread has used. Windows advances it a scheduler tick
-/// (about 15.6 ms) at a time, so it reads up to a tick short: a runaway
-/// script stops that much later.
+/// (about 15.6 ms) at a time, so a difference of two readings is up to a
+/// tick off either way (`CPU_GRAIN`): a runaway script stops up to two
+/// ticks late, and none early.
 #[cfg(windows)]
 fn thread_cpu() -> Duration {
     #[repr(C)]
@@ -3686,5 +3708,36 @@ mod tests {
             assert!(vm.deadline.get().is_none(), "no call left running");
             assert_eq!(vm.interrupt.state(), (false, false));
         }
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    const MS: Duration = Duration::from_millis(1);
+
+    #[test]
+    fn a_call_is_past_its_budget_only_on_both_clocks() {
+        let exact = Duration::ZERO;
+        assert!(!past_budget(29 * MS, 31 * MS, 30 * MS, exact), "wall short");
+        assert!(
+            !past_budget(40 * MS, 25 * MS, 30 * MS, exact),
+            "a busy machine, CPU short"
+        );
+        assert!(past_budget(31 * MS, 31 * MS, 30 * MS, exact));
+    }
+
+    #[test]
+    fn a_coarse_cpu_clock_never_stops_a_call_short() {
+        // Windows: 25 ms of CPU across two tick boundaries reads as two
+        // 15.625 ms ticks, 31.25 ms, over a 30 ms budget it hasn't spent.
+        let tick = Duration::from_micros(15_625);
+        let two_ticks = 2 * tick;
+        assert!(
+            !past_budget(40 * MS, two_ticks, 30 * MS, tick),
+            "two ticks of 25 ms"
+        );
+        // A runaway is stopped once it reads a tick beyond.
+        assert!(past_budget(60 * MS, 3 * tick, 30 * MS, tick));
     }
 }
