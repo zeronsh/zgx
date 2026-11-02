@@ -28,7 +28,7 @@ jobs:
             ( cd "../w-$name" && CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=line-tables-only CARGO_TARGET_DIR="$PWD/../t-$name" \
                 cargo build --release --locked -p zgx --example style_bench )
             ( cd /tmp && env -i PATH="$PATH" HOME="$HOME" LD_PRELOAD="$GITHUB_WORKSPACE/out/same_run.so" ZGX_GATE=1 ZGX_ASSISTIVE=0 \
-                setarch -R valgrind --tool=cachegrind --cache-sim=no --dump-instr=yes --cachegrind-out-file="$GITHUB_WORKSPACE/out/$name.cg" \
+                setarch -R valgrind --tool=callgrind --dump-instr=yes --dump-line=no --callgrind-out-file="$GITHUB_WORKSPACE/out/$name.cg" \
                 "$GITHUB_WORKSPACE/../t-$name/release/examples/style_bench" > /dev/null 2> "$GITHUB_WORKSPACE/out/$name.err" )
             grep -E 'I *refs' "out/$name.err" || true
             bin="$GITHUB_WORKSPACE/../t-$name/release/examples/style_bench"
