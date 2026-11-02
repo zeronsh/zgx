@@ -178,7 +178,8 @@ fn runaway_scripts_hit_their_time_budget() {
         // 33 ms on a quiet machine.
         assert!(
             spent < Duration::from_millis(150),
-            "{code}: stopped after {spent:?} of CPU ({wall:?} wall)"
+            "{code}: stopped after {spent:?} of CPU ({wall:?} wall); {:?}",
+            zgx_script::last_budget_stop()
         );
     }
 
