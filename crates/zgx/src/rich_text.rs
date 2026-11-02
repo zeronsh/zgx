@@ -249,11 +249,13 @@ impl RichText {
         self.options == other.options
             && self.text == other.text
             && self.runs.len() == other.runs.len()
-            && self
-                .runs
-                .iter()
-                .zip(other.runs.iter())
-                .all(|(a, b)| a.range == b.range && a.font == b.font && a.font_size == b.font_size)
+            && self.runs.iter().zip(other.runs.iter()).all(|(a, b)| {
+                // A run's padding across takes room in its line.
+                a.range == b.range
+                    && a.font_size == b.font_size
+                    && a.padding[0] == b.padding[0]
+                    && a.font == b.font
+            })
     }
     /// `!same_metrics`, for `Scene::set_leaf_kind`: written apart so that
     /// `same_metrics` keeps the callers it is inlined into (a third one
@@ -262,11 +264,12 @@ impl RichText {
         self.options != other.options
             || self.text != other.text
             || self.runs.len() != other.runs.len()
-            || self
-                .runs
-                .iter()
-                .zip(other.runs.iter())
-                .any(|(a, b)| a.range != b.range || a.font != b.font || a.font_size != b.font_size)
+            || self.runs.iter().zip(other.runs.iter()).any(|(a, b)| {
+                a.range != b.range
+                    || a.font_size != b.font_size
+                    || a.padding[0] != b.padding[0]
+                    || a.font != b.font
+            })
     }
     /// The text.
     pub fn text(&self) -> &str {

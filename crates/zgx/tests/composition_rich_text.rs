@@ -113,6 +113,25 @@ fn inherited_color_changes_only_paint_and_font_size_reflows() {
     assert_eq!(text.runs()[1].font_size, 12.);
 }
 
+/// A chip's padding takes room in its line: padding that changes measures
+/// its paragraph again (it was kept as measured, only colours changing).
+#[test]
+fn a_spans_padding_that_changes_measures_its_paragraph_again() {
+    let mut ui = Ui::new(300., 150.);
+    let padding = ui.signal(4_f32);
+    let read = padding.clone();
+    let view =
+        ui.mount(row().text_size(10.).child(
+            rich_text_signal(move || vec![text_span("ab").padding(read.get(), 0.)]).id("chip"),
+        ));
+    ui.prepare_frame();
+    let width = |ui: &Ui| ui.scene.borrow().bounds(view.find("chip").unwrap()).width;
+    // Two cells of 6, and the padding either side.
+    assert_eq!(width(&ui), 20.);
+    padding.set(14.);
+    ui.prepare_frame();
+    assert_eq!(width(&ui), 40.);
+}
 #[test]
 fn styled_inline_button_label_is_accessible_and_updates() {
     let mut ui = Ui::new(200., 100.);
