@@ -756,6 +756,9 @@ pub(crate) struct RareEvents {
     /// on one spot, as the DOM's `dblclick`, heard as the second is let go;
     /// the innermost node with one takes it.
     pub double_click: Option<Handler>,
+    /// `capture_keys = true`: while focus is in it, every key goes to what
+    /// is focused, no shortcut or menu taking one (a shortcut recorder).
+    pub capture_keys: bool,
 }
 impl Kind {
     /// Regions that become a box of any number of children, laid out as
@@ -3221,6 +3224,7 @@ const LATE_FIELDS: &[&str] = &[
     "at_end",
     "on_paste",
     "overscroll",
+    "capture_keys",
     "scroll_padding",
     "read_only",
     "selection_radius",
@@ -3352,6 +3356,15 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                     rare.get_or_insert_default().scroll_padding = Some(padding)
                 }
                 _ => {}
+            }
+        }
+        "capture_keys" => {
+            if lua.unpack::<bool>(value)? {
+                node.events
+                    .get_or_insert_default()
+                    .rare
+                    .get_or_insert_default()
+                    .capture_keys = true;
             }
         }
         "overscroll" => {

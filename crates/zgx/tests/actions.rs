@@ -536,3 +536,69 @@ fn a_binding_by_physical_key_tells_the_keypad_from_the_digit_row() {
         Modifiers::default()
     ));
 }
+
+/// A node that records a shortcut (`View::capture_keys`): while focus is
+/// in it, a key a binding takes (the menus' ⌘J) goes to what is focused
+/// instead, and the host is told no binding takes it; out of it, the
+/// binding works again.
+#[test]
+fn a_node_capturing_keys_takes_them_from_the_bindings() {
+    let mut ui = Ui::new(400., 200.);
+    let ran = Rc::new(RefCell::new(Vec::new()));
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let (log, keys) = (ran.clone(), heard.clone());
+    let command = Modifiers {
+        meta: true,
+        ..Default::default()
+    };
+    let at = |key: &str| Keystroke::new(character(key), command);
+    let mounted = ui.mount(
+        column()
+            .keymap(
+                Keymap::new().bind(KeyBinding::new([at("j")], Action::new(Save("run"))).unwrap()),
+            )
+            .on_action(move |action: &Save, cx| {
+                log.borrow_mut().push(action.0);
+                cx.prevent_default();
+            })
+            .child(
+                div()
+                    .id("recorder")
+                    .focusable(true)
+                    .capture_keys(true)
+                    .on_event(move |cx| {
+                        if let InputEvent::KeyDown {
+                            key: Key::Character(k),
+                            modifiers,
+                            ..
+                        } = &cx.event
+                        {
+                            keys.borrow_mut().push((k.to_string(), modifiers.meta));
+                        }
+                    }),
+            )
+            .child(div().id("other").focusable(true)),
+    );
+    ui.prepare_frame();
+    let press = |ui: &mut Ui| {
+        ui.dispatch(InputEvent::KeyDown {
+            key: character("j"),
+            modifiers: command,
+            repeat: false,
+        })
+    };
+    ui.input.focus(&ui.scene, mounted.find("recorder"));
+    assert!(ui.input.captures_keys(&ui.scene.borrow()));
+    assert!(
+        !ui.input
+            .binds_key(&ui.scene.borrow(), &character("j"), command)
+    );
+    press(&mut ui);
+    assert!(ran.borrow().is_empty(), "the binding ran while recording");
+    assert_eq!(*heard.borrow(), vec![("j".to_string(), true)]);
+    // Focus elsewhere: shortcuts as ever.
+    ui.input.focus(&ui.scene, mounted.find("other"));
+    assert!(!ui.input.captures_keys(&ui.scene.borrow()));
+    press(&mut ui);
+    assert_eq!(*ran.borrow(), vec!["run"]);
+}

@@ -877,6 +877,13 @@ fn menu_bar_services_item() -> Option<objc2::rc::Retained<objc2_app_kit::NSMenuI
         .submenu()?
         .itemAtIndex(0)
 }
+/// While `on` (focus in a node that records a shortcut,
+/// `InputDispatcher::captures_keys`), every key goes to zgx's view and the
+/// menu bar takes none: ⌘Q is the key recorded, not Quit.
+#[cfg(target_os = "macos")]
+pub(crate) fn capture_keys(on: bool) {
+    edit_keys::capture(on);
+}
 /// Offer the key AppKit is dispatching to the menu bar, as AppKit offers
 /// every key before the window has it: whether an item took it.
 #[cfg(target_os = "macos")]
@@ -974,6 +981,8 @@ mod edit_keys {
 
     thread_local! {
         static WATCHING: Cell<bool> = const { Cell::new(false) };
+        /// Focus is in a node that takes every key (`capture_keys`).
+        static CAPTURING: Cell<bool> = const { Cell::new(false) };
         /// (key, shift) for each standard item in the installed menu bar.
         static SHORTCUTS: RefCell<Vec<(&'static str, bool)>> = const { RefCell::new(Vec::new()) };
     }
@@ -1070,6 +1079,12 @@ mod edit_keys {
         );
     }
 
+    /// Every key to zgx's view, none to the menu bar, while `on`: focus is
+    /// in a node recording a shortcut (`InputDispatcher::captures_keys`).
+    pub(super) fn capture(on: bool) {
+        CAPTURING.set(on);
+    }
+
     pub(super) fn watch(items: &[StandardItem]) {
         SHORTCUTS
             .with(|keys| *keys.borrow_mut() = items.iter().map(|item| shortcut(*item)).collect());
@@ -1084,7 +1099,7 @@ mod edit_keys {
             {
                 trace(key);
             }
-            if is_edit_shortcut(key)
+            if (CAPTURING.get() || is_edit_shortcut(key))
                 && let Some(view) = zgx_view(key)
             {
                 // To the view, not the menu bar: taken here, AppKit sends it nowhere else.

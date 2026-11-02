@@ -2078,6 +2078,10 @@ export type NodeProps = {
 	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: boolean?,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -2470,6 +2474,10 @@ export type Props = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -2825,6 +2833,7 @@ export type Props_class = string?
 export type Props_variants = (Variants | ((choice: any) -> Variants))?
 export type Props_ref = (Ref | { Ref })?
 export type Props_focusable = boolean?
+export type Props_capture_keys = boolean?
 export type Props_role = AriaRole?
 export type Props_heading = number?
 export type Props_selected = (boolean | Readable<boolean> | (() -> boolean))?
@@ -3099,6 +3108,10 @@ export type ContainerProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -3506,6 +3519,10 @@ export type ScrollProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -3928,6 +3945,10 @@ export type TextProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -4319,6 +4340,10 @@ export type MarkdownViewProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -4777,6 +4802,10 @@ export type RichProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -5162,6 +5191,10 @@ export type ImageProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -5564,6 +5597,10 @@ export type SvgProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -6054,6 +6091,10 @@ export type Scene3DProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -6462,6 +6503,10 @@ export type CanvasProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -6879,6 +6924,10 @@ export type CheckboxProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -7274,6 +7323,10 @@ export type InputProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -7770,6 +7823,10 @@ export type ProgressProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -8156,6 +8213,10 @@ export type SliderProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -8560,6 +8621,10 @@ export type SegmentedProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -8957,6 +9022,10 @@ export type StepperProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -9355,6 +9424,10 @@ export type DisclosureProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -9765,6 +9838,10 @@ export type AccordionProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -10148,6 +10225,10 @@ export type SectionProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -10557,6 +10638,10 @@ export type SeparatorProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -10948,6 +11033,10 @@ export type TabsProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -11361,6 +11450,10 @@ export type TreeProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -11770,6 +11863,10 @@ export type DataGridProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -12175,6 +12272,10 @@ export type CalendarProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -12573,6 +12674,10 @@ export type DatePickerProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -12969,6 +13074,10 @@ export type TimeFieldProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -13364,6 +13473,10 @@ export type ComboboxProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -13767,6 +13880,10 @@ export type CommandPaletteProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -14158,6 +14275,10 @@ export type SelectProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -14556,6 +14677,10 @@ export type SplitProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -14972,6 +15097,10 @@ export type ListProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -15441,6 +15570,10 @@ export type LayerProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -15847,6 +15980,10 @@ export type ModalProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -16271,6 +16408,10 @@ export type PopoverProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -16705,6 +16846,10 @@ export type MenuItemProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -17095,6 +17240,10 @@ export type SubmenuProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -17507,6 +17656,10 @@ export type WebViewProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -17915,6 +18068,10 @@ export type TerminalProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -18301,6 +18458,10 @@ export type SlotProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -18736,6 +18897,10 @@ export type EachOptions = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -19137,6 +19302,10 @@ export type PresenceOptions = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.

@@ -656,6 +656,9 @@ struct State {
     /// A few at most: a list, not a map (a map's instance shared with another
     /// set's outlined that one's insert).
     hollow: Vec<NodeId>,
+    /// Nodes that take every key while focus is in them (`set_capture_keys`):
+    /// a shortcut recorder. A few at most.
+    capturing: Vec<NodeId>,
     disabled_observers: crate::scene::NodeMap<Signal<bool>>,
     next: u64,
     focused: Option<NodeId>,
@@ -942,6 +945,9 @@ impl InputDispatcher {
     /// before taking a key from a native view that would otherwise use it
     /// (a terminal's): one zgx binds is the app's shortcut. Reads only.
     pub fn binds_key(&self, scene: &Scene, key: &Key, modifiers: Modifiers) -> bool {
+        if self.captures_keys(scene) {
+            return false;
+        }
         let path = self.action_path(scene);
         let stroke = crate::actions::Keystroke::new(key.clone(), modifiers);
         let code = self.state.borrow().key_code.clone();
@@ -953,12 +959,53 @@ impl InputDispatcher {
     /// is (`binds_key`) is reserved (`KeyBinding::reserved`): the app's
     /// before a native view (a page, a terminal) has it. Reads only.
     pub fn reserves_key(&self, scene: &Scene, key: &Key, modifiers: Modifiers) -> bool {
+        if self.captures_keys(scene) {
+            return false;
+        }
         let path = self.action_path(scene);
         let stroke = crate::actions::Keystroke::new(key.clone(), modifiers);
         let code = self.state.borrow().key_code.clone();
         self.actions
             .try_borrow()
             .is_ok_and(|actions| actions.reserves(&path, &stroke, code.as_deref()))
+    }
+    /// While focus is in `node` (it or what it holds), every key goes to
+    /// the focused node: no key binding (the menus' shortcuts) takes one,
+    /// and a host gives the menu bar none (`captures_keys`). For a field
+    /// that records a shortcut: ⌘J is the key to record, not the command.
+    pub fn set_capture_keys(&self, node: NodeId, on: bool) {
+        let mut s = self.state.borrow_mut();
+        let at = s.capturing.iter().position(|id| *id == node);
+        match (on, at) {
+            (true, None) => s.capturing.push(node),
+            (false, Some(at)) => {
+                s.capturing.swap_remove(at);
+            }
+            _ => {}
+        }
+    }
+    /// Whether focus is in a node that takes every key
+    /// (`set_capture_keys`): bindings and the menu bar take none now.
+    pub fn captures_keys(&self, scene: &Scene) -> bool {
+        if self.state.borrow().capturing.is_empty() {
+            return false;
+        }
+        self.focus_captures_keys(scene)
+    }
+    /// `captures_keys` once some node does. A node gone stays listed until
+    /// here (ids are not reused), so removing a node costs nothing.
+    #[cold]
+    fn focus_captures_keys(&self, scene: &Scene) -> bool {
+        let mut s = self.state.borrow_mut();
+        s.capturing.retain(|id| scene.contains(*id));
+        let mut at = s.focused;
+        while let Some(id) = at {
+            if s.capturing.contains(&id) {
+                return true;
+            }
+            at = scene.parent(id);
+        }
+        false
     }
     /// Route a typed action from focus through its enabled ancestors.
     pub fn dispatch_action(
@@ -2452,7 +2499,8 @@ impl InputDispatcher {
         ) {
             self.actions.borrow_mut().cancel();
         }
-        if bindings {
+        let keys = matches!(event, InputEvent::KeyDown { .. } | InputEvent::KeyUp { .. });
+        if bindings && !(keys && self.captures_keys(&scene.borrow())) {
             self.advance_key_sequence(scene, Instant::now());
             if self.actions.borrow_mut().retain_event(&event) {
                 return DispatchResult {

@@ -4946,6 +4946,9 @@ fn with_rare(
     if let Some(handler) = &rare.double_click {
         view = with_double_click(view, handler.clone(), vm, low, handle.clone());
     }
+    if rare.capture_keys {
+        view = view.capture_keys(true);
+    }
     if rare.file_drop.is_some() || rare.file_hover.is_some() {
         view = with_file_drop(view, rare, vm, low, handle);
     }
