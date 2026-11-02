@@ -398,6 +398,15 @@ def by_function(rows, scenes, base):
             for side, binary, checkout in (('base', WORK / 'gate-bin-base' / example, base),
                                            ('head', WORK / 'gate-bin-head' / example, ROOT)):
                 count(binary, env, checkout, out=str(into / f'{name}.{side}.cg'))
+                # Diagnostic (#1239): callgrind's call graph, and who calls libc's
+                # string and allocator functions.
+                raw = into / f'{name}.{side}.callgrind'
+                command = ['valgrind', '--tool=callgrind', f'--callgrind-out-file={raw}', str(binary)]
+                subprocess.run(['setarch', '-R', *command] if shutil.which('setarch') else command,
+                               env=environment(binary, env, checkout, None), capture_output=True, text=True)
+                tree = subprocess.run(['callgrind_annotate', '--tree=caller', '--inclusive=no', '--threshold=100', str(raw)],
+                                      capture_output=True, text=True).stdout
+                (into / f'{name}.{side}.callers.txt').write_text(tree)
             report, groups, total = cgdiff.diff(into / f'{name}.base.cg', into / f'{name}.head.cg')
         except (Infra, OSError, ValueError) as error:
             print(f'=== {name}: no functions ({error})', flush=True)
