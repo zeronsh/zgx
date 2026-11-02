@@ -25,7 +25,7 @@ A web view (`zgx::web_view`, `ui.webview`) is the platform's own page, laid out 
 | Clip, rounded corners, opacity, transforms | yes | yes | yes |
 | zgx content over the page | overlay plane | overlay plane | ordinary paint |
 | Glass over the page | blurs the page | tint only | blurs the page |
-| Pixels per frame | none copied | none copied | three CPU copies of the damaged part ([below](#what-a-linux-page-frame-costs)) |
+| Pixels per frame | none copied | none copied | three CPU copies of what changed: the whole page while WebKit composites (the default), only the changed parts with `accelerated: false` ([below](#what-a-linux-page-frame-costs)) |
 | Keys, reserved shortcuts, fall-through | yes | yes | yes |
 | Input method | AppKit's | the Text Services Framework | the window's (XIM, text-input-v3), through a WebKit input method context of zgx's |
 | `<select>` popups | WebKit's | WebView2's | a zgx menu |
@@ -42,7 +42,7 @@ Linux's choice: Wayland cannot embed another client's surface, an X11 child wind
 
 ## What a Linux page frame costs
 
-Each page frame takes three copies of its damaged part on the CPU:
+Each page frame takes three copies of its damaged parts on the CPU:
 
 1. WebKit paints its buffer into zgx's cairo image surface (`gtk_widget_draw`, on GTK's thread).
 2. zgx copies the surface's rows into the frame it shares with the UI thread.
@@ -68,6 +68,26 @@ On a machine with a GPU, WebKit 2.52 renders into dma-bufs, and GTK 3's offscree
 - **WPE WebKit:** its `wpe_view_backend_exportable_fdo` API hands an embedder each frame as a dma-buf or EGLImage, the direct route into a wgpu texture. It isn't packaged on Ubuntu 24.04.
 
 Idle stays free: a static page costs no CPU once drawn (0.0% over 20 s). Memory (PSS) on that page: the app 177 MB, WebKit's web process 202 MB, its network process 23 MB.
+
+### Composited or painted: `accelerated`
+
+WebKitGTK 4.1 composites pages by default: WebKit's compositor (its GPU path) draws each frame, and GTK 3's side of it then reports the **whole page** changed, whatever moved. A page animating a 40 × 40 spinner is painted, copied and uploaded whole on every frame. WebKit's feature flags for damage (`UseDamagingInformationForCompositing`, `UnifyDamagedRegions`) change nothing at that side, and its on-demand policy is no longer honoured (it reads back as always).
+
+`WebViewOptions::accelerated` (Luau `accelerated`), on by default, chooses that. Off, WebKit paints the page on the CPU (its `NEVER` policy) and reports what each frame changed. zgx keeps the changed parts as up to four rectangles (those close together become one), and paints, copies and uploads only those. macOS and Windows ignore the option: their pages are the platform's own views and copy nothing.
+
+Measured November 2026 in the same container (release `web_view`, page 1076 × 700, 753,200 pixels; WebKitGTK 2.52.6; no GPU, so WebKit's compositor runs on llvmpipe), two runs of 14 s each, CPU as a share of one core:
+
+| Page | Composited (default): pixels per upload | WebKit's web process | `accelerated: false`: pixels per upload | WebKit's web process |
+| --- | --- | --- | --- | --- |
+| 40 × 40 spinner | 753,200 | 40–52% | 3,296 | 3–9% |
+| two spinners, opposite corners | 753,200 | 47–58% | 10,871, in 2.35 parts | 8–9% |
+| 3D-rotating square | 753,200 | 39–67% | 4,591 | 2–4% |
+| scrolled by script | 753,200 | 47–59% | 753,200 (all of it moves) | 5–6% |
+| WebGL triangle | 753,200 | 100–160% | 753,200 | 134–142% |
+
+Composited, a frame costs what it did before the parts: one part, the whole page. Painted, zgx's own copies (2 and 3) take tens of microseconds for a spinner instead of about 0.6 ms. WebGL still runs painted, as fast as composited. What a page loses painted: `backdrop-filter` draws nothing, and 3D transforms flatten (no perspective). `filter`, `box-shadow`, 2D transforms and animations draw as composited. Turn it off for an app's own pages that animate small parts (spinners, progress, a caret) and use neither.
+
+Neither choice changes idle (no frames, no CPU). Painted, the app holds about 10 MB more (PSS 188–198 MB, against 177–186 MB composited). In the container, zgx's own frame of the window for each page frame (its renderer on llvmpipe) is the larger cost either way; on a GPU it's the GPU's.
 
 # Terminals
 

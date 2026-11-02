@@ -30,7 +30,9 @@ button.
 made it), and after a click an `AudioContext` runs. `--inspector`: on a
 page large enough for WebKit to dock Web Inspector in, Ctrl+I opens it in a
 window of its own, no frame of it docked shows in the page, and its
-console, typed into, reaches the page.
+console, typed into, reaches the page. `--unaccelerated`: the page painted
+on the CPU (`WebViewOptions::accelerated` false) passes the same checks,
+and two dots far apart that it turns green upload as two small parts.
 """
 import argparse
 import functools
@@ -58,6 +60,8 @@ COLOURS = {
     "square over the page": ((620, 420), (255, 0, 0)),
     "clipped corner": ((42, 42), (0x20, 0x20, 0x20)),
 }
+# The page's two dots (F8 turns them green), far apart.
+DOTS = ((345, 195), (605, 295))
 
 
 def near(found, wanted, tolerance=24):
@@ -276,7 +280,28 @@ def downloads(private):
     return folder
 
 
-def page_checks(session, ime, transparent=False):
+def damage_checks(session):
+    """Painted on the CPU, the page uploads what changed: F8 turns its two
+    dots green, both show, and no upload since was more than a tenth of
+    the page (one box around both would be about one)."""
+    page = PAGE[2] * PAGE[3]
+    before = len(session.lines("WEB_DAMAGE "))
+    session.key("F8")
+    def green():
+        pixel = session.grab()
+        return all(near(pixel(x, y), (0, 255, 0)) for x, y in DOTS)
+    session.wait(green, "the page's dots never turned green")
+    uploads = [[tuple(int(n) for n in re.split("[,x]", part)) for part in line.split()]
+               for line in session.lines("WEB_DAMAGE ")[before:]]
+    if not uploads:
+        raise AssertionError("no upload logged after F8")
+    largest = max(w * h for parts in uploads for (_, _, w, h) in parts)
+    if largest > page // 10:
+        raise AssertionError(f"an upload took {largest} of the page's {page} pixels: {uploads}")
+    return {"uploads": len(uploads), "largest part": largest}
+
+
+def page_checks(session, ime, transparent=False, unaccelerated=False):
     session.wait(lambda: session.lines("EVAL "), "the page never loaded", 30)
     colours = dict(COLOURS)
     if transparent:
@@ -349,6 +374,8 @@ def page_checks(session, ime, transparent=False):
     if saved:
         raise AssertionError(f"the page's download was saved: {saved}")
     checks["download refused"] = True
+    if unaccelerated:
+        checks["uploads what changed"] = damage_checks(session)
     for _ in range(3):
         session.click(300, 300, 5)
     scrolled = session.wait(lambda: [m for m in session.messages() if "scrolled" in m[0]], "the wheel never scrolled the page")
@@ -679,6 +706,9 @@ def x11(args, output, private):
         # A page WebKit would dock Web Inspector in (`on_inspector_attach`).
         extra += ["--large-page"] if args.inspector else []
         extra += ["--media", serve_media(output)] if args.media else []
+        if args.unaccelerated:
+            extra.append("--unaccelerated")
+            env["ZGX_WEB_DAMAGE"] = "1"
         with (output / "application.log").open("w") as log:
             app = subprocess.Popen([str(args.binary.resolve())] + extra, env=env, stdout=log, stderr=subprocess.STDOUT)
         owned.append(app)
@@ -724,7 +754,7 @@ def x11(args, output, private):
         if args.inspector:
             return inspector_checks(session), "X11"
         check = ime_x11 if args.ime else read if args.orca else None
-        return page_checks(session, check, args.transparent), "X11"
+        return page_checks(session, check, args.transparent, args.unaccelerated), "X11"
     finally:
         end(owned)
 
@@ -798,6 +828,9 @@ def wayland(args, output, private):
                 time.sleep(.1)
         with (output / "application.log").open("w") as log:
             extra = (["--transparent"] if args.transparent else []) + (["--large-page"] if args.inspector else [])
+            if args.unaccelerated:
+                extra.append("--unaccelerated")
+                native["ZGX_WEB_DAMAGE"] = "1"
             app = subprocess.Popen([str(args.binary.resolve())] + extra, env=native, stdout=log, stderr=subprocess.STDOUT)
         owned.append(app)
         subprocess.run(["xdotool", "windowfocus", "--sync", window], env=env, check=False)
@@ -820,7 +853,7 @@ def wayland(args, output, private):
             return compose(session, checks)
         if args.inspector:
             return inspector_checks(session), "Wayland"
-        return page_checks(session, ime_wayland if args.ime else None, args.transparent), "Wayland"
+        return page_checks(session, ime_wayland if args.ime else None, args.transparent, args.unaccelerated), "Wayland"
     finally:
         end(owned)
 
@@ -835,6 +868,7 @@ def main():
     parser.add_argument("--orca", action="store_true", help="the page's accessible tree, and Orca reading it (X11)")
     parser.add_argument("--media", action="store_true", help="a video plays and an AudioContext runs (X11)")
     parser.add_argument("--inspector", action="store_true", help="Web Inspector opens in a window of its own and takes input")
+    parser.add_argument("--unaccelerated", action="store_true", help="the page painted on the CPU, uploading what changed")
     parser.add_argument("--slow-replies", action="store_true",
                         help="WebKit's answers come 800 ms late (ZGX_WEBKITGTK_REPLY_DELAY_MS, debug builds only): on keys, after Ctrl is up; on the caret, after its frame")
     args = parser.parse_args()
@@ -853,7 +887,7 @@ def main():
         os.environ["ZGX_WEBKITGTK_REPLY_DELAY_MS"] = "800"
     with private_runtime("zgx-web-view-") as private:
         checks, backend = (wayland if args.wayland else x11)(args, args.output, private)
-    result = {"result": "pass", "backend": backend + (" IME" if args.ime else "") + (" Orca" if args.orca else "") + (" media" if args.media else "") + (" transparent" if args.transparent else ""), "checks": checks}
+    result = {"result": "pass", "backend": backend + (" IME" if args.ime else "") + (" Orca" if args.orca else "") + (" media" if args.media else "") + (" transparent" if args.transparent else "") + (" unaccelerated" if args.unaccelerated else ""), "checks": checks}
     (args.output / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     print("PASS: " + ", ".join(checks))
 

@@ -162,6 +162,8 @@ api! {
     fn cairo_clip(Ptr);
     fn cairo_set_operator(Ptr, c_int);
     fn cairo_paint(Ptr);
+    fn cairo_region_num_rectangles(Ptr) -> c_int;
+    fn cairo_region_get_rectangle(Ptr, c_int, *mut GdkRectangle);
     // JavaScriptCore and libsoup.
     fn jsc_value_to_json(Ptr, c_uint) -> *mut c_char;
     fn webkit_javascript_result_get_js_value(Ptr) -> Ptr;
@@ -194,6 +196,7 @@ api! {
     fn webkit_web_view_get_settings(Ptr) -> Ptr;
     fn webkit_settings_set_enable_developer_extras(Ptr, gboolean);
     fn webkit_settings_set_user_agent(Ptr, *const c_char);
+    fn webkit_settings_set_hardware_acceleration_policy(Ptr, c_int);
     fn webkit_web_view_load_uri(Ptr, *const c_char);
     fn webkit_web_view_load_html(Ptr, *const c_char, *const c_char);
     fn webkit_web_view_reload(Ptr);
@@ -404,6 +407,8 @@ pub struct GdkEventExpose {
     pub count: c_int,
 }
 
+/// `WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER`.
+pub const WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER: c_int = 2;
 pub const GDK_MOTION_NOTIFY: c_int = 3;
 pub const GDK_BUTTON_PRESS: c_int = 4;
 pub const GDK_BUTTON_RELEASE: c_int = 7;

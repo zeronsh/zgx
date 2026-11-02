@@ -1262,6 +1262,9 @@ export type WebOptions = {
 	-- `window.zgx.postMessage(value)` from the page reaches on_message.
 	messages: boolean?,
 	new_windows: boolean?,
+	-- Linux: false paints pages on the CPU, uploading only what changed
+	-- (no backdrop-filter, no 3D perspective). macOS and Windows ignore it.
+	accelerated: boolean?,
 	[number]: never,
 }
 export type WebEvent = { kind: "started" | "committed" | "finished" | "failed" | "changed", url: string }
@@ -17405,6 +17408,9 @@ export type WebViewProps = {
 	-- `window.zgx.postMessage(value)` from the page reaches on_message.
 	messages: boolean?,
 	new_windows: boolean?,
+	-- Linux: false paints pages on the CPU, uploading only what changed
+	-- (no backdrop-filter, no 3D perspective). macOS and Windows ignore it.
+	accelerated: boolean?,
 	[number]: never,
 	-- A `ui.web()` controller, so the page outlives the node; the options
 	-- above make one otherwise.

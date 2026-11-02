@@ -21,7 +21,7 @@ ui.command(opts: CommandOptions) -> ()
 
 ## Web view options
 
-`ui.webview` takes these, `ui.web` the first six, and any [property](properties.md) and [event](events.md):
+`ui.webview` takes these, `ui.web` the first seven, and any [property](properties.md) and [event](events.md):
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |
@@ -31,6 +31,7 @@ ui.command(opts: CommandOptions) -> ()
 | `user_agent` | `string` | WebKit's | |
 | `messages` | `boolean` | `true` | the page's `window.zgx.postMessage(value)` reaches `on_message` |
 | `new_windows` | `boolean` | `true` | `window.open` and `target=_blank` reach `on_new_window` (and open nothing) |
+| `accelerated` | `boolean` | `true` | Linux only (macOS and Windows ignore it): `false` paints the page on the CPU and uploads only what each frame changed, far cheaper for a page that animates a little, but draws no `backdrop-filter` and flattens 3D transforms ([what it saves](../native-surfaces.md#what-a-linux-page-frame-costs)) |
 | `web` | `Web` | a page for the node | a controller, so the page outlives the node (a tab switched away and back) |
 | `src` | `Reactive<string>` | none | the URL; the page navigates when it changes |
 | `html`, `base_url` | `string`, `string?` | none | a page from markup, loaded once |
