@@ -2540,8 +2540,25 @@ fn kind_view(
         }
         Kind::Text(text) => lower_text(text, vm),
         Kind::Markdown { text, options } => {
-            let (text, vm) = (copy_text(text), vm.clone());
-            crate::markdown::view::view(move || render_text(&text, &vm), options.clone())
+            use crate::markdown::view::Source;
+            // A state's text, as it is (`"{reply}"`): not copied into a
+            // string, and a long one streamed in is parsed by its edits.
+            if let Text::Template(segments) = text
+                && let [Segment::State(state, path)] = &segments[..]
+                && path.is_empty()
+            {
+                let state = state.clone();
+                crate::markdown::view::view(
+                    move || Source::Held(state.with(Value::clone)),
+                    options.clone(),
+                )
+            } else {
+                let (text, vm) = (copy_text(text), vm.clone());
+                crate::markdown::view::view(
+                    move || Source::Made(render_text(&text, &vm)),
+                    options.clone(),
+                )
+            }
         }
         Kind::Rich(spans) => lower_rich(spans, vm, low),
         Kind::Image { .. } => lower_image(node, vm, low),

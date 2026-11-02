@@ -4173,6 +4173,53 @@ fn a_streamed_markdown_view_matches_a_full_render_after_every_piece() {
 }
 
 #[test]
+fn a_long_markdown_reply_appended_to_shows_what_one_set_whole_does() {
+    // Past `zgx::text::LONG`: the state holds a long text, which the view
+    // follows by its appends.
+    let mut prefix = String::new();
+    for i in 0..2_000 {
+        prefix.push_str(&format!("Paragraph {i} of what came before.\n\n"));
+    }
+    assert!(prefix.len() > zgx::text::LONG);
+    let document = "# Plan\n\nSome **bold** words, then `code` and a [link](https://example.com).\n\n```rust\nfn main() {}\n```\n\n1. one\n2. two\n\n> quoted\n\nThe end.";
+    const APP: &str =
+        r#"return ui.column { w = 380, h = 600, ui.markdown_view { "{reply}", w_full = true } }"#;
+    let app = |text: &str| {
+        let mut reply = None;
+        let h = Harness::new(|runtime| {
+            let host = zgx_script::ScriptHost::inline(runtime, "app", APP);
+            reply = Some(host.shared("reply", zgx_script::Value::from(text)));
+            host
+        });
+        (h, reply.unwrap())
+    };
+    let (mut streamed, reply) = app("");
+    reply.set(zgx_script::Value::Text(zgx::text::Text::new(&prefix)));
+    streamed.frames(1);
+    let mut so_far = prefix.clone();
+    for (i, piece) in document.as_bytes().chunks(9).enumerate() {
+        let piece = std::str::from_utf8(piece).unwrap();
+        reply.append(piece).unwrap();
+        so_far.push_str(piece);
+        streamed.frames(1);
+        assert!(
+            reply.with_untracked(|v| matches!(v, zgx_script::Value::Text(_))),
+            "a long text still"
+        );
+        if i % 6 == 0 || so_far.len() == prefix.len() + document.len() {
+            let (mut whole, _) = app(&so_far);
+            whole.frames(1);
+            assert_eq!(
+                scene_shown(&mut streamed),
+                scene_shown(&mut whole),
+                "after piece {i}"
+            );
+        }
+    }
+    assert_eq!(streamed.error(), None);
+}
+
+#[test]
 fn a_shrunk_column_grows_back_to_content_that_outgrew_it() {
     let mut h = Harness::inline(
         r##"local tall = ui.state("tall", 290)

@@ -590,14 +590,23 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
 /// place and kind, and only what a block's new value changes laid out and
 /// painted again: a reply streaming in grows its last paragraph or code
 /// block in place.
-pub(crate) fn view(mut source: impl FnMut() -> String + 'static, options: ViewOptions) -> View {
+/// What a markdown view shows: text made for it, or a state's value as it
+/// holds it (`"{reply}"`), which a long text's edits are followed in.
+pub(crate) enum Source {
+    Made(String),
+    Held(Value),
+}
+pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOptions) -> View {
     zgx::compose::component(move |cx| {
         let parser = RefCell::new(Incremental::new(options.parse.clone()));
         let top = cx.runtime().signal(Value::List(Vec::new().into()));
         let blocks = top.clone();
         cx.retain(cx.runtime().effect(move || {
             let mut parser = parser.borrow_mut();
-            parser.set_text(&source());
+            match source() {
+                Source::Made(text) => parser.set_text(&text),
+                Source::Held(value) => parser.set_value(&value),
+            }
             let parsed = parser.blocks();
             blocks.mutate(|was| {
                 *was = Value::List(parsed.into());

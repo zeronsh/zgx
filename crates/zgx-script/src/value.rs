@@ -1990,6 +1990,18 @@ impl Shared {
     pub fn signal(&self) -> Signal<Value> {
         self.0.clone()
     }
+    /// `text` added to the end of the string it holds, as a script's
+    /// `state:append(text)`: a long one (`Value::Text`) takes it where it
+    /// ends, and what follows it (an editor, `ui.markdown_view`) reads the
+    /// edit alone. An error if it holds something else.
+    pub fn append(&self, text: &str) -> Result<(), String> {
+        let next = self
+            .0
+            .with_untracked(|was| appended(Some(was), text))
+            .map_err(|error| error.to_string())?;
+        self.0.set(next);
+        Ok(())
+    }
 }
 impl std::ops::Deref for Shared {
     type Target = Signal<Value>;
