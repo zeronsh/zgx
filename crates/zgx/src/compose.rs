@@ -2565,6 +2565,23 @@ pub fn scrollbar(offset: Signal<f32>, mut extent: impl FnMut() -> f32 + 'static)
 }
 /// A conditional region. Equal selector values retain their component and local state.
 pub fn switch<K: PartialEq + Clone + 'static>(
+    select: impl FnMut() -> K + 'static,
+    build: impl FnMut(K, &mut Context) -> View + 'static,
+) -> View {
+    switch_with::<K, false>(select, build)
+}
+/// [`switch`], focus in a branch it replaces found again in the next: a
+/// focusable node of the same role and accessible name (a list's row,
+/// wherever the list builds it), else the node at the same place, once the
+/// frame settles. For one interface built again (a script reloaded), where
+/// what had the keyboard should keep it.
+pub fn switch_keeping_focus<K: PartialEq + Clone + 'static>(
+    select: impl FnMut() -> K + 'static,
+    build: impl FnMut(K, &mut Context) -> View + 'static,
+) -> View {
+    switch_with::<K, true>(select, build)
+}
+fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
     mut select: impl FnMut() -> K + 'static,
     mut build: impl FnMut(K, &mut Context) -> View + 'static,
 ) -> View {
@@ -2591,8 +2608,15 @@ pub fn switch<K: PartialEq + Clone + 'static>(
                 let node = mount(&mut ui, root, view, environment.clone());
                 cx.finish(&mut ui, node);
                 transaction.commit();
+                let trail = match (KEEP_FOCUS, mounted) {
+                    (true, Some(old)) => ui.focus_trail(old),
+                    _ => None,
+                };
                 if let Some(old) = mounted.replace(node) {
                     ui.remove(old);
+                }
+                if let Some(trail) = trail {
+                    ui.refocus_trail(node, trail);
                 }
             });
             selected = Some(key);

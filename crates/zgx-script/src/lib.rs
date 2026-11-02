@@ -3109,7 +3109,9 @@ impl ScriptHost {
     pub fn view(&self) -> View {
         let host = self.0.clone();
         let generation = self.0.generation.clone();
-        let app = switch(
+        // Built again each load: what had the keyboard keeps it (a list's
+        // row included, found by its role and name).
+        let app = zgx::compose::switch_keeping_focus(
             move || generation.get(),
             move |_, _| {
                 let current = host.current.borrow().clone();
