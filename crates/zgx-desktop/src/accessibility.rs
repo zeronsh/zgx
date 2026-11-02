@@ -1,7 +1,7 @@
 //! Native accessibility tree translation. Stable IDs survive incremental updates.
 pub mod audit;
 use accesskit::{Action, Node, NodeId as AccessibleId, Tree, TreeId, TreeUpdate};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use unicode_segmentation::UnicodeSegmentation;
 use zgx::{
     scene::{NodeId, Scene},
@@ -187,7 +187,7 @@ impl AccessibilityTree {
         nodes: &mut Vec<(AccessibleId, Node)>,
     ) {
         let mut was = self.long_runs.remove(&owner).unwrap_or_default();
-        let mut kept = HashMap::with_capacity(lines.len());
+        let mut kept = HashMap::with_capacity_and_hasher(lines.len(), Default::default());
         let mut ids = Vec::new();
         let count = text.line_count();
         for line in lines.start.min(count)..lines.end.min(count) {
@@ -324,7 +324,7 @@ impl AccessibilityTree {
             self.language_revision = scene.language_revision();
             self.projection_revisions.clear();
         }
-        let mut children: HashMap<NodeId, Vec<AccessibleId>> = HashMap::new();
+        let mut children: HashMap<NodeId, Vec<AccessibleId>> = HashMap::default();
         // Scene order, not hash-map iteration order, determines accessible traversal.
         let mut ordered: Vec<_> = scene
             .paint_items()
@@ -372,7 +372,7 @@ impl AccessibilityTree {
         self.ids.retain(|id, _| visible.contains(id));
         self.projection_revisions
             .retain(|id, _| visible.contains(id));
-        let mut parents = HashMap::new();
+        let mut parents = HashMap::default();
         for (id, _) in &ordered {
             if *id == scene.root() {
                 continue;
@@ -423,9 +423,9 @@ impl AccessibilityTree {
         // Where each list's items are in it ("3 of 5", as a browser's
         // `<li>` reads), for items the app doesn't say it of: only a tree
         // with a list counts.
-        let mut list_items: HashMap<NodeId, (usize, usize)> = HashMap::new();
+        let mut list_items: HashMap<NodeId, (usize, usize)> = HashMap::default();
         if ordered.iter().any(|(_, s)| s.role == Role::List) {
-            let mut counts: HashMap<NodeId, usize> = HashMap::new();
+            let mut counts: HashMap<NodeId, usize> = HashMap::default();
             let mut lists: Vec<(NodeId, NodeId, usize)> = Vec::new();
             for (id, semantic) in &ordered {
                 let Some(&list) = parents.get(id) else {
@@ -452,7 +452,7 @@ impl AccessibilityTree {
         let error_shown = if any_errors {
             error_texts(scene, semantics, &ordered)
         } else {
-            HashMap::new()
+            HashMap::default()
         };
         let mut nodes = Vec::with_capacity(ordered.len() + 1);
         // Selectable regions projected now, and their selections: set once
@@ -1421,7 +1421,7 @@ fn error_texts(
     semantics: &Semantics,
     ordered: &[(NodeId, &SemanticNode)],
 ) -> HashMap<NodeId, NodeId> {
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     for (i, (field, _)) in ordered.iter().enumerate() {
         let Some(error) = semantics.error(*field) else {
             continue;
@@ -1809,8 +1809,8 @@ mod editor_text_tests {
     ) -> Option<Vec<TextRunData>> {
         // Each shown grapheme's line and edges; a break (not in a line) sits
         // zero-wide at the end of the line before it.
-        let mut edges: HashMap<usize, (usize, f32, f32)> = HashMap::new();
-        let mut wrap_starts: HashSet<usize> = HashSet::new();
+        let mut edges: HashMap<usize, (usize, f32, f32)> = HashMap::default();
+        let mut wrap_starts: HashSet<usize> = HashSet::default();
         if let Some(lines) = lines {
             for (index, line) in lines.iter().enumerate() {
                 let shown = value.get(line.range.clone())?;
@@ -2607,7 +2607,7 @@ mod document_selection_tests {
         );
         ui.prepare_frame();
         let mut adapter = AccessibilityTree::new();
-        let mut tree: HashMap<accesskit::NodeId, accesskit::Node> = HashMap::new();
+        let mut tree: HashMap<accesskit::NodeId, accesskit::Node> = HashMap::default();
         let mut update = |adapter: &mut AccessibilityTree, ui: &Ui| {
             let update = adapter.update(
                 &ui.scene.borrow(),
