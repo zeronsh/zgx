@@ -20,6 +20,10 @@ return ui.column {
 }
 "##;
 
+/// Held by tests that read or size the frame log (`keep`): it is the
+/// process's, and another test keeping two frames would cut theirs short.
+static FRAME_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn app() -> (TestApp, Session) {
     let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", APP));
     let session = Session::new(&app.ui, app.handle.clone(), &app.host, None);
@@ -283,6 +287,7 @@ fn a_snapshot_is_a_png_of_the_node_only_its_user_reads() {
 
 #[test]
 fn a_tape_records_and_replays_through_the_host_saying_how_frames_were_paced() {
+    let _log = FRAME_LOG.lock().unwrap_or_else(|e| e.into_inner());
     let (mut app, session) = app();
     // Without a host's recorder, it says why.
     let refused = error(&ask(&app, &session, r#"{"cmd":"record"}"#));
@@ -445,6 +450,7 @@ fn tape_host(
 
 #[test]
 fn frames_read_since_a_mark_with_the_runs_asked_for_the_gpu_and_the_engines_notes() {
+    let _log = FRAME_LOG.lock().unwrap_or_else(|e| e.into_inner());
     let (mut app, session) = app();
     text(&ask(&app, &session, r##"{"cmd":"click","target":"#add"}"##));
     let marked = ask(&app, &session, r#"{"cmd":"mark","name":"here"}"#);
@@ -512,6 +518,69 @@ fn frames_read_since_a_mark_with_the_runs_asked_for_the_gpu_and_the_engines_note
     assert!(kept.field("data").unwrap().list().len() <= 2);
     text(&ask(&app, &session, r#"{"cmd":"frames","keep":480}"#));
     assert_eq!(zgx::trace::kept(), 480);
+}
+
+/// An interaction between two marks, as a whole: its frames, the input
+/// events they took and what each cost, the work's percentiles and each
+/// phase's; frames after the second mark left out.
+#[test]
+fn frames_sum_up_an_interaction_between_two_marks() {
+    let _log = FRAME_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut app, session) = app();
+    app.frame();
+    text(&ask(&app, &session, r#"{"cmd":"mark","name":"start"}"#));
+    for _ in 0..3 {
+        app.click("add");
+        app.frame();
+    }
+    text(&ask(&app, &session, r#"{"cmd":"mark","name":"end"}"#));
+    let summary = ask(
+        &app,
+        &session,
+        r#"{"cmd":"frames","since":"start","until":"end","summary":true}"#,
+    );
+    let said = text(&summary);
+    assert!(said.contains("input events: each"), "{said}");
+    assert!(said.contains("phases at p95:"), "{said}");
+    let data = summary.field("data").unwrap();
+    let number = |key: &str| data.field(key).and_then(Value::as_f64).unwrap();
+    assert!(number("frames") >= 3., "{said}");
+    // A click is a press and a release.
+    assert!(number("events") >= 6., "{said}");
+    let work = data.field("work_ms").unwrap();
+    let ms = |of: &Value, key: &str| of.field(key).and_then(Value::as_f64).unwrap();
+    assert!(ms(work, "p50") <= ms(work, "p95") && ms(work, "p95") <= ms(work, "max"));
+    let per_event = data.field("per_event_ms").unwrap();
+    assert!(ms(per_event, "max") <= ms(work, "max") + 1e-9);
+    assert!(!data.field("phases").unwrap().list().is_empty());
+    // Each frame says what input it took.
+    let listed = ask(
+        &app,
+        &session,
+        r#"{"cmd":"frames","since":"start","until":"end"}"#,
+    );
+    let frames = listed.field("data").unwrap().list();
+    let events: f64 = frames
+        .iter()
+        .map(|f| f.field("events").and_then(Value::as_f64).unwrap())
+        .sum();
+    assert_eq!(events, number("events"));
+    // What follows the second mark stays out.
+    app.click("add");
+    app.frame();
+    let again = ask(
+        &app,
+        &session,
+        r#"{"cmd":"frames","since":"start","until":"end","summary":true}"#,
+    );
+    assert_eq!(
+        again
+            .field("data")
+            .unwrap()
+            .field("events")
+            .and_then(Value::as_f64),
+        Some(number("events"))
+    );
 }
 
 #[test]

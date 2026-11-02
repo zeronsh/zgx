@@ -90,6 +90,9 @@ pub struct Frame {
     /// How long the GPU itself ran the frame, in microseconds, where the
     /// renderer measures it ([`gpu`]; macOS's direct Metal frames).
     pub gpu_micros: Option<f32>,
+    /// Input events dispatched in it ([`input`]): a pointer's moves, keys,
+    /// wheel steps. What an interaction costs per event reads from these.
+    pub events: u32,
 }
 
 #[derive(Default)]
@@ -195,6 +198,19 @@ pub fn gpu(time: std::time::Duration) {
         log.current.gpu_micros = Some(time.as_secs_f32() * 1e6);
     });
 }
+/// An input event was dispatched (`Ui::dispatch`): counted in the frame
+/// being traced.
+#[inline]
+pub fn input() {
+    if enabled() {
+        counted_input();
+    }
+}
+#[cold]
+#[inline(never)]
+fn counted_input() {
+    LOG.with_borrow_mut(|log| log.current.events += 1);
+}
 /// The frame being traced is done (`zgx::profile::frame`, as a renderer
 /// presents it), its phases' split given: kept if anything happened in it.
 pub fn end_frame(phases: Vec<(&'static str, u64, f32)>) {
@@ -206,6 +222,7 @@ pub fn end_frame(phases: Vec<(&'static str, u64, f32)>) {
         if log.current.writes.is_empty()
             && log.current.runs.is_empty()
             && log.current.notes.is_empty()
+            && log.current.events == 0
             && phases.is_empty()
         {
             return;

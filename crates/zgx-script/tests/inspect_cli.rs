@@ -61,3 +61,30 @@ fn the_mcp_server_says_what_it_offers() {
         lines[2]
     );
 }
+
+/// A command's own field given as `key=value` is that field (`frames n=300`
+/// is n = 300, not a word); a field that takes a number says so when given
+/// something else, before any app is asked.
+#[test]
+fn key_value_words_are_the_commands_fields() {
+    let empty = std::env::temp_dir().join(format!("zgx-no-apps-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).unwrap();
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zgx"))
+            .arg("inspect")
+            .args(args)
+            // No app's socket here: nothing running answers.
+            .env("TMPDIR", &empty)
+            .env("LOCALAPPDATA", &empty)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let said = run(&["frames", "n=many"]);
+    assert!(said.contains("`n` takes a number, not `many`"), "{said}");
+    let said = run(&["frames", "--runs", "lots"]);
+    assert!(said.contains("`runs` takes a number, not `lots`"), "{said}");
+    // A number reads as one: no complaint about it (no app answers here).
+    let said = run(&["frames", "n=300", "since=drag"]);
+    assert!(!said.contains("takes a number"), "{said}");
+}

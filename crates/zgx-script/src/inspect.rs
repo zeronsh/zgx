@@ -141,17 +141,52 @@ const NOT_PRESENTING: &str = "the window isn't presenting (hidden, minimized or 
      draws no frames, and input waits for it until it shows";
 
 /// How frames since `from` (`trace::now_ms`) were paced: how many, the
-/// time between them, and the work in each.
+/// time between them, and the work in each ([`interaction`]).
 fn pacing(from: f64) -> (String, Value) {
     let frames: Vec<_> = zgx::trace::frames(usize::MAX)
         .into_iter()
         .filter(|f| f.ended_ms >= from)
         .collect();
+    interaction(&frames)
+}
+
+/// `values`' `p`th percentile (nearest rank), sorted first.
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    let rank = ((p / 100.) * sorted.len() as f64).ceil() as usize;
+    sorted[rank.clamp(1, sorted.len()) - 1]
+}
+
+/// The least-to-most spread of `values` (ms): median, p90, p95, p99, most
+/// and mean, as text and data.
+fn spread_ms(mut values: Vec<f64>) -> (String, Vec<(&'static str, Value)>) {
+    values.sort_by(f64::total_cmp);
+    let round = |v: f64| Value::Num((v * 1000.).round() / 1000.);
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let (p50, p95) = (percentile(&values, 50.), percentile(&values, 95.));
+    let most = values[values.len() - 1];
+    (
+        format!("{p50:.2} ms median, {p95:.2} ms p95, {most:.2} ms most"),
+        vec![
+            ("p50", round(p50)),
+            ("p90", round(percentile(&values, 90.))),
+            ("p95", round(p95)),
+            ("p99", round(percentile(&values, 99.))),
+            ("max", round(most)),
+            ("mean", round(mean)),
+        ],
+    )
+}
+
+/// What an interaction's `frames` cost: how many, the time between them,
+/// the work in each (its spread: median, p95, most), the input events they
+/// took and the work per event (a drag's moves, a fling's steps), and each
+/// phase's spread, the costliest at p95 first.
+fn interaction(frames: &[zgx::trace::Frame]) -> (String, Value) {
     if frames.len() < 2 {
         return (
             format!(
-                "{} frames: nothing to pace (did the tape move anything there? a target that \
-                 doesn't scroll draws nothing new)",
+                "{} frames: nothing to pace (did anything change there? a target that doesn't \
+                 scroll or move draws nothing new)",
                 frames.len()
             ),
             Value::record([("frames", Value::Num(frames.len() as f64))]),
@@ -169,38 +204,115 @@ fn pacing(from: f64) -> (String, Value) {
     let longest = gaps.iter().copied().fold(0., f64::max);
     // Later than half a refresh past its turn: a frame shown late.
     let late = gaps.iter().filter(|g| **g > every * 1.5).count();
-    let work: Vec<f64> = frames
-        .iter()
-        .map(|f| {
-            f.phases
-                .iter()
-                .filter(|p| p.0 != "wait")
-                .map(|p| p.2 as f64)
-                .sum::<f64>()
-                / 1e3
-        })
-        .collect();
+    let work_of = |f: &zgx::trace::Frame| {
+        f.phases
+            .iter()
+            .filter(|p| p.0 != "wait")
+            .map(|p| p.2 as f64)
+            .sum::<f64>()
+            / 1e3
+    };
+    let work: Vec<f64> = frames.iter().map(work_of).collect();
     let (most, at) =
-        work.iter().zip(&frames).fold(
+        work.iter().zip(frames).fold(
             (0., 0),
             |(most, at), (w, f)| {
                 if *w > most { (*w, f.index) } else { (most, at) }
             },
         );
-    let text = format!(
+    let (work_text, work_data) = spread_ms(work.clone());
+    let work_data = Value::record(work_data);
+    let mut text = format!(
         "{} frames, every {every:.2} ms (median), longest gap {longest:.2} ms, {late} over 1.5 \
-         frames; work {:.2} ms median, {most:.2} ms most (frame {at})",
+         frames; work {work_text} (frame {at})",
         frames.len(),
-        median(work.clone())
     );
+    // Each event's share of the frame it was taken in.
+    let events: u32 = frames.iter().map(|f| f.events).sum();
+    let per_event: Vec<f64> = frames
+        .iter()
+        .filter(|f| f.events > 0)
+        .flat_map(|f| {
+            let share = work_of(f) / f.events as f64;
+            std::iter::repeat_n(share, f.events as usize)
+        })
+        .collect();
+    let per_event_data = if per_event.is_empty() {
+        Value::Nil
+    } else {
+        let (t, data) = spread_ms(per_event);
+        text.push_str(&format!("\n{events} input events: each {t}"));
+        Value::record(data)
+    };
+    // Each phase's spread over the frames it ran in.
+    let mut names: Vec<&'static str> = Vec::new();
+    for f in frames {
+        for p in &f.phases {
+            if p.0 != "wait" && !names.contains(&p.0) {
+                names.push(p.0);
+            }
+        }
+    }
+    let mut phases: Vec<(f64, &'static str, Value)> = names
+        .into_iter()
+        .map(|name| {
+            let (micros, instructions): (Vec<f64>, u64) =
+                frames.iter().fold((Vec::new(), 0), |(mut m, i), f| {
+                    let ran = f.phases.iter().filter(|p| p.0 == name);
+                    let (us, n) = ran.fold((0., 0), |(us, n), p| (us + p.2 as f64, n + p.1));
+                    m.push(us / 1e3);
+                    (m, i + n)
+                });
+            let total: f64 = micros.iter().sum();
+            let mut sorted = micros.clone();
+            sorted.sort_by(f64::total_cmp);
+            let p95 = percentile(&sorted, 95.);
+            let (_, spread) = spread_ms(micros);
+            let mut fields = vec![
+                ("name", Value::from(name)),
+                ("total_ms", Value::Num((total * 1000.).round() / 1000.)),
+            ];
+            if instructions > 0 {
+                fields.push(("instructions", Value::Num(instructions as f64)));
+            }
+            fields.extend(spread);
+            (p95, name, Value::record(fields))
+        })
+        .collect();
+    phases.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let top: Vec<String> = phases
+        .iter()
+        .take(5)
+        .map(|(p95, name, _)| format!("{name} {p95:.2} ms"))
+        .collect();
+    text.push_str(&format!("\nphases at p95: {}", top.join(", ")));
     let round = |v: f64| Value::Num((v * 100.).round() / 100.);
     let data = Value::record([
         ("frames", Value::Num(frames.len() as f64)),
+        ("first_frame", Value::Num(frames[0].index as f64)),
+        (
+            "last_frame",
+            Value::Num(frames[frames.len() - 1].index as f64),
+        ),
         ("interval_ms", round(every)),
         ("longest_gap_ms", round(longest)),
         ("late", Value::Num(late as f64)),
         ("work_median_ms", round(median(work))),
         ("work_most_ms", round(most)),
+        ("work_most_frame", Value::Num(at as f64)),
+        ("work_ms", work_data),
+        ("events", Value::Num(events as f64)),
+        ("per_event_ms", per_event_data),
+        (
+            "phases",
+            Value::List(
+                phases
+                    .into_iter()
+                    .map(|(_, _, d)| d)
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+        ),
     ]);
     (text, data)
 }
@@ -883,13 +995,14 @@ impl Session {
                 if let Some(keep) = number("keep") {
                     zgx::trace::set_kept(keep.max(1.) as usize);
                 }
-                // After a frame number, or the frame a mark was set after.
-                let since = match field("since") {
-                    None => None,
-                    Some(at) => Some(match at.as_f64() {
+                // A frame number, or the frame a mark was set after: a mark
+                // or number as the command line gives it (`--since 12`, text).
+                let frame_of = |key: &str| -> Result<Option<u64>, String> {
+                    let Some(at) = field(key) else {
+                        return Ok(None);
+                    };
+                    Ok(Some(match at.as_f64() {
                         Some(frame) => frame.max(0.) as u64,
-                        // A mark, or a frame's number as the command line
-                        // gives it (`--since 12`, text).
                         None => {
                             let name = at.to_string();
                             let marked = self.0.marks.borrow().get(&name).copied();
@@ -897,8 +1010,25 @@ impl Session {
                                 format!("no mark named `{name}` (`mark {name}` sets one)")
                             })?
                         }
-                    }),
+                    }))
                 };
+                let since = frame_of("since")?;
+                // Up to a frame or a mark: an interaction between two marks.
+                let until = frame_of("until")?;
+                if field("summary").is_some_and(|v| v.truthy()) {
+                    let frames: Vec<_> = zgx::trace::frames(usize::MAX)
+                        .into_iter()
+                        .filter(|f| since.is_none_or(|s| f.index > s))
+                        .filter(|f| until.is_none_or(|u| f.index <= u))
+                        .collect();
+                    let (text, data) = interaction(&frames);
+                    let text = if ui.is_presented() {
+                        text
+                    } else {
+                        format!("{NOT_PRESENTING}\n{text}")
+                    };
+                    return Ok((text, data));
+                }
                 let runs = if field("all").is_some_and(|v| v.truthy()) {
                     usize::MAX
                 } else {
@@ -907,7 +1037,7 @@ impl Session {
                 let n = number("n").map_or(if since.is_some() { usize::MAX } else { 10 }, |n| {
                     n.max(0.) as usize
                 });
-                let (text, data) = self.frames(n, runs, since);
+                let (text, data) = self.frames(n, runs, since, until);
                 // Hidden or covered, the window draws nothing: say so first.
                 let text = if ui.is_presented() {
                     text
@@ -1240,7 +1370,13 @@ impl Session {
     /// given): per frame, the states written and the effects they ran, each
     /// with its time (the costliest `runs` of them), its phases, the GPU's
     /// own time and what the engine noted of it.
-    fn frames(&self, n: usize, runs_shown: usize, since: Option<u64>) -> (String, Value) {
+    fn frames(
+        &self,
+        n: usize,
+        runs_shown: usize,
+        since: Option<u64>,
+        until: Option<u64>,
+    ) -> (String, Value) {
         let names: std::collections::HashMap<usize, String> = self
             .0
             .host
@@ -1305,6 +1441,9 @@ impl Session {
         let mut text = Vec::new();
         let mut data = Vec::new();
         let mut frames = zgx::trace::frames(usize::MAX);
+        if let Some(until) = until {
+            frames.retain(|f| f.index <= until);
+        }
         if let Some(since) = since {
             frames.retain(|f| f.index > since);
         }
@@ -1352,10 +1491,19 @@ impl Session {
                 } else {
                     String::new()
                 },
-                if writes.is_empty() {
-                    "no writes".into()
-                } else {
-                    writes.join(", ")
+                {
+                    // The states written, then the input the frame took.
+                    let mut what = writes.clone();
+                    match frame.events {
+                        0 => {}
+                        1 => what.push("1 input event".into()),
+                        n => what.push(format!("{n} input events")),
+                    }
+                    if what.is_empty() {
+                        "no writes".into()
+                    } else {
+                        what.join(", ")
+                    }
                 },
                 frame.runs.len(),
                 total
@@ -1428,6 +1576,7 @@ impl Session {
                     ),
                 ),
                 ("runs", Value::Num(frame.runs.len() as f64)),
+                ("events", Value::Num(frame.events as f64)),
                 (
                     "run_list",
                     Value::List(

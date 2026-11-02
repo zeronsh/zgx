@@ -42,9 +42,10 @@ zgx inspect errors                    # the script error, type errors, lint find
 zgx inspect lint                      # zgx lint over the app's scripts: file:line:col rule message
 zgx inspect frames 5                  # the last frames: where their time went, what ran and why
 zgx inspect frames --since fling      # only the frames after `mark fling`; --since 412 after frame 412
+zgx inspect frames since=a until=b summary=true   # what the frames between two marks cost, as a whole
 zgx inspect frames 5 --runs 20        # more of each frame's runs (5 by default); --all for every one
 zgx inspect frames --keep 2000        # keep more frames (480 by default: four seconds at 120 Hz)
-zgx inspect mark fling                # mark now, to read only what follows
+zgx inspect mark fling                # mark now, to read only what follows (`mark name=fling` too)
 zgx inspect snapshot '#messages' --out list.png   # what it looks like, as the window last drew it
 zgx inspect search "overflow"         # find in page: the count, the current match, the first five
 zgx inspect search --next             # the window's find steps on; --prev back, --all every match, --close
@@ -195,6 +196,36 @@ zgx inspect replay '#messages' fling.tape --every 8.33     # as a window keeping
 ```
 
 The answer comes once the tape and what follows it (springing back from an edge) have played: how many frames, the time between them, frames shown late (more than half a refresh past their turn), and the work in each. `frames` then has every frame of it. Nothing reaches the desktop: the events go to this window alone, through the same path as the platform's, so the trackpad's phases, resampling and elastic edges run as they do for a hand. A tape is text, an event a line (`8.312 pixel 0 -6.75 moved`: milliseconds, pixel motion in points or wheel `lines`, across and down, the phase), so one can be written or edited too. Desktop windows record and replay; headless hosts and `TestApp` say they cannot.
+
+## An interaction as a whole
+
+A drag, a fling or a run of keystrokes is many frames: what it cost is their spread, not one of them. Mark before and after it (or play it from a tape, below), then ask for the frames between as a summary:
+
+```sh
+zgx inspect mark start
+# … drag the panel's edge by hand, or replay a pointer tape …
+zgx inspect mark end
+zgx inspect --json frames since=start until=end summary=true
+```
+
+```text
+96 frames, every 8.33 ms (median), longest gap 25.02 ms, 2 over 1.5 frames; work 3.41 ms median, 7.80 ms p95, 9.12 ms most (frame 2210)
+96 input events: each 3.41 ms median, 7.80 ms p95, 9.12 ms most
+phases at p95: layout 5.10 ms, text 1.22 ms, update 0.61 ms, paint 0.40 ms, encode 0.20 ms
+```
+
+The JSON gives the work's `p50`, `p90`, `p95`, `p99`, `max` and `mean` (`work_ms`), the input events (`events`) and each one's share of the frame it came in (`per_event_ms`: a drag's moves, one a frame, cost what their frames did), and each phase's spread and total, the costliest at p95 first (`phases`). Each frame of `frames` says the input it took (`2 input events`; `events` in its JSON). A command's own fields can be given as `key=value` words (`frames n=300`, `mark name=drag`), and a field that takes a number refuses anything else rather than falling back to its default.
+
+A tape can move the pointer as well as the wheel, for an interaction a script plays the same way each time: `pointer`, where from the target's centre in points (across, down), and `down`, `moved` or `up` (the primary button). Each event comes at its time, so a move a frame apart lands in a frame of its own, through the window's own input path:
+
+```text
+0 pointer 0 0 down
+8.33 pointer 4 0 moved
+16.67 pointer 8 0 moved
+25 pointer 12 0 up
+```
+
+`replay '#divider' drag.tape --repeat 5` then answers the same summary for each run, and the spread across them. Recordings hold wheel input only.
 
 ## Switches: one app, two paths
 
