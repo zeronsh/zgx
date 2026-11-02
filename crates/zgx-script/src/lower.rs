@@ -7111,10 +7111,11 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         text: Text,
         style: SpanStyle,
         font: Option<Rc<str>>,
+        lang: Option<Rc<str>>,
         followed: Vec<(&'static str, Ty, Owned)>,
         click: Option<Handler>,
         href: Option<Arc<str>>,
-        icon: Option<crate::node::SpanIcon>,
+        icon: Option<Box<crate::node::SpanIcon>>,
     }
     #[derive(Clone, Copy)]
     struct SpanStyle {
@@ -7166,6 +7167,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 hover: s.hover,
             },
             font: s.font.clone(),
+            lang: s.lang.clone(),
             followed: (s.followed.iter())
                 .map(|(name, ty, source)| (*name, *ty, resolve_owned(source)))
                 .collect(),
@@ -7255,6 +7257,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 }
                 if italic {
                     out = out.italic(true);
+                }
+                if let Some(lang) = &span.lang {
+                    out = out.lang(&**lang);
                 }
                 if underline {
                     out = out.underline(decoration());
@@ -7877,6 +7882,7 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
             s.font_features(zgx::text_layout::FontFeatures::new([(*b"tnum", 1)]))
         }
         (FontFeatures, Lit::Str(v)) => s.font_features(font_features(v)),
+        (Lang, Lit::Str(v)) => s.lang(&**v),
         _ => s,
     }
 }

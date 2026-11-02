@@ -4699,7 +4699,10 @@ fn open_element(
                     font.fallbacks = value;
                 }
                 if let Some(value) = features {
-                    font.features = value;
+                    let inherited = std::mem::replace(&mut font.features, value);
+                    if inherited.han() != 0 || font.features.han() != 0 {
+                        font.features = inherited.layered(&font.features);
+                    }
                 }
                 if let Some(value) = span.styles.font_family.clone() {
                     font.family = value;
@@ -4843,7 +4846,9 @@ fn open_element(
                 let mut style = scene.style(paragraph);
                 style.text_wrap = base.wrap;
                 scene.set_style(paragraph, style);
-                scene.set_kind(paragraph, NodeKind::RichText { text: rich.clone() });
+                // The language each run's text is in, where any node says.
+                let shown = scene.rich_with_languages(paragraph, rich.clone());
+                scene.set_kind(paragraph, NodeKind::RichText { text: shown });
             }
             // Icons' placeholders aren't text to read out.
             let content = if icons.is_empty() {
