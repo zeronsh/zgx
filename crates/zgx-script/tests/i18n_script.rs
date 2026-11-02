@@ -479,3 +479,83 @@ fn a_catalog_folder_without_locale_files_warns() {
     );
     let _ = std::fs::remove_dir_all(&empty);
 }
+
+/// Each locale's plurals need CLDR's cases for it, whatever the build:
+/// Chinese has `other` alone, English `one` and `other`, Arabic six.
+#[test]
+fn a_plural_needs_the_cases_its_locale_has() {
+    let path = app(
+        "plurals",
+        "ui.i18n { dir = \"locales\", source = \"en\" }\nreturn ui.text { ui.t(\"edited\", { n = 2 }) }\n",
+        &[
+            (
+                "en",
+                r#"{ "edited": "{n, plural, other {Edited # files}}" }"#,
+            ),
+            (
+                "zh-Hans",
+                r#"{ "edited": "{n, plural, other {编辑了 # 个文件}}" }"#,
+            ),
+            (
+                "ar",
+                r#"{ "edited": "{n, plural, zero {لا ملفات} one {ملف} two {ملفان} few {# ملفات} many {# ملفًا} other {# ملف}}" }"#,
+            ),
+            (
+                "ar-EG",
+                r#"{ "edited": "{n, plural, zero {لا ملفات} one {ملف} two {ملفان} many {# ملفًا} other {# ملف}}" }"#,
+            ),
+        ],
+    );
+    let report = zgx_script::lint::lint(&[path.parent().unwrap().to_path_buf()]).unwrap();
+    let plural: Vec<String> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "i18n-plural")
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        plural.iter().any(|m| m.contains("needs one in en")),
+        "{plural:?}"
+    );
+    assert!(
+        plural.iter().any(|m| m.contains("needs few in ar-EG")),
+        "{plural:?}"
+    );
+    assert!(
+        !plural
+            .iter()
+            .any(|m| m.contains("zh-Hans") || m.ends_with(" in ar")),
+        "{plural:?}"
+    );
+    assert_eq!(plural.len(), 2, "{plural:?}");
+}
+
+/// A debug build's lint findings aren't errors: never the error card (a
+/// modal that takes the pointer), and in a test host not shown at all, so
+/// a finding never lies over what a test clicks.
+#[test]
+fn lint_findings_never_cover_the_interface() {
+    let path = app(
+        "lint-strip",
+        "local count = ui.state(\"count\", 0)\nreturn ui.column { h = \"100%\", ui.text { \"Count: \" .. count:get() }, ui.column { grow = 1 }, ui.button { id = \"corner\", w = 400, h = 40, on_click = function() count:set(count:peek() + 1) end } }\n",
+        &[],
+    );
+    let mut h = harness(&path);
+    assert!(
+        h.host.warnings().iter().any(|w| w.contains("lint[")),
+        "a finding: {:?}",
+        h.host.warnings()
+    );
+    assert!(h.find("lint-findings").is_none(), "no strip in a test host");
+    assert!(h.find("script-error").is_none(), "no error card");
+    // What lies in the corner takes the click.
+    h.click("corner");
+    h.settle();
+    let count = h.host.states().into_iter().find(|(n, _)| n == "count");
+    assert_eq!(count.map(|(_, v)| v), Some(zgx_script::Value::Num(1.)));
+    // A window's host shows the strip: findings, not an error.
+    h.host.lint_strip(true);
+    h.settle();
+    assert!(h.find("lint-findings").is_some(), "the strip");
+    assert!(h.find("script-error").is_none(), "still no error card");
+}

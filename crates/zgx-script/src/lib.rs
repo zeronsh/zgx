@@ -801,6 +801,54 @@ fn banner(text: &str, dismiss: impl Fn() + 'static) -> View {
 /// show: over any modal or popover, its × taking its own clicks while a
 /// dialog holds focus (a click there reached the dialog's backdrop), and
 /// the pointer passing through the rest. Made only while an error shows.
+/// A debug build's lint findings (`zgx lint: 3 findings` and the first of
+/// them), in the window's lower corner with a dismiss button: no modal, no
+/// error, and only its own area takes the pointer. The rest are in
+/// `ScriptHost::warnings` and on stderr.
+fn lint_strip(text: &str, dismiss: impl Fn() + 'static) -> View {
+    let mut lines = text.lines();
+    let count = lines.next().unwrap_or_default().to_owned();
+    let first = lines.next().unwrap_or_default().to_owned();
+    row()
+        .id("lint-findings")
+        .absolute()
+        .left(12.)
+        .bottom(12.)
+        .max_w(480.)
+        .gap(8.)
+        .items_center()
+        .px(10.)
+        .py(6.)
+        .rounded(6.)
+        .bg(rgba(0x1d2027e6))
+        .child(
+            zgx::compose::text(count)
+                .text_size(11.5)
+                .text_color(rgb(0xf5c26b)),
+        )
+        .child(
+            zgx::compose::text(first)
+                .font_family(FontFamily::Monospace)
+                .text_size(11.)
+                .text_color(rgb(0xc9ccd3))
+                .flex_shrink(1.)
+                .min_w(0.),
+        )
+        .child(
+            button()
+                .id("lint-dismiss")
+                .on_click(dismiss)
+                .w(16.)
+                .h(16.)
+                .rounded(4.)
+                .items_center()
+                .justify_center()
+                .text_color(rgb(0x9aa0ab))
+                .hover(|s| s.bg(rgba(0xffffff1a)).text_color(rgb(0xf1f2f5)))
+                .child(zgx::compose::text("×").text_size(12.)),
+        )
+}
+
 fn error_layer(banner: View, cx: &mut zgx::compose::Context) -> View {
     let open = cx.runtime().signal(true);
     zgx::compose::modal("Script error", open)
@@ -1445,6 +1493,8 @@ struct Inner {
     opens: Rc<opens::Opens>,
     /// Whether errors show over the interface (`error_banner`).
     show_errors: bool,
+    /// Whether lint findings show in the window's corner (`lint_strip`).
+    show_lint: Cell<bool>,
     /// What hears each script error (`on_error`), and what follows them.
     error_hooks: ErrorHooks,
     /// The framework's last issues, with their kinds (`ScriptHost::issues`),
@@ -1630,6 +1680,7 @@ impl ScriptHost {
             folders: Rc::new(folder::Access::new(persist.clone())),
             opens: Rc::default(),
             show_errors: cfg!(debug_assertions),
+            show_lint: Cell::new(true),
             error_hooks: error_hooks.clone(),
             issues: issues.clone(),
             _issues: zgx::issues::on_issue_kind(runtime, move |kind, issue| {
@@ -1746,6 +1797,18 @@ impl ScriptHost {
     /// builds, off in release ones.
     pub fn error_banner(self, show: bool) -> Self {
         self.configure(|inner| inner.show_errors = show)
+    }
+    /// Whether a debug build's lint findings show as a strip in the window's
+    /// corner, its count and a dismiss button (on), or only where they are
+    /// kept: [`warnings`](Self::warnings), `lint_findings` and stderr (off).
+    /// Findings never show as an error, nor over a modal. A test host turns
+    /// the strip off (`testing::TestApp` does), so a finding never lies over
+    /// what a test clicks.
+    pub fn lint_strip(&self, show: bool) {
+        if self.0.show_lint.replace(show) != show {
+            // What shows the findings reads them again.
+            self.0.lint.mutate(|_| true);
+        }
     }
     /// Calls `hook` with each issue the framework reports (`zgx::issues`),
     /// with its kind: an error, or the renderer going on with less (a layer
@@ -2598,8 +2661,8 @@ impl ScriptHost {
         self.0.type_errors.clone()
     }
     /// What `zgx lint` found in the scripts at the last load, in a debug
-    /// build (see `docs/scripting.md`), shown over the interface while there
-    /// is no error or type error.
+    /// build (see `docs/scripting.md`), shown in the window's corner
+    /// (`lint_strip`).
     pub fn lint_findings(&self) -> Signal<Option<String>> {
         self.0.lint.clone()
     }
@@ -3158,6 +3221,7 @@ impl ScriptHost {
         let (dismiss_error, dismiss_types, dismiss_lint) =
             (error.clone(), type_errors.clone(), lint.clone());
         let show_errors = self.0.show_errors;
+        let lint_host = self.0.clone();
         let engine = self.0.engine.clone();
         let persist = self.0.persist.clone();
         let timers = self.0.timers.clone();
@@ -3196,12 +3260,9 @@ impl ScriptHost {
             // The banner exists only while there is an error: no node, no
             // work otherwise. It shows in a layer of its own, over the
             // interface and any modal (`error_layer`).
-            let (error, type_errors, lint) = (error.clone(), type_errors.clone(), lint.clone());
-            let (dismiss_error, dismiss_types, dismiss_lint) = (
-                dismiss_error.clone(),
-                dismiss_types.clone(),
-                dismiss_lint.clone(),
-            );
+            let (error, type_errors) = (error.clone(), type_errors.clone());
+            let (dismiss_error, dismiss_types) = (dismiss_error.clone(), dismiss_types.clone());
+            let (lint, dismiss_lint) = (lint.clone(), dismiss_lint.clone());
             // The script's root fills across, as a block fills its parent;
             // down, it takes what it holds, and `h_full` asks for the rest.
             let root = overlay()
@@ -3217,27 +3278,37 @@ impl ScriptHost {
                 },
                 |_, _| zgx_components::toast_host(),
             );
+            // Lint findings aren't errors: a strip in the corner, under the
+            // error banner and any modal, never one itself. Only a debug
+            // build lints (`lint_loaded`): a release one carries none of it.
+            let root = match cfg!(debug_assertions) {
+                false => root,
+                true => root.child_when(
+                    move || {
+                        let message = lint.get();
+                        (show_errors && lint_host.show_lint.get())
+                            .then_some(message)
+                            .flatten()
+                    },
+                    move |message, _| {
+                        let lint = dismiss_lint.clone();
+                        lint_strip(&message, move || {
+                            lint.set(None);
+                        })
+                    },
+                ),
+            };
             root.child_when(
                 move || {
                     show_errors
-                        .then(|| {
-                            error
-                                .get()
-                                .or_else(|| type_errors.get())
-                                .or_else(|| lint.get())
-                        })
+                        .then(|| error.get().or_else(|| type_errors.get()))
                         .flatten()
                 },
                 move |message, cx| {
-                    let (error, types, lint) = (
-                        dismiss_error.clone(),
-                        dismiss_types.clone(),
-                        dismiss_lint.clone(),
-                    );
+                    let (error, types) = (dismiss_error.clone(), dismiss_types.clone());
                     let banner = banner(&message, move || {
                         error.set(None);
                         types.set(None);
-                        lint.set(None);
                     });
                     error_layer(banner, cx)
                 },

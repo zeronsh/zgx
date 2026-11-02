@@ -64,6 +64,10 @@ smallvec = "1.16"
 rustc-hash = "2.1"
 # Devtools' snapshots (`inspect`).
 png = { version = "0.18", optional = true }
+# `zgx lint`'s plural cases: each locale's CLDR categories (`i18n-plural`),
+# in every build. The formatters stay behind the `i18n` feature.
+icu_plurals = { version = "~2.4", default-features = false, features = ["compiled_data"] }
+icu_locale_core = { version = "~2.4", default-features = false }
 
 # The script time budget counts the thread's CPU time (clock_gettime).
 [target.'cfg(unix)'.dependencies]

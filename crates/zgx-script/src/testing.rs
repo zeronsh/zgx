@@ -328,6 +328,8 @@ impl TestApp {
         // Timers keep the test's time: its frames advance it.
         host.0.timers.use_test_clock();
         host.expose_classes();
+        // A lint finding never lies over what a test clicks.
+        host.lint_strip(false);
         host.reload().map_err(|error| error.to_string())?;
         let executor = Rc::new(RefCell::new(LocalExecutor::new()));
         let clock = FrameClock::new();
