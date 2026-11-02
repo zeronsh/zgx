@@ -51,6 +51,8 @@ mod list_focus_scroll;
 mod mentions;
 #[path = "../regions.rs"]
 mod regions;
+#[path = "../reload_focus.rs"]
+mod reload_focus;
 #[path = "../rtl.rs"]
 mod rtl;
 #[cfg(feature = "scene3d")]
