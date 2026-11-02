@@ -7194,6 +7194,13 @@ impl ApplicationHandler<Event> for WindowManager {
         self.contain(event_loop, token, |this| {
             this.window_event_turn(event_loop, id, event)
         });
+        // Focus in a node recording a shortcut takes every key from the
+        // menu bar, as it moves there and away.
+        #[cfg(target_os = "macos")]
+        crate::app_menu::capture_keys(self.hosts.values().any(|host| {
+            let ui = &host.context.ui;
+            ui.input.captures_keys(&ui.scene.borrow())
+        }));
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.contain(event_loop, None, |this| this.about_to_wait_turn(event_loop));

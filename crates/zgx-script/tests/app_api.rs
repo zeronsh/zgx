@@ -107,6 +107,28 @@ fn a_shortcut_following_a_state_is_rebound_without_a_reload() {
 }
 
 #[test]
+fn a_recorder_with_capture_keys_takes_every_key_while_focused() {
+    // Settings' Shortcuts: a field records the next combination, ⌘J
+    // included, instead of a menu running its command.
+    let mut h = Harness::inline(
+        r##"local got = ui.state("got", "")
+        return ui.column {
+            ui.row { id = "recorder", focusable = true, capture_keys = true, w = 100, h = 30,
+                on_key = function(e) got:set(e.key) return true end },
+            ui.row { id = "other", focusable = true, w = 100, h = 30 },
+            ui.text { id = "got", "{got}" },
+        }"##,
+    );
+    h.click("recorder");
+    assert!(h.ui.input.captures_keys(&h.ui.scene.borrow()));
+    h.keys("cmd+j");
+    assert_eq!(h.text("got"), "j");
+    h.click("other");
+    assert!(!h.ui.input.captures_keys(&h.ui.scene.borrow()));
+    assert_eq!(h.error(), None);
+}
+
+#[test]
 fn a_failed_load_keeps_the_published_commands() {
     let runtime = zgx::reactive::Runtime::new();
     let dir = std::env::temp_dir().join(format!("zgx-commands-{}", std::process::id()));

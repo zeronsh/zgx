@@ -1454,6 +1454,20 @@ impl View {
             }
         })
     }
+    /// While focus is in this view, every key goes to what is focused: no
+    /// key binding and no menu shortcut takes one
+    /// (`InputDispatcher::set_capture_keys`). For a field that records a
+    /// shortcut; as focus leaves, shortcuts work again.
+    pub fn capture_keys(self, on: bool) -> Self {
+        if !on {
+            return self;
+        }
+        self.on_mount(|handle| {
+            if let Some(ui) = handle.ui.upgrade() {
+                ui.input.set_capture_keys(handle.node, true);
+            }
+        })
+    }
     /// Make this view a container its descendants' queries
     /// (`View::when_container`) read, as CSS's `container-type: size`.
     pub fn container(mut self) -> Self {

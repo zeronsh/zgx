@@ -2047,6 +2047,10 @@ export type NodeProps = {
 	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: boolean?,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
