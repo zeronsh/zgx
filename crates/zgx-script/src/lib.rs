@@ -1733,6 +1733,7 @@ impl ScriptHost {
         reports.extend(
             self.dropped_shortcuts()
                 .into_iter()
+                .filter(|drop| !drop.plugin.is_empty())
                 .map(|drop| ContributionReport {
                     error: Some(format!(
                         "its shortcut `{}` was dropped: {} (`{}`)",
@@ -1746,12 +1747,15 @@ impl ScriptHost {
         );
         reports
     }
-    /// The plugin commands' shortcuts the last load dropped, in declaration
-    /// order: a plugin command's key that the app's commands (or an earlier
-    /// plugin's) hold, spelled the same or not, stays theirs, and the
-    /// command is published (`commands`) without it. Each says the key, why
-    /// and the command that holds it, for the app to tell the plugin's
-    /// author. Read it as `commands` changes; empty without plugins.
+    /// The shortcuts the last publish dropped, in declaration order: a
+    /// plugin command's key that the app's commands (or an earlier
+    /// plugin's) hold, spelled the same or not, stays theirs, and an app
+    /// command's key an earlier app command holds (one rebound to it, `key`
+    /// following a state) stays the earlier's (its `plugin` empty): the
+    /// command is published (`commands`) without it, so the menu bar never
+    /// has a key twice. Each says the key, why and the command that holds
+    /// it, for the app to tell the plugin's author or the person rebinding.
+    /// Read it as `commands` changes.
     pub fn dropped_shortcuts(&self) -> Vec<DroppedShortcut> {
         self.0.commands.dropped.borrow().clone()
     }
@@ -3393,6 +3397,10 @@ impl ScriptHost {
         let commands = self.0.commands.clone();
         lazy.ui(&["command", "shortcut_text"], move |lua, ui| {
             command::install(lua, ui, commands)
+        });
+        let commands = self.0.commands.clone();
+        lazy.ui(&["shortcut_owner"], move |lua, ui| {
+            command::install_owner(lua, ui, commands)
         });
         i18n::install(&lazy, self.0.locales.clone(), self.0.files);
         let (windows, shared) = (self.0.windows.clone(), self.0.shared.clone());

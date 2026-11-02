@@ -1518,7 +1518,9 @@ export type CommandOptions = {
 	-- "File" (the default), "Edit", "View", "Window" or any other menu.
 	menu: string?,
 	-- Modifiers and a key joined by "+": "cmd+shift+d", "cmd+alt+arrowleft".
-	key: string?,
+	-- A state or a function saying it follows what it reads: rebound (a
+	-- shortcuts setting), the menus have the new key at once, no reload.
+	key: (string | State<string> | (() -> string?))?,
 	-- The app's whatever has the keyboard: its key comes to the app before
 	-- a focused web page or terminal, which otherwise get each key first
 	-- (as a browser keeps ⌘T from its pages). Not a plugin's to set.
@@ -19613,6 +19615,9 @@ declare ui: {
 	-- "Ctrl+Shift+Z" elsewhere (`cmd` is Command on macOS, Control
 	-- elsewhere); a lone modifier ("cmd") as itself, "⌘" or "Ctrl".
 	shortcut_text: (keys: string) -> string,
+	-- The id of the command (the app's or a plugin's) holding a shortcut
+	-- now, `Shift+Cmd+J` or `cmd+shift+j` alike; nil if none.
+	shortcut_owner: (keys: string) -> string?,
 	window: WindowApi,
 	-- Where an element shows in the window, in the window's points (a
 	-- pointer's `x` and `y`), through every zoom and transform around it;
