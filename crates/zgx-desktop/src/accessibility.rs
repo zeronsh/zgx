@@ -263,6 +263,51 @@ impl AccessibilityTree {
         let ids = self.text_runs.get(&owner)?;
         Some(run_position(ids, &self.text_positions, byte))
     }
+    /// Label `id`'s text runs as AccessKit's `TextRun` nodes, given ids
+    /// kept across updates, into `nodes`.
+    fn push_runs(
+        &mut self,
+        id: NodeId,
+        runs: Vec<TextRunData>,
+        nodes: &mut Vec<(AccessibleId, Node)>,
+    ) {
+        let ids = self.text_runs.entry(id).or_default();
+        ids.truncate(runs.len());
+        while ids.len() < runs.len() {
+            self.next += 1;
+            ids.push(AccessibleId(self.next));
+        }
+        // Whether each run's line goes on into the next.
+        let joined: Vec<bool> = runs
+            .iter()
+            .map(|run| !run.wraps && !run.value.ends_with(['\n', '\r']))
+            .collect();
+        let count = runs.len();
+        for (index, run) in runs.into_iter().enumerate() {
+            let mut text = Node::new(accesskit::Role::TextRun);
+            text.set_value(run.value);
+            text.set_character_lengths(run.lengths);
+            text.set_word_starts(run.words);
+            if let Some(geometry) = run.geometry {
+                text.set_bounds(geometry.bounds);
+                text.set_character_positions(geometry.positions);
+                text.set_character_widths(geometry.widths);
+                text.set_text_direction(if geometry.rtl {
+                    accesskit::TextDirection::RightToLeft
+                } else {
+                    accesskit::TextDirection::LeftToRight
+                });
+            }
+            if index > 0 && joined[index - 1] {
+                text.set_previous_on_line(ids[index - 1]);
+            }
+            if index + 1 < count && joined[index] {
+                text.set_next_on_line(ids[index + 1]);
+            }
+            self.text_positions.insert(ids[index], (id, run.offsets));
+            nodes.push((ids[index], text));
+        }
+    }
     /// What changed in the accessible tree since the last update: nodes whose
     /// semantics changed, and the focus. `title` names the window and `scale`
     /// converts its logical bounds to physical pixels.
@@ -817,7 +862,54 @@ impl AccessibilityTree {
                     }
                     _ => None,
                 };
-                if let Some((dx, dy, now)) = shifted {
+                // Out of reach of the window (beyond a screen of it either
+                // way), and not where the reader is: its runs keep the text,
+                // shaped again once it comes near. A reader still gets every
+                // character of it (`AXStringForRange`); only where they show
+                // waits, as off-screen text isn't shown. Shaping every label
+                // of a long list cost a reflow ~30 ms of a frame.
+                let off_screen = shown_box.is_some_and(|shown| {
+                    let window = scene.bounds(scene.root());
+                    let (top, bottom) = (-window.height, window.height * 2.);
+                    let (left, right) = (-window.width, window.width * 2.);
+                    shown.y + shown.height < top
+                        || shown.y > bottom
+                        || shown.x + shown.width < left
+                        || shown.x > right
+                }) && focused != Some(id)
+                    && text
+                    && apart.is_none()
+                    && long.is_none();
+                if shifted.is_none()
+                    && !reusable
+                    && off_screen
+                    && unchanged
+                    && self.text_runs.contains_key(&id)
+                {
+                    // Kept as they are: their text is the label's.
+                } else if shifted.is_none()
+                    && !reusable
+                    && off_screen
+                    && self.text_runs.get(&id).is_none_or(Vec::is_empty)
+                {
+                    // First seen off-screen, or its text changed there: its
+                    // text as runs, unshaped (no positions), and its box
+                    // forgotten so that coming near shapes it.
+                    self.run_boxes.remove(&id);
+                    if block {
+                        self.blocks.insert(id);
+                    } else {
+                        self.blocks.remove(&id);
+                    }
+                    // Approximate places, unshaped: its box, its graphemes
+                    // spread across it, so a range's bounds come out near
+                    // where it is (`AXBoundsForRange`) until it is shaped.
+                    let value = text_value.unwrap_or("");
+                    let lines = shown_box.map(|rect| vec![estimated_line(value, rect)]);
+                    if let Some(runs) = text_run_data_on(value, block, lines.as_deref(), scale) {
+                        self.push_runs(id, runs, &mut nodes);
+                    }
+                } else if let Some((dx, dy, now)) = shifted {
                     self.run_boxes.insert(id, now);
                     for run in &self.text_runs[&id] {
                         let Some(cached) = self.cache.get(run) else {
@@ -856,42 +948,7 @@ impl AccessibilityTree {
                     if let Some(runs) =
                         text_run_data_on(text_value.unwrap_or(""), block, lines.as_deref(), scale)
                     {
-                        let ids = self.text_runs.entry(id).or_default();
-                        ids.truncate(runs.len());
-                        while ids.len() < runs.len() {
-                            self.next += 1;
-                            ids.push(AccessibleId(self.next));
-                        }
-                        // Whether each run's line goes on into the next.
-                        let joined: Vec<bool> = runs
-                            .iter()
-                            .map(|run| !run.wraps && !run.value.ends_with(['\n', '\r']))
-                            .collect();
-                        let count = runs.len();
-                        for (index, run) in runs.into_iter().enumerate() {
-                            let mut text = Node::new(accesskit::Role::TextRun);
-                            text.set_value(run.value);
-                            text.set_character_lengths(run.lengths);
-                            text.set_word_starts(run.words);
-                            if let Some(geometry) = run.geometry {
-                                text.set_bounds(geometry.bounds);
-                                text.set_character_positions(geometry.positions);
-                                text.set_character_widths(geometry.widths);
-                                text.set_text_direction(if geometry.rtl {
-                                    accesskit::TextDirection::RightToLeft
-                                } else {
-                                    accesskit::TextDirection::LeftToRight
-                                });
-                            }
-                            if index > 0 && joined[index - 1] {
-                                text.set_previous_on_line(ids[index - 1]);
-                            }
-                            if index + 1 < count && joined[index] {
-                                text.set_next_on_line(ids[index + 1]);
-                            }
-                            self.text_positions.insert(ids[index], (id, run.offsets));
-                            nodes.push((ids[index], text));
-                        }
+                        self.push_runs(id, runs, &mut nodes);
                     } else {
                         self.text_runs.remove(&id);
                     }
@@ -1138,6 +1195,20 @@ fn text_run_data_on(
 }
 /// A grapheme's line and its left and right edges.
 type Edge = (usize, f32, f32);
+/// `value` as one line across `rect`, its graphemes spread evenly: where
+/// text far from the window is, near enough, without shaping it.
+fn estimated_line(value: &str, rect: zgx::scene::Rect) -> zgx::scene::TextLine {
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = value.trim_end_matches(['\n', '\r']);
+    let count = text.graphemes(true).count().max(1);
+    let step = rect.width / count as f32;
+    zgx::scene::TextLine {
+        range: 0..text.len(),
+        rect,
+        carets: (0..=count).map(|i| rect.x + step * i as f32).collect(),
+        rtl: false,
+    }
+}
 /// Where `text_run_data_on`'s walk is in a text's lines.
 struct LineWalk<'a> {
     lines: &'a [zgx::scene::TextLine],
@@ -2516,6 +2587,96 @@ mod document_selection_tests {
     use super::*;
     use zgx::{compose::prelude::*, selection::TextPoint, widgets::Ui};
 
+    /// A reflow of a long list shapes only the labels near the window (a
+    /// screen of it either way), and every label, near or not, keeps runs
+    /// holding its whole text, so a reader gets every character of it; one
+    /// scrolled near is shaped, its runs placed where it shows.
+    #[test]
+    fn a_reflow_shapes_only_the_text_near_the_window_and_every_label_keeps_its_text() {
+        let mut ui = Ui::new(400., 200.);
+        let offset = ui.signal(0_f32);
+        let lines: Vec<String> = (0..300)
+            .map(|i| format!("line {i}: a few words that wrap as the window narrows"))
+            .collect();
+        let view = ui.mount(
+            scroll(offset.clone()).w_full().h_full().child(
+                column()
+                    .w_full()
+                    .children(lines.iter().map(|line| text(line.as_str()).text_wrap(true))),
+            ),
+        );
+        ui.prepare_frame();
+        let mut adapter = AccessibilityTree::new();
+        let mut tree: HashMap<accesskit::NodeId, accesskit::Node> = HashMap::new();
+        let mut update = |adapter: &mut AccessibilityTree, ui: &Ui| {
+            let update = adapter.update(
+                &ui.scene.borrow(),
+                &ui.semantics.borrow(),
+                Some(view.node()),
+                "Test",
+                1.,
+            );
+            for (id, node) in update.nodes {
+                tree.insert(id, node);
+            }
+            // Each label's text, as its runs hold it, and whether they say
+            // where it shows.
+            let mut labels: Vec<(String, String, bool)> = tree
+                .values()
+                .filter(|node| node.role() == accesskit::Role::Label)
+                .map(|node| {
+                    let runs: Vec<&accesskit::Node> = node
+                        .children()
+                        .iter()
+                        .filter_map(|run| tree.get(run))
+                        .collect();
+                    (
+                        node.value().unwrap_or_default().to_string(),
+                        runs.iter()
+                            .filter_map(|run| run.value())
+                            .collect::<String>(),
+                        runs.iter().all(|run| run.character_positions().is_some()),
+                    )
+                })
+                .collect();
+            labels.sort();
+            labels
+        };
+        let before = SHAPED.with(|s| s.get());
+        let first = update(&mut adapter, &ui);
+        assert_eq!(first.len(), 300);
+        let shaped = SHAPED.with(|s| s.get()) - before;
+        assert!(
+            shaped < 40,
+            "only the text near the window shaped: {shaped}"
+        );
+        for (label, runs, _) in &first {
+            assert_eq!(label, runs, "every label's runs hold its text");
+        }
+        // Narrower: everything reflows; again only what is near is shaped.
+        ui.scene.borrow_mut().resize(250., 200.);
+        ui.prepare_frame();
+        let before = SHAPED.with(|s| s.get());
+        let narrowed = update(&mut adapter, &ui);
+        let shaped = SHAPED.with(|s| s.get()) - before;
+        assert!(
+            shaped < 40,
+            "a reflow shapes only the text near the window: {shaped}"
+        );
+        for (label, runs, _) in &narrowed {
+            assert_eq!(label, runs, "still every label's text");
+        }
+        // Scrolled to the end: the last lines are shaped, their runs placed.
+        offset.set(1.0e6);
+        ui.prepare_frame();
+        let scrolled = update(&mut adapter, &ui);
+        let last = scrolled
+            .iter()
+            .find(|(label, ..)| label.starts_with("line 299:"))
+            .unwrap();
+        assert!(last.2, "the text scrolled near says where it shows");
+    }
+
     #[test]
     fn scrolled_text_moves_its_runs_without_shaping_them_again() {
         let mut ui = Ui::new(400., 200.);
@@ -2540,12 +2701,16 @@ mod document_selection_tests {
                 scale,
             )
         };
+        // The runs, where they show.
         let runs = |update: &accesskit::TreeUpdate| -> Vec<(accesskit::NodeId, accesskit::Rect)> {
             update
                 .nodes
                 .iter()
                 .filter(|(_, node)| node.role() == accesskit::Role::TextRun)
-                .map(|(id, node)| (*id, node.bounds().unwrap()))
+                // The paragraph's: "Second line" lies a screen below the
+                // window, its runs kept as they are (not shaped, not sent).
+                .filter(|(_, node)| node.value() != Some("Second line"))
+                .filter_map(|(id, node)| Some((*id, node.bounds()?)))
                 .collect()
         };
         let first = runs(&update(&mut adapter, &ui));
