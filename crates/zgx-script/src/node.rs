@@ -1181,7 +1181,9 @@ pub(crate) struct Span {
     pub size: Option<f32>,
     pub weight: Option<u16>,
     pub italic: bool,
-    pub underline: bool,
+    /// `underline`: on, off (a link's too, which is otherwise underlined),
+    /// or as it would be.
+    pub underline: Option<bool>,
     pub strike: bool,
     /// `font`: as `ui.text`'s, `"mono"` or a family's name.
     pub font: Option<Rc<str>>,
@@ -4330,7 +4332,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
         size: None,
         weight: None,
         italic: false,
-        underline: false,
+        underline: None,
         strike: false,
         font: None,
         lang: None,
@@ -4374,7 +4376,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 b"weight" => span.weight = number(given)?.map(|v| v as u16),
                 b"bold" => bold = lua.unpack::<Value>(given)?.truthy(),
                 b"italic" => span.italic = lua.unpack::<Value>(given)?.truthy(),
-                b"underline" => span.underline = lua.unpack::<Value>(given)?.truthy(),
+                b"underline" => span.underline = Some(lua.unpack::<Value>(given)?.truthy()),
                 b"strike" => span.strike = lua.unpack::<Value>(given)?.truthy(),
                 b"font" => {
                     if let Value::Str(font) = lua.unpack(given)? {
@@ -4461,10 +4463,15 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
             });
         }
         span.followed = followed;
-        // One of them says it is underlined, as `underline = true` does.
-        span.underline |= span.underline_style.is_some()
-            || span.underline_color.is_some()
-            || span.underline_thickness.is_some();
+        // One of them says it is underlined, as `underline = true` does
+        // (unless `underline = false` says otherwise).
+        if span.underline.is_none()
+            && (span.underline_style.is_some()
+                || span.underline_color.is_some()
+                || span.underline_thickness.is_some())
+        {
+            span.underline = Some(true);
+        }
     }
     Ok(span)
 }

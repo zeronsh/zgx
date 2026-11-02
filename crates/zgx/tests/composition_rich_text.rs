@@ -386,3 +386,25 @@ fn immutable_rich_options_are_authoritative_over_plain_text_style_options() {
     assert_eq!(scene.bounds(rich).height, 46.);
     assert_eq!(scene.bounds(plain).height, 23.);
 }
+
+/// A clicked span is underlined at rest, as a link is, unless it says not
+/// (`no_underline`, Luau's `underline = false`): a chip that is clicked.
+#[test]
+fn a_clicked_span_is_underlined_unless_it_says_not() {
+    let underlined = |span: TextSpan| {
+        let mut ui = Ui::new(400., 100.);
+        let handle = ui.mount(column().child(rich_text().child(span).id("rich")));
+        ui.prepare_frame();
+        let owner = handle.find("rich").unwrap();
+        let scene = ui.scene.borrow();
+        let NodeKind::RichText { text } = scene.kind(scene.children(owner)[0]) else {
+            panic!()
+        };
+        text.runs()[0].underline.is_some()
+    };
+    assert!(underlined(text_span("chat.rs").on_click(|| {})));
+    assert!(!underlined(
+        text_span("chat.rs").on_click(|| {}).no_underline()
+    ));
+    assert!(!underlined(text_span("chat.rs")));
+}

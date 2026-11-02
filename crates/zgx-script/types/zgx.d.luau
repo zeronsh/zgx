@@ -4564,6 +4564,8 @@ export type SpanProps = {
 	weight: Reactive<number>?,
 	bold: Reactive<boolean>?,
 	italic: Reactive<boolean>?,
+	-- `false` leaves even a link (`on_click`, `href`) not underlined at
+	-- rest: a chip that is clicked.
 	underline: Reactive<boolean>?,
 	strike: Reactive<boolean>?,
 	-- As `ui.text`'s: "mono", "sans", "serif" or a family's name.
@@ -4574,7 +4576,8 @@ export type SpanProps = {
 	-- `text-underline-offset`).
 	underline_offset: number?,
 	-- How the underline is drawn, its colour and its thickness; any of them
-	-- underlines the span. `"wavy"` marks a mistake or a diagnostic.
+	-- underlines the span (unless `underline = false`). `"wavy"` marks a
+	-- mistake or a diagnostic.
 	underline_style: ("solid" | "double" | "dotted" | "dashed" | "wavy")?,
 	underline_color: Color?,
 	underline_thickness: number?,
