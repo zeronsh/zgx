@@ -131,6 +131,10 @@ pub const RULES: &[(&str, &str)] = &[
         "state:update(fn) copying the whole value for one change",
     ),
     (
+        "append-concat",
+        "state:set(state:get() .. text): the whole string copied into Luau and back for a token",
+    ),
+    (
         "computed-sort",
         "a computed that sorts a whole list again each time it runs",
     ),
@@ -1330,6 +1334,35 @@ impl Linter<'_> {
         })
     }
 
+    /// `x:set(x:get() .. token)` (or `:peek()`) at the call opened at
+    /// `open`: the whole string read into Luau, a copy made with the token
+    /// and written back, for each token of a stream. `x:append(token)`
+    /// adds it in Rust, and an editor bound to `x` takes the token alone.
+    fn append_concat(&mut self, open: usize) {
+        let Some(state) = open.checked_sub(3).and_then(|at| self.name(at)) else {
+            return;
+        };
+        let reads = self.is(open - 2, ":")
+            && self.is(open - 1, "set")
+            && self.name(open + 1) == Some(state)
+            && self.is(open + 2, ":")
+            && (self.is(open + 3, "get") || self.is(open + 3, "peek"))
+            && self.is(open + 4, "(")
+            && self.is(open + 5, ")")
+            && self.is(open + 6, "..");
+        if reads {
+            let state = state.to_string();
+            self.report(
+                open - 3,
+                "append-concat",
+                format!(
+                    "`{state}:set({state}:get() .. …)` copies the whole string into Luau and \
+                     back for each piece; `{state}:append(…)` adds it in Rust, and an editor \
+                     bound to `{state}` takes the piece alone."
+                ),
+            );
+        }
+    }
     fn run(&mut self) {
         let mut stack: Vec<Frame> = Vec::new();
         for at in 0..self.tokens.len() {
@@ -1339,6 +1372,7 @@ impl Linter<'_> {
             }
             match token.text.as_str() {
                 "(" | "{" | "[" => {
+                    self.append_concat(at);
                     let open = match token.text.as_str() {
                         "(" => Open::Paren,
                         "{" => Open::Brace,
@@ -2239,6 +2273,24 @@ anime.animate("#b", { x = 100, onUpdate = function(a) print(a.progress) end })
 anime.animate("#c", { x = 100, onComplete = function() done:set(true) end })
 "##;
         assert_eq!(rules(source), one(2, "per-frame-state"));
+    }
+
+    #[test]
+    fn a_string_set_to_itself_and_a_piece_is_an_append() {
+        let source = r##"
+reply:set(reply:get() .. token)
+reply:set(reply:peek() .. "\n")
+reply:set(other:get() .. token)
+reply:set(token .. reply:get())
+reply:append(token)
+"##;
+        assert_eq!(
+            rules(source),
+            [
+                (2, "append-concat".to_string()),
+                (3, "append-concat".to_string()),
+            ]
+        );
     }
 
     #[test]

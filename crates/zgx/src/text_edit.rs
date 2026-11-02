@@ -1,7 +1,7 @@
 //! Unicode grapheme-aware text editing with bounded undo history and IME preedit.
 //! All offsets are UTF-8 bytes, clamped to extended grapheme boundaries.
 use crate::text::{LONG, Text, TextValue as Buffer, TextValue};
-use std::{borrow::Cow, collections::VecDeque, ops::Range};
+use std::{borrow::Cow, cell::Cell, collections::VecDeque, ops::Range};
 use unicode_segmentation::UnicodeSegmentation;
 
 // What an editor holds its text in: a string while short (edited in place,
@@ -252,6 +252,23 @@ impl Edit {
         }
     }
 }
+thread_local! {
+    /// `TextEditor::whole_compares`.
+    static WHOLE_COMPARES: Cell<u64> = const { Cell::new(0) };
+}
+/// Where a change taken from outside leaves the selection
+/// (`TextEditor::commit_change`).
+#[derive(Clone, Copy)]
+enum Caret {
+    /// At the end: `set_text`'s whole new document.
+    ToEnd,
+    /// Moved with the text around it: `apply_external`'s edit.
+    Moved,
+}
+/// Whether byte `at` of UTF-8 `bytes` starts a character (or ends them).
+fn is_boundary(bytes: &[u8], at: usize) -> bool {
+    at == 0 || at == bytes.len() || (bytes[at] as i8) >= -0x40
+}
 /// What a value bound to an editor reads of its changes.
 #[derive(Default)]
 struct Bound {
@@ -262,6 +279,9 @@ struct Bound {
     /// The bound value's version and the editor's revision when the two
     /// last held the same text (`bound`).
     bound: Option<(u64, u64)>,
+    /// The id of the long text it last took whole or followed (`taken`),
+    /// and its revision then.
+    taken: Option<(u64, u64)>,
 }
 /// A plain-text editing model: the text, its selection, IME preedit
 /// and a bounded undo history.
@@ -313,7 +333,12 @@ impl TextEditor {
             text => text,
         };
         let end = text.len();
-        Self {
+        // A long text it is made from is one a binding can follow from.
+        let taken = match &text {
+            Buffer::Long(long) => Some(long.id()),
+            Buffer::Flat(_) => None,
+        };
+        let editor = Self {
             text,
             selection: Selection {
                 anchor: end,
@@ -334,7 +359,12 @@ impl TextEditor {
             history_bytes: 4 * 1024 * 1024,
             run: None,
             ime: None,
+        };
+        let mut editor = editor;
+        if let Some(id) = taken {
+            editor.set_taken(id);
         }
+        editor
     }
     /// The committed text, without any preedit: borrowed while short, a
     /// copy of a long one (see `slice` and `long_text` for those).
@@ -594,7 +624,38 @@ impl TextEditor {
         if self.text.ptr_eq(value) {
             return false;
         }
-        self.take(Incoming::Value(value))
+        let changed = self.take(Incoming::Value(value));
+        if let TextValue::Long(text) = value {
+            self.set_taken(text.id());
+        }
+        changed
+    }
+    /// The id of the long text it last took (`set_value`) or followed
+    /// (`set_taken`), if it hasn't changed since: what a binding's next
+    /// value applies the edits after.
+    pub(crate) fn taken(&self) -> Option<u64> {
+        let (id, revision) = self.sync.as_ref()?.taken?;
+        (revision == self.revision).then_some(id)
+    }
+    /// Hold `text`, as long as its own and made by the edits it has just
+    /// applied (a binding following a text's edits): one text for both
+    /// again, not a copy each, and nothing in its history changed.
+    pub(crate) fn share(&mut self, text: &Text) {
+        if text.len() == self.text.len() {
+            self.text = Buffer::Long(text.clone());
+        }
+    }
+    /// It holds the text `id` names now (a binding applied its edits).
+    pub(crate) fn set_taken(&mut self, id: u64) {
+        let revision = self.revision;
+        self.sync.get_or_insert_default().taken = Some((id, revision));
+    }
+    /// How many times it has compared a whole incoming document with its
+    /// own (`set_text`, `set_value`), for tests: a binding following a
+    /// text's edits makes none. Counted in debug builds only.
+    #[doc(hidden)]
+    pub fn whole_compares() -> u64 {
+        WHOLE_COMPARES.with(Cell::get)
     }
     /// The next text it is given (`set_text`, `set_value`, its binding) is a
     /// document rather than an edit: it leaves nothing to undo.
@@ -630,6 +691,8 @@ impl TextEditor {
         self.text.clone()
     }
     fn take(&mut self, value: Incoming<'_>) -> bool {
+        #[cfg(debug_assertions)]
+        WHOLE_COMPARES.with(|n| n.set(n.get() + 1));
         let (mut prefix, mut suffix) = match value {
             Incoming::Str(text) => self
                 .text
@@ -652,32 +715,149 @@ impl TextEditor {
         }
         let old_end = self.text.len() - suffix;
         let new_end = value.len() - suffix;
-        self.run = None;
-        let before = self.selection;
         let deleted = self.text.slice(prefix..old_end).into_owned();
         let inserted = value.slice(prefix..new_end).into_owned();
+        // A long text is taken as it is, shared with whoever gave it.
+        let shared = match value {
+            Incoming::Value(TextValue::Long(text)) if text.len() >= LONG / 2 => Some(text.clone()),
+            _ => None,
+        };
+        self.commit_change(prefix, deleted, inserted, shared, Caret::ToEnd);
+        true
+    }
+    /// Replace bytes `range` of the committed text with `text`: an edit made
+    /// outside the editor (text streaming in, a collaborator), taken as
+    /// `set_text` takes the document it makes (the same text, revision and
+    /// undo and redo, `load_next` and `answer_next` honoured), but applied
+    /// where it is: only `range` and `text` are compared, never the
+    /// document. Unlike `set_text`, which puts the caret at the end, the
+    /// selection moves with the text around it, as `substitute`'s does: a
+    /// caret at the end stays at the end as text streams in. `range` is
+    /// clamped to the text and to its characters' boundaries. Whether the
+    /// text changed.
+    pub fn apply_external(&mut self, range: Range<usize>, text: &str) -> bool {
+        let len = self.text.len();
+        let mut start = range.start.min(len);
+        while !self.text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = range.end.clamp(start, len);
+        while !self.text.is_char_boundary(end) {
+            end += 1;
+        }
+        // The span that changes, within `range` and `text` alone.
+        let old = self.text.slice(start..end);
+        let (old, new) = (old.as_bytes(), text.as_bytes());
+        let mut prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+        if prefix == old.len() && prefix == new.len() {
+            return false;
+        }
+        while !is_boundary(old, prefix) || !is_boundary(new, prefix) {
+            prefix -= 1;
+        }
+        let room = (old.len() - prefix).min(new.len() - prefix);
+        let mut suffix = old
+            .iter()
+            .rev()
+            .zip(new.iter().rev())
+            .take(room)
+            .take_while(|(a, b)| a == b)
+            .count();
+        while !is_boundary(old, old.len() - suffix) || !is_boundary(new, new.len() - suffix) {
+            suffix -= 1;
+        }
+        let deleted = String::from_utf8(old[prefix..old.len() - suffix].to_vec())
+            .expect("on character boundaries");
+        let inserted = text[prefix..text.len() - suffix].to_owned();
+        self.commit_change(start + prefix, deleted, inserted, None, Caret::Moved);
+        true
+    }
+    /// `inserted` put at byte `at`, as `apply_external` puts it, when
+    /// `text` is what that makes: the step recorded and `text` held as it
+    /// is, its own text not edited first (a binding following its value's
+    /// one edit, which then shares that value's text). Whether it changed.
+    pub(crate) fn insert_shared(&mut self, at: usize, inserted: &str, text: &Text) -> bool {
+        if inserted.is_empty()
+            || at > self.text.len()
+            || !self.text.is_char_boundary(at)
+            || self.text.len() + inserted.len() != text.len()
+        {
+            return false;
+        }
+        self.commit_change(
+            at,
+            String::new(),
+            inserted.to_owned(),
+            Some(text.clone()),
+            Caret::Moved,
+        );
+        true
+    }
+    /// `text` added at the end, as `apply_external` adds it: a token of a
+    /// stream, the caret at the end following it.
+    pub fn append_external(&mut self, text: &str) -> bool {
+        let end = self.text.len();
+        self.apply_external(end..end, text)
+    }
+    /// A change taken from outside (`take`, `apply_external`): `deleted`
+    /// at `start` becomes `inserted` (or the text becomes `shared`, which
+    /// holds that change), one undo step, as `set_text` records it. The
+    /// caret goes to the end (`set_text`), or the selection moves with the
+    /// text around it (`apply_external`).
+    fn commit_change(
+        &mut self,
+        start: usize,
+        deleted: String,
+        inserted: String,
+        shared: Option<Text>,
+        caret: Caret,
+    ) {
+        let old_end = start + deleted.len();
+        self.run = None;
+        let before = self.selection;
         self.cancel_preedit();
         // An answer to an undo keeps what redoes it.
         if !(self.answering && self.undone) {
             self.redo.clear();
             self.redo_bytes = 0;
         }
-        match value {
-            // A long text is taken as it is, shared with whoever gave it.
-            Incoming::Value(TextValue::Long(text)) if text.len() >= LONG / 2 => {
-                self.text = TextValue::Long(text.clone());
-            }
-            _ => self.text.replace_range(prefix..old_end, &inserted),
+        match shared {
+            Some(text) => self.text = TextValue::Long(text),
+            None => self.text.replace_range(start..old_end, &inserted),
         }
         self.revision = self.revision.wrapping_add(1);
-        self.sync.get_or_insert_default().last_edit = (prefix, old_end - prefix, new_end - prefix);
-        self.selection = Selection {
-            anchor: self.text.len(),
-            focus: self.text.len(),
+        self.sync.get_or_insert_default().last_edit = (start, deleted.len(), inserted.len());
+        self.selection = match caret {
+            Caret::ToEnd => Selection {
+                anchor: self.text.len(),
+                focus: self.text.len(),
+            },
+            Caret::Moved => {
+                // Text put where a bound of the selection is goes before it
+                // (a caret follows it, as one at the end follows a stream)
+                // except at a selection's far end: what is selected stays
+                // what it was, nothing added at its edges.
+                let (low, high) = (
+                    before.anchor.min(before.focus),
+                    before.anchor.max(before.focus),
+                );
+                let moved = |at: usize, follows: bool| match at {
+                    at if at > old_end || (at == old_end && follows) => {
+                        at - deleted.len() + inserted.len()
+                    }
+                    at if at > start => start + inserted.len(),
+                    at => at,
+                };
+                let follows = |at: usize| low == high || at == low;
+                Selection {
+                    anchor: moved(before.anchor, follows(before.anchor)),
+                    focus: moved(before.focus, follows(before.focus)),
+                }
+            }
         };
         self.undo_bytes += deleted.len() + inserted.len();
         self.undo.push_back(Edit {
-            start: prefix,
+            start,
             deleted,
             inserted,
             before,
@@ -700,7 +880,6 @@ impl TextEditor {
         if std::mem::take(&mut self.answering) {
             self.fold_answer();
         }
-        true
     }
     /// The step just taken is what the app made of the one before: they
     /// are one step, or undo would go to text the app answers again and
