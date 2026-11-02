@@ -74,6 +74,8 @@ jobs:
           restore-keys: apt-${{ runner.arch }}-
       # A stalled mirror fails fast and retries rather than holding the job;
       # the whole install is tried three times before the job gives up.
+      - name: Rehearsal only, never merged - an early failure
+        run: exit 1
       - name: Linux packages
         id: linux-packages
         timeout-minutes: 15
