@@ -509,6 +509,8 @@ def startup_section(startup, e):
             'the probe starts the app (the lab scene, idle, in the suite&#8217;s font), waits for its window, then reads the top of '
             'its content as the window drew it until the first text has drawn, and reads the process&#8217;s CPU time and cycles '
             'at that moment. zgx shows its window with its first frame; MyGo and Rune show theirs before they draw. '
+            'Launches are warm: each finds the caches the launches before it wrote (zgx&#8217;s system-font cache among them), '
+            'as an app&#8217;s second launch onward does; a first launch&#8217;s one-time cache misses are not measured. '
             f'Measured after the suite, on the same PC, at <code>{e(startup["commit"][:7])}</code>.</p>'
             f'<div class="charts">{"".join(charts)}</div></section>'
         )
@@ -518,6 +520,8 @@ def startup_section(startup, e):
         'the probe starts the app, waits for its window, then captures the top of its content until the first text has drawn, '
         'and reads the process&#8217;s CPU time and instructions retired at that moment. '
         'Both apps build the same menu bar at launch (Services, Hide, Quit, and the Window menu), so they start the same work. '
+        'Launches are warm: each finds the caches the launches before it wrote (zgx&#8217;s system-font cache among them), '
+        'as an app&#8217;s second launch onward does; a first launch&#8217;s one-time cache misses are not measured. '
         f'Measured separately from the suite, on the same Mac, at <code>{e(startup["commit"][:7])}</code>.</p>'
         f'<div class="charts">{"".join(charts)}</div></section>'
     )

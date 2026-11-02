@@ -97,6 +97,8 @@ jobs:
         run: python3 scripts/test_windows_guard.py -v
       - name: New pub fields only on structs with Default (the release check's)
         run: python3 scripts/test_semver_defaults.py -v
+      - name: The instruction gate counts each binary warm, with a cache of its own
+        run: python3 scripts/perf/test_gate.py -v
       - run: cargo fmt --all -- --check
       # Every Luau script in the repository (examples and probes too), as
       # stylua.toml and .styluaignore have them.
@@ -291,6 +293,10 @@ jobs:
       # where the branch left main, which a later main has passed: a PR
       # opened before main changed counted main's change as its own (#488
       # took #482's +1.25%). On main, the commit before.
+      # Each binary is counted warm (gate.py's `warm`): run once uncounted,
+      # with a cache directory of its own, before its first count.
+      - name: Warm counting
+        run: python3 scripts/perf/test_gate.py -v
       - name: Base
         id: base
         run: |
