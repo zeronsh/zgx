@@ -6362,10 +6362,16 @@ impl Scene {
         let NodeKind::Text { text, .. } = &node.kind else {
             panic!("set_text requires a text node")
         };
-        if *text == value {
+        // The comparison's own length test, kept: a counter or a clock, as
+        // long as before, may measure the same (`set_text_same_length`).
+        let same_length = text.len() == value.len();
+        if same_length && **text == *value {
             return;
         }
         let fixed = node.style.width.is_some() && node.style.height.is_some();
+        if same_length && !fixed {
+            return self.set_text_same_length(id, value);
+        }
         self.damage_subtree(id);
         let node = self.node_mut(id);
         if let NodeKind::Text { text, .. } = &mut node.kind {
@@ -6377,6 +6383,64 @@ impl Scene {
         if !fixed {
             self.invalidate_layout(id);
         }
+    }
+    /// `set_text` for a text in a box it sizes, as long as before: one that
+    /// measures as before (`unwrapped_resize`) is repainted alone; another
+    /// lays out again, its new size kept for layout to find.
+    #[cold]
+    #[inline(never)]
+    fn set_text_same_length(&mut self, id: NodeId, value: Arc<str>) {
+        let measured = self.unwrapped_resize(id, &value);
+        self.damage_subtree(id);
+        let node = self.node_mut(id);
+        if let NodeKind::Text { text, .. } = &mut node.kind {
+            *text = value;
+        }
+        node.text_size.set(TextSizes::default());
+        self.invalidate(id, PAINT);
+        match measured {
+            // Measured as before: it lays out as before, repainted alone.
+            Some((true, size)) => self.remember_text_size(id, size),
+            Some((false, size)) => {
+                self.invalidate_layout(id);
+                // Measured already: layout finds it.
+                self.remember_text_size(id, size);
+            }
+            None => self.invalidate_layout(id),
+        }
+    }
+    /// For a text that doesn't wrap, measured before: `text`'s size, and
+    /// whether it is the size it has now. Such a text's size is its
+    /// content's alone, whatever room its parent gives it (`leaf_size`), so
+    /// one measuring as before lays out as before and its ancestors need no
+    /// relayout. `None`: it wraps, or was never measured.
+    #[cold]
+    #[inline(never)]
+    fn unwrapped_resize(&self, id: NodeId, text: &Arc<str>) -> Option<(bool, (f32, f32))> {
+        let node = self.node(id);
+        let style = &node.style;
+        if style.text_wrap || style.text_options != Default::default() {
+            return None;
+        }
+        let NodeKind::Text { font_size, .. } = &node.kind else {
+            return None;
+        };
+        let revision = self.text_shaper_revision;
+        let was = node.text_size.get().find(None, revision)?;
+        let size = match &self.font_measurer {
+            Some(measure) => measure(text, *font_size, None, &node.font),
+            None => self.measure_text_with_font(text, *font_size, None, &node.font),
+        };
+        Some((size == was, size))
+    }
+    /// Keep `size` as `id`'s unwrapped text size, as layout would measure it.
+    fn remember_text_size(&self, id: NodeId, size: (f32, f32)) {
+        TextSizes::remember(
+            &self.node(id).text_size,
+            None,
+            self.text_shaper_revision,
+            size,
+        );
     }
     /// Change `id`'s layout style, invalidating its layout.
     pub fn set_style(&mut self, id: NodeId, style: Style) {
@@ -7015,6 +7079,12 @@ impl Scene {
         let node = self.node_mut(id);
         node.style_writes = node.style_writes.wrapping_add(1);
         self.invalidate_layout(id);
+    }
+    /// Whether `id` waits to be laid out again, for tests: what a change
+    /// relayouts and what it leaves.
+    #[doc(hidden)]
+    pub fn layout_pending(&self, id: NodeId) -> bool {
+        self.node(id).dirty & LAYOUT != 0
     }
     /// How many nodes hold track lists, for tests: they go with their nodes.
     #[doc(hidden)]
