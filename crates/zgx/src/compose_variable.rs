@@ -535,12 +535,13 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     let length = model.count();
                     let total = model.content_height();
                     let limit = (total - height).max(0.);
-                    let mut position = if requested.is_finite() {
-                        requested.max(0.)
-                    } else {
+                    // As a scroll view takes it: past the end (`math.huge`)
+                    // is the end; NaN, the top.
+                    let mut position = if requested.is_nan() {
                         0.
-                    }
-                    .min(limit);
+                    } else {
+                        requested.clamp(0., limit)
+                    };
                     if let Some(previous) = &anchor
                         && previous.revision != revision
                         && requested == previous.position

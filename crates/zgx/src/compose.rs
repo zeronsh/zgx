@@ -2940,12 +2940,14 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 let (width, height) = size.get();
                 let model = crate::virtual_list::VirtualList::new(length, row_height, overscan);
                 let requested = offset.get();
-                let mut position = if requested.is_finite() {
-                    requested.max(0.0)
-                } else {
+                // As a scroll view takes it: past the end (`math.huge`) is
+                // the end; NaN, the top.
+                let limit = (model.content_height() - height).max(0.0);
+                let mut position = if requested.is_nan() {
                     0.0
-                }
-                .min((model.content_height() - height).max(0.0));
+                } else {
+                    requested.clamp(0.0, limit)
+                };
                 let request = navigation
                     .as_ref()
                     .map(|navigation| navigation.request.get());

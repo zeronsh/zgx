@@ -1318,11 +1318,21 @@ pub(crate) fn bridge<T: PartialEq + Clone + 'static>(
     from: fn(&Value) -> T,
     to: fn(T) -> Value,
 ) -> Signal<T> {
+    // Alike, NaN included: a value unequal to itself (NaN) written each way
+    // as a change would pass between the two for ever.
+    fn same<T: PartialEq>(a: &T, b: &T) -> bool {
+        #[allow(clippy::eq_op)]
+        let nan = a != a && b != b;
+        a == b || nan
+    }
     let typed = cx.state(value.with_untracked(from));
     let runtime = cx.runtime();
     let (v, t) = (value.clone(), typed.clone());
     cx.retain(runtime.effect(move || {
-        t.set(from(&v.get()));
+        let next = from(&v.get());
+        if !t.with_untracked(|now| same(now, &next)) {
+            t.set(next);
+        }
     }));
     let (v, t) = (value.clone(), typed.clone());
     // The widget writes back only after its first change, so mounting never
@@ -1330,7 +1340,7 @@ pub(crate) fn bridge<T: PartialEq + Clone + 'static>(
     let mut first = true;
     cx.retain(runtime.effect(move || {
         let next = t.get();
-        if !std::mem::take(&mut first) {
+        if !std::mem::take(&mut first) && !v.with_untracked(|now| same(&from(now), &next)) {
             v.set(to(next));
         }
     }));
