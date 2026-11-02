@@ -5,8 +5,12 @@
 //! allocations per update, after a warm-up.
 //! Run: cargo run --release -p zgx-script --example update_bench
 //! (`TICKS` sets the updates, 600 by default; `ONLY=name` runs one scenario.)
+//! Under the instruction gate the rows made beforehand for every update, and
+//! dropping them, are the bench's own work and left uncounted (`gate_marks`).
 #[path = "support/bench_limits.rs"]
 mod bench_limits;
+#[path = "support/gate_marks.rs"]
+mod gate_marks;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     sync::atomic::{AtomicU64, Ordering::Relaxed},
@@ -99,20 +103,22 @@ fn rows_value(tick: usize) -> Value {
 /// Rows of a label each, ten of whose labels change each update.
 fn rows_rust(ui: &Ui, ticks: usize) -> (View, Step) {
     let labels: Vec<_> = (0..ROWS).map(|i| ui.signal(label(i, 0))).collect();
-    let published: Vec<Vec<String>> = (0..=ticks)
-        .map(|tick| {
-            (0..ROWS)
-                .map(|i| {
-                    let at = if (i + tick).is_multiple_of(ROWS / CHANGED) {
-                        tick
-                    } else {
-                        0
-                    };
-                    label(i, at)
-                })
-                .collect()
-        })
-        .collect();
+    let published: Vec<Vec<String>> = gate_marks::outside(|| {
+        (0..=ticks)
+            .map(|tick| {
+                (0..ROWS)
+                    .map(|i| {
+                        let at = if (i + tick).is_multiple_of(ROWS / CHANGED) {
+                            tick
+                        } else {
+                            0
+                        };
+                        label(i, at)
+                    })
+                    .collect()
+            })
+            .collect()
+    });
     let view = column().children(labels.iter().map(|label| {
         let label = label.clone();
         row()
@@ -136,7 +142,7 @@ fn rows_rust(ui: &Ui, ticks: usize) -> (View, Step) {
 /// The rows each update publishes, made beforehand, published in turn.
 fn rows_published(host: &ScriptHost, ticks: usize) -> Step {
     let rows = host.shared("rows", Value::List(std::rc::Rc::from([])));
-    let published: Vec<Value> = (0..=ticks).map(rows_value).collect();
+    let published: Vec<Value> = gate_marks::outside(|| (0..=ticks).map(rows_value).collect());
     Box::new(move |_, tick, _| {
         rows.set(published[tick].clone());
     })
@@ -322,6 +328,7 @@ fn run(scenario: &Scenario, luau: bool, ticks: usize) -> (f64, f64) {
             allocations += ALLOCATIONS.load(Relaxed) - allocated;
         }
     }
+    gate_marks::outside(|| drop(step));
     drop(host);
     let measured = (ticks - warmup) as f64;
     (
