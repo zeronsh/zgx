@@ -4029,16 +4029,16 @@ fn paragraph_effect<const LOCATING: bool>(
             }
             let link = span.action.is_some() || span.href.is_some();
             // Most spans have none of these: one test for all three.
-            let (hover, icon, menu) = match span.extras.take() {
-                None => (None, None, None),
+            let (hover, icon, menu, plain) = match span.extras.take() {
+                None => (None, None, None, false),
                 Some(extras) => {
                     let extras = *extras;
-                    (extras.hover, extras.icon, extras.menu)
+                    (extras.hover, extras.icon, extras.menu, extras.plain)
                 }
             };
             let hover = hover.as_ref();
             let styled_hover = hover.is_some();
-            if link && !styled_hover {
+            if link && !styled_hover && !plain {
                 span.underline.get_or_insert_with(Default::default);
             }
             if let Some(hover) = hover.filter(|_| link && hovered == Some(links.len())) {

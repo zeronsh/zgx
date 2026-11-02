@@ -2417,6 +2417,40 @@ pub fn plain_underlines<'a>(
     })
     .collect()
 }
+/// The background `output` has for the run before `index` that a wash of
+/// `run`'s (`bounds`, `color`, `radius`) joins: on its line, touching it,
+/// the same, and one of the two only word joiners (room kept in the line).
+fn joined_wash<'o>(
+    output: &'o mut [RichDecoration],
+    rich: &zgx::rich_text::RichText,
+    index: usize,
+    bounds: Rect,
+    color: zgx::scene::Color,
+    radius: f32,
+) -> Option<&'o mut Rect> {
+    let runs = rich.runs();
+    let spacer = |run: &zgx::rich_text::TextRun| {
+        let text = &rich.text()[run.range.clone()];
+        !text.is_empty() && text.chars().all(|c| c == '\u{2060}')
+    };
+    let before = output.iter_mut().rev().find(|d| d.background)?;
+    let joins = index > 0
+        && before.run + 1 == index
+        && (spacer(&runs[index]) || spacer(&runs[index - 1]))
+        && before.color == color
+        && before.radius == radius
+        && (before.bounds.y - bounds.y).abs() < 0.01
+        && (before.bounds.height - bounds.height).abs() < 0.01
+        && ((bounds.x - (before.bounds.x + before.bounds.width)).abs() < 0.5
+            || (before.bounds.x - (bounds.x + bounds.width)).abs() < 0.5);
+    if joins {
+        // The next run joins it as the run it now ends with.
+        before.run = index;
+        Some(&mut before.bounds)
+    } else {
+        None
+    }
+}
 /// Derive decoration geometry from shaped visual fragments, including bidi and wrapping.
 pub fn rich_decorations(buffer: &Buffer, rich: &zgx::rich_text::RichText) -> Vec<RichDecoration> {
     rich_decorations_in(buffer.layout_runs(), &line_starts(buffer), rich)
@@ -2472,6 +2506,16 @@ pub fn rich_decorations_in<'a>(
                     } else {
                         Rect::new(left, line.line_top, right - left, line.line_height)
                     };
+                    // A run of word joiners alone keeps room in its line
+                    // (an icon's, a span's padding beside it): its
+                    // background and its neighbour's, the same and touching
+                    // on its line, are one wash (a chip's), not three.
+                    if let Some(joined) =
+                        joined_wash(&mut output, rich, index, bounds, color, run.radius)
+                    {
+                        *joined = joined.union(bounds);
+                        continue;
+                    }
                     output.push(RichDecoration {
                         bounds,
                         color,
@@ -2560,5 +2604,71 @@ mod monospace_fallback_tests {
             "{:?}",
             face.post_script_name
         );
+    }
+}
+
+#[cfg(test)]
+mod wash_tests {
+    use super::*;
+    use zgx::{
+        rich_text::{RichText, TextRun},
+        scene::Color,
+    };
+
+    fn run(range: std::ops::Range<usize>, wash: Option<(Color, [f32; 2])>) -> TextRun {
+        TextRun {
+            range,
+            background: wash.map(|(color, _)| color),
+            padding: wash.map_or([0.; 2], |(_, padding)| padding),
+            radius: if wash.is_some() { 5. } else { 0. },
+            font_size: 18.,
+            ..Default::default()
+        }
+    }
+    fn washes(rich: &RichText) -> Vec<Rect> {
+        let mut fonts = FontSystem::new();
+        let buffer = rich_buffer(&mut fonts, rich, Some(600.), None);
+        rich_decorations(&buffer, rich)
+            .into_iter()
+            .filter(|d| d.background)
+            .map(|d| d.bounds)
+            .collect()
+    }
+
+    /// A chip with an icon is runs of its own (the icon's room, its text,
+    /// the padding after it): they wash as one, not three. Spans side by
+    /// side, the same colour, each keep theirs.
+    #[test]
+    fn a_chips_icon_text_and_padding_wash_as_one() {
+        let red = Color(255, 0, 0, 255);
+        let text = "Look at \u{2060}chat.rs\u{2060} please";
+        let (icon, name) = (8..11, 11..18);
+        let rich = RichText::new(
+            text,
+            vec![
+                run(0..8, None),
+                run(icon, Some((red, [11., 2.]))),
+                run(name.clone(), Some((red, [0., 2.]))),
+                run(18..21, Some((red, [2., 2.]))),
+                run(21..text.len(), None),
+            ],
+        )
+        .unwrap();
+        let found = washes(&rich);
+        assert_eq!(found.len(), 1, "one wash: {found:?}");
+        let alone = RichText::new("chat.rs", vec![run(0..7, Some((red, [0., 2.])))]).unwrap();
+        assert!(
+            found[0].width > washes(&alone)[0].width + 20.,
+            "it holds the icon and padding"
+        );
+        let apart = RichText::new(
+            "ab",
+            vec![
+                run(0..1, Some((red, [0., 2.]))),
+                run(1..2, Some((red, [0., 2.]))),
+            ],
+        )
+        .unwrap();
+        assert_eq!(washes(&apart).len(), 2, "two spans side by side: two");
     }
 }

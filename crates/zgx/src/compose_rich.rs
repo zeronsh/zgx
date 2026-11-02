@@ -120,6 +120,8 @@ pub(crate) struct SpanExtras {
     pub hover: Option<SpanHover>,
     pub icon: Option<SpanIcon>,
     pub menu: Option<SpanMenu>,
+    /// Not underlined, though a link (`TextSpan::no_underline`).
+    pub plain: bool,
 }
 /// How a link span looks under the pointer (`TextSpan::hover`): CSS's
 /// `a:hover { text-decoration: underline }`.
@@ -173,8 +175,15 @@ impl TextSpan {
         self.radius = radius.max(0.);
         self
     }
+    /// Not underlined, though it is a link (`on_click`, `href`), which
+    /// otherwise is unless it has a `hover` style: a chip that is clicked.
+    pub fn no_underline(mut self) -> Self {
+        self.underline = None;
+        self.extras.get_or_insert_default().plain = true;
+        self
+    }
     /// Make this span a keyboard-accessible link with shaped hit regions,
-    /// underlined unless it has a `hover` style.
+    /// underlined unless it has a `hover` style or `no_underline`.
     pub fn on_click(self, mut callback: impl FnMut() + 'static) -> Self {
         self.on_click_with(move |_| callback())
     }

@@ -7415,7 +7415,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         size: Option<f32>,
         weight: Option<u16>,
         italic: bool,
-        underline: bool,
+        underline: Option<bool>,
         strike: bool,
         padding: [f32; 2],
         radius: f32,
@@ -7496,7 +7496,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         "weight" => style.weight = number.map(|weight| weight as u16),
                         "bold" => style.weight = on.then_some(700),
                         "italic" => style.italic = on,
-                        "underline" => style.underline = on,
+                        "underline" => style.underline = Some(on),
                         "strike" => style.strike = on,
                         _ => {
                             if let Some(Lit::Str(name)) = lit {
@@ -7552,7 +7552,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 if let Some(lang) = &span.lang {
                     out = out.lang(&**lang);
                 }
-                if underline {
+                if underline == Some(true) {
                     out = out.underline(decoration());
                 }
                 if let Some(color) = underline_color {
@@ -7585,6 +7585,10 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         run(&handler, &vm, &actions, keys)
                             .is_some_and(|v| v.as_boolean() == Some(true))
                     });
+                    // A link, otherwise underlined: `underline = false` too.
+                    if underline == Some(false) {
+                        out = out.no_underline();
+                    }
                 }
                 let rare = span.rare.as_deref();
                 if let Some(build) = rare.and_then(|rare| rare.menu.as_ref()) {
@@ -7593,6 +7597,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 }
                 if let Some(href) = &span.href {
                     out = out.href(href.clone());
+                    if underline == Some(false) {
+                        out = out.no_underline();
+                    }
                 }
                 if let Some(icon) = rare.and_then(|rare| rare.icon.as_ref()) {
                     // Tracked: a remote icon shows once it comes.

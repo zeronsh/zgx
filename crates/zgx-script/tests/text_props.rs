@@ -135,6 +135,9 @@ fn a_span_keeps_every_option_it_is_given() {
             },
             ui.span { "d", href = "https://zgx.zeron.sh", hover = { underline = true } },
             ui.span { "e", font = "mono", underline = true },
+            ui.span { "f", on_click = function() end },
+            ui.span { "g", on_click = function() end, underline = false },
+            ui.span { "h", underline = false, underline_color = "#778899" },
         }"##,
     );
     h.frames(1);
@@ -167,6 +170,14 @@ fn a_span_keeps_every_option_it_is_given() {
     assert!(run("c").underline.is_some(), "underlined by its style");
     assert!(run("e").underline.is_some());
     assert!(format!("{:?}", run("e").font.family).contains("Monospace"));
+    // A link is underlined at rest, unless `underline = false` says not;
+    // and that says not over an underline's style.
+    assert!(run("f").underline.is_some(), "a link");
+    assert!(run("g").underline.is_none(), "a link not underlined");
+    assert!(
+        run("h").underline.is_none(),
+        "not underlined, though styled"
+    );
 }
 
 /// A span's table is read as an element's is, a plain table: what its
