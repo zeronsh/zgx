@@ -8,6 +8,9 @@
 //!   binds (`clear_screen`);
 //! - ⌘⇧L, a zgx key binding that is in no menu.
 //!
+//! Then ⌘ alone, down and up (`flagsChanged:`), which `Ui::modifiers`
+//! follows whatever has the keyboard: `MODIFIERS <held> focus=<who>`.
+//!
 //! Each is pressed with zgx's own box focused, then the page, then (with
 //! `--features ghostty`) a terminal. It prints `ACTION <name> focus=<who>`
 //! for each app action that fired, `PAGE <key> focus=<who>` for what the
@@ -142,16 +145,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 binding
             };
             let keymap = cx.ui.input.bind_keys(root, Keymap::new().bind(binding));
+            // The modifier keys held, as `Ui::modifiers` follows them.
+            let held = cx.ui.modifiers();
+            let heard = focus.clone();
+            let modifiers = cx.ui.runtime.effect(move || {
+                let m = held.get();
+                let names: Vec<&str> = [(m.shift, "shift"), (m.alt, "alt"), (m.meta, "meta")]
+                    .into_iter()
+                    .filter_map(|(down, name)| down.then_some(name))
+                    .collect();
+                let names = if names.is_empty() {
+                    "none".into()
+                } else {
+                    names.join("+")
+                };
+                println!("MODIFIERS {names} focus={}", heard.borrow());
+            });
             let own = view.find("own").unwrap();
             let ui = cx.ui.downgrade();
             let window = cx.window.clone();
             cx.tasks.spawn(async move {
-                let _keep = (page, keymap);
+                let _keep = (page, keymap, modifiers);
                 let pause = |ms| zgx::timer::sleep(std::time::Duration::from_millis(ms));
                 let press_all = || {
                     keys::press("u", 32, true, false);
                     keys::press("k", 40, true, false);
                     keys::press("l", 37, true, true);
+                    keys::command_alone();
                 };
                 pause(2500).await;
                 if ime {
@@ -275,6 +295,31 @@ mod keys {
             app.postEvent_atStart(&event, false);
         }
     }
+    /// ⌘ alone, down and up (left Command, key code 55): `flagsChanged:`
+    /// events posted to this app's own queue.
+    pub fn command_alone() {
+        let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        let Some(window) = app.keyWindow() else {
+            println!("NO_KEY_WINDOW");
+            return;
+        };
+        for flags in [NSEventModifierFlags::Command, NSEventModifierFlags::empty()] {
+            let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                NSEventType::FlagsChanged,
+                NSPoint::new(0., 0.),
+                flags,
+                NSProcessInfo::processInfo().systemUptime(),
+                window.windowNumber(),
+                None,
+                &NSString::from_str(""),
+                &NSString::from_str(""),
+                false,
+                55,
+            )
+            .unwrap();
+            app.postEvent_atStart(&event, false);
+        }
+    }
     /// Whether the app hid and its window minimized (what ⌘H and ⌘M do),
     /// then the app shown and the window restored again.
     pub fn report_standard() {
@@ -361,6 +406,7 @@ mod keys {
 #[cfg(not(target_os = "macos"))]
 mod keys {
     pub fn press(_: &str, _: u16, _: bool, _: bool) {}
+    pub fn command_alone() {}
     pub fn first_responder() {}
     pub fn report_standard() {}
     pub fn japanese() -> Option<()> {

@@ -4316,8 +4316,16 @@ impl Host {
                     alt: s.alt_key(),
                     meta: s.super_key(),
                 };
-                // A modifier alone too: `Ui::modifiers` changes with it.
-                zgx::input::set_held_modifiers(&self.context.ui.runtime, self.modifiers);
+                // A modifier alone too: `Ui::modifiers` changes with it. On
+                // macOS with native views, their monitor writes it instead
+                // (`modifiers_watched`): this can be a key a page handed back.
+                #[cfg(target_os = "macos")]
+                let watched = crate::native_host::modifiers_watched();
+                #[cfg(not(target_os = "macos"))]
+                let watched = false;
+                if !watched {
+                    zgx::input::set_held_modifiers(&self.context.ui.runtime, self.modifiers);
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let p = position.to_logical::<f32>(self.scale_factor);

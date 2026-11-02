@@ -12,6 +12,7 @@ all three; ⌘U and ⌘⇧L, which it leaves alone, still reach the app, and ⌘
 which it takes, does not. With the terminal focused, ⌘U and ⌘⇧L reach the
 app and ⌘K stays Ghostty's. AppKit's own menu keys still act with each
 part focused: ⌘H hides the app, ⌘M minimizes the window, ⌘Q quits.
+And ⌘ alone, down and up, reaches `Ui::modifiers` with each part focused.
 
 The keys go to the app's own queue (`-[NSApplication postEvent:atStart:]`),
 not the system: the user's keyboard and other apps hear nothing. It is
@@ -80,6 +81,7 @@ def main():
         return 2
     actions = set(re.findall(r'^ACTION (\S+) focus=(\S+)$', out, re.M))
     pages = set(re.findall(r'^PAGE (.+) focus=web$', out, re.M))
+    held = re.findall(r'^MODIFIERS (\S+) focus=(\S+)$', out, re.M)
     checks = {
         'zgx: the unused menu key': ('unused', 'zgx') in actions,
         'zgx: the menu key a view uses': ('used', 'zgx') in actions,
@@ -89,12 +91,16 @@ def main():
         'page: a binding in no menu falls through': ('binding', 'web') in actions,
         'page: the key it took stays its': ('used', 'web') not in actions,
         'done': 'KEY_ROUTING_DONE' in out,
+        'zgx: Ui::modifiers follows ⌘ alone': {('meta', 'zgx'), ('none', 'zgx')} <= set(held),
+        'page: Ui::modifiers follows ⌘ alone': {('meta', 'web'), ('none', 'web')} <= set(held),
+        'nothing left held': bool(held) and held[-1][0] == 'none',
     }
     if args.ghostty:
         checks.update({
             'terminal: an unused menu key falls through': ('unused', 'terminal') in actions,
             'terminal: a binding in no menu reaches the app': ('binding', 'terminal') in actions,
             "terminal: Ghostty's binding stays its": ('used', 'terminal') not in actions,
+            'terminal: Ui::modifiers follows ⌘ alone': {('meta', 'terminal'), ('none', 'terminal')} <= set(held),
         })
     for (key, part), (code, text) in standard.items():
         name = {'h': 'hides the app', 'm': 'minimizes the window', 'q': 'quits'}[key]
@@ -103,7 +109,7 @@ def main():
         else:
             ok = code == 0 and ('HIDDEN true' if key == 'h' else 'MINIMIZED true') in text
         checks[f'{part}: ⌘{key.upper()} {name}'] = ok
-    print('\n'.join(line for line in out.splitlines() if re.match(r'(ACTION|PAGE|FIRST|NO_KEY) ', line)))
+    print('\n'.join(line for line in out.splitlines() if re.match(r'(ACTION|PAGE|FIRST|NO_KEY|MODIFIERS) ', line)))
     for name, ok in checks.items():
         print(('ok  ' if ok else 'FAIL') + ' ' + name)
     return 0 if all(checks.values()) else 1
