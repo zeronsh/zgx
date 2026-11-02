@@ -77,6 +77,9 @@ pub struct Incremental {
     /// The last top-level block's mending so far, and where that block
     /// starts: an append to it scans only what came.
     mender: Option<(usize, mend::Mender)>,
+    /// The long text (`Value::Text`) the source is, by its id (`Text::id`;
+    /// 0 for none): its next version is followed by what it inserted.
+    taken: u64,
 }
 
 /// A top-level element: where it starts, and the blocks it made (one, or
@@ -107,6 +110,7 @@ impl Incremental {
     /// The text so far: an append takes the incremental path, anything else
     /// parses afresh.
     pub fn set_text(&mut self, text: &str) {
+        self.taken = 0;
         if text.len() >= self.source.len() && text.starts_with(self.source.as_str()) {
             let delta = &text[self.source.len()..];
             if delta.is_empty() {
@@ -117,6 +121,46 @@ impl Incremental {
         } else {
             self.reset(text);
         }
+    }
+    /// The text a state holds. A long text (`Value::Text`) that grew from
+    /// the one taken last, by inserts at its end (`state:append`), is
+    /// parsed from those alone: the document is neither copied nor compared
+    /// again. Anything else is [`set_text`](Self::set_text)'s.
+    pub fn set_value(&mut self, value: &Value) {
+        let Value::Text(text) = value else {
+            return match value {
+                Value::Str(text) => self.set_text(text),
+                other => self.set_text(&other.to_string()),
+            };
+        };
+        if self.taken != 0
+            && let Some(inserts) = text.inserts_since(self.taken)
+        {
+            // Each at the end of the text before it.
+            let mut end = self.source.len();
+            let at_end = inserts.clone().all(|(at, inserted)| {
+                let ok = at == end;
+                end += inserted.len();
+                ok
+            });
+            if at_end && end == text.len() {
+                let mut inserts = inserts.map(|(_, inserted)| inserted);
+                match (inserts.next(), inserts.next()) {
+                    (None, _) => self.last_parse_bytes = 0,
+                    (Some(one), None) => self.append(one),
+                    (Some(first), Some(second)) => {
+                        // A burst: parsed once, as one append.
+                        let mut delta = format!("{first}{second}");
+                        delta.extend(inserts);
+                        self.append(&delta);
+                    }
+                }
+                self.taken = text.id();
+                return;
+            }
+        }
+        self.set_text(&text.to_cow());
+        self.taken = text.id();
     }
     fn reset(&mut self, text: &str) {
         self.mender = None;
@@ -1150,6 +1194,68 @@ mod tests {
                 .all(|(a, b)| same(a, b)),
             "the blocks before the tail are the same values"
         );
+    }
+
+    #[test]
+    fn a_long_text_streamed_in_is_parsed_by_its_inserts() {
+        let mut long = String::new();
+        for i in 0..200 {
+            long.push_str(&format!("Paragraph {i} with some words.\n\n"));
+        }
+        let mut text = zgx::text::Text::new(&long);
+        let mut parser = Incremental::new(plain());
+        parser.set_value(&Value::Text(text.clone()));
+        let mut whole = long.clone();
+        // A token at a time: each parses the tail alone.
+        for (i, chunk) in CORPUS.as_bytes().chunks(7).enumerate() {
+            let chunk = std::str::from_utf8(chunk).unwrap();
+            text.append(chunk);
+            whole.push_str(chunk);
+            parser.set_value(&Value::Text(text.clone()));
+            assert!(
+                parser.last_parse_bytes() < 400,
+                "token {i}: only the tail, not {} bytes",
+                parser.last_parse_bytes()
+            );
+        }
+        assert_eq!(parser.source(), whole);
+        assert_eq!(parser.blocks(), parse(&whole, &plain()));
+        // The same text again: nothing to do.
+        parser.set_value(&Value::Text(text.clone()));
+        assert_eq!(parser.last_parse_bytes(), 0);
+        // A burst between reads: parsed once, from its inserts.
+        for token in ["One ", "more ", "line.\n"] {
+            text.append(token);
+            whole.push_str(token);
+        }
+        parser.set_value(&Value::Text(text.clone()));
+        assert!(parser.last_parse_bytes() < 400);
+        assert_eq!(parser.blocks(), parse(&whole, &plain()));
+        // More edits than a text keeps: read whole, and followed again after.
+        for i in 0..40 {
+            let token = format!("w{i} ");
+            text.append(&token);
+            whole.push_str(&token);
+        }
+        parser.set_value(&Value::Text(text.clone()));
+        assert_eq!(parser.blocks(), parse(&whole, &plain()));
+        text.append("tail");
+        whole.push_str("tail");
+        parser.set_value(&Value::Text(text.clone()));
+        assert!(parser.last_parse_bytes() < 400);
+        assert_eq!(parser.blocks(), parse(&whole, &plain()));
+        // An edit before the end: read whole.
+        text.replace_range(0..9, "Section");
+        whole.replace_range(0..9, "Section");
+        parser.set_value(&Value::Text(text.clone()));
+        assert_eq!(parser.source(), whole);
+        assert_eq!(parser.blocks(), parse(&whole, &plain()));
+        // A plain string between: the long text that follows is read whole.
+        parser.set_value(&Value::from("short"));
+        text.append(" end");
+        whole.push_str(" end");
+        parser.set_value(&Value::Text(text.clone()));
+        assert_eq!(parser.blocks(), parse(&whole, &plain()));
     }
 
     #[test]

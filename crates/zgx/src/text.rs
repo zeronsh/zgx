@@ -173,20 +173,33 @@ impl Text {
     }
     /// Which text this is: the same number for it and its clones, a new one
     /// for each text made or edited.
-    pub(crate) fn id(&self) -> u64 {
+    pub fn id(&self) -> u64 {
         self.0.id
     }
     /// The edits that made this text from the one `id` names, earliest
     /// first, if its log reaches back to it: none for this text itself,
     /// `None` for a text it doesn't follow (its log dropped it, or it
     /// never was).
-    pub(crate) fn edits_since(&self, id: u64) -> Option<impl Iterator<Item = &TextDelta>> {
+    pub(crate) fn edits_since(
+        &self,
+        id: u64,
+    ) -> Option<std::collections::vec_deque::Iter<'_, TextDelta>> {
         let edits = &self.0.log.edits;
         let from = match id == self.0.id {
             true => edits.len(),
             false => edits.iter().position(|edit| edit.before == id)?,
         };
         Some(edits.range(from..))
+    }
+    /// What was inserted to make this text from the one `id` names, where
+    /// (the byte it went in at, then), earliest first, if its log reaches
+    /// back to that one and nothing was removed since: a reader that took
+    /// that text follows this one by these alone (a reply streamed in,
+    /// each token where it ends). `None` otherwise: read it whole.
+    pub fn inserts_since(&self, id: u64) -> Option<impl Iterator<Item = (usize, &str)> + Clone> {
+        let edits = self.edits_since(id)?;
+        let inserts = edits.clone().all(|edit| edit.old_len == 0);
+        inserts.then(|| edits.map(|edit| (edit.start, &*edit.inserted)))
     }
     /// Whether `other` is this same text (a clone of it), not just equal.
     pub fn ptr_eq(&self, other: &Text) -> bool {
@@ -692,6 +705,23 @@ mod tests {
         assert_ne!(c.id(), a.id());
         assert_eq!(a.to_cow(), "hello", "the original is as it was");
         assert_ne!(Text::new("hello").id(), a.id(), "an equal text is another");
+    }
+
+    #[test]
+    fn a_text_grown_by_inserts_lists_them_and_one_cut_lists_none() {
+        let start = Text::new("ab");
+        let mut text = start.clone();
+        text.append("c");
+        text.replace_range(0..0, "<");
+        let inserts: Vec<_> = text.inserts_since(start.id()).unwrap().collect();
+        assert_eq!(inserts, [(2, "c"), (0, "<")]);
+        assert_eq!(text.inserts_since(text.id()).unwrap().count(), 0);
+        text.replace_range(0..1, "");
+        assert!(text.inserts_since(start.id()).is_none(), "a removal");
+        assert!(
+            text.inserts_since(Text::new("x").id()).is_none(),
+            "not followed"
+        );
     }
 
     #[test]
