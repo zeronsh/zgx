@@ -831,3 +831,54 @@ fn a_pages_file_input_asks_the_windows_file_dialog_and_always_hears_back() {
     assert_eq!(replies.borrow().len(), 5);
     assert_eq!(replies.borrow()[4], None);
 }
+
+/// A page's find goes to its platform page, which answers it; with none
+/// yet, or for no text, it finds nothing at once.
+#[test]
+fn find_asks_the_platforms_page_and_always_answers() {
+    use std::cell::Cell;
+    use zgx::web_view::{FindOptions, FindResult};
+    struct Finder(RefCell<Vec<(String, bool, bool)>>, Cell<u32>);
+    impl WebViewBackend for Finder {
+        fn run(&self, _: WebViewCommand) {}
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn find(&self, text: &str, options: &FindOptions, reply: Box<dyn FnOnce(FindResult)>) {
+            self.0
+                .borrow_mut()
+                .push((text.to_owned(), options.backwards, options.case_sensitive));
+            let mut found = FindResult::default();
+            found.found = true;
+            found.matches = Some(3);
+            reply(found);
+        }
+        fn clear_find(&self) {
+            self.1.set(self.1.get() + 1);
+        }
+    }
+    let ui = Ui::new(100., 100.);
+    let web = WebView::new(&ui.runtime, WebViewOptions::default());
+    let answers: Rc<RefCell<Vec<FindResult>>> = Rc::default();
+    let ask = |text: &str, options: FindOptions| {
+        let answers = answers.clone();
+        web.find(text, options, move |found| answers.borrow_mut().push(found));
+    };
+    // No platform page yet: nothing found, at once.
+    ask("word", FindOptions::default());
+    assert_eq!(*answers.borrow(), [FindResult::default()]);
+    let finder = Rc::new(Finder(RefCell::default(), Cell::new(0)));
+    web.attach(finder.clone());
+    ask(
+        "word",
+        FindOptions::default().backwards(true).case_sensitive(true),
+    );
+    // No text: nothing to find, the page not asked.
+    ask("", FindOptions::default());
+    assert_eq!(*finder.0.borrow(), [("word".to_owned(), true, true)]);
+    assert_eq!(answers.borrow().len(), 3);
+    assert!(answers.borrow()[1].found && answers.borrow()[1].matches == Some(3));
+    assert!(!answers.borrow()[2].found);
+    web.clear_find();
+    assert_eq!(finder.1.get(), 1);
+}

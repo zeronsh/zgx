@@ -584,6 +584,12 @@ Unlike macOS:
 As with WebKit without delegates for them, pages save no downloads and get no
 permission (camera, microphone, location, notifications, clipboard reads).
 
+WebView2's browser keys are off (`AreBrowserAcceleratorKeysEnabled`): Ctrl+F,
+F3, Ctrl+P, Ctrl+R, F5, zoom, Alt+arrows and F12 reach the page, and the
+app's bindings when the page leaves them alone, as on macOS and Linux.
+Editing keys (Ctrl+C, X, V, A, Z, Y) stay the page's. `WebView::find` finds
+in the page (WebView2's find, its own bar suppressed), counting matches.
+
 `scripts/windows_webview_smoke.py` checks the page against zgx content
 around and over it.
 

@@ -41,6 +41,7 @@ A web view (`zgx::web_view`, `ui.webview`) is the platform's own page, laid out 
 | Full screen (`requestFullscreen`) | WebKit's window over the screen | the element fills the node | the element fills the node |
 | File inputs (`<input type=file>`) | the window's file dialog, a sheet | WebView2's picker | the window's file dialog (the desktop portal's, or zenity's) |
 | Printing (`WebView::print`, the page's `window.print()`) | the print panel, a sheet on the window | WebView2's print preview | GTK's print dialog, transient for the window on X11 |
+| Find in page (`WebView::find`) | WebKit's, without a count of matches | WebView2's, counting matches; its own find bar and browser keys off | WebKit's, counting matches (up to 1,000) |
 | Missing engine | — | placeholder | placeholder (the library is opened as the first page shows) |
 
 Linux's choice: Wayland cannot embed another client's surface, an X11 child window can't be faded or rounded smoothly or covered by translucent zgx content, and WPE WebKit isn't packaged on Ubuntu 24.04; drawing offscreen behaves the same on X11 and Wayland. See [the Linux notes](linux.md#web-views).

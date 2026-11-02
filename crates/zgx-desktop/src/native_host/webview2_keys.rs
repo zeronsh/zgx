@@ -9,8 +9,9 @@
 //! post the same message, so the host takes one only as a key it saw
 //! pressed: WebView2's `AcceleratorKeyPressed` for that page within the
 //! last second, the same key and modifiers, each taken once
-//! ([`Pressed`]). The browser's own keys (editing, find, print, reload,
-//! zoom, history, devtools) stay the browser's ([`browsers`]).
+//! ([`Pressed`]). Editing keys stay the browser's ([`browsers`]); its
+//! browser keys (find, print, reload, zoom, history, devtools) are off, so
+//! those reach the app as on macOS and Linux.
 #![cfg_attr(not(windows), allow(dead_code))]
 use std::time::{Duration, Instant};
 use zgx::input::{Key, Modifiers};
@@ -258,10 +259,11 @@ fn key_of(key: &str, code: &str, modifiers: Modifiers) -> Option<Key> {
     })
 }
 
-/// Whether `key` with `modifiers` is the browser's in a page: editing
-/// (cut, copy, paste, select all, undo, redo) and WebView2's browser keys
-/// (find, print, reload, zoom, back and forward, devtools), which act
-/// whatever the page does and so never also reach the app.
+/// Whether `key` with `modifiers` is the browser's in a page: editing (cut,
+/// copy, paste, select all, undo, redo), which acts whatever the page does
+/// and so never also reaches the app. WebView2's browser keys (find, print,
+/// reload, zoom, back and forward, devtools) are off
+/// (`AreBrowserAcceleratorKeysEnabled`): the app's, as on macOS and Linux.
 pub(super) fn browsers(key: &Key, modifiers: Modifiers) -> bool {
     let Modifiers {
         control,
@@ -275,15 +277,11 @@ pub(super) fn browsers(key: &Key, modifiers: Modifiers) -> bool {
     let ctrl_only = control && !alt;
     match key {
         Key::Character(c) if ctrl_only => matches!(
-            (c.to_ascii_lowercase().as_str(), shift),
-            ("c" | "x" | "v" | "a" | "z" | "y" | "f" | "g" | "p" | "r", _)
-                | ("i" | "j", true)
-                | ("=" | "+" | "-" | "0", _)
+            c.to_ascii_lowercase().as_str(),
+            "c" | "x" | "v" | "a" | "z" | "y"
         ),
         Key::Insert => (ctrl_only && !shift) || (shift && !control && !alt),
         Key::Delete => shift && !control && !alt,
-        Key::ArrowLeft | Key::ArrowRight => alt && !control,
-        Key::Function(3 | 5 | 12) => !alt,
         _ => false,
     }
 }
@@ -406,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn editing_and_the_browsers_keys_stay_the_browsers() {
+    fn editing_stays_the_browsers_and_its_browser_keys_are_the_apps() {
         let shift = |m: Modifiers| Modifiers { shift: true, ..m };
         let alt = Modifiers {
             alt: true,
@@ -417,20 +415,21 @@ mod tests {
             (c("c"), ctrl()),
             (c("V"), ctrl()),
             (c("z"), shift(ctrl())),
+            (Key::Insert, shift(Modifiers::default())),
+        ] {
+            assert!(browsers(&key, modifiers), "{key:?} {modifiers:?}");
+        }
+        for (key, modifiers) in [
             (c("f"), ctrl()),
             (c("p"), ctrl()),
             (c("r"), ctrl()),
             (c("i"), shift(ctrl())),
             (c("="), ctrl()),
             (c("0"), ctrl()),
+            (Key::Function(3), Modifiers::default()),
             (Key::Function(5), Modifiers::default()),
             (Key::Function(12), Modifiers::default()),
             (Key::ArrowLeft, alt),
-            (Key::Insert, shift(Modifiers::default())),
-        ] {
-            assert!(browsers(&key, modifiers), "{key:?} {modifiers:?}");
-        }
-        for (key, modifiers) in [
             (c("u"), ctrl()),
             (c("k"), ctrl()),
             (c("l"), shift(ctrl())),

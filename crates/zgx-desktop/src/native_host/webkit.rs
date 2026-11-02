@@ -1184,6 +1184,45 @@ impl WebViewBackend for MacWebView {
     fn print(&self) {
         print_page(&self.view);
     }
+    fn find(
+        &self,
+        text: &str,
+        options: &zgx::web_view::FindOptions,
+        reply: Box<dyn FnOnce(zgx::web_view::FindResult)>,
+    ) {
+        let mtm = MainThreadMarker::from(&*self.view);
+        let reply = Cell::new(Some(reply));
+        // SAFETY: WKWebView's find (macOS 11) on the main thread, where
+        // WebKit calls the completion, with the result it passes.
+        unsafe {
+            let config = objc2_web_kit::WKFindConfiguration::new(mtm);
+            config.setBackwards(options.backwards);
+            config.setCaseSensitive(options.case_sensitive);
+            config.setWraps(true);
+            let done = block2::RcBlock::new(
+                move |result: std::ptr::NonNull<objc2_web_kit::WKFindResult>| {
+                    let found = result.as_ref().matchFound();
+                    if let Some(reply) = reply.take() {
+                        let mut result = zgx::web_view::FindResult::default();
+                        result.found = found;
+                        reply(result);
+                    }
+                },
+            );
+            self.view.findString_withConfiguration_completionHandler(
+                &NSString::from_str(text),
+                Some(&config),
+                &done,
+            );
+        }
+    }
+    fn clear_find(&self) {
+        // WebKit selects a match as it finds it, and has no call to stop.
+        self.run(WebViewCommand::Evaluate {
+            script: "window.getSelection().removeAllRanges()".into(),
+            reply: None,
+        });
+    }
 }
 impl Drop for MacWebView {
     fn drop(&mut self) {

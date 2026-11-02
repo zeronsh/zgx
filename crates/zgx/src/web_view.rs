@@ -431,6 +431,38 @@ impl std::fmt::Debug for WebViewCommand {
     }
 }
 
+/// How [`WebView::find`] searches. Matches wrap past the page's end.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FindOptions {
+    /// Toward the page's start, from the current match.
+    pub backwards: bool,
+    /// Letters' case must match.
+    pub case_sensitive: bool,
+}
+impl FindOptions {
+    /// Search toward the page's start.
+    pub fn backwards(mut self, backwards: bool) -> Self {
+        self.backwards = backwards;
+        self
+    }
+    /// Match letters' case.
+    pub fn case_sensitive(mut self, case_sensitive: bool) -> Self {
+        self.case_sensitive = case_sensitive;
+        self
+    }
+}
+/// What [`WebView::find`] found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FindResult {
+    /// The page has a match, now selected and scrolled to.
+    pub found: bool,
+    /// How many matches the page has, where the platform counts them
+    /// (Linux and Windows; `None` on macOS).
+    pub matches: Option<u32>,
+}
+
 /// A platform's page (implemented by the desktop host).
 pub trait WebViewBackend {
     /// Carry out `command`.
@@ -440,6 +472,14 @@ pub trait WebViewBackend {
     /// Show the platform's print dialog for the page (see
     /// [`WebView::print`]). One that can't prints nothing.
     fn print(&self) {}
+    /// Find `text` in the page (see [`WebView::find`]), calling `reply`
+    /// once. One that can't finds nothing.
+    fn find(&self, text: &str, options: &FindOptions, reply: Box<dyn FnOnce(FindResult)>) {
+        let _ = (text, options);
+        reply(FindResult::default());
+    }
+    /// Stop finding: no match stays selected (see [`WebView::clear_find`]).
+    fn clear_find(&self) {}
 }
 
 type Listener = Rc<RefCell<dyn FnMut(&WebViewEvent)>>;
@@ -789,6 +829,25 @@ impl WebView {
     pub fn print(&self) {
         if let Some(backend) = self.backend() {
             backend.print();
+        }
+    }
+    /// Find `text` in the page, as a browser's find bar does: the next
+    /// match from the current one (the previous with
+    /// [`FindOptions::backwards`]), wrapping past the end, is selected and
+    /// scrolled into view. `reply` gets whether there is one and, where the
+    /// platform counts them, how many. Asking again with the same text steps
+    /// to the next match. A page not showing yet finds nothing.
+    pub fn find(&self, text: &str, options: FindOptions, reply: impl FnOnce(FindResult) + 'static) {
+        match self.backend() {
+            Some(backend) if !text.is_empty() => backend.find(text, &options, Box::new(reply)),
+            _ => reply(FindResult::default()),
+        }
+    }
+    /// Stop finding: the match goes unselected and the platform's
+    /// highlights of the others go.
+    pub fn clear_find(&self) {
+        if let Some(backend) = self.backend() {
+            backend.clear_find();
         }
     }
     /// Open Web Inspector, when [`WebViewOptions::inspectable`].

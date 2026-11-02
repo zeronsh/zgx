@@ -512,6 +512,14 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     # which repaints the whole page once.
     if not session.wayland:
         checks["printed"] = print_checks(session)
+    # Find (reserved keys, the app's): the heading's word, twice (the next
+    # match), and a word the page hasn't.
+    for key in ("ctrl+f", "ctrl+f", "ctrl+g"):
+        session.key(key)
+    finds = session.wait(lambda: len(session.lines("FIND ")) >= 3 and session.lines("FIND "), "the page's find never answered")
+    if finds != ["Probe found=true matches=Some(1)"] * 2 + ["nowhere-in-the-page found=false matches=Some(0)"]:
+        raise AssertionError(f"found {finds}")
+    checks["found"] = finds
     for _ in range(3):
         session.click(300, 300, 5)
     scrolled = session.wait(lambda: [m for m in session.messages() if "scrolled" in m[0]], "the wheel never scrolled the page")

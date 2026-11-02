@@ -33,9 +33,9 @@ use zgx::{
     scene::{NodeId, Rect, Scene},
     style::Styled,
     web_view::{
-        NavigationKind, NavigationRequest, PageViews, SchemeHandler, SchemeRequest,
-        SchemeResponder, SchemeResponse, ScriptResult, WeakWebView, WebProfile, WebView,
-        WebViewBackend, WebViewCommand, WebViewEvent,
+        FindOptions, FindResult, NavigationKind, NavigationRequest, PageViews, SchemeHandler,
+        SchemeRequest, SchemeResponder, SchemeResponse, ScriptResult, WeakWebView, WebProfile,
+        WebView, WebViewBackend, WebViewCommand, WebViewEvent,
     },
     widgets::Ui,
 };
@@ -442,6 +442,14 @@ struct Page {
     images: RefCell<HashMap<String, Ptr>>,
     /// The X11 window the page's box is in, 0 for none known.
     window_xid: Cell<u64>,
+    /// The text and case WebKit's find controller last searched for, so
+    /// the same again steps to the next match.
+    finding: RefCell<Option<(String, bool)>>,
+    /// Finds asked and not answered yet, oldest first: WebKit answers each
+    /// search with one signal (`on_found`).
+    find_replies: RefCell<VecDeque<u64>>,
+    /// How many matches the last search counted.
+    find_count: Cell<Option<u32>>,
 }
 
 /// Defines `window.zgx.postMessage(value)`: what it posts carries the
@@ -695,6 +703,9 @@ impl Gtk {
                 context: RefCell::new(None),
                 images: RefCell::new(HashMap::new()),
                 window_xid: Cell::new(0),
+                finding: RefCell::new(None),
+                find_replies: RefCell::new(VecDeque::new()),
+                find_count: Cell::new(None),
             });
             let data = Rc::as_ptr(&page) as Ptr;
             let handler = |f: *const ()| std::mem::transmute::<*const (), gtk::GCallback>(f);
@@ -762,6 +773,23 @@ impl Gtk {
                 view,
                 "web-process-terminated",
                 handler(on_terminated as *const ()),
+                data,
+                false,
+            );
+            let finder = (api.webkit_web_view_get_find_controller)(view);
+            connect(
+                api,
+                finder,
+                "found-text",
+                handler(on_found as *const ()),
+                data,
+                false,
+            );
+            connect(
+                api,
+                finder,
+                "failed-to-find-text",
+                handler(on_not_found as *const ()),
                 data,
                 false,
             );
@@ -886,7 +914,16 @@ impl Gtk {
             let list = (api.webkit_web_view_get_back_forward_list)(page.view);
             let inspector = (api.webkit_web_view_get_inspector)(page.view);
             let gdk = (api.gtk_widget_get_window)(page.view);
-            for object in [page.window, page.view, page.content, list, inspector, gdk] {
+            let finder = (api.webkit_web_view_get_find_controller)(page.view);
+            for object in [
+                page.window,
+                page.view,
+                page.content,
+                list,
+                inspector,
+                gdk,
+                finder,
+            ] {
                 if object.is_null() {
                     continue;
                 }
@@ -1089,6 +1126,34 @@ impl Page {
                 (api.g_object_unref)(operation);
             }
         }
+    }
+    /// Answer the oldest find waiting with `result`, on the UI thread.
+    fn found(&self, reply: u64, result: FindResult) {
+        let id = self.id;
+        deliver(move || {
+            if let Some(page) = ui_page(id)
+                && let Some(reply) = page.finds.borrow_mut().remove(&reply)
+            {
+                reply(result);
+            }
+        });
+    }
+    /// WebKit answered the oldest search: `count` matches, or none found.
+    fn searched(&self, count: Option<u32>) {
+        let Some(reply) = self.find_replies.borrow_mut().pop_front() else {
+            return;
+        };
+        if let Some(count) = count.filter(|&count| count > 0) {
+            self.find_count.set(Some(count));
+        }
+        let mut result = FindResult::default();
+        result.found = count.is_some();
+        result.matches = if count.is_some() {
+            self.find_count.get()
+        } else {
+            Some(0)
+        };
+        self.found(reply, result);
     }
     fn post(&self, delivery: impl FnOnce(&WebView) + Send + 'static) {
         let id = self.id;
@@ -1389,6 +1454,50 @@ impl Page {
                 Command::Print => self.print(null_mut()),
                 Command::OpenDevtools => {
                     (api.webkit_web_inspector_show)((api.webkit_web_view_get_inspector)(view));
+                }
+                Command::Find {
+                    text,
+                    backwards,
+                    case_sensitive,
+                    reply,
+                } => {
+                    let finder = (api.webkit_web_view_get_find_controller)(view);
+                    self.find_replies.borrow_mut().push_back(reply);
+                    let search = (text, case_sensitive);
+                    if self.finding.borrow().as_ref() == Some(&search) {
+                        if backwards {
+                            (api.webkit_find_controller_search_previous)(finder);
+                        } else {
+                            (api.webkit_find_controller_search_next)(finder);
+                        }
+                    } else {
+                        let mut flags = gtk::WEBKIT_FIND_OPTIONS_WRAP_AROUND;
+                        if !case_sensitive {
+                            flags |= gtk::WEBKIT_FIND_OPTIONS_CASE_INSENSITIVE;
+                        }
+                        if backwards {
+                            flags |= gtk::WEBKIT_FIND_OPTIONS_BACKWARDS;
+                        }
+                        self.find_count.set(None);
+                        (api.webkit_find_controller_search)(
+                            finder,
+                            c(&search.0).as_ptr(),
+                            flags,
+                            MOST_MATCHES,
+                        );
+                        *self.finding.borrow_mut() = Some(search);
+                    }
+                }
+                Command::ClearFind => {
+                    (api.webkit_find_controller_search_finish)((api
+                        .webkit_web_view_get_find_controller)(
+                        view
+                    ));
+                    *self.finding.borrow_mut() = None;
+                    // Those still waiting found nothing.
+                    while let Some(reply) = self.find_replies.borrow_mut().pop_front() {
+                        self.found(reply, FindResult::default());
+                    }
                 }
                 Command::SetZoom(zoom) => {
                     self.zoom.set((zoom, self.zoom.get().1));
@@ -2522,6 +2631,18 @@ unsafe extern "C" fn attach_print_dialog(data: Ptr) -> gtk::gboolean {
         1
     }
 }
+/// Matches a search counts at most, as a browser's find bar shows "1000+".
+const MOST_MATCHES: c_uint = 1000;
+/// WebKit found the text searched for: `count` matches.
+unsafe extern "C" fn on_found(_: Ptr, count: c_uint, data: Ptr) {
+    // SAFETY: GTK passes this handler's page, on its thread.
+    unsafe { page(data) }.searched(Some(count));
+}
+/// WebKit found no match.
+unsafe extern "C" fn on_not_found(_: Ptr, data: Ptr) {
+    // SAFETY: as `on_found`.
+    unsafe { page(data) }.searched(None);
+}
 /// A `<select>`'s popup: drawn by zgx (`option_menu`), as GTK's own would
 /// open off the page.
 unsafe extern "C" fn on_option_menu(
@@ -3220,6 +3341,14 @@ enum Command {
     Window(u64),
     /// `WebView::print`: GTK's print dialog for the page.
     Print,
+    /// `WebView::find`, answered under `reply` (`UiPage::finds`).
+    Find {
+        text: String,
+        backwards: bool,
+        case_sensitive: bool,
+        reply: u64,
+    },
+    ClearFind,
     /// The box's size in device pixels, and device pixels a point.
     Size {
         width: u32,
@@ -3328,6 +3457,8 @@ fn ui_page(id: u64) -> Option<Rc<UiPage>> {
 
 /// What gets a script's result.
 type Reply = Box<dyn FnOnce(ScriptResult)>;
+/// What gets a find's answer.
+type FindReply = Box<dyn FnOnce(FindResult)>;
 /// A page, on the UI thread: what its controller, box and painter share.
 struct UiPage {
     id: u64,
@@ -3335,6 +3466,8 @@ struct UiPage {
     gpu: zgx::gpu_view::GpuView,
     schemes: Vec<SchemeHandler>,
     replies: RefCell<HashMap<u64, Reply>>,
+    /// What gets each find's answer, under the same ids as `replies`.
+    finds: RefCell<HashMap<u64, FindReply>>,
     next_reply: Cell<u64>,
     /// The box showing it, and its scene.
     node: Cell<Option<NodeId>>,
@@ -3775,6 +3908,21 @@ impl WebViewBackend for GtkWebView {
         self.0.send_window();
         self.0.send(Command::Print);
     }
+    fn find(&self, text: &str, options: &FindOptions, reply: Box<dyn FnOnce(FindResult)>) {
+        let page = &self.0;
+        let id = page.next_reply.get() + 1;
+        page.next_reply.set(id);
+        page.finds.borrow_mut().insert(id, reply);
+        page.send(Command::Find {
+            text: text.to_owned(),
+            backwards: options.backwards,
+            case_sensitive: options.case_sensitive,
+            reply: id,
+        });
+    }
+    fn clear_find(&self) {
+        self.0.send(Command::ClearFind);
+    }
 }
 impl Drop for GtkWebView {
     fn drop(&mut self) {
@@ -3827,6 +3975,7 @@ fn backend(
         }),
         schemes: schemes.clone(),
         replies: RefCell::new(HashMap::new()),
+        finds: RefCell::new(HashMap::new()),
         next_reply: Cell::new(0),
         node: Cell::new(None),
         scene: RefCell::new(Weak::new()),
