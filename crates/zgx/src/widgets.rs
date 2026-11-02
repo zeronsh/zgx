@@ -3355,33 +3355,34 @@ impl Ui {
                 } else {
                     Vec::new()
                 };
-                let bounds = if geometry_changed {
-                    self.storage
-                        .observed_bounds
-                        .borrow()
-                        .iter()
-                        .filter(|(node, _)| scene.contains(**node))
-                        .map(|(node, signal)| (*node, signal.clone(), scene.world_bounds(*node)))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                // Only those that moved: most observed nodes stay where they
+                // were as something else changes (a reply's last paragraph
+                // growing, the others not).
+                let mut bounds = Vec::new();
+                if geometry_changed {
+                    for (node, signal) in self.storage.observed_bounds.borrow().iter() {
+                        if scene.contains(*node) {
+                            let now = scene.world_bounds(*node);
+                            if signal.with_untracked(|told| *told != now) {
+                                bounds.push((*node, signal.clone(), now));
+                            }
+                        }
+                    }
+                }
                 (sizes, bounds)
             };
-            let visibility: Vec<_> = if geometry_changed {
+            let mut visibility = Vec::new();
+            if geometry_changed {
                 let scene = self.scene.borrow();
-                self.storage
-                    .observed_visibility
-                    .borrow()
-                    .iter()
-                    .filter(|(node, _)| scene.contains(**node))
-                    .map(|(node, signal)| {
-                        (*node, signal.clone(), scene.visible_bounds(*node).is_some())
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+                for (node, signal) in self.storage.observed_visibility.borrow().iter() {
+                    if scene.contains(*node) {
+                        let now = scene.visible_bounds(*node).is_some();
+                        if signal.with_untracked(|told| *told != now) {
+                            visibility.push((*node, signal.clone(), now));
+                        }
+                    }
+                }
+            }
             // Publish outside every storage/scene borrow: geometry subscribers can
             // mount, dispose, translate, or reenter frame preparation.
             self.runtime.batch(|| {
@@ -3392,14 +3393,22 @@ impl Ui {
                         signal.set(size);
                     }
                 }
+                // Changed, as gathered above (what reads them runs after
+                // the batch): set without comparing again.
                 for (node, signal, visible) in visibility {
                     if self.scene.borrow().contains(node) {
-                        signal.set(visible);
+                        signal.mutate(|told| {
+                            *told = visible;
+                            true
+                        });
                     }
                 }
                 for (node, signal, bounds) in bounds {
                     if self.scene.borrow().contains(node) {
-                        signal.set(bounds);
+                        signal.mutate(|told| {
+                            *told = bounds;
+                            true
+                        });
                     }
                 }
             });
