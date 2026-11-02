@@ -557,6 +557,58 @@ unsafe fn found(finder: &ICoreWebView2Find) -> FindResult {
     result.matches = u32::try_from(count).ok();
     result
 }
+/// Tell `status` how a download the app saves goes: its bytes as they
+/// come, then its end.
+///
+/// # Safety
+/// On the UI thread.
+unsafe fn follow_download(
+    operation: &ICoreWebView2DownloadOperation,
+    status: zgx::web_view::DownloadStatusFn,
+) {
+    let status = Rc::new(RefCell::new(status));
+    let mut token = 0;
+    // SAFETY: as the caller promises; WebView2 calls the handlers there.
+    unsafe {
+        let hear = status.clone();
+        let _ = operation.add_BytesReceivedChanged(
+            &BytesReceivedChangedEventHandler::create(Box::new(move |sender, _| {
+                if let Some(operation) = sender {
+                    let (mut received, mut total) = (0_i64, 0_i64);
+                    let _ = operation.BytesReceived(&mut received);
+                    let _ = operation.TotalBytesToReceive(&mut total);
+                    (hear.borrow_mut())(zgx::web_view::DownloadStatus::Progress {
+                        received: received.max(0) as u64,
+                        total: (total > 0).then_some(total as u64),
+                    });
+                }
+                Ok(())
+            })),
+            &mut token,
+        );
+        let _ = operation.add_StateChanged(
+            &StateChangedEventHandler::create(Box::new(move |sender, _| {
+                let Some(operation) = sender else {
+                    return Ok(());
+                };
+                let mut state = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+                let _ = operation.State(&mut state);
+                if state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
+                    (status.borrow_mut())(zgx::web_view::DownloadStatus::Finished);
+                } else if state == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED {
+                    let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE;
+                    let _ = operation.InterruptReason(&mut reason);
+                    (status.borrow_mut())(zgx::web_view::DownloadStatus::Failed(format!(
+                        "interrupted (WebView2 reason {})",
+                        reason.0
+                    )));
+                }
+                Ok(())
+            })),
+            &mut token,
+        );
+    }
+}
 impl Drop for Backend {
     fn drop(&mut self) {
         // The controller goes now (with the page's processes). Taken out
@@ -981,24 +1033,77 @@ impl Page {
                 )),
                 &mut token,
             );
-            // As WebKit with no delegate for them: pages save no files and
-            // get no permission (camera, location, notifications, the
-            // clipboard) in the app's name.
+            // As WebKit with no delegate for them: pages get no permission
+            // (camera, location, notifications, the clipboard) in the app's
+            // name. All but a page's further downloads, should WebView2 ask
+            // to let a page start more on its own: each is the app's to save
+            // or cancel (`DownloadStarting` below). (WebView2 also holds a
+            // page's second download started without a gesture back until
+            // it navigates, asking nothing: that is its own.)
             let _ = view.add_PermissionRequested(
                 &PermissionRequestedEventHandler::create(Box::new(|_, args| {
                     if let Some(args) = args {
-                        let _ = args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY);
+                        let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+                        let _ = args.PermissionKind(&mut kind);
+                        let _ = args.SetState(
+                            if kind == COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS {
+                                COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                            } else {
+                                COREWEBVIEW2_PERMISSION_STATE_DENY
+                            },
+                        );
                     }
                     Ok(())
                 })),
                 &mut token,
             );
+            // A download is the app's (`WebView::download`): saved where
+            // it says, or cancelled, as with no handler. WebView2's own
+            // download bar stays hidden.
             if let Ok(view) = view.cast::<ICoreWebView2_4>() {
+                let page = on.clone();
                 let _ = view.add_DownloadStarting(
-                    &DownloadStartingEventHandler::create(Box::new(|_, args| {
-                        if let Some(args) = args {
-                            let _ = args.SetCancel(true);
-                        }
+                    &DownloadStartingEventHandler::create(Box::new(move |_, args| {
+                        let Some(args) = args else { return Ok(()) };
+                        let _ = args.SetHandled(true);
+                        let operation = args.DownloadOperation()?;
+                        let suggested = take(|v| args.ResultFilePath(v));
+                        let request = zgx::web_view::DownloadRequest::new(
+                            take(|v| operation.Uri(v)),
+                            std::path::Path::new(&suggested)
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                            take(|v| operation.MimeType(v)),
+                        );
+                        let deferral = args.GetDeferral()?;
+                        page(&|page| {
+                            let (args, operation, deferral, request) = (
+                                args.clone(),
+                                operation.clone(),
+                                deferral.clone(),
+                                request.clone(),
+                            );
+                            page.post(move |web| {
+                                web.download(
+                                    request,
+                                    zgx::web_view::DownloadResponder::new(move |answer| {
+                                        match answer {
+                                            Some((path, status)) => {
+                                                let _ = args.SetResultFilePath(&HSTRING::from(
+                                                    path.as_os_str(),
+                                                ));
+                                                follow_download(&operation, status);
+                                            }
+                                            None => {
+                                                let _ = args.SetCancel(true);
+                                            }
+                                        }
+                                        let _ = deferral.Complete();
+                                    }),
+                                )
+                            });
+                        });
                         Ok(())
                     })),
                     &mut token,

@@ -140,6 +140,7 @@ pub(crate) struct WebSpec {
     pub on_message: Option<Function>,
     pub on_error: Option<Function>,
     pub on_new_window: Option<Function>,
+    pub on_download: Option<Function>,
 }
 
 /// `ui.web(opts)`: a web view's controller, usable before and after its
@@ -5695,6 +5696,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 on_message: handler("on_message")?,
                 on_error: handler("on_error")?,
                 on_new_window: handler("on_new_window")?,
+                on_download: handler("on_download")?,
             };
             // What the constructor read is not a style.
             for key in [
@@ -5715,6 +5717,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 "on_message",
                 "on_error",
                 "on_new_window",
+                "on_download",
             ] {
                 table.raw_set(key, mlua::Value::Nil)?;
             }

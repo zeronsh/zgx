@@ -497,3 +497,110 @@ fn a_dialog_asked_for_as_the_script_loads_opens_or_says_why_not() {
     assert!(error.contains("Capability::Files"), "{error}");
     assert!(h.desktop.clone().unwrap().asked().is_empty(), "no dialog");
 }
+
+/// A page's downloads are the script's (`on_download`): saved at a file
+/// the user picked, through the save dialog (`d:ask`), refused at a path
+/// the user didn't pick, or cancelled; how a saved one goes reaches its
+/// callbacks.
+#[test]
+fn a_pages_downloads_are_the_scripts_to_save_or_not() {
+    use zgx::{
+        native_view::NativeContent,
+        web_view::{DownloadRequest, DownloadResponder, DownloadStatus, DownloadStatusFn},
+    };
+    let dir = dir("downloads");
+    let mut h = app(
+        &dir,
+        r#"
+local shown = ui.state("shown", "")
+local function note(s) shown:set(shown:get() .. s .. ";") end
+return ui.column {
+    ui.text { id = "label", function() return shown:get() end },
+    ui.webview { id = "page", w = 100, h = 60, on_download = function(d)
+        note(`{d.name} {d.mime}`)
+        if d.name == "keep.txt" then
+            ui.task(function()
+                local file = ui.save_file({ name = d.name }):await()
+                d:save_to(file, {
+                    on_progress = function(got, total) note(`got {got}/{total}`) end,
+                    on_finish = function(ok) note(`finished {ok}`) end,
+                })
+            end)
+        elseif d.name == "ask.txt" then
+            ui.task(function()
+                local file = d:ask({ on_finish = function(ok, err) note(`failed {err}`) end }):await()
+                note(`asked {file.name}`)
+            end)
+        elseif d.name == "sneak.txt" then
+            note(`sneak {pcall(function() d:save_to("/etc/sneak.txt") end)}`)
+            d:cancel()
+        else
+            d:cancel()
+        end
+    end },
+}
+"#,
+        None,
+    );
+    h.ui.prepare_frame();
+    let node = h.find("page").unwrap();
+    let Some(NativeContent::Web(web)) = h.natives.content(node) else {
+        panic!("no page")
+    };
+    let answers: Rc<RefCell<Vec<Option<PathBuf>>>> = Rc::default();
+    let statuses: Rc<RefCell<Vec<DownloadStatusFn>>> = Rc::default();
+    let start = |name: &str, mime: &str| {
+        let (answers, statuses) = (answers.clone(), statuses.clone());
+        web.download(
+            DownloadRequest::new(format!("https://page.test/{name}"), name, mime),
+            DownloadResponder::new(move |answer| {
+                answers.borrow_mut().push(answer.map(|(path, status)| {
+                    statuses.borrow_mut().push(status);
+                    path
+                }))
+            }),
+        );
+    };
+    let settle = |h: &mut Harness, until: &dyn Fn(&str) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !until(&h.text("label")) {
+            assert!(
+                Instant::now() < deadline,
+                "label reads {:?} ({:?})",
+                h.text("label"),
+                h.host.error().get()
+            );
+            h.settle();
+            h.ui.prepare_frame();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    // Picked through the save dialog, then saved there; how it goes heard.
+    start("keep.txt", "text/plain");
+    settle(&mut h, &|label| {
+        !answers.borrow().is_empty() && label.contains("keep.txt")
+    });
+    assert_eq!(answers.borrow()[0], Some(dir.join("out.txt")));
+    (statuses.borrow_mut()[0])(DownloadStatus::Progress {
+        received: 5,
+        total: Some(9),
+    });
+    (statuses.borrow_mut()[0])(DownloadStatus::Finished);
+    settle(&mut h, &|label| label.contains("finished true"));
+    assert!(h.text("label").contains("got 5/9;"), "{}", h.text("label"));
+    // `d:ask()`: the save dialog suggesting its name, and the file saved to.
+    start("ask.txt", "text/plain");
+    settle(&mut h, &|label| label.contains("asked out.txt"));
+    assert_eq!(answers.borrow()[1], Some(dir.join("out.txt")));
+    (statuses.borrow_mut()[1])(DownloadStatus::Failed("offline".into()));
+    settle(&mut h, &|label| label.contains("failed offline"));
+    // A path the user didn't pick: refused, and the script cancels.
+    start("sneak.txt", "text/plain");
+    settle(&mut h, &|label| label.contains("sneak false"));
+    assert_eq!(answers.borrow()[2], None);
+    // Cancelled.
+    start("other.bin", "application/octet-stream");
+    settle(&mut h, &|_| answers.borrow().len() == 4);
+    assert_eq!(answers.borrow()[3], None);
+    assert_eq!(h.host.error().get(), None);
+}

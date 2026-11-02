@@ -480,3 +480,120 @@ pub(crate) fn install(
     )?;
     Ok(())
 }
+
+/// `on_download`'s `d`: a download the page started, for the script to save
+/// (`d:save_to(file)`, a file the user picked; `d:ask()`, the save dialog
+/// with its name) or not (`d:cancel()`). One left unanswered is cancelled
+/// as it's collected: a page saves nothing the app didn't decide on.
+pub(crate) struct DownloadUd {
+    request: zgx::web_view::DownloadRequest,
+    responder: RefCell<Option<zgx::web_view::DownloadResponder>>,
+}
+impl DownloadUd {
+    pub(crate) fn new(
+        request: zgx::web_view::DownloadRequest,
+        responder: zgx::web_view::DownloadResponder,
+    ) -> Self {
+        Self {
+            request,
+            responder: RefCell::new(Some(responder)),
+        }
+    }
+    fn take(&self, what: &str) -> mlua::Result<zgx::web_view::DownloadResponder> {
+        self.responder.borrow_mut().take().ok_or_else(|| {
+            mlua::Error::runtime(format!("{what}: this download was answered already"))
+        })
+    }
+}
+/// What hears a saved download's progress and end: `opts.on_progress(received,
+/// total)` (total nil where the server didn't say) and `opts.on_finish(ok,
+/// error)`, called on the script's thread.
+fn download_status(
+    lua: &Lua,
+    opts: Option<Table>,
+) -> mlua::Result<impl FnMut(zgx::web_view::DownloadStatus) + 'static> {
+    use zgx::web_view::DownloadStatus;
+    let vm = crate::node::env(lua)?.vm.clone();
+    let progress = opts
+        .as_ref()
+        .map(|o| o.get::<Option<mlua::Function>>("on_progress"))
+        .transpose()?
+        .flatten();
+    let finish = opts
+        .as_ref()
+        .map(|o| o.get::<Option<mlua::Function>>("on_finish"))
+        .transpose()?
+        .flatten();
+    Ok(move |status: DownloadStatus| {
+        let Some(vm) = vm.upgrade() else { return };
+        let result = match status {
+            DownloadStatus::Progress { received, total } => progress
+                .as_ref()
+                .map(|f| vm.call::<()>(f, (received as f64, total.map(|t| t as f64)))),
+            DownloadStatus::Finished => finish
+                .as_ref()
+                .map(|f| vm.call::<()>(f, (true, mlua::Value::Nil))),
+            DownloadStatus::Failed(why) => finish.as_ref().map(|f| vm.call::<()>(f, (false, why))),
+            _ => None,
+        };
+        if let Some(Err(e)) = result {
+            vm.report(e);
+        }
+    })
+}
+impl mlua::UserData for DownloadUd {
+    fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("url", |_, d| Ok(d.request.url.clone()));
+        fields.add_field_method_get("name", |_, d| Ok(d.request.name.clone()));
+        fields.add_field_method_get("mime", |_, d| Ok(d.request.mime.clone()));
+    }
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method(
+            "save_to",
+            |lua, d, (file, opts): (mlua::Value, Option<Table>)| {
+                let env = crate::node::env(lua)?;
+                if !env.grants.allows(&crate::Capability::Files) {
+                    return Err(denied("d:save_to", "Files"));
+                }
+                let path = chosen(&env.picked, &file, "d:save_to")?;
+                let status = download_status(lua, opts)?;
+                d.take("d:save_to")?.save_to(path, status);
+                Ok(())
+            },
+        );
+        // The save dialog, suggesting the download's name: a promise of
+        // the file saved to (`{ path, … }`), or nil if the person cancelled.
+        methods.add_method("ask", |lua, d, opts: Option<Table>| {
+            let env = crate::node::env(lua)?;
+            if !env.grants.allows(&crate::Capability::Files) {
+                return Err(denied("d:ask", "Files"));
+            }
+            let responder = d.take("d:ask")?;
+            let status = download_status(lua, opts)?;
+            let picker = zgx::platform::FilePicker {
+                title: "Save".into(),
+                file_name: Some(d.request.name.clone()),
+                ..Default::default()
+            };
+            let (shared, picked) = (env.platform.clone(), env.picked.clone());
+            let promise = pending(lua, "ask".into())?;
+            settle_with(lua, &promise, crate::errors::Kind::Io, async move {
+                let path = later(&shared, "d:ask")?.0.save_file(picker).await?;
+                let Some(path) = path else {
+                    responder.cancel();
+                    return Ok(Value::Nil);
+                };
+                picked.borrow_mut().insert(path.clone());
+                responder.save_to(path.clone(), status);
+                Ok(file_value(&path))
+            })?;
+            Ok(PromiseUd(promise))
+        });
+        methods.add_method("cancel", |_, d, ()| {
+            if let Some(responder) = d.responder.borrow_mut().take() {
+                responder.cancel();
+            }
+            Ok(())
+        });
+    }
+}

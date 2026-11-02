@@ -33,9 +33,10 @@ use zgx::{
     scene::{NodeId, Rect, Scene},
     style::Styled,
     web_view::{
-        FindOptions, FindResult, NavigationKind, NavigationRequest, PageViews, SchemeHandler,
-        SchemeRequest, SchemeResponder, SchemeResponse, ScriptResult, WeakWebView, WebProfile,
-        WebView, WebViewBackend, WebViewCommand, WebViewEvent,
+        DownloadRequest, DownloadResponder, DownloadStatus, FindOptions, FindResult,
+        NavigationKind, NavigationRequest, PageViews, SchemeHandler, SchemeRequest,
+        SchemeResponder, SchemeResponse, ScriptResult, WeakWebView, WebProfile, WebView,
+        WebViewBackend, WebViewCommand, WebViewEvent,
     },
     widgets::Ui,
 };
@@ -2430,22 +2431,229 @@ unsafe extern "C" fn on_terminated(_: Ptr, _: c_int, data: Ptr) {
         web.emit(WebViewEvent::ProcessTerminated);
     });
 }
-/// Pages save no files in the app's name, as macOS's and Windows's web
-/// views with no handler of the app's: each download a context starts (a
-/// `download` link, an attachment) is cancelled before it picks a file.
+/// Each download a context starts (a `download` link, an attachment) goes
+/// to its page's app (`WebView::download`), which saves it where it says
+/// or cancels it, as it does with no handler: a page saves no file into the
+/// person's folders unless the app decides it (as on macOS and Windows).
 ///
 /// # Safety
 /// On GTK's thread, `context` a live `WebKitWebContext`.
 unsafe fn refuse_downloads(api: &Api, context: Ptr) {
-    unsafe extern "C" fn cancel(_: Ptr, download: Ptr, _: Ptr) {
-        // SAFETY: GTK passes the download it just started, on its thread.
-        unsafe { (gtk::api().expect("GTK runs").webkit_download_cancel)(download) };
-    }
-    // SAFETY: as the caller promises; `cancel` has the signal's signature.
+    // SAFETY: as the caller promises; `on_download` has the signal's signature.
     unsafe {
-        let handler = std::mem::transmute::<*const (), gtk::GCallback>(cancel as *const ());
+        let handler = std::mem::transmute::<*const (), gtk::GCallback>(on_download as *const ());
         connect(api, context, "download-started", handler, null_mut(), false);
     }
+}
+thread_local! {
+    /// GTK's downloads, by id: the download (a reference held) and the
+    /// bytes it has received, and those last told.
+    static DOWNLOADS: RefCell<HashMap<u64, (Ptr, u64, u64)>> = RefCell::new(HashMap::new());
+    /// The UI thread's: what hears how each saved download goes.
+    static DOWNLOAD_STATUS: RefCell<HashMap<u64, zgx::web_view::DownloadStatusFn>> = RefCell::new(HashMap::new());
+}
+static NEXT_DOWNLOAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// A download started: kept, its signals followed, until it ends.
+unsafe extern "C" fn on_download(_: Ptr, download: Ptr, _: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: GTK passes the download it just started, on its thread: a
+    // reference of ours is held until it ends, its handlers' data its id.
+    unsafe {
+        let view = (api.webkit_download_get_web_view)(download);
+        if GTK.with(|gtk| gtk.page_of_view(view)).is_none() {
+            (api.webkit_download_cancel)(download);
+            return;
+        }
+        let id = NEXT_DOWNLOAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        DOWNLOADS.with(|downloads| {
+            downloads
+                .borrow_mut()
+                .insert(id, ((api.g_object_ref)(download), 0, 0))
+        });
+        let data = id as usize as Ptr;
+        let handler = |f: *const ()| std::mem::transmute::<*const (), gtk::GCallback>(f);
+        connect(
+            api,
+            download,
+            "decide-destination",
+            handler(on_decide_destination as *const ()),
+            data,
+            false,
+        );
+        connect(
+            api,
+            download,
+            "received-data",
+            handler(on_download_data as *const ()),
+            data,
+            false,
+        );
+        connect(
+            api,
+            download,
+            "finished",
+            handler(on_download_finished as *const ()),
+            data,
+            false,
+        );
+        connect(
+            api,
+            download,
+            "failed",
+            handler(on_download_failed as *const ()),
+            data,
+            false,
+        );
+    }
+}
+/// Where to save it: the app's answer, later (WebKit waits).
+unsafe extern "C" fn on_decide_destination(
+    download: Ptr,
+    name: *const c_char,
+    data: Ptr,
+) -> gtk::gboolean {
+    let api = gtk::api().expect("GTK runs");
+    let id = data as usize as u64;
+    // SAFETY: GTK passes the download and its suggested name, on its
+    // thread; its request and response are its own, read now.
+    let (page, request) = unsafe {
+        let view = (api.webkit_download_get_web_view)(download);
+        let response = (api.webkit_download_get_response)(download);
+        let mime = if response.is_null() {
+            String::new()
+        } else {
+            string((api.webkit_uri_response_get_mime_type)(response))
+        };
+        let url = string((api.webkit_uri_request_get_uri)((api
+            .webkit_download_get_request)(
+            download
+        )));
+        (
+            GTK.with(|gtk| gtk.page_of_view(view)),
+            DownloadRequest::new(url, string(name), mime),
+        )
+    };
+    let Some(page) = page else {
+        // SAFETY: as above.
+        unsafe { (api.webkit_download_cancel)(download) };
+        return 1;
+    };
+    page.post(move |web| {
+        web.download(
+            request,
+            DownloadResponder::new(move |answer| {
+                let path = answer.map(|(path, status)| {
+                    DOWNLOAD_STATUS.with(|statuses| statuses.borrow_mut().insert(id, status));
+                    path
+                });
+                on_gtk(move |_| {
+                    let api = gtk::api().expect("GTK runs");
+                    let Some(download) =
+                        DOWNLOADS.with(|downloads| downloads.borrow().get(&id).map(|d| d.0))
+                    else {
+                        return;
+                    };
+                    // SAFETY: the download kept for `id`, on GTK's thread;
+                    // the URI GLib makes freed after.
+                    unsafe {
+                        let uri = path
+                            .and_then(|path| CString::new(path.to_str()?).ok())
+                            .map(|path| {
+                                (api.g_filename_to_uri)(path.as_ptr(), std::ptr::null(), null_mut())
+                            })
+                            .filter(|uri| !uri.is_null());
+                        match uri {
+                            Some(uri) => {
+                                (api.webkit_download_set_destination)(download, uri);
+                                (api.g_free)(uri.cast());
+                            }
+                            None => (api.webkit_download_cancel)(download),
+                        }
+                    }
+                });
+            }),
+        )
+    });
+    1
+}
+/// What the UI thread's status for download `id` hears, if it has one.
+fn download_status(id: u64, status: DownloadStatus, last: bool) {
+    deliver(move || {
+        DOWNLOAD_STATUS.with(|statuses| {
+            let mut statuses = statuses.borrow_mut();
+            if let Some(hear) = statuses.get_mut(&id) {
+                hear(status);
+            }
+            if last {
+                statuses.remove(&id);
+            }
+        })
+    });
+}
+/// Bytes came: told every 256 KiB.
+unsafe extern "C" fn on_download_data(download: Ptr, length: u64, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    let id = data as usize as u64;
+    let told = DOWNLOADS.with(|downloads| {
+        let mut downloads = downloads.borrow_mut();
+        let entry = downloads.get_mut(&id)?;
+        entry.1 += length;
+        (entry.1 - entry.2 >= 256 * 1024).then(|| {
+            entry.2 = entry.1;
+            entry.1
+        })
+    });
+    if let Some(received) = told {
+        // SAFETY: the download GTK passes, on its thread.
+        let response = unsafe { (api.webkit_download_get_response)(download) };
+        let total = (!response.is_null())
+            .then(|| unsafe { (api.webkit_uri_response_get_content_length)(response) })
+            .filter(|&total| total > 0);
+        download_status(id, DownloadStatus::Progress { received, total }, false);
+    }
+}
+unsafe extern "C" fn on_download_finished(_: Ptr, data: Ptr) {
+    let id = data as usize as u64;
+    if let Some(received) = end_download(id) {
+        download_status(
+            id,
+            DownloadStatus::Progress {
+                received,
+                total: Some(received),
+            },
+            false,
+        );
+        download_status(id, DownloadStatus::Finished, true);
+    }
+}
+unsafe extern "C" fn on_download_failed(_: Ptr, error: *const gtk::GError, data: Ptr) {
+    let id = data as usize as u64;
+    // SAFETY: GTK passes the error, live through the call.
+    let message = unsafe { string((*error).message) };
+    // WebKit says "finished" after a failure too: the status ends here.
+    if end_download(id).is_some() {
+        download_status(id, DownloadStatus::Failed(message), true);
+    }
+}
+/// The download `id` ended: let go, its handlers off; the bytes it had,
+/// or `None` if it had ended already.
+fn end_download(id: u64) -> Option<u64> {
+    let api = gtk::api().expect("GTK runs");
+    let (download, received, _) = DOWNLOADS.with(|downloads| downloads.borrow_mut().remove(&id))?;
+    // SAFETY: the reference `on_download` took, on GTK's thread.
+    unsafe {
+        (api.g_signal_handlers_disconnect_matched)(
+            download,
+            gtk::G_SIGNAL_MATCH_DATA,
+            0,
+            0,
+            null_mut(),
+            null_mut(),
+            id as usize as Ptr,
+        );
+        (api.g_object_unref)(download);
+    }
+    Some(received)
 }
 /// `ZGX_WEB_MENU=1` prints each context menu's items on stderr, as
 /// `WEB_MENU Open Link|Copy Link Address|…` (what `web_view_smoke.py` reads).

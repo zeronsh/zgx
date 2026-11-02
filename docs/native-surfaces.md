@@ -35,7 +35,7 @@ A web view (`zgx::web_view`, `ui.webview`) is the platform's own page, laid out 
 | Page accessibility | the platform's | the platform's | in the window's tree: the page's own (AT-SPI), under its box |
 | Drags out of the page | the platform's | the platform's | zgx's: links, images (their bytes) and text, to zgx's targets and other apps |
 | Files dropped on it, drags within it | the platform's | the platform's | the page's `dragover` and `drop`: its own drags' data, zgx's text, other apps' files as `File`s |
-| Downloads | none saved (no download delegate) | none saved (each cancelled) | none saved (each cancelled) |
+| Downloads (`WebView::set_download_handler`, Luau `on_download`) | the app's: saved where it says (`WKDownload`), else none | the app's: saved where it says, WebView2's download bar hidden, else none | the app's: saved where it says (`WebKitDownload`), else none |
 | Context menu (a right click) | WebKit's | WebView2's | WebKit's items for what's clicked (a link, an image, media, a selection, a field, the page) as a zgx menu where the click was; spelling, font and media-control items left out |
 | Script dialogs (`alert`, `confirm`, `prompt`) | alert sheets on the window, the page's origin under the message | WebView2's dialogs | WebKit's, drawn in the page |
 | Full screen (`requestFullscreen`) | WebKit's window over the screen | the element fills the node | the element fills the node |
@@ -43,6 +43,8 @@ A web view (`zgx::web_view`, `ui.webview`) is the platform's own page, laid out 
 | Printing (`WebView::print`, the page's `window.print()`) | the print panel, a sheet on the window | WebView2's print preview | GTK's print dialog, transient for the window on X11 |
 | Find in page (`WebView::find`) | WebKit's, without a count of matches | WebView2's, counting matches; its own find bar and browser keys off | WebKit's, counting matches (up to 1,000) |
 | Missing engine | — | placeholder | placeholder (the library is opened as the first page shows) |
+
+A page never saves a file into the person's folders unless the app decides it. Each download it starts (a `download` link, an attachment, a response the page can't show) goes to the app's handler with its URL, suggested name and type; the app saves it at a file the person chose (its save dialog: Luau's `d:ask()`, through the window's file dialogs, so a sandboxed macOS app saves where the person picked) or not. With no handler, or a responder dropped unanswered, it's cancelled. How a saved one goes (bytes received, the end, a failure) reaches the handler's status callback on every platform.
 
 Linux's choice: Wayland cannot embed another client's surface, an X11 child window can't be faded or rounded smoothly or covered by translucent zgx content, and WPE WebKit isn't packaged on Ubuntu 24.04; drawing offscreen behaves the same on X11 and Wayland. See [the Linux notes](linux.md#web-views).
 

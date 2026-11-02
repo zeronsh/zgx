@@ -882,3 +882,43 @@ fn find_asks_the_platforms_page_and_always_answers() {
     web.clear_find();
     assert_eq!(finder.1.get(), 1);
 }
+
+/// A page's download is the app's handler's: without one, or with the
+/// responder dropped, it's cancelled; `save_to` gives where.
+#[test]
+fn downloads_go_to_the_apps_handler_and_are_cancelled_without_one() {
+    use std::path::PathBuf;
+    use zgx::web_view::{DownloadRequest, DownloadResponder};
+    let ui = Ui::new(100., 100.);
+    let web = WebView::new(&ui.runtime, WebViewOptions::default());
+    let answers: Rc<RefCell<Vec<Option<PathBuf>>>> = Rc::default();
+    let start = |name: &str| {
+        let answers = answers.clone();
+        web.download(
+            DownloadRequest::new("https://page.test/f", name, "text/plain"),
+            DownloadResponder::new(move |answer| {
+                answers.borrow_mut().push(answer.map(|(path, _)| path))
+            }),
+        );
+    };
+    start("none.txt");
+    assert_eq!(*answers.borrow(), [None], "no handler: cancelled");
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    {
+        let heard = heard.clone();
+        web.set_download_handler(move |request, responder| {
+            heard.borrow_mut().push(request.name.clone());
+            if request.name == "keep.txt" {
+                responder.save_to("/picked/keep.txt", |_| {});
+            }
+        });
+    }
+    start("keep.txt");
+    start("drop.txt");
+    assert_eq!(*heard.borrow(), ["keep.txt", "drop.txt"]);
+    assert_eq!(
+        *answers.borrow(),
+        [None, Some(PathBuf::from("/picked/keep.txt")), None],
+        "saved where it says; a dropped responder cancels"
+    );
+}

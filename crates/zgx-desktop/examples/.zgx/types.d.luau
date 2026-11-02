@@ -1376,6 +1376,25 @@ end
 
 -- `ui.web(opts)`: a web page's controller. Its fields are tracked, so a
 -- text or computed reading `web.title` follows the page.
+-- How a saved download goes: its bytes as they come (total nil where the
+-- server didn't say), then its end.
+export type DownloadOptions = {
+	on_progress: ((received: number, total: number?) -> ...unknown)?,
+	on_finish: ((ok: boolean, err: string?) -> ...unknown)?,
+}
+-- `on_download`'s download: answer it once, now or later. One collected
+-- unanswered is cancelled.
+declare extern type Download with
+	url: string
+	-- The file's name, as the page or its server suggests it.
+	name: string
+	mime: string
+	-- Save it at a file the user picked (`ui.save_file`).
+	function save_to(self, file: File | string, opts: DownloadOptions?): ()
+	-- The save dialog, suggesting `name`: the file saved to, or nil.
+	function ask(self, opts: DownloadOptions?): Promise<File?>
+	function cancel(self): ()
+end
 declare extern type Web with
 	url: string
 	title: string
@@ -18046,6 +18065,9 @@ export type WebViewProps = {
 	on_message: ((value: any, origin: string, main_frame: boolean) -> ...unknown)?,
 	on_error: ((url: string, err: string) -> ...unknown)?,
 	on_new_window: ((url: string) -> ...unknown)?,
+	-- A download the page started: save it (`d:save_to`, `d:ask`) or
+	-- not. Without this, none is saved.
+	on_download: ((d: Download) -> ...unknown)?,
 }
 export type TerminalProps = {
 	-- Size and position.

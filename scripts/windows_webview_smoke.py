@@ -11,8 +11,10 @@ fills its node, edge to edge.
     python scripts/windows_webview_smoke.py target/debug/examples/web_view.exe
 """
 import argparse
+import os
 import pathlib
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -58,8 +60,10 @@ def main():
     parser.add_argument("--shots", type=pathlib.Path, help="save captures here")
     args = parser.parse_args()
     lines = []
+    save_dir = pathlib.Path(tempfile.mkdtemp(prefix="zgx-downloads-"))
     proc = subprocess.Popen(
-        [str(args.binary.resolve())], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        [str(args.binary.resolve())], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        env=dict(os.environ, ZGX_EXAMPLE_SAVE_DIR=str(save_dir)),
     )
     threading.Thread(target=lambda: lines.extend(proc.stdout), daemon=True).start()
     heard = lambda prefix: any(line.startswith(prefix) for line in lines)
@@ -96,6 +100,23 @@ def main():
         win.key("ctrl+f")
         wait_for(lambda: heard("FIND Hello found=true"), "the app's find after Ctrl+F in the page")
         print("ok: Ctrl+F in the page reaches the app, and its find finds the heading")
+
+        # Downloads are the app's: with no handler a download link saves
+        # nothing in the user's Downloads; after Ctrl+D (the app's handler)
+        # it saves in the folder the app says, and only there.
+        downloads = pathlib.Path(os.environ["USERPROFILE"], "Downloads", "zgx-example.txt")
+        before = downloads.exists()
+        win.click(window, *at(740, 348))
+        time.sleep(2.0)
+        assert downloads.exists() == before, "a download with no handler landed in Downloads"
+        win.key("ctrl+d")
+        wait_for(lambda: heard("DOWNLOADS on"), "the app's download handler")
+        win.click(window, *at(740, 348))
+        wait_for(lambda: heard("DOWNLOAD_STATUS Finished"), "the app's download to finish", 20)
+        saved = save_dir / "zgx-example.txt"
+        assert saved.read_text() == "saved by the app", saved
+        assert downloads.exists() == before, "the app's download also landed in Downloads"
+        print("ok: a download with no handler saves nothing; the app's handler saves it where it says")
 
         # zgx's composer over the page: the click and the keyboard are zgx's.
         win.click(window, *at(400, 700))

@@ -125,6 +125,89 @@ impl std::fmt::Debug for SchemeResponder {
     }
 }
 
+/// A download a page started (a `download` link, an attachment, a file the
+/// page can't show), for the app to save or not
+/// ([`WebView::set_download_handler`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DownloadRequest {
+    /// Where it comes from.
+    pub url: String,
+    /// The file's name, as the page or its server suggests it.
+    pub name: String,
+    /// Its MIME type, empty if the server didn't say.
+    pub mime: String,
+}
+impl DownloadRequest {
+    /// A download of `url`, suggested as `name`, of type `mime` (for hosts).
+    pub fn new(url: impl Into<String>, name: impl Into<String>, mime: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            name: name.into(),
+            mime: mime.into(),
+        }
+    }
+}
+/// How a download the app saves goes ([`DownloadResponder::save_to`]).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum DownloadStatus {
+    /// `received` bytes so far, of `total` where the server said.
+    Progress {
+        /// Bytes so far.
+        received: u64,
+        /// All of them, where known.
+        total: Option<u64>,
+    },
+    /// Saved, whole, where the app said.
+    Finished,
+    /// It stopped before the end: why.
+    Failed(String),
+}
+/// What hears a saved download's [`DownloadStatus`].
+pub type DownloadStatusFn = Box<dyn FnMut(DownloadStatus)>;
+/// Answers one [`DownloadRequest`], once, on the UI thread, now or later
+/// (after asking where to save it). Dropping it unanswered cancels the
+/// download: nothing is saved.
+pub struct DownloadResponder(Option<DeliverDownload>);
+/// Where a [`DownloadResponder`]'s answer goes: a path and what hears the
+/// download, or `None` to cancel.
+type DeliverDownload = Box<dyn FnOnce(Option<(std::path::PathBuf, DownloadStatusFn)>)>;
+impl DownloadResponder {
+    /// `deliver` gets where to save it and what hears how it goes, or `None`
+    /// to cancel (for hosts).
+    pub fn new(
+        deliver: impl FnOnce(Option<(std::path::PathBuf, DownloadStatusFn)>) + 'static,
+    ) -> Self {
+        Self(Some(Box::new(deliver)))
+    }
+    /// Save the download at `path` (a file the person chose, as through
+    /// the app's save dialog), `status` hearing how it goes.
+    pub fn save_to(
+        mut self,
+        path: impl Into<std::path::PathBuf>,
+        status: impl FnMut(DownloadStatus) + 'static,
+    ) {
+        if let Some(deliver) = self.0.take() {
+            deliver(Some((path.into(), Box::new(status))));
+        }
+    }
+    /// Save nothing.
+    pub fn cancel(self) {}
+}
+impl Drop for DownloadResponder {
+    fn drop(&mut self) {
+        if let Some(deliver) = self.0.take() {
+            deliver(None);
+        }
+    }
+}
+impl std::fmt::Debug for DownloadResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DownloadResponder")
+    }
+}
+
 /// Serves a URL scheme of the app's own (`myapp://…`) to pages: `serve` is
 /// called on the UI thread for each request and may answer later, from
 /// another thread, through its responder.
@@ -484,6 +567,7 @@ pub trait WebViewBackend {
 
 type Listener = Rc<RefCell<dyn FnMut(&WebViewEvent)>>;
 type Policy = Rc<dyn Fn(&NavigationRequest) -> bool>;
+type DownloadHandler = Rc<dyn Fn(DownloadRequest, DownloadResponder)>;
 struct Inner {
     id: u64,
     options: WebViewOptions,
@@ -502,6 +586,7 @@ struct Inner {
     policy: RefCell<Option<Policy>>,
     /// What answers the page's file inputs: the latest node showing it.
     chooser: RefCell<Option<Chooser>>,
+    downloads: RefCell<Option<DownloadHandler>>,
 }
 /// The window's file dialogs and the component that waits on them, from
 /// the node showing a page (`WebView::choose_files`).
@@ -589,6 +674,7 @@ impl WebView {
             src: RefCell::new(None),
             policy: RefCell::new(None),
             chooser: RefCell::new(None),
+            downloads: RefCell::new(None),
         }))
     }
     /// Files for the page's file input (`<input type=file>`), chosen in the
@@ -848,6 +934,26 @@ impl WebView {
     pub fn clear_find(&self) {
         if let Some(backend) = self.backend() {
             backend.clear_find();
+        }
+    }
+    /// Decide each download the page starts: `handler` gets what it is and a
+    /// responder to save it ([`DownloadResponder::save_to`], at a file the
+    /// person chose, as in the app's save dialog) or not. Without a handler,
+    /// or with a responder dropped, the download is cancelled: a page never
+    /// saves a file into the person's folders without the app deciding.
+    pub fn set_download_handler(
+        &self,
+        handler: impl Fn(DownloadRequest, DownloadResponder) + 'static,
+    ) {
+        *self.0.downloads.borrow_mut() = Some(Rc::new(handler));
+    }
+    /// A download the page started, for the app's handler (for hosts):
+    /// cancelled at once without one.
+    pub fn download(&self, request: DownloadRequest, responder: DownloadResponder) {
+        let handler = self.0.downloads.borrow().clone();
+        match handler {
+            Some(handler) => handler(request, responder),
+            None => responder.cancel(),
         }
     }
     /// Open Web Inspector, when [`WebViewOptions::inspectable`].

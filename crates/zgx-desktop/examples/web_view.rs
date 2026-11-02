@@ -43,6 +43,8 @@ const PAGE: &str = r#"<!doctype html>
   <button onclick="window.zgx.postMessage({clicked: Date.now()})">Message the app</button>
   <input id="upload" type="file" multiple style="position:absolute;left:-9999px"
     onchange="window.chosen = [...this.files].map((f) => f.name).join(',')">
+  <a id="save" download="zgx-example.txt" href="data:text/plain,saved by the app"
+    style="position:absolute;left:700px;top:290px;color:#fff;font-weight:700">Save a file</a>
   <div class="grid">
     <div class="tile" style="background:#1d3557">Navy</div>
     <div class="tile" style="background:#e63946">Red</div>
@@ -366,6 +368,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Ctrl+F: find the heading's first word, printing `FIND`. Pressed
             // in the page (which leaves it alone), it reaches this binding:
             // WebView2's own find key is off.
+            // Ctrl+D (reserved): the app saves the page's downloads into
+            // `ZGX_EXAMPLE_SAVE_DIR` (a temporary folder without it),
+            // printing `DOWNLOAD <name> <type>` and `DOWNLOAD_STATUS …`.
+            // Before it the app has no handler, and saves none.
             let root = cx.ui.root();
             let finder = web.clone();
             cx.ui.on_event(root, false, move |event| {
@@ -379,19 +385,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     event.prevent_default();
                 }
             });
+            let downloads = web.clone();
+            cx.ui.on_event(root, false, move |event| {
+                if event.phase != EventPhase::Capture
+                    && let InputEvent::Action(action) = &event.event
+                    && action.downcast_ref::<MenuAction>().is_some_and(|action| action.0 == "downloads")
+                {
+                    let folder = std::env::var_os("ZGX_EXAMPLE_SAVE_DIR")
+                        .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+                    downloads.set_download_handler(move |request, responder| {
+                        println!("DOWNLOAD {} {}", request.name, request.mime);
+                        responder.save_to(folder.join(&request.name), |status| {
+                            println!("DOWNLOAD_STATUS {status:?}")
+                        });
+                    });
+                    println!("DOWNLOADS on");
+                    event.prevent_default();
+                }
+            });
             let control = Modifiers {
                 control: true,
                 ..Default::default()
             };
             let keymap = cx.ui.input.bind_keys(
                 root,
-                Keymap::new().bind(
-                    KeyBinding::new(
-                        [Keystroke::new(Key::Character("f".into()), control)],
-                        Action::new(MenuAction("find".into())),
+                Keymap::new()
+                    .bind(
+                        KeyBinding::new(
+                            [Keystroke::new(Key::Character("f".into()), control)],
+                            Action::new(MenuAction("find".into())),
+                        )
+                        .expect("one keystroke"),
                     )
-                    .expect("one keystroke"),
-                ),
+                    .bind(
+                        KeyBinding::new(
+                            [Keystroke::new(Key::Character("d".into()), control)],
+                            Action::new(MenuAction("downloads".into())),
+                        )
+                        .expect("one keystroke")
+                        .reserved(),
+                    ),
             );
             let keep = Rc::new(RefCell::new(Some((subscription, keymap))));
             cx.on_closed(move || drop(keep.borrow_mut().take()));
@@ -670,6 +703,59 @@ fn run_fixture(cx: &mut zgx_desktop::WindowContext, web: WebView, fixture: Fixtu
                 "find finds the heading's word and not a word the page hasn't",
                 finds == [true, false],
                 format!("{finds:?}"),
+            );
+            // Downloads: the app's handler hears each, with its name and
+            // type. A `download` link it saves (here, in a temporary folder);
+            // a response the page can't show (an iframe's octet stream) it
+            // cancels, which saves nothing.
+            let folder = std::env::temp_dir().join(format!("zgx-fixture-downloads-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&folder);
+            let asked = Rc::new(RefCell::new(Vec::new()));
+            let statuses = Rc::new(RefCell::new(Vec::new()));
+            {
+                let (asked, statuses, folder) = (asked.clone(), statuses.clone(), folder.clone());
+                web.set_download_handler(move |request, responder| {
+                    asked.borrow_mut().push((request.name.clone(), request.mime.clone()));
+                    if request.mime == "text/plain" {
+                        let statuses = statuses.clone();
+                        responder.save_to(folder.join(&request.name), move |status| {
+                            statuses.borrow_mut().push(status)
+                        });
+                    }
+                });
+            }
+            web.run_js(
+                "const a = document.createElement('a'); a.href = 'data:text/plain,saved by the app'; \
+                 a.download = 'zgx-fixture.txt'; document.body.appendChild(a); a.click();",
+            );
+            for _ in 0..80 {
+                sleep(50).await;
+                if statuses.borrow().contains(&zgx::web_view::DownloadStatus::Finished) {
+                    break;
+                }
+            }
+            web.run_js(
+                "const f = document.createElement('iframe'); f.style.display = 'none'; \
+                 f.src = 'data:application/octet-stream,not shown'; document.body.appendChild(f);",
+            );
+            for _ in 0..80 {
+                sleep(50).await;
+                if asked.borrow().len() == 2 {
+                    break;
+                }
+            }
+            sleep(300).await;
+            let saved = std::fs::read_to_string(folder.join("zgx-fixture.txt")).ok();
+            let others = std::fs::read_dir(&folder).map_or(0, |entries| entries.count());
+            let _ = std::fs::remove_dir_all(&folder);
+            check(
+                "a download is the app's: saved where it says, or nothing",
+                asked.borrow().first() == Some(&("zgx-fixture.txt".into(), "text/plain".into()))
+                    && asked.borrow().get(1).is_some_and(|(_, mime)| mime == "application/octet-stream")
+                    && saved.as_deref() == Some("saved by the app")
+                    && others == 1
+                    && statuses.borrow().last() == Some(&zgx::web_view::DownloadStatus::Finished),
+                format!("asked {:?}, saved {saved:?}, files {others}, statuses {:?}", asked.borrow(), statuses.borrow()),
             );
             web.run_js("window.zgx.postMessage({hello: 1})");
             sleep(200).await;
