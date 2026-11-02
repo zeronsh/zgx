@@ -522,8 +522,10 @@ A click on a page's plain content (no field, link or other focusable
 element) focuses nothing in it, in zgx as in a GTK window of WebKit's own:
 WebKit reports focus only for an element taking it, and never the
 document's. Orca reads where such a click moves the caret only when AT-SPI's
-registry has given it the click's button (`web-view-orca` checks the
-registry gives it one before its clicks).
+registry has given it the click's button. On X11 the registry finds a
+button by polling the pointer, so a press and release closer together than
+its polls reach no one: `web-view-orca` holds each click's button until
+the registry reports the press, heard by an AT-SPI listener of its own.
 zgx can't report the document's focus for WebKit: the document is the web
 process's object, its events sent from that process's own connection, and
 WebKitGTK has no call to post one; focusing the document from a script
