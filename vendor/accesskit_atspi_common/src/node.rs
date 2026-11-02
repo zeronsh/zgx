@@ -390,7 +390,14 @@ impl NodeWrapper<'_> {
             atspi_state.insert(State::Enabled | State::Sensitive);
         }
 
-        if self.is_focused() {
+        // zgx patch: not a node embedding another process's tree, which
+        // says what is focused itself (`crate::EMBED`).
+        if self.is_focused()
+            && !self
+                .0
+                .author_id()
+                .is_some_and(|id| id.starts_with(crate::EMBED))
+        {
             atspi_state.insert(State::Focused);
         }
 
@@ -881,12 +888,19 @@ impl PlatformNode {
 
     pub fn accessible_id(&self) -> Result<String> {
         self.resolve(|node| {
-            if let Some(author_id) = node.author_id() {
+            // zgx patch: an embedding (`crate::EMBED`) is no ID of the node's.
+            if let Some(author_id) = node.author_id().filter(|id| !id.starts_with(crate::EMBED)) {
                 Ok(author_id.to_string())
             } else {
                 Ok(String::new())
             }
         })
+    }
+
+    /// zgx patch: the other process's object this node embeds as its last
+    /// child (`crate::EMBED`), as its bus name and path.
+    pub fn embedded(&self) -> Result<Option<(String, String)>> {
+        self.resolve(|node| Ok(node.author_id().and_then(crate::embedded)))
     }
 
     pub fn child_at_index(&self, index: usize) -> Result<Option<NodeId>> {
@@ -1842,6 +1856,13 @@ impl PlatformNode {
 
     pub fn minimum_increment(&self) -> Result<f64> {
         self.resolve(|node| Ok(node.numeric_value_step().unwrap_or(0.0)))
+    }
+
+    /// zgx patch: what the value reads as (`aria-valuetext`, AT-SPI's
+    /// `Value.Text`, which Orca reads before the number): the node's text
+    /// value, empty without one.
+    pub fn value_text(&self) -> Result<String> {
+        self.resolve(|node| Ok(node.value().unwrap_or_default()))
     }
 
     pub fn current_value(&self) -> Result<f64> {

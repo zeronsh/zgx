@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Exercise native Wayland file dialogs through a private GTK portal."""
-from sway_host import wait_for_openbox
+from sway_host import wait_for_openbox, sway_config
 import argparse
 import json
 import os
@@ -24,7 +24,7 @@ def main():
     parser.add_argument('--escape-cancel', action='store_true', help='Probe GTK Escape termination separately from its Cancel button')
     parser.add_argument('--native-prompts', action='store_true', help='Verify prompt and URL using installed system Zenity')
     args = parser.parse_args()
-    for name in ('Xvfb', 'openbox', 'sway', 'swaymsg', 'dbus-daemon', 'xdotool', 'xwininfo', 'grim'):
+    for name in ('Xvfb', 'openbox', 'sway', 'swaymsg', 'dbus-daemon', 'gdbus', 'xdotool', 'xwininfo', 'grim'):
         if not shutil.which(name):
             parser.error('Missing executable: ' + name)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -37,7 +37,7 @@ def main():
         for name in ('DISPLAY', 'WAYLAND_DISPLAY', 'SWAYSOCK', 'I3SOCK', 'IBUS_ADDRESS', 'XMODIFIERS', 'GTK_IM_MODULE', 'QT_IM_MODULE', 'QT_IM_MODULES', 'SDL_IM_MODULE', 'AT_SPI_BUS_ADDRESS', 'FCITX_DBUS_ADDRESS'):
             env.pop(name, None)
         config = pathlib.Path(private, 'sway.conf')
-        config.write_text('xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx platform services"] floating enable\n')
+        sway_config(config, 'xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx platform services"] floating enable\n')
         (args.output/'sway.conf').write_text(config.read_text())
         bus_config = pathlib.Path(private, 'dbus.conf')
         # No activation directories: desktop portals must not mount into this
@@ -96,8 +96,19 @@ def main():
             portals = pathlib.Path(private, 'config/xdg-desktop-portal')
             portals.mkdir(parents=True, exist_ok=True)
             (portals/'portals.conf').write_text('[preferred]\ndefault=gtk\n')
+            def owned(name, process, seconds=30):
+                # A portal asked before its backend took its name fails the
+                # request with code 2, which GTK's chooser also gives for
+                # Escape, so the app hears no choice (on CI the GTK backend
+                # took 8 s to start, and no dialog ever showed).
+                deadline=time.monotonic()+seconds
+                while '(true,)' not in subprocess.run(['gdbus','call','--session','--dest','org.freedesktop.DBus','--object-path','/org/freedesktop/DBus','--method','org.freedesktop.DBus.NameHasOwner',name],env=native,capture_output=True,text=True).stdout:
+                    if time.monotonic()>deadline or process.poll() is not None: raise RuntimeError(name+' never came on the bus')
+                    time.sleep(.05)
             gtk_portal = launch('gtk-portal', ['/usr/libexec/xdg-desktop-portal-gtk'], process_env=native)
+            owned('org.freedesktop.impl.portal.desktop.gtk', gtk_portal)
             portal = launch('portal', ['/usr/libexec/xdg-desktop-portal'], process_env=native)
+            owned('org.freedesktop.portal.Desktop', portal)
             fixture = args.output.resolve()/'fixture.txt'
             fixture.write_text('native portal selection fixture\n')
             folder=args.output.resolve()/'chosen-folder'; folder.mkdir(exist_ok=True)

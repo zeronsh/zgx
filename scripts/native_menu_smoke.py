@@ -2,7 +2,7 @@
 """Owned X11/Wayland desktop: dynamic menus, command state and native-key shortcuts."""
 import argparse, ctypes, json, os, pathlib, re, select, shutil, subprocess, time
 from platform_smoke import private_runtime, stop
-from sway_host import wait_for_openbox, wait_for_sway_host
+from sway_host import wait_for_openbox, wait_for_sway_host, sway_config
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -27,7 +27,7 @@ def main():
             host=None
             if a.wayland:
                 env.update(WLR_BACKENDS='x11',WLR_X11_OUTPUTS='1',WLR_RENDERER='pixman')
-                config=pathlib.Path(private,'sway.conf');config.write_text('xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx dynamic menus.*"] floating enable\n')
+                config=pathlib.Path(private,'sway.conf');sway_config(config, 'xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx dynamic menus.*"] floating enable\n')
                 (a.output/'sway.conf').write_text(config.read_text());sway=launch('sway',['sway','--unsupported-gpu','--config',str(config)])
                 host=wait_for_sway_host(env,a.output,sway)
                 deadline=time.monotonic()+10
@@ -60,7 +60,7 @@ def main():
                 else:
                     deadline=time.monotonic()+20
                     while True:
-                        found=subprocess.run(['xdotool','search','--name','^'+title+'$'],env=env,text=True,stdout=subprocess.PIPE)
+                        found=subprocess.run(['xdotool','search','--onlyvisible','--name','^'+title+'$'],env=env,text=True,stdout=subprocess.PIPE)
                         if found.returncode==0:target=found.stdout.strip().splitlines()[0];break
                         if time.monotonic()>deadline:raise RuntimeError('Missing native menu window '+title)
                         time.sleep(.05)
@@ -73,7 +73,7 @@ def main():
                 subprocess.run(['swaymsg','[title="^zgx dynamic menus secondary$"]','move','position','600','40'],env=env,check=True,stdout=subprocess.DEVNULL)
             elif not a.overlap_debug:
                 for title,x in [('zgx dynamic menus',20),('zgx dynamic menus secondary',600)]:
-                    target=subprocess.check_output(['xdotool','search','--name','^'+title+'$'],env=env,text=True).strip().splitlines()[0];xdo('windowmove',target,x,40)
+                    target=subprocess.check_output(['xdotool','search','--onlyvisible','--name','^'+title+'$'],env=env,text=True).strip().splitlines()[0];xdo('windowmove',target,x,40)
             focus('zgx dynamic menus')
             key('ctrl+s');time.sleep(.15);assert 'ACTION save' not in (a.output/'application.log').read_text()
             key('ctrl+b');wait('CHECKED true');key('ctrl+s');wait('ACTION save')

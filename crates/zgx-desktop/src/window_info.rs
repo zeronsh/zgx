@@ -314,6 +314,12 @@ pub(crate) fn attributes(
         }
         attrs = attrs.with_min_inner_size(winit::dpi::LogicalSize::new(w, h));
     }
+    if let Some((w, h)) = options.max_size {
+        if !w.is_finite() || !h.is_finite() || w <= 0. || h <= 0. {
+            return Err("maximum window dimensions must be finite and positive".into());
+        }
+        attrs = attrs.with_max_inner_size(winit::dpi::LogicalSize::new(w, h));
+    }
     if let Some(selector) = &options.display {
         let monitor = select_monitor(event_loop, selector)
             .ok_or_else(|| "requested display is unavailable".to_owned())?;

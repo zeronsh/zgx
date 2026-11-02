@@ -117,6 +117,18 @@ pub enum ScrollGesture {
     /// Momentum scrolling ended.
     MomentumEnded,
 }
+/// A step back or forward through where an app has been, as a browser's
+/// Back and Forward go: a trackpad's swipe between pages (macOS) reaches
+/// the view under it as this action, in an [`InputEvent::Action`]
+/// ([`InputDispatcher::navigate`]); a view takes it with
+/// `View::on_navigate`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Navigation {
+    /// Back, to where it was.
+    Back,
+    /// Forward again, to where it went back from.
+    Forward,
+}
 /// An input event, routed to nodes by the [`InputDispatcher`]. Positions
 /// are in window points from the top left.
 #[derive(Clone, Debug, PartialEq)]
@@ -532,6 +544,13 @@ struct FocusScope {
     previous: Option<NodeId>,
     /// What the scope below holds stays live too (a submenu over its menu).
     porous: bool,
+    /// What opened it (a popover's or menu's trigger): focus returns there
+    /// as it closes when what had focus is gone, if it opened from the
+    /// keyboard (`keyboard`).
+    trigger: Option<NodeId>,
+    /// It opened while the keyboard was in use (`focus_visible_now`), or
+    /// from a press on its trigger: focus may return to the trigger.
+    keyboard: bool,
 }
 #[derive(Clone, Copy)]
 struct Click {
@@ -606,6 +625,8 @@ struct State {
     /// Views that take keys while nothing is focused (`take_unfocused_keys`),
     /// the last mounted first.
     unfocused_keys: Vec<NodeId>,
+    /// Views that take a step back or forward (`take_navigation`).
+    navigators: Vec<NodeId>,
     entries: crate::scene::NodeMap<Vec<Entry>>,
     options: crate::scene::NodeMap<NodeInput>,
     /// Boxes the pointer passes through while nothing they hold is displayed
@@ -630,6 +651,10 @@ struct State {
     pointer: Option<(f32, f32)>,
     file_hovered: Option<NodeId>,
     pressed: Option<NodeId>,
+    /// What the last press landed on, as its listeners run and after: a
+    /// popup opening from a press on its trigger counts it as focused, as a
+    /// browser's press focuses a button first.
+    last_press: Option<NodeId>,
     key_pressed: Option<(NodeId, Key)>,
     /// The window's semantics: a control's role says which keys activate it
     /// (`activates`).
@@ -761,6 +786,52 @@ impl InputDispatcher {
         state.unfocused_keys.retain(|n| *n != node);
         state.unfocused_keys.push(node);
     }
+    /// `node` takes a step back or forward ([`Navigation`]) from what is
+    /// under it: a trackpad's swipe over it navigates rather than scrolls
+    /// where nothing between scrolls that way (`Ui::set_navigation_swipes`).
+    /// It hears the action with its listeners (`View::on_navigate`).
+    pub fn take_navigation(&self, node: NodeId, scene: &Scene) {
+        let mut state = self.state.borrow_mut();
+        state
+            .navigators
+            .retain(|n| *n != node && scene.contains(*n));
+        state.navigators.push(node);
+    }
+    /// Whether `target` or a view around it takes navigation
+    /// (`take_navigation`). Reads only.
+    pub(crate) fn navigates(&self, scene: &Scene, target: NodeId) -> bool {
+        let state = self.state.borrow();
+        !state.navigators.is_empty()
+            && std::iter::once(target)
+                .chain(scene.ancestors(target))
+                .any(|node| state.navigators.contains(&node))
+    }
+    /// Step back or forward from what is under `x`, `y`, as a swipe there
+    /// does: the view under it hears `navigation`, and the views around it
+    /// as it bubbles. Whether one took it.
+    pub fn navigate(
+        &self,
+        scene: &Rc<RefCell<Scene>>,
+        x: f32,
+        y: f32,
+        navigation: Navigation,
+    ) -> bool {
+        let Some(target) = self.hit_target(&scene.borrow(), x, y) else {
+            return false;
+        };
+        self.dispatch_to(
+            scene,
+            target,
+            InputEvent::Action(crate::actions::Action::new(navigation)),
+        )
+        .default_prevented
+    }
+    /// The next press starts a count of its own, as one after the
+    /// double-click time has passed would: separate clicks a test makes in
+    /// a row, which a person's hand could not make that fast.
+    pub fn forget_clicks(&self) {
+        self.state.borrow_mut().clicks.0 = None;
+    }
     /// How soon after a press another on the same spot counts as a double
     /// (then triple) click: the system's double-click time, which the
     /// desktop host gives (macOS's and Windows' setting, GNOME's and KDE's);
@@ -768,6 +839,11 @@ impl InputDispatcher {
     pub fn set_double_click_time(&self, interval: Duration) {
         self.state.borrow_mut().clicks.1 =
             interval.clamp(Duration::from_millis(100), Duration::from_secs(5));
+    }
+    /// The double-click time in use (`set_double_click_time`): 500 ms until
+    /// the host gives the system's.
+    pub fn double_click_time(&self) -> Duration {
+        self.state.borrow().clicks.1
     }
     /// The box, in points, centred on a press, that the next must land in
     /// to count as its double (then triple) click: the system's, which the
@@ -1309,8 +1385,9 @@ impl InputDispatcher {
         let hit = self.hit_target(&scene.borrow(), x, y);
         self.set_hover(scene, hit);
     }
-    /// What a press at `x, y` lands on, as dispatch finds it.
-    pub(crate) fn pointer_target(&self, scene: &Scene, x: f32, y: f32) -> Option<NodeId> {
+    /// What a press at `x, y` lands on, as dispatch finds it: the nearest
+    /// node with listeners under it, past pass-through and empty overlays.
+    pub fn pointer_target(&self, scene: &Scene, x: f32, y: f32) -> Option<NodeId> {
         self.hit_target(scene, x, y)
     }
     /// What a primary press at `x, y` would focus, as dispatch finds it:
@@ -1448,7 +1525,57 @@ impl InputDispatcher {
     /// listeners may have removed it or moved focus on (a dialog's button
     /// closing the dialog), and what has focus now did not hear the key.
     fn still_targeted(&self, scene: &Rc<RefCell<Scene>>, target: Option<NodeId>) -> Option<NodeId> {
-        target.filter(|id| self.focused() == Some(*id) && scene.borrow().contains(*id))
+        target.filter(|id| {
+            let scene = scene.borrow();
+            // Inert content (a row leaving) activates on no key.
+            self.focused() == Some(*id) && scene.contains(*id) && scene.inert_around(*id).is_none()
+        })
+    }
+    /// Move focus off inert content (`Scene::set_inert`: a row playing its
+    /// exit, gone from its data): to the next focusable control after it,
+    /// else the one before, else the nearest focusable around it, as a
+    /// platform's list moves focus off a row it deletes. Whoever makes
+    /// content inert calls it (`NodeHandle::leave`).
+    pub fn leave_inert(&self, scene: &Rc<RefCell<Scene>>) {
+        let target = {
+            let scene = scene.borrow();
+            let Some(focused) = self.focused() else {
+                return;
+            };
+            let Some(leaving) = scene.inert_around(focused) else {
+                return;
+            };
+            let takes = |id: NodeId| {
+                self.options(id)
+                    .is_some_and(|o| o.focusable && o.tab_index >= 0)
+                    && scene.inert_around(id).is_none()
+                    && self.enabled(&scene, id)
+            };
+            // Document order, leaving's subtree passed over.
+            let (mut before, mut after) = (None, None);
+            let mut passed = false;
+            let mut stack = vec![scene.root()];
+            while let Some(id) = stack.pop() {
+                if id == leaving {
+                    passed = true;
+                    continue;
+                }
+                if takes(id) {
+                    if passed {
+                        after = Some(id);
+                        break;
+                    }
+                    before = Some(id);
+                }
+                stack.extend(scene.children(id).iter().rev().copied());
+            }
+            after
+                .or(before)
+                .or_else(|| scene.ancestors(leaving).find(|id| takes(*id)))
+        };
+        if target.is_none() || !self.focus(scene, target) {
+            self.focus(scene, None);
+        }
     }
     /// Whether `node` can take input now: shown, not disabled itself or by
     /// an ancestor, not transparent, and inside the active modal scope.
@@ -1498,14 +1625,32 @@ impl InputDispatcher {
     }
     /// Enter a nested modal scope and save the previous focus for restoration.
     pub fn push_focus_scope(&self, scene: &Rc<RefCell<Scene>>, root: NodeId) -> bool {
-        self.push_scope(scene, root, false)
+        self.push_scope(scene, root, false, None)
     }
     /// As `push_focus_scope`, leaving the scope below live to the pointer
     /// and keys too: a submenu, whose parent menu's items stay hoverable.
     pub fn push_porous_focus_scope(&self, scene: &Rc<RefCell<Scene>>, root: NodeId) -> bool {
-        self.push_scope(scene, root, true)
+        self.push_scope(scene, root, true, None)
     }
-    fn push_scope(&self, scene: &Rc<RefCell<Scene>>, root: NodeId, porous: bool) -> bool {
+    /// As `push_focus_scope` (porous with `porous`), opened by `trigger`: a
+    /// popover's or menu's, where focus returns as it closes when what had
+    /// focus before is gone and it opened from the keyboard.
+    pub(crate) fn push_focus_scope_from(
+        &self,
+        scene: &Rc<RefCell<Scene>>,
+        root: NodeId,
+        porous: bool,
+        trigger: Option<NodeId>,
+    ) -> bool {
+        self.push_scope(scene, root, porous, trigger)
+    }
+    fn push_scope(
+        &self,
+        scene: &Rc<RefCell<Scene>>,
+        root: NodeId,
+        porous: bool,
+        trigger: Option<NodeId>,
+    ) -> bool {
         // Opening a sibling modal may supersede the current scope. Check the
         // node's actual ancestry, without applying the active scope boundary.
         if !self.enabled_without_scope(&scene.borrow(), root)
@@ -1523,10 +1668,21 @@ impl InputDispatcher {
             return false;
         }
         let previous = self.focused();
+        // Opened from the keyboard, or by a press on its trigger (which a
+        // browser's press would have focused): focus may go back to it.
+        let pressed = self.state.borrow().last_press;
+        let keyboard = self.focus_visible_now()
+            || (trigger.zip(pressed)).is_some_and(|(trigger, pressed)| {
+                let scene = scene.borrow();
+                pressed == trigger
+                    || (scene.contains(pressed) && scene.ancestors(pressed).any(|a| a == trigger))
+            });
         self.state.borrow_mut().scopes.push(FocusScope {
             root,
             previous,
             porous,
+            trigger,
+            keyboard,
         });
         let next = self.next_focus(&scene.borrow(), false);
         self.focus(scene, next);
@@ -1538,7 +1694,10 @@ impl InputDispatcher {
                 .iter()
                 .any(|scope| scope.root == root)
     }
-    /// Close the innermost scope and restore the previous mounted, enabled focus.
+    /// Close the innermost scope and give focus back, as browsers and native
+    /// toolkits do: to what had it as the scope opened, else (that gone) to
+    /// what opened it if that was from the keyboard, else to nothing. Never
+    /// to the window's first focusable node.
     pub fn pop_focus_scope(&self, scene: &Rc<RefCell<Scene>>) -> bool {
         let scope = self.state.borrow_mut().scopes.pop();
         let Some(scope) = scope else {
@@ -1548,10 +1707,9 @@ impl InputDispatcher {
         if scene.borrow().contains(scope.root) {
             self.route(scene, scope.root, InputEvent::FocusScopeClosed);
         }
-        let previous = scope
-            .previous
-            .filter(|id| self.enabled(&scene.borrow(), *id));
-        let next = previous.or_else(|| self.next_focus(&scene.borrow(), false));
+        let usable = |id: &NodeId| self.enabled(&scene.borrow(), *id);
+        let next = (scope.previous.filter(usable))
+            .or_else(|| scope.trigger.filter(|_| scope.keyboard).filter(usable));
         self.focus(scene, next);
         true
     }
@@ -2185,10 +2343,16 @@ impl InputDispatcher {
         }
         match &event {
             InputEvent::PointerDown { .. } => self.state.borrow_mut().pointer_modality = true,
-            InputEvent::KeyDown { modifiers, .. }
+            // As `:focus-visible`: a key that moves or types does; Escape
+            // (closing a popup) and shortcuts don't. The key is looked at
+            // only while the pointer's in use: typing keeps the keyboard's.
+            InputEvent::KeyDown { key, modifiers, .. }
                 if !modifiers.meta && !modifiers.control && !modifiers.alt =>
             {
-                self.state.borrow_mut().pointer_modality = false
+                let mut state = self.state.borrow_mut();
+                if state.pointer_modality && !matches!(key, Key::Escape) {
+                    state.pointer_modality = false;
+                }
             }
             _ => {}
         }
@@ -2428,8 +2592,18 @@ impl InputDispatcher {
             0
         };
         // This press's, whatever becomes of it (`keep_focus_for_press`).
-        let keep_focus = matches!(event, InputEvent::PointerDown { .. })
-            && std::mem::take(&mut self.state.borrow_mut().keep_focus);
+        // And, in the same borrow, what it lands on (`last_press`) and the
+        // scopes open before it: whether it opens a popup (below).
+        let (keep_focus, scopes) = if matches!(event, InputEvent::PointerDown { .. }) {
+            let mut state = self.state.borrow_mut();
+            state.last_press = target;
+            (
+                std::mem::take(&mut state.keep_focus),
+                Some(state.scopes.len()),
+            )
+        } else {
+            (false, None)
+        };
         let mut prevented = false;
         if let Some(id) = target {
             let ctx = self.route_pointer(
@@ -2441,6 +2615,21 @@ impl InputDispatcher {
                 false,
             );
             prevented = ctx.prevented;
+            // The press opened a popup (a menu opens on it): its release
+            // goes to the popup, so what was pressed hears no more of it
+            // and shows pressed no longer.
+            if let Some(scopes) = scopes
+                && self.state.borrow().scopes.len() > scopes
+                && let Some(root) = self.focus_scope()
+            {
+                let inside = {
+                    let scene = scene.borrow();
+                    id == root || (scene.contains(id) && scene.ancestors(id).any(|a| a == root))
+                };
+                if !inside && scene.borrow().contains(id) {
+                    self.route(scene, id, InputEvent::PointerCancel);
+                }
+            }
             if let InputEvent::Scroll {
                 delta_x, delta_y, ..
             } = event
@@ -2741,6 +2930,7 @@ mod tests {
         assert_eq!(press(0), 1);
         assert_eq!(press(700), 1, "past the default 500 ms");
         input.set_double_click_time(Duration::from_millis(900));
+        assert_eq!(input.double_click_time(), Duration::from_millis(900));
         assert_eq!(press(1400), 2);
         input.set_double_click_time(Duration::ZERO);
         assert_eq!(input.state.borrow().clicks.1, Duration::from_millis(100));

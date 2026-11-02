@@ -215,9 +215,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         info.last_request_error.get()
                     );
                     println!("CONTROLS_READY");
-                    zgx::timer::sleep(Duration::from_secs(2)).await;
-                    window.refresh_window_info();
-                    zgx::timer::sleep(Duration::from_millis(100)).await;
+                    // The probe drags the custom titlebar as soon as it can, and
+                    // how soon is the machine's: read the bounds once they move
+                    // (or after ten seconds), not at a fixed time that a loaded
+                    // runner's drag may not have reached yet.
+                    let placed = info.bounds.get().position;
+                    for _ in 0..100 {
+                        zgx::timer::sleep(Duration::from_millis(100)).await;
+                        window.refresh_window_info();
+                        zgx::timer::sleep(Duration::from_millis(10)).await;
+                        if info.bounds.get().position != placed {
+                            // Settled: the WM's move has ended.
+                            zgx::timer::sleep(Duration::from_millis(300)).await;
+                            window.refresh_window_info();
+                            zgx::timer::sleep(Duration::from_millis(10)).await;
+                            break;
+                        }
+                    }
                     println!(
                         "AFTER_DRAG {:?} error={:?}",
                         info.bounds.get(),

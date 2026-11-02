@@ -15,7 +15,7 @@ import tempfile
 import time
 
 from platform_smoke import stop, wait_for_wm
-from sway_host import wait_for_sway_host
+from sway_host import wait_for_sway_host, sway_config
 
 TITLE = "zgx cursor styles"
 # wp_cursor_shape_device_v1.shape
@@ -52,7 +52,7 @@ def main():
             wait_for_wm(env)
             env.update(WLR_BACKENDS="x11", WLR_X11_OUTPUTS="1", WLR_RENDERER="pixman")
             config = pathlib.Path(private, "sway.conf")
-            config.write_text(f"xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\n"
+            sway_config(config, f"xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\n"
                               f"default_border none\nfor_window [title=\"{TITLE}\"] floating enable\n")
             sway = launch("sway", ["sway", "--unsupported-gpu", "--config", str(config)], env)
             host = wait_for_sway_host(env, args.output, sway)

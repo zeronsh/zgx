@@ -43,11 +43,11 @@ Plugins may also target an element by role and name, as the app writes them (`ro
 
 | | call | needs |
 |---|---|---|
-| add beside an element | `ui.contribute { target, before = node }`, `after = node` | nothing, unless the host asks a capability for that target (`expose_hook`) |
+| add beside an element | `ui.contribute { target, before = node }`, `after = node` | nothing, unless the host asks a capability for that target (`expose_hook`) or for every contribution (`require_contribution_capability`) |
 | put a node in its place | `ui.contribute { target, replace = node }` | `Capability::Override(target)` |
 | pass a prop through a function | `ui.filter { target, text = fn, … }` (text, label, hidden, disabled, tooltip, items, order) | `Capability::Override(target)` |
 | replace an app module | `ui.override { module = "@app/…", with = "./file" }` | `Capability::Override(module)`, a trust grant (below) |
-| add to a slot the app made | `ui.contribute(name, node)` | nothing |
+| add to a slot the app made | `ui.contribute(name, node)` | nothing, unless the host asks a capability for every contribution (`require_contribution_capability`) |
 
 From the focus plugin:
 
@@ -66,7 +66,9 @@ A filter runs in the plugin's VM. It runs again whenever what it reads changes: 
 
 What a plugin adds is described to assistive technology as the plugin's ("From the plugin focus"), so a contributed "Confirm" next to the app's can be traced.
 
-Before and after work among a container's children. Inside a `ui.show` or `ui.switch`, which lays out as the one element it shows, an element can be replaced or filtered but not given siblings. The app's root element, and the panes of a split or a library component, are not targets.
+Before and after work among a container's children. Inside a `ui.show` or `ui.switch`, which lays out as the one element it shows, an element can be replaced or filtered but not given siblings. The app's root element, and the panes of a split or a library component, are not targets. The root of a `ui.each` or `ui.list` row isn't given siblings yet either: adding before or after one is an error, so target an element inside the row or the list's container.
+
+What a plugin adds reads what the app provides above where it lands (`provide`, `ui.use_context`), nearest first. A value arrives as a copy in the plugin's own script; a state arrives as the same state, read only, so what reads it follows the app's changes; a name nobody provides gives the default. A function can't cross into a plugin: providing one where a plugin's node reads it is an error naming it.
 
 ## The trust model
 
@@ -84,7 +86,7 @@ Plugin { name: "stamps".into(), entry, grants: vec![
 
 **`Override` on a module is a trust grant.** The replacement runs in the app's VM as the app's own code, with everything the app's scripts may do: its state, its actions, its packages. That is why stamps' row can `require("@app-original/components/task_row")` (the module it replaces; only the replacement may reach it) and `require("@kit/badge")`. Grant `Override("@app/…")` as you would install the plugin's code into the app, and `Override("*")` only to a plugin you trust with the whole app.
 
-The host can also ask a capability before anyone adds beside a target: `host.expose_hook("#checkout", Some(Capability::Named("payments".into())))`.
+The host can also ask a capability before anyone adds beside a target: `host.expose_hook("#checkout", Some(Capability::Named("payments".into())))`. To lock every contribution down at once (slots, and beside any `#id` or hook), `host.require_contribution_capability(Capability::Named("contribute".into()))` makes each take that capability; `expose_hook(target, None)` (`"slot:name"` for a slot) opens one again.
 
 ## What plugins see of the app
 
@@ -97,6 +99,52 @@ A plugin sees nothing of the app's own `ui.state`. What it reads and changes, th
   Pass a capability instead of `None` to expose it to the plugins granted that capability only. The example shares its tasks read only: the focus plugin counts the open ones on its button and filters the list, but only the app and the host's actions change them. `focus` is the plugin's to set.
 - **Actions.** `host.action("complete", …)` is a Rust handler that scripts call with `ui.action("complete", id)` (as a handler) or `ui.invoke`. `host.expose_action("complete", None)` lets plugins call it too. The example exposes completing a task but not adding one or clearing what is done: those stay the app's.
 - **Everything else** (fetching, the clipboard, files, windows, web views, terminals) takes its own capability; see the table in [scripting.md](scripting.md#plugins).
+
+## Plugins in a Luau app: zgx.json
+
+An app run with `zgx run` has no Rust of its own. Its `zgx.json` sets both sides instead: what the app exposes, and what each plugin is allowed. `zgx test` and `zgx audit` load the same plugins.
+
+```json
+{
+  "expose": {
+    "shared": { "tasks": "read", "focus": "write" },
+    "actions": ["complete"],
+    "hooks": { "#tasks": "override" }
+  },
+  "plugins": {
+    "focus": {
+      "path": "plugins/focus",
+      "allow": ["shared:tasks", "shared:focus", "action:complete", "override:#tasks"]
+    }
+  }
+}
+```
+
+- **`expose`** is the app's whole plugin surface, kept in one place.
+  - `shared` maps each `ui.shared` key to `"read"` or `"write"`.
+  - `actions` names what plugins may call.
+  - `hooks` maps a target, or an `@app/…` module, to `"override"` when a plugin may replace or filter it. Adding before and after is open, so `"open"` changes nothing. `"*": "override"` offers every target.
+- **`plugins`** names each plugin's folder (its `init.luau`) or file, and its `allow` list:
+  - `shared:<key>`, `action:<name>` and `override:<target>` for what `expose` offers;
+  - `fetch`, `clipboard`, `files`, `folders`, `terminals`, `web` and `windows` for the sandbox. `folders` is `ui.open_folder`, and the host can refuse it to every script (`ScriptHost::refuse_folders`).
+- **A grant beyond what's exposed is an error as the app loads**, naming the plugin and the grant: ``plugin `focus` is allowed `action:complete`, which the app doesn't expose (add "complete" to expose.actions)``. So is an unknown grant or a missing path.
+- **The app's script defines its actions** with `ui.actions`. Plugins call them as they call a Rust host's: `ui.invoke("complete", id)`, or `ui.action("complete", id)` as a handler. The app calls them the same way. A plugin can't define actions.
+
+  ```lua
+  local tasks = ui.shared("tasks", {})
+  ui.actions {
+      complete = function(id)
+          tasks:update(function(list)
+              for _, task in list do
+                  if task.id == id then
+                      task.done = true
+                  end
+              end
+          end)
+      end,
+  }
+  ```
+- **The app's `ui.shared` default is what shows.** Plugins load before the app, and a default a plugin gives (`ui.shared("tasks", {})`) gives way to the app's own. A Rust host's `host.shared` value still comes first.
 
 ## Packages
 

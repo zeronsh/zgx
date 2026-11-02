@@ -300,6 +300,11 @@ impl AccessibilityTree {
         if !hidden.is_empty() {
             ordered.retain(|(id, _)| !hidden.iter().any(|h| scene.is_within(*id, *h)));
         }
+        // Inert content (a row playing its exit, gone from its data) is not
+        // there to act on: a reader doesn't offer it.
+        if scene.has_inert() {
+            ordered.retain(|(id, _)| scene.inert_around(*id).is_none());
+        }
         if bare_image {
             ordered.retain(|(id, s)| {
                 !(s.role == Role::Image
@@ -421,8 +426,10 @@ impl AccessibilityTree {
                 || scene
                     .ancestors(id)
                     .any(|ancestor| semantics.get(ancestor).is_some_and(|s| s.disabled));
-            // Assistive bounds: the box around where it shows.
-            let r = scene.transformed_bounds(id);
+            // Assistive bounds: the box around where it shows, or where an
+            // animation is taking it with `hit = "target"` (as Core
+            // Animation's model layer): a reader's highlight goes ahead.
+            let r = scene.hit_bounds(id);
             let revision = semantics
                 .node_revision(id)
                 .expect("projected semantic node");
@@ -477,6 +484,18 @@ impl AccessibilityTree {
                 continue;
             }
             let mut n = Node::new(semantic_role(semantic));
+            // A page drawn as an image embeds its own accessible tree
+            // (another process's) as its last child: a frame holding a
+            // document, as a browser's iframe is.
+            // From the first projection: a role changed later stays as a
+            // reader first cached it.
+            #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
+            if let Some(embedding) = crate::native_host::webkitgtk::embedding(id) {
+                n.set_role(accesskit::Role::Iframe);
+                if let Some(embedding) = embedding {
+                    n.set_author_id(embedding);
+                }
+            }
             // AccessKit Label content belongs in value; AT-SPI derives its
             // accessible name from value, rather than the control-label field.
             // A long field has none: its text is its runs, a page of it.
@@ -602,6 +621,11 @@ impl AccessibilityTree {
             }
             if let Some(v) = semantic.max {
                 n.set_max_numeric_value(v);
+            }
+            // What it moves by: UIA's RangeValue SmallChange, AT-SPI's
+            // minimum increment.
+            if let Some(step) = scene.numeric_step(id) {
+                n.set_numeric_value_step(step);
             }
             if matches!(
                 semantic.role,
@@ -2321,6 +2345,87 @@ mod projection_key_tests {
         );
     }
 
+    /// A row playing its exit (inert, gone from its data) is no control a
+    /// reader offers; the one staying is.
+    #[test]
+    fn inert_content_is_not_offered() {
+        let mut scene = Scene::new(400., 300.);
+        let list = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            fixed(300., 200.),
+        );
+        let [leaving, staying] = ["Remove 1", "Remove 2"]
+            .map(|_| scene.append(list, NodeKind::Rect(Color(0, 0, 0, 255)), fixed(100., 20.)));
+        scene.prepare_layout();
+        let mut semantics = Semantics::new();
+        semantics.set(
+            list,
+            zgx::semantics::SemanticNode::new(Role::Group, "Photos"),
+        );
+        semantics.set(
+            leaving,
+            zgx::semantics::SemanticNode::new(Role::Button, "Remove 1"),
+        );
+        semantics.set(
+            staying,
+            zgx::semantics::SemanticNode::new(Role::Button, "Remove 2"),
+        );
+        let mut adapter = AccessibilityTree::new();
+        adapter.update(&scene, &semantics, None, "Test", 1.);
+        let (list_id, staying_id) = (adapter.ids[&list], adapter.ids[&staying]);
+        scene.set_inert(leaving, true);
+        let update = adapter.update(&scene, &semantics, None, "Test", 1.);
+        let children = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == list_id)
+            .expect("the list changed")
+            .1
+            .children()
+            .to_vec();
+        assert_eq!(children, [staying_id]);
+    }
+
+    /// A group laid out in its parent's place (`set_display_contents`)
+    /// keeps its role and name, its children under it.
+    #[test]
+    fn a_group_laid_out_in_its_parents_place_keeps_its_children() {
+        let mut scene = Scene::new(400., 300.);
+        let grid = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Row),
+            fixed(300., 200.),
+        );
+        let group = scene.append(grid, NodeKind::Container(Layout::Column), Style::default());
+        let buttons = ["One", "Two"]
+            .map(|_| scene.append(group, NodeKind::Rect(Color(0, 0, 0, 255)), fixed(100., 20.)));
+        scene.set_display_contents(group, true);
+        scene.prepare_layout();
+        let mut semantics = Semantics::new();
+        semantics.set(
+            group,
+            zgx::semantics::SemanticNode::new(Role::Group, "Photos"),
+        );
+        for (button, name) in buttons.iter().zip(["One", "Two"]) {
+            semantics.set(
+                *button,
+                zgx::semantics::SemanticNode::new(Role::Button, name),
+            );
+        }
+        let mut adapter = AccessibilityTree::new();
+        let update = adapter.update(&scene, &semantics, None, "Test", 1.);
+        let group_id = adapter.ids[&group];
+        let held = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == group_id)
+            .map(|(_, node)| node)
+            .expect("the group is there");
+        assert_eq!(held.label(), Some("Photos"));
+        assert_eq!(held.children(), &buttons.map(|button| adapter.ids[&button]));
+    }
+
     #[test]
     fn replacing_semantics_instance_cannot_reuse_coincident_node_revisions() {
         let mut scene = Scene::new(100., 100.);
@@ -3219,5 +3324,66 @@ mod pacing_tests {
         assert!(pacer.update_now(at(500), false, true));
         // Focus moving goes out at once, even right after.
         assert!(pacer.update_now(at(501), true, false));
+    }
+}
+
+#[cfg(test)]
+mod slider_tests {
+    use super::*;
+    use zgx::{compose::prelude::*, widgets::Ui};
+
+    #[test]
+    fn a_custom_slider_reaches_assistive_technology_with_its_step_text_and_actions() {
+        let mut ui = Ui::new(400., 200.);
+        ui.set_assistive_technology(true);
+        let effort = ui.signal(3.0_f64);
+        let (read, write) = (effort.clone(), effort.clone());
+        let view = ui.mount(
+            column().children([
+                row()
+                    .size(200., 30.)
+                    .role(Role::Slider)
+                    .accessible_label("Effort")
+                    .numeric_when(1., 4., move || read.get())
+                    .value_when(|| "High".into())
+                    .adjustable(1., move |next| {
+                        write.set(next);
+                    })
+                    .id("effort"),
+                slider("Volume", ui.signal(20.), 0. ..=100.)
+                    .step(5.)
+                    .id("volume"),
+            ]),
+        );
+        ui.prepare_frame();
+        let mut adapter = AccessibilityTree::new();
+        let update = adapter.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "T", 1.);
+        let sent = |id: &str| {
+            let node = adapter.ids[&view.find(id).unwrap()];
+            update
+                .nodes
+                .iter()
+                .find(|(n, _)| *n == node)
+                .unwrap()
+                .1
+                .clone()
+        };
+        let effort = sent("effort");
+        assert_eq!(effort.role(), accesskit::Role::Slider);
+        assert_eq!(effort.label(), Some("Effort"));
+        assert_eq!(
+            (effort.min_numeric_value(), effort.max_numeric_value()),
+            (Some(1.), Some(4.))
+        );
+        assert_eq!(effort.numeric_value(), Some(3.));
+        assert_eq!(effort.numeric_value_step(), Some(1.));
+        assert_eq!(effort.value(), Some("High"));
+        for action in [Action::Increment, Action::Decrement, Action::SetValue] {
+            assert!(effort.supports_action(action), "{action:?}");
+        }
+        // A slider's own step, told as well.
+        let volume = sent("volume");
+        assert_eq!(volume.numeric_value_step(), Some(5.));
+        assert_eq!(volume.numeric_value(), Some(20.));
     }
 }

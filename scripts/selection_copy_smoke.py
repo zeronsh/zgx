@@ -17,7 +17,7 @@ import tempfile
 import time
 
 from platform_smoke import stop, wait_for_wm
-from sway_host import wait_for_sway_host
+from sway_host import wait_for_sway_host, sway_config
 
 TITLE = "zgx selectable text"
 LINE = "A transcript line in a virtual list of 10,000 (line {})"
@@ -58,7 +58,7 @@ def main():
             if args.wayland:
                 env.update(WLR_BACKENDS="x11", WLR_X11_OUTPUTS="1", WLR_RENDERER="pixman")
                 config = pathlib.Path(private, "sway.conf")
-                config.write_text("xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\n"
+                sway_config(config, "xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\n"
                                   f"default_border none\nfor_window [title=\"{TITLE}\"] floating enable\n")
                 sway = launch("sway", ["sway", "--unsupported-gpu", "--config", str(config)], env)
                 host = wait_for_sway_host(env, args.output, sway)

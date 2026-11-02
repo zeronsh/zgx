@@ -37,6 +37,13 @@ impl ValueInterface {
         self.node.minimum_increment().map_err(self.map_error())
     }
 
+    /// zgx patch: what the value reads as (`aria-valuetext`), AT-SPI 2.46's
+    /// `Value.Text`.
+    #[zbus(property)]
+    fn text(&self) -> fdo::Result<String> {
+        self.node.value_text().map_err(self.map_error())
+    }
+
     #[zbus(property)]
     fn current_value(&self) -> fdo::Result<f64> {
         self.node.current_value().map_err(self.map_error())

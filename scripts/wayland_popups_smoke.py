@@ -44,6 +44,7 @@ from PIL import Image, ImageChops
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from platform_smoke import stop  # noqa: E402
 from wayland_pointer import VirtualPointer  # noqa: E402
+from sway_host import sway_config
 
 OUTPUT = (1280, 960)
 CONTENT = (16, 20, 28)
@@ -111,7 +112,7 @@ def main():
         runtime.mkdir(mode=0o700)
         env["XDG_RUNTIME_DIR"] = str(runtime)
         config = runtime / "sway.conf"
-        config.write_text("output * mode %dx%d scale %g\ndefault_border none\n"
+        sway_config(config, "output * mode %dx%d scale %g\ndefault_border none\n"
                           "for_window [app_id=\".*\"] floating enable, move position 0 0\n" % (*output, scale))
         sway, _ = launch(f"sway-{scale}x", ["sway", "--unsupported-gpu", "-c", str(config)], env)
         sockets = lambda: [p for p in runtime.glob("wayland-*") if p.suffix != ".lock"]
@@ -170,7 +171,7 @@ def main():
             # sway: clicked.
             env = dict(base, WLR_BACKENDS="headless", WLR_RENDERER="pixman", WLR_LIBINPUT_NO_DEVICES="1")
             config = pathlib.Path(private, "sway.conf")
-            config.write_text("output * mode %dx%d\ndefault_border none\n"
+            sway_config(config, "output * mode %dx%d\ndefault_border none\n"
                               "for_window [app_id=\".*\"] floating enable, move position 0 0\n" % OUTPUT)
             sway, _ = launch("sway", ["sway", "--unsupported-gpu", "-c", str(config)], env)
             sockets = lambda: [p for p in pathlib.Path(private).glob("wayland-*") if p.suffix != ".lock"]
@@ -266,6 +267,11 @@ def main():
             until("a choice", lambda: 'CHOSEN "Item' in said())
             chosen = [line for line in said().splitlines() if line.startswith("OPEN")][-1]
             checks["sway: tall menu's choice"] = chosen
+            # The window's release heard after the popup's enter (#1199): the
+            # order that closed this menu as it opened, now heard where it was.
+            # Counted on every run; the trace is kept on every run too.
+            crossed = said().count("window button at ")
+            checks["sway: tall: window buttons heard after a popup's move"] = crossed
             checks["sway: its last item, scrolled to, takes a click"] = 'CHOSEN "Item 60"' in chosen
             stop(app)
 
@@ -352,6 +358,8 @@ def main():
         (args.output / "result.json").write_text(json.dumps(checks, indent=2) + "\n")
         failed = [key for key, value in checks.items() if value is False]
         assert not failed, f"failed: {failed}\n{json.dumps(checks, indent=2)}"
+        crossed = checks.get("sway: tall: window buttons heard after a popup's move", 0)
+        print(f"tall menu: {crossed} window button(s) heard after a popup's move (#1199's order)")
         print("PASS: Wayland popups: past the window on sway and Weston, chosen from, closed, flipped at the output's "
               "edge, a submenu beside its flipped menu, a menu taller than the output cut to it and scrolled, "
               "a flipped popover's arrow facing its trigger, "

@@ -2,7 +2,7 @@
 """Owned X11/Wayland desktop: window controls and native application D-Bus events."""
 import argparse, json, os, pathlib, re, select, shutil, subprocess, time
 from platform_smoke import private_runtime, stop
-from sway_host import wait_for_openbox, wait_for_sway_host
+from sway_host import wait_for_openbox, wait_for_sway_host, sway_config
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -27,7 +27,7 @@ def main():
             host=None
             if a.wayland:
                 env.update(WLR_BACKENDS='x11',WLR_X11_OUTPUTS='1',WLR_RENDERER='pixman')
-                config=pathlib.Path(private,'sway.conf');config.write_text('xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx native platform"] floating enable\n')
+                config=pathlib.Path(private,'sway.conf');sway_config(config, 'xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx native platform"] floating enable\n')
                 (a.output/'sway.conf').write_text(config.read_text());sway=launch('sway',['sway','--unsupported-gpu','--config',str(config)])
                 host=wait_for_sway_host(env,a.output,sway)
                 deadline=time.monotonic()+10
@@ -54,9 +54,15 @@ def main():
                     if node.get('name')=='zgx native platform':rect=node['rect'];break
                 xdo('windowactivate','--sync',host);xdo('mousemove','--window',host,rect['x']+90,rect['y']+16)
             else:
-                host=subprocess.check_output(['xdotool','search','--name','^zgx native platform$'],env=env,text=True).strip().splitlines()[0]
+                host=subprocess.check_output(['xdotool','search','--onlyvisible','--name','^zgx native platform$'],env=env,text=True).strip().splitlines()[0]
                 xdo('windowactivate','--sync',host);xdo('mousemove','--window',host,90,16)
-            xdo('mousedown',1);time.sleep(.15);xdo('mousemove_relative','--sync',80,55);time.sleep(.15);xdo('mouseup',1)
+            # The move is the window manager's from the moment the app asks for
+            # it (_NET_WM_MOVERESIZE, sent as it handles the press, at the
+            # pointer and with the button held): moving or releasing before then
+            # leaves the WM nothing to follow, so wait for the app to have asked.
+            xdo('mousedown',1);wait('DRAG_QUEUED');time.sleep(.2)
+            for _ in range(5):xdo('mousemove_relative','--sync',16,11);time.sleep(.03)
+            time.sleep(.15);xdo('mouseup',1)
             if a.wayland:
                 time.sleep(.15)
                 tree=json.loads(subprocess.check_output(['swaymsg','-t','get_tree','-r'],env=env,text=True));pending=[tree]

@@ -64,6 +64,7 @@ impl Open {
         if let (Some(node), Some(mut ui)) = (self.node.take(), self.ui.upgrade())
             && ui.scene.borrow().contains(node)
         {
+            ui.remove_portal(node);
             ui.remove(node);
         }
     }
@@ -127,12 +128,14 @@ pub(crate) fn mount(
         let Some(mut ui) = weak.upgrade() else {
             return;
         };
-        let origin = ui.scene.borrow().bounds(node);
+        // Hung in the window, where the box shows.
+        let origin = ui.scene.borrow().transformed_bounds(node);
+        let (local_x, local_y) = ui.scene.borrow().local_point(node, x, y);
         let event = ContextMenuEvent {
             x,
             y,
-            local_x: x - origin.x,
-            local_y: y - origin.y,
+            local_x,
+            local_y,
         };
         let items = build(&event);
         if items.is_empty() {
@@ -140,6 +143,18 @@ pub(crate) fn mount(
         }
         cx.prevent_default();
         cx.stop_propagation();
+        // A context click focuses what it lands on, as any button's press
+        // does in a browser (a field's caret goes there): the menu gives
+        // focus back to it as it closes.
+        let pressed = matches!(cx.event, InputEvent::PointerDown { .. });
+        let within = ui.input.focused().is_some_and(|focused| {
+            let scene = ui.scene.borrow();
+            focused == node
+                || (scene.contains(focused) && scene.ancestors(focused).any(|a| a == node))
+        });
+        if pressed && !within && ui.input.options(node).is_some_and(|o| o.focusable) {
+            ui.input.focus(&ui.scene, Some(node));
+        }
         current.close();
         let shown = ui.runtime.signal(true);
         let anchor = if below {
@@ -166,6 +181,8 @@ pub(crate) fn mount(
         };
         let root = ui.root();
         let mounted = crate::compose::mount(&mut ui, root, view, environment.clone());
+        // Mounted at the root, it is its element's: devtools find it there.
+        ui.add_portal(node, mounted);
         current.node.set(Some(mounted));
     });
     ui.retain(node, binding);

@@ -2,7 +2,7 @@
 """Owned X11/Wayland desktop: actual Wayland URI-list file-drop transport."""
 import argparse, json, os, pathlib, re, select, shutil, subprocess, time
 from platform_smoke import private_runtime, stop
-from sway_host import wait_for_openbox, wait_for_sway_host
+from sway_host import wait_for_openbox, wait_for_sway_host, sway_config
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -27,7 +27,7 @@ def main():
             host=None
             if a.wayland:
                 env.update(WLR_BACKENDS='x11',WLR_X11_OUTPUTS='1',WLR_RENDERER='pixman')
-                config=pathlib.Path(private,'sway.conf');config.write_text('xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx typed drag"] floating enable\nfor_window [title="zgx file source"] floating enable\n')
+                config=pathlib.Path(private,'sway.conf');sway_config(config, 'xwayland disable\nseat seat0 fallback true\noutput * mode 1200x800\ndefault_border none\nfor_window [title="zgx typed drag"] floating enable\nfor_window [title="zgx file source"] floating enable\n')
                 (a.output/'sway.conf').write_text(config.read_text());sway=launch('sway',['sway','--unsupported-gpu','--config',str(config)])
                 host=wait_for_sway_host(env,a.output,sway)
                 deadline=time.monotonic()+10
