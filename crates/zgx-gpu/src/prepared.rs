@@ -48,6 +48,10 @@ const UNDRAWN_BUDGET: usize = 64 * 1024;
 const SHAPED_BYTES_PER_CHAR: usize = 190;
 /// Recently prepared entries a new text may reuse lines from.
 const RECENT: usize = 6;
+/// The words the run cache holds at least before it is swept, and how many
+/// sweeps a word not looked up survives (`TextCache::sweep_words`).
+const WORDS_FLOOR: usize = 16384;
+const WORDS_KEPT_SWEEPS: u64 = 2;
 /// Widths whose sizes an entry remembers.
 const SIZES: usize = 4;
 /// As `Buffer` lays out.
@@ -893,6 +897,10 @@ pub struct TextCache {
     spare_lists: Vec<Vec<BufferLine>>,
     /// Every compact's words and advances.
     slab: Slab,
+    /// The run cache's words after its last sweep, and whether the next
+    /// text shaped looks at them again (`sweep_words`).
+    words_kept: usize,
+    sweep_due: bool,
     /// Plain text's words, shaped once (`words`).
     words: words::WordCache,
     /// The word lists of dropped texts, filled again by new ones (boxed as
@@ -1242,6 +1250,22 @@ impl TextCache {
             self.entries.shrink_to_fit();
         }
     }
+    /// cosmic-text's run cache swept of words unused lately, once it has
+    /// grown a quarter past what the last sweep left (and `WORDS_FLOOR` at
+    /// least), looked at once prepared text has outgrown its budget
+    /// (`evict`, which says so to the next text shaped): a renderer trims it
+    /// as it draws, and text measured without one (`TextServices`) would
+    /// otherwise keep every word it ever shaped.
+    #[cold]
+    #[inline(never)]
+    fn sweep_words(&mut self, fonts: &mut FontSystem) {
+        self.sweep_due = false;
+        let words = fonts.shape_run_cache.len();
+        if words > self.words_kept + (self.words_kept / 4).max(WORDS_FLOOR) {
+            fonts.shape_run_cache.sweep(WORDS_KEPT_SWEEPS);
+            self.words_kept = fonts.shape_run_cache.len();
+        }
+    }
     /// Estimated bytes held: shaped lines, and compact measurements.
     pub fn bytes(&self) -> (usize, usize) {
         (self.shaped_bytes, self.compact_bytes)
@@ -1284,6 +1308,9 @@ impl TextCache {
         }
         let known = cached.is_some();
         self.shaped += 1;
+        if self.sweep_due {
+            self.sweep_words(fonts);
+        }
         // A paragraph cosmic-text shapes as one span: from its words,
         // without a line built around them.
         if let Some((plain, base)) = self.words_of(fonts, source, caret_row) {
@@ -1685,6 +1712,9 @@ impl TextCache {
     /// lines first, keeping measurements where the text has them.
     fn evict(&mut self, keep: u64) {
         if self.shaped_bytes > SHAPED_BUDGET {
+            // Words go with the text they were shaped for, at the next text
+            // shaped (`sweep_words`).
+            self.sweep_due = true;
             for hash in self.by_age(keep, Entry::shaped) {
                 if self.shaped_bytes <= SHAPED_BUDGET / 4 * 3 {
                     break;

@@ -330,3 +330,12 @@ needs of this crate, all additions:
 zgx-gpu's `plain_text_from_its_words_lays_out_as_its_line` and
 `rich_paragraphs_from_their_words_lay_out_as_their_line` check that its
 glyphs, runs and sizes are this crate's, bit for bit, at every width.
+
+## A sweep without the trim's period (zgx-cosmic-text 0.19.8)
+
+`ShapeRunCache::sweep(keep)`: the words not looked up in the last `keep`
+sweeps go, at once and without shrinking the table, for a host with no
+renderer to trim the cache as it draws (zgx-gpu's `TextServices`, through
+its text cache once the cache has grown past what the last sweep left).
+`trim` sweeps only every `TRIM_PERIOD` ages and shrinks the table after,
+which rehashed every word a sweep kept.
