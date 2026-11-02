@@ -196,6 +196,26 @@ pub struct TextMark {
     pub color: Color,
 }
 
+/// A node's drop shadow (CSS's `filter: drop-shadow`): what its subtree
+/// paints, again under it, moved by `offset`, blurred and in `color`, by
+/// its alpha rather than its box (`Scene::set_drop_shadow`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DropShadow {
+    /// How far it is moved from what casts it, in points.
+    pub offset: Transform,
+    /// The blur's Gaussian sigma, in points; 0 draws it sharp.
+    pub blur: f32,
+    /// Its colour: what casts it shows its shape in it, its alpha times
+    /// this one's.
+    pub color: Color,
+}
+impl DropShadow {
+    /// Where it can paint, for a subtree painting in `ink`.
+    pub(crate) fn ink(&self, ink: Rect) -> Rect {
+        ink.translated(self.offset).expand(self.blur.max(0.) * 3.)
+    }
+}
+
 /// A text node's shadow (CSS's `text-shadow`): its glyphs again, under
 /// them, moved by `offset` and painted in `color`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -574,8 +594,10 @@ impl Scene {
             None => maps.text_gradients.remove(&id),
         };
         self.sync_cold(id);
+        // A drop shadow keeps it a layer too.
+        let extra = filled || self.drop_shadow(id).is_some();
         let node = self.node_mut(id);
-        node.relayer(filled);
+        node.relayer(extra);
         if filled && !std::mem::replace(&mut node.promoted, true) {
             self.promoted_count += 1;
         }
@@ -613,6 +635,61 @@ impl Scene {
         self.cold
             .as_ref()
             .is_some_and(|cold| !cold.text_gradients.is_empty())
+    }
+    /// Paint node `id`'s subtree again under itself as `shadow` says (CSS's
+    /// `filter: drop-shadow`): its shape by its alpha, moved, blurred and in
+    /// the shadow's colour; `None`: no more. It paints as a cached layer
+    /// while it has one, and the shadow is that layer's, blurred once: a
+    /// shadow moved or recoloured composites again without repainting it.
+    pub fn set_drop_shadow(&mut self, id: NodeId, shadow: Option<DropShadow>) {
+        let shadow = shadow.filter(|shadow| shadow.color.3 > 0);
+        let held = self
+            .cold
+            .as_ref()
+            .and_then(|cold| cold.drop_shadows.get(&id));
+        if !self.contains(id) || held == shadow.as_ref() {
+            return;
+        }
+        self.damage_subtree(id);
+        let shadowed = shadow.is_some();
+        let maps = self.cold.get_or_insert_default();
+        let had = match shadow {
+            Some(shadow) => maps.drop_shadows.insert(id, shadow),
+            None => maps.drop_shadows.remove(&id),
+        }
+        .is_some();
+        // Its damage spreads (`descend`), as a content blur's does.
+        match (had, shadowed) {
+            (false, true) => self.filtered.set(self.filtered.get() + 1),
+            (true, false) => self.filtered.set(self.filtered.get() - 1),
+            _ => {}
+        }
+        self.sync_cold(id);
+        // A text gradient keeps it a layer too.
+        let extra = shadowed || self.text_gradient(id).is_some();
+        let node = self.node_mut(id);
+        node.relayer(extra);
+        if shadowed && !std::mem::replace(&mut node.promoted, true) {
+            self.promoted_count += 1;
+        }
+        // Damaged where it reached, then where it reaches (as `set_effects`).
+        self.invalidate(id, COMPOSITE);
+        self.damage_subtree(id);
+    }
+    /// Whether any node has a drop shadow.
+    #[inline(always)]
+    pub fn has_drop_shadows(&self) -> bool {
+        self.cold
+            .as_ref()
+            .is_some_and(|cold| !cold.drop_shadows.is_empty())
+    }
+    /// Node `id`'s drop shadow (`set_drop_shadow`), if it has one.
+    #[inline]
+    pub fn drop_shadow(&self, id: NodeId) -> Option<&DropShadow> {
+        self.cold
+            .as_ref()
+            .filter(|cold| !cold.drop_shadows.is_empty())
+            .and_then(|cold| cold.drop_shadows.get(&id))
     }
     /// Whether any node has text shadows.
     #[inline(always)]

@@ -7804,6 +7804,17 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
                 })
                 .collect::<Vec<_>>(),
         ),
+        // The box shadow's form, its first: its blur CSS's, the sigma half
+        // of it (`blur_radius`), as `text_shadow`'s.
+        (DropShadow, Lit::Shadows(shadows)) => match shadows.first() {
+            Some(shadow) => s.drop_shadow(
+                shadow.offset.x,
+                shadow.offset.y,
+                shadow.blur_radius,
+                shadow.color,
+            ),
+            None => s,
+        },
         (InsetShadow, Lit::Shadows(shadows)) => s.inset_shadows(shadows.clone()),
         (Opacity, Lit::Num(v)) => s.opacity(v.clamp(0., 1.)),
         (Blur, Lit::Num(v)) => s.filter_blur(v.max(0.)),

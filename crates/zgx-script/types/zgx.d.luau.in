@@ -1675,6 +1675,7 @@ export type Styles = {
 	-- a list, the first on top. Inherited by the text inside; `blur` is a
 	-- Gaussian's sigma in points. It paints past the text's box.
 	text_shadow: Shadow?,
+	drop_shadow: Shadow?,
 	-- Shadows inside the box (CSS's inset): a ring as wide on each side as
 	-- the offset pushes it, plus the spread; drawn sharp (no blur).
 	inset_shadow: Shadow?,
@@ -1883,6 +1884,7 @@ export type StyleProps = {
 	outline_dash: Reactive<Pair?>?,
 	shadow: Reactive<Shadow>?,
 	text_shadow: Reactive<Shadow>?,
+	drop_shadow: Reactive<Shadow>?,
 	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,

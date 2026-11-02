@@ -307,6 +307,7 @@ return ui.div {
 | `brightness`, `contrast`, `saturate` | `number` | `1` | CSS filter functions over the node and its subtree |
 | `hue_rotate`, `sepia`, `invert` | `number` | `0` | CSS filter functions over the node and its subtree, by the spec's matrices: `hue_rotate` in degrees, `sepia` and `invert` from 0 to 1 (`invert = 1` for a dark-mode icon). They paint it once into a layer that composites through a shader, so they cost what a layer does, and take the place of a `layer_shader`. Not under Direct3D 11 |
 | `blur` | `number` | `0` | blurs the node's content (CSS `filter: blur()`) |
+| `drop_shadow` | `Shadow` | none | a shadow of what the node and its subtree paint, by their alpha rather than the box (CSS `filter: drop-shadow`), written as `shadow` is, its `blur` CSS's (twice the Gaussian's sigma). The node paints as a cached layer: moving or fading the shadow composites again without repainting |
 | `backdrop_blur` | `number` | `0` | blurs what is behind it: frosted glass |
 | `fade` | `Pair` | | a clipping view's top and bottom edges fade over those widths |
 | `fade_x` | `Pair` | | its left and right edges |
