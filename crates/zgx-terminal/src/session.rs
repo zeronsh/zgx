@@ -504,7 +504,7 @@ impl Io {
                 match event.key {
                     CHILD_EVENT => {
                         if let Some(ChildEvent::Exited(status)) = self.pty.next_child_event() {
-                            let _ = self.read(&mut parse, &mut buffer);
+                            self.read_last(&mut parse, &mut buffer);
                             let code = status.map_or(-1, exit_code);
                             *self.exited.lock().unwrap() = Some(code);
                             self.shared.push(SessionEvent::Exited(code));
@@ -552,6 +552,38 @@ impl Io {
         }
         let _ = self.pty.deregister(&self.poller);
         // Dropping the pty hangs up the program and reaps it.
+    }
+
+    /// What the program wrote last, once it has exited. Windows: ConPTY
+    /// renders it after the program has gone, as the pseudoconsole closes,
+    /// and then ends the output pipe, so it is read until the pipe ends (a
+    /// few seconds at most, should it never). Read once at once, it was
+    /// often still to come: a program's last lines (ping's statistics after
+    /// Ctrl+C) never showed.
+    fn read_last(&mut self, parse: &mut Parse, buffer: &mut [u8]) {
+        #[cfg(windows)]
+        {
+            self.pty.close_console();
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            let mut events = Events::with_capacity(NonZeroUsize::new(4).unwrap());
+            loop {
+                if self.read(parse, buffer).is_err() || self.pty.output_finished() {
+                    return;
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    return;
+                }
+                events.clear();
+                if self.poller.wait(&mut events, Some(deadline - now)).is_err() {
+                    return;
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = self.read(parse, buffer);
+        }
     }
 
     fn read(&mut self, parse: &mut Parse, buffer: &mut [u8]) -> io::Result<()> {

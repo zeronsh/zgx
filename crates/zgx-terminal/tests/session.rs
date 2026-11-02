@@ -268,18 +268,22 @@ fn ctrl_c_reaches_a_windows_program() {
     // shell): inherited, the shell would never get it.
     // SAFETY: no handler, TRUE: this process ignores Ctrl+C.
     unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 1) };
-    let mut run = Scripted::run("cmd.exe /d /c ping -t 127.0.0.1", 60, 6);
-    run.until("ping running", |_, term| {
-        rows(term).iter().any(|row| row.starts_with("Pinging"))
+    // Rows enough for ping's statistics whole: on six, ConPTY's repaint
+    // of them could leave their heading above the screen, and the check
+    // below failed with ping's statistics and "Control-C" plainly shown.
+    let mut run = Scripted::run("cmd.exe /d /c ping -t 127.0.0.1", 80, 24);
+    // A reply: ping is in its loop, its Ctrl+C handler set.
+    run.until("ping replying", |_, term| {
+        rows(term).iter().any(|row| row.starts_with("Reply from"))
     });
     run.session.write(b"\x03".as_slice());
-    // ping stops with its statistics and cmd /c ends with it.
+    // `ping -t` ends only on Ctrl+C, and cmd /c ends with it.
     run.exited();
-    assert!(
-        shows_prefix(&run.session.term(), "Ping statistics"),
-        "{}",
-        run.screen()
-    );
+    let shown = {
+        let term = run.session.term();
+        shows_prefix(&term, "Ping statistics") && shows_prefix(&term, "Control-C")
+    };
+    assert!(shown, "{}", run.screen());
 }
 #[cfg(windows)]
 fn shows_prefix(term: &Term, prefix: &str) -> bool {
@@ -333,6 +337,37 @@ fn ptys_opened_at_once_from_many_threads_all_open() {
         failed.len(),
         &failed[..failed.len().min(3)]
     );
+}
+
+/// A program that prints and exits at once: all it printed is on the
+/// screen as the session reports its exit. ConPTY renders a program's last
+/// output after the program has gone; a pty hands it on through the
+/// kernel's buffer, Linux's on a work queue of its own.
+#[test]
+fn a_program_that_prints_and_exits_at_once_shows_all_it_printed() {
+    #[cfg(unix)]
+    let command = "i=1; while [ $i -le 400 ]; do echo \"line $i\"; i=$((i+1)); done; \
+                   printf 'the last line'";
+    #[cfg(windows)]
+    let command = "cmd.exe /d /c (for /l %i in (1,1,400) do @echo line %i)& echo the last line";
+    let started = std::time::Instant::now();
+    let mut run = Scripted::run(command, 80, 24);
+    run.exited();
+    let shown = rows(&run.session.term())
+        .iter()
+        .any(|row| row.starts_with("the last line"));
+    assert!(shown, "{}", run.screen());
+    // Windows: the output pipe ends as the pseudoconsole closes (our ends of
+    // its pipes closed once it had its own), so the exit comes as soon as
+    // the last output is read, not after the drain's five seconds.
+    #[cfg(windows)]
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the exit waited for the drain's deadline: {:?}",
+        started.elapsed()
+    );
+    #[cfg(not(windows))]
+    let _ = started;
 }
 
 /// What an app links this crate with still infers its comparisons of

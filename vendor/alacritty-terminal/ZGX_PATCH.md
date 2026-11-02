@@ -40,3 +40,26 @@ one thread never failed in 7,200. `tty::open_pty` opens the pair behind a
 process-wide lock, and `tty::new` uses it. zgx-terminal's
 `ptys_opened_at_once_from_many_threads_all_open` failed 9 runs in 10
 without the lock, none with it. Version 0.26.1.
+
+## A program's last output, read after it exits (Windows)
+
+ConPTY renders what a program last wrote after the program has gone, as
+the pseudoconsole closes, and then ends the output pipe. zgx-terminal read
+the pipe once at the child's exit and dropped the pty, so a program's last
+lines were often still to come and never showed: on WING-PC, ping's
+statistics after Ctrl+C were missing in 98 of 100 runs once the test sent
+Ctrl+C after ping's first reply. `Pty::close_console` closes the
+pseudoconsole on a thread of its own (`ClosePseudoConsole` blocks until the
+pipe is drained, so it can't run on the thread draining it; `Drop` then
+closes nothing), and `Pty::output_finished` says when the pipe has ended
+and everything in it was read (`UnblockedReader::finished`: the reader
+returns 0 alike for nothing yet and for the end). zgx-terminal's session
+reads until then, five seconds at most. Also in 0.26.1.
+
+The pipe's end came only once nothing else held its writing end. `new`
+passed the pseudoconsole its ends of the pipes with `into_raw_handle`,
+leaving this process's copies open for good, so the output pipe never
+ended and every drain waited its five seconds (on WING-PC, 5 of 50
+immediate exits under load timed out on the exit). They are now closed once
+`CreatePseudoConsole` holds its own (Microsoft's ConPTY guidance), and the
+child's thread handle once `CreateProcessW` returns.

@@ -55,6 +55,18 @@ impl Pty {
     pub fn child_watcher(&self) -> &ChildExitWatcher {
         &self.child_watcher
     }
+
+    /// zgx: once the program has exited, close the pseudoconsole: it renders
+    /// the program's last output, which it hadn't yet as the program went,
+    /// and ends the output pipe. Read `reader()` until `output_finished`.
+    pub fn close_console(&mut self) {
+        self.backend.close();
+    }
+
+    /// zgx: whether the output pipe has ended and all it held was read.
+    pub fn output_finished(&self) -> bool {
+        self.conout.finished()
+    }
 }
 
 fn with_key(mut event: Event, key: usize) -> Event {
