@@ -339,7 +339,7 @@ def by_function(rows, scenes, base):
     import cgdiff
     into = pathlib.Path(FUNCTIONS)
     into.mkdir(parents=True, exist_ok=True)
-    grew = sorted((row for row in rows if row[3] is not None and row[3] > 0.01), key=lambda row: -row[3])
+    grew = sorted((row for row in rows if row[3] is not None and row[3] > 0.0), key=lambda row: -row[3])
     summary = []
     for name, *_ in grew[:FUNCTIONS_MAX]:
         _, package, example, env = scenes[name]
