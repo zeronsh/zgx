@@ -83,3 +83,74 @@ fn an_earlier_page_comes_in_above_and_the_view_stays_on_its_rows() {
     assert_eq!(row.y - list.y, -10.);
     assert_eq!(h.error(), None);
 }
+
+/// Where an offset of `math.huge`, `-math.huge` or NaN leaves `list`, a
+/// list or scroll view of rows `row-1` to `row-60`: whether the first and
+/// the last row show.
+fn ends_shown(list: &str) -> Vec<(bool, bool)> {
+    let mut h = Harness::inline(&format!(
+        r#"local offset = ui.state("offset", 300)
+        ui.command {{ id = "huge", run = function() offset:set(math.huge) end }}
+        ui.command {{ id = "minus", run = function() offset:set(-math.huge) end }}
+        ui.command {{ id = "nan", run = function() offset:set(0 / 0) end }}
+        local rows = {{}}
+        for n = 1, 60 do rows[n] = {{ id = n }} end
+        local function row(r)
+            local n = if type(r) == "number" then r else r.id
+            return ui.text {{ id = `row-{{n}}`, h = 20, tostring(n) }}
+        end
+        return {list}"#
+    ));
+    h.frames(3);
+    ["huge", "minus", "huge", "nan"]
+        .iter()
+        .map(|command| {
+            assert!(h.host.run_command(command));
+            h.frames(5);
+            (in_view(&mut h, "row-1"), in_view(&mut h, "row-60"))
+        })
+        .collect()
+}
+
+/// Whether `id` is built and inside the 200-point view at the window's top.
+fn in_view(h: &mut Harness, id: &str) -> bool {
+    h.find(id).is_some_and(|node| {
+        let rect = h.ui.scene.borrow().transformed_bounds(node);
+        rect.y >= -0.5 && rect.y + rect.height <= 200.5
+    })
+}
+
+/// `math.huge` is past the end, so every list kind shows its end, as a
+/// scroll view does; `-math.huge` and NaN, its start.
+#[test]
+fn an_infinite_offset_is_the_end_in_every_list_kind_as_in_a_scroll_view() {
+    let want = vec![(false, true), (true, false), (false, true), (true, false)];
+    for (kind, list) in [
+        (
+            "fixed",
+            "ui.list { h = 200, height = 20, count = 60, offset = offset, row = row }",
+        ),
+        (
+            "keyed",
+            "ui.list { h = 200, height = 20, data = ui.state('rows', rows), \
+             key = function(r) return r.id end, offset = offset, row = row }",
+        ),
+        (
+            "measured",
+            "ui.list { h = 200, height = 20, measured = true, count = 60, \
+             offset = offset, row = row }",
+        ),
+        (
+            "measured and keyed",
+            "ui.list { h = 200, height = 20, measured = true, data = ui.state('rows', rows), \
+             key = function(r) return r.id end, offset = offset, row = row }",
+        ),
+        (
+            "scroll",
+            "ui.scroll { h = 200, w = 200, offset = offset, ui.column((function() \
+             local out = {} for n = 1, 60 do out[n] = row(n) end return out end)()) }",
+        ),
+    ] {
+        assert_eq!(ends_shown(list), want, "{kind}");
+    }
+}
