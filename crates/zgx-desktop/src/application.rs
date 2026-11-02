@@ -4031,7 +4031,9 @@ impl Host {
             crate::native_ime::discard_native_composition(window);
         }
         self.ime_geometry = None;
+        // Released elsewhere (Command-Tab away): none held here.
         self.modifiers = Modifiers::default();
+        zgx::input::set_held_modifiers(&self.context.ui.runtime, self.modifiers);
         self.focus_memory.deactivate(&self.context.ui);
     }
     fn unregister_file_surface(&mut self) {
@@ -4314,6 +4316,8 @@ impl Host {
                     alt: s.alt_key(),
                     meta: s.super_key(),
                 };
+                // A modifier alone too: `Ui::modifiers` changes with it.
+                zgx::input::set_held_modifiers(&self.context.ui.runtime, self.modifiers);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let p = position.to_logical::<f32>(self.scale_factor);

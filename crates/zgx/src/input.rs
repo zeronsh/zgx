@@ -39,6 +39,28 @@ impl Modifiers {
         }
     }
 }
+/// The modifier keys held now, a state the runtime's windows share: made
+/// the first time something asks ([`held_modifiers`]), and until then
+/// nothing is written to it.
+struct HeldModifiers(Signal<Modifiers>);
+/// The modifier keys held now, as a state (`Ui::modifiers`): it changes as
+/// one goes down or up, a modifier alone included (Command held for
+/// shortcut hints), and is cleared as the window loses focus, so one
+/// released in another app isn't left held.
+pub fn held_modifiers(runtime: &Runtime) -> Signal<Modifiers> {
+    runtime
+        .extension(|runtime| HeldModifiers(runtime.signal(Modifiers::default())))
+        .0
+        .clone()
+}
+/// The host's report of the modifier keys held now (all up as its window
+/// loses focus): written to [`held_modifiers`] only once something has
+/// asked for it.
+pub fn set_held_modifiers(runtime: &Runtime, held: Modifiers) {
+    if let Some(state) = runtime.existing_extension::<HeldModifiers>() {
+        state.0.set(held);
+    }
+}
 /// A key, by what it means rather than where it is (see
 /// `EventContext::key_code` for the physical key).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3976,3 +3998,48 @@ mod disabled_observer_tests {
 #[path = "input_drag.rs"]
 mod drag;
 pub use drag::{DragEnded, DragEvent, DragItem, DragPhase, DragState, DraggedText, SPRING_DELAY};
+
+#[cfg(test)]
+mod held_modifiers_tests {
+    use super::*;
+
+    /// Until something asks for the modifiers held, the host's reports
+    /// write nothing (no state is made); once asked, a modifier alone going
+    /// down and up re-runs what reads it, and the window losing focus
+    /// clears it.
+    #[test]
+    fn a_modifier_alone_changes_the_state_once_something_reads_it() {
+        let runtime = Runtime::new();
+        let command = Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        };
+        set_held_modifiers(&runtime, command);
+        assert!(runtime.existing_extension::<HeldModifiers>().is_none());
+        let held = held_modifiers(&runtime);
+        assert_eq!(held.get(), Modifiers::default(), "made with none held");
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _effect = {
+            let (held, seen) = (held.clone(), seen.clone());
+            runtime.effect(move || seen.borrow_mut().push(held.get()))
+        };
+        // Command alone, down then up.
+        set_held_modifiers(&runtime, command);
+        set_held_modifiers(&runtime, command);
+        set_held_modifiers(&runtime, Modifiers::default());
+        // Held again, then the window loses focus.
+        set_held_modifiers(&runtime, command);
+        set_held_modifiers(&runtime, Modifiers::default());
+        assert_eq!(
+            *seen.borrow(),
+            [
+                Modifiers::default(),
+                command,
+                Modifiers::default(),
+                command,
+                Modifiers::default()
+            ],
+            "each change once, a repeat none"
+        );
+    }
+}

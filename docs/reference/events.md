@@ -87,6 +87,15 @@ A draggable (`anime.createDraggable`) moves its `x` and `y` in its parent's poin
 
 `cmd` is the platform's command key, as `cmd` in a command's keys: Command (`meta`) on macOS, Ctrl (`ctrl`) elsewhere; test it for a shortcut (`e.cmd and e.key == "z"`) rather than `meta or ctrl`, which takes Super+Z on Linux and Ctrl+Z on macOS. `x` and `y` are in points from the window's top left, `local_x` and `local_y` from the node's, `w` and `h` its size. Key names are the character typed (`"a"`, `"A"`, `"/"`), `" "` for Space, `"F1"` to `"F35"`, or one of `"Tab"`, `"Enter"`, `"Escape"`, `"Backspace"`, `"Delete"`, `"ArrowLeft"`, `"ArrowRight"`, `"ArrowUp"`, `"ArrowDown"`, `"Home"`, `"End"`, `"PageUp"`, `"PageDown"`, `"Insert"`.
 
+A modifier pressed alone (Command held to show ⌘1–9 hints) reaches no `on_key`. Read it from `ui.modifiers` instead: `shift`, `control`, `alt` and `meta`, each a tracked state (`ui.modifiers.meta:get()`; `meta` is Command on macOS, Windows or Super elsewhere). They change as a key goes down or up, and are all up as the window loses focus, so a ⌘-Tab away leaves none held. They are made the first time a script reads `ui.modifiers`; until then nothing is written.
+
+```lua
+local held = ui.modifiers
+return ui.show(function()
+    return held.meta:get() and not held.shift:get()
+end, ui.text { "⌘1" })
+```
+
 ## Example
 
 ```lua

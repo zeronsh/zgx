@@ -66,6 +66,7 @@ pub mod lint;
 mod lower;
 pub mod markdown;
 mod meter;
+mod modifiers;
 mod motion;
 mod node;
 mod opens;
@@ -3437,6 +3438,7 @@ impl ScriptHost {
             theme::install(lua, ui, dir, packages)
         });
         lazy.ui(&["form"], form::install);
+        lazy.ui(&["modifiers"], modifiers::install);
         lazy.ui(&["editor"], element::install_editor);
         lazy.ui(&["router"], router::install);
         lazy.ui(&["async", "optimistic"], handlers::install);

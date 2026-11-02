@@ -138,6 +138,7 @@ SMOKES = [
     ("wayland-external-ime", "python3 scripts/wayland_external_ime_smoke.py {bin}/external_ime --output {out}", False),
     ("wayland-readonly-ime", "python3 scripts/wayland_external_ime_smoke.py {bin}/external_ime --read-only-test --output {out}", False),
     ("held-keys", "python3 scripts/held_keys_smoke.py {bin}/held_keys --output {out}", False),
+    ("held-modifiers", "python3 scripts/held_modifiers_smoke.py {bin}/held_modifiers --output {out}", False),
     ("live-dpi", "python3 scripts/dpi_transition_smoke.py {bin}/dpi_transition --output {out}", False),
     ("live-dpi-pointer", "python3 scripts/live_dpi_pointer_smoke.py {bin}/live_dpi_pointer --output {out}", False),
     ("live-dpi-maximized", "python3 scripts/live_dpi_pointer_smoke.py {bin}/live_dpi_pointer --maximized --output {out}", False),

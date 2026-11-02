@@ -675,6 +675,12 @@ export type SortedSpec<T> = {
 }
 -- What a property bound to state reads: any state whose value is a `T`.
 export type Readable<T> = { read get: (self: never) -> T }
+-- State the engine keeps and a script reads (`ui.prefers`,
+-- `ui.modifiers`): `get` tracked, `peek` not; nothing to set.
+export type ReadOnlyState<T> = {
+	get: (self: ReadOnlyState<T>) -> T,
+	peek: (self: ReadOnlyState<T>) -> T,
+}
 
 ---------------------------------------------------------------------------
 -- Engine objects.
@@ -19404,9 +19410,19 @@ declare ui: {
 	-- tracked). The themes' tokens already take them (zero motion
 	-- durations, stronger borders, opaque glass); read them for the rest.
 	prefers: {
-		reduced_motion: Readable<boolean>,
-		more_contrast: Readable<boolean>,
-		reduced_transparency: Readable<boolean>,
+		reduced_motion: ReadOnlyState<boolean>,
+		more_contrast: ReadOnlyState<boolean>,
+		reduced_transparency: ReadOnlyState<boolean>,
+	},
+	-- The modifier keys held now, each `:get()` tracked: a modifier alone
+	-- too (`meta` is Command on macOS, Windows or Super elsewhere), as for
+	-- shortcut hints shown while Command is held. All up as the window
+	-- loses focus.
+	modifiers: {
+		shift: ReadOnlyState<boolean>,
+		control: ReadOnlyState<boolean>,
+		alt: ReadOnlyState<boolean>,
+		meta: ReadOnlyState<boolean>,
 	},
 	-- Call `fn` every `ms` milliseconds on zgx's clock (no frames between);
 	-- returning false stops it. Returns a function that stops it. It lives as
