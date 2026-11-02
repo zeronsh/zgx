@@ -130,7 +130,7 @@ jobs:
           LUAU_LSP="$dir/luau-lsp" cargo run -q -p zgx-script --bin zgx --locked -- check crates/zgx-script/examples crates/zgx-desktop/examples
       # With 3D scenes (zgx-script's `scene3d`, off by default; the Windows
       # and macOS jobs test without it).
-      - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload -p zgx-script --all-targets --features zgx-script/scene3d --locked
+      - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload -p zgx-script -p zgx-profiler --all-targets --features zgx-script/scene3d --locked
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # zgx-script's tests with all its features, as an app built by zgx-run
@@ -365,7 +365,7 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload --all-targets --locked
+      - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload -p zgx-profiler --all-targets --locked
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
@@ -438,6 +438,7 @@ jobs:
       # notifications) and its bundled script paths (caught a Windows
       # separator bug), in one run.
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-script --lib --test components --test bundle --locked
+      - run: cargo test -p zgx-profiler --lib --locked
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.

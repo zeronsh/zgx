@@ -460,6 +460,10 @@ pub fn run_hosting(
             zgx_script::inspect::prepare();
         }
         let handle = cx.render(host.view());
+        #[cfg(feature = "profiler")]
+        if PROFILE.load(std::sync::atomic::Ordering::Relaxed) || zgx_profiler::asked() {
+            zgx_profiler::attach(cx, zgx_profiler::Config::from_env());
+        }
         let devtools = devtools_asked
             .then(|| inspect(&host, cx, handle, &script))
             .flatten();
@@ -473,6 +477,11 @@ pub fn run_hosting(
 }
 
 static INSPECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PROFILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_profile(on: bool) {
+    PROFILE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Serve devtools (`zgx inspect`) from the next window `run` opens, as
 /// `zgx run --inspect` asks (`ZGX_INSPECT_SOCKET=1` asks too). Built

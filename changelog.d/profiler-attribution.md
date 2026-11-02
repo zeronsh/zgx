@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **The profiler says what was slow, not just which phase** (`zgx-profiler`): the HUD and the Chrome trace now carry the costliest named effects of each frame (`app.luau:30`, `@5 binding`, with the signal whose write queued them), the engine's notes on why a frame happened and whole-window repaints, the worst late frame kept since the recording began (its phase split, reset with F10 or `Profiler::clear`), per-phase retired instructions where the platform counts them (macOS, Linux), and a pacing graph whose bars are coloured by the phase that took each frame. `Profiler::mark` still writes markers, and the stretches between them are now measured — `Profiler::segments()` and the trace's `segments` track give each one its frames, fps, p50/p95, damaged area and mean phase costs, so two scenarios compare without counting pixels by hand. `F10` (the new `ResetStats` action in `keymap()`) forgets every frame kept and starts the recording over.

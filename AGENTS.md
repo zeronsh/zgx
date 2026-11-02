@@ -58,15 +58,11 @@ The interface is built once; Rust re-runs only what reads state that changed. `z
 
 `-- zgx-lint: allow(rule)` accepts a deliberate exception.
 
-## The profiler's test harness
+## Profiling
 
-`examples/music-player/` is a harness for `crates/zgx-profiler`, not part of the
-framework. It is in `.gitignore`, its `Cargo.toml` is a workspace of its own so
-the framework's build never sees it, and it stays out of commits and releases.
-Run it with `cargo run --release --manifest-path examples/music-player/Cargo.toml -- --library <folder>`;
-`PROFILING.md` says what it shows and what the numbers mean. Anything that
-harness finds wrong in zgx is fixed in zgx, with a test there — the harness
-itself is disposable.
+`zgx-run --profile app/` (or `ZGX_PROFILER=1`) shows `crates/zgx-profiler`'s
+HUD over a running app; `PROFILING.md` says what it shows and what the
+numbers mean.
 
 ## Where things are
 

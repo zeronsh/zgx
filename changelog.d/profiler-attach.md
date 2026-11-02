@@ -1,0 +1,5 @@
+---
+section: added
+---
+- **Profile any app with one flag** (`zgx-run`, `zgx-profiler`): `zgx-run --profile app/` or `ZGX_PROFILER=1` shows the profiler's HUD over a Luau app, and `ZGX_PROFILER_TRACE=1` writes its Chrome trace on close, into `ZGX_PROFILER_OUT` when set. A Rust app attaches it with `zgx_profiler::attach(cx, Config::default())`, which now binds F12, F11 and F10 itself (`Config::keys` off to bind them another way), or `attach_if_asked(cx)`. The profiler's files go to `Config::out_dir`. It is part of `zgx-run`'s default features, as `inspect` is.
+- **Profiler numbers that hold up** (`zgx-profiler`): an idle gap no longer counts as a late frame, the HUD's own repaints no longer reset the pacing clock or hide the app's repaints under the overlay, the phase that took a frame and its total leave out `wait` (waiting for the display, not work), the HUD keeps a fixed height so its menu holds still, the frame log's memory column is memory, the flash overlay stops waking an idle window, and Linux's resident memory reads the real page size. On Linux the one-core switch builds again and puts back the threads it pinned if pinning fails partway.

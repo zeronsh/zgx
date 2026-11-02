@@ -6,15 +6,39 @@ use zgx::{
     widgets::Ui,
 };
 
-use crate::record::Summary;
+use crate::record::{Bar, PhaseCost, Summary, WAIT};
 
 pub struct Model<'a> {
     pub summary: &'a Summary,
-    pub graph: &'a [f32],
+    pub graph: &'a [Bar],
     pub thrashing: &'a [(usize, u32)],
     pub damage: &'a [Rect],
+    /// Where the app is repainting, with each rect's age in milliseconds:
+    /// the flash overlay draws them pulsing as they fade.
+    pub flashes: &'a [(Rect, f32)],
     pub damage_overlay: bool,
     pub visible: bool,
+}
+
+/// How long a flashing rect stays lit, milliseconds.
+pub(super) const FLASH_MS: f32 = 600.;
+/// Flashing rects kept on screen.
+const FLASH_QUADS: usize = 32;
+
+/// A flashing rect's fill and border at `age` milliseconds: pink, fading out,
+/// pulsing at ~18 Hz so a repaint reads as a flash rather than a stain.
+/// `None` once it has faded out.
+pub(super) fn flash_fill(age_ms: f32) -> Option<(Color, Color)> {
+    if !(0. ..FLASH_MS).contains(&age_ms) {
+        return None;
+    }
+    let fade = 1. - age_ms / FLASH_MS;
+    let pulse = 0.55 + 0.45 * (age_ms * 0.11).sin();
+    let alpha = fade * pulse;
+    Some((
+        Color(255, 60, 100, (alpha * 130.) as u8),
+        Color(255, 90, 130, (alpha * 210.) as u8),
+    ))
 }
 
 const PAD: f32 = 10.;
@@ -27,7 +51,7 @@ const BAR_W: f32 = 3.1;
 const STACK_H: f32 = 8.;
 const OUTLINES: usize = 16;
 
-const BG: Color = Color(20, 17, 24, 245);
+const BG: Color = Color(20, 17, 24, 255);
 const BORDER: Color = Color(255, 255, 255, 24);
 const TEXT: Color = Color(214, 222, 235, 255);
 const DIM: Color = Color(136, 148, 168, 255);
@@ -80,12 +104,20 @@ pub struct Hud {
     segment_state: Vec<(Rect, Color)>,
     outlines: Vec<NodeId>,
     outline_state: Vec<Rect>,
+    flashes: Vec<NodeId>,
+    flash_state: Vec<(Rect, Color)>,
     origin: Option<(f32, f32)>,
     pub bounds: Option<Rect>,
 }
 
 impl Hud {
-    pub fn update(&mut self, ui: &Ui, model: &Model) -> bool {
+    /// The HUD's root node, above the app (the window's dev overlays order
+    /// themselves once, after both are drawn).
+    pub fn root(&self) -> Option<NodeId> {
+        self.root
+    }
+
+    pub fn update(&mut self, ui: &Ui, model: &Model) -> Vec<Rect> {
         let mut scene = ui.scene.borrow_mut();
         if !model.visible {
             return self.clear(&mut scene);
@@ -96,20 +128,32 @@ impl Hud {
         let x = (viewport.width - WIDTH - 12.).max(0.);
         let y = (viewport.height - content.height - 76.).max(52.);
         let panel = Rect::new(x, y, WIDTH, content.height);
-        self.bounds = Some(panel);
-        let mut changed = self.draw_panel(&mut scene, root, panel);
-        changed |= self.draw_rows(&mut scene, root, panel, &content.rows);
-        changed |= self.draw_graph(&mut scene, root, panel, &content, model);
-        changed |= self.draw_stack(&mut scene, root, panel, &content, model);
-        changed |= self.draw_outlines(&mut scene, root, model);
+        let before = self.bounds.replace(panel);
+        let mut panel_changed = self.draw_panel(&mut scene, root, panel);
+        panel_changed |= self.draw_rows(&mut scene, root, panel, &content.rows);
+        panel_changed |= self.draw_graph(&mut scene, root, panel, &content, model);
+        panel_changed |= self.draw_stack(&mut scene, root, panel, &content, model);
+        let mut changed = self.draw_outlines(&mut scene, root, model);
+        changed.extend(self.draw_flashes(&mut scene, root, model));
         self.origin = Some((panel.x, panel.y));
+        if panel_changed {
+            changed.push(panel);
+            changed.extend(before.filter(|before| *before != panel));
+        }
         changed
     }
 
-    fn clear(&mut self, scene: &mut Scene) -> bool {
+    fn clear(&mut self, scene: &mut Scene) -> Vec<Rect> {
         let Some(root) = self.root.take() else {
-            return false;
+            return Vec::new();
         };
+        let shown: Vec<Rect> = self
+            .bounds
+            .into_iter()
+            .chain(self.outline_state.iter().copied())
+            .chain(self.flash_state.iter().map(|(rect, _)| *rect))
+            .filter(|rect| rect.width > 0.)
+            .collect();
         self.panel = None;
         self.panel_state = None;
         self.rows.clear();
@@ -120,12 +164,14 @@ impl Hud {
         self.segment_state.clear();
         self.outlines.clear();
         self.outline_state.clear();
+        self.flashes.clear();
+        self.flash_state.clear();
         self.origin = None;
         self.bounds = None;
         if scene.contains(root) {
             scene.remove(root);
         }
-        true
+        shown
     }
 
     fn ensure_root(&mut self, scene: &mut Scene, viewport: Rect) -> NodeId {
@@ -153,12 +199,6 @@ impl Hud {
                 root
             }
         };
-        let children = scene.children(scene_root).to_vec();
-        if children.last() != Some(&root) {
-            let mut order: Vec<_> = children.into_iter().filter(|c| *c != root).collect();
-            order.push(root);
-            scene.reorder_children(scene_root, &order);
-        }
         scene.set_style(
             root,
             Style {
@@ -294,20 +334,23 @@ impl Hud {
         let scale = model
             .graph
             .iter()
-            .copied()
+            .map(|bar| bar.ms)
             .fold(16.7_f32, |max, ms| max.max(ms))
             .clamp(16.7, 240.);
         let first = BARS.saturating_sub(model.graph.len());
         for i in 0..BARS {
             let (rect, color) = match model.graph.get(i + first) {
-                Some(ms) => {
-                    let height = (ms / scale * GRAPH_H).clamp(1., GRAPH_H);
-                    let color = match *ms {
-                        ms if ms <= 9. => GOOD,
-                        ms if ms <= 18. => Color(150, 200, 140, 255),
-                        ms if ms <= 34. => WARN,
-                        _ => BAD,
-                    };
+                Some(bar) => {
+                    let height = (bar.ms / scale * GRAPH_H).clamp(1., GRAPH_H);
+                    let color = bar.dominant.map_or_else(
+                        || match bar.ms {
+                            ms if ms <= 9. => GOOD,
+                            ms if ms <= 18. => Color(150, 200, 140, 255),
+                            ms if ms <= 34. => WARN,
+                            _ => BAD,
+                        },
+                        phase_color,
+                    );
                     (
                         Rect::new(x0 + i as f32 * SLOT, y0 + GRAPH_H - height, BAR_W, height),
                         color,
@@ -358,8 +401,13 @@ impl Hud {
         content: &Content,
         model: &Model,
     ) -> bool {
-        let phases = &model.summary.phase_micros;
-        let total: f32 = phases.iter().map(|(_, micros)| micros).sum();
+        let phases: Vec<&PhaseCost> = model
+            .summary
+            .phase_micros
+            .iter()
+            .filter(|phase| phase.name != WAIT)
+            .collect();
+        let total: f32 = phases.iter().map(|phase| phase.micros).sum();
         let width = WIDTH - PAD * 2.;
         let x0 = panel.x + PAD;
         let y0 = panel.y + content.stack_y;
@@ -378,11 +426,11 @@ impl Hud {
         }
         let mut changed = false;
         let mut x = x0;
-        for (i, (name, micros)) in phases.iter().enumerate() {
-            let fraction = if total > 0. { micros / total } else { 0. };
+        for (i, phase) in phases.iter().enumerate() {
+            let fraction = if total > 0. { phase.micros / total } else { 0. };
             let segment = Rect::new(x, y0, (width * fraction).max(0.), STACK_H);
             x += segment.width;
-            let color = phase_color(name);
+            let color = phase_color(phase.name);
             let state = &mut self.segment_state[i];
             if *state != (segment, color) {
                 *state = (segment, color);
@@ -414,7 +462,7 @@ impl Hud {
         changed
     }
 
-    fn draw_outlines(&mut self, scene: &mut Scene, root: NodeId, model: &Model) -> bool {
+    fn draw_outlines(&mut self, scene: &mut Scene, root: NodeId, model: &Model) -> Vec<Rect> {
         let rects: Vec<Rect> = if model.damage_overlay {
             model.damage.iter().take(OUTLINES).copied().collect()
         } else {
@@ -432,11 +480,12 @@ impl Hud {
             self.outlines.push(node);
             self.outline_state.push(Rect::default());
         }
-        let mut changed = false;
+        let mut changed = Vec::new();
         for i in 0..OUTLINES {
             let rect = rects.get(i).copied().unwrap_or_default();
             if self.outline_state[i] != rect {
-                self.outline_state[i] = rect;
+                let old = std::mem::replace(&mut self.outline_state[i], rect);
+                changed.extend([old, rect].into_iter().filter(|rect| rect.width > 0.));
                 let fill = if rect.width > 0. {
                     Color(255, 140, 90, 22)
                 } else {
@@ -454,7 +503,48 @@ impl Hud {
                         ..QuadStyle::default()
                     },
                 );
-                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn draw_flashes(&mut self, scene: &mut Scene, root: NodeId, model: &Model) -> Vec<Rect> {
+        while self.flashes.len() < FLASH_QUADS {
+            let node = scene.append(
+                root,
+                NodeKind::Quad(QuadStyle::default()),
+                Style {
+                    absolute: true,
+                    ..Style::default()
+                },
+            );
+            self.flashes.push(node);
+            self.flash_state.push((Rect::default(), Color(0, 0, 0, 0)));
+        }
+        let mut changed = Vec::new();
+        for i in 0..FLASH_QUADS {
+            let (rect, fill, border) =
+                match model.flashes.get(i).and_then(|&(rect, age)| {
+                    flash_fill(age).map(|(fill, border)| (rect, fill, border))
+                }) {
+                    Some(placed) => placed,
+                    None => (Rect::default(), Color(0, 0, 0, 0), Color(0, 0, 0, 0)),
+                };
+            if self.flash_state[i] != (rect, fill) {
+                let (old, _) = std::mem::replace(&mut self.flash_state[i], (rect, fill));
+                changed.extend([old, rect].into_iter().filter(|rect| rect.width > 0.));
+                place(
+                    scene,
+                    self.flashes[i],
+                    rect,
+                    QuadStyle {
+                        fill,
+                        border_color: border,
+                        border_width: 1.5,
+                        border_over: true,
+                        ..QuadStyle::default()
+                    },
+                );
             }
         }
         changed
@@ -556,6 +646,64 @@ fn build(model: &Model) -> Content {
         &mut rows,
         &mut y,
     );
+    if !summary.slow.is_empty() {
+        let shown: Vec<String> = summary
+            .slow
+            .iter()
+            .take(2)
+            .map(|run| format!("{} {}", cut(&run.name, 24), micros(run.micros)))
+            .collect();
+        push(
+            format!("slow  {}", shown.join("  ·  ")),
+            if summary.slow[0].micros >= 2000. {
+                WARN
+            } else {
+                TEXT
+            },
+            11.,
+            &mut rows,
+            &mut y,
+        );
+    } else {
+        push(String::new(), TEXT, 11., &mut rows, &mut y);
+    }
+    let why = why(summary);
+    if !why.is_empty() {
+        push(
+            format!("why  {}", cut(&why, 46)),
+            DIM,
+            11.,
+            &mut rows,
+            &mut y,
+        );
+    } else {
+        push(String::new(), DIM, 11., &mut rows, &mut y);
+    }
+    if let Some(worst) = &summary.worst {
+        let worst_color = match worst.interval_ms {
+            ms if ms > 34. => BAD,
+            ms if ms > 20. => WARN,
+            _ => DIM,
+        };
+        let dominant = worst
+            .dominant()
+            .map(|phase| format!("  ·  {} {}", phase.name, micros(phase.micros)))
+            .unwrap_or_default();
+        let slow = worst
+            .slow
+            .first()
+            .map(|run| format!("  ·  {} {}", cut(&run.name, 14), micros(run.micros)))
+            .unwrap_or_default();
+        push(
+            format!("worst  {:.1} ms{dominant}{slow}", worst.interval_ms),
+            worst_color,
+            11.,
+            &mut rows,
+            &mut y,
+        );
+    } else {
+        push(String::new(), DIM, 11., &mut rows, &mut y);
+    }
     y += 4.;
     let graph_y = y;
     y += GRAPH_H + 6.;
@@ -563,11 +711,11 @@ fn build(model: &Model) -> Content {
     y += STACK_H + 6.;
     let legend: Vec<String> = {
         let mut phases = summary.phase_micros.clone();
-        phases.sort_by(|a, b| b.1.total_cmp(&a.1));
-        phases
-            .iter()
-            .take(3)
-            .map(|(name, micros)| format!("{name} {micros:.0}"))
+        phases.sort_by(|a, b| b.micros.total_cmp(&a.micros));
+        let work = phases.iter().filter(|phase| phase.name != WAIT).take(3);
+        let wait = phases.iter().filter(|phase| phase.name == WAIT);
+        work.chain(wait)
+            .map(|phase| format!("{} {:.0}", phase.name, phase.micros))
             .collect()
     };
     push(
@@ -583,7 +731,8 @@ fn build(model: &Model) -> Content {
     );
     push(
         format!(
-            "rss {:.0} MiB  ·  gpu {}",
+            "{}  ·  rss {:.0} MiB  ·  gpu {}",
+            instructions(summary.instructions),
             summary.rss_mib,
             summary
                 .gpu_micros
@@ -596,7 +745,7 @@ fn build(model: &Model) -> Content {
     );
     push(
         format!(
-            "F12 hud  ·  F11 damage rects {}",
+            "F12 hud  ·  F11 damage {}  ·  F10 reset",
             if model.damage_overlay { "on" } else { "off" }
         ),
         DIM,
@@ -630,6 +779,54 @@ fn place(scene: &mut Scene, node: NodeId, rect: Rect, quad: QuadStyle) {
             y: rect.y,
         },
     );
+}
+
+/// Why the last app frame did what it did: its first note, the rest counted,
+/// a whole-window repaint named where the host said so.
+fn why(summary: &Summary) -> String {
+    let mut why = String::new();
+    if let Some(note) = summary.notes.first() {
+        why.push_str(note);
+        if summary.notes.len() > 1 {
+            why.push_str(&format!(" (+{})", summary.notes.len() - 1));
+        }
+    }
+    if summary.full {
+        if !why.is_empty() {
+            why.push_str("  ·  ");
+        }
+        why.push_str("full repaint");
+    }
+    why
+}
+
+fn micros(micros: f32) -> String {
+    if micros >= 1000. {
+        format!("{:.1} ms", micros / 1000.)
+    } else {
+        format!("{micros:.0} µs")
+    }
+}
+
+fn instructions(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M instr", count as f64 / 1e6)
+    } else if count >= 1_000 {
+        format!("{:.0}k instr", count as f64 / 1e3)
+    } else if count > 0 {
+        format!("{count} instr")
+    } else {
+        "-".to_string()
+    }
+}
+
+fn cut(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(width - 1).collect();
+    cut.push('…');
+    cut
 }
 
 fn area(points: f32) -> String {

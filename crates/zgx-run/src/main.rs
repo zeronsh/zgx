@@ -2,7 +2,7 @@
 //! hot reload (`zgx_run::run`).
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: zgx-run [--inspect] <app.luau-or-dir> [args…]
+const USAGE: &str = "usage: zgx-run [--inspect] [--profile] <app.luau-or-dir> [args…]
 
 Opens the script (a file, or a directory's app.luau) in a window and
 reloads it as its files change. A zgx.json beside it sets the window
@@ -18,6 +18,10 @@ script's directory it may require (require(\"@kit/button\")).
 --inspect serves devtools for agents: `zgx inspect help` drives the
 running app (its tree, states, clicks, typing, keys) over a socket only
 this user can reach.
+
+--profile shows the frame profiler's HUD (F12 hides it, F11 outlines
+damage, F10 starts over); ZGX_PROFILER=1 asks too. ZGX_PROFILER_TRACE=1
+writes zgx-profile.json on close, into ZGX_PROFILER_OUT if set.
 
 --audit [--human] audits the app for assistive technology, headless (what
 `zgx audit` runs): its first screen, its commands, the first screen's
@@ -53,9 +57,13 @@ fn main() -> ExitCode {
             }
         };
     }
-    if args.first().is_some_and(|a| a == "--inspect") {
+    loop {
+        match args.first().map(String::as_str) {
+            Some("--inspect") => zgx_run::set_inspect(true),
+            Some("--profile") => zgx_run::set_profile(true),
+            _ => break,
+        }
         args.remove(0);
-        zgx_run::set_inspect(true);
     }
     let [path, rest @ ..] = args.as_slice() else {
         eprintln!("{USAGE}");

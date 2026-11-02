@@ -56,7 +56,7 @@ pub fn mib() -> f32 {
 }
 
 /// The process's resident memory, mebibytes.
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
 pub fn mib() -> f32 {
     let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
     let resident_pages: f32 = statm
@@ -64,11 +64,12 @@ pub fn mib() -> f32 {
         .nth(1)
         .and_then(|pages| pages.parse().ok())
         .unwrap_or(0.);
-    resident_pages * 4096. / (1024. * 1024.)
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(0) as f32;
+    resident_pages * page / (1024. * 1024.)
 }
 
 /// The process's resident memory, mebibytes.
-#[cfg(not(any(windows, unix)))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub fn mib() -> f32 {
     0.
 }

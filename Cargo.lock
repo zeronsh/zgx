@@ -5261,6 +5261,8 @@ dependencies = [
 name = "zgx-profiler"
 version = "0.1.6"
 dependencies = [
+ "libc",
+ "serde_json",
  "zgx",
  "zgx-desktop",
 ]
@@ -5278,6 +5280,7 @@ dependencies = [
  "webpki-roots",
  "zgx",
  "zgx-desktop",
+ "zgx-profiler",
  "zgx-script",
 ]
 
