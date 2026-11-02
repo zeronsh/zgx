@@ -1,6 +1,6 @@
 //! Native visual-page navigation through a responsive Unicode text area.
 use std::time::Duration;
-use zgx::{compose::prelude::*, scene::NodeKind};
+use zgx::compose::prelude::*;
 use zgx_desktop::{Application, WindowOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let editor = cx.ui.focused_editor().unwrap();
         if smoke {
             let scene = cx.ui.scene.clone();
+            let semantics = cx.ui.semantics.clone();
             let window = cx.window.clone();
             cx.tasks.spawn(async move {
                 for _ in 0..200 {
@@ -34,15 +35,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let viewport = scene.bounds(scene.parent(editor.caret).unwrap());
                         let caret = scene.bounds(editor.caret);
                         let bounds = scene.bounds(editor.node);
-                        let mut pending = vec![editor.node];
-                        let mut scroll = 0.;
-                        while let Some(id) = pending.pop() {
-                            if matches!(scene.kind(id), NodeKind::Text { .. }) {
-                                scroll = viewport.y - scene.bounds(id).y;
-                                break;
-                            }
-                            pending.extend(scene.children(id));
-                        }
+                        // Its text node, scrolled with its text (a text area's
+                        // lines show apart, each placed in it).
+                        let text = semantics.borrow().text_node(editor.node).unwrap();
+                        let scroll = viewport.y - scene.bounds(text).y;
                         println!("PAGING anchor={} focus={} caret_y={:.2} caret_h={:.2} viewport_y={:.2} viewport_h={:.2} width={:.2} scroll={:.2} readonly={} unchanged={}",
                             selection.anchor, selection.focus, caret.y, caret.height, viewport.y, viewport.height,
                             bounds.width, scroll, readonly.get(), value.get() == original);

@@ -3,7 +3,6 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 use zgx::{
     compose::prelude::*,
     input::{EventPhase, InputEvent, Key},
-    scene::NodeKind,
     widgets::EditorHandle,
 };
 use zgx_desktop::{Application, WindowOptions};
@@ -23,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let handles = Rc::new(RefCell::new(Vec::<EditorHandle>::new()));
         let reports = handles.clone();
         let scene = cx.ui.scene.clone();
+        let semantics = cx.ui.semantics.clone();
         let input = cx.ui.input.clone();
         let close = cx.window.clone();
         let tasks = cx.tasks.clone();
@@ -50,12 +50,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for (index,editor) in reports.borrow().iter().enumerate() {
                     let selection = editor.editor.borrow().selection();
                     let viewport = scene.bounds(scene.parent(editor.caret).unwrap());
-                    let mut pending = vec![editor.node];
-                    let text_bounds = loop {
-                        let node = pending.pop().unwrap();
-                        if matches!(scene.kind(node),NodeKind::Text {..}) {break scene.bounds(node);}
-                        pending.extend(scene.children(node));
-                    };
+                    // Its text node, scrolled with its text (a text area's lines
+                    // show apart, each placed in it).
+                    let text_bounds = scene.bounds(semantics.borrow().text_node(editor.node).unwrap());
                     let expected = if index==0 {&original} else {&horizontal_original};
                     println!("AUTOSCROLL editor={} anchor={} focus={} x={:.2} y={:.2} captured={} readonly={} unchanged={}",
                         index,selection.anchor,selection.focus,viewport.x-text_bounds.x,viewport.y-text_bounds.y,

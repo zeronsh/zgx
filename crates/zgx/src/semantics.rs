@@ -298,6 +298,9 @@ pub struct Semantics {
     /// The text node showing a field's text (`set_text_node`), whose lines
     /// assistive technology is given the geometry of: few nodes have one.
     text_nodes: HashMap<NodeId, NodeId>,
+    /// A field's text shown a line at a time (`set_text_lines`): where each
+    /// shown line starts in it, and the node showing it.
+    text_lines: HashMap<NodeId, Vec<(usize, NodeId)>>,
     /// What names a node with no name of its own (`set_labelled_by`): an
     /// unnamed popover's or menu's trigger. Few nodes have one, and their
     /// portal clears it as it goes (`unlabel_within`).
@@ -320,6 +323,7 @@ impl Default for Semantics {
             long: HashMap::new(),
             errors: HashMap::new(),
             text_nodes: HashMap::new(),
+            text_lines: HashMap::new(),
             labelled_by: HashMap::new(),
         }
     }
@@ -387,6 +391,9 @@ impl Semantics {
         }
         if !self.text_nodes.is_empty() {
             self.text_nodes.remove(&id);
+            if !self.text_lines.is_empty() {
+                self.text_lines.remove(&id);
+            }
         }
         crate::shrink_sparse(&mut self.nodes);
     }
@@ -637,6 +644,35 @@ impl Semantics {
     pub fn set_text_node(&mut self, id: NodeId, text: NodeId) {
         self.text_nodes.insert(id, text);
     }
+    /// `id`'s text shows a line at a time (a text area's), `lines` of it in
+    /// view: where each starts in its text, and the node showing it, top to
+    /// bottom. Assistive technology is given their geometry, as a text
+    /// node's (`set_text_node`). None, when it shows in its text node.
+    pub fn set_text_lines(&mut self, id: NodeId, lines: Vec<(usize, NodeId)>) {
+        let held = self.text_lines.get(&id).map_or(&[][..], Vec::as_slice);
+        if held == lines.as_slice() || self.buried(id) {
+            return;
+        }
+        let Some(entry) = self.nodes.get_mut(&id) else {
+            return;
+        };
+        if lines.is_empty() {
+            if !self.text_lines.is_empty() {
+                self.text_lines.remove(&id);
+            }
+        } else {
+            self.text_lines.insert(id, lines);
+        }
+        self.revision = self.revision.wrapping_add(1);
+        entry.revision = self.revision;
+    }
+    /// The lines `id`'s text shows on apart (`set_text_lines`), if it does.
+    pub fn text_lines(&self, id: NodeId) -> Option<&[(usize, NodeId)]> {
+        if self.text_lines.is_empty() {
+            return None;
+        }
+        self.text_lines.get(&id).map(Vec::as_slice)
+    }
     /// The text node showing `id`'s text (`set_text_node`): itself for a
     /// text node, none for a node whose text is not shown in one.
     pub fn text_node(&self, id: NodeId) -> Option<NodeId> {
@@ -683,6 +719,9 @@ impl Semantics {
             }
             if !self.text_nodes.is_empty() {
                 self.text_nodes.remove(&id);
+                if !self.text_lines.is_empty() {
+                    self.text_lines.remove(&id);
+                }
             }
             self.revision = self.revision.wrapping_add(1);
             crate::shrink_sparse(&mut self.nodes);
@@ -698,6 +737,9 @@ impl Semantics {
         }
         if !self.labelled_by.is_empty() {
             self.labelled_by.retain(|id, _| scene.contains(*id));
+        }
+        if !self.text_lines.is_empty() {
+            self.text_lines.retain(|id, _| scene.contains(*id));
         }
         if self.nodes.len() != count {
             self.revision = self.revision.wrapping_add(1);

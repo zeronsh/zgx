@@ -338,6 +338,38 @@ impl Text {
                 room - bytes,
             )
     }
+    /// This text edited to be `text`: the bytes they start and end with
+    /// compared, those between replaced. It shares this one's chunks but
+    /// the edited one's (a copy made by `Text::new` would copy them all).
+    pub(crate) fn edited_to(&self, text: &str) -> Text {
+        let bytes = text.as_bytes();
+        let prefix = prefix_of(
+            self.0.chunks.iter().map(|c| c.text.as_bytes()),
+            std::iter::once(bytes),
+        );
+        let room = (self.len() - prefix).min(text.len() - prefix);
+        let suffix = suffix_of(
+            self.0.chunks.iter().rev().map(|c| c.text.as_bytes()),
+            std::iter::once(bytes),
+            room,
+        );
+        // Where both have a character boundary: the bytes past the common
+        // ones differ, and with them what starts a character.
+        let mut start = prefix;
+        while !text.is_char_boundary(start) || !self.is_char_boundary(start) {
+            start -= 1;
+        }
+        let (mut end, mut from) = (self.len() - suffix, text.len() - suffix);
+        while !text.is_char_boundary(from) || !self.is_char_boundary(end) {
+            end += 1;
+            from += 1;
+        }
+        let mut edited = self.clone();
+        if start != end || start != from {
+            edited.replace_range(start..end, &text[start..from]);
+        }
+        edited
+    }
     /// Its longest line's length in bytes.
     pub fn longest_line(&self) -> usize {
         let (mut longest, mut run) = (0, 0);
@@ -771,6 +803,44 @@ mod tests {
         text.append("c");
         assert_eq!(since(&text, first), None, "the earliest dropped to fit");
         assert_eq!(since(&text, second).map(|e| e.len()), Some(2));
+    }
+
+    /// A text edited to another (`edited_to`) holds it, whatever the edit:
+    /// appended, cut, replaced across chunks, or between characters that
+    /// share their first bytes. Its counts are the other's own, and the
+    /// chunks the edit missed are shared.
+    #[test]
+    fn a_text_edited_to_another_is_it() {
+        let line = "a line of the document so far, é候😀\n";
+        let base = line.repeat(3 * CHUNK / line.len());
+        let mut cases = vec![
+            format!("{base}token "),
+            base[..base.len() - line.len()].to_owned(),
+            format!("x{base}"),
+            base.replacen("so far", "SO FAR\r\nand on", 2),
+            String::new(),
+            base.replace('é', "è"),
+            base.replacen('😀', "😁", 1),
+        ];
+        let middle = base.len() / 2;
+        let middle = (middle..).find(|at| base.is_char_boundary(*at)).unwrap();
+        cases.push(format!("{}{}", &base[..middle], &base[middle + 4..]));
+        let old = Text::new(&base);
+        for case in cases {
+            let edited = old.edited_to(&case);
+            assert_eq!(edited.to_cow(), case);
+            let made = Text::new(&case);
+            assert_eq!(edited.line_count(), made.line_count());
+            assert_eq!(edited.has_returns(), made.has_returns());
+            for line in 0..made.line_count() {
+                assert_eq!(edited.line_range(line), made.line_range(line));
+            }
+        }
+        let appended = old.edited_to(&format!("{base}token "));
+        assert!(Arc::ptr_eq(
+            &old.0.chunks[0].text,
+            &appended.0.chunks[0].text
+        ));
     }
 
     /// A 2-, 3- and 4-byte character at every byte around where chunks are

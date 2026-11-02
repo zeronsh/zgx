@@ -27,16 +27,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for _ in 0..400 {
                     {
                         let selection = editor.editor.borrow().selection();
+                        // Its text, and where it starts in the window (a text
+                        // area's lines show apart, a node each).
+                        let text = editor.editor.borrow().text().into_owned();
+                        let bounds = editor.text_area(0..0).unwrap();
                         let scene = scene.borrow();
                         let viewport = scene.bounds(scene.parent(editor.caret).unwrap());
+                        // A node showing a line of it, for its font.
                         let mut pending = vec![editor.node];
                         let text_node = loop {
                             let node = pending.pop().unwrap();
-                            if matches!(scene.kind(node),NodeKind::Text { .. }) { break node; }
+                            if matches!(scene.kind(node),NodeKind::Text { text, .. } if !text.is_empty()) { break node; }
                             pending.extend(scene.children(node));
                         };
-                        let NodeKind::Text {text,font_size,..} = scene.kind(text_node) else {unreachable!()};
-                        let bounds = scene.bounds(text_node);
+                        let NodeKind::Text {font_size,..} = scene.kind(text_node) else {unreachable!()};
+                        let text = text.as_str();
                         let layout = scene.shape_text_with_font(text,*font_size,Some(viewport.width),scene.font(text_node));
                         let point = |byte_offset| {
                             let caret = layout.caret_position(TextPosition {byte_offset,..TextPosition::default()});

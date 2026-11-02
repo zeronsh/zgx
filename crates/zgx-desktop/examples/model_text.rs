@@ -3,17 +3,25 @@ use std::time::Duration;
 use zgx::{
     compose::prelude::*,
     scene::{NodeId, NodeKind, Scene},
+    semantics::Semantics,
 };
 use zgx_desktop::{Application, WindowOptions};
 
-fn displayed(scene: &Scene, node: NodeId) -> Option<String> {
-    if let NodeKind::Text { text, .. } = scene.kind(node) {
-        return Some(text.to_string());
+/// What editor `node` shows: its text node's text, or a text area's lines,
+/// which show apart.
+fn displayed(scene: &Scene, semantics: &Semantics, node: NodeId) -> Option<String> {
+    let text = |node| match scene.kind(node) {
+        NodeKind::Text { text, .. } => Some(text.to_string()),
+        _ => None,
+    };
+    match semantics.text_lines(node) {
+        Some(lines) => lines
+            .iter()
+            .map(|(_, line)| text(*line))
+            .collect::<Option<Vec<_>>>()
+            .map(|lines| lines.join("\n")),
+        None => text(semantics.text_node(node)?),
     }
-    scene
-        .children(node)
-        .iter()
-        .find_map(|child| displayed(scene, *child))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -64,6 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let single = cx.ui.focused_editor().expect("single-line editor");
             if smoke {
                 let scene = cx.ui.scene.clone();
+                let semantics = cx.ui.semantics.clone();
                 let window = cx.window.clone();
                 cx.tasks.spawn(async move {
                     for _ in 0..100 {
@@ -73,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let caret = scene.bounds(editor.caret);
                             println!(
                                 "MODEL_TEXT {} model={:?} display={:?} retained={} caret_y={} caret_h={}",
-                                label, editor.value().get(), displayed(&scene, editor.node).unwrap_or_default(),
+                                label, editor.value().get(), displayed(&scene, &semantics.borrow(), editor.node).unwrap_or_default(),
                                 retained, caret.y, caret.height
                             );
                         }

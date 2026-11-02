@@ -19,6 +19,7 @@ use std::{
     collections::HashMap,
     ops::Range,
     rc::Rc,
+    sync::Arc,
 };
 
 /// Shapes one line, wrapped at a width if given (`Scene::line_shaper`).
@@ -268,7 +269,11 @@ pub(crate) const LONG_TEXT_BYTES: usize = 64 * 1024;
 pub(crate) const LONG_TEXT_LINES: usize = 2_000;
 /// Whether `text` is long enough to lay out by its lines.
 pub(crate) fn is_long(text: &str) -> bool {
-    text.len() > LONG_TEXT_BYTES || text.match_indices('\n').nth(LONG_TEXT_LINES).is_some()
+    // Its line breaks counted only where there could be enough, a word of
+    // bytes at a time (an iterator of matches costs a call each).
+    text.len() > LONG_TEXT_BYTES
+        || (text.len() > LONG_TEXT_LINES
+            && text.bytes().filter(|byte| *byte == b'\n').count() > LONG_TEXT_LINES)
 }
 
 /// Lines kept shaped: about a few screens' worth.
@@ -336,6 +341,18 @@ struct Colored {
     used: u64,
 }
 impl LineCache {
+    /// The last layout made: the text it shows, by its lines.
+    pub(crate) fn last_layout(&self) -> Option<Rc<LinesLayout>> {
+        self.last.borrow().clone()
+    }
+    /// `text` as a `Text`: the last layout's, edited to it (`Text::edited_to`),
+    /// so a short text's keystroke copies a chunk of it, not all of it.
+    pub(crate) fn text_of(&self, text: &str) -> Text {
+        match self.last.borrow().as_ref() {
+            Some(last) => last.text.edited_to(text),
+            None => Text::new(text),
+        }
+    }
     /// Let go of the last layout, which holds this cache in turn: called as
     /// its editor goes (`widgets`), or the two would keep each other, their
     /// lines and the shaper alive.
@@ -681,7 +698,35 @@ pub(crate) struct LinesLayout {
     shape: LineShaper,
     rich: RichLineShaper,
     cache: Rc<LineCache>,
+    /// Lines across chunks, joined once (a long line's every draw would
+    /// copy it): a few, by number.
+    joined: RefCell<HashMap<usize, Arc<str>>>,
 }
+/// A line's text: in its chunk, or joined across chunks and kept.
+pub(crate) enum LineText<'a> {
+    In(&'a str),
+    Joined(Arc<str>),
+}
+impl std::ops::Deref for LineText<'_> {
+    type Target = str;
+    fn deref(&self) -> &str {
+        match self {
+            LineText::In(text) => text,
+            LineText::Joined(text) => text,
+        }
+    }
+}
+impl LineText<'_> {
+    /// As a node's text: the joined line shared, not copied.
+    pub(crate) fn to_arc(&self) -> Arc<str> {
+        match self {
+            LineText::In(text) => Arc::from(*text),
+            LineText::Joined(text) => text.clone(),
+        }
+    }
+}
+/// Joined lines a layout keeps, at most.
+const JOINED_LINES: usize = 64;
 impl LinesLayout {
     fn new(
         text: Text,
@@ -695,7 +740,9 @@ impl LinesLayout {
         let mut layout = Self {
             text,
             wrap,
-            row: row.max(1.),
+            // Any height a line can have (a fraction of a point too), but
+            // none: a line is found by dividing by it.
+            row: if row > 0. { row } else { 1. },
             advance: advance.max(0.),
             longest,
             widest: Cell::new(0.),
@@ -703,6 +750,7 @@ impl LinesLayout {
             shape,
             rich,
             cache,
+            joined: RefCell::default(),
         };
         if let Some(width) = wrap {
             let known = layout.cache.heights.borrow();
@@ -740,6 +788,7 @@ impl LinesLayout {
             shape: old.shape.clone(),
             rich: old.rich.clone(),
             cache: old.cache.clone(),
+            joined: RefCell::default(),
         };
         // The edited lines' lengths count for the longest.
         for i in kept - 1..first_moved.min(layout.line_count()) {
@@ -781,8 +830,22 @@ impl LinesLayout {
     pub(crate) fn line_range(&self, i: usize) -> Range<usize> {
         self.text.line_range(i)
     }
-    pub(crate) fn line_text(&self, i: usize) -> std::borrow::Cow<'_, str> {
-        self.text.line(i)
+    pub(crate) fn line_text(&self, i: usize) -> LineText<'_> {
+        if let Some(text) = self.joined.borrow().get(&i) {
+            return LineText::Joined(text.clone());
+        }
+        match self.text.line(i) {
+            std::borrow::Cow::Borrowed(text) => LineText::In(text),
+            std::borrow::Cow::Owned(text) => {
+                let text: Arc<str> = text.into();
+                let mut joined = self.joined.borrow_mut();
+                if joined.len() >= JOINED_LINES {
+                    joined.clear();
+                }
+                joined.insert(i, text.clone());
+                LineText::Joined(text)
+            }
+        }
     }
     /// The line holding byte `offset` (a line's end, before its break, is
     /// its own; the offset after the break, the next line's).

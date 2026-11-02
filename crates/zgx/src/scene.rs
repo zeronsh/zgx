@@ -6502,6 +6502,14 @@ impl Scene {
             size,
         );
     }
+    /// Keep `size` as text node `id`'s, wrapped at `limit` (or not): what its
+    /// text was shaped to elsewhere (an editor's line), not measured again.
+    pub(crate) fn know_text_size(&self, id: NodeId, limit: Option<f32>, size: (f32, f32)) {
+        let sizes = &self.node(id).text_size;
+        if sizes.get().find(limit, self.text_shaper_revision) != Some(size) {
+            TextSizes::remember(sizes, limit, self.text_shaper_revision, size);
+        }
+    }
     /// Change `id`'s layout style, invalidating its layout.
     pub fn set_style(&mut self, id: NodeId, style: Style) {
         self.restyle(id, style, true);
