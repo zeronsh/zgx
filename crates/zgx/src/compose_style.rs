@@ -1982,6 +1982,12 @@ fn apply_rare(
             // text, which takes it at the flush (`Scene::set_text_gradient`).
             scene.set_text_gradient(node, gradient);
         }
+        // What assistive technology reads its text in, and what the text it
+        // holds takes (`Scene::set_language`): looked at once a node has said.
+        let language = cold.and_then(|cold| cold.lang.clone());
+        if language.is_some() || scene.language_revision() != 0 {
+            scene.set_language(node, language);
+        }
     }
     if let Some(direction) = rare.direction {
         scene.set_direction(node, Some(direction));
