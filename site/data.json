@@ -3359,1421 +3359,192 @@
  "release": {
   "gate": {
    "from": {
-    "version": "0.1.6",
-    "commit": "e077e952"
+    "version": "0.1.7",
+    "commit": "b03245c4"
    },
    "to": {
-    "version": "0.1.7",
-    "commit": "fbf1d5e2",
-    "released": "b03245c4"
+    "version": "0.1.8",
+    "commit": "12a539a7",
+    "released": "50fefc92"
    },
    "unit": "million instructions",
-   "how": "scripts/perf/gate.py: exact instruction counts under cachegrind, Linux arm64 (gate.md, the speed-of-light lane's release run; x86 in gate-x86.md, from CI's perf job on probe PR #1297); Luau scenes the median of 3 heap placements",
+   "how": "scripts/perf/gate.py: exact instruction counts under cachegrind, Linux arm64 (gate.md, the speed-of-light lane's release run; x86 in gate-x86.md, from CI's perf job on probe PR #1346); Luau scenes the median of 3 heap placements",
    "scenes_fields": [
     "from",
     "to",
     "change: the gate's own, from unrounded counts"
    ],
    "notes": {
-    "script-update": "a script's state update costs 8.0% less (6.4% counted the old way, with the bench's own data)",
-    "app-sketch": "the apps rose 0.06 to 0.40%: z ordering (#1070), percent bases (#1116) and an editor conversion (#1020); followed up in #1276",
-    "3d": "textured 3D (not a row: v0.1.6 has no bench): a frame 8.81 \u2192 3.25 M instructions (\u221263%), the whole bench \u221256%, loading +4.8%"
+    "lab-stream": "+0.37%: the font cache's file check (#1307) runs on a thread of its own, and once a process has had a second thread glibc locks its allocator for the rest of its life; the check moves to the host's idle tick after 0.1.8; on x86 it falls 0.63%",
+    "script-update": "like for like, the same bench and allocator on both sides (see redefined)"
+   },
+   "redefined": {
+    "script-update": "since 0.1.8 the cell leaves uncounted its bench's own data (#1321) and counts without glibc's fastbins (#1333). Both releases are counted that way, with v0.1.8's bench on v0.1.7: 1,008.6 M and 968.4 M on arm64, \u22123.98% (x86: 1,041.8 M and 1,000.4 M, \u22124.02%). Against v0.1.7's own bench the gate read \u221227.4%, which was the change of definition."
    },
    "scenes": {
     "heavy-both": [
-     997.8,
-     996.1,
-     -0.0017
+     996.4,
+     970.0,
+     -0.0265
     ],
     "heavy-stream": [
-     949.7,
-     948.2,
-     -0.0016
+     948.5,
+     922.5,
+     -0.0274
     ],
     "heavy-scroll": [
-     75.2,
-     74.8,
-     -0.0048
+     74.9,
+     62.4,
+     -0.1659
     ],
     "heavy-stream-at": [
-     965.1,
-     963.6,
-     -0.0015
+     963.9,
+     937.9,
+     -0.027
     ],
     "lab-stream": [
-     431.2,
-     430.5,
-     -0.0017
+     430.7,
+     432.3,
+     0.0037
     ],
     "lab-scroll": [
-     66.1,
      62.9,
-     -0.0473
+     46.6,
+     -0.2592
     ],
     "animate": [
-     276.2,
      275.7,
-     -0.002
+     264.5,
+     -0.0407
     ],
     "micro-state": [
-     56.1,
-     55.9,
-     -0.0034
+     56.0,
+     35.6,
+     -0.3651
     ],
     "micro-vscroll-fixed": [
-     45.9,
      45.8,
-     -0.0026
+     34.1,
+     -0.2559
     ],
     "micro-vscroll-variable": [
-     82.0,
      81.9,
-     -0.0007
+     63.2,
+     -0.2283
     ],
     "micro-state-luau": [
-     77.1,
      76.9,
-     -0.0023
+     52.7,
+     -0.3149
     ],
     "micro-vscroll-fixed-luau": [
-     60.7,
      60.6,
-     -0.0017
+     47.9,
+     -0.2093
     ],
     "micro-vscroll-variable-luau": [
-     124.2,
      124.1,
-     -0.0009
+     102.7,
+     -0.1726
     ],
     "mount": [
-     297.1,
-     296.6,
-     -0.0016
+     296.5,
+     292.4,
+     -0.0159
     ],
     "script-update": [
-     1123.7,
-     1033.5,
-     -0.08032
+     1008.6,
+     968.4,
+     -0.0398
     ],
     "anime": [
-     2948.1,
      2947.8,
+     2947.5,
      -0.0001
     ],
     "script-layout": [
-     2817.6,
      2817.8,
-     0.0001
+     2814.8,
+     -0.0011
+    ],
+    "spans-plain": [
+     48.5,
+     48.0,
+     -0.0101
+    ],
+    "spans-follow": [
+     49.7,
+     49.7,
+     0.0002
+    ],
+    "spans-md": [
+     55.5,
+     55.2,
+     -0.0051
     ],
     "list-state": [
-     819.5,
      819.6,
-     0.0001
+     819.3,
+     -0.0004
     ],
     "style": [
-     1246.7,
      1246.0,
-     -0.0005
+     1246.0,
+     -0.0
+    ],
+    "3d-textured": [
+     129.7,
+     129.6,
+     -0.0009
+    ],
+    "3d-mixed": [
+     354.7,
+     346.9,
+     -0.0218
     ],
     "widgets": [
-     137.9,
      137.6,
-     -0.0025
+     137.4,
+     -0.0009
     ],
     "app-mail": [
-     286.1,
      286.4,
-     0.0011
+     286.1,
+     -0.0012
     ],
     "app-chat": [
-     46.4,
      46.5,
-     0.003
+     46.2,
+     -0.0078
     ],
     "app-dashboard": [
-     166.9,
      167.0,
-     0.0006
+     164.4,
+     -0.0156
     ],
     "app-dashboard-sort": [
-     110.2,
      110.3,
-     0.001
+     108.6,
+     -0.0158
     ],
     "app-sketch": [
-     44.3,
      44.5,
-     0.004
+     44.1,
+     -0.0086
     ],
     "app-code": [
      91.8,
-     91.8,
-     0.0008
+     88.3,
+     -0.0379
     ],
     "app-code-search": [
-     80.8,
      80.9,
-     0.0015
+     79.5,
+     -0.0182
     ]
-   },
-   "redefined": {
-    "script-update": "since 0.1.8 the cell leaves uncounted the rows its bench makes beforehand for every update (update_bench's own data, 21% of the cell), which read as the engine's work. Both releases are counted the new way: 1,123.7 M and 1,033.5 M on arm64, \u22128.0%, where the old way read 1,404.6 M and 1,314.1 M, \u22126.4% (x86: 1,168.1 M and 1,070.9 M, \u22128.3%, against \u22126.7%)."
    }
   },
-  "previous_commit": "e077e952f63030808a098ca54f3e69501e3271bd",
-  "previous_date": "2026-10-30",
-  "rebuilt": "the rivals built again from suite sources unchanged since 0.1.6",
-  "changes": [
-   {
-    "scene": "heavy",
-    "mode": "idle",
-    "framework": "zgx",
-    "change": {
-     "cpu": {
-      "from": 0.0014,
-      "to": 0.0012499999999999998,
-      "change": -0.10714285714285732
-     },
-     "memory": {
-      "from": 52.904872,
-      "to": 53.232552,
-      "change": 0.0061937584878761776
-     },
-     "server": {
-      "from": 0.2136,
-      "to": 0.5311,
-      "change": 1.4864232209737827
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "idle",
-    "framework": "gpui-fast",
-    "change": {
-     "cpu": {
-      "from": 0.385,
-      "to": 0.36395,
-      "change": -0.054675324675324655
-     },
-     "memory": {
-      "from": 74.310484,
-      "to": 74.50708,
-      "change": 0.0026456024697671943
-     },
-     "server": {
-      "from": 0.37505,
-      "to": 0.53185,
-      "change": 0.41807758965471287
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "idle",
-    "framework": "mygo",
-    "change": {
-     "cpu": {
-      "from": 0.00165,
-      "to": 0.0012000000000000001,
-      "change": -0.2727272727272727
-     },
-     "memory": {
-      "from": 65.217676,
-      "to": 66.1482815,
-      "change": 0.014269222043422625
-     },
-     "server": {
-      "from": 0.2669,
-      "to": 0.5352,
-      "change": 1.005245410266017
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "idle",
-    "framework": "rune",
-    "change": {
-     "cpu": {
-      "from": 0.00135,
-      "to": 0.00145,
-      "change": 0.07407407407407396
-     },
-     "memory": {
-      "from": 74.613624,
-      "to": 75.465592,
-      "change": 0.011418397262140667
-     },
-     "server": {
-      "from": 0.21465,
-      "to": 0.5323,
-      "change": 1.4798509201024923
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "stream",
-    "framework": "zgx",
-    "change": {
-     "cpu": {
-      "from": 5.5988,
-      "to": 5.0169,
-      "change": -0.10393298563977993
-     },
-     "gpu": {
-      "from": 124.8,
-      "to": 125.14999999999998,
-      "change": 0.002804487179487003
-     },
-     "memory": {
-      "from": 264.063743,
-      "to": 263.934708,
-      "change": -0.0004886509542508799
-     },
-     "server": {
-      "from": 10.922,
-      "to": 10.0171,
-      "change": -0.08285112616736878
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "stream",
-    "framework": "gpui-fast",
-    "change": {
-     "cpu": {
-      "from": 12.7695,
-      "to": 11.4065,
-      "change": -0.10673871334038143
-     },
-     "gpu": {
-      "from": 166.8,
-      "to": 181.25,
-      "change": 0.0866306954436451
-     },
-     "memory": {
-      "from": 268.24298899999997,
-      "to": 283.26043699999997,
-      "change": 0.055984493969383875
-     },
-     "server": {
-      "from": 10.0686,
-      "to": 9.7558,
-      "change": -0.031066881195002227
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "stream",
-    "framework": "mygo",
-    "change": {
-     "cpu": {
-      "from": 13.9843,
-      "to": 13.403,
-      "change": -0.04156804416381221
-     },
-     "gpu": {
-      "from": 226.20000000000002,
-      "to": 231.55,
-      "change": 0.02365163572060114
-     },
-     "memory": {
-      "from": 308.137424,
-      "to": 308.602216,
-      "change": 0.0015083919180163274
-     },
-     "server": {
-      "from": 10.9792,
-      "to": 10.8824,
-      "change": -0.008816671524336961
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "stream",
-    "framework": "rune",
-    "change": {
-     "cpu": {
-      "from": 17.6289,
-      "to": 16.0983,
-      "change": -0.08682334121811364
-     },
-     "gpu": {
-      "from": 491.4,
-      "to": 494.75,
-      "change": 0.006817256817256867
-     },
-     "memory": {
-      "from": 476.85702499999996,
-      "to": 477.045209,
-      "change": 0.00039463401005779275
-     },
-     "server": {
-      "from": 9.9776,
-      "to": 9.596,
-      "change": -0.03824567030147541
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "scroll",
-    "framework": "zgx",
-    "change": {
-     "cpu": {
-      "from": 2.5571,
-      "to": 2.4650499999999997,
-      "change": -0.03599781001916247
-     },
-     "gpu": {
-      "from": 82.3,
-      "to": 85.25,
-      "change": 0.035844471445929615
-     },
-     "memory": {
-      "from": 259.716291,
-      "to": 260.1966825,
-      "change": 0.0018496779626349102
-     },
-     "server": {
-      "from": 10.3116,
-      "to": 9.97845,
-      "change": -0.03230827417665538
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "scroll",
-    "framework": "gpui-fast",
-    "change": {
-     "cpu": {
-      "from": 6.98025,
-      "to": 6.4534,
-      "change": -0.07547723935389128
-     },
-     "gpu": {
-      "from": 167.25,
-      "to": 170.74999999999997,
-      "change": 0.020926756352765086
-     },
-     "memory": {
-      "from": 265.8567495,
-      "to": 278.10287999999997,
-      "change": 0.046062891098425984
-     },
-     "server": {
-      "from": 10.12815,
-      "to": 9.5067,
-      "change": -0.06135868840805081
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "scroll",
-    "framework": "mygo",
-    "change": {
-     "cpu": {
-      "from": 11.5723,
-      "to": 10.861049999999999,
-      "change": -0.061461420806581346
-     },
-     "gpu": {
-      "from": 115.70000000000002,
-      "to": 117.8,
-      "change": 0.01815038893690568
-     },
-     "memory": {
-      "from": 297.815054,
-      "to": 297.736926,
-      "change": -0.000262337309516969
-     },
-     "server": {
-      "from": 10.7597,
-      "to": 10.5662,
-      "change": -0.017983772781768992
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "scroll",
-    "framework": "rune",
-    "change": {
-     "cpu": {
-      "from": 17.4301,
-      "to": 16.6446,
-      "change": -0.04506571964589989
-     },
-     "gpu": {
-      "from": 492.4,
-      "to": 496.85,
-      "change": 0.00903736799350141
-     },
-     "memory": {
-      "from": 629.440238,
-      "to": 629.791103,
-      "change": 0.0005574238487118244
-     },
-     "server": {
-      "from": 11.0409,
-      "to": 9.6893,
-      "change": -0.12241755653977493
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "both",
-    "framework": "zgx",
-    "change": {
-     "cpu": {
-      "from": 6.2112,
-      "to": 5.7613,
-      "change": -0.0724336682122616
-     },
-     "gpu": {
-      "from": 145.1,
-      "to": 147.35,
-      "change": 0.015506547208821608
-     },
-     "memory": {
-      "from": 265.72272799999996,
-      "to": 264.826863,
-      "change": -0.003371427829086615
-     },
-     "server": {
-      "from": 11.1544,
-      "to": 10.1231,
-      "change": -0.09245678835257831
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "both",
-    "framework": "gpui-fast",
-    "change": {
-     "cpu": {
-      "from": 13.0056,
-      "to": 12.1911,
-      "change": -0.06262686842590881
-     },
-     "gpu": {
-      "from": 166.1,
-      "to": 182.89999999999998,
-      "change": 0.10114388922335937
-     },
-     "memory": {
-      "from": 268.96419199999997,
-      "to": 275.743365,
-      "change": 0.02520474175238907
-     },
-     "server": {
-      "from": 10.0761,
-      "to": 9.676649999999999,
-      "change": -0.039643314377586725
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "both",
-    "framework": "mygo",
-    "change": {
-     "cpu": {
-      "from": 13.9074,
-      "to": 13.765450000000001,
-      "change": -0.010206796381782346
-     },
-     "gpu": {
-      "from": 227.5,
-      "to": 231.45,
-      "change": 0.017362637362637212
-     },
-     "memory": {
-      "from": 307.998938,
-      "to": 308.4000685,
-      "change": 0.0013023762439077213
-     },
-     "server": {
-      "from": 11.2591,
-      "to": 10.61285,
-      "change": -0.05739801582719761
-     }
-    }
-   },
-   {
-    "scene": "heavy",
-    "mode": "both",
-    "framework": "rune",
-    "change": {
-     "cpu": {
-      "from": 20.1338,
-      "to": 19.3596,
-      "change": -0.03845275109517332
-     },
-     "gpu": {
-      "from": 489.59999999999997,
-      "to": 499.75,
-      "change": 0.02073120915032689
-     },
-     "memory": {
-      "from": 632.949827,
-      "to": 630.853075,
-      "change": -0.0033126669927978636
-     },
-     "server": {
-      "from": 10.08,
-      "to": 9.6484,
-      "change": -0.042817460317460254
-     }
-    }
-   },
-   {
-    "scene": "lab",
-    "mode": "stream",
-    "framework": "zgx",
-    "change": {
-     "cpu": {
-      "from": 2.4093999999999998,
-      "to": 2.3385,
-      "change": -0.029426413214908242
-     },
-     "gpu": {
-      "from": 59.35000000000001,
-      "to": 59.25,
-      "change": -0.0016849199663017123
-     },
-     "memory": {
-      "from": 243.3675405,
-      "to": 243.52595399999998,
-      "change": 0.0006509228785176457
-     },
-     "server": {
-      "from": 9.94095,
-      "to": 9.7635,
-      "change": -0.017850406651275796
-     }
-    }
-   },
-   {
-    "scene": "lab",
-    "mode": "stream",
-    "framework": "gpui-fast",
-    "change": {
-     "cpu": {
-      "from": 4.6941,
-      "to": 4.5842,
-      "change": -0.02341236871817809
-     },
-     "gpu": {
-      "from": 108.39999999999999,
-      "to": 108.95,
-      "change": 0.005073800738007561
-     },
-     "memory": {
-      "from": 248.362619,
-      "to": 247.898488,
-      "change": -0.0018687635114686962
-     },
-     "server": {
-      "from": 9.6863,
-      "to": 9.4476,
-      "change": -0.02464305255876853
-     }
-    }
-   },
-   {
-    "scene": "lab",
-    "mode": "stream",
-    "framework": "mygo",
-    "change": {
-     "cpu": {
-      "from": 7.0297,
-      "to": 6.73805,
-      "change": -0.041488256966869086
-     },
-     "gpu": {
-      "from": 67.05000000000001,
-      "to": 65.9,
-      "change": -0.017151379567487024
-     },
-     "memory": {
-      "from": 272.134436,
-      "to": 272.919599,
-      "change": 0.0028852026650534324
-     },
-     "server": {
-      "from": 10.51425,
-      "to": 10.6868,
-      "change": 0.01641106117887614
-     }
-    }
-   },
-   {
-    "scene": "lab",
-    "mode": "stream",
-    "framework": "rune",
-    "change": {
-     "cpu": {
-      "from": 5.7237,
-      "to": 5.77915,
-      "change": 0.009687789367017752
-     },
-     "gpu": {
-      "from": 315.5,
-      "to": 312.70000000000005,
-      "change": -0.008874801901743168
-     },
-     "memory": {
-      "from": 432.803117,
-      "to": 425.7956445,
-      "change": -0.016190901185214934
-     },
-     "server": {
-      "from": 10.3983,
-      "to": 9.57715,
-      "change": -0.07896963926795741
-     }
-    }
-   },
-   {
-    "scene": "lab",
-    "mode": "scroll",
-    "framework": "zgx",
-    "change": {
-     "cpu": {
-      "from": 2.2326,
-      "to": 2.16035,
-      "change": -0.032361372390934284
-     },
-     "gpu": {
-      "from": 63.0,
-      "to": 63.7,
-      "change": 0.011111111111111072
-     },
-     "memory": {
-      "from": 241.54715199999998,
-      "to": 241.4778715,
-      "change": -0.0002868197758755242
-     },
-     "server": {
-      "from": 10.1189,
-      "to": 9.87945,
-      "change": -0.023663639328385444
-     }
-    }
-   },
-   {
-    "scene": "lab",
-    "mode": "scroll",
-    "framework": "gpui-fast",
-    "change": {
-     "cpu": {
-      "from": 3.8184,
-      "to": 3.702,
-      "change": -0.03048397234443745
-     },
-     "gpu": {
-      "from": 106.0,
-      "to": 106.75000000000001,
-      "change": 0.0070754716981134
-     },
-     "memory": {
-      "from": 246.096893,
-      "to": 246.790574,
-      "change": 0.0028187312385126173
-     },
-     "server": {
-      "from": 9.6242,
-      "to": 9.5095,
-      "change": -0.011917873693398029
-     }
-    }
-   },
-   {
-    "scene": "lab",
-    "mode": "scroll",
-    "framework": "mygo",
-    "change": {
-     "cpu": {
-      "from": 5.5163,
-      "to": 5.5082,
-      "change": -0.0014683755415767497
-     },
-     "gpu": {
-      "from": 100.2,
-      "to": 100.05000000000001,
-      "change": -0.0014970059880238251
-     },
-     "memory": {
-      "from": 262.53819,
-      "to": 262.93292249999996,
-      "change": 0.0015035241158629642
-     },
-     "server": {
-      "from": 10.7618,
-      "to": 10.508099999999999,
-      "change": -0.023574123287925852
-     }
-    }
-   },
-   {
-    "scene": "lab",
-    "mode": "scroll",
-    "framework": "rune",
-    "change": {
-     "cpu": {
-      "from": 5.1501,
-      "to": 5.3538499999999996,
-      "change": 0.03956233859536695
-     },
-     "gpu": {
-      "from": 307.70000000000005,
-      "to": 311.1,
-      "change": 0.011049723756906049
-     },
-     "memory": {
-      "from": 430.007768,
-      "to": 419.04551399999997,
-      "change": -0.025493153416707548
-     },
-     "server": {
-      "from": 9.8155,
-      "to": 9.3311,
-      "change": -0.04935051703937654
-     }
-    }
-   },
-   {
-    "scene": "lab",
-    "mode": "both",
-    "framework": "zgx",
-    "change": {
-     "cpu": {
-      "from": 2.7221,
-      "to": 2.646,
-      "change": -0.027956357224201978
-     },
-     "gpu": {
-      "from": 67.89999999999999,
-      "to": 67.65,
-      "change": -0.003681885125183859
-     },
-     "memory": {
-      "from": 244.35546,
-      "to": 243.78517,
-      "change": -0.00233385413200915
-     },
-     "server": {
-      "from": 10.1493,
-      "to": 9.8033,
-      "change": -0.034091021055639326
-     }
-    }
-   },
-   {
-    "scene": "lab",
-    "mode": "both",
-    "framework": "gpui-fast",
-    "change": {
-     "cpu": {
-      "from": 4.6117,
-      "to": 4.786899999999999,
-      "change": 0.03799032894594179
-     },
-     "gpu": {
-      "from": 108.8,
-      "to": 109.0,
-      "change": 0.0018382352941177516
-     },
-     "memory": {
-      "from": 248.329625,
-      "to": 248.08392949999998,
-      "change": -0.000989392626836172
-     },
-     "server": {
-      "from": 9.4637,
-      "to": 9.31205,
-      "change": -0.016024387924384764
-     }
-    }
-   },
-   {
-    "scene": "lab",
-    "mode": "both",
-    "framework": "mygo",
-    "change": {
-     "cpu": {
-      "from": 6.811,
-      "to": 6.7193000000000005,
-      "change": -0.013463514902363749
-     },
-     "gpu": {
-      "from": 105.3,
-      "to": 104.95,
-      "change": -0.003323836657169954
-     },
-     "memory": {
-      "from": 272.35443,
-      "to": 272.798367,
-      "change": 0.001629997353081336
-     },
-     "server": {
-      "from": 10.5405,
-      "to": 10.363150000000001,
-      "change": -0.016825577534272496
-     }
-    }
-   },
-   {
-    "scene": "lab",
-    "mode": "both",
-    "framework": "rune",
-    "change": {
-     "cpu": {
-      "from": 6.417199999999999,
-      "to": 5.9966,
-      "change": -0.06554260425107516
-     },
-     "gpu": {
-      "from": 318.55000000000007,
-      "to": 314.65,
-      "change": -0.012242975984931959
-     },
-     "memory": {
-      "from": 433.1349745,
-      "to": 427.43394,
-      "change": -0.013162258500554302
-     },
-     "server": {
-      "from": 10.003599999999999,
-      "to": 9.37805,
-      "change": -0.06253248830421032
-     }
-    }
-   },
-   {
-    "scene": "animate",
-    "mode": "animate",
-    "framework": "zgx",
-    "change": {
-     "cpu": {
-      "from": 3.5474,
-      "to": 3.2838,
-      "change": -0.07430794384619732
-     },
-     "gpu": {
-      "from": 116.7,
-      "to": 120.65,
-      "change": 0.033847472150814184
-     },
-     "memory": {
-      "from": 242.091829,
-      "to": 241.22493799999998,
-      "change": -0.00358083543579657
-     },
-     "server": {
-      "from": 18.5312,
-      "to": 18.1006,
-      "change": -0.023236487653254922
-     }
-    }
-   },
-   {
-    "scene": "animate",
-    "mode": "animate",
-    "framework": "gpui-fast",
-    "change": {
-     "cpu": {
-      "from": 5.6331,
-      "to": 5.1121,
-      "change": -0.09248903800749142
-     },
-     "gpu": {
-      "from": 142.3,
-      "to": 141.55,
-      "change": -0.005270555165144075
-     },
-     "memory": {
-      "from": 255.822804,
-      "to": 255.781397,
-      "change": -0.00016185812739355487
-     },
-     "server": {
-      "from": 20.0213,
-      "to": 20.6838,
-      "change": 0.03308975940623249
-     }
-    }
-   },
-   {
-    "scene": "animate",
-    "mode": "animate",
-    "framework": "mygo",
-    "change": {
-     "cpu": {
-      "from": 6.767,
-      "to": 6.5252,
-      "change": -0.03573222993941194
-     },
-     "gpu": {
-      "from": 117.8,
-      "to": 114.85000000000001,
-      "change": -0.02504244482173168
-     },
-     "memory": {
-      "from": 263.37999099999996,
-      "to": 263.81219799999997,
-      "change": 0.0016410016507291125
-     },
-     "server": {
-      "from": 22.0141,
-      "to": 21.8719,
-      "change": -0.006459496413662058
-     }
-    }
-   },
-   {
-    "scene": "animate",
-    "mode": "animate",
-    "framework": "rune",
-    "change": {
-     "cpu": {
-      "from": 6.7351,
-      "to": 6.2241,
-      "change": -0.07587118231355139
-     },
-     "gpu": {
-      "from": 295.9,
-      "to": 292.75,
-      "change": -0.010645488340655596
-     },
-     "memory": {
-      "from": 415.779226,
-      "to": 424.565931,
-      "change": 0.021133102498968936
-     },
-     "server": {
-      "from": 16.9003,
-      "to": 19.6566,
-      "change": 0.16309177943586795
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "scroll",
-    "framework": "zgx",
-    "change": {
-     "cpu": {
-      "from": 2.3688,
-      "to": 2.2506,
-      "change": -0.049898682877406175
-     },
-     "gpu": {
-      "from": 61.5,
-      "to": 60.05,
-      "change": -0.02357723577235782
-     },
-     "memory": {
-      "from": 244.54136499999998,
-      "to": 244.32972099999998,
-      "change": -0.0008654732094097728
-     },
-     "server": {
-      "from": 10.01,
-      "to": 9.8384,
-      "change": -0.017142857142857126
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "scroll",
-    "framework": "zgx-luau",
-    "change": {
-     "cpu": {
-      "from": 2.5502,
-      "to": 2.3101,
-      "change": -0.09414947847227673
-     },
-     "gpu": {
-      "from": 61.5,
-      "to": 60.15,
-      "change": -0.02195121951219514
-     },
-     "memory": {
-      "from": 246.585062,
-      "to": 246.568691,
-      "change": -6.639088299675855e-05
-     },
-     "server": {
-      "from": 10.108,
-      "to": 9.8897,
-      "change": -0.02159675504550862
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "scroll",
-    "framework": "gpui-fast",
-    "change": {
-     "cpu": {
-      "from": 4.4524,
-      "to": 4.1808499999999995,
-      "change": -0.060989578654209065
-     },
-     "gpu": {
-      "from": 90.3,
-      "to": 88.55,
-      "change": -0.019379844961240345
-     },
-     "memory": {
-      "from": 284.198965,
-      "to": 283.8525585,
-      "change": -0.0012188872679391727
-     },
-     "server": {
-      "from": 9.5126,
-      "to": 9.4038,
-      "change": -0.011437461892647716
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "scroll",
-    "framework": "mygo",
-    "change": {
-     "cpu": {
-      "from": 8.5341,
-      "to": 7.8578,
-      "change": -0.07924678642153249
-     },
-     "gpu": {
-      "from": 94.69999999999999,
-      "to": 94.45,
-      "change": -0.0026399155227031512
-     },
-     "memory": {
-      "from": 264.503205,
-      "to": 264.226247,
-      "change": -0.0010470875012649206
-     },
-     "server": {
-      "from": 11.1263,
-      "to": 10.9913,
-      "change": -0.012133413623576561
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "scroll",
-    "framework": "rune",
-    "change": {
-     "cpu": {
-      "from": 6.7863,
-      "to": 6.43835,
-      "change": -0.05127241648615588
-     },
-     "gpu": {
-      "from": 248.5,
-      "to": 245.1,
-      "change": -0.013682092555332037
-     },
-     "memory": {
-      "from": 450.41475699999995,
-      "to": 449.97452799999996,
-      "change": -0.0009773858275251568
-     },
-     "server": {
-      "from": 9.82085,
-      "to": 9.4692,
-      "change": -0.03580647296313444
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "fling",
-    "framework": "zgx",
-    "change": {
-     "cpu": {
-      "from": 2.4602,
-      "to": 2.4513,
-      "change": -0.003617592065685793
-     },
-     "gpu": {
-      "from": 62.0,
-      "to": 60.75000000000001,
-      "change": -0.020161290322580516
-     },
-     "memory": {
-      "from": 245.175986,
-      "to": 244.689013,
-      "change": -0.0019862181771750365
-     },
-     "server": {
-      "from": 10.1236,
-      "to": 9.7091,
-      "change": -0.04094393298826504
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "fling",
-    "framework": "zgx-luau",
-    "change": {
-     "cpu": {
-      "from": 2.5934,
-      "to": 2.47905,
-      "change": -0.044092696845839385
-     },
-     "gpu": {
-      "from": 61.699999999999996,
-      "to": 61.5,
-      "change": -0.0032414910858994395
-     },
-     "memory": {
-      "from": 247.021996,
-      "to": 247.35571099999999,
-      "change": 0.0013509525686126178
-     },
-     "server": {
-      "from": 10.071,
-      "to": 9.8727,
-      "change": -0.01969019958296092
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "fling",
-    "framework": "gpui-fast",
-    "change": {
-     "cpu": {
-      "from": 4.7363,
-      "to": 4.4078,
-      "change": -0.06935793763063991
-     },
-     "gpu": {
-      "from": 90.5,
-      "to": 89.95,
-      "change": -0.006077348066298338
-     },
-     "memory": {
-      "from": 287.467453,
-      "to": 289.885267,
-      "change": 0.008410739980362125
-     },
-     "server": {
-      "from": 9.4373,
-      "to": 9.3482,
-      "change": -0.009441259682324454
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "fling",
-    "framework": "mygo",
-    "change": {
-     "cpu": {
-      "from": 8.5992,
-      "to": 7.9947,
-      "change": -0.07029723695227463
-     },
-     "gpu": {
-      "from": 96.1,
-      "to": 95.25,
-      "change": -0.008844953173777204
-     },
-     "memory": {
-      "from": 265.3085165,
-      "to": 264.9433595,
-      "change": -0.00137634858020097
-     },
-     "server": {
-      "from": 11.098749999999999,
-      "to": 10.9103,
-      "change": -0.01697938957089762
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "fling",
-    "framework": "rune",
-    "change": {
-     "cpu": {
-      "from": 7.9852,
-      "to": 7.21735,
-      "change": -0.09615914441717177
-     },
-     "gpu": {
-      "from": 248.5,
-      "to": 245.09999999999997,
-      "change": -0.013682092555332148
-     },
-     "memory": {
-      "from": 452.00355199999996,
-      "to": 451.6300265,
-      "change": -0.0008263773555479137
-     },
-     "server": {
-      "from": 9.7275,
-      "to": 9.54325,
-      "change": -0.018941146234900952
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "jump",
-    "framework": "zgx",
-    "change": {
-     "cpu": {
-      "from": 2.4822,
-      "to": 2.44485,
-      "change": -0.015047135605511186
-     },
-     "gpu": {
-      "from": 62.4,
-      "to": 60.5,
-      "change": -0.03044871794871795
-     },
-     "memory": {
-      "from": 245.588699,
-      "to": 245.51239249999998,
-      "change": -0.0003107085151340394
-     },
-     "server": {
-      "from": 9.9704,
-      "to": 9.83345,
-      "change": -0.01373565754633721
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "jump",
-    "framework": "zgx-luau",
-    "change": {
-     "cpu": {
-      "from": 2.61415,
-      "to": 2.4805,
-      "change": -0.051125604881127606
-     },
-     "gpu": {
-      "from": 61.64999999999999,
-      "to": 60.650000000000006,
-      "change": -0.016220600162205723
-     },
-     "memory": {
-      "from": 247.45479899999998,
-      "to": 247.8460395,
-      "change": 0.001581058446152861
-     },
-     "server": {
-      "from": 10.15025,
-      "to": 9.87875,
-      "change": -0.02674810965247154
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "jump",
-    "framework": "gpui-fast",
-    "change": {
-     "cpu": {
-      "from": 4.574,
-      "to": 4.53795,
-      "change": -0.00788150415391331
-     },
-     "gpu": {
-      "from": 90.39999999999999,
-      "to": 89.45,
-      "change": -0.01050884955752196
-     },
-     "memory": {
-      "from": 285.34105999999997,
-      "to": 289.602801,
-      "change": 0.014935603729796298
-     },
-     "server": {
-      "from": 9.7349,
-      "to": 9.233699999999999,
-      "change": -0.051484863737686126
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "jump",
-    "framework": "mygo",
-    "change": {
-     "cpu": {
-      "from": 9.1471,
-      "to": 8.70015,
-      "change": -0.04886248100490853
-     },
-     "gpu": {
-      "from": 95.8,
-      "to": 96.3,
-      "change": 0.005219206680584509
-     },
-     "memory": {
-      "from": 268.57106849999997,
-      "to": 268.580224,
-      "change": 3.408967336326896e-05
-     },
-     "server": {
-      "from": 11.205300000000001,
-      "to": 10.894649999999999,
-      "change": -0.02772348799228963
-     }
-    }
-   },
-   {
-    "scene": "vlist",
-    "mode": "jump",
-    "framework": "rune",
-    "change": {
-     "cpu": {
-      "from": 8.9879,
-      "to": 8.6263,
-      "change": -0.04023186728824302
-     },
-     "gpu": {
-      "from": 247.10000000000002,
-      "to": 244.7,
-      "change": -0.00971266693646311
-     },
-     "memory": {
-      "from": 455.206083,
-      "to": 454.904458,
-      "change": -0.0006626119712903611
-     },
-     "server": {
-      "from": 9.6864,
-      "to": 9.2878,
-      "change": -0.04115047902213409
-     }
-    }
-   }
-  ]
+  "suite_commit": "afa2960e00463a8c067e4bc1e8aca836c4a60d37"
  },
  "field": {
   "scene": "field",

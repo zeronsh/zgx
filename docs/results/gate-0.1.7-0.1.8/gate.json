@@ -1,0 +1,187 @@
+{
+ "from": {
+  "version": "0.1.7",
+  "commit": "b03245c4"
+ },
+ "to": {
+  "version": "0.1.8",
+  "commit": "12a539a7",
+  "released": "50fefc92"
+ },
+ "unit": "million instructions",
+ "how": "scripts/perf/gate.py: exact instruction counts under cachegrind, Linux arm64 (gate.md, the speed-of-light lane's release run; x86 in gate-x86.md, from CI's perf job on probe PR #1346); Luau scenes the median of 3 heap placements",
+ "scenes_fields": [
+  "from",
+  "to",
+  "change: the gate's own, from unrounded counts"
+ ],
+ "notes": {
+  "lab-stream": "+0.37%: the font cache's file check (#1307) runs on a thread of its own, and once a process has had a second thread glibc locks its allocator for the rest of its life; the check moves to the host's idle tick after 0.1.8; on x86 it falls 0.63%",
+  "script-update": "like for like, the same bench and allocator on both sides (see redefined)"
+ },
+ "redefined": {
+  "script-update": "since 0.1.8 the cell leaves uncounted its bench's own data (#1321) and counts without glibc's fastbins (#1333). Both releases are counted that way, with v0.1.8's bench on v0.1.7: 1,008.6 M and 968.4 M on arm64, −3.98% (x86: 1,041.8 M and 1,000.4 M, −4.02%). Against v0.1.7's own bench the gate read −27.4%, which was the change of definition."
+ },
+ "scenes": {
+  "heavy-both": [
+   996.4,
+   970.0,
+   -0.0265
+  ],
+  "heavy-stream": [
+   948.5,
+   922.5,
+   -0.0274
+  ],
+  "heavy-scroll": [
+   74.9,
+   62.4,
+   -0.1659
+  ],
+  "heavy-stream-at": [
+   963.9,
+   937.9,
+   -0.027
+  ],
+  "lab-stream": [
+   430.7,
+   432.3,
+   0.0037
+  ],
+  "lab-scroll": [
+   62.9,
+   46.6,
+   -0.2592
+  ],
+  "animate": [
+   275.7,
+   264.5,
+   -0.0407
+  ],
+  "micro-state": [
+   56.0,
+   35.6,
+   -0.3651
+  ],
+  "micro-vscroll-fixed": [
+   45.8,
+   34.1,
+   -0.2559
+  ],
+  "micro-vscroll-variable": [
+   81.9,
+   63.2,
+   -0.2283
+  ],
+  "micro-state-luau": [
+   76.9,
+   52.7,
+   -0.3149
+  ],
+  "micro-vscroll-fixed-luau": [
+   60.6,
+   47.9,
+   -0.2093
+  ],
+  "micro-vscroll-variable-luau": [
+   124.1,
+   102.7,
+   -0.1726
+  ],
+  "mount": [
+   296.5,
+   292.4,
+   -0.0159
+  ],
+  "script-update": [
+   1008.6,
+   968.4,
+   -0.0398
+  ],
+  "anime": [
+   2947.8,
+   2947.5,
+   -0.0001
+  ],
+  "script-layout": [
+   2817.8,
+   2814.8,
+   -0.0011
+  ],
+  "spans-plain": [
+   48.5,
+   48.0,
+   -0.0101
+  ],
+  "spans-follow": [
+   49.7,
+   49.7,
+   0.0002
+  ],
+  "spans-md": [
+   55.5,
+   55.2,
+   -0.0051
+  ],
+  "list-state": [
+   819.6,
+   819.3,
+   -0.0004
+  ],
+  "style": [
+   1246.0,
+   1246.0,
+   -0.0
+  ],
+  "3d-textured": [
+   129.7,
+   129.6,
+   -0.0009
+  ],
+  "3d-mixed": [
+   354.7,
+   346.9,
+   -0.0218
+  ],
+  "widgets": [
+   137.6,
+   137.4,
+   -0.0009
+  ],
+  "app-mail": [
+   286.4,
+   286.1,
+   -0.0012
+  ],
+  "app-chat": [
+   46.5,
+   46.2,
+   -0.0078
+  ],
+  "app-dashboard": [
+   167.0,
+   164.4,
+   -0.0156
+  ],
+  "app-dashboard-sort": [
+   110.3,
+   108.6,
+   -0.0158
+  ],
+  "app-sketch": [
+   44.5,
+   44.1,
+   -0.0086
+  ],
+  "app-code": [
+   91.8,
+   88.3,
+   -0.0379
+  ],
+  "app-code-search": [
+   80.9,
+   79.5,
+   -0.0182
+  ]
+ }
+}

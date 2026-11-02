@@ -19,7 +19,7 @@
 <div class="card"><dt>long frames (over 25 ms), at most</dt><dd><span class="big">0.2%</span><span class="note">median of each mode&#x27;s captures, every scene; GPUI Fast, MyGo and Rune: up to 21.5%</span></dd></div>
 <div class="card"><dt>CPU while idle</dt><dd><span class="big">0.00%</span><span class="note">GPUI Fast 0.36%, MyGo 0.00%, Rune 0.00%</span></dd></div>
 </dl>
-<nav aria-label="Scenes"><a href="#heavy">Heavy dashboard</a> <a href="#lab">Text and a 100,000-row list</a> <a href="#animate">Animation</a> <a href="#vlist">Variable-height list</a> <a href="#release">Since 0.1.6</a> <a href="#field">A focused field</a> <a href="#method">How this was measured</a></nav>
+<nav aria-label="Scenes"><a href="#heavy">Heavy dashboard</a> <a href="#lab">Text and a 100,000-row list</a> <a href="#animate">Animation</a> <a href="#vlist">Variable-height list</a> <a href="#release">Since 0.1.7</a> <a href="#field">A focused field</a> <a href="#method">How this was measured</a></nav>
 </header>
 <main>
 <section id="heavy" aria-labelledby="heavy-h"><h2 id="heavy-h">Heavy dashboard</h2><p class="scene-note">A 1280×800 dashboard: 6 tiles, 30 cards of 26 sparkline bars, a status table and a log. Most values change 60 times a second; the table scrolls. <a href="https://github.com/zeronsh/zgx/tree/main/docs/results/suite-macos-2026-10-31-afa2960/heavy">Raw data</a></p><div class="charts"><figure class="chart"><table><caption><span class="title">CPU</span> <span class="unit">% of one core</span> <span class="better">lower is better</span></caption>
@@ -606,55 +606,44 @@
 <tr class="fw-rune"><th scope="row">Rune</th><td><span class="track" aria-hidden="true"><span class="bar" style="width:28.7%"></span></span><span class="value">0.2</span> <span class="range">(0.1–0.2)</span></td></tr>
 </tbody>
 </table></figure></div></section>
-<section id="release" aria-labelledby="release-h"><h2 id="release-h">0.1.6 &#8594; 0.1.7</h2>
-<p class="scene-note">Instructions each scene of the CI gate runs (scripts/perf/gate.py: exact instruction counts under cachegrind, Linux arm64 (gate.md, the speed-of-light lane&#x27;s release run; x86 in gate-x86.md, from CI&#x27;s perf job on probe PR #1297); Luau scenes the median of 3 heap placements), 0.1.6 (<code>e077e952</code>) against 0.1.7 (<code>fbf1d5e2</code>): exact counts, not samples. 18 of 27 scenes run fewer.</p>
-<figure class="chart"><table><caption><span class="title">Instructions per scene</span> <span class="unit">million instructions</span> <span class="better">lower is better</span></caption><thead><tr><th scope="col">Scene</th><th scope="col">0.1.6</th><th scope="col">0.1.7</th><th scope="col">Change</th></tr></thead><tbody>
-<tr><th scope="row">script-update</th><td>1,123.7</td><td>1,033.5</td><td>&#8722;8.03%</td></tr>
-<tr><th scope="row">lab-scroll</th><td>66.1</td><td>62.9</td><td>&#8722;4.73%</td></tr>
-<tr><th scope="row">heavy-scroll</th><td>75.2</td><td>74.8</td><td>&#8722;0.48%</td></tr>
-<tr><th scope="row">micro-state</th><td>56.1</td><td>55.9</td><td>&#8722;0.34%</td></tr>
-<tr><th scope="row">micro-vscroll-fixed</th><td>45.9</td><td>45.8</td><td>&#8722;0.26%</td></tr>
-<tr><th scope="row">widgets</th><td>137.9</td><td>137.6</td><td>&#8722;0.25%</td></tr>
-<tr><th scope="row">micro-state-luau</th><td>77.1</td><td>76.9</td><td>&#8722;0.23%</td></tr>
-<tr><th scope="row">animate</th><td>276.2</td><td>275.7</td><td>&#8722;0.20%</td></tr>
-<tr><th scope="row">heavy-both</th><td>997.8</td><td>996.1</td><td>&#8722;0.17%</td></tr>
-<tr><th scope="row">lab-stream</th><td>431.2</td><td>430.5</td><td>&#8722;0.17%</td></tr>
-<tr><th scope="row">micro-vscroll-fixed-luau</th><td>60.7</td><td>60.6</td><td>&#8722;0.17%</td></tr>
-<tr><th scope="row">heavy-stream</th><td>949.7</td><td>948.2</td><td>&#8722;0.16%</td></tr>
-<tr><th scope="row">mount</th><td>297.1</td><td>296.6</td><td>&#8722;0.16%</td></tr>
-<tr><th scope="row">heavy-stream-at</th><td>965.1</td><td>963.6</td><td>&#8722;0.15%</td></tr>
-<tr><th scope="row">micro-vscroll-variable-luau</th><td>124.2</td><td>124.1</td><td>&#8722;0.09%</td></tr>
-<tr><th scope="row">micro-vscroll-variable</th><td>82.0</td><td>81.9</td><td>&#8722;0.07%</td></tr>
-<tr><th scope="row">style</th><td>1,246.7</td><td>1,246.0</td><td>&#8722;0.05%</td></tr>
-<tr><th scope="row">anime</th><td>2,948.1</td><td>2,947.8</td><td>&#8722;0.01%</td></tr>
-<tr><th scope="row">script-layout</th><td>2,817.6</td><td>2,817.8</td><td>+0.01%</td></tr>
-<tr><th scope="row">list-state</th><td>819.5</td><td>819.6</td><td>+0.01%</td></tr>
-<tr><th scope="row">app-dashboard</th><td>166.9</td><td>167.0</td><td>+0.06%</td></tr>
-<tr><th scope="row">app-code</th><td>91.8</td><td>91.8</td><td>+0.08%</td></tr>
-<tr><th scope="row">app-dashboard-sort</th><td>110.2</td><td>110.3</td><td>+0.10%</td></tr>
-<tr><th scope="row">app-mail</th><td>286.1</td><td>286.4</td><td>+0.11%</td></tr>
-<tr><th scope="row">app-code-search</th><td>80.8</td><td>80.9</td><td>+0.15%</td></tr>
-<tr><th scope="row">app-chat</th><td>46.4</td><td>46.5</td><td>+0.30%</td></tr>
-<tr><th scope="row">app-sketch</th><td>44.3</td><td>44.5</td><td>+0.40%</td></tr>
+<section id="release" aria-labelledby="release-h"><h2 id="release-h">0.1.7 &#8594; 0.1.8</h2>
+<p class="scene-note">Instructions each scene of the CI gate runs (scripts/perf/gate.py: exact instruction counts under cachegrind, Linux arm64 (gate.md, the speed-of-light lane&#x27;s release run; x86 in gate-x86.md, from CI&#x27;s perf job on probe PR #1346); Luau scenes the median of 3 heap placements), 0.1.7 (<code>b03245c4</code>) against 0.1.8 (<code>12a539a7</code>): exact counts, not samples. 29 of 32 scenes run fewer.</p>
+<figure class="chart"><table><caption><span class="title">Instructions per scene</span> <span class="unit">million instructions</span> <span class="better">lower is better</span></caption><thead><tr><th scope="col">Scene</th><th scope="col">0.1.7</th><th scope="col">0.1.8</th><th scope="col">Change</th></tr></thead><tbody>
+<tr><th scope="row">micro-state</th><td>56.0</td><td>35.6</td><td>&#8722;36.51%</td></tr>
+<tr><th scope="row">micro-state-luau</th><td>76.9</td><td>52.7</td><td>&#8722;31.49%</td></tr>
+<tr><th scope="row">lab-scroll</th><td>62.9</td><td>46.6</td><td>&#8722;25.92%</td></tr>
+<tr><th scope="row">micro-vscroll-fixed</th><td>45.8</td><td>34.1</td><td>&#8722;25.59%</td></tr>
+<tr><th scope="row">micro-vscroll-variable</th><td>81.9</td><td>63.2</td><td>&#8722;22.83%</td></tr>
+<tr><th scope="row">micro-vscroll-fixed-luau</th><td>60.6</td><td>47.9</td><td>&#8722;20.93%</td></tr>
+<tr><th scope="row">micro-vscroll-variable-luau</th><td>124.1</td><td>102.7</td><td>&#8722;17.26%</td></tr>
+<tr><th scope="row">heavy-scroll</th><td>74.9</td><td>62.4</td><td>&#8722;16.59%</td></tr>
+<tr><th scope="row">animate</th><td>275.7</td><td>264.5</td><td>&#8722;4.07%</td></tr>
+<tr><th scope="row">script-update</th><td>1,008.6</td><td>968.4</td><td>&#8722;3.98%</td></tr>
+<tr><th scope="row">app-code</th><td>91.8</td><td>88.3</td><td>&#8722;3.79%</td></tr>
+<tr><th scope="row">heavy-stream</th><td>948.5</td><td>922.5</td><td>&#8722;2.74%</td></tr>
+<tr><th scope="row">heavy-stream-at</th><td>963.9</td><td>937.9</td><td>&#8722;2.70%</td></tr>
+<tr><th scope="row">heavy-both</th><td>996.4</td><td>970.0</td><td>&#8722;2.65%</td></tr>
+<tr><th scope="row">3d-mixed</th><td>354.7</td><td>346.9</td><td>&#8722;2.18%</td></tr>
+<tr><th scope="row">app-code-search</th><td>80.9</td><td>79.5</td><td>&#8722;1.82%</td></tr>
+<tr><th scope="row">mount</th><td>296.5</td><td>292.4</td><td>&#8722;1.59%</td></tr>
+<tr><th scope="row">app-dashboard-sort</th><td>110.3</td><td>108.6</td><td>&#8722;1.58%</td></tr>
+<tr><th scope="row">app-dashboard</th><td>167.0</td><td>164.4</td><td>&#8722;1.56%</td></tr>
+<tr><th scope="row">spans-plain</th><td>48.5</td><td>48.0</td><td>&#8722;1.01%</td></tr>
+<tr><th scope="row">app-sketch</th><td>44.5</td><td>44.1</td><td>&#8722;0.86%</td></tr>
+<tr><th scope="row">app-chat</th><td>46.5</td><td>46.2</td><td>&#8722;0.78%</td></tr>
+<tr><th scope="row">spans-md</th><td>55.5</td><td>55.2</td><td>&#8722;0.51%</td></tr>
+<tr><th scope="row">app-mail</th><td>286.4</td><td>286.1</td><td>&#8722;0.12%</td></tr>
+<tr><th scope="row">script-layout</th><td>2,817.8</td><td>2,814.8</td><td>&#8722;0.11%</td></tr>
+<tr><th scope="row">3d-textured</th><td>129.7</td><td>129.6</td><td>&#8722;0.09%</td></tr>
+<tr><th scope="row">widgets</th><td>137.6</td><td>137.4</td><td>&#8722;0.09%</td></tr>
+<tr><th scope="row">list-state</th><td>819.6</td><td>819.3</td><td>&#8722;0.04%</td></tr>
+<tr><th scope="row">anime</th><td>2,947.8</td><td>2,947.5</td><td>&#8722;0.01%</td></tr>
+<tr><th scope="row">style</th><td>1,246.0</td><td>1,246.0</td><td>&#8722;0.00%</td></tr>
+<tr><th scope="row">spans-follow</th><td>49.7</td><td>49.7</td><td>+0.02%</td></tr>
+<tr><th scope="row">lab-stream</th><td>430.7</td><td>432.3</td><td>+0.37%</td></tr>
 </tbody></table></figure>
-<p class="scene-note"><strong>script-update changed:</strong> since 0.1.8 the cell leaves uncounted the rows its bench makes beforehand for every update (update_bench&#x27;s own data, 21% of the cell), which read as the engine&#x27;s work. Both releases are counted the new way: 1,123.7 M and 1,033.5 M on arm64, −8.0%, where the old way read 1,404.6 M and 1,314.1 M, −6.4% (x86: 1,168.1 M and 1,070.9 M, −8.3%, against −6.7%).</p>
-<p class="scene-note">The suite, this run against the last one published (<code>e077e95</code>, 2026-10-30), each cell&#8217;s median. The runs are in different sessions, and a session moves a whole run (see the caveats), so GPUI Fast is shown beside zgx (the rivals built again from suite sources unchanged since 0.1.6): the part of a change it shares is the session&#8217;s. Idle shows its values, which are near nothing.</p>
-<figure class="chart"><table><caption><span class="title">Change since the last run</span> <span class="unit">zgx, and GPUI Fast in brackets</span> <span class="better">lower is better</span></caption><thead><tr><th scope="col">Scene</th><th scope="col">CPU</th><th scope="col">GPU power</th><th scope="col">Memory</th><th scope="col">WindowServer CPU</th></tr></thead><tbody>
-<tr><th scope="row">Heavy dashboard, idle</th><td>0.00 &#8594; 0.00 <span class="range">(0.39 &#8594; 0.36)</span></td><td>&#8211;</td><td>53 &#8594; 53 <span class="range">(74 &#8594; 75)</span></td><td>0.21 &#8594; 0.53 <span class="range">(0.38 &#8594; 0.53)</span></td></tr>
-<tr><th scope="row">Heavy dashboard, streaming</th><td>&#8722;10.4% <span class="range">(&#8722;10.7%)</span></td><td>+0.3% <span class="range">(+8.7%)</span></td><td>&#177;0.0% <span class="range">(+5.6%)</span></td><td>&#8722;8.3% <span class="range">(&#8722;3.1%)</span></td></tr>
-<tr><th scope="row">Heavy dashboard, scrolling</th><td>&#8722;3.6% <span class="range">(&#8722;7.5%)</span></td><td>+3.6% <span class="range">(+2.1%)</span></td><td>+0.2% <span class="range">(+4.6%)</span></td><td>&#8722;3.2% <span class="range">(&#8722;6.1%)</span></td></tr>
-<tr><th scope="row">Heavy dashboard, both</th><td>&#8722;7.2% <span class="range">(&#8722;6.3%)</span></td><td>+1.6% <span class="range">(+10.1%)</span></td><td>&#8722;0.3% <span class="range">(+2.5%)</span></td><td>&#8722;9.2% <span class="range">(&#8722;4.0%)</span></td></tr>
-<tr><th scope="row">Text and a 100,000-row list, streaming</th><td>&#8722;2.9% <span class="range">(&#8722;2.3%)</span></td><td>&#8722;0.2% <span class="range">(+0.5%)</span></td><td>+0.1% <span class="range">(&#8722;0.2%)</span></td><td>&#8722;1.8% <span class="range">(&#8722;2.5%)</span></td></tr>
-<tr><th scope="row">Text and a 100,000-row list, scrolling</th><td>&#8722;3.2% <span class="range">(&#8722;3.0%)</span></td><td>+1.1% <span class="range">(+0.7%)</span></td><td>&#177;0.0% <span class="range">(+0.3%)</span></td><td>&#8722;2.4% <span class="range">(&#8722;1.2%)</span></td></tr>
-<tr><th scope="row">Text and a 100,000-row list, both</th><td>&#8722;2.8% <span class="range">(+3.8%)</span></td><td>&#8722;0.4% <span class="range">(+0.2%)</span></td><td>&#8722;0.2% <span class="range">(&#8722;0.1%)</span></td><td>&#8722;3.4% <span class="range">(&#8722;1.6%)</span></td></tr>
-<tr><th scope="row">Animation, animating</th><td>&#8722;7.4% <span class="range">(&#8722;9.2%)</span></td><td>+3.4% <span class="range">(&#8722;0.5%)</span></td><td>&#8722;0.4% <span class="range">(&#177;0.0%)</span></td><td>&#8722;2.3% <span class="range">(+3.3%)</span></td></tr>
-<tr><th scope="row">Variable-height list, scrolling</th><td>&#8722;5.0% <span class="range">(&#8722;6.1%)</span></td><td>&#8722;2.4% <span class="range">(&#8722;1.9%)</span></td><td>&#8722;0.1% <span class="range">(&#8722;0.1%)</span></td><td>&#8722;1.7% <span class="range">(&#8722;1.1%)</span></td></tr>
-<tr><th scope="row">Variable-height list, scrolling (Luau)</th><td>&#8722;9.4% <span class="range">(&#8722;6.1%)</span></td><td>&#8722;2.2% <span class="range">(&#8722;1.9%)</span></td><td>&#177;0.0% <span class="range">(&#8722;0.1%)</span></td><td>&#8722;2.2% <span class="range">(&#8722;1.1%)</span></td></tr>
-<tr><th scope="row">Variable-height list, flinging</th><td>&#8722;0.4% <span class="range">(&#8722;6.9%)</span></td><td>&#8722;2.0% <span class="range">(&#8722;0.6%)</span></td><td>&#8722;0.2% <span class="range">(+0.8%)</span></td><td>&#8722;4.1% <span class="range">(&#8722;0.9%)</span></td></tr>
-<tr><th scope="row">Variable-height list, flinging (Luau)</th><td>&#8722;4.4% <span class="range">(&#8722;6.9%)</span></td><td>&#8722;0.3% <span class="range">(&#8722;0.6%)</span></td><td>+0.1% <span class="range">(+0.8%)</span></td><td>&#8722;2.0% <span class="range">(&#8722;0.9%)</span></td></tr>
-<tr><th scope="row">Variable-height list, jumping</th><td>&#8722;1.5% <span class="range">(&#8722;0.8%)</span></td><td>&#8722;3.0% <span class="range">(&#8722;1.1%)</span></td><td>&#177;0.0% <span class="range">(+1.5%)</span></td><td>&#8722;1.4% <span class="range">(&#8722;5.1%)</span></td></tr>
-<tr><th scope="row">Variable-height list, jumping (Luau)</th><td>&#8722;5.1% <span class="range">(&#8722;0.8%)</span></td><td>&#8722;1.6% <span class="range">(&#8722;1.1%)</span></td><td>+0.2% <span class="range">(+1.5%)</span></td><td>&#8722;2.7% <span class="range">(&#8722;5.1%)</span></td></tr>
-</tbody></table></figure></section>
+<p class="scene-note"><strong>script-update changed:</strong> since 0.1.8 the cell leaves uncounted its bench&#x27;s own data (#1321) and counts without glibc&#x27;s fastbins (#1333). Both releases are counted that way, with v0.1.8&#x27;s bench on v0.1.7: 1,008.6 M and 968.4 M on arm64, −3.98% (x86: 1,041.8 M and 1,000.4 M, −4.02%). Against v0.1.7&#x27;s own bench the gate read −27.4%, which was the change of definition.</p>
+<p class="scene-note">The suite on this page is 0.1.7&#8217;s (<code>afa2960</code>), not run again for 0.1.8: only the instruction counts above are new.</p></section>
 <section id="startup" aria-labelledby="startup-h"><h2 id="startup-h">Startup</h2><p class="scene-note">From launch to the window&#8217;s first content, 10 launches of each in alternating order: the probe starts the app, waits for its window, then captures the top of its content until the first text has drawn, and reads the process&#8217;s CPU time and instructions retired at that moment. Both apps build the same menu bar at launch (Services, Hide, Quit, and the Window menu), so they start the same work. Launches are warm: each finds the caches the launches before it wrote (zgx&#8217;s system-font cache among them), as an app&#8217;s second launch onward does; a first launch&#8217;s one-time cache misses are not measured. Measured separately from the suite, on the same Mac, at <code>03a9d89</code>.</p><div class="charts"><figure class="chart"><table><caption><span class="title">Launch to first content</span> <span class="unit">ms</span> <span class="better">lower is better</span></caption>
 <colgroup><col class="c-fw"><col></colgroup><thead><tr><th scope="col">Framework</th><th scope="col">Median <span class="range-head">(range)</span></th></tr></thead><tbody>
 <tr class="fw-zgx"><th scope="row">zgx</th><td><span class="track" aria-hidden="true"><span class="bar" style="width:90.0%"></span></span><span class="value">163</span> <span class="range">(144–437)</span></td></tr>
