@@ -86,6 +86,10 @@ pub(crate) struct Touches {
     /// A touchpad scroll's recent steps (`wheel`), for its speed at lift.
     #[cfg(target_os = "linux")]
     wheel_trail: Vec<(Instant, (f32, f32))>,
+    /// A touchpad scroll's whole motion so far, its fingers' and its
+    /// coast's: it comes to rest on a whole device pixel (`settle`).
+    #[cfg(target_os = "linux")]
+    wheel_sum: Option<(f32, f32)>,
     fling: Option<Fling>,
     /// The press has been held long enough, and the host told (`hold`).
     held: bool,
@@ -100,6 +104,8 @@ impl Default for Touches {
             trail: Vec::new(),
             #[cfg(target_os = "linux")]
             wheel_trail: Vec::new(),
+            #[cfg(target_os = "linux")]
+            wheel_sum: None,
             fling: None,
             held: false,
         }
@@ -380,7 +386,11 @@ impl Touches {
     }
 
     /// The fling's scroll since its last step, at `now`: where, and how far.
-    pub(crate) fn coast(&mut self, now: Instant) -> Option<(f32, f32, f32, f32)> {
+    /// A touchpad scroll's last step comes to rest on a whole device pixel
+    /// (`unit` points long): content rests crisp, as the wheel's does.
+    pub(crate) fn coast(&mut self, now: Instant, unit: f32) -> Option<(f32, f32, f32, f32)> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = unit;
         let fling = self.fling.as_mut()?;
         let t = now.duration_since(fling.began).as_secs_f32();
         // Distance travelled is the speed's integral: speed · COAST · (1 - e^(-t/COAST)).
@@ -389,17 +399,42 @@ impl Touches {
         fling.elapsed = t;
         let speed = (-t / COAST).exp() * fling.speed.0.hypot(fling.speed.1);
         let (x, y) = fling.at;
-        let delta = (fling.speed.0 * step, fling.speed.1 * step);
+        #[allow(unused_mut)]
+        let mut delta = (fling.speed.0 * step, fling.speed.1 * step);
+        #[cfg(target_os = "linux")]
+        if let Some(sum) = &mut self.wheel_sum {
+            *sum = (sum.0 + delta.0, sum.1 + delta.1);
+        }
         if speed < STILL {
             self.fling = None;
+            #[cfg(target_os = "linux")]
+            if let Some(rest) = self.settle(unit) {
+                delta = (delta.0 + rest.0, delta.1 + rest.1);
+            }
         }
         Some((x, y, delta.0, delta.1))
+    }
+
+    /// What brings a touchpad scroll's whole motion to a whole number of
+    /// device pixels (`unit` points each), at most half of one either way:
+    /// its view, crisp before it, rests crisp after. Once a scroll.
+    #[cfg(target_os = "linux")]
+    fn settle(&mut self, unit: f32) -> Option<(f32, f32)> {
+        let (x, y) = self.wheel_sum.take()?;
+        if !(unit > 0. && unit.is_finite()) {
+            return None;
+        }
+        let whole = |v: f32| (v / unit).round() * unit - v;
+        let rest = (whole(x), whole(y));
+        (rest.0.abs() > 1e-4 || rest.1.abs() > 1e-4).then_some(rest)
     }
 
     /// A touchpad's two-finger scroll of `delta` at `at` (Linux, where
     /// Wayland reports the fingers lifting: libinput's axis stop, `Ended`).
     /// The fingers lifting at speed fling it, as GTK coasts it; fingers
     /// back on the touchpad stop the fling, as does a click (`stop`).
+    /// Lifted without a fling, the scroll's last step to rest on a whole
+    /// device pixel (`unit` points), for the host to send.
     #[cfg(target_os = "linux")]
     pub(crate) fn wheel(
         &mut self,
@@ -407,10 +442,15 @@ impl Touches {
         at: (f32, f32),
         delta: (f32, f32),
         now: Instant,
-    ) {
+        unit: f32,
+    ) -> Option<(f32, f32)> {
         if phase == TouchPhase::Started {
             self.fling = None;
             self.wheel_trail.clear();
+            self.wheel_sum = Some((0., 0.));
+        }
+        if let Some(sum) = &mut self.wheel_sum {
+            *sum = (sum.0 + delta.0, sum.1 + delta.1);
         }
         self.wheel_trail
             .retain(|(t, _)| now.duration_since(*t) <= SPEED_WINDOW);
@@ -428,15 +468,28 @@ impl Touches {
                     });
                 }
                 self.wheel_trail.clear();
+                // A fling settles as it stops (`coast`).
+                if self.fling.is_none() {
+                    return self.settle(unit);
+                }
             }
-            TouchPhase::Cancelled => self.wheel_trail.clear(),
+            TouchPhase::Cancelled => {
+                self.wheel_trail.clear();
+                self.wheel_sum = None;
+            }
             _ => {}
         }
+        None
     }
 
-    /// The fling hit the end of what it scrolls: it stops.
+    /// The fling hit the end of what it scrolls, or a click stopped it: it
+    /// stops where it is.
     pub(crate) fn stop(&mut self) {
         self.fling = None;
+        #[cfg(target_os = "linux")]
+        {
+            self.wheel_sum = None;
+        }
     }
 }
 
@@ -493,12 +546,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn swipe(touches: &mut Touches, t: Instant, step: f32, n: u64) -> Instant {
         let at = |i: u64| t + Duration::from_micros(8333 * i);
-        touches.wheel(Started, (50., 50.), (0., step), at(0));
+        touches.wheel(Started, (50., 50.), (0., step), at(0), 1.);
         for i in 1..n {
-            touches.wheel(Moved, (50., 50.), (0., step), at(i));
+            touches.wheel(Moved, (50., 50.), (0., step), at(i), 1.);
         }
         // libinput's axis stop: the fingers lift, nothing more scrolled.
-        touches.wheel(Ended, (50., 50.), (0., 0.), at(n));
+        touches.wheel(Ended, (50., 50.), (0., 0.), at(n), 1.);
         at(n)
     }
 
@@ -508,22 +561,85 @@ mod tests {
         let mut touches = Touches::default();
         let lifted = swipe(&mut touches, Instant::now(), 20., 12);
         assert!(touches.flinging(), "20 points a frame at 120 Hz is a flick");
-        let (_, _, dx, dy) = touches.coast(lifted + Duration::from_millis(16)).unwrap();
+        let (_, _, dx, dy) = touches
+            .coast(lifted + Duration::from_millis(16), 1.)
+            .unwrap();
         assert_eq!(dx, 0.);
         assert!(dy > 20., "on in the scroll's direction, at its speed: {dy}");
         // It slows, and stops.
-        let (_, _, _, later) = touches.coast(lifted + Duration::from_millis(400)).unwrap();
+        let (_, _, _, later) = touches
+            .coast(lifted + Duration::from_millis(400), 1.)
+            .unwrap();
         assert!(later > 0.);
         let mut at = lifted + Duration::from_millis(400);
         while touches.flinging() {
             at += Duration::from_millis(16);
-            touches.coast(at);
+            touches.coast(at, 1.);
             assert!(at < lifted + Duration::from_secs(5), "never stopped");
         }
 
         let mut touches = Touches::default();
         swipe(&mut touches, Instant::now(), 0.2, 12);
         assert!(!touches.flinging(), "24 points a second only scrolls");
+    }
+
+    /// A touchpad scroll comes to rest on a whole device pixel, coasting or
+    /// not: its fingers' and its coast's motion together sum to whole device
+    /// pixels (at 1x, and at 1.5x, where one is 2/3 of a point), the last
+    /// step putting it there by under half of one. Moving, fractions stay.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_touchpad_scroll_rests_on_a_whole_device_pixel() {
+        for unit in [1., 2. / 3.] {
+            // Coasting: 3.3 points a frame, then on after the lift.
+            let mut touches = Touches::default();
+            let t = Instant::now();
+            let at = |i: u64| t + Duration::from_micros(8333 * i);
+            let mut total = 0.;
+            for i in 0..8 {
+                let phase = if i == 0 { Started } else { Moved };
+                touches.wheel(phase, (50., 50.), (0., 3.3), at(i), unit);
+                total += 3.3;
+            }
+            assert_eq!(
+                touches.wheel(Ended, (50., 50.), (0., 0.), at(8), unit),
+                None
+            );
+            assert!(touches.flinging());
+            let (mut now, mut fraction_seen) = (at(8), false);
+            while touches.flinging() {
+                now += Duration::from_millis(16);
+                let step = touches.coast(now, unit).unwrap().3;
+                total += step;
+                fraction_seen |= (total / unit).fract().abs() > 1e-3;
+            }
+            assert!(fraction_seen, "fractions while it moves");
+            let off = (total / unit).round() * unit - total;
+            assert!(
+                off.abs() < 1e-3,
+                "coasted to rest at {total} ({unit} a pixel)"
+            );
+
+            // Lifted slowly, no coast: the lift's step settles it.
+            let mut touches = Touches::default();
+            let mut total = 0.;
+            for i in 0..8 {
+                let phase = if i == 0 { Started } else { Moved };
+                touches.wheel(phase, (50., 50.), (0., 0.137), at(i * 10), unit);
+                total += 0.137;
+            }
+            let rest = touches
+                .wheel(Ended, (50., 50.), (0., 0.), at(81), unit)
+                .expect("a step to rest");
+            assert!(!touches.flinging());
+            assert!(
+                rest.1.abs() <= unit / 2. + 1e-4,
+                "under half a pixel: {rest:?}"
+            );
+            total += rest.1;
+            let off = (total / unit).round() * unit - total;
+            assert!(off.abs() < 1e-3, "rests at {total} ({unit} a pixel)");
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -537,6 +653,7 @@ mod tests {
             (50., 50.),
             (0., 1.),
             lifted + Duration::from_millis(100),
+            1.,
         );
         assert!(!touches.flinging());
     }
@@ -686,13 +803,13 @@ mod tests {
         touches.touch(1, Ended, (100., 180.), false, t + Duration::from_millis(60));
         assert!(touches.flinging());
         let lift = t + Duration::from_millis(60);
-        let (_, _, _, first) = touches.coast(lift + Duration::from_millis(16)).unwrap();
+        let (_, _, _, first) = touches.coast(lift + Duration::from_millis(16), 1.).unwrap();
         assert!(first > 0., "it scrolls on the way the finger went: {first}");
         let mut total = first;
         let mut at = lift + Duration::from_millis(16);
         while touches.flinging() {
             at += Duration::from_millis(16);
-            total += touches.coast(at).unwrap().3;
+            total += touches.coast(at, 1.).unwrap().3;
             assert!(at < lift + Duration::from_secs(5), "it stops");
         }
         // 2000 px/s coasting 0.325 s: about 650 px, less what is cut short.

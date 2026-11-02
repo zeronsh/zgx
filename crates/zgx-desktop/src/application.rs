@@ -4515,10 +4515,21 @@ impl Host {
                 // A touchpad's scroll coasts on after the fingers lift
                 // (Wayland says when: libinput's axis stop).
                 #[cfg(target_os = "linux")]
-                if matches!(delta, MouseScrollDelta::PixelDelta(_)) {
-                    self.touch
-                        .wheel(phase, self.cursor, (dx, dy), std::time::Instant::now());
-                }
+                let settle = if matches!(delta, MouseScrollDelta::PixelDelta(_)) {
+                    self.touch.wheel(
+                        phase,
+                        self.cursor,
+                        (dx, dy),
+                        std::time::Instant::now(),
+                        self.device_pixel(),
+                    )
+                } else {
+                    None
+                };
+                // Lifted without a fling: the scroll's last step rests its view
+                // on a whole device pixel, as the wheel's ease does.
+                #[cfg(target_os = "linux")]
+                let (dx, dy) = settle.map_or((dx, dy), |(x, y)| (dx + x, dy + y));
                 // Control with the wheel zooms the window, a level a notch, as
                 // browsers on Windows and Linux do, unless what is under the
                 // pointer takes it (scroll views leave it). On macOS neither
@@ -4782,6 +4793,11 @@ impl Host {
         if !self.native_drag.active() || cfg!(target_os = "linux") {
             self.popups.follow(window, &drag);
         }
+    }
+    /// A device pixel, in the window's points: where scrolled content
+    /// rests crisp (`Touches::coast`, `Touches::wheel`).
+    fn device_pixel(&self) -> f32 {
+        1. / (self.scale_factor as f32 * self.context.ui.zoom() as f32)
     }
     /// Its drag left the app's windows: carrying what other apps take
     /// (`View::drag_export`), it becomes the platform's.
@@ -5322,7 +5338,9 @@ impl Host {
         // it scrolls.
         if self.touch.flinging()
             && (self.frame_arrived || !self.frames_presented())
-            && let Some((x, y, delta_x, delta_y)) = self.touch.coast(std::time::Instant::now())
+            && let Some((x, y, delta_x, delta_y)) = self
+                .touch
+                .coast(std::time::Instant::now(), self.device_pixel())
             && !self.dispatch_prevented(InputEvent::Scroll {
                 x,
                 y,

@@ -362,8 +362,11 @@ def main():
                 # Two fingers up, then left: the view moves down and right.
                 # (One axis a swipe: sway asserts on a frame scrolling both
                 # from a virtual pointer, the second axis left sourceless.)
-                pointer.swipe(dy=-3., frames=4)
-                pointer.swipe(dx=-3., frames=4)
+                # The fingers rest before lifting: no coast, so the pan
+                # stops where the fingers did (12 points each way), whatever
+                # the runner's timing.
+                pointer.swipe(dy=-3., frames=4, rest=.25)
+                pointer.swipe(dx=-3., frames=4, rest=.25)
                 park()
 
             def sway_click(x, y):
