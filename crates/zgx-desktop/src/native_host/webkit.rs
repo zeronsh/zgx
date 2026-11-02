@@ -19,7 +19,7 @@ use objc2_foundation::{
     NSURL, NSURLRequest, NSUUID,
 };
 use objc2_web_kit::{
-    WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
+    WKFrameInfo, WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
     WKNavigationType, WKScriptMessage, WKScriptMessageHandler, WKUIDelegate, WKURLSchemeHandler,
     WKURLSchemeTask, WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebView,
     WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
@@ -50,6 +50,76 @@ const OBSERVED: [&str; 6] = [
     "canGoBack",
     "canGoForward",
 ];
+/// A page's script dialog (`alert`, `confirm`, `prompt` with its default).
+enum Dialog {
+    Alert,
+    Confirm,
+    Prompt(String),
+}
+/// A page's script dialog as an alert sheet on its window, the message its
+/// text and the page's origin under it (as Safari says which page asks):
+/// `answer` gets `Some` for OK (a prompt's field, else empty), `None` for
+/// Cancel, or at once if the page is in no window. WebKit waits for it,
+/// the page's script paused, as a browser's dialog pauses it.
+fn page_dialog(
+    view: &WKWebView,
+    frame: &WKFrameInfo,
+    message: &NSString,
+    dialog: Dialog,
+    answer: impl FnOnce(Option<String>) + 'static,
+) {
+    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSModalResponse, NSTextField};
+    let mtm = MainThreadMarker::from(view);
+    let Some(window) = view.window() else {
+        // No window to show it on: an alert is dismissed, the rest cancelled.
+        return answer(matches!(dialog, Dialog::Alert).then(String::new));
+    };
+    // SAFETY: getters of the frame WebKit passes for this call.
+    let origin = unsafe {
+        let origin = frame.securityOrigin();
+        let (scheme, host) = (origin.protocol().to_string(), origin.host().to_string());
+        if host.is_empty() {
+            String::new()
+        } else {
+            format!("{scheme}://{host}")
+        }
+    };
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(message);
+    alert.setInformativeText(&NSString::from_str(&origin));
+    alert.addButtonWithTitle(&NSString::from_str("OK"));
+    if !matches!(dialog, Dialog::Alert) {
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    }
+    let field = match &dialog {
+        Dialog::Prompt(default) => {
+            let field = NSTextField::initWithFrame(
+                NSTextField::alloc(mtm),
+                NSRect::new(
+                    objc2_foundation::NSPoint::new(0., 0.),
+                    objc2_foundation::NSSize::new(260., 24.),
+                ),
+            );
+            field.setStringValue(&NSString::from_str(default));
+            alert.setAccessoryView(Some(&field));
+            alert.window().setInitialFirstResponder(Some(&field));
+            Some(field)
+        }
+        _ => None,
+    };
+    let answer = Cell::new(Some(answer));
+    let done = block2::RcBlock::new(move |response: NSModalResponse| {
+        let Some(answer) = answer.take() else { return };
+        let ok = response == NSAlertFirstButtonReturn;
+        answer(ok.then(|| {
+            field
+                .as_ref()
+                .map(|field| field.stringValue().to_string())
+                .unwrap_or_default()
+        }));
+    });
+    alert.beginSheetModalForWindow_completionHandler(&window, Some(&done));
+}
 /// The pages back and forward from the current one, nearest first.
 fn history(
     view: &WKWebView,
@@ -233,6 +303,30 @@ define_class!(
                 self.post(move |web| web.emit(WebViewEvent::NewWindowRequested { url }));
             }
             None
+        }
+        /// `alert(message)`: an alert sheet with OK.
+        #[unsafe(method(webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:))]
+        fn alert(&self, view: &WKWebView, message: &NSString, frame: &WKFrameInfo, completion: &block2::DynBlock<dyn Fn()>) {
+            let completion = completion.copy();
+            page_dialog(view, frame, message, Dialog::Alert, move |_| completion.call(()));
+        }
+        /// `confirm(message)`: OK (true) or Cancel (false).
+        #[unsafe(method(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:))]
+        fn confirm(&self, view: &WKWebView, message: &NSString, frame: &WKFrameInfo, completion: &block2::DynBlock<dyn Fn(objc2::runtime::Bool)>) {
+            let completion = completion.copy();
+            page_dialog(view, frame, message, Dialog::Confirm, move |answer| {
+                completion.call((objc2::runtime::Bool::new(answer.is_some()),))
+            });
+        }
+        /// `prompt(message, default)`: the field's text for OK, null for Cancel.
+        #[unsafe(method(webView:runJavaScriptTextInputPanelWithPrompt:defaultText:initiatedByFrame:completionHandler:))]
+        fn prompt(&self, view: &WKWebView, message: &NSString, default: Option<&NSString>, frame: &WKFrameInfo, completion: &block2::DynBlock<dyn Fn(*mut NSString)>) {
+            let completion = completion.copy();
+            let default = default.map(|text| text.to_string()).unwrap_or_default();
+            page_dialog(view, frame, message, Dialog::Prompt(default), move |answer| {
+                let text = answer.map(|text| NSString::from_str(&text));
+                completion.call((text.as_ref().map_or(std::ptr::null_mut(), |text| Retained::as_ptr(text).cast_mut()),))
+            });
         }
     }
     unsafe impl WKScriptMessageHandler for Observer {

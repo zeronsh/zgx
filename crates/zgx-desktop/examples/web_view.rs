@@ -52,6 +52,47 @@ const PAGE: &str = r#"<!doctype html>
   </div>
 </main></body></html>"#;
 
+/// A window's sheet, and the window, if one is attached (a page's dialog).
+#[cfg(target_os = "macos")]
+fn attached_sheet() -> Option<(
+    objc2::rc::Retained<objc2_app_kit::NSWindow>,
+    objc2::rc::Retained<objc2_app_kit::NSWindow>,
+)> {
+    let mtm = objc2::MainThreadMarker::new()?;
+    objc2_app_kit::NSApplication::sharedApplication(mtm)
+        .windows()
+        .iter()
+        .find_map(|window| Some((window.clone(), window.attachedSheet()?)))
+}
+/// End `sheet` with `button` (1000 the first, 1001 the second), typing
+/// `typed` into its text field first: what its field held before, if it
+/// has one.
+#[cfg(target_os = "macos")]
+fn answer_sheet(
+    parent: &objc2_app_kit::NSWindow,
+    sheet: &objc2_app_kit::NSWindow,
+    button: isize,
+    typed: Option<&str>,
+) -> Option<String> {
+    fn field(
+        view: &objc2_app_kit::NSView,
+    ) -> Option<objc2::rc::Retained<objc2_app_kit::NSTextField>> {
+        if let Some(field) = view.downcast_ref::<objc2_app_kit::NSTextField>()
+            && field.isEditable()
+        {
+            return Some(objc2::Message::retain(field));
+        }
+        view.subviews().iter().find_map(|child| field(&child))
+    }
+    let found = sheet.contentView().and_then(|view| field(&view));
+    let held = found.as_ref().map(|field| field.stringValue().to_string());
+    if let (Some(field), Some(typed)) = (&found, typed) {
+        field.setStringValue(&objc2_foundation::NSString::from_str(typed));
+    }
+    parent.endSheet_returnCode(sheet, button);
+    held
+}
+
 fn icon_button(label: &str) -> View {
     button()
         .h(30.)
@@ -394,6 +435,55 @@ fn run_fixture(
                 "page CSS width is its box's",
                 css.is_some_and(|css| (css - bounds("page").width).abs() <= 1.),
                 format!("{css:?} vs {}", bounds("page").width),
+            );
+            // Script dialogs: sheets on the window, answered here as a
+            // person would (OK, OK, Cancel, then a name typed and OK).
+            web.run_js(
+                "window.dialogs = []; dialogs.push(alert('Hello from the page') === undefined); \
+                 dialogs.push(confirm('Sure?')); dialogs.push(confirm('Again?')); \
+                 dialogs.push(prompt('Name?', 'default'));",
+            );
+            let mut shown = Vec::new();
+            for (button, typed) in [
+                (1000, None),
+                (1000, None),
+                (1001, None),
+                (1000, Some("zgx")),
+            ] {
+                let mut sheet = None;
+                for _ in 0..60 {
+                    sleep(50).await;
+                    sheet = attached_sheet();
+                    if sheet.is_some() {
+                        break;
+                    }
+                }
+                let Some((parent, sheet)) = sheet else {
+                    break;
+                };
+                shown.push(answer_sheet(&parent, &sheet, button, typed));
+                sleep(100).await;
+            }
+            let dialogs = Rc::new(RefCell::new(None));
+            {
+                let dialogs = dialogs.clone();
+                web.evaluate_js("JSON.stringify(window.dialogs)", move |value| {
+                    *dialogs.borrow_mut() = Some(value)
+                });
+            }
+            for _ in 0..40 {
+                if dialogs.borrow().is_some() {
+                    break;
+                }
+                sleep(25).await;
+            }
+            let dialogs = dialogs.borrow().clone();
+            check(
+                "alert, confirm and prompt are sheets with their answers",
+                shown.len() == 4
+                    && shown[3] == Some("default".into())
+                    && dialogs == Some(Ok("\"[true,true,false,\\\"zgx\\\"]\"".into())),
+                format!("prompt fields {shown:?}, page heard {dialogs:?}"),
             );
             web.run_js("window.zgx.postMessage({hello: 1})");
             sleep(200).await;
