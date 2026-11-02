@@ -227,3 +227,44 @@ return ui.column {
     assert_eq!(h.text("heard").matches("load").count(), 1, "{heard}");
     assert!(h.0.host.warnings().is_empty(), "{:?}", h.0.host.warnings());
 }
+
+/// An 8×8 GIF of two frames (Zeron's `blink.gif`).
+const GIF: &[u8] = &[
+    71, 73, 70, 56, 57, 97, 8, 0, 8, 0, 129, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33, 255, 11,
+    78, 69, 84, 83, 67, 65, 80, 69, 50, 46, 48, 3, 1, 0, 0, 0, 33, 249, 4, 0, 20, 0, 0, 0, 44, 0,
+    0, 0, 0, 8, 0, 8, 0, 0, 8, 15, 0, 1, 8, 28, 72, 176, 160, 193, 131, 8, 19, 42, 76, 24, 16, 0,
+    33, 249, 4, 1, 20, 0, 1, 0, 44, 0, 0, 0, 0, 8, 0, 8, 0, 129, 255, 255, 255, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 8, 15, 0, 1, 8, 28, 72, 176, 160, 193, 131, 8, 19, 42, 76, 24, 16, 0, 59,
+];
+
+/// A GIF in `ui.image` (zgx-gpu's `gif` feature, on by default) shows: its
+/// first frame, sized as it is, no error.
+#[test]
+fn a_gif_shows() {
+    let dir = std::env::temp_dir().join(format!("zgx-image-gif-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("blink.gif"), GIF).unwrap();
+    let app = dir.join("app.luau");
+    std::fs::write(
+        &app,
+        r#"local w, h = ui.image_size("blink.gif")
+return ui.column {
+	ui.image { src = "blink.gif", id = "gif", on_error = function(why: string) print(why) end },
+	ui.text { `{w}x{h}`, id = "size" },
+}
+"#,
+    )
+    .unwrap();
+    let mut h = Harness::new(|runtime| zgx_script::ScriptHost::new(runtime, app));
+    h.frame();
+    assert_eq!(h.error(), None);
+    assert!(h.0.host.warnings().is_empty(), "{:?}", h.0.host.warnings());
+    assert_eq!(h.text("size"), "8x8");
+    let node = h.find("gif").unwrap();
+    let bounds = h.ui.scene.borrow().bounds(node);
+    assert_eq!(
+        (bounds.width, bounds.height),
+        (8., 8.),
+        "as large as its pixels"
+    );
+}

@@ -14,7 +14,7 @@ ui.shader(source: string, opts: { fps: number? }?) -> Shader
 
 ## image
 
-A PNG or JPEG, decoded once per `src` and kept while a node shows it. Of those no node shows, the most recently shown are kept within the host's budget (`ScriptHost::image_cache`, 48 MiB by default), so a reload or a page shown again decodes nothing.
+A PNG, JPEG or GIF (with zgx-gpu's `gif` feature, on by default: its first frame, still), decoded once per `src` and kept while a node shows it. Of those no node shows, the most recently shown are kept within the host's budget (`ScriptHost::image_cache`, 48 MiB by default), so a reload or a page shown again decodes nothing.
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |
