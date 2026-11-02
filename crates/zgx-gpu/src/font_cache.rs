@@ -218,19 +218,39 @@ type Stamps = Vec<(PathBuf, (u64, u64))>;
 /// Then the cache is marked in use, and other formats' caches long unused
 /// are removed.
 fn check_later(cache: PathBuf, files: Stamps) {
-    let _ = std::thread::Builder::new()
-        .name("zgx font cache check".into())
-        .spawn(move || {
-            std::thread::sleep(Duration::from_secs(2));
-            if stale(&files) {
-                let _ = std::fs::remove_file(&cache);
-            } else {
-                keep_fresh(&cache, SystemTime::now());
-            }
-            if let Some(dir) = cache.parent() {
-                prune(dir, SystemTime::now());
-            }
-        });
+    // No thread of its own: a process that ever had a second thread locks
+    // its allocator on every allocation (glibc), and the check waits for the
+    // app to have started (`check_pending`) instead.
+    if let Ok(mut pending) = PENDING.lock() {
+        *pending = Some((cache, files));
+    }
+}
+
+/// The cache read at launch and its files' stamps, until `check_pending`.
+static PENDING: std::sync::Mutex<Option<(PathBuf, Stamps)>> = std::sync::Mutex::new(None);
+
+/// Checks the cache read at launch, once, as the app has started: on a
+/// renderer's first trim (its host gone idle, no wake of its own) or after
+/// its first frames (`LAUNCH_FRAMES`) for an app that never goes idle.
+pub(crate) fn check_pending() {
+    let Some((cache, files)) = PENDING.lock().ok().and_then(|mut pending| pending.take()) else {
+        return;
+    };
+    check(&cache, &files);
+}
+
+/// Whether a font file changed in place since `cache` was written: if one
+/// did, it goes (the next launch loads the fonts again), else it is marked
+/// in use; then other formats' caches long unused are removed.
+fn check(cache: &Path, files: &[(PathBuf, (u64, u64))]) {
+    if stale(files) {
+        let _ = std::fs::remove_file(cache);
+    } else {
+        keep_fresh(cache, SystemTime::now());
+    }
+    if let Some(dir) = cache.parent() {
+        prune(dir, SystemTime::now());
+    }
 }
 
 /// Marks a cache read as in use, at most once a day: reading it changes
@@ -836,6 +856,31 @@ mod tests {
             assert_eq!(dir.join(name).exists(), kept, "{name}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The check the app runs once started: a cache whose font file changed
+    /// in place goes, one whose fonts are as stamped stays; and taking the
+    /// pending check leaves none to run again.
+    #[test]
+    fn a_started_app_checks_its_cache_once() {
+        let dir = std::env::temp_dir().join(format!("zgx-font-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let font = dir.join("face.ttf");
+        std::fs::write(&font, b"glyphs").unwrap();
+        let cache = dir.join(FILE);
+        std::fs::write(&cache, b"cache").unwrap();
+        let as_written = vec![(font.clone(), stamp(&font))];
+        check(&cache, &as_written);
+        assert!(cache.exists(), "fonts as stamped keep the cache");
+        std::fs::write(&font, b"other glyphs").unwrap();
+        check(&cache, &as_written);
+        assert!(!cache.exists(), "a font changed in place drops it");
+        let _ = std::fs::remove_dir_all(&dir);
+        // Taken, a pending check runs once.
+        *PENDING.lock().unwrap() = None;
+        check_pending();
+        assert!(PENDING.lock().unwrap().is_none());
     }
 
     /// A cache in use is marked so once a day, not at every launch.
