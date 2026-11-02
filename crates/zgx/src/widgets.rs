@@ -211,6 +211,10 @@ impl EditorValue {
 fn follow(editor: &mut TextEditor, text: &Text, current: &TextValue) -> bool {
     let edits = editor.taken().and_then(|id| text.edits_since(id));
     let Some(edits) = edits else {
+        // Changed from outside: from now on its edits are kept, and the
+        // next ones come as they are. (Typing alone never comes here: an
+        // editor's own text keeps no edits until something follows it.)
+        text.keep_edits();
         return editor.set_value(current);
     };
     let edits: smallvec::SmallVec<[_; 2]> = edits.collect();

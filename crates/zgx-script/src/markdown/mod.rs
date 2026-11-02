@@ -133,6 +133,8 @@ impl Incremental {
                 other => self.set_text(&other.to_string()),
             };
         };
+        // Followed by its edits from here on.
+        text.keep_edits();
         if self.taken != 0
             && let Some(inserts) = text.inserts_since(self.taken)
         {

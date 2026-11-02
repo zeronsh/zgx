@@ -77,6 +77,27 @@ pub(crate) struct TextDelta {
 struct EditLog {
     edits: VecDeque<TextDelta>,
     bytes: usize,
+    /// Whether a reader follows the text by its edits (`Text::keep_edits`):
+    /// until one does, an edit keeps none, and costs only its id.
+    followed: Followed,
+}
+/// `EditLog::followed`: set through a shared text (a reader holds the
+/// text it took, not the producer's), and carried to the text an edit
+/// makes of it.
+#[derive(Debug, Default)]
+struct Followed(std::sync::atomic::AtomicBool);
+impl Clone for Followed {
+    fn clone(&self) -> Self {
+        Self(self.0.load(Ordering::Relaxed).into())
+    }
+}
+impl Followed {
+    fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+    fn set(&self, followed: bool) {
+        self.0.store(followed, Ordering::Relaxed);
+    }
 }
 const LOG_EDITS: usize = 16;
 const LOG_BYTES: usize = 64 * 1024;
@@ -206,7 +227,10 @@ impl Text {
     /// [`id`](Text::id)): a reader that took it goes on from here, and one
     /// that took an earlier text reads it whole. Only while nothing else
     /// holds it (a clone keeps them); whether it dropped any.
+    /// It stops keeping edits too, until a reader asks again
+    /// ([`keep_edits`](Text::keep_edits)), shared or not.
     pub fn forget_edits(&mut self) -> bool {
+        self.0.log.followed.set(false);
         match Arc::get_mut(&mut self.0) {
             Some(chunks) if !chunks.log.edits.is_empty() => {
                 chunks.log = EditLog::default();
@@ -214,6 +238,14 @@ impl Text {
             }
             _ => false,
         }
+    }
+    /// Says a reader follows this text by its edits ([`inserts_since`](
+    /// Text::inserts_since)): from now on its edits, and those of the
+    /// texts edits make of it, are kept for it. A reader asks as it takes
+    /// the text (an editor bound to it, `ui.markdown_view`); a text nothing
+    /// follows keeps none, and an edit costs it only its new id.
+    pub fn keep_edits(&self) {
+        self.0.log.followed.set(true);
     }
     /// Whether `other` is this same text (a clone of it), not just equal.
     pub fn ptr_eq(&self, other: &Text) -> bool {
@@ -447,14 +479,21 @@ impl Text {
             chunks.chunks.retain(|chunk| !chunk.text.is_empty());
         }
         chunks.sum(first.min(chunks.chunks.len().saturating_sub(1)));
-        // Another text now, following the one it was.
+        // Another text now, following the one it was: the edit kept only
+        // for a reader that follows it.
         let before = std::mem::replace(&mut chunks.id, fresh_id());
-        chunks.log.record(TextDelta {
-            before,
-            start,
-            old_len: end - start,
-            inserted: with.into(),
-        });
+        if chunks.log.followed.get() {
+            chunks.log.record(TextDelta {
+                before,
+                start,
+                old_len: end - start,
+                inserted: with.into(),
+            });
+        } else if !chunks.log.edits.is_empty() {
+            // Edits kept before it no longer reach this text.
+            chunks.log.edits.clear();
+            chunks.log.bytes = 0;
+        }
     }
     /// `with` added at the end, as `replace_range` would put it there.
     pub fn append(&mut self, with: &str) {
@@ -756,6 +795,7 @@ mod tests {
     #[test]
     fn a_text_grown_by_inserts_lists_them_and_one_cut_lists_none() {
         let start = Text::new("ab");
+        start.keep_edits();
         let mut text = start.clone();
         text.append("c");
         text.replace_range(0..0, "<");
@@ -773,6 +813,7 @@ mod tests {
     #[test]
     fn a_text_forgets_its_edits_staying_itself_unless_shared() {
         let start = Text::new("ab");
+        start.keep_edits();
         let mut text = start.clone();
         text.append("c");
         let id = text.id();
@@ -787,8 +828,29 @@ mod tests {
     }
 
     #[test]
+    fn a_text_nothing_follows_keeps_no_edits_and_one_followed_does() {
+        let start = Text::new("ab");
+        let mut text = start.clone();
+        text.append("c");
+        assert_ne!(text.id(), start.id(), "another text");
+        assert!(text.inserts_since(start.id()).is_none(), "none kept");
+        // A reader takes it: what follows is kept, for it.
+        let taken = text.clone();
+        taken.keep_edits();
+        text.append("d");
+        let inserts: Vec<_> = text.inserts_since(taken.id()).unwrap().collect();
+        assert_eq!(inserts, [(3, "d")]);
+        // Forgotten (its host idle): none kept again, shared or not.
+        let mut idle = text.clone();
+        idle.forget_edits();
+        text.append("e");
+        assert!(text.inserts_since(taken.id()).is_none());
+    }
+
+    #[test]
     fn a_text_lists_the_edits_since_one_it_follows() {
         let start = Text::new("ab");
+        start.keep_edits();
         let mut text = start.clone();
         text.append("c");
         let middle = text.id();
@@ -809,6 +871,7 @@ mod tests {
     #[test]
     fn a_texts_log_keeps_its_last_edits_within_its_bounds() {
         let start = Text::new("");
+        start.keep_edits();
         let mut text = start.clone();
         let mut ids = vec![start.id()];
         for i in 0..20 {
@@ -826,6 +889,7 @@ mod tests {
         assert_eq!(since(&text, ids[20]), None);
         // Inserts within it drop the earliest to fit.
         let mut text = Text::new("");
+        text.keep_edits();
         let first = text.id();
         text.append(&"a".repeat(LOG_BYTES / 2));
         let second = text.id();
