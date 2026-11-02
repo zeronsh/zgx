@@ -5279,6 +5279,8 @@ dependencies = [
 name = "zgx-script"
 version = "0.1.8"
 dependencies = [
+ "icu_locale_core",
+ "icu_plurals",
  "libc",
  "memchr",
  "png 0.18.1",

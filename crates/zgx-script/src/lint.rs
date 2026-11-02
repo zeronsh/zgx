@@ -424,7 +424,7 @@ pub(crate) fn source_keys(files: &[crate::token_lint::File]) -> Option<Vec<Strin
     Some(keys)
 }
 fn lint_locales(files: &[crate::token_lint::File]) -> Vec<Diagnostic> {
-    use zgx::i18n::{ArgumentKind, Catalog, plural_categories};
+    use zgx::i18n::{ArgumentKind, Catalog};
     let mut asked_for = Asked::default();
     for file in files {
         asked(file.path, file.tokens, &mut asked_for);
@@ -1870,6 +1870,39 @@ fn is_element(callee: &str) -> bool {
             !callee.contains(['.', ':']) && callee.chars().next().is_some_and(char::is_uppercase)
         }
     }
+}
+
+/// The plural categories CLDR gives `locale` (cardinal, or `ordinal`): what
+/// its messages' plurals need cases for. Chinese, Japanese, Korean, Thai
+/// and Vietnamese have `other` alone; English `one` and `other`; Arabic all
+/// six. From ICU4X's data in every build, whether or not the formatters'
+/// `i18n` feature is on (without it they pick English's cases, and a
+/// missing one shows `other`'s text). A locale ICU can't read needs
+/// `other` alone.
+fn plural_categories(locale: &str, ordinal: bool) -> Vec<&'static str> {
+    use icu_plurals::PluralCategory::*;
+    let Ok(locale) = icu_locale_core::Locale::try_from_str(locale) else {
+        return vec!["other"];
+    };
+    let prefs = (&locale).into();
+    let rules = match ordinal {
+        true => icu_plurals::PluralRules::try_new_ordinal(prefs),
+        false => icu_plurals::PluralRules::try_new_cardinal(prefs),
+    };
+    let Ok(rules) = rules else {
+        return vec!["other"];
+    };
+    rules
+        .categories()
+        .map(|category| match category {
+            Zero => "zero",
+            One => "one",
+            Two => "two",
+            Few => "few",
+            Many => "many",
+            Other => "other",
+        })
+        .collect()
 }
 
 #[cfg(test)]

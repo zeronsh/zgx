@@ -316,6 +316,8 @@ impl TestApp {
         let mut ui = Ui::new(400., 300.);
         let host = host(&ui.runtime);
         host.expose_classes();
+        // A lint finding never lies over what a test clicks.
+        host.lint_strip(false);
         host.reload().map_err(|error| error.to_string())?;
         let executor = Rc::new(RefCell::new(LocalExecutor::new()));
         let clock = FrameClock::new();

@@ -108,7 +108,7 @@ zgx lint --rules            # what it looks for
 
 `-- zgx-lint: allow(rule)` on the finding's line or the line above accepts a deliberate exception (`allow(rule-a, rule-b)` for several).
 
-A debug build lints the scripts itself after every load and reload, so a findings list needs no one to remember to ask: each finding is printed once to stderr, kept in `ScriptHost::warnings()`, and shown over the interface (`ScriptHost::lint_findings()`) while there is no error. It costs milliseconds per reload, a release build or a bundled app does nothing, and `ZGX_LINT=0` turns it off. For tools, `zgx lint --format json` prints `{ "files": n, "findings": [{ "file", "line", "column", "rule", "message" }] }`; like the text form, it exits 1 when it finds anything.
+A debug build lints the scripts itself after every load and reload, so a findings list needs no one to remember to ask: each finding is printed once to stderr, kept in `ScriptHost::warnings()` and `ScriptHost::lint_findings()`, and counted in a strip in the window's lower corner. A finding is never shown as an error, nor over a modal, and a test host (`testing::TestApp`, or any host calling `ScriptHost::lint_strip(false)`) shows no strip at all, so a finding never lies over what a test clicks. It costs milliseconds per reload, a release build or a bundled app does nothing, and `ZGX_LINT=0` turns it off. For tools, `zgx lint --format json` prints `{ "files": n, "findings": [{ "file", "line", "column", "rule", "message" }] }`; like the text form, it exits 1 when it finds anything.
 
 Some costs the engine removes instead of asking scripts to avoid them: `ui.tween`, `ui.spring`, `ui.loop`, text templates and animations of states or elements run without calling the script at all.
 
