@@ -582,6 +582,11 @@ def release_section(release, e):
     # columns are counted the new way, and the page says what changed.
     for name, why in gate.get('redefined', {}).items():
         out.append(f'<p class="scene-note"><strong>{e(name)} changed:</strong> {e(why)}</p>')
+    if 'previous_commit' not in release:
+        out.append(f'<p class="scene-note">The suite on this page is {e(gate["from"]["version"])}&#8217;s '
+                   f'(<code>{e(release["suite_commit"][:7])}</code>), not run again for {e(gate["to"]["version"])}: '
+                   'only the instruction counts above are new.</p></section>')
+        return '\n'.join(out)
     previous = release['previous_commit']
     out.append(f'<p class="scene-note">The suite, this run against the last one published (<code>{e(previous[:7])}</code>, '
                f'{e(release["previous_date"])}), each cell&#8217;s median. The runs are in different sessions, and a session '
@@ -950,7 +955,12 @@ def main():
         # Medians and ranges only; every launch stays in the run's file.
         data['startup'] = {k: startup[k] for k in ('commit', 'machine', 'probe', 'apps', 'protocol', 'medians')}
     release = None
-    if args.gate and args.previous:
+    if args.gate and not args.previous:
+        # A release whose suite was not run again (a fix release): its gate
+        # counts alone, and the page says whose suite it shows.
+        release = {'gate': json.loads(args.gate.read_text()), 'suite_commit': by['heavy']['commit']}
+        data['release'] = release
+    elif args.gate and args.previous:
         previous = {name: load(args.previous.resolve() / name) for name in ORDER}
         release = {'gate': json.loads(args.gate.read_text()), 'previous_commit': previous['heavy']['commit'],
                    'previous_date': previous['heavy']['started_utc'][:10], 'rebuilt': args.rebuilt,
