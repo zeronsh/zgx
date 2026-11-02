@@ -394,6 +394,8 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     session.key("ctrl+v")
     session.wait(lambda: any(m[0].get("value") == "from elsewhere" for m in session.messages()), "the clipboard never pasted into the page")
     checks["pasted"] = "from elsewhere"
+    if session.wayland:
+        checks["rich clipboard"] = rich_clipboard_checks(session)
     # The select's popup, a zgx menu: Down to Beta, Return chooses it.
     session.click(500, 75)
     session.key("Down")
@@ -428,6 +430,31 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     scrolled = session.wait(lambda: [m for m in session.messages() if "scrolled" in m[0]], "the wheel never scrolled the page")
     checks["scrolled"] = scrolled[0][0]["scrolled"]
     return checks
+
+
+def rich_clipboard_checks(session):
+    """Wayland, where GTK's clipboard reaches nothing: the page's copy of a
+    selection reaches other apps as HTML too, and an image the page copies
+    as a PNG."""
+    # The heading selected (a triple click), copied: its HTML too.
+    session.click(90, 250)
+    session.xdo("click", "--repeat", "3", "--delay", "80", "1")
+    session.key("ctrl+c")
+    def html():
+        found = subprocess.run(["wl-paste", "--type", "text/html"], env=session.wayland, capture_output=True, text=True, timeout=5)
+        return found.returncode == 0 and "Probe heading" in found.stdout
+    session.wait(html, "the page's copy reached other apps without its HTML", 10)
+    # An image the page copies (F6: a canvas's PNG, through the clipboard
+    # API): other apps paste it.
+    session.key("F6")
+    copied = session.wait(lambda: [m[0]["copied"] for m in session.messages() if "copied" in m[0]], "the page's image copy never answered")[-1]
+    if copied != "image":
+        raise AssertionError(f"the page's image copy: {copied}")
+    def png():
+        found = subprocess.run(["wl-paste", "--type", "image/png"], env=session.wayland, capture_output=True, timeout=5)
+        return found.returncode == 0 and found.stdout.startswith(b"\x89PNG")
+    session.wait(png, "the page's copied image never reached other apps", 10)
+    return {"html": True, "image": True}
 
 
 def cursor_checks(session):

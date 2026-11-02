@@ -137,6 +137,14 @@ api! {
     fn gtk_clipboard_get_for_display(Ptr, Ptr) -> Ptr;
     fn gtk_clipboard_set_text(Ptr, *const c_char, c_int);
     fn gtk_clipboard_request_text(Ptr, unsafe extern "C" fn(Ptr, *const c_char, Ptr), Ptr);
+    fn gtk_clipboard_wait_is_image_available(Ptr) -> gboolean;
+    fn gtk_clipboard_wait_for_image(Ptr) -> Ptr;
+    fn gtk_clipboard_wait_for_contents(Ptr, Ptr) -> Ptr;
+    fn gtk_selection_data_get_data(Ptr) -> *const u8;
+    fn gtk_selection_data_get_length(Ptr) -> c_int;
+    fn gtk_selection_data_free(Ptr);
+    fn gdk_atom_intern_static_string(*const c_char) -> Ptr;
+    fn gdk_pixbuf_save_to_bufferv(Ptr, *mut *mut c_char, *mut usize, *const c_char, *const *const c_char, *const *const c_char, *mut *mut GError) -> gboolean;
     fn gdk_display_get_default_seat(Ptr) -> Ptr;
     fn gdk_seat_get_pointer(Ptr) -> Ptr;
     fn gdk_seat_get_keyboard(Ptr) -> Ptr;

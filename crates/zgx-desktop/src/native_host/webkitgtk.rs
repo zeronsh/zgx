@@ -384,6 +384,8 @@ struct Gtk {
     /// The clipboard text last given to zgx's clipboard or taken from it
     /// (Wayland's bridge).
     clipboard: RefCell<String>,
+    /// The same, an image's: its PNG's hash.
+    clipboard_image: Cell<u64>,
 }
 thread_local! {
     static GTK: Gtk = Gtk::default();
@@ -1643,7 +1645,9 @@ impl Page {
             (api.gtk_main_do_event)(event);
             (api.gdk_event_free)(event);
         }
-        if press && state & (gtk::GDK_CONTROL_MASK | gtk::GDK_SHIFT_MASK) != 0 {
+        // Any key may copy (a shortcut, or a page's key handler writing
+        // the clipboard): read it after each, cheaply, as it's in-process.
+        if press {
             check_clipboard();
         }
     }
@@ -2304,9 +2308,9 @@ unsafe extern "C" fn on_option_menu_closed(menu: Ptr, data: Ptr) {
 /// Where GTK's clipboard reaches nothing (`BRIDGED`), what a page copies
 /// goes to zgx's: a copy (a shortcut, a page's copy button) is the web
 /// process's, done after the input that asked for it, and GTK says nothing
-/// of a clipboard set in the process; so after a key with Control or Shift,
-/// or a click, the clipboard is read a little later, twice, and new text
-/// goes on (not what zgx's gave it for a paste).
+/// of a clipboard set in the process; so after a key or a click the
+/// clipboard is read a little later, twice, and what's new goes on (not
+/// what zgx's gave it for a paste).
 fn check_clipboard() {
     if !BRIDGED.load(std::sync::atomic::Ordering::Relaxed) {
         return;
@@ -2337,34 +2341,105 @@ unsafe extern "C" fn read_clipboard(_: Ptr) -> gtk::gboolean {
     }
     0
 }
-/// Read GTK's `clipboard` and give new text to zgx's.
+/// Read GTK's `clipboard` and give what's new to zgx's: an image (as a
+/// PNG), else text, with its HTML where the page copied some (a selection
+/// keeps its formatting pasted elsewhere).
 ///
 /// # Safety
 /// On GTK's thread, `clipboard` GTK's clipboard for its display.
 unsafe fn on_clipboard(clipboard: Ptr) {
-    unsafe extern "C" fn read(_: Ptr, text: *const c_char, _: Ptr) {
-        // SAFETY: GTK passes the clipboard's text, or null.
-        let Some(text) = (unsafe { (!text.is_null()).then(|| string(text)) }) else {
-            return;
-        };
-        if GTK.with(|gtk| *gtk.clipboard.borrow() == text) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: as the caller promises: the page owns the clipboard in this
+    // process, so GTK's waits answer at once; what they give is freed here.
+    unsafe {
+        if (api.gtk_clipboard_wait_is_image_available)(clipboard) != 0 {
+            let pixbuf = (api.gtk_clipboard_wait_for_image)(clipboard);
+            if pixbuf.is_null() {
+                return;
+            }
+            let (mut buffer, mut size) = (null_mut::<c_char>(), 0usize);
+            let saved = (api.gdk_pixbuf_save_to_bufferv)(
+                pixbuf,
+                &mut buffer,
+                &mut size,
+                c"png".as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                null_mut(),
+            ) != 0;
+            (api.g_object_unref)(pixbuf);
+            if !saved || buffer.is_null() {
+                return;
+            }
+            let png = std::slice::from_raw_parts(buffer as *const u8, size).to_vec();
+            (api.g_free)(buffer.cast());
+            if GTK.with(|gtk| gtk.clipboard_image.replace(hash(&png)) == hash(&png)) {
+                return;
+            }
+            to_clipboard(move |clipboard| clipboard.set_png(png));
             return;
         }
-        GTK.with(|gtk| *gtk.clipboard.borrow_mut() = text.clone());
-        deliver(move || {
-            // The windows share one clipboard: any page's reaches it.
-            let page = UI_PAGES.with(|pages| pages.borrow().values().find_map(Weak::upgrade));
-            if let Some(page) = page
-                && let Some(clipboard) = page.clipboard.borrow_mut().as_mut()
-                && let Err(error) = clipboard.set_text(text)
-            {
-                eprintln!("zgx: a page's copy did not reach the clipboard: {error}");
+        let html = {
+            let data = (api.gtk_clipboard_wait_for_contents)(
+                clipboard,
+                (api.gdk_atom_intern_static_string)(c"text/html".as_ptr()),
+            );
+            if data.is_null() {
+                None
+            } else {
+                let bytes = (api.gtk_selection_data_get_data)(data);
+                let length = (api.gtk_selection_data_get_length)(data);
+                let html = (!bytes.is_null() && length > 0).then(|| {
+                    String::from_utf8_lossy(std::slice::from_raw_parts(bytes, length as usize))
+                        .into_owned()
+                });
+                (api.gtk_selection_data_free)(data);
+                html
             }
-        });
+        };
+        *HTML.lock().unwrap() = html;
+        (api.gtk_clipboard_request_text)(clipboard, read_text, null_mut());
     }
-    let api = gtk::api().expect("GTK runs");
-    // SAFETY: as the caller promises.
-    unsafe { (api.gtk_clipboard_request_text)(clipboard, read, null_mut()) };
+}
+/// The HTML GTK's clipboard held as its text was asked for.
+static HTML: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+unsafe extern "C" fn read_text(_: Ptr, text: *const c_char, _: Ptr) {
+    // SAFETY: GTK passes the clipboard's text, or null.
+    let Some(text) = (unsafe { (!text.is_null()).then(|| string(text)) }) else {
+        return;
+    };
+    if GTK.with(|gtk| *gtk.clipboard.borrow() == text) {
+        return;
+    }
+    GTK.with(|gtk| *gtk.clipboard.borrow_mut() = text.clone());
+    match HTML.lock().unwrap().take() {
+        Some(html) => to_clipboard(move |clipboard| clipboard.set_rich_text(text, html)),
+        None => to_clipboard(move |clipboard| clipboard.set_text(text)),
+    }
+}
+/// Put something on zgx's clipboard, on the UI thread: the windows share
+/// one, so any page's reaches it.
+fn to_clipboard(
+    put: impl FnOnce(&mut crate::clipboard::Clipboard) -> Result<(), Box<dyn std::error::Error>>
+    + Send
+    + 'static,
+) {
+    deliver(move || {
+        let page = UI_PAGES.with(|pages| pages.borrow().values().find_map(Weak::upgrade));
+        if let Some(page) = page
+            && let Some(clipboard) = page.clipboard.borrow_mut().as_mut()
+            && let Err(error) = put(clipboard)
+        {
+            eprintln!("zgx: a page's copy did not reach the clipboard: {error}");
+        }
+    });
+}
+/// A PNG's hash, to tell a copied image from the last.
+fn hash(png: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    png.hash(&mut hasher);
+    hasher.finish()
 }
 /// An element of the page went full screen (`requestFullscreen`): it
 /// fills the page's box, and the app hears (`WebViewState::full_screen`) to
