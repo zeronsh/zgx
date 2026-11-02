@@ -202,11 +202,16 @@ type Release = {
     unit: string;
     how: string;
     scenes: Record<string, [number, number, number]>;
+    /** Cells counted differently from earlier releases, and how (both columns counted the new way). */
+    redefined?: Record<string, string>;
   };
-  previous_commit: string;
-  previous_date: string;
+  /** The last published suite run, when this release ran the suite again. */
+  previous_commit?: string;
+  previous_date?: string;
   rebuilt?: string | null;
-  changes: { scene: string; mode: string; framework: string; change: Record<string, ReleaseChange> }[];
+  changes?: { scene: string; mode: string; framework: string; change: Record<string, ReleaseChange> }[];
+  /** A release whose suite was not run again: the suite shown, the earlier release's. */
+  suite_commit?: string;
 };
 /** Release over release (data.json's `release`): the gate's exact counts and the suite's per-cell change, when the run has one. */
 export const release = ((perf as Record<string, unknown>).release ?? null) as Release | null;
