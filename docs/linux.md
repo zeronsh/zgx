@@ -552,5 +552,12 @@ Unlike macOS:
   A selection goes as plain text. The page's own drag is cancelled once its
   `dragstart` listeners ran (WebKit's GTK drag can't begin while zgx's
   window holds the pointer), and the dragged element hears `dragend` as
-  zgx's drag ends. Files dropped on a page, and drags within it, are not
-  supported.
+  zgx's drag ends.
+- A drag over the page is the page's, as a browser's is: its own drag
+  (back over it, or within it), zgx's text dragged onto it, and files from
+  another app reach it as `dragenter`, `dragover`, `dragleave` and `drop`
+  where the pointer is. The page's own drag carries the data its
+  `dragstart` set (`text/x-card` and the like, not only text); files come
+  as `File`s with their names, types and bytes (up to 64 MB in all; past
+  that, a file arrives empty). The events are made in the page (an
+  isolated script world gives them), so `event.isTrusted` is false.

@@ -34,7 +34,7 @@ A web view (`zgx::web_view`, `ui.webview`) is the platform's own page, laid out 
 | Cursor | the page's | the page's | the page's: CSS's named cursors as the theme's, `url()` images as themselves |
 | Page accessibility | the platform's | the platform's | in the window's tree: the page's own (AT-SPI), under its box |
 | Drags out of the page | the platform's | the platform's | zgx's: links, images (their bytes) and text, to zgx's targets and other apps |
-| Files dropped on it, drags within it | the platform's | the platform's | no |
+| Files dropped on it, drags within it | the platform's | the platform's | the page's `dragover` and `drop`: its own drags' data, zgx's text, other apps' files as `File`s |
 | Downloads | none saved (no download delegate) | none saved (each cancelled) | none saved (each cancelled) |
 | Context menu (a right click) | WebKit's | WebView2's | WebKit's items for what's clicked (a link, an image, media, a selection, a field, the page) as a zgx menu where the click was; spelling, font and media-control items left out |
 | Script dialogs (`alert`, `confirm`, `prompt`) | alert sheets on the window, the page's origin under the message | WebView2's dialogs | WebKit's, drawn in the page |

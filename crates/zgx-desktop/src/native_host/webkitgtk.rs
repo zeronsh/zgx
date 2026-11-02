@@ -459,7 +459,12 @@ const WORLD: &std::ffi::CStr = c"zgx";
 /// the pointer: GTK warned), and drags it instead. A page stopping the
 /// event short of the window keeps its drag, and zgx drags it as well.
 /// `zgxDragEnded()` gives the dragged element its `dragend`.
-const DRAG_SCRIPT: &str = "(() => { const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zgxDrag; if (!handler) return; const post = handler.postMessage.bind(handler); let source = null; addEventListener('dragstart', (event) => { const data = event.dataTransfer; const uri = data ? (data.getData('text/uri-list').split(/\\r?\\n/).find((line) => line && !line.startsWith('#')) || '') : ''; const image = event.target && event.target.closest ? event.target.closest('img') : null; const drag = { t: data ? data.getData('text/plain') : '', u: uri, i: image ? (image.currentSrc || image.src) : '' }; let posted = false; addEventListener('dragstart', (late) => { if (late !== event || event.defaultPrevented) return; posted = true; event.preventDefault(); source = event.target; post(drag); }, { once: true }); setTimeout(() => { if (!posted && !event.defaultPrevented) post(drag); }, 0); }, true); window.zgxDragEnded = () => { const target = source; source = null; if (target) target.dispatchEvent(new DragEvent('dragend', { bubbles: true })); }; })();";
+/// `zgxDragOver(x, y, payload)`, `zgxDragLeave()` and `zgxDrop(x, y,
+/// payload)` give the page a drag zgx's is over it with (`Page::drag`):
+/// `dragenter`, `dragover`, `dragleave` and `drop` where it is, carrying
+/// the page's own drag's data (`payload.own`), a drag's text, or files
+/// (`payload.files`: name, type and base64 bytes).
+const DRAG_SCRIPT: &str = "(() => { const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zgxDrag; if (!handler) return; const post = handler.postMessage.bind(handler); let source = null; let pending = null; let over = null; const capture = (data) => ({ data: data ? Object.fromEntries([...data.types].filter((type) => type !== 'Files').map((type) => [type, data.getData(type)])) : {}, effect: data ? data.effectAllowed : 'all' }); addEventListener('dragstart', (event) => { const data = event.dataTransfer; const uri = data ? (data.getData('text/uri-list').split(/\\r?\\n/).find((line) => line && !line.startsWith('#')) || '') : ''; const image = event.target && event.target.closest ? event.target.closest('img') : null; const drag = { t: data ? data.getData('text/plain') : '', u: uri, i: image ? (image.currentSrc || image.src) : '' }; let posted = false; addEventListener('dragstart', (late) => { if (late !== event || event.defaultPrevented) return; posted = true; pending = capture(event.dataTransfer); event.preventDefault(); source = event.target; post(drag); }, { once: true }); setTimeout(() => { if (!posted && !event.defaultPrevented) { pending = capture(null); post(drag); } }, 0); }, true); window.zgxDragEnded = () => { const target = source; source = null; pending = null; if (target) target.dispatchEvent(new DragEvent('dragend', { bubbles: true })); }; const transfer = (payload) => { const data = new DataTransfer(); if (payload.own && pending) { for (const [type, value] of Object.entries(pending.data)) data.setData(type, value); data.effectAllowed = pending.effect; } else if (payload.text) { data.setData('text/plain', payload.text); } for (const file of payload.files || []) { const bytes = file.bytes ? Uint8Array.from(atob(file.bytes), (c) => c.charCodeAt(0)) : new Uint8Array(); data.items.add(new File([bytes], file.name, { type: file.type })); } return data; }; const fire = (type, target, data, x, y) => target.dispatchEvent(new DragEvent(type, { dataTransfer: data, clientX: x, clientY: y, bubbles: true, cancelable: true, composed: true })); const at = (x, y) => document.elementFromPoint(x, y) || document.documentElement; window.zgxDragOver = (x, y, payload) => { const target = at(x, y); const data = transfer(payload); if (target !== over) { if (over) fire('dragleave', over, data, x, y); fire('dragenter', target, data, x, y); over = target; } return !fire('dragover', target, data, x, y); }; window.zgxDragLeave = () => { if (over) fire('dragleave', over, new DataTransfer(), 0, 0); over = null; }; window.zgxDrop = (x, y, payload) => { const target = at(x, y); over = null; return !fire('drop', target, transfer(payload), x, y); }; })();";
 const CHANNEL_SCRIPT: &str = "(() => { const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zgx; if (!handler || window.zgx) return; const post = handler.postMessage.bind(handler); const stringify = JSON.stringify; const origin = location.origin; const main = window === window.top; Object.defineProperty(window, 'zgx', { value: Object.freeze({ postMessage(value) { post({ n: NONCE, o: origin, m: main, b: stringify(value === undefined ? null : value) }); } }) }); Object.defineProperty(window, 'zgui', { value: window.zgx }); })();"; // rename-to-zgx: keep
 
 /// What a page is made with, sent to GTK's thread.
@@ -1409,6 +1414,11 @@ impl Page {
                         (api.gtk_widget_hide)(self.window);
                     }
                 }
+                Command::DragOver { x, y, payload } => {
+                    self.drag("zgxDragOver", Some((x, y, payload)))
+                }
+                Command::DragLeave => self.drag("zgxDragLeave", None),
+                Command::Drop { x, y, payload } => self.drag("zgxDrop", Some((x, y, payload))),
                 Command::DragEnded => (api.webkit_web_view_evaluate_javascript)(
                     self.view,
                     c"zgxDragEnded()".as_ptr(),
@@ -1789,6 +1799,32 @@ impl Page {
                 45 => edit(c"PasteAsPlainText"),
                 _ => {}
             }
+        }
+    }
+    /// Call `DRAG_SCRIPT`'s `function` in the page, at `x`, `y` in the
+    /// view's pixels (the page's CSS pixels, through its zoom).
+    fn drag(&self, function: &str, at: Option<(f64, f64, String)>) {
+        let api = gtk::api().expect("GTK runs");
+        // SAFETY: WebKit's calls on this page's live view, on GTK's thread;
+        // the script's text lives through the call.
+        unsafe {
+            let script = match at {
+                Some((x, y, payload)) => {
+                    let zoom = (api.webkit_web_view_get_zoom_level)(self.view).max(0.01);
+                    format!("{function}({}, {}, {payload})", x / zoom, y / zoom)
+                }
+                None => format!("{function}()"),
+            };
+            (api.webkit_web_view_evaluate_javascript)(
+                self.view,
+                c(&script).as_ptr(),
+                -1,
+                WORLD.as_ptr(),
+                std::ptr::null(),
+                null_mut(),
+                None,
+                null_mut(),
+            );
         }
     }
     fn ime(&self, ime: Ime) {
@@ -3193,6 +3229,19 @@ enum Command {
     Shown(bool),
     /// zgx's drag of what the page dragged ended (`DRAG_SCRIPT`).
     DragEnded,
+    /// A drag zgx has is over the page at `x`, `y` (the view's pixels), or
+    /// dropped there, carrying `payload` (JSON, `DRAG_SCRIPT`'s); or it left.
+    DragOver {
+        x: f64,
+        y: f64,
+        payload: String,
+    },
+    DragLeave,
+    Drop {
+        x: f64,
+        y: f64,
+        payload: String,
+    },
     Pointer(Pointer),
     Key {
         press: bool,
@@ -3494,6 +3543,77 @@ impl UiPage {
             // The page's dragged element hears its drag end.
             InputEvent::Drag(drag) if drag.phase == DragPhase::End => {
                 self.send(Command::DragEnded);
+            }
+            // A drag of zgx's over the page (its own, back over it, or text
+            // from elsewhere in the window): the page's, as a browser's
+            // drag over a page is, its drop the page's to take.
+            InputEvent::Drag(drag)
+                if matches!(
+                    drag.phase,
+                    DragPhase::Over | DragPhase::Drop | DragPhase::Leave
+                ) =>
+            {
+                let Some(text) = drag.payload.downcast_ref::<DraggedText>() else {
+                    return;
+                };
+                let own = self.node.get() == Some(drag.source) && !drag.visiting;
+                let payload = || drag_payload(own, text.text(), &[]);
+                match drag.phase {
+                    DragPhase::Over => {
+                        event.accept_drag();
+                        if let Some((x, y)) = self.local(drag.x, drag.y) {
+                            self.send(Command::DragOver {
+                                x,
+                                y,
+                                payload: payload(),
+                            });
+                        }
+                    }
+                    DragPhase::Drop => {
+                        if let Some((x, y)) = self.local(drag.x, drag.y) {
+                            event.prevent_default();
+                            event.stop_propagation();
+                            self.send(Command::Drop {
+                                x,
+                                y,
+                                payload: payload(),
+                            });
+                        }
+                    }
+                    _ => self.send(Command::DragLeave),
+                }
+            }
+            // Files dragged from another app: the page's, as `File`s in its
+            // `drop` (read here, up to `DROPPED_BYTES` in all).
+            InputEvent::FileHover { x, y, path } => {
+                if let Some((x, y)) = self.local(x, y) {
+                    let payload = drag_payload(false, "", &[(path, None)]);
+                    self.send(Command::DragOver { x, y, payload });
+                }
+            }
+            InputEvent::FileHoverCancelled => self.send(Command::DragLeave),
+            InputEvent::FilesDrop { x, y, paths } => {
+                if let Some((x, y)) = self.local(x, y) {
+                    let mut left = DROPPED_BYTES;
+                    let files: Vec<_> = paths
+                        .iter()
+                        .map(|path| {
+                            let bytes = std::fs::metadata(path)
+                                .ok()
+                                .filter(|meta| meta.is_file() && meta.len() <= left)
+                                .and_then(|_| std::fs::read(path).ok());
+                            left =
+                                left.saturating_sub(bytes.as_ref().map_or(0, |b| b.len() as u64));
+                            (path.clone(), bytes)
+                        })
+                        .collect();
+                    event.prevent_default();
+                    self.send(Command::Drop {
+                        x,
+                        y,
+                        payload: drag_payload(false, "", &files),
+                    });
+                }
             }
             InputEvent::PointerMove { x, y } => {
                 if let Some((x, y)) = self.local(x, y) {
@@ -3849,6 +3969,92 @@ fn option_menu(page: &Rc<UiPage>, cx: &mut zgx::compose::Context) -> View {
         })
     });
     zgx::compose::menu("Options", open, anchor).children(items)
+}
+/// The most a drop gives a page of files' bytes in all: past it, a file
+/// arrives empty (its name and type still).
+const DROPPED_BYTES: u64 = 64 * 1024 * 1024;
+/// `DRAG_SCRIPT`'s drag payload: the page's own drag (`own`, its data the
+/// page kept), text, or files with their bytes where read.
+fn drag_payload(own: bool, text: &str, files: &[(std::path::PathBuf, Option<Vec<u8>>)]) -> String {
+    let files: Vec<String> = files
+        .iter()
+        .map(|(path, bytes)| {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let bytes = bytes
+                .as_deref()
+                .map_or_else(|| "null".into(), |bytes| format!("\"{}\"", base64(bytes)));
+            format!(
+                "{{\"name\":{},\"type\":\"{}\",\"bytes\":{bytes}}}",
+                json_string(&name),
+                mime_of(&name)
+            )
+        })
+        .collect();
+    format!(
+        "{{\"own\":{own},\"text\":{},\"files\":[{}]}}",
+        json_string(text),
+        files.join(",")
+    )
+}
+/// `text` as a JSON string, quoted and escaped.
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 || c == '\u{2028}' || c == '\u{2029}' => {
+                out.push_str(&format!("\\u{:04x}", c as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+/// A file's type by its extension, as a browser gives a dropped file's.
+fn mime_of(name: &str) -> &'static str {
+    match name
+        .rsplit('.')
+        .next()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("txt") => "text/plain",
+        Some("html" | "htm") => "text/html",
+        Some("json") => "application/json",
+        Some("csv") => "text/csv",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("pdf") => "application/pdf",
+        Some("zip") => "application/zip",
+        _ => "",
+    }
+}
+/// `bytes` as base64 (standard alphabet, padded), for a page's `atob`.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i)) as usize & 63] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 /// A box showing a page: the page shows while one does.
 struct Shown(Rc<UiPage>, NodeId);
@@ -4431,6 +4637,36 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a page's drop script gets: its own drag, text or files, as
+    /// JSON its `atob` and `JSON` read.
+    #[test]
+    fn drag_payloads_are_json_with_base64_bytes() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(&[0xff, 0xfe, 0x00]), "//4A");
+        assert_eq!(
+            drag_payload(true, "", &[]),
+            r#"{"own":true,"text":"","files":[]}"#
+        );
+        assert_eq!(
+            drag_payload(false, "a \"quote\"\n\\", &[]),
+            r#"{"own":false,"text":"a \"quote\"\u000a\\","files":[]}"#
+        );
+        let files = [
+            (
+                std::path::PathBuf::from("/tmp/x/notes.txt"),
+                Some(b"hi".to_vec()),
+            ),
+            (std::path::PathBuf::from("/tmp/x/big.bin"), None),
+        ];
+        assert_eq!(
+            drag_payload(false, "", &files),
+            r#"{"own":false,"text":"","files":[{"name":"notes.txt","type":"text/plain","bytes":"aGk="},{"name":"big.bin","type":"","bytes":null}]}"#
+        );
+    }
 
     fn damage(rects: &[Part]) -> Damage {
         let mut damage = Damage::default();
