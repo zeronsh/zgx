@@ -41,6 +41,8 @@ mod intrinsic_sizes;
 mod layout_gaps;
 #[path = "../layout_motion.rs"]
 mod layout_motion;
+#[path = "../layout_unsettled.rs"]
+mod layout_unsettled;
 #[path = "../lazy_ui.rs"]
 mod lazy_ui;
 #[path = "../list_edges.rs"]

@@ -314,7 +314,17 @@ impl TestApp {
         wrap: impl FnOnce(View) -> View,
     ) -> Result<Self, String> {
         let mut ui = Ui::new(400., 300.);
+        // A layout that doesn't settle is the app's error, as a window
+        // shows it, its last layout kept: a test sees it (`error`), and
+        // goes on.
+        ui.contain_layout_feedback();
         let host = host(&ui.runtime);
+        let error = host.error();
+        host.on_issue(move |kind, issue| {
+            if kind == zgx::issues::IssueKind::Degraded && issue.contains("did not settle") {
+                error.set(Some(issue.to_string()));
+            }
+        });
         host.expose_classes();
         host.reload().map_err(|error| error.to_string())?;
         let executor = Rc::new(RefCell::new(LocalExecutor::new()));
