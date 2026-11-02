@@ -4147,7 +4147,7 @@ fn paragraph_effect<const LOCATING: bool>(
             scene.set_style(paragraph, style);
             // The language each run's text is in, where any node says.
             let shown = scene.rich_with_languages(paragraph, rich.clone());
-            scene.set_kind(paragraph, NodeKind::RichText { text: shown });
+            scene.set_leaf_kind(paragraph, NodeKind::RichText { text: shown });
         }
         // Icons' placeholders aren't text to read out.
         let content = if icons.is_empty() {

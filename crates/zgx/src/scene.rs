@@ -2307,6 +2307,10 @@ const PERCENT_WIDTH: u8 = 8;
 const PERCENT_HEIGHT: u8 = 16;
 const OWN_PERCENT_WIDTH: u8 = 32;
 const OWN_PERCENT_HEIGHT: u8 = 64;
+/// Not known (`READS_KNOWN` cleared, so every layout reads it afresh), but
+/// what it read before a change below it, kept for `relayout_alone` to
+/// compare.
+const READS_KEPT: u8 = 128;
 /// Which way a node's lines run (CSS's `direction`), inherited by its
 /// subtree: rows run from the right, text starts at the right, and the
 /// arrows read the other way.
@@ -2943,6 +2947,9 @@ pub struct Scene {
     walk_hints: std::cell::Cell<(usize, usize)>,
     /// Dirty fixed-size containers whose ancestors stayed clean.
     layout_roots: Vec<NodeId>,
+    /// A walk stopped at a child of a row or column (`stops_alone`), to
+    /// lay out alone if its parent sees no change (`layout_alone`).
+    alone_pending: bool,
     /// How deep the contents syncs running now nest (`sync_contents`).
     syncing: u32,
     /// Nodes holding more than `MEASUREMENT_ALTERNATES` results of this pass,
@@ -3166,6 +3173,7 @@ impl Scene {
             content_revision: 0,
             walk_hints: Default::default(),
             layout_roots: Vec::new(),
+            alone_pending: false,
             syncing: 0,
             overfull: Vec::new(),
             relative_count: 0,
@@ -6446,7 +6454,7 @@ impl Scene {
         node.text_size.set(TextSizes::default());
         self.invalidate(id, PAINT);
         if !fixed {
-            self.invalidate_layout(id);
+            self.invalidate_content_layout(id);
         }
     }
     /// `set_text` for a text in a box it sizes, as long as before: one that
@@ -6467,11 +6475,11 @@ impl Scene {
             // Measured as before: it lays out as before, repainted alone.
             Some((true, size)) => self.remember_text_size(id, size),
             Some((false, size)) => {
-                self.invalidate_layout(id);
+                self.invalidate_content_layout(id);
                 // Measured already: layout finds it.
                 self.remember_text_size(id, size);
             }
-            None => self.invalidate_layout(id),
+            None => self.invalidate_content_layout(id),
         }
     }
     /// For a text that doesn't wrap, measured before: `text`'s size, and
@@ -7449,8 +7457,8 @@ impl Scene {
         old.margin = style.margin;
         // Only its box changed: laid out again, it is `repaint::BOX_ONLY`.
         match reads {
-            true => self.invalidate_layout_with(id, true, false),
-            false => self.invalidate_layout_with(id, false, false),
+            true => self.invalidate_layout_with::<false>(id, true, false, id),
+            false => self.invalidate_layout_with::<false>(id, false, false, id),
         }
         // A contents parent lays out as its last child.
         if self.contents_count > 0
@@ -7898,19 +7906,79 @@ impl Scene {
     /// stops at a layout boundary: its size cannot depend on its content, so
     /// its parent keeps its layout and only the boundary's subtree is redone.
     fn invalidate_layout(&mut self, id: NodeId) {
-        self.invalidate_layout_with(id, false, true);
+        self.invalidate_layout_with::<false>(id, false, true, id);
+    }
+    /// `invalidate_layout` for a change of a leaf's content (a text's): its
+    /// ancestors may answer as they did, so the walk may stop at a child of
+    /// a plain row or column (`alone_stop`) and lay that out alone.
+    #[inline(never)]
+    fn invalidate_content_layout(&mut self, id: NodeId) {
+        match self.alone_stop(id) {
+            Some(stop) => self.invalidate_layout_with::<true>(id, false, true, stop),
+            None => self.invalidate_layout(id),
+        }
+    }
+    /// `set_kind` for a paragraph whose runs change in place (a reply
+    /// streaming): its parent may see no change, so if it is a child of a
+    /// plain row or column that asked it one size, that child is laid out
+    /// alone (`invalidate_content_layout`), its siblings left where they
+    /// are. Anything else (a new kind, one never laid out, a change of
+    /// colour alone) is `set_kind`'s.
+    pub fn set_leaf_kind(&mut self, id: NodeId, kind: NodeKind) {
+        let node = self.node(id);
+        let (NodeKind::RichText { text: old }, NodeKind::RichText { text: new }) =
+            (&node.kind, &kind)
+        else {
+            return self.set_kind(id, kind);
+        };
+        if node.measurement.is_none() || !old.metrics_differ(new) {
+            return self.set_kind(id, kind);
+        }
+        self.damage_subtree(id);
+        self.node_mut(id).kind = kind;
+        self.invalidate(id, PAINT);
+        self.invalidate_content_layout(id);
+    }
+    /// Where a walk up from `id`'s content change stops to lay out alone:
+    /// its parent or its grandparent (a text in a row, in a button in a
+    /// row), if one is such a child (`stops_alone`). None under a node never
+    /// laid out (just mounted): what it is in changed.
+    #[inline]
+    fn alone_stop(&self, id: NodeId) -> Option<NodeId> {
+        let node = self.node(id);
+        node.measurement.as_ref()?;
+        let parent = node.parent?;
+        if self.stops_alone(parent) {
+            return Some(parent);
+        }
+        let above = self.tree_node(parent);
+        above.measurement.as_ref()?;
+        let grandparent = above.parent?;
+        self.stops_alone(grandparent).then_some(grandparent)
     }
     /// `invalidate_layout`, keeping (`keep_reads`) what the nodes it marks
     /// read (see `invalidate_with`).
     /// `own`: something besides its box changed (`CHANGED`): `set_box` alone
     /// leaves the node a `repaint::BOX_ONLY` candidate.
+    /// `ALONE`: a leaf's content changed, and the walk stops at `stop`
+    /// unless a boundary comes first (`invalidate_content_layout`).
     #[inline(always)]
-    fn invalidate_layout_with(&mut self, id: NodeId, keep_reads: bool, own: bool) {
+    fn invalidate_layout_with<const ALONE: bool>(
+        &mut self,
+        id: NodeId,
+        keep_reads: bool,
+        own: bool,
+        stop: NodeId,
+    ) {
         let layers = self.isolation_count + self.promoted_count > 0;
         let mut current = id;
         let mut first = true;
         let mut marked = 0u64;
         let (mut parent, mut ink) = loop {
+            // Above `id`, a child of a plain row or column whose answers to
+            // it may not have changed: laid out alone if they haven't
+            // (`relayout_alone`), its siblings left where they are.
+            let alone = ALONE && current == stop;
             // Past `id`, a parent the tree led to (`tree_node_mut`).
             let node = if first {
                 self.node_mut(current)
@@ -7918,6 +7986,8 @@ impl Scene {
                 self.tree_node_mut(current)
             };
             let boundary = !first && Self::is_layout_boundary(node);
+            // A boundary is laid out as one (`layout_roots`).
+            let alone = alone && !boundary;
             let parent = node.parent;
             let ink = node.bounds_valid.replace(0);
             node.dirty |= LAYOUT;
@@ -7926,7 +7996,14 @@ impl Scene {
             }
             if !keep_reads {
                 node.text_size.set(TextSizes::default());
-                node.reads.set(0);
+                // One laid out alone keeps what it read, as unknown:
+                // `relayout_alone` checks it reads the same.
+                match alone {
+                    true => node
+                        .reads
+                        .set((node.reads.get() & !READS_KNOWN) | READS_KEPT),
+                    false => node.reads.set(0),
+                }
             }
             if layers {
                 marked = marked.wrapping_add(1);
@@ -7942,6 +8019,10 @@ impl Scene {
                 if self.layout_roots.last() != Some(&current) {
                     self.layout_roots.push(current);
                 }
+                break (parent, ink);
+            }
+            if alone {
+                self.alone_pending = true;
                 break (parent, ink);
             }
             match parent {
@@ -7972,6 +8053,123 @@ impl Scene {
                 parent = node.parent;
             }
         }
+    }
+    /// Whether the walk up from a change stops at `id`, a child of a plain
+    /// row or column, to lay it out alone (`relayout_alone`): laid out
+    /// before, in the flow, its parent's layout plain (no grid, wrap or
+    /// baseline: no `advanced_layout`) and answering one size alone (no
+    /// alternates or kept sizes: only the results `id` holds were asked
+    /// of it), and what it reads known. Not `id` changed itself: its style
+    /// is its parent's to read.
+    #[inline]
+    fn stops_alone(&self, id: NodeId) -> bool {
+        let node = self.tree_node(id);
+        let Some(parent) = node.parent else {
+            return false;
+        };
+        // One result, the one its parent asked for: a child its parent
+        // asked more of (its natural width, to stretch it to the widest)
+        // changes what it answers there often, and its parent lays it out.
+        if !node.alternates.is_empty()
+            || !node.sizes.is_empty()
+            || node.measurement.is_none()
+            || node.style.absolute
+            || node.special.any()
+            || node.reads.get() & READS_KNOWN == 0
+        {
+            return false;
+        }
+        let parent = self.tree_node(parent);
+        matches!(
+            parent.kind,
+            NodeKind::Container(Layout::Row | Layout::Column)
+                | NodeKind::Panel {
+                    layout: Layout::Row | Layout::Column,
+                    ..
+                }
+        ) && parent.advanced_layout.is_none()
+            && !parent.special.any()
+            && parent.measurement.is_some()
+            && parent.alternates.is_empty()
+            && parent.sizes.is_empty()
+    }
+    /// `id`, where a walk stopped (`stops_alone`), laid out again under the
+    /// one constraint its parent asked it: if it gives what it did, and it
+    /// reads what it did, its parent's layout stands, and `id` alone is laid
+    /// out. Otherwise, false: laid out as usual (what this measured serves
+    /// that layout).
+    #[inline(never)]
+    fn relayout_alone(&mut self, id: NodeId) -> bool {
+        let node = self.node(id);
+        let (Some(parent), Some((asked, was))) = (
+            node.parent,
+            node.measurement.as_ref().map(|m| (m.constraints, m.size)),
+        ) else {
+            return false;
+        };
+        // What it read before the change (`READS_KEPT`); gone if a layout
+        // read it afresh since.
+        let read = node.reads.get();
+        let kept_reads = match (read & READS_KEPT != 0, read & READS_KNOWN != 0) {
+            (true, _) => (read & !READS_KEPT) | READS_KNOWN,
+            (false, true) => read,
+            (false, false) => return false,
+        };
+        // Sized along by its parent (grown or shrunk: flexed): how far it
+        // gives depends on more than the result it holds (its content's
+        // floor), so its parent lays it out.
+        let flexed = match self.node(parent).kind {
+            NodeKind::Container(Layout::Row)
+            | NodeKind::Panel {
+                layout: Layout::Row,
+                ..
+            } => asked.force_width,
+            _ => asked.force_height,
+        };
+        flexed.is_none() && self.reads_bits(id) == kept_reads && self.measure_full(id, asked) == was
+    }
+    /// The children walks stopped at (`stops_alone`), before any other
+    /// layout this pass: each measured again (`relayout_alone`) and, if it
+    /// stands, placed where it is, its siblings left; otherwise marked up to
+    /// the root, for a layout that takes what this pass measured of it.
+    /// Found among the nodes marked (the dirty queue): a node marked for
+    /// layout under a parent that isn't, neither the root nor a boundary
+    /// (`layout_roots`). A pass that panics (a measurer's) leaves them
+    /// marked for the next.
+    #[cold]
+    #[inline(never)]
+    fn layout_alone(&mut self, report: &mut FrameReport) {
+        let mut at = 0;
+        while let Some(&id) = self.dirty.get(at) {
+            at += 1;
+            if !self.contains(id) {
+                continue;
+            }
+            let node = self.tree_node(id);
+            let Some(parent) = node.parent else {
+                continue;
+            };
+            if node.dirty & LAYOUT == 0
+                || self.tree_node(parent).dirty & LAYOUT != 0
+                || Self::is_layout_boundary(node)
+            {
+                continue;
+            }
+            if self.relayout_alone(id) {
+                let bounds = self.node(id).bounds;
+                self.arrange_from(id, bounds.x, bounds.y, report);
+            } else {
+                // Its ancestors, for a layout that takes what this pass
+                // measured of it (and what it read): it changed no more
+                // than the walk marked.
+                let mut above = Some(parent);
+                while let Some(ancestor) = above {
+                    self.invalidate_with(ancestor, LAYOUT, false, false);
+                    above = self.node(ancestor).parent;
+                }
+            }
+        }
+        self.alone_pending = false;
     }
     /// A laid-out container with an explicit width and height: parents measure
     /// it from those (or from their own flex allocation), never from its
@@ -10508,7 +10706,7 @@ impl Scene {
     #[inline(never)]
     pub fn prepare_layout(&mut self) {
         let full = self.node(self.root).dirty & LAYOUT != 0;
-        if !full && self.layout_roots.is_empty() {
+        if !full && self.layout_roots.is_empty() && !self.alone_pending {
             return;
         }
         self.prepare_layout_active(full);
@@ -10521,6 +10719,15 @@ impl Scene {
         let _span = crate::profile::span(crate::profile::Phase::Layout);
         self.layout_pass = self.layout_pass.wrapping_add(1);
         let mut report = FrameReport::default();
+        // First: one that falls back marks its ancestors for the layouts
+        // below, before any answers for them as it did.
+        let full = match self.alone_pending {
+            true => {
+                self.layout_alone(&mut report);
+                self.node(self.root).dirty & LAYOUT != 0
+            }
+            false => full,
+        };
         if full {
             self.measure_full(self.root, Constraints::default());
             self.arrange_from(self.root, 0.0, 0.0, &mut report);

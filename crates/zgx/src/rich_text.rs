@@ -255,6 +255,19 @@ impl RichText {
                 .zip(other.runs.iter())
                 .all(|(a, b)| a.range == b.range && a.font == b.font && a.font_size == b.font_size)
     }
+    /// `!same_metrics`, for `Scene::set_leaf_kind`: written apart so that
+    /// `same_metrics` keeps the callers it is inlined into (a third one
+    /// outlines it from `set_kind`).
+    pub(crate) fn metrics_differ(&self, other: &Self) -> bool {
+        self.options != other.options
+            || self.text != other.text
+            || self.runs.len() != other.runs.len()
+            || self
+                .runs
+                .iter()
+                .zip(other.runs.iter())
+                .any(|(a, b)| a.range != b.range || a.font != b.font || a.font_size != b.font_size)
+    }
     /// The text.
     pub fn text(&self) -> &str {
         &self.text

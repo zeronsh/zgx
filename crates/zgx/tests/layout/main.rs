@@ -26,6 +26,8 @@ mod grid_tracks;
 mod incremental_layout_equivalence;
 #[path = "../intrinsic_sizes.rs"]
 mod intrinsic_sizes;
+#[path = "../layout_alone.rs"]
+mod layout_alone;
 #[path = "../layout_automatic_minimum.rs"]
 mod layout_automatic_minimum;
 #[path = "../layout_box_model.rs"]
