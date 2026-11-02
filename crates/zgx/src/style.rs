@@ -745,12 +745,36 @@ pub(crate) struct ColdStyles {
     pub(crate) image_rendering: Option<crate::image::ImageRendering>,
     /// `Styled::outline_style`.
     pub(crate) outline_style: Option<crate::decoration::BorderStyle>,
-    /// `Styled::mask_gradient`.
-    pub(crate) mask_gradient: Option<crate::decoration::Gradient>,
+    /// `Styled::mask_gradient` and `text_gradient`.
+    pub(crate) gradients: Option<std::sync::Arc<StyleGradients>>,
     /// `Styled::w_calc` and the like.
     pub(crate) size_calcs: Option<std::sync::Arc<crate::size_calc::SizeCalcs>>,
     /// `Styled::text_balance`.
     pub(crate) text_balance: Option<bool>,
+}
+/// `ColdStyles`' gradients, behind one pointer: inline, each would make
+/// every `ColdStyles` 40 bytes larger to copy and compare, and allocate it a
+/// size class up, in apps with neither.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct StyleGradients {
+    /// `Styled::mask_gradient`.
+    pub(crate) mask: Option<crate::decoration::Gradient>,
+    /// `Styled::text_gradient`.
+    pub(crate) text: Option<crate::decoration::Gradient>,
+}
+impl ColdStyles {
+    /// Its gradients, to set one.
+    fn gradients_mut(&mut self) -> &mut StyleGradients {
+        std::sync::Arc::make_mut(self.gradients.get_or_insert_default())
+    }
+    /// `Styled::mask_gradient`.
+    pub(crate) fn mask_gradient(&self) -> Option<&crate::decoration::Gradient> {
+        self.gradients.as_ref()?.mask.as_ref()
+    }
+    /// `Styled::text_gradient`.
+    pub(crate) fn text_gradient(&self) -> Option<&crate::decoration::Gradient> {
+        self.gradients.as_ref()?.text.as_ref()
+    }
 }
 /// How an image sits in its box: `Styled::object_fit` and `object_position`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -947,8 +971,14 @@ impl RareStyles {
             if theirs.outline_style.is_some() {
                 mine.outline_style = theirs.outline_style;
             }
-            if theirs.mask_gradient.is_some() {
-                mine.mask_gradient = theirs.mask_gradient.clone();
+            if let Some(theirs) = &theirs.gradients {
+                let mine = std::sync::Arc::make_mut(mine.gradients.get_or_insert_default());
+                if theirs.mask.is_some() {
+                    mine.mask = theirs.mask.clone();
+                }
+                if theirs.text.is_some() {
+                    mine.text = theirs.text.clone();
+                }
             }
             if theirs.z.is_some() {
                 mine.z = theirs.z;
@@ -2526,7 +2556,20 @@ pub trait Styled: Sized {
             .rare_mut()
             .cold
             .get_or_insert_default()
-            .mask_gradient = Some(gradient);
+            .gradients_mut()
+            .mask = Some(gradient);
+        self
+    }
+    /// Fill a text's glyphs with `gradient` over its box rather than its
+    /// colour (CSS's `background-clip: text`): a heading in a gradient. Its
+    /// selection, highlights and shadows show as plain text's do.
+    fn text_gradient(mut self, gradient: crate::decoration::Gradient) -> Self {
+        self.styles_mut()
+            .rare_mut()
+            .cold
+            .get_or_insert_default()
+            .gradients_mut()
+            .text = Some(gradient);
         self
     }
     /// Mix the view with what lies beneath it by `mode`, as CSS
