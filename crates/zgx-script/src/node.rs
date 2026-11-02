@@ -1545,6 +1545,7 @@ props! {
     "text_gradient" => TextGradient: Gradient, "text_radial" => TextRadial: Radial,
     "lang" => Lang: Str,
     "drop_shadow" => DropShadow: Shadow,
+    "slice" => Slice: Corners,
     // Transforms: after layout, about `origin` (fractions of the node).
     // Last, so that `is_transform` is a single comparison.
     "x" => X: Num, "y" => Y: Num,
