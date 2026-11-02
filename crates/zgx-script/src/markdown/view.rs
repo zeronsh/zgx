@@ -255,27 +255,44 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
 /// settled (a parse keeps them as they were): built as they are, again
 /// only if their value changes (the last becoming settled, once), as a
 /// table always is.
+/// `Kept`: its place, kind (`kind_id`), and a heading's level or an
+/// ordered list's start (0 for others). Plain numbers: a key holds no
+/// part of the block it was found for.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Place {
-    Kept(usize, Rc<str>),
+    Kept(u32, u8, u32),
     Whole(usize, usize),
 }
+/// The kinds of block the parser makes (`t`), by number; `None` for any
+/// other, built whole.
+fn kind_id(kind: &str) -> Option<u8> {
+    Some(match kind {
+        "p" => 1,
+        "h" => 2,
+        "quote" => 3,
+        "code" => 4,
+        "ul" => 5,
+        "ol" => 6,
+        "img" => 7,
+        "hr" => 8,
+        _ => return None,
+    })
+}
 fn place(index: usize, last: bool, b: &Value) -> Place {
-    let kind = text_of(b.field("t"));
-    if !last || kind == "table" {
+    let kind = match b.field("t") {
+        Some(Value::Str(kind)) if last => kind_id(kind),
+        _ => None,
+    };
+    let Some(kind) = kind else {
         return Place::Whole(index, identity(b));
-    }
-    match kind.as_str() {
-        "h" => {
-            let level = b.field("l").and_then(Value::as_f64).unwrap_or(1.) as usize;
-            Place::Kept(index, format!("h{level}").into())
-        }
-        "ol" => {
-            let start = b.field("start").and_then(Value::as_f64).unwrap_or(1.) as usize;
-            Place::Kept(index, format!("ol{start}").into())
-        }
-        _ => Place::Kept(index, kind.into()),
-    }
+    };
+    let number = |field: &str| b.field(field).and_then(Value::as_f64).unwrap_or(1.) as u32;
+    let n = match kind {
+        2 => number("l"),
+        6 => number("start"),
+        _ => 0,
+    };
+    Place::Kept(index as u32, kind, n)
 }
 
 /// Write `value` into `cell` if it is another value (blocks a parse kept
@@ -320,7 +337,7 @@ fn block_list(list: Signal<Value>, options: &ViewOptions) -> View {
         },
         move |place: Place, cx: &mut Context| {
             let (index, live) = match place {
-                Place::Kept(i, _) => (i, true),
+                Place::Kept(i, ..) => (i as usize, true),
                 Place::Whole(i, _) => (i, false),
             };
             let b = reading.with_untracked(|l| l.list().get(index).cloned().unwrap_or(Value::Nil));

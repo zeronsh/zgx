@@ -4221,6 +4221,52 @@ fn a_long_markdown_reply_appended_to_shows_what_one_set_whole_does() {
 }
 
 #[test]
+fn a_markdown_view_edited_mid_document_shows_what_a_fresh_one_does() {
+    // Streamed, then changed before its end (a full parse: every block a
+    // new value), its last block changing kind too: the view keeps no
+    // place a block had before.
+    const APP: &str =
+        r#"return ui.column { w = 380, h = 900, ui.markdown_view { "{reply}", w_full = true } }"#;
+    let app = |text: &str| {
+        let mut reply = None;
+        let h = Harness::new(|runtime| {
+            let host = zgx_script::ScriptHost::inline(runtime, "app", APP);
+            reply = Some(host.shared("reply", zgx_script::Value::from(text)));
+            host
+        });
+        (h, reply.unwrap())
+    };
+    let mut document = String::new();
+    for i in 0..12 {
+        document.push_str(&format!("Paragraph {i} with some words.\n\n"));
+    }
+    let (mut shown, reply) = app("");
+    for end in (0..document.len()).step_by(37) {
+        reply.set(zgx_script::Value::from(&document[..end]));
+        shown.frames(1);
+    }
+    for edited in [
+        document.replace("Paragraph 5", "# A heading where 5 was"),
+        format!("{document}## Last, a heading"),
+        format!(
+            "{}3. now a list",
+            document.replace("Paragraph 2 ", "Paragraph two ")
+        ),
+    ] {
+        reply.set(zgx_script::Value::from(edited.as_str()));
+        shown.frames(1);
+        let (mut fresh, _) = app(&edited);
+        fresh.frames(1);
+        assert_eq!(
+            scene_shown(&mut shown),
+            scene_shown(&mut fresh),
+            "{edited:?}"
+        );
+    }
+    assert_eq!(shown.error(), None);
+}
+
+#[test]
 fn a_shrunk_column_grows_back_to_content_that_outgrew_it() {
     let mut h = Harness::inline(
         r##"local tall = ui.state("tall", 290)
