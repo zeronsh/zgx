@@ -1044,8 +1044,9 @@ declare extern type Element with
 	x: number?
 	y: number?
 	-- Keyboard focus to the element or its first focusable descendant
-	-- (shown ones only); whether it took.
-	function focus(self): boolean
+	-- (shown ones only), scrolled into view in the scroll views and lists
+	-- holding it (`{ scroll = false }`: left where it is); whether it took.
+	function focus(self, options: { scroll: boolean? }?): boolean
 	-- A list's row `i` (from 1) in view, placed by `align`: "start",
 	-- "center", "end" or "nearest" (the default, the least scrolling). A
 	-- list of measured rows measures those around it as it lands, so it
@@ -3715,6 +3716,10 @@ export type ScrollProps = {
 	-- edges (CSS's overscroll-behavior), the scroll views around it never
 	-- moving; "auto" (the default) hands what it can't scroll on to them.
 	overscroll: ("auto" | "contain")?,
+	-- What a focused control or a find keeps clear of scrolling into view
+	-- (CSS's scroll-padding): a composer or a bar floating over its edges.
+	-- Points: one number for every side, or { top, bottom, left, right }.
+	scroll_padding: (number | { top: number?, bottom: number?, left: number?, right: number? })?,
 }
 -- `ui.text { "Count: {count}", text_size = 18 }`: the text first.
 export type TextProps = {
@@ -15188,6 +15193,10 @@ export type ListProps = {
 	-- edges (CSS's overscroll-behavior), the scroll views around it never
 	-- moving; "auto" (the default) hands what it can't scroll on to them.
 	overscroll: ("auto" | "contain")?,
+	-- What a focused control or a find keeps clear of scrolling into view
+	-- (CSS's scroll-padding): a composer or a bar floating over its edges.
+	-- Points: one number for every side, or { top, bottom, left, right }.
+	scroll_padding: (number | { top: number?, bottom: number?, left: number?, right: number? })?,
 	-- Each row's own height instead, in order: a list, a state holding one
 	-- (a host's shared value costs the script nothing), or a function
 	-- returning one (tracked). The row count is its length.

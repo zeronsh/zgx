@@ -1334,9 +1334,14 @@ impl UserData for ElementUd {
         fields.add_field_method_get("y", |_, e| Ok(e.0.read(|s, id| s.bounds(id).y)));
     }
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        // Keyboard focus to the node or its first focusable descendant.
-        methods.add_method("focus", |_, e, ()| {
-            Ok(e.0.handle.get().is_some_and(NodeHandle::focus))
+        // Keyboard focus to the node or its first focusable descendant,
+        // scrolled into view; `{ scroll = false }` leaves it where it is.
+        methods.add_method("focus", |_, e, options: Option<mlua::Table>| {
+            let scroll = match options {
+                Some(options) => options.get::<Option<bool>>("scroll")?.unwrap_or(true),
+                None => true,
+            };
+            Ok(e.0.handle.get().is_some_and(|h| h.focus_with(scroll)))
         });
         // A list's row in view: `el:scroll_to_row(i, { align = "center" })`,
         // `i` from 1, `align` start, center, end or nearest (the default).

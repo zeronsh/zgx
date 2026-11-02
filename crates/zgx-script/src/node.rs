@@ -835,6 +835,8 @@ pub(crate) struct ListRare {
     pub(crate) at_end: Option<Signal<Value>>,
     /// `overscroll = "contain"`: a wheel over it stays with it.
     pub(crate) contain: bool,
+    /// `scroll_padding`: kept clear as a row's control scrolls into view.
+    pub(crate) scroll_padding: Option<zgx::scene::Insets>,
 }
 
 /// `ui.list`'s `on_end`, called as its end comes within `distance` points.
@@ -889,6 +891,8 @@ pub(crate) enum Kind {
         scrollbar: bool,
         /// `overscroll = "contain"`: a wheel over it stays with it.
         contain: bool,
+        /// `scroll_padding`: kept clear as what it holds scrolls into view.
+        padding: Option<Box<zgx::scene::Insets>>,
     },
     Text(Text),
     /// `ui.markdown_view { text }`: markdown drawn, parsed as the text
@@ -3217,6 +3221,7 @@ const LATE_FIELDS: &[&str] = &[
     "at_end",
     "on_paste",
     "overscroll",
+    "scroll_padding",
     "read_only",
     "selection_radius",
     "autocorrect",
@@ -3337,6 +3342,16 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                     }
                     _ => rare.at_end = Some(expect_state(&value, "`at_end`")?),
                 }
+            }
+        }
+        "scroll_padding" => {
+            let padding = scroll_padding(lua, value)?;
+            match &mut node.kind {
+                Kind::Scroll { padding: set, .. } => *set = Some(Box::new(padding)),
+                Kind::List { rare, .. } => {
+                    rare.get_or_insert_default().scroll_padding = Some(padding)
+                }
+                _ => {}
             }
         }
         "overscroll" => {
@@ -4568,6 +4583,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             scrollbar,
                             // Set as `fill` walks the table (`late_field`).
                             contain: false,
+                            padding: None,
                         },
                     ),
                     table.as_ref(),
@@ -6350,6 +6366,40 @@ pub(crate) fn retain(env: &Env, resource: Box<dyn Any>) {
     match &*scope {
         Some(scope) => scope.retained.borrow_mut().push(resource),
         None => env.retained.borrow_mut().push(resource),
+    }
+}
+
+/// `scroll_padding = 8` (every side) or `{ top, bottom, left, right }`
+/// (each 0 unless given): what a scroll view keeps clear as what it holds
+/// scrolls into view, as CSS's `scroll-padding`.
+fn scroll_padding(lua: &Lua, value: mlua::Value) -> mlua::Result<zgx::scene::Insets> {
+    let side = |n: f32| {
+        if n.is_finite() && n >= 0. {
+            Ok(n)
+        } else {
+            Err(mlua::Error::runtime(
+                "`scroll_padding` takes points, 0 or more",
+            ))
+        }
+    };
+    match value {
+        mlua::Value::Table(sides) => {
+            let get = |name: &str| -> mlua::Result<f32> {
+                side(sides.get::<Option<f32>>(name)?.unwrap_or(0.))
+            };
+            Ok(zgx::scene::Insets {
+                top: get("top")?,
+                right: get("right")?,
+                bottom: get("bottom")?,
+                left: get("left")?,
+            })
+        }
+        value => {
+            let all = side(lua.unpack::<f32>(value).map_err(|_| {
+                mlua::Error::runtime("`scroll_padding` is a number or { top, bottom, left, right }")
+            })?)?;
+            Ok(zgx::scene::Insets::all(all))
+        }
     }
 }
 

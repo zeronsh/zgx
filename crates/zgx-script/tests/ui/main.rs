@@ -43,6 +43,8 @@ mod layout_motion;
 mod lazy_ui;
 #[path = "../list_edges.rs"]
 mod list_edges;
+#[path = "../list_focus_scroll.rs"]
+mod list_focus_scroll;
 #[path = "../mentions.rs"]
 mod mentions;
 #[path = "../regions.rs"]

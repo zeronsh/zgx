@@ -10,7 +10,7 @@ ui.list(props: ListProps) -> Node
 
 ## scroll and scroll_x
 
-`scroll` stacks its children top to bottom and scrolls vertically; `scroll_x` lays them in a row and scrolls horizontally. The wheel scrolls the innermost viewport that can still move, and passes to an outer one at an edge; focus moving into a viewport (Tab, `el:focus()`) scrolls the focused node into view.
+`scroll` stacks its children top to bottom and scrolls vertically; `scroll_x` lays them in a row and scrolls horizontally. The wheel scrolls the innermost viewport that can still move, and passes to an outer one at an edge; focus moving into a viewport (Tab, a focus group's arrows, a press, `el:focus()`) scrolls it the least that shows the focused node, `scroll_padding` kept clear (`el:focus({ scroll = false })` leaves it where it is).
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |
@@ -20,6 +20,7 @@ ui.list(props: ListProps) -> Node
 | `follow` | `boolean` | `false` | stays at the end while the content grows, until scrolled away from it (a transcript, a log) |
 | `scrollbar` | `boolean` | `false` | an interactive scrollbar over the trailing edge: drag it, click its track to page; overlay style (hidden until scrolling) where the system has overlay scrollbars |
 | `overscroll` | `"auto"` \| `"contain"` | `"auto"` | `"contain"`: a wheel or trackpad gesture that starts over it stays with it at its edges, momentum included, as CSS's `overscroll-behavior: contain`: the scroll views around it neither move nor stretch (a transcript inside a page). `"auto"` hands what it can't scroll on to them |
+| `scroll_padding` | `number` \| `{ top, bottom, left, right }` | `0` | points kept clear inside its edges as a focused control scrolls into view, as CSS's `scroll-padding`: what floats over them (a composer over the bottom, a title bar over the top) doesn't cover it. One number for every side; a side not given is 0 |
 | `w`, `h` | `Length` | `320` by `240` when nothing else sizes it | a stretching parent, `grow`, `w`/`h` or `w_full` size it instead |
 | `gap`, `items`, `p`… | | | lay out the content as a column's (a row's for `scroll_x`) |
 | `overflow` | `Overflow` | `"hidden"` | |
@@ -46,6 +47,7 @@ A child with `sticky_top` holds at the top as the view scrolls past it, inside i
 | `offset` | `State<number>` | its own | the scroll position in points, as `scroll`'s |
 | `scrollbar` | `boolean` | `false` | an interactive scrollbar, as `scroll`'s |
 | `overscroll` | `"auto"` \| `"contain"` | `"auto"` | as `scroll`'s: `"contain"` keeps a gesture over the list with it at its ends |
+| `scroll_padding` | `number` \| `{ top, bottom, left, right }` | `0` | as `scroll`'s: focus moving to a control in a row (Tab past the rows in view, onto one built beyond them) scrolls the list to it, the offset following, this much kept clear |
 | `keyboard` | `boolean` | `false` | its rows are one Tab stop, landing on the row last focused, and the arrows, Page Up/Down, Home and End move focus through every row (mounting it), as a list box's do; typing jumps to the next row whose text starts with what was typed (letters within 750 ms build a prefix, the same letter again cycles), rows not mounted read by `row_text`. A row with `role = "option"` (or `"listitem"`) takes the focus itself, so its `on_focus` can open it (selection following focus); other controls in a row keep their own keys |
 | `on_end` | `() -> ()` | none | called as its end comes within `end_distance` points of the bottom of the view (an infinite scroll's next page, `ui.paged`'s `more`): once each time, and again once its rows have grown; while its rows are shorter than the view too, until they fill it or a call adds none. Watched in Rust: no script runs while it scrolls short of it |
 | `end_distance` | `number` | `200` | how far from the end `on_end` is called |

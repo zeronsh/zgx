@@ -637,6 +637,8 @@ struct State {
     disabled_observers: crate::scene::NodeMap<Signal<bool>>,
     next: u64,
     focused: Option<NodeId>,
+    /// Focus moving without scrolling into view (`focus_in_place`).
+    in_place: bool,
     captured: Option<NodeId>,
     capture_button: Option<PointerButton>,
     /// The hovered node (the pointer's hit target) and its ancestors, up to
@@ -1356,6 +1358,19 @@ impl InputDispatcher {
     /// The node with keyboard focus, if any.
     pub fn focused(&self) -> Option<NodeId> {
         self.state.borrow().focused
+    }
+    /// `focus`, the scroll views holding `target` left where they are (the
+    /// web's `preventScroll`): a script's `focus({ scroll = false })`.
+    pub fn focus_in_place(&self, scene: &Rc<RefCell<Scene>>, target: Option<NodeId>) -> bool {
+        let was = std::mem::replace(&mut self.state.borrow_mut().in_place, true);
+        let focused = self.focus(scene, target);
+        self.state.borrow_mut().in_place = was;
+        focused
+    }
+    /// Whether focus moving now scrolls into view: not under
+    /// `focus_in_place`.
+    pub fn focus_scrolls(&self) -> bool {
+        !self.state.borrow().in_place
     }
     /// The node under the pointer that takes input (its hit target), while
     /// it still listens.
