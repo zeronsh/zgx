@@ -802,6 +802,13 @@ impl Page {
                 // the app's, as on macOS and Linux: `WebView::find` finds.
                 if let Ok(settings) = settings.cast::<ICoreWebView2Settings3>() {
                     settings.SetAreBrowserAcceleratorKeysEnabled(false)?;
+                    // `ZGX_WEB_SETTINGS=1`: the setting as WebView2 reads it
+                    // back, on stderr (`windows_webview_smoke.py
+                    // --no-foreground` checks it, sending no key).
+                    if std::env::var_os("ZGX_WEB_SETTINGS").is_some() {
+                        let on = flag(|v| settings.AreBrowserAcceleratorKeysEnabled(v));
+                        eprintln!("WEB_SETTINGS browser_keys={on}");
+                    }
                 }
                 if let Some(agent) = &options.user_agent
                     && let Ok(settings) = settings.cast::<ICoreWebView2Settings2>()
@@ -1040,18 +1047,24 @@ impl Page {
             // or cancel (`DownloadStarting` below). (WebView2 also holds a
             // page's second download started without a gesture back until
             // it navigates, asking nothing: that is its own.)
+            // `ZGX_WEB_SETTINGS=1` also tells each permission asked and each
+            // download started, on stderr (`windows_webview_smoke.py`).
+            let report = std::env::var_os("ZGX_WEB_SETTINGS").is_some();
             let _ = view.add_PermissionRequested(
-                &PermissionRequestedEventHandler::create(Box::new(|_, args| {
+                &PermissionRequestedEventHandler::create(Box::new(move |_, args| {
                     if let Some(args) = args {
                         let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
                         let _ = args.PermissionKind(&mut kind);
-                        let _ = args.SetState(
-                            if kind == COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS {
-                                COREWEBVIEW2_PERMISSION_STATE_ALLOW
-                            } else {
-                                COREWEBVIEW2_PERMISSION_STATE_DENY
-                            },
-                        );
+                        let allow =
+                            kind == COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS;
+                        if report {
+                            eprintln!("WEB_PERMISSION kind={} allowed={allow}", kind.0);
+                        }
+                        let _ = args.SetState(if allow {
+                            COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                        } else {
+                            COREWEBVIEW2_PERMISSION_STATE_DENY
+                        });
                     }
                     Ok(())
                 })),
@@ -1068,6 +1081,9 @@ impl Page {
                         let _ = args.SetHandled(true);
                         let operation = args.DownloadOperation()?;
                         let suggested = take(|v| args.ResultFilePath(v));
+                        if report {
+                            eprintln!("WEB_DOWNLOAD_STARTING {}", take(|v| operation.Uri(v)));
+                        }
                         let request = zgx::web_view::DownloadRequest::new(
                             take(|v| operation.Uri(v)),
                             std::path::Path::new(&suggested)
