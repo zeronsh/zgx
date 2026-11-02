@@ -62,6 +62,14 @@ class WarmTests(unittest.TestCase):
         self.assertEqual(len(caches), 2)
         self.assertEqual(len({len(c) for c in caches}), 1)
 
+    def test_a_scenes_tunables_hold_under_every_placement(self):
+        env = {'TICKS': '200', 'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0'}
+        alone = gate.environment(self.head, env, None)
+        placed = gate.environment(self.head, env, None, 'glibc.malloc.top_pad=1048576')
+        self.assertEqual(alone['GLIBC_TUNABLES'], 'glibc.malloc.mxfast=0')
+        self.assertEqual(placed['GLIBC_TUNABLES'], 'glibc.malloc.mxfast=0:glibc.malloc.top_pad=1048576')
+        self.assertNotIn('ZGUI_GLIBC_TUNABLES', placed)
+
     def test_a_failed_warm_up_is_the_gates_failure(self):
         failed = SimpleNamespace(returncode=1, stdout='', stderr='boom')
         with patch.object(gate.subprocess, 'run', return_value=failed):
