@@ -517,10 +517,20 @@ pub fn decoded_bytes() -> usize {
         })
         .sum()
 }
-/// Who to tell that pixels a renderer waited for are decoded: a host draws
-/// again.
+/// Who to tell that pixels a renderer waited for are decoded, or a
+/// shader's pipeline it went without is compiled: a host draws again.
 pub fn set_decoded_wake(wake: impl Fn() + Send + Sync + 'static) {
     *WAKE.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(wake));
+}
+/// Something a frame went without is ready, off the main thread (a kept
+/// file's pixels, a shader's pipeline): whoever waited draws again, through
+/// `set_decoded_wake`'s wake. Renderer plumbing.
+#[doc(hidden)]
+pub fn wake_waiting() {
+    let wake = WAKE.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    if let Some(wake) = wake {
+        wake();
+    }
 }
 type Wake = Arc<dyn Fn() + Send + Sync>;
 static WAKE: std::sync::Mutex<Option<Wake>> = std::sync::Mutex::new(None);

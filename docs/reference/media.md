@@ -169,5 +169,5 @@ return ui.column {
 - An image is as large as its pixels in points unless sized; give it a `w` and `h` (or `aspect` and one of them).
 - `draw` runs again only for its size and the state it read; reading state through `peek` (or outside `draw`) does not redraw it. Keep it cheap: it runs in the script for every change it follows.
 - A drawn path cannot grow (`a drawn path cannot be extended`): build paths whole, then draw them.
-- `ui.shader` checks the WGSL when it is made: a source that does not compile is a script error with its line. A shader is compiled once per source and `fps`.
+- `ui.shader` checks the WGSL when it is made: a source that does not compile is a script error with its line. A shader is compiled once per source and `fps`. Its pipeline compiles from then on, off the frame, on a thread of its own: declared ahead of its first draw (at a module's top, say), it is ready by then. A frame that draws it before it is ready doesn't wait: the box shows its `bg` colour meanwhile and the window draws again once the pipeline is ready (a compile can take 70 to 360 ms on macOS).
 - A mask's bitmap is sampled without smoothing, which suits dithers and sprites; scale it with `w` and `h`, not by making it larger.
