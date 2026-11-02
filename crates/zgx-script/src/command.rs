@@ -16,7 +16,7 @@ use std::{
     collections::HashMap,
     rc::{Rc, Weak},
 };
-use zgx::reactive::{Runtime, Signal};
+use zgx::reactive::{Effect, Runtime, Signal};
 
 /// A command as the application shows it.
 #[derive(Clone, Debug, PartialEq)]
@@ -34,14 +34,15 @@ pub struct Command {
     pub separator: bool,
 }
 
-/// A plugin command's shortcut zgx dropped because a command declared
-/// before it holds the same one (`Shift+Cmd+D` is `cmd+shift+d`), as
+/// A command's shortcut zgx dropped because a command declared before it
+/// holds the same one (`Shift+Cmd+D` is `cmd+shift+d`), as
 /// `ScriptHost::dropped_shortcuts` reports it: the command stays, without
-/// the key, so the app can tell the plugin's author why.
+/// the key, so the app can tell the plugin's author (or the person
+/// rebinding) why.
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct DroppedShortcut {
-    /// The plugin whose command lost the key.
+    /// The plugin whose command lost the key; empty for the app's.
     pub plugin: String,
     /// The command's id (`<plugin>/<id>`).
     pub command: String,
@@ -56,8 +57,49 @@ pub struct DroppedShortcut {
 type Runner = (Function, Weak<Vm>);
 /// A declared command, its runner and the plugin that declared it.
 type Pending = (Command, Option<Runner>, Option<Rc<str>>);
+/// A shortcut that follows what it reads (`key = state` or a function):
+/// the list is published again as it changes, no reload needed.
+#[derive(Clone)]
+enum KeySource {
+    State(Signal<crate::Value>),
+    Function(Function, Weak<Vm>),
+}
+impl KeySource {
+    /// The shortcut now (tracked: read in the commands' effect).
+    fn read(&self) -> Option<String> {
+        match self {
+            KeySource::State(state) => match state.get() {
+                crate::Value::Str(key) if !key.is_empty() => Some(key.to_string()),
+                _ => None,
+            },
+            KeySource::Function(f, vm) => {
+                let vm = vm.upgrade()?;
+                match vm.call::<Option<String>>(f, ()) {
+                    Ok(key) => key.filter(|key| !key.is_empty()),
+                    Err(error) => {
+                        vm.report(error);
+                        None
+                    }
+                }
+            }
+        }
+    }
+}
+/// What a load declared, kept to publish again as dynamic shortcuts change.
+struct Declared {
+    commands: Vec<(Command, Option<Rc<str>>)>,
+    /// The commands whose shortcut follows what it reads, by index.
+    keys: Vec<(usize, KeySource)>,
+    reserved: Vec<String>,
+}
 pub(crate) struct Commands {
     pending: RefCell<Vec<Pending>>,
+    /// Pending commands' dynamic shortcuts, by id.
+    pending_keys: RefCell<Vec<(String, KeySource)>>,
+    /// While a load's commands have dynamic shortcuts: what publishes them
+    /// again as those change.
+    following: RefCell<Option<Effect>>,
+    runtime: Runtime,
     /// The ids of the commands declared `reserved` in the load under way.
     pending_reserved: RefCell<Vec<String>>,
     runners: RefCell<HashMap<String, Runner>>,
@@ -72,6 +114,9 @@ impl Commands {
     pub fn new(runtime: &Runtime) -> Self {
         Self {
             pending: RefCell::default(),
+            pending_keys: RefCell::default(),
+            following: RefCell::default(),
+            runtime: runtime.clone(),
             pending_reserved: RefCell::default(),
             runners: RefCell::default(),
             dropped: RefCell::default(),
@@ -82,31 +127,83 @@ impl Commands {
     /// A load begins: what it declares replaces what is published.
     pub fn begin(&self) {
         self.pending.borrow_mut().clear();
+        self.pending_keys.borrow_mut().clear();
         self.pending_reserved.borrow_mut().clear();
     }
-    /// The load succeeded: publish what it declared.
-    pub fn publish(&self) {
-        let mut pending = std::mem::take(&mut *self.pending.borrow_mut());
-        let dropped = match pending.iter().any(|(_, _, plugin)| plugin.is_some()) {
+    /// The load succeeded: publish what it declared, and again whenever a
+    /// shortcut that follows a state changes.
+    pub fn publish(self: &Rc<Self>) {
+        let pending = std::mem::take(&mut *self.pending.borrow_mut());
+        let mut dynamic = std::mem::take(&mut *self.pending_keys.borrow_mut());
+        let mut runners = HashMap::new();
+        let mut declared = Declared {
+            commands: Vec::with_capacity(pending.len()),
+            keys: Vec::new(),
+            reserved: std::mem::take(&mut *self.pending_reserved.borrow_mut()),
+        };
+        for (command, runner, plugin) in pending {
+            if let Some(runner) = runner {
+                runners.insert(command.id.clone(), runner);
+            }
+            if !dynamic.is_empty()
+                && let Some(at) = dynamic.iter().position(|(id, _)| *id == command.id)
+            {
+                let (_, source) = dynamic.swap_remove(at);
+                declared.keys.push((declared.commands.len(), source));
+            }
+            declared.commands.push((command, plugin));
+        }
+        *self.runners.borrow_mut() = runners;
+        // The last load's following, if any, is done with.
+        drop(self.following.borrow_mut().take());
+        if declared.keys.is_empty() {
+            // Published once, as declared.
+            let pending = declared
+                .commands
+                .into_iter()
+                .map(|(command, plugin)| (command, None, plugin))
+                .collect();
+            self.publish_list(pending, &declared.reserved, false);
+            return;
+        }
+        let commands = Rc::downgrade(self);
+        let effect = self.runtime.effect(move || {
+            if let Some(commands) = commands.upgrade() {
+                commands.publish_declared(&declared);
+            }
+        });
+        *self.following.borrow_mut() = Some(effect);
+    }
+    /// Publish `declared`, its dynamic shortcuts read now. A shortcut a
+    /// command before it holds is dropped (and said so in `dropped`): the
+    /// app's first, then each plugin's, so neither a plugin nor a rebinding
+    /// gives the menu bar a key twice.
+    fn publish_declared(&self, declared: &Declared) {
+        let mut pending: Vec<Pending> = declared
+            .commands
+            .iter()
+            .map(|(command, plugin)| (command.clone(), None, plugin.clone()))
+            .collect();
+        for (at, source) in &declared.keys {
+            pending[*at].0.key = source.read();
+        }
+        self.publish_list(pending, &declared.reserved, true);
+    }
+    /// Publish `pending`. A `rebinding`'s key may be one an earlier command
+    /// holds: the app's own are checked then too (as declared, they are the
+    /// app's to keep apart).
+    fn publish_list(&self, mut pending: Vec<Pending>, reserved: &[String], rebinding: bool) {
+        let dropped = match rebinding || pending.iter().any(|(_, _, plugin)| plugin.is_some()) {
             false => Vec::new(),
-            true => drop_taken(&mut pending),
+            true => drop_taken(&mut pending, rebinding),
         };
         if *self.dropped.borrow() != dropped {
             *self.dropped.borrow_mut() = dropped;
         }
-        let mut runners = HashMap::new();
-        let mut list = Vec::with_capacity(pending.len());
-        for (command, runner, _) in pending {
-            if let Some(runner) = runner {
-                runners.insert(command.id.clone(), runner);
-            }
-            list.push(command);
-        }
-        *self.runners.borrow_mut() = runners;
-        let ids = std::mem::take(&mut *self.pending_reserved.borrow_mut());
+        let list: Vec<Command> = pending.into_iter().map(|(command, _, _)| command).collect();
         let reserved: Vec<String> = list
             .iter()
-            .filter(|command| ids.contains(&command.id))
+            .filter(|command| reserved.contains(&command.id))
             .filter_map(|command| command.key.clone())
             .collect();
         if self.list.with_untracked(|old| *old != list) {
@@ -115,6 +212,20 @@ impl Commands {
         if self.reserved.with_untracked(|old| *old != reserved) {
             self.reserved.set(reserved);
         }
+    }
+    /// The command holding shortcut `keys` now, if any.
+    pub fn owner(&self, keys: &str) -> Option<String> {
+        let wanted = shortcut(keys);
+        self.list.with_untracked(|list| {
+            list.iter()
+                .find(|command| {
+                    command
+                        .key
+                        .as_deref()
+                        .is_some_and(|key| shortcut(key) == wanted)
+                })
+                .map(|command| command.id.clone())
+        })
     }
     /// Run the command `id`; whether one ran.
     pub fn run(&self, id: &str) -> bool {
@@ -136,14 +247,32 @@ impl Commands {
 /// app's shortcuts first, then each plugin's not yet taken. What was taken.
 #[cold]
 #[inline(never)]
-fn drop_taken(pending: &mut [Pending]) -> Vec<DroppedShortcut> {
+fn drop_taken(pending: &mut [Pending], apps_too: bool) -> Vec<DroppedShortcut> {
     // Shortcut → the id of its command and the plugin that declared it.
-    let mut taken: HashMap<String, (String, Option<Rc<str>>)> = pending
-        .iter()
-        .filter(|(_, _, plugin)| plugin.is_none())
-        .filter_map(|(c, _, _)| Some((shortcut(c.key.as_deref()?), (c.id.clone(), None))))
-        .collect();
+    let mut taken: HashMap<String, (String, Option<Rc<str>>)> = HashMap::new();
     let mut dropped = Vec::new();
+    // The app's first, in order: one rebound to a key an earlier one has
+    // loses it (`apps_too`; otherwise both keep it, as declared).
+    for (command, _, plugin) in pending.iter_mut() {
+        let (None, Some(key)) = (&plugin, &command.key) else {
+            continue;
+        };
+        match taken.entry(shortcut(key)) {
+            std::collections::hash_map::Entry::Vacant(free) => {
+                free.insert((command.id.clone(), None));
+            }
+            std::collections::hash_map::Entry::Occupied(_) if !apps_too => {}
+            std::collections::hash_map::Entry::Occupied(held) => {
+                dropped.push(DroppedShortcut {
+                    plugin: String::new(),
+                    command: command.id.clone(),
+                    key: command.key.take().unwrap_or_default(),
+                    reason: format!("taken by the command `{}`", held.get().0),
+                    holder: held.get().0.clone(),
+                });
+            }
+        }
+    }
     for (command, _, plugin) in pending.iter_mut() {
         let (Some(plugin), Some(key)) = (plugin, &command.key) else {
             continue;
@@ -187,6 +316,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
         "shortcut_text",
         lua.create_function(|_, keys: String| Ok(crate::lower::shortcut_label(&keys)))?,
     )?;
+
     // Made once: a `&str` key is a new string pushed each declaration.
     let reserved_key = lua.create_string("reserved")?;
     ui.set(
@@ -227,7 +357,21 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
             let run: Function = table
                 .get::<Option<Function>>("run")?
                 .ok_or_else(|| mlua::Error::runtime(format!("ui.command `{id}` needs `run`")))?;
-            let key = table.get::<Option<String>>("key")?;
+            // A shortcut, or a state or function saying it: one that
+            // follows what it reads is published again as that changes.
+            let (key, source) = match table.get::<mlua::Value>("key")? {
+                mlua::Value::Nil => (None, None),
+                mlua::Value::String(key) => (Some(key.to_str()?.to_string()), None),
+                mlua::Value::Function(f) => (None, Some(KeySource::Function(f, env.vm.clone()))),
+                state => match crate::node::state_of(&state) {
+                    Some(state) => (None, Some(KeySource::State(state))),
+                    None => {
+                        return Err(mlua::Error::runtime(format!(
+                            "ui.command `{id}`: `key` is a shortcut (\"cmd+k\"), a state or a function"
+                        )));
+                    }
+                },
+            };
             // The app's alone to keep: a plugin's would take a key from
             // every page and terminal.
             let reserved = table.get::<Option<bool>>(&reserved_key)?.unwrap_or(false);
@@ -246,6 +390,9 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
             if reserved {
                 commands.pending_reserved.borrow_mut().push(id.clone());
             }
+            if let Some(source) = source {
+                commands.pending_keys.borrow_mut().push((id.clone(), source));
+            }
             pending.push((
                 Command {
                     id,
@@ -259,5 +406,15 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
             ));
             Ok(())
         })?,
+    )
+}
+
+/// Installs `ui.shortcut_owner(keys)`: the id of the command (the app's or
+/// a plugin's) holding a shortcut now, for a rebinding to show a conflict.
+/// Apart from `ui.command`: made only for a script that asks.
+pub(crate) fn install_owner(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Result<()> {
+    ui.set(
+        "shortcut_owner",
+        lua.create_function(move |_, keys: String| Ok(commands.owner(&keys)))?,
     )
 }

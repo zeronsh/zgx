@@ -47,6 +47,66 @@ fn commands_are_published_after_a_load_and_run_by_id() {
 }
 
 #[test]
+fn a_shortcut_following_a_state_is_rebound_without_a_reload() {
+    // Settings' Shortcuts: rebinding applies at once, everywhere.
+    let mut h = Harness::inline(
+        r##"local keymap = ui.state("keymap", { run = "cmd+j" })
+        local count = ui.state("count", 0)
+        local find_key = ui.state("find_key", "")
+        ui.command { id = "run", title = "Run", key = function() return keymap:get().run end,
+            run = function() count:add(1) end }
+        ui.command { id = "copy", title = "Copy", key = "cmd+c", run = function() end }
+        ui.command { id = "find", title = "Find", key = find_key, run = function() end }
+        return ui.column {
+            ui.button { id = "to-l", w = 20, h = 20, on_click = function() keymap:set_key("run", "cmd+l") end },
+            ui.button { id = "to-c", w = 20, h = 20, on_click = function() keymap:set_key("run", "cmd+c") end },
+            ui.button { id = "find-f", w = 20, h = 20, on_click = function() find_key:set("cmd+f") end },
+            ui.text { id = "owner", function()
+                keymap:get()
+                return `{ui.shortcut_owner("cmd+l") or "none"} {ui.shortcut_owner("Shift+Cmd+J") or "none"}`
+            end },
+        }"##,
+    );
+    let key = |h: &Harness, id: &str| {
+        h.host
+            .commands()
+            .get()
+            .iter()
+            .find(|c| c.id == id)
+            .and_then(|c| c.key.clone())
+    };
+    assert_eq!(key(&h, "run").as_deref(), Some("cmd+j"));
+    assert_eq!(key(&h, "find"), None);
+    h.click("to-l");
+    h.settle();
+    // Published again: the menu's key equivalent follows, no reload.
+    assert_eq!(key(&h, "run").as_deref(), Some("cmd+l"));
+    assert_eq!(h.text("owner"), "run none");
+    assert!(h.host.run_command("run"));
+    // A state for a key, too.
+    h.click("find-f");
+    h.settle();
+    assert_eq!(key(&h, "find").as_deref(), Some("cmd+f"));
+    // Onto another command's key: the earlier keeps it, and the menu bar
+    // never has it twice; the drop is reported.
+    h.click("to-c");
+    h.settle();
+    assert_eq!(key(&h, "run").as_deref(), Some("cmd+c"));
+    assert_eq!(key(&h, "copy"), None);
+    let dropped = h.host.dropped_shortcuts();
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    assert_eq!(
+        (
+            dropped[0].command.as_str(),
+            dropped[0].holder.as_str(),
+            dropped[0].plugin.as_str()
+        ),
+        ("copy", "run", "")
+    );
+    assert_eq!(h.error(), None);
+}
+
+#[test]
 fn a_failed_load_keeps_the_published_commands() {
     let runtime = zgx::reactive::Runtime::new();
     let dir = std::env::temp_dir().join(format!("zgx-commands-{}", std::process::id()));
