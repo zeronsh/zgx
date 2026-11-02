@@ -1862,6 +1862,11 @@ struct ColdMaps {
     /// Gradient masks (`set_mask_gradient`), each with the size its mask
     /// image was last made at.
     mask_gradients: NodeMap<(crate::decoration::Gradient, (f32, f32))>,
+    /// The languages nodes say their text is in (`set_language`), for what
+    /// they hold.
+    languages: NodeMap<Arc<str>>,
+    /// Counts changes to `languages` (`language_revision`).
+    language_revision: u64,
 }
 /// A node painted outside its parent's fade (`Scene::set_outside_fade`).
 #[derive(Clone, Copy, Debug)]
@@ -2941,6 +2946,10 @@ pub struct Scene {
     /// Nodes with `Style::relative`: none keeps every absolute child placed
     /// by its parent, with no ancestor walk.
     relative_count: usize,
+    /// A node says a language (`set_language`): a font set is then given
+    /// the one its text is in. Kept out of the cold maps so that a text in
+    /// a scene with none pays one test for it (`set_font`).
+    languages: bool,
     /// Two counts in one word, each a single test: below `SPECIAL_UNIT`,
     /// the nodes whose children's changes and styles need looking at
     /// (contents nodes, zoomed ones and parents painting raised children in
@@ -3155,6 +3164,7 @@ impl Scene {
             syncing: 0,
             overfull: Vec::new(),
             relative_count: 0,
+            languages: false,
             contents_count: 0,
             escaped: Vec::new(),
             #[cfg(test)]
@@ -5465,11 +5475,44 @@ impl Scene {
         if self.node(id).font == font && self.node(id).align_logical == logical {
             return;
         }
+        // The language its text is in, where it or what holds it says one
+        // (`language_features`): looked at only for a font that changed (a
+        // text that took one compares unequal until it has taken it again).
+        // Most text is in no scene that says a language.
+        if self.languages {
+            return self.set_font_in_language(id, font, logical);
+        }
+        self.store_font(id, font, logical);
+    }
+    /// `font` is node `id`'s, aligned as `logical` says (`set_font`).
+    #[inline(always)]
+    fn store_font(
+        &mut self,
+        id: NodeId,
+        font: crate::text_layout::FontStyle,
+        logical: Option<crate::text_layout::TextAlign>,
+    ) {
         self.damage_subtree(id);
         self.node_mut(id).align_logical = logical;
         self.node_mut(id).font = font;
         self.invalidate(id, PAINT);
         self.invalidate_layout(id);
+    }
+    /// `set_font` in a scene where a node says a language: `font` given
+    /// the one its text is in (`language_features`) first.
+    #[cold]
+    #[inline(never)]
+    fn set_font_in_language(
+        &mut self,
+        id: NodeId,
+        mut font: crate::text_layout::FontStyle,
+        logical: Option<crate::text_layout::TextAlign>,
+    ) {
+        font.features = self.language_features(id, &font.features);
+        if self.node(id).font == font && self.node(id).align_logical == logical {
+            return;
+        }
+        self.store_font(id, font, logical);
     }
     /// Shape and measure text with `shaper` (the renderer's font system);
     /// text lays out and paints again.
@@ -6506,6 +6549,7 @@ impl Scene {
                 || cold.contained.contains_key(&id)
                 || cold.mask_gradients.contains_key(&id)
                 || cold.text_gradients.contains_key(&id)
+                || cold.languages.contains_key(&id)
         }) || self.has_own_text_shadows(id);
         self.set_special(id, COLD, cold);
     }
@@ -6618,6 +6662,145 @@ impl Scene {
     /// What slider `id`'s value moves by (`set_numeric_step`), if said.
     pub fn numeric_step(&self, id: NodeId) -> Option<f64> {
         self.cold.as_ref()?.steps.get(&id).copied()
+    }
+    /// Whether any node says a language (`set_language`).
+    fn has_languages(&self) -> bool {
+        self.languages
+    }
+    /// `features`, a text's of node `id`, with the language its text is in:
+    /// their own where they say one (a span's `lang`), else the nearest of
+    /// `id` and its ancestors' (`set_language`), marked inherited to be
+    /// taken again when that changes; without the mark of a language alone
+    /// (`FontFeatures::resolved`).
+    #[cold]
+    #[inline(never)]
+    fn language_features(
+        &self,
+        id: NodeId,
+        features: &crate::text_layout::FontFeatures,
+    ) -> crate::text_layout::FontFeatures {
+        let features = features.resolved();
+        if features.han() != 0 && !features.inherited_han() {
+            return features;
+        }
+        let han = self.language(id).map_or(0, |language| {
+            crate::text_layout::FontFeatures::han_of(language)
+        });
+        features.with_inherited_han(han)
+    }
+    /// `rich`, paragraph `id`'s, its runs taking the language their text is
+    /// in (`language_features`), where any node says one. (Runs as a
+    /// paragraph builds them carry no inherited language: one a language
+    /// gave is taken away with it, `retake_languages`.)
+    pub(crate) fn rich_with_languages(
+        &self,
+        id: NodeId,
+        rich: std::sync::Arc<crate::rich_text::RichText>,
+    ) -> std::sync::Arc<crate::rich_text::RichText> {
+        if !self.has_languages() {
+            return rich;
+        }
+        self.relayered(id, &rich).map_or(rich, std::sync::Arc::new)
+    }
+    /// `rich` with its runs' languages taken again, if any changed.
+    #[cold]
+    #[inline(never)]
+    fn relayered(
+        &self,
+        id: NodeId,
+        rich: &crate::rich_text::RichText,
+    ) -> Option<crate::rich_text::RichText> {
+        let mut changed = false;
+        let runs: Vec<_> = rich
+            .runs()
+            .iter()
+            .map(|run| {
+                let features = self.language_features(id, &run.font.features);
+                changed |= features != run.font.features;
+                let mut run = run.clone();
+                run.font.features = features;
+                run
+            })
+            .collect();
+        changed.then(|| {
+            crate::rich_text::RichText::new(rich.text(), runs)
+                .expect("the same runs")
+                .with_options(rich.options())
+        })
+    }
+    /// After `id`'s language changed: the text it holds takes its language
+    /// again (`language_features`). Only on a change of a language.
+    #[cold]
+    #[inline(never)]
+    fn retake_languages(&mut self, id: NodeId) {
+        let mut pending = vec![id];
+        while let Some(node) = pending.pop() {
+            pending.extend_from_slice(self.children(node));
+            match self.kind(node) {
+                NodeKind::Text { .. } => {
+                    let font = self.node(node).font.clone();
+                    let features = self.language_features(node, &font.features);
+                    if features != font.features {
+                        let mut font = font;
+                        font.features = features;
+                        self.set_font(node, font);
+                    }
+                }
+                NodeKind::RichText { text } => {
+                    if let Some(rich) = self.relayered(node, text) {
+                        self.set_kind(
+                            node,
+                            NodeKind::RichText {
+                                text: std::sync::Arc::new(rich),
+                            },
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    /// `id` and what it holds say their text is in `language` (HTML's
+    /// `lang`, a BCP 47 tag), or nothing of their own with `None`: what
+    /// assistive technology reads it in (`language`). Its fonts come with its
+    /// style (`Styled::lang`).
+    #[cold]
+    #[inline(never)]
+    pub fn set_language(&mut self, id: NodeId, language: Option<Arc<str>>) {
+        let held = (self.cold.as_ref()).and_then(|cold| cold.languages.get(&id));
+        if held == language.as_ref() || !self.contains(id) {
+            return;
+        }
+        let maps = self.cold.get_or_insert_default();
+        match language {
+            Some(language) => maps.languages.insert(id, language),
+            None => maps.languages.remove(&id),
+        };
+        maps.language_revision += 1;
+        self.languages = !maps.languages.is_empty();
+        self.sync_cold(id);
+        self.retake_languages(id);
+    }
+    /// The language `id`'s text is in: as the nearest of it and its
+    /// ancestors that says (`set_language`); none where none does.
+    pub fn language(&self, id: NodeId) -> Option<&Arc<str>> {
+        let cold = self
+            .cold
+            .as_ref()
+            .filter(|cold| !cold.languages.is_empty())?;
+        let mut at = Some(id).filter(|id| self.contains(*id));
+        while let Some(node) = at {
+            if let Some(language) = cold.languages.get(&node) {
+                return Some(language);
+            }
+            at = self.node(node).parent;
+        }
+        None
+    }
+    /// Counts changes to what nodes say their text's language is
+    /// (`set_language`): unchanged, every node's `language` is as it was.
+    pub fn language_revision(&self) -> u64 {
+        self.cold.as_ref().map_or(0, |cold| cold.language_revision)
     }
     /// The width text `id` wraps at in a box `width` wide, and how far right
     /// of the box's left edge its lines start: `(width, 0)`, unless its lines
@@ -7017,6 +7200,10 @@ impl Scene {
             maps.contained.remove(&id);
             maps.mask_gradients.remove(&id);
             maps.text_gradients.remove(&id);
+            if maps.languages.remove(&id).is_some() {
+                maps.language_revision += 1;
+                self.languages = !maps.languages.is_empty();
+            }
         }
     }
     /// Hit `id` and what it holds where an animation is taking it, not
