@@ -143,3 +143,44 @@ return ui.column {
     assert_eq!(h.text("offset"), "950");
     assert_eq!(h.error(), None);
 }
+
+#[test]
+fn a_live_scroll_padding_follows_the_composer_as_it_grows() {
+    // The padding from a state: the composer grows taller after the list is
+    // made, and a row tabbed to comes in above its new top.
+    let mut h = Harness::inline(
+        r#"
+local composer = ui.state("composer", 80)
+ui.command { id = "grow", run = function() composer:set(200) end }
+local rows = {}
+for i = 1, 40 do rows[i] = { id = i } end
+return ui.overlay {
+    w = 400, h = 600,
+    ui.list {
+        id = "list", w = 400, h = 600, height = 50,
+        data = ui.state("rows", rows),
+        key = function(row) return row.id end,
+        scroll_padding = function() return { bottom = composer:get() } end,
+        row = function(row)
+            return ui.button { id = `b{row.id}`, w = 100, h = 50, tostring(row.id) }
+        end,
+    },
+}
+"#,
+    );
+    h.frames(2);
+    assert!(h.host.run_command("grow"));
+    h.frames(2);
+    h.click("b1");
+    // Tab down the rows: each one shown above the 200-point composer.
+    for step in 0..12 {
+        h.key(Key::Tab);
+        h.frames(1);
+        let (top, bottom) = focused(&mut h);
+        assert!(
+            top >= -0.01 && bottom <= 400.01,
+            "step {step}: at {top}..{bottom}"
+        );
+    }
+    assert_eq!(h.error(), None);
+}

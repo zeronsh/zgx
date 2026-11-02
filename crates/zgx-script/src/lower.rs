@@ -2539,7 +2539,7 @@ fn kind_view(
                 view
             };
             let view = match padding {
-                Some(padding) => view.scroll_padding(**padding),
+                Some(padding) => with_scroll_padding(view, padding, vm),
                 None => view,
             };
             if *scrollbar {
@@ -6665,8 +6665,8 @@ fn list_edges(mut list: View, rare: &crate::node::ListRare, vm: &Rc<Vm>) -> View
     if rare.contain {
         list = list.overscroll_contain();
     }
-    if let Some(padding) = rare.scroll_padding {
-        list = list.scroll_padding(padding);
+    if let Some(padding) = &rare.scroll_padding {
+        list = with_scroll_padding(list, padding, vm);
     }
     if let Some(at_end) = &rare.at_end {
         let at_end = at_end.clone();
@@ -6712,6 +6712,21 @@ fn list_heights(
     rows
 }
 
+/// `scroll_padding`: as given, or followed (a state's, a function's).
+fn with_scroll_padding(view: View, padding: &crate::node::ScrollPadding, vm: &Rc<Vm>) -> View {
+    match padding {
+        crate::node::ScrollPadding::Fixed(insets) => view.scroll_padding(*insets),
+        crate::node::ScrollPadding::Live(source) => {
+            let (source, vm) = (source.clone(), vm.clone());
+            view.scroll_padding_with(move || {
+                crate::node::scroll_padding_now(&vm, &source).unwrap_or_else(|error| {
+                    vm.report(error);
+                    zgx::scene::Insets::default()
+                })
+            })
+        }
+    }
+}
 /// A list's scrollbar and what happens at its edges.
 fn list_chrome(
     mut list: View,

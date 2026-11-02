@@ -1425,6 +1425,24 @@ impl View {
         self.mounted.push(Box::new(f));
         self
     }
+    /// [`scroll_padding`](Self::scroll_padding), followed: `padding` is read
+    /// again whenever what it reads changes (a composer growing).
+    pub fn scroll_padding_with(
+        self,
+        mut padding: impl FnMut() -> crate::scene::Insets + 'static,
+    ) -> Self {
+        self.on_mount(move |handle| {
+            if let Some(mut ui) = handle.ui.upgrade() {
+                let (weak, node) = (handle.ui.clone(), handle.node);
+                ui.bind(node, move || {
+                    let now = padding();
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_scroll_padding(node, now);
+                    }
+                });
+            }
+        })
+    }
     /// For a scroll view (`scroll`, `scroll_x`): keep `padding` clear inside
     /// it when something scrolls into view there (a focused control, a find
     /// match), as CSS's `scroll-padding`: what floats over its edges (a
