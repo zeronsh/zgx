@@ -1172,9 +1172,10 @@ export type MarkdownOptions = {
 	paths: boolean?,
 }
 -- A run of a block's text: `x`, and whether it is bold (`b`), italic
--- (`i`), code (`c`), struck (`s`), a link (`a`, where to) or a repository
--- file (`f`, with `paths`).
-export type MarkdownRun = { x: string, b: boolean?, i: boolean?, c: boolean?, s: boolean?, a: string?, f: string? }
+-- (`i`), code (`c`), struck (`s`), a link (`a`, where to), a repository
+-- file (`f`, with `paths`) or a picture among words (`img`, its source;
+-- `x` its alt). A picture on a line of its own is an `img` block.
+export type MarkdownRun = { x: string, b: boolean?, i: boolean?, c: boolean?, s: boolean?, a: string?, f: string?, img: string? }
 -- A block of `ui.markdown`'s, by its `t`: refine on it (`if b.t == "code"`)
 -- and its fields are typed.
 export type MarkdownBlock =

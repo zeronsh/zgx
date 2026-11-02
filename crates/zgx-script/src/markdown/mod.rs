@@ -372,6 +372,9 @@ fn parse_at(text: &str, offset: usize, options: &Options) -> Vec<Top> {
         code: None,
         heading: None,
         image: None,
+        picture: None,
+        line: (0, 0),
+        took: false,
         options,
         deeper: 0,
     };
@@ -419,6 +422,8 @@ struct Run {
     code: bool,
     link: Option<String>,
     file: Option<String>,
+    /// A picture among the words: its source, its text the alt's.
+    img: Option<String>,
 }
 
 /// Where a link goes: a page, or (with `paths`) a file in the repository.
@@ -583,7 +588,7 @@ fn map(fields: Vec<(&str, Value)>) -> Value {
 fn runs_value(runs: &[Run]) -> Value {
     Value::List(
         runs.iter()
-            .filter(|r| !r.text.is_empty())
+            .filter(|r| !r.text.is_empty() || r.img.is_some())
             .map(|r| {
                 let mut f = vec![("x", Value::Str(r.text.as_str().into()))];
                 if r.style.bold {
@@ -603,6 +608,9 @@ fn runs_value(runs: &[Run]) -> Value {
                 }
                 if let Some(file) = &r.file {
                     f.push(("f", Value::Str(file.as_str().into())));
+                }
+                if let Some(img) = &r.img {
+                    f.push(("img", Value::Str(img.as_str().into())));
                 }
                 map(f)
             })
@@ -636,6 +644,16 @@ struct Builder<'a> {
     code: Option<(String, String)>,
     heading: Option<u8>,
     image: Option<(String, String)>,
+    /// A picture read, whose place is known by what follows it: alone on
+    /// its line (only blanks before it since `line`, a line's end after) it
+    /// is a block; among words, a run. Its source, alt, whether only
+    /// blanks came before it on its line, and the page it links to.
+    picture: Option<(String, String, bool, Option<String>)>,
+    /// Where the line being read starts in `runs`: a run, and a byte in it.
+    line: (usize, usize),
+    /// A picture took its paragraph's place (or its last line's): the
+    /// paragraph leaves none empty behind.
+    took: bool,
     options: &'a Options,
     /// Quotes, lists and items open beyond `NESTING`: read into the deepest
     /// container kept, as its blocks.
@@ -684,6 +702,7 @@ impl Builder<'_> {
                 && !last.code
                 && file.is_none()
                 && last.file.is_none()
+                && last.img.is_none()
                 && last.link == link
                 && {
                     let s = last.style;
@@ -700,7 +719,89 @@ impl Builder<'_> {
             code,
             link,
             file,
+            img: None,
         });
+    }
+
+    /// A line starts here (a paragraph's, or after a break).
+    fn mark_line(&mut self) {
+        self.line = match self.runs.last() {
+            Some(last) => (self.runs.len() - 1, last.text.len()),
+            None => (0, 0),
+        };
+    }
+
+    /// Whether only blanks have been read since the line started.
+    fn blank_line(&self) -> bool {
+        let (run, byte) = self.line;
+        self.runs.iter().enumerate().skip(run).all(|(i, r)| {
+            let text = if i == run {
+                r.text.get(byte..).unwrap_or("")
+            } else {
+                &r.text
+            };
+            r.img.is_none() && text.trim().is_empty()
+        })
+    }
+
+    /// The picture read (`picture`), placed by `event`, what follows it:
+    /// alone on its line, the words before it are a paragraph and it a
+    /// block (the words after it the next paragraph); else a run among the
+    /// words. Whether the event was the line's end it took.
+    fn place_picture(&mut self, event: &Event) -> bool {
+        // Inline tags closing after it (a link around a badge) leave its
+        // place to what follows them.
+        if matches!(
+            event,
+            Event::End(TagEnd::Link | TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough)
+        ) {
+            return false;
+        }
+        let Some((src, alt, blank, link)) = self.picture.take() else {
+            return false;
+        };
+        let ends = matches!(
+            event,
+            Event::SoftBreak | Event::HardBreak | Event::End(TagEnd::Paragraph | TagEnd::Item)
+        );
+        let blocks = matches!(self.frames.last(), Some(Frame::Blocks(_)));
+        if !(blank && ends && blocks && self.heading.is_none()) {
+            self.runs.push(Run {
+                text: alt,
+                style: self.style(),
+                code: false,
+                link,
+                file: None,
+                img: Some(src),
+            });
+            return false;
+        }
+        // The words before its line, as their paragraph.
+        let (run, byte) = self.line;
+        self.runs.truncate(run + 1);
+        if let Some(last) = self.runs.get_mut(run) {
+            last.text.truncate(byte);
+        }
+        if let Some(last) = self.runs.last_mut() {
+            last.text.truncate(last.text.trim_end().len());
+        }
+        if self
+            .runs
+            .iter()
+            .any(|r| !r.text.is_empty() || r.img.is_some())
+        {
+            let runs = self.take_runs();
+            self.block(map(vec![("t", "p".into()), ("s", runs)]));
+        }
+        self.runs.clear();
+        self.block(map(vec![
+            ("t", "img".into()),
+            ("src", src.as_str().into()),
+            ("alt", alt.as_str().into()),
+        ]));
+        self.took = true;
+        self.line = (0, 0);
+        matches!(event, Event::SoftBreak | Event::HardBreak)
     }
 
     fn take_runs(&mut self) -> Value {
@@ -739,6 +840,10 @@ impl Builder<'_> {
     }
 
     fn event(&mut self, event: Event) {
+        // A picture's place, by what follows it (its line's end, taken).
+        if self.picture.is_some() && self.place_picture(&event) {
+            return;
+        }
         if let Event::Start(Tag::List(_) | Tag::CodeBlock(_) | Tag::BlockQuote(_) | Tag::Table(_))
         | Event::Rule = &event
         {
@@ -825,12 +930,20 @@ impl Builder<'_> {
                 Tag::Image { dest_url, .. } => {
                     self.image = Some((dest_url.to_string(), String::new()))
                 }
+                Tag::Paragraph => {
+                    self.took = false;
+                    self.line = (0, 0);
+                }
                 _ => {}
             },
             Event::End(end) => match end {
                 TagEnd::Paragraph => {
-                    let runs = self.take_runs();
-                    self.block(map(vec![("t", "p".into()), ("s", runs)]));
+                    // None is left empty where a picture took its place.
+                    if !(self.took && self.runs.is_empty()) {
+                        let runs = self.take_runs();
+                        self.block(map(vec![("t", "p".into()), ("s", runs)]));
+                    }
+                    self.took = false;
                 }
                 TagEnd::Heading(_) => {
                     let runs = self.take_runs();
@@ -924,18 +1037,14 @@ impl Builder<'_> {
                     self.links.pop();
                 }
                 TagEnd::Image => {
+                    // Placed by what follows it (`place_picture`).
                     if let Some((src, alt)) = self.image.take() {
-                        // An image alone in its paragraph is a block; inline,
-                        // its alt text stands in.
-                        if self.runs.is_empty() {
-                            self.block(map(vec![
-                                ("t", "img".into()),
-                                ("src", src.as_str().into()),
-                                ("alt", alt.as_str().into()),
-                            ]));
-                        } else {
-                            self.push_text(&alt, false);
-                        }
+                        let blank = self.blank_line();
+                        let link = match self.links.last() {
+                            Some(Link::Url(url)) => Some(url.clone()),
+                            _ => None,
+                        };
+                        self.picture = Some((src, alt, blank, link));
                     }
                 }
                 _ => {}
@@ -948,9 +1057,13 @@ impl Builder<'_> {
             Event::InlineMath(text) | Event::DisplayMath(text) => self.push_text(&text, true),
             Event::SoftBreak => {
                 let breaks = self.options.breaks;
-                self.push_text(if breaks { "\n" } else { " " }, false)
+                self.push_text(if breaks { "\n" } else { " " }, false);
+                self.mark_line();
             }
-            Event::HardBreak => self.push_text("\n", false),
+            Event::HardBreak => {
+                self.push_text("\n", false);
+                self.mark_line();
+            }
             Event::Rule => self.block(map(vec![("t", "hr".into())])),
             Event::Html(_) | Event::InlineHtml(_) => {}
             Event::TaskListMarker(done) => self.push_text(if done { "☑ " } else { "☐ " }, false),
@@ -986,6 +1099,67 @@ mod tests {
             (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
+    }
+
+    /// A picture on a line of its own in a paragraph (only blanks beside
+    /// it) is a block of its own there, the words before and after it
+    /// their own paragraphs, and none left empty. Among words it is a run
+    /// keeping its source (`img`), its text its alt.
+    #[test]
+    fn a_picture_on_a_line_of_its_own_is_a_picture_and_among_words_a_run() {
+        let cases: [(&str, &[&str]); 8] = [
+            ("Here it is:\n![shot](a.png)", &["p", "img"]),
+            ("![a](a.png)\n![b](b.png)", &["img", "img"]),
+            ("![a](a.png)\n\nAfter.", &["img", "p"]),
+            ("Before\n![a](a.png)\nAfter", &["p", "img", "p"]),
+            ("Before  \n  ![a](a.png)  ", &["p", "img"]),
+            ("[![badge](b.svg)](https://example.com)", &["img"]),
+            ("see ![shot](a.png) here", &["p"]),
+            ("- ![a](a.png)\n- text", &["ul"]),
+        ];
+        for (source, want) in cases {
+            assert_eq!(kinds(&parse(source, &plain())), want, "{source:?}");
+        }
+        let text = |v: Option<&Value>| match v {
+            Some(Value::Str(s)) => Some(s.to_string()),
+            _ => None,
+        };
+        // The words before keep their text, without the line's break.
+        let blocks = parse("Here it is:\n![shot](a.png)", &plain());
+        let words = blocks[0].field("s").unwrap();
+        let Value::List(runs) = words else { panic!() };
+        assert_eq!(text(runs[0].field("x")).as_deref(), Some("Here it is:"));
+        assert_eq!(text(blocks[1].field("src")).as_deref(), Some("a.png"));
+        assert_eq!(text(blocks[1].field("alt")).as_deref(), Some("shot"));
+        // Among words: a run with its source, its text the alt.
+        let blocks = parse("see ![shot](a.png) here", &plain());
+        let Some(Value::List(runs)) = blocks[0].field("s") else {
+            panic!()
+        };
+        let texts: Vec<_> = runs
+            .iter()
+            .map(|r| (text(r.field("x")), text(r.field("img"))))
+            .collect();
+        let want = [("see ", None), ("shot", Some("a.png")), (" here", None)]
+            .map(|(x, img)| (Some(x.to_string()), img.map(str::to_string)));
+        assert_eq!(texts, want);
+        // In a list item, alone: the item's block.
+        let blocks = parse("- ![a](a.png)\n- text", &plain());
+        let Some(Value::List(items)) = blocks[0].field("items") else {
+            panic!()
+        };
+        let Value::List(first) = &items[0] else {
+            panic!()
+        };
+        assert_eq!(kinds(first), ["img"]);
+        // In a table's cell: a run (a cell holds runs).
+        let blocks = parse("| a |\n|---|\n| ![p](p.png) |", &plain());
+        let Some(Value::List(rows)) = blocks[0].field("rows") else {
+            panic!()
+        };
+        let Value::List(row) = &rows[0] else { panic!() };
+        let Value::List(cell) = &row[0] else { panic!() };
+        assert_eq!(text(cell[0].field("img")).as_deref(), Some("p.png"));
     }
 
     #[test]
