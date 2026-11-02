@@ -109,7 +109,7 @@ return ui.component(function()
 			el:replace_selection(snippet)
 			el:focus()
 		else
-			text:set(text:peek() .. snippet)
+			text:append(snippet)
 		end
 	end
 	local function mention(user: User)
@@ -266,7 +266,7 @@ return ui.component(function()
 								mention(matches:peek()[math.min(active:peek() or 1, count)])
 								return true
 							elseif e.key == "Escape" then
-								text:set(text:peek() .. " ")
+								text:append(" ")
 								return true
 							end
 						end

@@ -618,7 +618,7 @@ export type State<T> = {
 	set_key: (self: State<T>, path: StatePath, value: any) -> (),
 	-- Adds `text` to the string at `path` (or puts it there), in Rust: a
 	-- reply's token, without the text so far copied into the script.
-	append: (self: State<T>, path: StatePath, text: string) -> (),
+	append: ((self: State<T>, text: string) -> ()) & ((self: State<T>, path: StatePath, text: string) -> ()),
 	-- A shallow merge into the table.
 	patch: (self: State<T>, fields: Partial<T>) -> (),
 	-- Sets `not value` (a boolean).
