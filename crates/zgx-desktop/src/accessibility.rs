@@ -463,8 +463,8 @@ impl AccessibilityTree {
             // Reuse the existing cached node's geometry/children instead of
             // retaining another copy in the revision cache. Text runs must still
             // have live cached nodes/positions before omitting this projection.
-            let runs_at = semantics
-                .text_node(id)
+            let runs_at = first_line(semantics, id)
+                .or_else(|| semantics.text_node(id))
                 .or(text.then_some(id))
                 .filter(|node| scene.contains(*node))
                 // Where it shows: a zoom or transform moves its runs too.
@@ -760,19 +760,25 @@ impl AccessibilityTree {
             if text || matches!(semantic.role, Role::TextInput | Role::MultilineTextInput) {
                 // The node its text shows in, while it shows that text (a
                 // field composing shows other): its lines' geometry.
-                let shown_in = semantics
-                    .text_node(id)
-                    .or(text.then_some(id))
-                    .filter(|node| {
-                        scene.contains(*node)
-                            && match scene.kind(*node) {
-                                zgx::scene::NodeKind::Text { text, .. } => {
-                                    Some(&**text) == text_value
+                // A text shown a line at a time: where its first shown line
+                // is (its lines' geometry, `field_lines`).
+                let apart = semantics.text_lines(id).filter(|_| text_value.is_some());
+                let shown_in = match apart {
+                    Some(_) => first_line(semantics, id).filter(|node| scene.contains(*node)),
+                    None => semantics
+                        .text_node(id)
+                        .or(text.then_some(id))
+                        .filter(|node| {
+                            scene.contains(*node)
+                                && match scene.kind(*node) {
+                                    zgx::scene::NodeKind::Text { text, .. } => {
+                                        Some(&**text) == text_value
+                                    }
+                                    zgx::scene::NodeKind::RichText { .. } => text,
+                                    _ => false,
                                 }
-                                zgx::scene::NodeKind::RichText { .. } => text,
-                                _ => false,
-                            }
-                    });
+                        }),
+                };
                 let shown_box = shown_in.map(|node| scene.transformed_bounds(node));
                 let was = self.run_boxes.get(&id).copied();
                 let moved = was != shown_box;
@@ -798,6 +804,7 @@ impl AccessibilityTree {
                         if moved
                             && unchanged
                             && long.is_none()
+                            && apart.is_none()
                             && was.width == now.width
                             && was.height == now.height
                             && self.text_runs.contains_key(&id) =>
@@ -842,7 +849,10 @@ impl AccessibilityTree {
                     };
                     #[cfg(test)]
                     SHAPED.with(|shaped| shaped.set(shaped.get() + 1));
-                    let lines = shown_in.and_then(|node| scene.text_lines(node));
+                    let lines = match apart {
+                        Some(apart) => field_lines(scene, apart, text_value.unwrap_or("")),
+                        None => shown_in.and_then(|node| scene.text_lines(node)),
+                    };
                     if let Some(runs) =
                         text_run_data_on(text_value.unwrap_or(""), block, lines.as_deref(), scale)
                     {
@@ -1009,6 +1019,34 @@ fn text_run_data(value: &str, block: bool) -> Option<Vec<TextRunData>> {
 /// `Scene::text_lines`) wrap, each run given its box and its characters'
 /// places at `scale`: what lets a screen reader's cursor and a magnifier
 /// follow the caret and the selection.
+/// The first node a field's text shows a line at a time in, if it does
+/// (`Semantics::text_lines`).
+fn first_line(semantics: &Semantics, id: NodeId) -> Option<NodeId> {
+    semantics.text_lines(id)?.first().map(|(_, node)| *node)
+}
+/// The lines of a field's text shown a line at a time, `apart`: each shown
+/// line node's, at its place in the text. None, if one no longer shows
+/// what the text holds there (it is drawn again before it is read).
+fn field_lines(
+    scene: &Scene,
+    apart: &[(usize, NodeId)],
+    value: &str,
+) -> Option<Vec<zgx::scene::TextLine>> {
+    let mut lines = Vec::new();
+    for (start, node) in apart {
+        let zgx::scene::NodeKind::Text { text, .. } = scene.kind(*node) else {
+            return None;
+        };
+        if !scene.contains(*node) || value.get(*start..start + text.len())? != &**text {
+            return None;
+        }
+        for mut line in scene.text_lines(*node)? {
+            line.range = line.range.start + start..line.range.end + start;
+            lines.push(line);
+        }
+    }
+    Some(lines)
+}
 fn text_run_data_on(
     value: &str,
     block: bool,
@@ -1507,8 +1545,9 @@ mod editor_text_tests {
         let focus = tree.state().focus().unwrap();
         let boxes = focus.text_selection().unwrap().bounding_boxes();
         assert_eq!(boxes.len(), 1, "{boxes:?}");
-        // Where "two" shows, at twice the points.
-        let text_node = ui.semantics.borrow().text_node(view.node()).unwrap();
+        // Where "two" shows, at twice the points (on the first line's node:
+        // a text area's lines show apart).
+        let text_node = ui.semantics.borrow().text_lines(view.node()).unwrap()[0].1;
         let lines = ui.scene.borrow().text_lines(text_node).unwrap();
         let (left, right) = (lines[0].carets[4] as f64, lines[0].carets[7] as f64);
         let shown = boxes[0];

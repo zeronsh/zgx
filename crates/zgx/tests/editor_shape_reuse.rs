@@ -7,11 +7,22 @@ use zgx::{
 };
 
 fn fixture() -> (Ui, EditorHandle, Rc<Cell<usize>>) {
+    fixture_of(
+        "abcdefghijabcdefghij\nx\nabcdefghijabcdefghij\nlast\n",
+        true,
+    )
+}
+/// A field of one line, wrapped: its layout is the one the focused editor
+/// keeps whole (a text area keeps its shaped lines, focused or not).
+fn field_fixture() -> (Ui, EditorHandle, Rc<Cell<usize>>) {
+    fixture_of("abcdefghijabcdefghij x abcdefghijabcdefghij last ", false)
+}
+fn fixture_of(text: &str, multiline: bool) -> (Ui, EditorHandle, Rc<Cell<usize>>) {
     let mut ui = Ui::new(400., 300.);
     let calls = Rc::new(Cell::new(0));
     install_shaper(&mut ui, calls.clone(), 1.);
-    let value = ui.signal("abcdefghijabcdefghij\nx\nabcdefghijabcdefghij\nlast\n".repeat(4));
-    let editor = ui.text_input(ui.root(), "Editor", value, 100., true);
+    let value = ui.signal(text.repeat(4));
+    let editor = ui.text_input(ui.root(), "Editor", value, 100., multiline);
     editor.set_typography(
         ui.theme().color(zgx::theme::tok::TEXT_PRIMARY),
         10.,
@@ -235,14 +246,15 @@ fn preedit_cursor_changes_reuse_geometry_but_composed_text_changes_invalidate() 
         cursor: None,
     });
     ui.prepare_frame();
-    assert!(calls.replace(0) > 0);
+    // The committed line shows again, as it was shaped before composing.
+    calls.set(0);
     assert_stable(&ui, &editor, &calls);
     assert_eq!(editor.value().get(), original);
 }
 
 #[test]
 fn focus_owner_reacquires_geometry_and_retained_handle_cannot_refresh_removed_owner() {
-    let (mut ui, editor, calls) = fixture();
+    let (mut ui, editor, calls) = field_fixture();
     ui.input.focus(&ui.scene, None);
     ui.prepare_frame();
     calls.set(0);
@@ -299,7 +311,7 @@ impl TextLayout for TrackedLayout {
 
 #[test]
 fn cached_layout_is_released_on_blur_and_removal_despite_retained_editor_handle() {
-    let (mut ui, editor, _) = fixture();
+    let (mut ui, editor, _) = field_fixture();
     let live = Rc::new(Cell::new(0));
     let observed = live.clone();
     ui.scene.borrow_mut().set_font_text_shaper(
@@ -328,4 +340,42 @@ fn cached_layout_is_released_on_blur_and_removal_despite_retained_editor_handle(
     );
     editor.refresh();
     assert_eq!(live.get(), 0);
+}
+
+/// A text area of any length is laid out a line at a time: text appended to
+/// a short one, as a reply streams in, shapes the line it changed alone,
+/// and its other lines show as they were shaped.
+#[test]
+fn an_append_to_a_short_text_area_shapes_its_last_line_alone() {
+    let mut ui = Ui::new(400., 300.);
+    let shaped = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let seen = shaped.clone();
+    ui.scene.borrow_mut().set_font_text_shaper(
+        move |text: &str, size, width, font: &FontStyle| -> Box<dyn TextLayout> {
+            seen.borrow_mut().push(text.to_owned());
+            Box::new(FallbackTextLayout::with_line_height(
+                text,
+                size,
+                width,
+                font.line_height,
+            ))
+        },
+    );
+    let value = ui.signal("a line of the reply so far\n".repeat(40));
+    let editor = ui.text_input(ui.root(), "Reply", value.clone(), 300., true);
+    ui.prepare_frame();
+    for token in ["one", " two", " three", "\nfour", " five"] {
+        shaped.borrow_mut().clear();
+        value.update(|text| text.push_str(token));
+        ui.prepare_frame();
+        let shaped = shaped.borrow();
+        let line = editor.value().get().rsplit('\n').next().unwrap().to_owned();
+        assert!(
+            // (A selection's own empty text, measured once, is not the
+            // editor's.)
+            shaped.iter().all(|text| text.is_empty() || *text == line),
+            "{token:?} shapes its line alone: {shaped:?}"
+        );
+    }
+    assert!(editor.value().get().ends_with("one two three\nfour five"));
 }

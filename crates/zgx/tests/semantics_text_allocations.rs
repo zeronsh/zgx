@@ -176,8 +176,12 @@ fn warmed_editor_selection_and_policy_refresh_do_not_copy_the_document() {
         widgets::Ui,
     };
 
+    // The node showing its text (a text area's lines show apart: its one
+    // line, here).
     fn text_node(scene: &Scene, node: NodeId) -> Option<(NodeId, Arc<str>)> {
-        if let NodeKind::Text { text, .. } = scene.kind(node) {
+        if let NodeKind::Text { text, .. } = scene.kind(node)
+            && !text.is_empty()
+        {
             return Some((node, text.clone()));
         }
         scene

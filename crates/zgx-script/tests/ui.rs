@@ -3190,8 +3190,9 @@ return ui.textarea {{ id = "code", value = text, line_numbers = true, w = 300, h
         let mut stack = vec![scene.root()];
         let mut found = None;
         while let Some(n) = stack.pop() {
+            // Its first line (a text area's lines show apart).
             if let zgx::scene::NodeKind::Text { text, .. } = scene.kind(n)
-                && text.starts_with("line 1\n")
+                && &**text == "line 1"
             {
                 found = Some(scene.bounds(n).x);
             }

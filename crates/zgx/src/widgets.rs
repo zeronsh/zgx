@@ -273,6 +273,10 @@ struct EditorHint {
     /// (`EditorHandle::set_caret_style`).
     caret: Cell<(Option<Color>, Option<f32>)>,
     select_on_focus: Cell<bool>,
+    /// A text area: once its text holds a line break, it is laid out a line
+    /// at a time at any length (`editor_lines`), so an edit shapes the line
+    /// it touched alone (a single line is shaped whole either way).
+    lines: bool,
     /// A wheel over it stays with it at its edges (`View::overscroll_contain`).
     contain: Cell<bool>,
     /// A password field: its text shows masked and never leaves it.
@@ -452,6 +456,8 @@ struct CodeHint {
     lines: RefCell<Option<Rc<crate::editor_lines::LineCache>>>,
     line_layer: Cell<Option<NodeId>>,
     line_nodes: RefCell<Vec<(usize, NodeId)>>,
+    /// The lines last given assistive technology (`Semantics::set_text_lines`).
+    told_lines: RefCell<Vec<(usize, NodeId)>>,
     /// Marks behind the selection (the current line, decorations), made
     /// when the first shows.
     decoration_layer: Cell<Option<NodeId>>,
@@ -482,12 +488,13 @@ impl Drop for CodeHint {
     }
 }
 impl EditorHint {
-    fn new(value: EditorValue) -> Self {
+    fn new(value: EditorValue, lines: bool) -> Self {
         Self {
             value,
             placeholder: RefCell::default(),
             caret: Cell::default(),
             select_on_focus: Cell::default(),
+            lines,
             contain: Cell::default(),
             secure: Cell::default(),
             input_mode: Cell::default(),
@@ -575,6 +582,23 @@ impl EditorHint {
             .get_or_insert_with(Default::default)
             .clone()
     }
+    /// The lines it shows apart, if it does (`editor_lines`): each one's
+    /// bytes in the text it shows, and the node showing it, top to bottom.
+    fn shown_lines(&self) -> Option<Vec<(std::ops::Range<usize>, NodeId)>> {
+        let code = self.code()?;
+        let pool = code.line_nodes.borrow();
+        if pool.is_empty() {
+            return None;
+        }
+        let layout = code.lines.borrow().as_ref()?.last_layout()?;
+        let mut lines: Vec<_> = pool
+            .iter()
+            .filter(|(i, _)| *i < layout.line_count())
+            .map(|(i, node)| (layout.line_range(*i), *node))
+            .collect();
+        lines.sort_by_key(|(range, _)| range.start);
+        Some(lines)
+    }
     fn highlighted(&self) -> bool {
         self.code()
             .and_then(|code| code.lines.borrow().clone())
@@ -652,7 +676,28 @@ impl EditorHandle {
     /// lines to ask (a password's). Shapes the text: for an input method
     /// asking where a range is (Windows' `GetTextExt`), not every frame.
     pub fn text_area(&self, range: std::ops::Range<usize>) -> Option<Rect> {
-        self.scene.borrow().text_range_area(self.text, range)
+        let scene = self.scene.borrow();
+        let Some(lines) = self.hint.shown_lines() else {
+            return scene.text_range_area(self.text, range);
+        };
+        // Shown a line at a time: each line it runs on gives its piece.
+        let (start, end) = (range.start, range.end.max(range.start));
+        let mut area: Option<Rect> = None;
+        for (line, node) in lines {
+            let on = if start == end {
+                line.start <= start && start <= line.end
+            } else {
+                line.start < end && start < line.end
+            };
+            if !on {
+                continue;
+            }
+            let local = start.max(line.start) - line.start..end.min(line.end) - line.start;
+            if let Some(piece) = scene.text_range_area(node, local) {
+                area = Some(area.map_or(piece, |area| area.union(piece)));
+            }
+        }
+        area
     }
     /// The selection as UTF-8 byte offsets into the committed text,
     /// `(anchor, focus)`: equal for a caret, `focus` where the caret is.
@@ -1267,7 +1312,8 @@ fn committed_layout(
     let lines = storage.upgrade().and_then(|s| {
         let editors = s.editors.borrow();
         let hint = &editors.get(&node)?.hint;
-        (e.long_text().is_some() || hint.highlighted()).then(|| hint.line_cache())
+        (e.long_text().is_some() || (hint.lines && e.text().contains('\n')) || hint.highlighted())
+            .then(|| hint.line_cache())
     });
     match lines {
         Some(lines) => {
@@ -4199,10 +4245,15 @@ impl Ui {
         if let Some(canonical) = canonical {
             initial = canonical.into();
         }
-        // A long text's lines show apart (`editor_lines`): its node, never
-        // laid out with all of it, starts empty.
+        // A long text's lines, and a text area's, show apart
+        // (`editor_lines`): its node, never laid out with all of it, starts
+        // empty.
         let shown = match &initial {
-            TextValue::Flat(text) if !crate::editor_lines::is_long(text) => text.clone(),
+            TextValue::Flat(text)
+                if !(multiline && text.contains('\n')) && !crate::editor_lines::is_long(text) =>
+            {
+                text.clone()
+            }
             _ => String::new(),
         };
         let text = self.label(viewport, shown, fixed(width - 16., height - 12.));
@@ -4291,7 +4342,7 @@ impl Ui {
         let draw_read_only = read_only.clone();
         let gesture = Rc::new(EditorDrag::default());
         let draw_gesture = gesture.clone();
-        let hint = Rc::new(EditorHint::new(value));
+        let hint = Rc::new(EditorHint::new(value, multiline));
         let wheel_hint = hint.clone();
         hint.composition_layer.set(Some(preedit_layer));
         let draw_hint = hint.clone();
@@ -4336,7 +4387,11 @@ impl Ui {
             let display_len = display_text.as_ref().map_or(display.len(), Text::len);
             let display_cursor = display_cursor.min(display_len);
             // The text the long layout reads, made only if its revision is new.
-            let display_source = || display_text.clone().unwrap_or_else(|| Text::new(&display));
+            let display_source = || {
+                display_text
+                    .clone()
+                    .unwrap_or_else(|| draw_hint.line_cache().text_of(&display))
+            };
             let mut s = scene.borrow_mut();
             if !s.contains(root) {
                 return;
@@ -4370,6 +4425,7 @@ impl Ui {
             let numbered = draw_numbers.get();
             // Long, or coloured a line at a time: laid out by its lines.
             let long = display_text.is_some()
+                || (draw_hint.lines && display.contains('\n'))
                 || crate::editor_lines::is_long(&display)
                 || draw_hint.highlighted();
             let (digits, digit) = if numbered {
@@ -4463,8 +4519,13 @@ impl Ui {
                 ),
                 None => (display.as_ref(), color),
             };
-            // A long text's lines show apart (below): this node holds none.
-            let shown_text = if long { "" } else { shown_text };
+            // A long text's lines show apart (below): this node holds none
+            // but the placeholder, shown for an empty one.
+            let shown_text = if long && shown.is_none() {
+                ""
+            } else {
+                shown_text
+            };
             // Selection and policy changes retain the same immutable paint text.
             let paint_text = match s.kind(text) {
                 NodeKind::Text { text, .. } if text.as_ref() == shown_text => text.clone(),
@@ -4702,7 +4763,7 @@ impl Ui {
                                     s.set_kind(
                                         *id,
                                         NodeKind::Text {
-                                            text: std::sync::Arc::from(&*line),
+                                            text: line.to_arc(),
                                             color,
                                             font_size: size,
                                         },
@@ -4711,10 +4772,19 @@ impl Ui {
                             }
                         }
                         s.set_font(*id, font.clone());
-                        let width = wrap_width.unwrap_or_else(|| lines.line(*i).size().0 + 2.);
+                        let shaped = lines.line(*i).size();
+                        let width = wrap_width.unwrap_or(shaped.0 + 2.);
                         let mut style = fixed(width, lines.height(*i));
                         style.text_wrap = draw_wrap.get();
                         s.set_style(*id, style);
+                        // The size its line was shaped to here: showing it,
+                        // or moving it, shapes it no more. A node just made is
+                        // asked for its ink in the empty box it had (where it
+                        // painted nothing; a line's box is never empty).
+                        s.know_text_size(*id, wrap_width, shaped);
+                        if s.bounds(*id).width == 0. {
+                            s.know_text_size(*id, Some(0.), shaped);
+                        }
                         s.set_transform(
                             *id,
                             Transform {
@@ -5247,6 +5317,23 @@ impl Ui {
                 let window =
                     around.start.saturating_sub(page)..(around.end + page).min(text.line_count());
                 semantics.update_long_lines(root, window);
+            }
+            // A short text shown a line at a time: its lines' geometry, as
+            // its text node's would be (a long one's reads as its window).
+            if long_lines.is_some() && e.long_text().is_none() {
+                let lines: Vec<_> = (draw_hint.shown_lines().unwrap_or_default().into_iter())
+                    .map(|(range, node)| (range.start, node))
+                    .collect();
+                let told = &draw_hint.code_made().told_lines;
+                if *told.borrow() != lines {
+                    semantics.set_text_lines(root, lines.clone());
+                    *told.borrow_mut() = lines;
+                }
+            } else if let Some(code) = draw_hint.code()
+                && !code.told_lines.borrow().is_empty()
+            {
+                semantics.set_text_lines(root, Vec::new());
+                code.told_lines.borrow_mut().clear();
             }
             semantics.set_placeholder(root, placeholder.as_ref().map(|(hint, _)| hint.as_ref()));
         });
@@ -6641,7 +6728,7 @@ fn editor_word_segment(text: &str, index: usize) -> (usize, usize) {
 
 fn normalize_text(text: &str, multiline: bool) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
-    if !text.contains('\r') && (multiline || !text.contains('\n')) {
+    if !holds(text, b'\r') && (multiline || !holds(text, b'\n')) {
         return Cow::Borrowed(text);
     }
     let mut canonical = String::with_capacity(text.len());
@@ -6661,6 +6748,20 @@ fn normalize_text(text: &str, multiline: bool) -> std::borrow::Cow<'_, str> {
         }
     }
     Cow::Owned(canonical)
+}
+
+/// Whether `text` holds `byte`, read a block at a time: a bound text is
+/// checked on every change, and a block's test vectorizes where a search
+/// returning at the first byte cannot.
+fn holds(text: &str, byte: u8) -> bool {
+    if text.len() < 64 {
+        return text.as_bytes().contains(&byte);
+    }
+    let (blocks, rest) = text.as_bytes().as_chunks::<64>();
+    blocks
+        .iter()
+        .any(|block| block.iter().fold(false, |any, b| any | (*b == byte)))
+        || rest.contains(&byte)
 }
 
 /// A legacy control's background states (`Ui::control`).
@@ -7547,7 +7648,7 @@ mod editor_layout_cache_tests {
             "Editor",
             ui.signal(String::from("short")),
             100.,
-            true,
+            false,
         );
         ui.prepare_frame();
         ui.input.focus(&ui.scene, Some(editor.node));
