@@ -1630,6 +1630,9 @@ struct Host {
     focus_memory: crate::focus_memory::FocusMemory,
     last_accessibility: Option<(u64, Option<NodeId>)>,
     accessibility_geometry_dirty: bool,
+    /// A reader asked to scroll a node in: the tree its new place is in
+    /// goes out at once, not paced as geometry is.
+    accessibility_revealed: bool,
     /// The popups' layer revisions, summed: what changes in them damages
     /// nothing in this window (`Scene::set_popup`), so their geometry is
     /// dirty when these move.
@@ -2018,6 +2021,7 @@ impl Host {
             focus_memory: crate::focus_memory::FocusMemory::default(),
             last_accessibility: None,
             accessibility_geometry_dirty: true,
+            accessibility_revealed: false,
             popup_revisions: 0,
             accessibility_pacer: Default::default(),
             #[cfg(target_os = "linux")]
@@ -2164,8 +2168,12 @@ impl Host {
         // host, voice access) read names as they need them: for them names
         // and values are paced as geometry is, and a dashboard's live values
         // no longer rebuild the tree every frame.
-        let urgent =
-            crate::accessibility::urgent(focused, semantics, crate::accessibility::screen_reader);
+        let urgent = crate::accessibility::urgent(
+            focused,
+            std::mem::take(&mut self.accessibility_revealed),
+            semantics,
+            crate::accessibility::screen_reader,
+        );
         if !self.accessibility_pacer.update_now(
             std::time::Instant::now(),
             urgent,
@@ -3087,6 +3095,10 @@ impl Host {
                     .ui
                     .input
                     .focus(&self.context.ui.scene, Some(node));
+            }
+            accesskit::Action::ScrollIntoView => {
+                self.context.ui.scroll_into_view(node);
+                self.accessibility_revealed = true;
             }
             accesskit::Action::Click => {
                 self.context.ui.input.dispatch_to(

@@ -17,12 +17,18 @@ use zgx::{
 pub(crate) const GEOMETRY_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Whether a change goes to assistive technology at once rather than paced
-/// (`GeometryPacer`): focus moving always; names, values and selection
-/// changing while a screen reader runs (`screen_reader`, asked only then),
-/// as it speaks them. Other clients (the touch keyboard's host, voice
-/// access) read names as they need them.
-pub(crate) fn urgent(focused: bool, semantics: bool, screen_reader: impl FnOnce() -> bool) -> bool {
-    focused || (semantics && screen_reader())
+/// (`GeometryPacer`): focus moving always, and a node a reader asked to
+/// scroll in (`revealed`: its new place, before the reader reads it);
+/// names, values and selection changing while a screen reader runs
+/// (`screen_reader`, asked only then), as it speaks them. Other clients
+/// (the touch keyboard's host, voice access) read names as they need them.
+pub(crate) fn urgent(
+    focused: bool,
+    revealed: bool,
+    semantics: bool,
+    screen_reader: impl FnOnce() -> bool,
+) -> bool {
+    focused || revealed || (semantics && screen_reader())
 }
 
 /// Whether a screen reader runs (Narrator, NVDA, JAWS set the system's flag,
@@ -469,6 +475,12 @@ impl AccessibilityTree {
             bounds.height as f64 * scale,
         ));
         nodes.push((root, window));
+        let window_box = accesskit::Rect::new(
+            0.,
+            0.,
+            bounds.width as f64 * scale,
+            bounds.height as f64 * scale,
+        );
         for (id, semantic) in ordered {
             if id == scene.root() {
                 continue;
@@ -514,12 +526,25 @@ impl AccessibilityTree {
                 .filter(|node| scene.contains(*node))
                 // Where it shows: a zoom or transform moves its runs too.
                 .map(|node| scene.transformed_bounds(node));
+            // More than a window away, and on the side of it it was last
+            // sent on: its box as sent stays (a reflow sends no node a
+            // screen away, as it shapes none), and comes up to date as it
+            // comes near. Above stays above, below below: a reader's order
+            // and the way it scrolls to it are the same as the box's.
+            let far = focused != Some(id)
+                && far_side(bounds, window_box).is_some_and(|now| {
+                    self.cache
+                        .get(&native)
+                        .and_then(Node::bounds)
+                        .and_then(|was| far_side(was, window_box))
+                        == Some(now)
+                });
             if self.projection_revisions.get(&id) == Some(&revision)
-                && self.run_boxes.get(&id).copied() == runs_at.filter(|_| !runs.is_empty())
+                && (far || self.run_boxes.get(&id).copied() == runs_at.filter(|_| !runs.is_empty()))
                 && self.blocks.contains(&id) == block
                 && self.cache.get(&native).is_some_and(|cached| {
                     let counted = list_items.get(&id);
-                    cached.bounds() == Some(bounds)
+                    (far || cached.bounds() == Some(bounds))
                         && cached.is_disabled() == disabled
                         && cached.position_in_set()
                             == semantic.position_in_set.or(counted.map(|c| c.0))
@@ -800,6 +825,11 @@ impl AccessibilityTree {
                     ScrollAxis::Horizontal => accesskit::Orientation::Horizontal,
                     ScrollAxis::Vertical => accesskit::Orientation::Vertical,
                 });
+            }
+            // In a scroll view: a reader moving to it scrolls it in
+            // (`AXScrollToVisible`, UIA's and AT-SPI's scroll-into-view).
+            if scene.ancestors(id).any(|a| scene.is_scroll_content(a)) {
+                n.add_action(Action::ScrollIntoView);
             }
             n.set_bounds(bounds);
             if text || matches!(semantic.role, Role::TextInput | Role::MultilineTextInput) {
@@ -1195,6 +1225,30 @@ fn text_run_data_on(
 }
 /// A grapheme's line and its left and right edges.
 type Edge = (usize, f32, f32);
+/// Which way a box more than a window away from `window` is from it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FarSide {
+    Above,
+    Below,
+    Left,
+    Right,
+}
+/// The side of `window` `rect` is on, when it is more than a window's height
+/// (or width) away; `None` near it.
+fn far_side(rect: accesskit::Rect, window: accesskit::Rect) -> Option<FarSide> {
+    let (width, height) = (window.width(), window.height());
+    if rect.y1 < window.y0 - height {
+        Some(FarSide::Above)
+    } else if rect.y0 > window.y1 + height {
+        Some(FarSide::Below)
+    } else if rect.x1 < window.x0 - width {
+        Some(FarSide::Left)
+    } else if rect.x0 > window.x1 + width {
+        Some(FarSide::Right)
+    } else {
+        None
+    }
+}
 /// `value` as one line across `rect`, its graphemes spread evenly: where
 /// text far from the window is, near enough, without shaping it.
 fn estimated_line(value: &str, rect: zgx::scene::Rect) -> zgx::scene::TextLine {
@@ -2677,6 +2731,113 @@ mod document_selection_tests {
         assert!(last.2, "the text scrolled near says where it shows");
     }
 
+    /// A reflow of a long list sends the nodes near the window, not those a
+    /// window away, whose boxes as sent stay on the side they are on (above
+    /// stays above, below below); one scrolled in, as a reader moving to it
+    /// asks, is sent where it now shows.
+    #[test]
+    fn a_reflow_sends_only_what_is_near_the_window_and_far_boxes_keep_their_side() {
+        let mut ui = Ui::new(400., 200.);
+        let offset = ui.signal(0_f32);
+        let lines: Vec<String> = (0..300)
+            .map(|i| format!("line {i}: a few words that wrap as the window narrows"))
+            .collect();
+        ui.mount(
+            scroll(offset.clone()).w_full().h_full().child(
+                column()
+                    .w_full()
+                    .children(lines.iter().map(|line| text(line.as_str()).text_wrap(true))),
+            ),
+        );
+        ui.prepare_frame();
+        let mut adapter = AccessibilityTree::new();
+        let mut tree: HashMap<accesskit::NodeId, accesskit::Node> = HashMap::default();
+        let mut update = |adapter: &mut AccessibilityTree, ui: &Ui| {
+            let update =
+                adapter.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Test", 1.);
+            let sent = update.nodes.len();
+            for (id, node) in update.nodes {
+                tree.insert(id, node);
+            }
+            // Each label's box as sent, and where it is.
+            let scene = ui.scene.borrow();
+            let boxes: Vec<(NodeId, accesskit::Rect, accesskit::Rect)> = adapter
+                .ids
+                .iter()
+                .filter(|(node, _)| **node != scene.root())
+                .map(|(node, native)| {
+                    let r = scene.hit_bounds(*node);
+                    let now = accesskit::Rect::new(
+                        r.x as f64,
+                        r.y as f64,
+                        (r.x + r.width) as f64,
+                        (r.y + r.height) as f64,
+                    );
+                    (*node, tree[native].bounds().unwrap(), now)
+                })
+                .collect();
+            (sent, boxes)
+        };
+        let window = accesskit::Rect::new(0., 0., 250., 200.);
+        let (sent, _) = update(&mut adapter, &ui);
+        assert!(sent > 300, "the first tree has every label: {sent}");
+        // Scrolled to the middle, then narrower: everything reflows, and
+        // what is far stays as sent, on its side.
+        offset.set(4000.);
+        ui.prepare_frame();
+        update(&mut adapter, &ui);
+        ui.scene.borrow_mut().resize(250., 200.);
+        ui.prepare_frame();
+        let (sent, boxes) = update(&mut adapter, &ui);
+        assert!(sent < 100, "a reflow sends what is near the window: {sent}");
+        let mut stale = (0, 0);
+        for (_, as_sent, now) in &boxes {
+            if as_sent != now {
+                let side = far_side(*now, window);
+                assert!(side.is_some(), "only far boxes stay as sent: {now:?}");
+                assert_eq!(far_side(*as_sent, window), side, "on the side they are");
+                match side {
+                    Some(FarSide::Above) => stale.0 += 1,
+                    _ => stale.1 += 1,
+                }
+            }
+        }
+        assert!(
+            stale.0 > 0 && stale.1 > 0,
+            "far boxes above and below kept: {stale:?}"
+        );
+        // A reader moving to the last line, a window below: scrolled in,
+        // it is sent where it shows.
+        let last = {
+            let scene = ui.scene.borrow();
+            let semantics = ui.semantics.borrow();
+            *adapter
+                .ids
+                .keys()
+                .find(|node| {
+                    semantics
+                        .get(**node)
+                        .is_some_and(|s| s.label.starts_with("line 299:"))
+                })
+                .filter(|node| scene.contains(**node))
+                .unwrap()
+        };
+        let as_sent = |boxes: &[(NodeId, accesskit::Rect, accesskit::Rect)]| {
+            boxes.iter().find(|(node, ..)| *node == last).unwrap().1
+        };
+        assert_eq!(far_side(as_sent(&boxes), window), Some(FarSide::Below));
+        ui.scroll_into_view(last);
+        ui.prepare_frame();
+        let (_, boxes) = update(&mut adapter, &ui);
+        let shown = as_sent(&boxes);
+        assert!(
+            shown.y0 >= 0. && shown.y1 <= 200.,
+            "scrolled in, sent where it shows: {shown:?}"
+        );
+        let r = ui.scene.borrow().hit_bounds(last);
+        assert_eq!((shown.y0, shown.y1), (r.y as f64, (r.y + r.height) as f64));
+    }
+
     #[test]
     fn scrolled_text_moves_its_runs_without_shaping_them_again() {
         let mut ui = Ui::new(400., 200.);
@@ -3507,14 +3668,17 @@ mod pacing_tests {
     #[test]
     fn names_and_values_go_out_at_once_only_while_a_screen_reader_runs() {
         use super::urgent;
-        assert!(urgent(true, false, || false));
-        assert!(urgent(true, true, || false));
-        assert!(urgent(false, true, || true));
-        assert!(!urgent(false, true, || false));
-        assert!(!urgent(false, false, || true));
+        assert!(urgent(true, false, false, || false));
+        assert!(urgent(true, false, true, || false));
+        assert!(urgent(false, false, true, || true));
+        assert!(!urgent(false, false, true, || false));
+        assert!(!urgent(false, false, false, || true));
         // The system is asked only when names or values changed.
-        assert!(urgent(true, false, || unreachable!()));
-        assert!(!urgent(false, false, || unreachable!()));
+        assert!(urgent(true, false, false, || unreachable!()));
+        assert!(!urgent(false, false, false, || unreachable!()));
+        // A node a reader asked to scroll in: its new place at once, for
+        // any client.
+        assert!(urgent(false, true, false, || unreachable!()));
     }
 
     #[test]
