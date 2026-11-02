@@ -566,6 +566,19 @@ impl Ui {
             }
         }
     }
+    /// Scroll the scroll views around `node` (innermost first) so it shows,
+    /// with a little room, laid out where it then is: what a screen reader
+    /// moving to it asks (`AXScrollToVisible`).
+    pub fn scroll_into_view(&mut self, node: NodeId) {
+        let rect = {
+            let scene = self.scene.borrow();
+            if !scene.contains(node) {
+                return;
+            }
+            scene.transformed_bounds(node)
+        };
+        self.scroll_rect_into_view(node, rect);
+    }
     /// Scroll the scroll views around `node` (innermost first) so `rect`
     /// (window points) shows, with a little room.
     fn scroll_rect_into_view(&mut self, node: NodeId, rect: Rect) {
