@@ -142,12 +142,12 @@ const NOT_PRESENTING: &str = "the window isn't presenting (hidden, minimized or 
 
 /// How frames since `from` (`trace::now_ms`) were paced: how many, the
 /// time between them, and the work in each ([`interaction`]).
-fn pacing(from: f64) -> (String, Value) {
+fn pacing(from: f64, named: &dyn Fn(&str) -> String) -> (String, Value) {
     let frames: Vec<_> = zgx::trace::frames(usize::MAX)
         .into_iter()
         .filter(|f| f.ended_ms >= from)
         .collect();
-    interaction(&frames)
+    interaction(&frames, named)
 }
 
 /// `values`' `p`th percentile (nearest rank), sorted first.
@@ -181,7 +181,7 @@ fn spread_ms(mut values: Vec<f64>) -> (String, Vec<(&'static str, Value)>) {
 /// the work in each (its spread: median, p95, most), the input events they
 /// took and the work per event (a drag's moves, a fling's steps), and each
 /// phase's spread, the costliest at p95 first.
-fn interaction(frames: &[zgx::trace::Frame]) -> (String, Value) {
+fn interaction(frames: &[zgx::trace::Frame], named: &dyn Fn(&str) -> String) -> (String, Value) {
     if frames.len() < 2 {
         return (
             format!(
@@ -286,6 +286,70 @@ fn interaction(frames: &[zgx::trace::Frame]) -> (String, Value) {
         .map(|(p95, name, _)| format!("{name} {p95:.2} ms"))
         .collect();
     text.push_str(&format!("\nphases at p95: {}", top.join(", ")));
+    // What layout measured afresh across them, and whose own measuring cost
+    // most in all (each frame keeps its costliest few).
+    let measured: u32 = frames.iter().map(|f| f.layout.measured).sum();
+    let mut by_node: Vec<(u32, f64, f64, u32)> = Vec::new();
+    for m in frames.iter().flat_map(|f| &f.layout.top) {
+        match by_node.iter_mut().find(|(node, ..)| *node == m.node) {
+            Some(entry) => {
+                entry.1 += m.self_micros as f64;
+                entry.2 += m.micros as f64;
+                entry.3 += 1;
+            }
+            None => by_node.push((m.node, m.self_micros as f64, m.micros as f64, 1)),
+        }
+    }
+    by_node.sort_by(|a, b| b.1.total_cmp(&a.1));
+    by_node.truncate(8);
+    if measured > 0 {
+        let costliest: Vec<String> = by_node
+            .iter()
+            .take(3)
+            .map(|(node, own, _, times)| {
+                format!(
+                    "{} {:.2} ms own over {times}",
+                    named(&format!("@{node}")),
+                    own / 1e3
+                )
+            })
+            .collect();
+        text.push_str(&format!(
+            "\nlayout: {measured} nodes measured afresh; costliest: {}",
+            costliest.join(", ")
+        ));
+    }
+    let layout = Value::record([
+        ("measured", Value::Num(measured as f64)),
+        (
+            "micros",
+            Value::Num(
+                frames
+                    .iter()
+                    .map(|f| f.layout.micros as f64)
+                    .sum::<f64>()
+                    .round(),
+            ),
+        ),
+        (
+            "top",
+            Value::List(
+                by_node
+                    .iter()
+                    .map(|(node, own, all, times)| {
+                        Value::record([
+                            ("node", Value::Num(*node as f64)),
+                            ("what", Value::from(named(&format!("@{node}")).as_str())),
+                            ("self_micros", Value::Num(own.round())),
+                            ("micros", Value::Num(all.round())),
+                            ("frames", Value::Num(*times as f64)),
+                        ])
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+        ),
+    ]);
     let round = |v: f64| Value::Num((v * 100.).round() / 100.);
     let data = Value::record([
         ("frames", Value::Num(frames.len() as f64)),
@@ -313,6 +377,7 @@ fn interaction(frames: &[zgx::trace::Frame]) -> (String, Value) {
                     .into(),
             ),
         ),
+        ("layout", layout),
     ]);
     (text, data)
 }
@@ -1021,7 +1086,7 @@ impl Session {
                         .filter(|f| since.is_none_or(|s| f.index > s))
                         .filter(|f| until.is_none_or(|u| f.index <= u))
                         .collect();
-                    let (text, data) = interaction(&frames);
+                    let (text, data) = interaction(&frames, &self.node_namer());
                     let text = if ui.is_presented() {
                         text
                     } else {
@@ -1197,7 +1262,7 @@ impl Session {
                                 }
                                 // Its frames, and the momentum and edges' after it.
                                 zgx::timer::sleep(Duration::from_millis(length as u64 + 400)).await;
-                                let (mut text, data) = pacing(from);
+                                let (mut text, data) = pacing(from, &session.node_namer());
                                 if session.0.ui.upgrade().is_some_and(|ui| !ui.is_presented()) {
                                     text.push_str(
                                         " (the window stopped presenting meanwhile: frames went \
@@ -1370,26 +1435,9 @@ impl Session {
     /// given): per frame, the states written and the effects they ran, each
     /// with its time (the costliest `runs` of them), its phases, the GPU's
     /// own time and what the engine noted of it.
-    fn frames(
-        &self,
-        n: usize,
-        runs_shown: usize,
-        since: Option<u64>,
-        until: Option<u64>,
-    ) -> (String, Value) {
-        let names: std::collections::HashMap<usize, String> = self
-            .0
-            .host
-            .named_states()
-            .into_iter()
-            .map(|(name, signal)| (signal.addr(), name))
-            .collect();
-        let name_of = |addr: usize| {
-            names
-                .get(&addr)
-                .cloned()
-                .unwrap_or_else(|| "a state".into())
-        };
+    /// Names `@n` as the frames' listing does: its id where it has one, and
+    /// how the script made it (its line) or else its kind.
+    fn node_namer(&self) -> impl Fn(&str) -> String + use<> {
         // A binding names its node by number: its id too, where it has one.
         let ids: std::collections::HashMap<u32, String> = self
             .0
@@ -1422,7 +1470,7 @@ impl Session {
             }
             None => Default::default(),
         };
-        let named = |name: &str| -> String {
+        move |name: &str| -> String {
             let number = name
                 .strip_prefix('@')
                 .and_then(|r| r.split(' ').next()?.parse::<u32>().ok());
@@ -1437,7 +1485,29 @@ impl Session {
                 out.push_str(&format!(" ({kind})"));
             }
             out
+        }
+    }
+    fn frames(
+        &self,
+        n: usize,
+        runs_shown: usize,
+        since: Option<u64>,
+        until: Option<u64>,
+    ) -> (String, Value) {
+        let names: std::collections::HashMap<usize, String> = self
+            .0
+            .host
+            .named_states()
+            .into_iter()
+            .map(|(name, signal)| (signal.addr(), name))
+            .collect();
+        let name_of = |addr: usize| {
+            names
+                .get(&addr)
+                .cloned()
+                .unwrap_or_else(|| "a state".into())
         };
+        let named = self.node_namer();
         let mut text = Vec::new();
         let mut data = Vec::new();
         let mut frames = zgx::trace::frames(usize::MAX);
@@ -1521,6 +1591,30 @@ impl Session {
             if !split.is_empty() {
                 line.push_str(&format!("\n  phases: {}", split.join(", ")));
             }
+            // What layout measured afresh, and where its own time went: the
+            // subtrees whose measuring cost most, their children's apart.
+            let layout = &frame.layout;
+            if layout.measured > 0 {
+                let top: Vec<String> = layout
+                    .top
+                    .iter()
+                    .take(3)
+                    .map(|m| {
+                        format!(
+                            "{} {:.0} µs (own {:.0} µs)",
+                            named(&format!("@{}", m.node)),
+                            m.micros,
+                            m.self_micros
+                        )
+                    })
+                    .collect();
+                line.push_str(&format!(
+                    "\n  layout: {} measured afresh, {:.0} µs; costliest: {}",
+                    layout.measured,
+                    layout.micros,
+                    top.join(", ")
+                ));
+            }
             // The GPU's own time: `present` also counts waiting for the
             // window server and the display.
             if let Some(gpu) = frame.gpu_micros {
@@ -1539,7 +1633,7 @@ impl Session {
             let what = |run: &zgx::trace::Run| {
                 run.name
                     .as_deref()
-                    .map_or_else(|| format!("effect {}", run.effect), named)
+                    .map_or_else(|| format!("effect {}", run.effect), &named)
             };
             let shown = &runs[..runs.len().min(runs_shown)];
             for run in shown {
@@ -1577,6 +1671,40 @@ impl Session {
                 ),
                 ("runs", Value::Num(frame.runs.len() as f64)),
                 ("events", Value::Num(frame.events as f64)),
+                (
+                    "layout",
+                    Value::record([
+                        ("measured", Value::Num(frame.layout.measured as f64)),
+                        ("micros", Value::Num(frame.layout.micros.round() as f64)),
+                        (
+                            "top",
+                            Value::List(
+                                frame
+                                    .layout
+                                    .top
+                                    .iter()
+                                    .map(|m| {
+                                        Value::record([
+                                            ("node", Value::Num(m.node as f64)),
+                                            (
+                                                "what",
+                                                Value::from(
+                                                    named(&format!("@{}", m.node)).as_str(),
+                                                ),
+                                            ),
+                                            ("micros", Value::Num(m.micros.round() as f64)),
+                                            (
+                                                "self_micros",
+                                                Value::Num(m.self_micros.round() as f64),
+                                            ),
+                                        ])
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .into(),
+                            ),
+                        ),
+                    ]),
+                ),
                 (
                     "run_list",
                     Value::List(

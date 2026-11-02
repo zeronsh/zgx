@@ -219,6 +219,35 @@ pub fn note(why: impl FnOnce() -> String) {
     let _ = why;
 }
 
+/// A node's fresh measure while devtools trace (`Scene::measured` without a
+/// kept result): timed until dropped, for the frame's layout attribution.
+/// `None`, one relaxed load, unless tracing.
+#[inline]
+pub fn layout_span(node: crate::scene::NodeId) -> Option<LayoutSpan> {
+    #[cfg(feature = "trace")]
+    if crate::trace::enabled() {
+        return Some(layout_span_begin(node));
+    }
+    let _ = node;
+    None
+}
+#[cfg(feature = "trace")]
+#[cold]
+#[inline(never)]
+fn layout_span_begin(node: crate::scene::NodeId) -> LayoutSpan {
+    crate::trace::measure_begin();
+    LayoutSpan(node.number())
+}
+/// See [`layout_span`].
+pub struct LayoutSpan(#[allow(dead_code)] u32);
+impl Drop for LayoutSpan {
+    #[cold]
+    fn drop(&mut self) {
+        #[cfg(feature = "trace")]
+        crate::trace::measure_end(self.0);
+    }
+}
+
 /// An input event was dispatched, for devtools' trace of the frame taking it
 /// (an interaction's cost per event). One relaxed load unless tracing.
 #[inline]

@@ -93,10 +93,46 @@ pub struct Frame {
     /// Input events dispatched in it ([`input`]): a pointer's moves, keys,
     /// wheel steps. What an interaction costs per event reads from these.
     pub events: u32,
+    /// Nodes layout measured afresh in it (not taken from a measurement it
+    /// kept), and those whose own measuring took longest ([`Measured`]).
+    pub layout: Layout,
+}
+
+/// A frame's layout work: how many nodes were measured afresh, their time,
+/// and the costliest of them by their own time (their children's apart).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Layout {
+    /// How many nodes were measured afresh.
+    pub measured: u32,
+    /// The outermost measures' time together, in microseconds.
+    pub micros: f32,
+    /// The costliest by their own time, the costliest first ([`TOP`]).
+    pub top: Vec<Measured>,
+}
+/// A node measured afresh (`Scene::measured` without a kept result).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Measured {
+    /// Its number (`NodeId::number`).
+    pub node: u32,
+    /// Its measuring's time, what it measured inside it included, in
+    /// microseconds.
+    pub micros: f32,
+    /// Its own part of that: less its children's measuring.
+    pub self_micros: f32,
+}
+/// How many of a frame's measures it keeps by their own time.
+pub const TOP: usize = 12;
+
+/// A measure in progress: when it began, and its children's time so far.
+struct Open {
+    began: Instant,
+    children: f32,
 }
 
 #[derive(Default)]
 struct Log {
+    /// The measures in progress, outermost first.
+    measuring: Vec<Open>,
     /// When tracing began: frames' times count from it.
     began: Option<Instant>,
     index: u64,
@@ -211,6 +247,46 @@ pub fn input() {
 fn counted_input() {
     LOG.with_borrow_mut(|log| log.current.events += 1);
 }
+/// A node begins to be measured afresh (`zgx::profile::layout_span`).
+pub fn measure_begin() {
+    LOG.with_borrow_mut(|log| {
+        log.measuring.push(Open {
+            began: Instant::now(),
+            children: 0.,
+        })
+    });
+}
+/// Node `node`'s fresh measure is done: counted, timed, and kept if it is
+/// among the frame's costliest by its own time.
+pub fn measure_end(node: u32) {
+    LOG.with_borrow_mut(|log| {
+        let Some(open) = log.measuring.pop() else {
+            return;
+        };
+        let micros = open.began.elapsed().as_secs_f32() * 1e6;
+        let self_micros = (micros - open.children).max(0.);
+        match log.measuring.last_mut() {
+            Some(parent) => parent.children += micros,
+            None => log.current.layout.micros += micros,
+        }
+        let layout = &mut log.current.layout;
+        layout.measured += 1;
+        let at = layout
+            .top
+            .partition_point(|kept| kept.self_micros >= self_micros);
+        if at < TOP {
+            layout.top.insert(
+                at,
+                Measured {
+                    node,
+                    micros,
+                    self_micros,
+                },
+            );
+            layout.top.truncate(TOP);
+        }
+    });
+}
 /// The frame being traced is done (`zgx::profile::frame`, as a renderer
 /// presents it), its phases' split given: kept if anything happened in it.
 pub fn end_frame(phases: Vec<(&'static str, u64, f32)>) {
@@ -223,6 +299,7 @@ pub fn end_frame(phases: Vec<(&'static str, u64, f32)>) {
             && log.current.runs.is_empty()
             && log.current.notes.is_empty()
             && log.current.events == 0
+            && log.current.layout.measured == 0
             && phases.is_empty()
         {
             return;
