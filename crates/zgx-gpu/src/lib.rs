@@ -3650,6 +3650,16 @@ impl GpuError {
         self.0 == "surface is incompatible with the shared GPU adapter"
     }
 }
+/// Frames a renderer draws before an app that never goes idle checks its
+/// font cache (`font_cache::check_pending`): launch's busy frames, ten
+/// seconds at 60 Hz.
+const LAUNCH_FRAMES: u64 = 600;
+/// `font_cache::check_pending`, kept out of the frame it runs in.
+#[cold]
+#[inline(never)]
+fn font_cache_check() {
+    font_cache::check_pending();
+}
 /// Wakes a host's event loop from another thread (`GpuRenderer::set_plane_waker`).
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
@@ -4967,6 +4977,10 @@ impl GpuRenderer {
         }
         let presented = std::mem::take(&mut self.present_stats);
         self.image_frame += 1;
+        if self.image_frame == LAUNCH_FRAMES {
+            // An app that never goes idle checks its font cache here, once.
+            font_cache_check();
+        }
         let mut stats = {
             let _span = zgx::profile::span(zgx::profile::Phase::Paint);
             self.render_inner(scene, damage)?
@@ -12856,6 +12870,8 @@ impl GpuRenderer {
             format!("{plane} trim")
         });
         self.flush_pending();
+        // The font cache read at launch, checked as the host first goes idle.
+        font_cache_check();
         self.blur_scratch = None;
         // A frame's quads and draws: the next frame makes them again.
         self.frame_quads = Vec::new();
