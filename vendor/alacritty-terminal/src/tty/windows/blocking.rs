@@ -127,6 +127,12 @@ impl<R: Read + Send + 'static> UnblockedReader<R> {
         *interest = None;
     }
 
+    /// zgx: whether what it reads from has ended and all it gave was read:
+    /// `read` returns 0 alike for nothing yet and for the end.
+    pub fn finished(&self) -> bool {
+        self.pipe.is_closed() && self.pipe.is_empty()
+    }
+
     /// Try to read from the reader.
     pub fn try_read(&mut self, buf: &mut [u8]) -> usize {
         let waker = Waker::from(self.interest.clone());

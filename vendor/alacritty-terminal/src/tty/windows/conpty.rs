@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{Error, Result};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::IntoRawHandle;
+use std::os::windows::io::AsRawHandle;
 use std::{mem, ptr};
 
-use windows_sys::Win32::Foundation::{HANDLE, S_OK};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, S_OK};
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
@@ -92,10 +92,39 @@ impl ConptyApi {
 pub struct Conpty {
     pub handle: HPCON,
     api: ConptyApi,
+    /// zgx: closed already, on a thread of its own (`close`).
+    closed: bool,
+}
+
+impl Conpty {
+    /// zgx: close the pseudoconsole on a thread of its own. It renders what
+    /// the program last wrote (after the program has gone) and then ends
+    /// the output pipe, which the caller reads to its end meanwhile:
+    /// `ClosePseudoConsole` blocks until that pipe is drained, so it can't
+    /// run on the thread draining it.
+    pub fn close(&mut self) {
+        if mem::replace(&mut self.closed, true) {
+            return;
+        }
+        struct Closing(HPCON, ClosePseudoConsoleFn);
+        // SAFETY: the handle may be closed from any thread, and is closed
+        // once (`closed`).
+        unsafe impl Send for Closing {}
+        impl Closing {
+            fn run(self) {
+                unsafe { (self.1)(self.0) }
+            }
+        }
+        let closing = Closing(self.handle, self.api.close);
+        crate::thread::spawn_named("alacritty-conpty-close", move || closing.run());
+    }
 }
 
 impl Drop for Conpty {
     fn drop(&mut self) {
+        if self.closed {
+            return;
+        }
         // XXX: This will block until the conout pipe is drained. Will cause a deadlock if the
         // conout pipe has already been dropped by this point.
         //
@@ -122,14 +151,23 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
     let result = unsafe {
         (api.create)(
             window_size.into(),
-            conin_pty_handle.into_raw_handle() as HANDLE,
-            conout_pty_handle.into_raw_handle() as HANDLE,
+            conin_pty_handle.as_raw_handle() as HANDLE,
+            conout_pty_handle.as_raw_handle() as HANDLE,
             0,
             &mut pty_handle as *mut _,
         )
     };
 
     assert_eq!(result, S_OK);
+
+    // zgx: the pseudoconsole holds its own copies of its ends of the pipes
+    // (Microsoft's ConPTY guidance: the caller closes its own once it has
+    // been created). Kept open here, as `into_raw_handle` left them, the
+    // output pipe had a writer for as long as this process ran, so its end
+    // never came after `ClosePseudoConsole` and a reader waiting for it
+    // waited out its timeout.
+    drop(conin_pty_handle);
+    drop(conout_pty_handle);
 
     let mut success;
 
@@ -232,6 +270,9 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
         if !success {
             return Err(Error::last_os_error());
         }
+        // zgx: the child's main thread isn't waited on; only its process is
+        // (`ChildExitWatcher`).
+        CloseHandle(proc_info.hThread);
     }
 
     let conin = UnblockedWriter::new(conin, PIPE_CAPACITY);
@@ -241,6 +282,7 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
     let conpty = Conpty {
         handle: pty_handle as HPCON,
         api,
+        closed: false,
     };
 
     Ok(Pty::new(conpty, conout, conin, child_watcher))
