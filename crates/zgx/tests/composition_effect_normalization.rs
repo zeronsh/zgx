@@ -128,3 +128,67 @@ fn a_size_only_restyle_leaves_paint_set_elsewhere() {
     ui.prepare_frame();
     assert_eq!(ui.scene.borrow().effects(node).opacity, 0.5);
 }
+
+/// A style re-run whose result is the same and sets no paint (a colour
+/// chosen by a selection that moved elsewhere) writes no paint either: what
+/// else set the node's translation and effects since stays, as an element
+/// only changed props touch keeps what was written to it. A style that sets
+/// that paint itself again wins.
+#[test]
+fn an_unchanged_restyle_leaves_paint_set_elsewhere() {
+    use zgx::scene::{Color, Transform};
+    let mut ui = Ui::new(200., 160.);
+    let selected = ui.signal(0_u32);
+    let fade = ui.signal(None::<f32>);
+    let shift = ui.signal(None::<f32>);
+    let (read_selected, read_fade, read_shift) = (selected.clone(), fade.clone(), shift.clone());
+    let view = ui.mount(div().size(20., 20.).reactive_style(move || {
+        let bg = if read_selected.get() == 1 {
+            Color(0xff, 0x88, 0, 255)
+        } else {
+            Color(0x22, 0x33, 0x44, 255)
+        };
+        let mut styles = Styles::new().bg(bg);
+        if let Some(opacity) = read_fade.get() {
+            styles = styles.opacity(opacity);
+        }
+        if let Some(x) = read_shift.get() {
+            styles = styles.translate(x, 0.);
+        }
+        styles
+    }));
+    ui.prepare_frame();
+    // Two runs with the same result: the second writes nothing.
+    for at in [2, 3] {
+        selected.set(at);
+        ui.prepare_frame();
+    }
+    let node = view.node();
+    let moved = Transform { x: 12., y: 3. };
+    {
+        let mut scene = ui.scene.borrow_mut();
+        scene.set_transform(node, moved);
+        let effects = Effects {
+            brightness: 0.5,
+            ..scene.effects(node)
+        };
+        scene.set_effects(node, effects);
+    }
+    selected.set(4);
+    ui.prepare_frame();
+    {
+        let scene = ui.scene.borrow();
+        assert_eq!(scene.transform(node), moved);
+        assert_eq!(scene.effects(node).brightness, 0.5);
+    }
+    // The style's own value for that paint wins over what was set.
+    fade.set(Some(0.5));
+    ui.prepare_frame();
+    assert_eq!(ui.scene.borrow().effects(node).opacity, 0.5);
+    shift.set(Some(30.));
+    ui.prepare_frame();
+    assert_eq!(
+        ui.scene.borrow().transform(node),
+        Transform { x: 30., y: 0. }
+    );
+}
