@@ -1812,6 +1812,8 @@ export type Styles = {
 	-- below the baseline the line sits.
 	underline: boolean?,
 	underline_offset: Num?,
+	-- The language its text is in (HTML's `lang`): "ja", "zh-TW".
+	lang: string?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: number?,
 	y: number?,
@@ -1992,6 +1994,11 @@ export type StyleProps = {
 	-- below the baseline the line sits.
 	underline: Reactive<boolean>?,
 	underline_offset: Reactive<Num>?,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Reactive<string>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -2417,6 +2424,11 @@ export type Props = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -2780,6 +2792,7 @@ export type Props_tabular = Reactive<boolean>?
 export type Props_font_features = Reactive<string>?
 export type Props_underline = Reactive<boolean>?
 export type Props_underline_offset = Reactive<Num>?
+export type Props_lang = Reactive<string>?
 export type Props_x = Reactive<number>?
 export type Props_y = Reactive<number>?
 export type Props_scale = Reactive<number>?
@@ -3036,6 +3049,11 @@ export type ContainerProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -3436,6 +3454,11 @@ export type ScrollProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -3847,6 +3870,11 @@ export type TextProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -4231,6 +4259,11 @@ export type MarkdownViewProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -4472,6 +4505,8 @@ export type SpanProps = {
 	strike: Reactive<boolean>?,
 	-- As `ui.text`'s: "mono", "sans", "serif" or a family's name.
 	font: Reactive<string>?,
+	-- The language its text is in, over its paragraph's (`lang`).
+	lang: string?,
 	-- How far below the baseline the underline sits (CSS's
 	-- `text-underline-offset`).
 	underline_offset: number?,
@@ -4671,6 +4706,11 @@ export type RichProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -5049,6 +5089,11 @@ export type ImageProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -5437,6 +5482,11 @@ export type SvgProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -5920,6 +5970,11 @@ export type Scene3DProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -6321,6 +6376,11 @@ export type CanvasProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -6731,6 +6791,11 @@ export type CheckboxProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -7119,6 +7184,11 @@ export type InputProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -7608,6 +7678,11 @@ export type ProgressProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -7987,6 +8062,11 @@ export type SliderProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -8384,6 +8464,11 @@ export type SegmentedProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -8774,6 +8859,11 @@ export type StepperProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -9165,6 +9255,11 @@ export type DisclosureProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -9568,6 +9663,11 @@ export type AccordionProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -9946,6 +10046,11 @@ export type SectionProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -10346,6 +10451,11 @@ export type SeparatorProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -10730,6 +10840,11 @@ export type TabsProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -11136,6 +11251,11 @@ export type TreeProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -11538,6 +11658,11 @@ export type DataGridProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -11936,6 +12061,11 @@ export type CalendarProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -12327,6 +12457,11 @@ export type DatePickerProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -12716,6 +12851,11 @@ export type TimeFieldProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -13104,6 +13244,11 @@ export type ComboboxProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -13500,6 +13645,11 @@ export type CommandPaletteProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -13884,6 +14034,11 @@ export type SelectProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -14275,6 +14430,11 @@ export type SplitProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -14684,6 +14844,11 @@ export type ListProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -15142,6 +15307,11 @@ export type LayerProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -15541,6 +15711,11 @@ export type ModalProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -15958,6 +16133,11 @@ export type PopoverProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -16385,6 +16565,11 @@ export type MenuItemProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -16768,6 +16953,11 @@ export type SubmenuProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -17173,6 +17363,11 @@ export type WebViewProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -17574,6 +17769,11 @@ export type TerminalProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -17953,6 +18153,11 @@ export type SlotProps = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -18381,6 +18586,11 @@ export type EachOptions = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -18775,6 +18985,11 @@ export type PresenceOptions = {
 	-- below the baseline the line sits.
 	underline: Props_underline,
 	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,

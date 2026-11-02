@@ -751,6 +751,8 @@ pub(crate) struct ColdStyles {
     pub(crate) size_calcs: Option<std::sync::Arc<crate::size_calc::SizeCalcs>>,
     /// `Styled::text_balance`.
     pub(crate) text_balance: Option<bool>,
+    /// `Styled::lang`.
+    pub(crate) lang: Option<std::sync::Arc<str>>,
 }
 /// `ColdStyles`' gradients, behind one pointer: inline, each would make
 /// every `ColdStyles` 40 bytes larger to copy and compare, and allocate it a
@@ -961,6 +963,9 @@ impl RareStyles {
             }
             if theirs.text_balance.is_some() {
                 mine.text_balance = theirs.text_balance;
+            }
+            if theirs.lang.is_some() {
+                mine.lang = theirs.lang.clone();
             }
             if theirs.text_shadows.is_some() {
                 mine.text_shadows = theirs.text_shadows.clone();
@@ -2699,6 +2704,19 @@ pub trait Styled: Sized {
     /// Inherited.
     fn text_wrap(mut self, value: bool) -> Self {
         self.styles_mut().fields_mut(bit::TEXT_WRAP).text_wrap = Some(value);
+        self
+    }
+    /// The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+    /// "zh-TW"), inherited by what it holds: Han characters take that
+    /// language's fonts (a Chinese quote's in a Japanese app, not the
+    /// app's Japanese ones), over the app's language and what a line's kana
+    /// or hangul say, and assistive technology reads it in that language.
+    fn lang(mut self, language: impl Into<std::sync::Arc<str>>) -> Self {
+        // Not a font feature, as in CSS: the scene keeps what each node says
+        // (`Scene::set_language`), and text takes its nearest's as its fonts
+        // are set (`Scene::set_font`, `Scene::take_languages`).
+        let rare = self.styles_mut().rare_mut();
+        rare.cold.get_or_insert_default().lang = Some(language.into());
         self
     }
     /// Wrap text with its lines balanced (CSS's `text-wrap: balance`): at
