@@ -724,3 +724,110 @@ fn a_hollow_box_over_a_page_takes_the_pointer_only_while_it_shows_something() {
         assert_eq!(at(&ui), route, "mode {mode}");
     }
 }
+
+/// What a page's file inputs ask of the window: the pickers shown, and the
+/// files the next one returns (`None`: the person cancelled).
+#[derive(Default)]
+struct Files {
+    asked: RefCell<Vec<zgx::platform::FilePicker>>,
+    answer: RefCell<Option<Vec<std::path::PathBuf>>>,
+}
+impl zgx::platform::Platform for Files {
+    fn clipboard_text(&self) -> Option<String> {
+        None
+    }
+    fn set_clipboard_text(&self, _: String) -> bool {
+        false
+    }
+    fn open_files(
+        &self,
+        picker: zgx::platform::FilePicker,
+    ) -> zgx::platform::Pending<Result<Vec<std::path::PathBuf>, String>> {
+        self.asked.borrow_mut().push(picker);
+        let answer = self.answer.borrow().clone().unwrap_or_default();
+        Box::pin(async move { Ok(answer) })
+    }
+    fn save_file(
+        &self,
+        _: zgx::platform::FilePicker,
+    ) -> zgx::platform::Pending<Result<Option<std::path::PathBuf>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn open_folder(
+        &self,
+        picker: zgx::platform::FilePicker,
+    ) -> zgx::platform::Pending<Result<Option<std::path::PathBuf>, String>> {
+        self.asked.borrow_mut().push(picker);
+        let answer = self
+            .answer
+            .borrow()
+            .clone()
+            .and_then(|files| files.into_iter().next());
+        Box::pin(async move { Ok(answer) })
+    }
+}
+
+#[test]
+fn a_pages_file_input_asks_the_windows_file_dialog_and_always_hears_back() {
+    use std::path::PathBuf;
+    use zgx::{compose::TaskRunner, task::LocalExecutor};
+    let files = Rc::new(Files::default());
+    let executor = Rc::new(RefCell::new(LocalExecutor::new()));
+    let mut ui = Ui::new(400., 300.);
+    let web = WebView::new(&ui.runtime, WebViewOptions::default());
+    let replies: Rc<RefCell<Vec<Option<Vec<PathBuf>>>>> = Rc::default();
+    let ask = |multiple: bool, folder: bool| {
+        let replies = replies.clone();
+        web.choose_files(multiple, folder, move |files| {
+            replies.borrow_mut().push(files)
+        });
+    };
+    // No node shows the page: no dialog, and the page hears it cancelled.
+    ask(false, false);
+    assert_eq!(*replies.borrow(), [None]);
+    let handle = ui.mount(provide(
+        TaskRunner::from_executor(executor.clone()),
+        provide(
+            zgx::platform::PlatformService(files.clone()),
+            web_view(&web).w(300.).h(200.),
+        ),
+    ));
+    ui.prepare_frame();
+    // Several files, chosen.
+    let chosen = vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")];
+    *files.answer.borrow_mut() = Some(chosen.clone());
+    ask(true, false);
+    executor.borrow_mut().tick();
+    assert_eq!(replies.borrow()[1], Some(chosen.clone()));
+    // One file; cancelled (nothing chosen) is `None`, not an empty list.
+    *files.answer.borrow_mut() = None;
+    ask(false, false);
+    executor.borrow_mut().tick();
+    assert_eq!(replies.borrow()[2], None);
+    // A folder input (`webkitdirectory`) asks for a folder.
+    *files.answer.borrow_mut() = Some(vec![PathBuf::from("/tmp")]);
+    ask(false, true);
+    executor.borrow_mut().tick();
+    assert_eq!(replies.borrow()[3], Some(vec![PathBuf::from("/tmp")]));
+    let asked: Vec<_> = files
+        .asked
+        .borrow()
+        .iter()
+        .map(|p| (p.title.clone(), p.multiple))
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            ("Choose Files".to_owned(), true),
+            ("Choose a File".to_owned(), false),
+            ("Choose a Folder".to_owned(), false),
+        ]
+    );
+    // The node goes while a dialog is open: the page still hears back.
+    *files.answer.borrow_mut() = Some(chosen);
+    ask(false, false);
+    handle.unmount();
+    executor.borrow_mut().tick();
+    assert_eq!(replies.borrow().len(), 5);
+    assert_eq!(replies.borrow()[4], None);
+}

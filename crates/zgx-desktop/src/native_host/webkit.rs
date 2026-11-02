@@ -14,15 +14,16 @@ use objc2::{
 };
 use objc2_app_kit::{NSColor, NSView};
 use objc2_foundation::{
-    NSData, NSDictionary, NSError, NSHTTPURLResponse, NSKeyValueChangeKey,
+    NSArray, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSKeyValueChangeKey,
     NSKeyValueObservingOptions, NSNumber, NSObjectNSKeyValueObserverRegistration, NSRect, NSString,
     NSURL, NSURLRequest, NSUUID,
 };
 use objc2_web_kit::{
     WKFrameInfo, WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
-    WKNavigationType, WKScriptMessage, WKScriptMessageHandler, WKUIDelegate, WKURLSchemeHandler,
-    WKURLSchemeTask, WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebView,
-    WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
+    WKNavigationType, WKOpenPanelParameters, WKScriptMessage, WKScriptMessageHandler, WKUIDelegate,
+    WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController, WKUserScript,
+    WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
+    WKWindowFeatures,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -343,6 +344,28 @@ define_class!(
                 let text = answer.map(|text| NSString::from_str(&text));
                 completion.call((text.as_ref().map_or(std::ptr::null_mut(), |text| Retained::as_ptr(text).cast_mut()),))
             });
+        }
+        /// A file input (`<input type=file>`): the window's own file dialog
+        /// as a sheet (`WebView::choose_files`), its answer the page's.
+        #[unsafe(method(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:))]
+        fn open_panel(&self, _view: &WKWebView, parameters: &WKOpenPanelParameters, _frame: &WKFrameInfo, completion: &block2::DynBlock<dyn Fn(*mut NSArray<NSURL>)>) {
+            // SAFETY: getters of the parameters WebKit passes for this call.
+            let (multiple, folder) = unsafe { (parameters.allowsMultipleSelection(), parameters.allowsDirectories()) };
+            let completion = completion.copy();
+            let answer = move |files: Option<Vec<std::path::PathBuf>>| {
+                let urls = files.map(|files| {
+                    let urls: Vec<Retained<NSURL>> = files
+                        .iter()
+                        .filter_map(|file| Some(NSURL::fileURLWithPath(&NSString::from_str(file.to_str()?))))
+                        .collect();
+                    NSArray::from_retained_slice(&urls)
+                });
+                completion.call((urls.as_ref().map_or(std::ptr::null_mut(), |urls| Retained::as_ptr(urls).cast_mut()),));
+            };
+            match self.ivars().web.upgrade() {
+                Some(web) => web.choose_files(multiple, folder, answer),
+                None => answer(None),
+            }
         }
     }
     unsafe impl WKScriptMessageHandler for Observer {

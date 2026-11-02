@@ -8,7 +8,8 @@
 //! at (360, 100), 120 × 60, a link (to https://example.com/dragged) at (20,
 //! 240), a 60 × 60 red image at (360, 180), a link that downloads a file
 //! (`download`) at (480, 190), two magenta 10 × 10 dots at (300, 150) and
-//! (560, 250) that F8 turns green, and enough height to scroll.
+//! (560, 250) that F8 turns green, a file input (several files) at (20, 300),
+//! and enough height to scroll.
 //! Beside the page, a gray zgx drop target at (660, 100), 90 × 60, prints
 //! `DROPPED <text>` for each drag dropped on it.
 //!
@@ -41,10 +42,11 @@ html, body { margin: 0; background: rgb(0, 0, 255); height: 3000px; }
 #link { position: absolute; left: 20px; top: 240px; font-size: 20px; color: white; }
 #pic { position: absolute; left: 360px; top: 180px; width: 60px; height: 60px; }
 #save { position: absolute; left: 480px; top: 190px; font-size: 20px; color: white; }
+#upload { position: absolute; left: 20px; top: 300px; width: 200px; }
 .dot { position: absolute; width: 10px; height: 10px; background: rgb(255, 0, 255); }
 #target { position: absolute; left: 20px; top: 100px; width: 200px; height: 80px; background: rgb(0, 255, 0); cursor: pointer; }
 #imaged { position: absolute; left: 360px; top: 100px; width: 120px; height: 60px; cursor: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR42mP4z8DwnxLMMGrAqAGjBgwXAwAwxP4QisZM5QAAAABJRU5ErkJggg==) 4 4, auto; }
-</style></head><body><h1 id="heading">Probe heading</h1><input id="field" aria-label="Probe field"><select id="choice"><option>Alpha</option><option>Beta</option><option>Gamma</option></select><div id="target"></div><div id="imaged"></div><a id="link" href="https://example.com/dragged">Drag me</a><div class="dot" style="left: 300px; top: 150px"></div><div class="dot" style="left: 560px; top: 250px"></div><a id="save" download="zgx-saved.txt" href="data:text/plain,saved">Save</a><img id="pic" alt="red" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR42mP4z8DwnxLMMGrAqAGjBgwXAwAwxP4QisZM5QAAAABJRU5ErkJggg=="><script>
+</style></head><body><h1 id="heading">Probe heading</h1><input id="field" aria-label="Probe field"><select id="choice"><option>Alpha</option><option>Beta</option><option>Gamma</option></select><div id="target"></div><div id="imaged"></div><a id="link" href="https://example.com/dragged">Drag me</a><div class="dot" style="left: 300px; top: 150px"></div><div class="dot" style="left: 560px; top: 250px"></div><input id="upload" type="file" multiple><a id="save" download="zgx-saved.txt" href="data:text/plain,saved">Save</a><img id="pic" alt="red" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR42mP4z8DwnxLMMGrAqAGjBgwXAwAwxP4QisZM5QAAAABJRU5ErkJggg=="><script>
 const post = (value) => window.zgx.postMessage(value);
 const field = document.getElementById('field');
 document.getElementById('target').addEventListener('click', (e) => post({ click: [e.offsetX, e.offsetY], detail: e.detail }));
@@ -63,6 +65,9 @@ document.addEventListener('keydown', (e) => {
 addEventListener('resize', () => post({ resized: innerHeight }));
 addEventListener('dragend', () => post({ dragend: true }));
 document.getElementById('save').addEventListener('click', () => post({ save: true }));
+const upload = document.getElementById('upload');
+upload.addEventListener('change', () => post({ files: [...upload.files].map((f) => f.name) }));
+upload.addEventListener('cancel', () => post({ files: null }));
 let scrolled = false;
 addEventListener('scroll', () => { if (!scrolled && scrollY > 0) { scrolled = true; post({ scrolled: scrollY }); } });
 </script></body></html>"#;

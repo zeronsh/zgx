@@ -39,6 +39,8 @@ const PAGE: &str = r#"<!doctype html>
   <p>This page is the platform's web view, laid out by zgx. The menu and the composer are zgx
   content drawn above it; on macOS their glass blurs it.</p>
   <button onclick="window.zgx.postMessage({clicked: Date.now()})">Message the app</button>
+  <input id="upload" type="file" multiple style="position:absolute;left:-9999px"
+    onchange="window.chosen = [...this.files].map((f) => f.name).join(',')">
   <div class="grid">
     <div class="tile" style="background:#1d3557">Navy</div>
     <div class="tile" style="background:#e63946">Red</div>
@@ -95,6 +97,43 @@ fn answer_sheet(
     held
 }
 
+/// The fixture's file dialog: what a page's file input asks the window for
+/// (`WebView::choose_files`), answered with one file at once, no panel shown.
+#[derive(Default)]
+struct FixtureFiles {
+    asked: std::cell::Cell<Option<bool>>,
+}
+impl zgx::platform::Platform for FixtureFiles {
+    fn clipboard_text(&self) -> Option<String> {
+        None
+    }
+    fn set_clipboard_text(&self, _: String) -> bool {
+        false
+    }
+    fn open_files(
+        &self,
+        picker: zgx::platform::FilePicker,
+    ) -> zgx::platform::Pending<Result<Vec<std::path::PathBuf>, String>> {
+        self.asked.set(Some(picker.multiple));
+        let file = std::env::temp_dir().join("zgx-fixture-upload.txt");
+        let written = std::fs::write(&file, "chosen for the page\n");
+        Box::pin(async move { written.map(|()| vec![file]).map_err(|e| e.to_string()) })
+    }
+    fn save_file(
+        &self,
+        _: zgx::platform::FilePicker,
+    ) -> zgx::platform::Pending<Result<Option<std::path::PathBuf>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+/// `view` with `files` for its file dialogs, if given (the fixture's).
+fn provide_files(files: Option<Rc<FixtureFiles>>, view: View) -> View {
+    match files {
+        Some(files) => provide(zgx::platform::PlatformService(files), view),
+        None => view,
+    }
+}
+
 fn icon_button(label: &str) -> View {
     button()
         .h(30.)
@@ -135,6 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..Default::default()
             };
             let web = WebView::new(&cx.ui.runtime, options);
+            let files = Rc::new(FixtureFiles::default());
             match &url {
                 Some(url) => web.load_url(url.clone()),
                 None => web.load_html(PAGE, Some("https://zgx.example/")),
@@ -288,7 +328,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .grow()
                 .flex_shrink(1.)
                 .min_h(0.)
-                .child(
+                .child(provide_files(
+                    fixture.then(|| files.clone()),
                     web_view(&web)
                         .id("page")
                         .absolute()
@@ -302,7 +343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let shown = page_shown.clone();
                             move || if shown.get() { Styles::default() } else { Styles::default().hidden() }
                         }),
-                )
+                ))
                 .child(composer);
             let view = cx.render(
                 column()
@@ -316,21 +357,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let keep = Rc::new(RefCell::new(Some(subscription)));
             cx.on_closed(move || drop(keep.borrow_mut().take()));
             if fixture {
-                run_fixture(cx, web, view, menu_open, page_shown, finished, messages);
+                run_fixture(
+                    cx,
+                    web,
+                    Fixture {
+                        view,
+                        menu_open,
+                        page_shown,
+                        finished,
+                        messages,
+                        files,
+                    },
+                );
             }
         })
 }
 
-/// Checks against live AppKit state (see the module documentation).
-fn run_fixture(
-    cx: &mut zgx_desktop::WindowContext,
-    web: WebView,
+/// What the fixture reads and drives besides the window and the page.
+struct Fixture {
     view: zgx::compose::ViewHandle,
     menu_open: zgx::reactive::Signal<bool>,
     page_shown: zgx::reactive::Signal<bool>,
     finished: zgx::reactive::Signal<u32>,
     messages: zgx::reactive::Signal<u32>,
-) {
+    files: Rc<FixtureFiles>,
+}
+
+/// Checks against live AppKit state (see the module documentation).
+fn run_fixture(cx: &mut zgx_desktop::WindowContext, web: WebView, fixture: Fixture) {
+    let Fixture {
+        view,
+        menu_open,
+        page_shown,
+        finished,
+        messages,
+        files,
+    } = fixture;
     #[cfg(target_os = "macos")]
     {
         let scene = cx.ui.scene.clone();
@@ -491,6 +553,28 @@ fn run_fixture(
                     && shown[3] == Some("default".into())
                     && dialogs == Some(Ok("\"[true,true,false,\\\"zgx\\\"]\"".into())),
                 format!("prompt fields {shown:?}, page heard {dialogs:?}"),
+            );
+            // A file input: the window's file dialog (the fixture's here,
+            // which shows no panel), its file the input's.
+            web.run_js("document.getElementById('upload').click()");
+            let chosen = Rc::new(RefCell::new(None));
+            for _ in 0..40 {
+                sleep(50).await;
+                let reply = chosen.clone();
+                web.evaluate_js("window.chosen || ''", move |value| {
+                    *reply.borrow_mut() = Some(value)
+                });
+                sleep(25).await;
+                if matches!(&*chosen.borrow(), Some(Ok(value)) if value != "\"\"") {
+                    break;
+                }
+            }
+            let chosen = chosen.borrow().clone();
+            check(
+                "a file input asks the window's file dialog",
+                files.asked.get() == Some(true)
+                    && chosen == Some(Ok("\"zgx-fixture-upload.txt\"".into())),
+                format!("multiple {:?}, chosen {chosen:?}", files.asked.get()),
             );
             web.run_js("window.zgx.postMessage({hello: 1})");
             sleep(200).await;
@@ -804,5 +888,7 @@ fn run_fixture(
     }
     // The fixture checks AppKit state; elsewhere there is nothing to check.
     #[cfg(not(target_os = "macos"))]
-    let _ = (cx, web, view, menu_open, page_shown, finished, messages);
+    let _ = (
+        cx, web, view, menu_open, page_shown, finished, messages, files,
+    );
 }

@@ -301,6 +301,41 @@ def damage_checks(session):
     return {"uploads": len(uploads), "largest part": largest}
 
 
+def file_checks(session):
+    """The page's file input opens the window's own file dialog (with no
+    portal here, zenity's chooser): the file typed into it reaches the
+    page, its name as the input's."""
+    chosen = session.output.resolve() / "chosen.txt"
+    chosen.write_text("chosen for the page\n")
+    session.click(110, 352)
+    def chooser():
+        found = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Choose Files$"], env=session.env,
+                               capture_output=True, text=True)
+        return found.stdout.split()[0] if found.returncode == 0 and found.stdout.strip() else None
+    window = session.wait(chooser, "the page's file input opened no file dialog", 20)
+    subprocess.run(["xdotool", "windowactivate", "--sync", window], env=session.env)
+    time.sleep(1)
+    # The location entry, then the path: a Return may only complete it.
+    session.xdo("key", "--clearmodifiers", "ctrl+l")
+    time.sleep(.5)
+    session.xdo("type", "--clearmodifiers", "--delay", "20", str(chosen))
+    time.sleep(.5)
+    def heard():
+        return [m[0]["files"] for m in session.messages() if "files" in m[0]]
+    for _ in range(3):
+        session.xdo("key", "--clearmodifiers", "Return")
+        try:
+            session.wait(heard, "", 4)
+            break
+        except AssertionError:
+            if not chooser():
+                raise
+    files = session.wait(heard, "the chosen file never reached the page's file input")[0]
+    if files != ["chosen.txt"]:
+        raise AssertionError(f"the page's file input took {files}")
+    return files
+
+
 def page_checks(session, ime, transparent=False, unaccelerated=False):
     session.wait(lambda: session.lines("EVAL "), "the page never loaded", 30)
     colours = dict(COLOURS)
@@ -386,6 +421,8 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     session.wait(lambda: session.lines("FULL_SCREEN ")[-1:] == ["false"], "the page never left full screen")
     session.wait(lambda: near(session.grab()(*COLOURS["page"][0]), COLOURS["page"][1]), "the page never came back from full screen")
     checks["full screen"] = True
+    if not session.wayland:
+        checks["file input"] = file_checks(session)
     for _ in range(3):
         session.click(300, 300, 5)
     scrolled = session.wait(lambda: [m for m in session.messages() if "scrolled" in m[0]], "the wheel never scrolled the page")
@@ -676,7 +713,9 @@ if document and "internal frame 'Web page'" in chain and "frame 'Web view probe'
 def x11(args, output, private):
     env = dict(os.environ, XDG_RUNTIME_DIR=private, WINIT_X11_SCALE_FACTOR="1", LANG="C.UTF-8",
                XDG_CONFIG_HOME=private + "/config", XDG_CACHE_HOME=private + "/cache", XDG_DATA_HOME=private + "/data")
-    for name in ("WAYLAND_DISPLAY", "IBUS_ADDRESS", "GTK_IM_MODULE", "XMODIFIERS"):
+    # No session bus but the private one IME and Orca runs start: a file
+    # dialog is zenity's, which xdotool answers (no portal's).
+    for name in ("WAYLAND_DISPLAY", "IBUS_ADDRESS", "GTK_IM_MODULE", "XMODIFIERS", "DBUS_SESSION_BUS_ADDRESS"):
         env.pop(name, None)
     owned = []
     try:

@@ -22,7 +22,7 @@ use super::gtk::{self, Api, Ptr, c, connect, string};
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
-    ffi::{c_char, c_int, c_uint, c_void},
+    ffi::{CString, c_char, c_int, c_uint, c_void},
     ptr::null_mut,
     rc::{Rc, Weak},
     sync::{Arc, Mutex, OnceLock},
@@ -765,6 +765,14 @@ impl Gtk {
                 view,
                 "show-option-menu",
                 handler(on_option_menu as *const ()),
+                data,
+                false,
+            );
+            connect(
+                api,
+                view,
+                "run-file-chooser",
+                handler(on_file_chooser as *const ()),
                 data,
                 false,
             );
@@ -2179,6 +2187,49 @@ unsafe fn refuse_downloads(api: &Api, context: Ptr) {
 /// No context menu of WebKit's own: it would open a window of GTK's
 /// somewhere off the page.
 unsafe extern "C" fn on_context_menu(_: Ptr, _: Ptr, _: Ptr, _: Ptr, _: Ptr) -> gtk::gboolean {
+    1
+}
+/// A file input (`<input type=file>`): the window's own file dialog
+/// (`WebView::choose_files`, the desktop portal's), not GTK's, which would
+/// open as a window of its own, apart from the app's.
+unsafe extern "C" fn on_file_chooser(_: Ptr, request: Ptr, data: Ptr) -> gtk::gboolean {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: GTK passes the request and this handler's page; the request is
+    // kept (a reference of ours) until answered, on GTK's thread.
+    let (page, multiple, request) = unsafe {
+        (
+            page(data),
+            (api.webkit_file_chooser_request_get_select_multiple)(request) != 0,
+            (api.g_object_ref)(request) as usize,
+        )
+    };
+    page.post(move |web| {
+        web.choose_files(multiple, false, move |files| {
+            on_gtk(move |_| {
+                let api = gtk::api().expect("GTK runs");
+                let request = request as Ptr;
+                let paths: Vec<CString> = files
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|file| CString::new(file.to_str()?).ok())
+                    .collect();
+                // SAFETY: the request kept above, answered once and let go,
+                // on GTK's thread; the paths a null-ended array living
+                // through the call.
+                unsafe {
+                    if paths.is_empty() {
+                        (api.webkit_file_chooser_request_cancel)(request);
+                    } else {
+                        let mut list: Vec<*const c_char> =
+                            paths.iter().map(|path| path.as_ptr()).collect();
+                        list.push(std::ptr::null());
+                        (api.webkit_file_chooser_request_select_files)(request, list.as_ptr());
+                    }
+                    (api.g_object_unref)(request);
+                }
+            });
+        });
+    });
     1
 }
 /// A `<select>`'s popup: drawn by zgx (`option_menu`), as GTK's own would

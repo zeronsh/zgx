@@ -457,6 +457,32 @@ struct Inner {
     /// The last `set_src`, so an unchanged reactive source navigates once.
     src: RefCell<Option<String>>,
     policy: RefCell<Option<Policy>>,
+    /// What answers the page's file inputs: the latest node showing it.
+    chooser: RefCell<Option<Chooser>>,
+}
+/// The window's file dialogs and the component that waits on them, from
+/// the node showing a page (`WebView::choose_files`).
+struct Chooser {
+    platform: Rc<crate::platform::PlatformService>,
+    tasks: crate::compose::Tasks,
+}
+/// A reply that's given once: `None` if dropped unanswered (the node went
+/// first), as a page's file input must hear back.
+struct Reply(Option<ReplyFn>);
+type ReplyFn = Box<dyn FnOnce(Option<Vec<std::path::PathBuf>>)>;
+impl Reply {
+    fn give(mut self, files: Option<Vec<std::path::PathBuf>>) {
+        if let Some(reply) = self.0.take() {
+            reply(files);
+        }
+    }
+}
+impl Drop for Reply {
+    fn drop(&mut self) {
+        if let Some(reply) = self.0.take() {
+            reply(None);
+        }
+    }
 }
 /// A web page's controller; clones share it.
 #[derive(Clone)]
@@ -519,7 +545,58 @@ impl WebView {
             next_listener: Cell::new(0),
             src: RefCell::new(None),
             policy: RefCell::new(None),
+            chooser: RefCell::new(None),
         }))
+    }
+    /// Files for the page's file input (`<input type=file>`), chosen in the
+    /// window's own file dialog (a sheet on macOS, the desktop portal's on
+    /// Linux): `reply` gets them, or `None` if the person cancelled or no
+    /// window shows the page. `multiple` lets several be chosen, `folder`
+    /// asks for a folder instead. For desktop hosts.
+    pub fn choose_files(
+        &self,
+        multiple: bool,
+        folder: bool,
+        reply: impl FnOnce(Option<Vec<std::path::PathBuf>>) + 'static,
+    ) {
+        use crate::platform::FilePicker;
+        let reply = Reply(Some(Box::new(reply)));
+        let chooser = self.0.chooser.borrow();
+        let Some(Chooser { platform, tasks }) = &*chooser else {
+            return reply.give(None);
+        };
+        let picker = FilePicker {
+            title: if folder {
+                "Choose a Folder"
+            } else if multiple {
+                "Choose Files"
+            } else {
+                "Choose a File"
+            }
+            .into(),
+            multiple,
+            ..FilePicker::default()
+        };
+        let platform = platform.clone();
+        tasks.spawn(async move {
+            let files = if folder {
+                platform
+                    .0
+                    .open_folder(picker)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|folder| vec![folder])
+            } else {
+                platform
+                    .0
+                    .open_files(picker)
+                    .await
+                    .ok()
+                    .filter(|files| !files.is_empty())
+            };
+            reply.give(files);
+        });
     }
     /// Unique per controller in this thread.
     pub fn id(&self) -> u64 {
@@ -859,6 +936,14 @@ fn native(
     src: Option<Box<dyn FnMut() -> String>>,
 ) -> View {
     component(move |cx| {
+        // The page's file inputs open this window's dialogs.
+        if let Some(web) = &web
+            && let Some(platform) = cx.try_service::<crate::platform::PlatformService>()
+            && cx.try_service::<crate::compose::TaskRunner>().is_some()
+        {
+            let tasks = cx.tasks();
+            *web.0.chooser.borrow_mut() = Some(Chooser { platform, tasks });
+        }
         let natives = cx.try_service::<NativeViews>();
         let supported = natives.as_ref().is_some_and(|natives| natives.supported());
         if let (Some(web), Some(mut src)) = (web.clone(), src) {
