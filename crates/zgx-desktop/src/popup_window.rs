@@ -488,6 +488,10 @@ mod macos {
         /// A popover's arrow (`View::arrow`): its triangle past the panel's
         /// edge, in its window's coordinates.
         arrow: Option<[(f32, f32); 3]>,
+        /// How opaque the panel is, through what holds it (a tooltip's fade):
+        /// the material fades with it, so it never outlives the panel's
+        /// content (an empty pane of glass as a tooltip fades out).
+        alpha: f32,
     }
     impl Material {
         /// For popup root `root`: its panel (what the root holds) is a box
@@ -505,6 +509,14 @@ mod macos {
                 return None;
             };
             if quad.fill.3 == 255 || (preview && scene.effects(panel).blur_radius <= 0.) {
+                return None;
+            }
+            let alpha = std::iter::once(panel)
+                .chain(scene.ancestors(panel).take_while(|node| *node != root))
+                .chain(std::iter::once(root))
+                .map(|node| scene.effects(node).opacity.clamp(0., 1.))
+                .product::<f32>();
+            if alpha <= 0. {
                 return None;
             }
             let menu = semantics
@@ -539,6 +551,7 @@ mod macos {
                     NSVisualEffectMaterial::Popover
                 },
                 arrow,
+                alpha,
             })
         }
         /// Moved by `(dx, dy)`.
@@ -798,6 +811,7 @@ mod macos {
                 None => self.effect.setHidden(true),
                 Some(material) => {
                     self.effect.setMaterial(material.material);
+                    self.effect.setAlphaValue(material.alpha as f64);
                     let bounds = material.bounds();
                     self.effect.setFrame(NSRect::new(
                         NSPoint::new(
@@ -1800,6 +1814,19 @@ mod macos {
             let painted = div().child(div().bg(rgba(0xffffff20)).rounded(4.).child(card()));
             let found = material(painted, false).expect("its own material");
             assert_eq!(found.radius, 4.);
+        }
+
+        /// A tooltip fading in or out fades the material under its card
+        /// with it: half faded, half the material; faded out, none, so no
+        /// empty pane of glass outlives the card.
+        #[test]
+        fn a_tooltips_material_fades_with_its_card() {
+            let tooltip =
+                |fade: f32| div().child(div().layer().child(column().opacity(fade).child(chip())));
+            assert_eq!(material(tooltip(1.), false).expect("shown").alpha, 1.);
+            let half = material(tooltip(0.5), false).expect("half faded");
+            assert!((half.alpha - 0.5).abs() < 1e-6, "{}", half.alpha);
+            assert!(material(tooltip(0.), false).is_none(), "faded out: none");
         }
 
         #[test]
