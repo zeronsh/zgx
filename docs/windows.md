@@ -968,7 +968,18 @@ The probes for the rest of Windows:
   it, zgx's composer over the page takes clicks and typing and its script
   changes the page, the menu popover draws above the page and takes its
   clicks, the wheel scrolls the page, and after a resize the page still fills
-  its node.
+  its node; Ctrl+F in the page reaches the app, whose `WebView::find` finds
+  the heading, and a `download` link saves nothing with no handler and, after
+  Ctrl+D (the app's handler), saves where the app says, never in Downloads.
+  `--no-foreground` sends no input, for a desktop another window may hold:
+  through the example's `--control` commands on stdin, WebView2's browser
+  keys read back off, find finds the heading's word and not a word the page
+  hasn't, and the page's own script starts its download with no handler, with
+  one cancelling it and with one saving it, the file landing only in the last
+  case (the page reloaded before each later one: WebView2 holds a page's
+  second download started without a gesture back until it navigates, asking
+  nothing); the real Ctrl+F is a case of its own, `BLOCKED` rather than
+  failed while a system overlay holds the foreground.
 - `windows_touch_smoke.py`: synthetic touch and pen (no touchscreen needed):
   a tap clicks, a finger drags a slider, pans a list and flings it, a held
   finger opens a context menu or selects text by words, and a pen's stroke

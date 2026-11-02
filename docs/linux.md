@@ -545,8 +545,11 @@ Unlike macOS:
   `devicePixelRatio` is 1 at any scale.
 - A message posted to `window.webkit.messageHandlers.zgx` directly, rather
   than through `window.zgx`, has no origin (empty) and `main_frame` false.
-- On Wayland the clipboard bridge carries text: what the page copies reaches
-  other apps as plain text, and the primary selection is the page's own.
+- On Wayland the clipboard bridge carries what the page copies to other
+  apps: a selection as plain text and HTML, an image (the clipboard API, a
+  canvas's PNG) as `image/png`. The primary selection is the page's own,
+  and an image another app copied doesn't paste into a page (WebKitGTK
+  gives a page's paste no image, on X11 too).
 - A drag out of the page is zgx's: its link, image or selected text drops
   on zgx's targets (as `DraggedText`, the selection or the address) and,
   out of the window, on other apps (the address, the text, and an image's
