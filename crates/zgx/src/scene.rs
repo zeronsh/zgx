@@ -4228,6 +4228,17 @@ impl Scene {
             }
         }
     }
+    /// Whether `id` is a scroll view or a list: its viewport, its first
+    /// child, holds its scrolled content.
+    fn scrolls(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        let Some(viewport) = self.children_raw(node).first() else {
+            return false;
+        };
+        self.children_raw(self.tree_node(*viewport))
+            .first()
+            .is_some_and(|content| self.tree_node(*content).scroll_copy)
+    }
     /// A flex child's automatic minimum along the main axis (CSS's
     /// `min-width: auto` / `min-height: auto`): the smaller of its own size
     /// (when it sets one) and its content's min-content size, or 0 for one
@@ -4376,10 +4387,19 @@ impl Scene {
             if absolute {
                 continue;
             }
-            let need = if clips(&self.node(self.laid_out_as(child)).style) {
-                0.
+            let own = if horizontal { width } else { height };
+            let laid = self.laid_out_as(child);
+            let need = if clips(&self.node(laid).style) {
+                // Its content needs nothing (CSS's scroll container), but a
+                // list's or a scroll view's height the app set is its
+                // height: in a column it needs that, whatever rows it holds
+                // (a floor of what it built for the room it was given never
+                // settled). Not a size a widget wrote into what it clips.
+                match (horizontal, own) {
+                    (false, Some(size)) if self.scrolls(laid) => size,
+                    _ => 0.,
+                }
             } else {
-                let own = if horizontal { width } else { height };
                 match own {
                     Some(size) => size,
                     // Down a column, at the width it is laid out at, so
