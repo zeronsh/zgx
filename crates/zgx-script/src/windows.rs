@@ -607,6 +607,7 @@ pub(crate) fn install(
         "__call",
         lua.create_function(move |lua, (_, table): (Table, Table)| {
             crate::node::env(lua)?.may(crate::Capability::Windows, "ui.window")?;
+            crate::reloads::per_load(lua, "ui.window");
             let id: String = table
                 .get::<Option<String>>("id")?
                 .ok_or_else(|| mlua::Error::runtime("ui.window needs an `id`"))?;

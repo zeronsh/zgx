@@ -235,22 +235,35 @@ A tape can move the pointer as well as the wheel, for an interaction a script pl
 
 `replay '#divider' drag.tape --repeat 5` then answers the same summary for each run, and the spread across them. Recordings hold wheel input only.
 
-## What a reload would keep
+## What a reload keeps
 
-A hot reload loads every script and module again and mounts the interface anew. While the app watches its files (`zgx-run`, a live-reloading host), each load records its modules: what each requires, and what its top level registers that outlives the call. Each reload then says what a reload keeping the modules a save didn't change would have done:
+While the app watches its files (`zgx-run`, a live-reloading host), each load records its modules: what each requires, the globals its top level sets, and what its top level starts or declares. With `ZGX_RELOAD=partial` in the app's environment, a save then runs again only what it changed: the app's VM is kept, and the modules the save changed run again with whatever requires them, up to the app's script, which always runs again (a partial reload). The other modules keep the values they returned and what their top levels made (an effect, a timer); what a module running again made at its top level goes first, as it would with the VM. The interface is still mounted anew. When keeping couldn't be right, everything loads again (a full reload), as before. Without `ZGX_RELOAD=partial` every reload is full (keeping is being proven on real apps first), and each reload still says which path it would have taken and why:
 
 ```sh
 zgx inspect reloads
 ```
 
 ```text
-what each reload would have kept (nothing is kept yet: every reload loads everything again)
+each reload's path: partial (the app's VM kept, what changed and what requires it run again) or full (everything loads again), and why
 #1 full: no record of the last load (it ran before the host watched its files) (changed theme.luau)
 #2 partial: app.luau, ds/button.luau, screens/chat.luau run again, 167 kept (changed ds/button.luau)
 #3 full: net/client.luau calls ui.task at its top level, which nothing yet carries over (changed net/client.luau)
+#4 full: screens/home.luau declares ui.command at its top level: kept, it wouldn't declare it again (changed ds/button.luau)
 ```
 
-`partial` names the modules that would run again (those that changed, and what requires them up to the app's script, which always runs again) and how many would be kept. `full` says why everything would load again: plugins are loaded, a file that changed isn't a module (an image, a new file), or a module that would run again sets a global or starts something at its top level that nothing carries over yet (a task, an animation, an `on_open` handler, actions, a router). Nothing is kept yet; this is the record that decides when it will be. A host that never watches its files records nothing.
+A reload loads everything again when:
+
+- plugins are loaded (they always load again in full);
+- a file that changed isn't a module the last load ran (an image, a new file);
+- a module running again, the app's script included, sets a global or starts at its top level something nothing carries over yet (a task, an animation, an `on_open` handler, actions, a router);
+- a module kept declares at its top level something each load gathers anew (a command, a window, a contribution or filter, an override, an `on_mount`);
+- every module changed or requires one that did (a template swapped whole);
+- the last reload failed partway;
+- the host asked for it (`ScriptHost::reload`: plugins set, a template switched), listed with no files.
+
+A save whose bytes are what the last load read (an editor saving the same text, files a reload the host asked for already read) reloads nothing, and theme and locale files are read again in place without reloading the scripts. A global zgx makes as a script first reads it (`anime`) isn't the script's to set.
+
+A partial reload that fails (a script error) leaves the last load running as it was, its modules' values and effects included, and the next reload loads everything again. Without `ZGX_RELOAD=partial`, a reload that could have kept is listed as `partial (not taken: ZGX_RELOAD=partial takes it)`: what it would have done. A host that never watches its files records nothing.
 
 ## Switches: one app, two paths
 

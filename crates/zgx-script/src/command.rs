@@ -322,6 +322,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
     ui.set(
         "command",
         lua.create_function(move |lua, table: Table| {
+            crate::reloads::per_load(lua, "ui.command");
             let menu = table
                 .get::<Option<String>>("menu")?
                 .unwrap_or_else(|| "File".into());
