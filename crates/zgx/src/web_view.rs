@@ -243,6 +243,16 @@ pub struct WebViewOptions {
     /// Schemes the app serves itself. On macOS each page served this way is
     /// its own origin and, like `https`, a secure context.
     pub schemes: Vec<SchemeHandler>,
+    /// Render the page with WebKit's compositor (its GPU path), as browsers
+    /// do. Linux only: macOS and Windows ignore it. There WebKitGTK reports
+    /// the whole page changed on each frame it composites, so a page that
+    /// animates anything is painted, copied and uploaded whole. `false`
+    /// paints the page on the CPU and uploads only what each frame changed:
+    /// for a 40 × 40 spinner on a 1076 × 700 page, about 3,300 pixels a frame
+    /// instead of 753,200, and 3–9% of a core in WebKit's web process instead
+    /// of 40–52%. Pages then draw no `backdrop-filter`, and flatten 3D transforms
+    /// (no perspective). See docs/native-surfaces.md.
+    pub accelerated: bool,
 }
 impl Default for WebViewOptions {
     fn default() -> Self {
@@ -255,6 +265,7 @@ impl Default for WebViewOptions {
             new_windows: true,
             scripts: Vec::new(),
             schemes: Vec::new(),
+            accelerated: true,
         }
     }
 }

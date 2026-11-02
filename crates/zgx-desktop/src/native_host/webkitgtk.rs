@@ -250,21 +250,118 @@ fn now_ms() -> u32 {
 // What a page draws, shared.
 
 /// A page's last drawing, as GTK's thread copied it: premultiplied BGRA
-/// rows, and the part changed since the painter last took it.
+/// rows, and the parts changed since the painter last took it.
 #[derive(Default)]
 struct Frame {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
-    damage: Option<(u32, u32, u32, u32)>,
+    damage: Damage,
     /// The UI thread was told of the damage and has not taken it yet.
     told: bool,
 }
-fn union(a: Option<(u32, u32, u32, u32)>, b: (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
-    let Some(a) = a else { return b };
+
+/// `ZGX_WEB_DAMAGE=1`: each upload's rectangles on stderr, as
+/// `WEB_DAMAGE x,y,wxh ...` (what `web_view_smoke.py --unaccelerated` reads).
+fn log_damage() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| zgx::env::var_os("ZGX_WEB_DAMAGE").is_some_and(|v| v != "0"))
+}
+
+/// x, y, width and height, in the page's pixels.
+type Part = (u32, u32, u32, u32);
+fn union(a: Part, b: Part) -> Part {
     let (x0, y0) = (a.0.min(b.0), a.1.min(b.1));
     let (x1, y1) = ((a.0 + a.2).max(b.0 + b.2), (a.1 + a.3).max(b.1 + b.3));
     (x0, y0, x1 - x0, y1 - y0)
+}
+fn area(rect: Part) -> u64 {
+    u64::from(rect.2) * u64::from(rect.3)
+}
+
+/// What changed since it was last taken, as up to [`Damage::MOST`]
+/// rectangles: a page changing in two corners paints, copies and uploads
+/// two small parts, not the box around both. Rectangles whose box costs
+/// little more than they do (overlapping or near) are one.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Damage {
+    rects: [Part; Damage::MOST],
+    len: usize,
+}
+impl Damage {
+    const MOST: usize = 4;
+    /// Pixels a box may add over its parts and still be one rectangle: a
+    /// rectangle more costs a clip, a row loop and an upload of its own.
+    const SLACK: u64 = 64 * 64;
+
+    /// All of a `width` × `height` page.
+    fn all(width: u32, height: u32) -> Damage {
+        let mut all = Damage::default();
+        all.add((0, 0, width, height));
+        all
+    }
+    fn rects(&self) -> &[Part] {
+        &self.rects[..self.len]
+    }
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    fn add(&mut self, rect: Part) {
+        if area(rect) == 0 {
+            return;
+        }
+        let mut rect = rect;
+        // Each rectangle taken in may make the box reach another.
+        while let Some(i) = (0..self.len).find(|&i| {
+            let r = self.rects[i];
+            area(union(r, rect)) <= area(r) + area(rect) + Self::SLACK
+        }) {
+            rect = union(rect, self.take(i));
+        }
+        if self.len == Self::MOST {
+            // Full: the two whose box adds least are one.
+            let mut best = (u64::MAX, 0, 0);
+            let all: [Part; Self::MOST + 1] =
+                std::array::from_fn(|i| if i < self.len { self.rects[i] } else { rect });
+            for a in 0..all.len() {
+                for b in a + 1..all.len() {
+                    let grows =
+                        area(union(all[a], all[b])).saturating_sub(area(all[a]) + area(all[b]));
+                    if grows < best.0 {
+                        best = (grows, a, b);
+                    }
+                }
+            }
+            let (_, a, b) = best;
+            let merged = union(all[a], all[b]);
+            self.len = 0;
+            for (i, r) in all.into_iter().enumerate() {
+                if i != a && i != b {
+                    self.rects[self.len] = r;
+                    self.len += 1;
+                }
+            }
+            return self.add(merged);
+        }
+        self.rects[self.len] = rect;
+        self.len += 1;
+    }
+    /// Remove rectangle `i`, keeping the rest.
+    fn take(&mut self, i: usize) -> Part {
+        let rect = self.rects[i];
+        self.len -= 1;
+        self.rects[i] = self.rects[self.len];
+        rect
+    }
+    /// Each rectangle cut to `width` × `height`, the empty ones gone.
+    fn clipped(self, width: u32, height: u32) -> Damage {
+        let mut out = Damage::default();
+        for &(x, y, w, h) in self.rects() {
+            let (x, y) = (x.min(width), y.min(height));
+            out.add((x, y, w.min(width - x), h.min(height - y)));
+        }
+        out
+    }
 }
 
 // GTK's side.
@@ -321,7 +418,7 @@ struct Page {
     frame: Arc<Mutex<Frame>>,
     surface: Cell<Ptr>,
     surface_size: Cell<(i32, i32)>,
-    damage: Cell<Option<(u32, u32, u32, u32)>>,
+    damage: Cell<Damage>,
     draw_queued: Cell<bool>,
     html: RefCell<Option<(String, Option<String>)>>,
     /// The app's zoom of the page, and device pixels a point.
@@ -368,6 +465,7 @@ struct Spec {
     user_agent: Option<String>,
     messages: bool,
     new_windows: bool,
+    accelerated: bool,
     scripts: Vec<(String, bool)>,
     schemes: Vec<String>,
     frame: Arc<Mutex<Frame>>,
@@ -520,6 +618,15 @@ impl Gtk {
             if let Some(agent) = &spec.user_agent {
                 (api.webkit_settings_set_user_agent)(settings, c(agent).as_ptr());
             }
+            // Composited, WebKit damages the whole page each frame; not, it
+            // paints on the CPU and damages what changed
+            // (`WebViewOptions::accelerated`).
+            if !spec.accelerated {
+                (api.webkit_settings_set_hardware_acceleration_policy)(
+                    settings,
+                    gtk::WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER,
+                );
+            }
             if spec.transparent {
                 let clear = gtk::GdkRGBA {
                     red: 0.,
@@ -562,7 +669,7 @@ impl Gtk {
                 frame: spec.frame,
                 surface: Cell::new(null_mut()),
                 surface_size: Cell::new((0, 0)),
-                damage: Cell::new(None),
+                damage: Cell::new(Damage::default()),
                 draw_queued: Cell::new(false),
                 html: RefCell::new(None),
                 zoom: Cell::new((1., 1.)),
@@ -1062,19 +1169,18 @@ impl Page {
                     (api.cairo_surface_destroy)(old);
                 }
                 self.surface_size.set((width, height));
-                self.damage.set(Some((0, 0, width as u32, height as u32)));
+                self.damage.set(Damage::all(width as u32, height as u32));
             }
-            let Some((x, y, w, h)) = self.damage.take() else {
-                return;
-            };
-            let (x, y) = (x.min(width as u32), y.min(height as u32));
-            let (w, h) = (w.min(width as u32 - x), h.min(height as u32 - y));
-            if w == 0 || h == 0 {
+            let damage = self.damage.take().clipped(width as u32, height as u32);
+            if damage.is_empty() {
                 return;
             }
             let surface = self.surface.get();
             let cr = (api.cairo_create)(surface);
-            (api.cairo_rectangle)(cr, x as f64, y as f64, w as f64, h as f64);
+            // One clip of all the rectangles: WebKit paints them in one go.
+            for &(x, y, w, h) in damage.rects() {
+                (api.cairo_rectangle)(cr, x as f64, y as f64, w as f64, h as f64);
+            }
             (api.cairo_clip)(cr);
             (api.cairo_set_operator)(cr, gtk::CAIRO_OPERATOR_CLEAR);
             (api.cairo_paint)(cr);
@@ -1092,21 +1198,25 @@ impl Page {
                 frame.height = fh;
                 frame.pixels.resize(fw as usize * fh as usize * 4, 0);
             }
-            let (x, y, w, h) = if full { (0, 0, fw, fh) } else { (x, y, w, h) };
-            let row = fw as usize * 4;
-            for line in y..y + h {
-                let from = std::slice::from_raw_parts(
-                    data.add(line as usize * stride + x as usize * 4),
-                    w as usize * 4,
-                );
-                let at = line as usize * row + x as usize * 4;
-                frame.pixels[at..at + w as usize * 4].copy_from_slice(from);
-            }
-            frame.damage = Some(if full {
-                (0, 0, fw, fh)
+            let damage = if full {
+                // What the painter hasn't taken was of the old size.
+                frame.damage = Damage::default();
+                Damage::all(fw, fh)
             } else {
-                union(frame.damage, (x, y, w, h))
-            });
+                damage
+            };
+            let row = fw as usize * 4;
+            for &(x, y, w, h) in damage.rects() {
+                for line in y..y + h {
+                    let from = std::slice::from_raw_parts(
+                        data.add(line as usize * stride + x as usize * 4),
+                        w as usize * 4,
+                    );
+                    let at = line as usize * row + x as usize * 4;
+                    frame.pixels[at..at + w as usize * 4].copy_from_slice(from);
+                }
+                frame.damage.add((x, y, w, h));
+            }
             if !std::mem::replace(&mut frame.told, true) {
                 let id = self.id;
                 deliver(move || {
@@ -1117,8 +1227,10 @@ impl Page {
             }
         }
     }
-    fn queue_draw(&self, area: (u32, u32, u32, u32)) {
-        self.damage.set(Some(union(self.damage.get(), area)));
+    fn queue_draw(&self, area: Part) {
+        let mut damage = self.damage.get();
+        damage.add(area);
+        self.damage.set(damage);
         if !self.draw_queued.replace(true) {
             let id = self.id;
             let api = gtk::api().expect("GTK runs");
@@ -1727,14 +1839,37 @@ unsafe extern "C" fn on_damage(
     event: *const gtk::GdkEventExpose,
     data: Ptr,
 ) -> gtk::gboolean {
-    // SAFETY: GTK passes the window's expose event and this handler's page.
-    let (page, area) = unsafe { (page(data), &(*event).area) };
-    page.queue_draw((
-        area.x.max(0) as u32,
-        area.y.max(0) as u32,
-        area.width.max(0) as u32,
-        area.height.max(0) as u32,
-    ));
+    let rect = |r: &gtk::GdkRectangle| {
+        let (x, y) = (r.x.max(0), r.y.max(0));
+        let (w, h) = ((r.x + r.width - x).max(0), (r.y + r.height - y).max(0));
+        (x as u32, y as u32, w as u32, h as u32)
+    };
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: GTK passes the window's expose event and this handler's page;
+    // the event's region (the parts damaged, its area their box) lives
+    // through the call, read within its count.
+    unsafe {
+        let page = page(data);
+        let region = (*event).region;
+        let count = if region.is_null() {
+            0
+        } else {
+            (api.cairo_region_num_rectangles)(region)
+        };
+        if count == 0 {
+            page.queue_draw(rect(&(*event).area));
+        }
+        for i in 0..count {
+            let mut part = gtk::GdkRectangle {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            };
+            (api.cairo_region_get_rectangle)(region, i, &mut part);
+            page.queue_draw(rect(&part));
+        }
+    }
     0
 }
 /// A key the page left alone, which WebKit sent on to its window.
@@ -3178,6 +3313,7 @@ fn backend(
         user_agent: options.user_agent.clone(),
         messages: options.messages,
         new_windows: options.new_windows,
+        accelerated: options.accelerated,
         scripts: options
             .scripts
             .iter()
@@ -3714,35 +3850,42 @@ impl Viewport for Painter {
                     blit.texture = Some((texture, bind, size));
                 }
                 let damage = if fresh {
-                    Some((0, 0, size.0, size.1))
+                    Damage::all(size.0, size.1)
                 } else {
-                    shared.damage
+                    shared.damage.clipped(size.0, size.1)
                 };
-                shared.damage = None;
-                if let (Some((x, y, w, h)), Some((texture, ..))) = (damage, &blit.texture)
-                    && w > 0
-                    && h > 0
-                {
-                    let row = size.0 * 4;
-                    frame.queue.write_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture,
-                            mip_level: 0,
-                            origin: wgpu::Origin3d { x, y, z: 0 },
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        &shared.pixels[(y * row + x * 4) as usize..],
-                        wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(row),
-                            rows_per_image: None,
-                        },
-                        wgpu::Extent3d {
-                            width: w,
-                            height: h,
-                            depth_or_array_layers: 1,
-                        },
-                    );
+                shared.damage = Damage::default();
+                if log_damage() && !damage.is_empty() {
+                    let rects: Vec<String> = damage
+                        .rects()
+                        .iter()
+                        .map(|(x, y, w, h)| format!("{x},{y},{w}x{h}"))
+                        .collect();
+                    eprintln!("WEB_DAMAGE {}", rects.join(" "));
+                }
+                let row = size.0 * 4;
+                if let Some((texture, ..)) = &blit.texture {
+                    for &(x, y, w, h) in damage.rects() {
+                        frame.queue.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d { x, y, z: 0 },
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            &shared.pixels[(y * row + x * 4) as usize..],
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(row),
+                                rows_per_image: None,
+                            },
+                            wgpu::Extent3d {
+                                width: w,
+                                height: h,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -3859,12 +4002,69 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
 mod tests {
     use super::*;
 
-    /// Damage gathered between two uploads is the box around all of it.
+    fn damage(rects: &[Part]) -> Damage {
+        let mut damage = Damage::default();
+        for &rect in rects {
+            damage.add(rect);
+        }
+        damage
+    }
+
+    /// Parts changed far apart stay apart; near or overlapping ones are
+    /// their box; the whole page (WebKit's composited frames) is one.
     #[test]
-    fn damage_unites_into_one_box() {
-        assert_eq!(union(None, (4, 5, 6, 7)), (4, 5, 6, 7));
-        assert_eq!(union(Some((0, 0, 10, 10)), (20, 5, 5, 20)), (0, 0, 25, 25));
-        assert_eq!(union(Some((10, 10, 5, 5)), (12, 12, 1, 1)), (10, 10, 5, 5));
+    fn damage_keeps_parts_apart_and_merges_near_ones() {
+        // Spinners in opposite corners of a 1076 × 700 page.
+        let corners = damage(&[(10, 10, 54, 54), (1012, 636, 54, 54)]);
+        assert_eq!(corners.rects(), [(10, 10, 54, 54), (1012, 636, 54, 54)]);
+        // Overlapping, and a few pixels apart: one box each time.
+        assert_eq!(
+            damage(&[(0, 0, 10, 10), (5, 5, 10, 10)]).rects(),
+            [(0, 0, 15, 15)]
+        );
+        assert_eq!(
+            damage(&[(0, 0, 40, 40), (44, 0, 40, 40)]).rects(),
+            [(0, 0, 84, 40)]
+        );
+        // A part inside another adds nothing.
+        assert_eq!(
+            damage(&[(10, 10, 5, 5), (12, 12, 1, 1)]).rects(),
+            [(10, 10, 5, 5)]
+        );
+        // A whole page takes in what came before it, and what comes after.
+        let page = damage(&[(10, 10, 54, 54), (0, 0, 1076, 700), (1012, 636, 54, 54)]);
+        assert_eq!(page.rects(), [(0, 0, 1076, 700)]);
+        // Empty parts are nothing.
+        assert!(damage(&[(5, 5, 0, 9), (5, 5, 9, 0)]).is_empty());
+    }
+
+    /// Past `Damage::MOST` parts, the two whose box adds least are one, and
+    /// every part stays covered.
+    #[test]
+    fn damage_merges_past_its_most_parts() {
+        let parts: Vec<Part> = (0..9).map(|i| (i * 200, (i % 3) * 300, 20, 20)).collect();
+        let merged = damage(&parts);
+        assert!(merged.rects().len() <= Damage::MOST);
+        for &(x, y, w, h) in &parts {
+            assert!(
+                merged.rects().iter().any(|&(rx, ry, rw, rh)| rx <= x
+                    && ry <= y
+                    && x + w <= rx + rw
+                    && y + h <= ry + rh),
+                "{:?} lost from {:?}",
+                (x, y, w, h),
+                merged.rects()
+            );
+        }
+    }
+
+    /// Damage cut to a smaller page: parts past it are gone, parts over
+    /// its edge end at it.
+    #[test]
+    fn damage_clips_to_the_page() {
+        let clipped =
+            damage(&[(0, 0, 20, 20), (90, 90, 40, 40), (500, 500, 10, 10)]).clipped(100, 100);
+        assert_eq!(clipped.rects(), [(0, 0, 20, 20), (90, 90, 10, 10)]);
     }
 
     /// zgx's modifiers as GDK's state: Meta is GDK's Super and Meta both,
