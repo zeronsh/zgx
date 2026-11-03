@@ -371,3 +371,19 @@ renderer to trim the cache as it draws (zgx-gpu's `TextServices`, through
 its text cache once the cache has grown past what the last sweep left).
 `trim` sweeps only every `TRIM_PERIOD` ages and shrinks the table after,
 which rehashed every word a sweep kept.
+
+## A family's nearest face for a weight it lacks (zgx-cosmic-text 0.19.10)
+
+`default_font_match_key` took a run's own family only where it has a face
+of exactly the weight asked for (or a variable face spanning it). Most
+installed families have Regular and Bold alone, so Medium (500) text in one
+drew in another family: the first in the platform's fallback list that has
+a Medium (Noto Sans on Linux). Failing an exact weight, it now takes the
+face fontdb's query picks for the family (CSS font matching: 500 takes 400
+first). `get_font_matches` puts that face first among the match keys, so it
+is the first key or none, and one look finds it. A face that can't be drawn
+(`Font::new_at` gives none: a bitmap-only face, or an `hvgl` one off macOS)
+is passed to the script fallbacks, as an exact-weight face is, so Chinese
+falls through to its fonts as before. zgx-gpu's
+`a_family_without_the_weight_asked_for_draws_in_its_nearest` checks it,
+under each platform's first fallback family's name.
