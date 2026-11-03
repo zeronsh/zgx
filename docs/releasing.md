@@ -1,6 +1,6 @@
 # Releasing
 
-zgx 0.1.8 is on crates.io (2026-11-02, tag `v0.1.8`; 0.1.0, the first, on 2026-10-25). This is how a release goes, and what it checks.
+zgx 0.1.9 is on crates.io (2026-11-03, tag `v0.1.9`; 0.1.0, the first, on 2026-10-25). This is how a release goes, and what it checks.
 
 ## Version scheme
 

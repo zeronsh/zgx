@@ -1,4 +1,0 @@
----
-section: added
----
-- **`zgx inspect frames` measures an interaction as a whole** (zgx-script, zgx-desktop): `until` (a mark or a frame) ends the frames read, as `since` starts them, and `summary` answers what they cost together: their count and pacing, the work's median, p90, p95, p99 and most, the input events they took and the work per event (a drag's moves), and each phase's spread. Each frame says the input events it took (`events`). A tape `replay` plays can move the pointer too (`ms pointer x y down|moved|up`, from the target's centre), so a scripted drag lands a move a frame through the window's own input path, and its answer gives the same percentiles. The CLI reads a command's own fields given as `key=value` words (`frames n=300`, `mark name=drag`) and refuses a number field given anything else, where it fell back to the default.

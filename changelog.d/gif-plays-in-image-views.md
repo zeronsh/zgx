@@ -1,4 +1,0 @@
----
-section: added
----
-- **A GIF in `ui.image` plays** (zgx, zgx-gpu): an image view whose source gives an animation's still (`ImageData::animated`, which zgx-gpu now decodes a GIF to) plays its frames as `animated_image` does, paused off screen, hidden or with the window unseen, its last frame kept once a finite one ends. The playback is set up the first time a source gives one, so a view of still pictures costs nothing more; a reactive `src` that changes to another GIF plays that one, and to a still stops. A GIF whose frames pass 4 MiB decoded streams them (`Animation::streamed`, zgx-gpu's `GIF_KEPT`): its file and a frame or two held, however long, all of it given back as it goes; a smaller one keeps its frames and costs nothing to play. Under the system's reduced motion an animation (`animated_image`'s too) shows its first frame, still.
