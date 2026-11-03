@@ -5109,3 +5109,81 @@ fn a_host_hears_issues_by_kind() {
     assert_eq!(errors.borrow().len(), 2, "on_error hears both");
     assert_eq!(h.host.issues().len(), 2);
 }
+
+/// A `ui.image` with a `fallback` places its picture as one without does:
+/// its `fit`, `object_position` and `image_rendering` are the picture's,
+/// not the box around it (the fallback's switch). A 4:1 picture in a 56 by
+/// 40 box, each way.
+#[test]
+fn an_image_with_a_fallback_keeps_its_fit() {
+    use zgx::image::ImageRendering;
+    use zgx::scene::NodeKind;
+    let mut ids = Vec::new();
+    let mut code =
+        String::from("local wide = ui.bitmap(4, 1, function() return 1 end)\nreturn ui.column {\n");
+    for fit in ["fill", "contain", "cover", "none", "scale_down"] {
+        for fallback in [false, true] {
+            let id = format!("{fit}-{fallback}");
+            let extra = if fallback {
+                ", fallback = ui.div {}"
+            } else {
+                ""
+            };
+            code += &format!(
+                "ui.overlay {{ w = 56, h = 40, overflow = 'hidden', ui.image {{ id = '{id}', src = wide, fit = '{fit}', object_position = {{ 0, 1 }}, image_rendering = 'pixelated', w_full = true, h_full = true{extra} }} }},\n"
+            );
+            ids.push((id, fit, fallback));
+        }
+    }
+    code += "}";
+    let mut h = Harness::inline(&code);
+    h.ui.prepare_frame();
+    let mut placed = std::collections::HashMap::new();
+    for (id, fit, fallback) in &ids {
+        let top = h.find(id).unwrap();
+        let scene = h.ui.scene.borrow();
+        let mut stack = vec![top];
+        let mut drawn = None;
+        while let Some(n) = stack.pop() {
+            match scene.kind(n) {
+                NodeKind::Image(_) => drawn = Some(n),
+                _ => stack.extend(scene.children(n).iter().copied()),
+            }
+        }
+        let drawn = drawn.expect("its picture");
+        let (outer, inner) = (scene.bounds(top), scene.bounds(drawn));
+        assert_eq!(
+            scene.image_rendering(drawn),
+            ImageRendering::Pixelated,
+            "{id}"
+        );
+        placed.insert(
+            (*fit, *fallback),
+            (
+                inner.x - outer.x,
+                inner.y - outer.y,
+                inner.width,
+                inner.height,
+                outer.width,
+                outer.height,
+            ),
+        );
+    }
+    for fit in ["fill", "contain", "cover", "none", "scale_down"] {
+        assert_eq!(
+            placed[&(fit, true)],
+            placed[&(fit, false)],
+            "{fit}: with a fallback as without"
+        );
+    }
+    // Cover: the box's height, four times as wide, at its left (position
+    // x 0); contain: its width, a quarter as tall, at its bottom (y 1).
+    let (x, y, w, h, bw, bh) = placed[&("cover", true)];
+    assert_eq!((x, y, w, h), (0., 0., bh * 4., bh), "cover in {bw}x{bh}");
+    let (x, y, w, h, bw, bh) = placed[&("contain", true)];
+    assert_eq!(
+        (x, y, w, h),
+        (0., bh - bw / 4., bw, bw / 4.),
+        "contain in {bw}x{bh}"
+    );
+}
