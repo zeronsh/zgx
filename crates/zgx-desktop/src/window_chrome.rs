@@ -150,7 +150,11 @@ pub(crate) fn set_glass(window: &winit::window::Window, glass: Option<Glass>) {
     mac::set_glass(window, glass);
     #[cfg(windows)]
     win::set_glass(window, glass);
-    #[cfg(not(any(target_os = "macos", windows)))]
+    // The compositor's blur follows the glass, on and off (Wayland; a no-op
+    // on X11), from the surface's next commit: the redraw the caller asks.
+    #[cfg(target_os = "linux")]
+    window.set_blur(glass.is_some());
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     let _ = (window, glass);
 }
 
