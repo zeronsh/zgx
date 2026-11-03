@@ -2596,6 +2596,15 @@ fn placed_whole(style: &Style) -> bool {
         || (set(options.inset.top) && set(options.inset.bottom));
     wide && tall && options.aspect_ratio.is_none()
 }
+/// Whether `style` and `constraints` may fix a box's size on both axes
+/// (`Scene::fixed_size` decides): a width and a height each from them.
+#[inline(always)]
+fn style_may_fix(style: &Style, constraints: &Constraints) -> bool {
+    (constraints.force_width.is_some() || style.width.is_some() || style.width_percent.is_some())
+        && (constraints.force_height.is_some()
+            || style.height.is_some()
+            || style.height_percent.is_some())
+}
 fn dimension(value: f32, min: Option<f32>, max: Option<f32>) -> f32 {
     value
         .max(0.0)
@@ -9582,18 +9591,15 @@ impl Scene {
         {
             return kept.size;
         }
-        if !full && let Some(size) = self.fixed_size(id, *constraints) {
-            let node = self.tree_node_mut(id);
-            node.sizes.insert(
-                0,
-                ProbeSize {
-                    constraints: *constraints,
-                    size,
-                    pass,
-                    fixed: true,
-                },
-            );
-            node.sizes.truncate(PROBE_SIZES);
+        // Probed again this pass, under other constraints (a level of a page
+        // its parents ask its natural, flexed and stretched sizes of): a box
+        // its style sizes answers from that, laying out nothing in it. Its
+        // first probe lays it out as before, the result `arrange` places.
+        if !full
+            && node.measurement.as_ref().is_some_and(|m| m.pass == pass)
+            && style_may_fix(&node.style, constraints)
+            && let Some(size) = self.probe_fixed(id, *constraints)
+        {
             return size;
         }
         // Measuring recurses into the children: one level of the tree more.
@@ -9603,6 +9609,24 @@ impl Scene {
         });
         self.measure_depth -= 1;
         size
+    }
+    /// `fixed_size`'s answer to a probe, kept as one (`sizes`, `fixed`).
+    #[inline(never)]
+    fn probe_fixed(&mut self, id: NodeId, constraints: Constraints) -> Option<(f32, f32)> {
+        let size = self.fixed_size(id, constraints)?;
+        let pass = self.layout_pass;
+        let node = self.tree_node_mut(id);
+        node.sizes.insert(
+            0,
+            ProbeSize {
+                constraints,
+                size,
+                pass,
+                fixed: true,
+            },
+        );
+        node.sizes.truncate(PROBE_SIZES);
+        Some(size)
     }
     /// `measured`, when nothing kept serves.
     /// A contents or zoomed node goes to `measure_special`.
