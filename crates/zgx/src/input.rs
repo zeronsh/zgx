@@ -2692,7 +2692,13 @@ impl InputDispatcher {
                 let scene = scene.borrow();
                 old.iter().copied().find(|id| scene.contains(*id))
             };
+            // What the files were over gone and one of its zones hit in its
+            // place (a hint the hover hid): they never left that zone, so
+            // no leave, which would bubble up to it.
+            let risen = old.first().is_some_and(|id| !scene.borrow().contains(*id))
+                && target.is_some_and(|target| old.contains(&target));
             if old.first().copied() != target
+                && !risen
                 && let Some(old) = live
             {
                 // Routed as a leave is, whether it shows or not: a zone

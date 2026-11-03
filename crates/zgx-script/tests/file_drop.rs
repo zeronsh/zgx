@@ -170,3 +170,93 @@ fn the_zone_hears_the_leave_when_what_the_files_were_over_is_gone() {
     assert_eq!(h.text("other"), "away");
     assert_eq!(h.error(), None);
 }
+
+/// The same zone, hit in the place of what the files were over (the hint
+/// the hover hid): the files never left it, so it hears no leave.
+const STAYS: &str = r#"
+local over = ui.state("over", false)
+local leaves = ui.state("leaves", 0)
+return ui.column {
+    p = 10,
+    ui.column {
+        id = "zone",
+        w = 200,
+        h = 100,
+        on_file_hover = function(now)
+            over:set(now)
+            if not now then leaves:update(function(n) return n + 1 end) end
+        end,
+        ui.show(function() return not over:get() end, ui.div {
+            id = "hint",
+            w = 200,
+            h = 100,
+            on_click = function() end,
+        }),
+    },
+    ui.text { id = "leaves", function() return tostring(leaves:get()) end },
+}
+"#;
+
+#[test]
+fn files_still_over_the_zone_hidden_under_them_never_leave_it() {
+    let mut h = Harness::inline(STAYS);
+    let paths = files("stays");
+    h.ui.prepare_frame();
+    for _ in 0..3 {
+        h.ui.dispatch(InputEvent::FileHover {
+            x: 50.,
+            y: 40.,
+            path: paths[0].clone(),
+        });
+        h.frames(1);
+    }
+    assert_eq!(h.text("leaves"), "0");
+    h.ui.dispatch(InputEvent::FileHoverCancelled);
+    h.frames(1);
+    assert_eq!(h.text("leaves"), "1");
+    assert_eq!(h.error(), None);
+}
+
+/// A child still there that the files move off, onto the zone round it:
+/// the child hears them leave, the zone keeps them.
+const CHILD: &str = r#"
+local zone = ui.state("zone", false)
+local child = ui.state("child", false)
+return ui.column {
+    p = 10,
+    ui.column {
+        id = "zone",
+        w = 200,
+        h = 100,
+        on_file_hover = function(now) zone:set(now) end,
+        ui.div {
+            id = "child",
+            w = 200,
+            h = 40,
+            on_file_hover = function(now) child:set(now) end,
+        },
+    },
+    ui.text { id = "zone-over", function() return if zone:get() then "over" else "away" end },
+    ui.text { id = "child-over", function() return if child:get() then "over" else "away" end },
+}
+"#;
+
+#[test]
+fn a_child_the_files_move_off_hears_them_leave() {
+    let mut h = Harness::inline(CHILD);
+    let paths = files("child");
+    h.ui.prepare_frame();
+    for y in [30., 90.] {
+        h.ui.dispatch(InputEvent::FileHover {
+            x: 50.,
+            y,
+            path: paths[0].clone(),
+        });
+        h.frames(1);
+    }
+    assert_eq!(
+        (h.text("zone-over"), h.text("child-over")),
+        ("over".into(), "away".into())
+    );
+    assert_eq!(h.error(), None);
+}
