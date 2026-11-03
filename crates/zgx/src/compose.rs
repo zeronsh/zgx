@@ -3574,6 +3574,30 @@ fn mount_portal_panel(
             );
         });
     }
+    // A modal (not a layer, nor a panel at a caret) opening closes the
+    // anchored popups open outside it, in the window or in popup windows
+    // of their own, which would otherwise stay drawn over it: as AppKit
+    // closes menus and popovers when a sheet opens.
+    {
+        let options = view.rare.as_ref().and_then(|r| r.portal.as_ref());
+        let overlay_only = options.is_some_and(|p| p.layer || p.at_caret);
+        if !anchored && !overlay_only {
+            let (was, weak, overlay) =
+                (std::cell::Cell::new(false), ui.downgrade(), portal.overlay);
+            let opened = open.clone();
+            ui.bind(overlay, move || {
+                let now = opened.get();
+                if now
+                    && !was.replace(now)
+                    && let Some(ui) = weak.upgrade()
+                {
+                    ui.runtime.untracked(|| ui.dismiss_popups_outside(overlay));
+                } else {
+                    was.set(now);
+                }
+            });
+        }
+    }
     environment.portal = Some((portal.overlay, portal.visible.clone()));
     let menu_context = is_menu.then(|| {
         crate::compose_menu::MenuContext::new(

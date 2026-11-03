@@ -3212,6 +3212,27 @@ impl Ui {
             }
         }
     }
+    /// Close every open anchored popup (popover, menu, submenu; in the
+    /// window or in a popup window of its own) that isn't inside `inside`:
+    /// a modal opening over them, as AppKit closes menus and popovers when a
+    /// sheet opens. Popups opened from inside the modal stay.
+    pub(crate) fn dismiss_popups_outside(&self, inside: NodeId) {
+        let open: Vec<Signal<bool>> = {
+            let scene = self.scene.borrow();
+            self.storage
+                .popups
+                .borrow()
+                .iter()
+                .filter(|(node, _)| scene.contains(*node) && !scene.is_within(*node, inside))
+                .map(|(_, open)| open.clone())
+                .collect()
+        };
+        for open in open {
+            if open.with_untracked(|open| *open) {
+                open.set(false);
+            }
+        }
+    }
     pub(crate) fn observe_visibility(&self, node: NodeId) -> Signal<bool> {
         if let Some(signal) = self.storage.observed_visibility.borrow().get(&node) {
             return signal.clone();
