@@ -3557,7 +3557,12 @@ fn mount_portal_panel(
         .as_ref()
         .map(|(_, visible)| visible.clone());
     let portal = crate::compose_modal::create(ui, owner, portal_parent);
-    if !anchored {
+    // A layer (`View::layer`, a toast host) or a panel at a caret is no
+    // modal: it has no backdrop, and closes nothing as it opens.
+    let overlay_only = (view.rare.as_ref())
+        .and_then(|r| r.portal.as_ref())
+        .is_some_and(|p| p.layer || p.at_caret);
+    if !anchored && !overlay_only {
         // The theme's backdrop, following it.
         let (scene, theme, overlay) = (ui.scene.clone(), ui.theme_scope(), portal.overlay);
         ui.bind(overlay, move || {
@@ -3579,8 +3584,6 @@ fn mount_portal_panel(
     // of their own, which would otherwise stay drawn over it: as AppKit
     // closes menus and popovers when a sheet opens.
     {
-        let options = view.rare.as_ref().and_then(|r| r.portal.as_ref());
-        let overlay_only = options.is_some_and(|p| p.layer || p.at_caret);
         if !anchored && !overlay_only {
             let (was, weak, overlay) =
                 (std::cell::Cell::new(false), ui.downgrade(), portal.overlay);

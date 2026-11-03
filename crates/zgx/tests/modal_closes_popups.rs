@@ -123,3 +123,70 @@ fn a_layer_opening_closes_nothing() {
         "a layer is an overlay, not a dialog: the popups stay"
     );
 }
+
+/// A layer (a toast host: `modal(..).layer()`) is no modal: it paints no
+/// backdrop over the window, and a press beside what it holds reaches what
+/// is under it. A modal still dims the window behind it.
+#[test]
+fn a_layer_paints_no_backdrop_and_lets_presses_through() {
+    use std::{cell::Cell, rc::Rc};
+    use zgx::input::{InputEvent, PointerButton};
+    use zgx::scene::NodeKind;
+    // The window, a button filling it, and `portal` over it, open.
+    let window = |layer: bool| {
+        let mut ui = Ui::new(400., 300.);
+        let open = ui.signal(false);
+        let pressed = Rc::new(Cell::new(0));
+        let count = pressed.clone();
+        let portal = modal("Over", open.clone()).child(div().size(80., 30.).child(text("Saved")));
+        ui.mount(
+            column().children([
+                button()
+                    .size(400., 300.)
+                    .on_click(move || count.set(count.get() + 1))
+                    .child(text("Under")),
+                if layer { portal.layer() } else { portal },
+            ]),
+        );
+        ui.prepare_frame();
+        open.set(true);
+        ui.prepare_frame();
+        (ui, pressed)
+    };
+    let dims = |ui: &Ui| {
+        let backdrop = ui.theme_scope().color(zgx::theme::tok::BACKDROP);
+        let scene = ui.scene.borrow();
+        let mut stack = vec![scene.root()];
+        let mut found = false;
+        while let Some(n) = stack.pop() {
+            if let NodeKind::Panel { quad, .. } = scene.kind(n)
+                && quad.fill == backdrop
+            {
+                found = true;
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        found
+    };
+    let (mut ui, pressed) = window(true);
+    assert!(!dims(&ui), "a layer has no backdrop");
+    // A press in the window's corner, beside the toast: the button under it.
+    ui.scene.borrow_mut().flush();
+    for event in [
+        InputEvent::PointerDown {
+            x: 8.,
+            y: 290.,
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerUp {
+            x: 8.,
+            y: 290.,
+            button: PointerButton::Primary,
+        },
+    ] {
+        ui.dispatch(event);
+    }
+    assert_eq!(pressed.get(), 1, "the press goes through the layer");
+    let (ui, _) = window(false);
+    assert!(dims(&ui), "a modal dims the window");
+}
