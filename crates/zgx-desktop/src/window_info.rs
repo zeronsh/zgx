@@ -256,6 +256,13 @@ pub(crate) fn attributes(
         .with_decorations(options.decorations)
         .with_window_level(options.level.winit())
         .with_visible(false);
+    // Linux: the glass is the compositor's blur behind the window, asked
+    // for (`ext-background-effect-v1`, or KWin's protocol); the window is
+    // transparent, so the compositor shows it through what zgx paints.
+    #[cfg(target_os = "linux")]
+    {
+        attrs = attrs.with_blur(options.glass.is_some());
+    }
     #[cfg(target_os = "macos")]
     if !options.shadow {
         use winit::platform::macos::WindowAttributesExtMacOS;

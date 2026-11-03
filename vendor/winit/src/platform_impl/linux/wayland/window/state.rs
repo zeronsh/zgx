@@ -28,6 +28,7 @@ use sctk::shell::WaylandSurface;
 use sctk::shm::slot::SlotPool;
 use sctk::shm::Shm;
 use sctk::subcompositor::SubcompositorState;
+use wayland_protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1;
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur::OrgKdeKwinBlur;
 
 use crate::cursor::CustomCursor as RootCustomCursor;
@@ -35,6 +36,7 @@ use crate::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, S
 use crate::error::{ExternalError, NotSupportedError};
 use crate::platform_impl::wayland::logical_to_physical_rounded;
 use crate::platform_impl::wayland::types::cursor::{CustomCursor, SelectedCursor};
+use crate::platform_impl::wayland::types::ext_background_effect::BackgroundEffectManager;
 use crate::platform_impl::wayland::types::kwin_blur::KWinBlurManager;
 use crate::platform_impl::{PlatformCustomCursor, WindowId};
 use crate::window::{CursorGrabMode, CursorIcon, ImePurpose, ResizeDirection, Theme};
@@ -157,6 +159,8 @@ pub struct WindowState {
     fractional_scale: Option<WpFractionalScaleV1>,
     blur: Option<OrgKdeKwinBlur>,
     blur_manager: Option<KWinBlurManager>,
+    background_effect: Option<ExtBackgroundEffectSurfaceV1>,
+    background_effect_manager: Option<BackgroundEffectManager>,
 
     /// Whether the client side decorations have pending move operations.
     ///
@@ -198,6 +202,8 @@ impl WindowState {
         Self {
             blur: None,
             blur_manager: winit_state.kwin_blur_manager.clone(),
+            background_effect: None,
+            background_effect_manager: winit_state.background_effect_manager.clone(),
             compositor,
             connection,
             csd_fails: false,
@@ -1092,6 +1098,19 @@ impl WindowState {
     /// Make window background blurred
     #[inline]
     pub fn set_blur(&mut self, blurred: bool) {
+        // `ext-background-effect-v1` where the compositor has it (applied on
+        // the surface's next commit), KWin's own protocol otherwise.
+        if let Some(manager) = self.background_effect_manager.as_ref() {
+            if blurred && self.background_effect.is_none() {
+                self.background_effect =
+                    manager.blur(self.window.wl_surface(), &self.compositor, &self.queue_handle);
+            } else if !blurred {
+                if let Some(effect) = self.background_effect.take() {
+                    effect.destroy();
+                }
+            }
+            return;
+        }
         if blurred && self.blur.is_none() {
             if let Some(blur_manager) = self.blur_manager.as_ref() {
                 let blur = blur_manager.blur(self.window.wl_surface(), &self.queue_handle);
@@ -1163,6 +1182,10 @@ impl Drop for WindowState {
     fn drop(&mut self) {
         if let Some(blur) = self.blur.take() {
             blur.release();
+        }
+
+        if let Some(effect) = self.background_effect.take() {
+            effect.destroy();
         }
 
         if let Some(fs) = self.fractional_scale.take() {

@@ -1,7 +1,10 @@
 //! Window chrome from `WindowOptions`: the title bar's style and a frosted
 //! glass behind a translucent window. Applied when the window is made, on
 //! macOS and Windows; on Linux zgx draws an undecorated window's buttons
-//! and resizes it from its edges, and draws no glass.
+//! and resizes it from its edges, and asks the compositor to blur what is
+//! behind a window with glass (`ext-background-effect-v1`, or KWin's blur
+//! protocol on Wayland). How much it blurs is the compositor's: Hyprland's
+//! is its `decoration:blur` settings, and only when blur is enabled there.
 
 /// How a window's title bar looks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,8 +31,10 @@ pub enum Titlebar {
 
 /// A blurred desktop behind a translucent window (macOS's behind-window
 /// `NSVisualEffectView`, cut to the window's rounded corners; on Windows 11
-/// the system backdrop nearest its material, Acrylic or Mica). The window is
-/// transparent where zgx paints nothing (or translucent colour).
+/// the system backdrop nearest its material, Acrylic or Mica; on Linux the
+/// compositor's blur, asked for where it has a protocol for it, with no
+/// material, tint or saturation of zgx's). The window is transparent where
+/// zgx paints nothing (or translucent colour).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Glass {
     /// The blur's material.
