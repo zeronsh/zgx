@@ -165,6 +165,25 @@ struct Evaluator<'a> {
     /// 0 not yet, 1 being evaluated (a reference cycle), 2 done.
     state: Vec<u8>,
 }
+/// A value of another kind than token `id`'s (`kind`), as it evaluates: a
+/// family's name given where the token's kind wasn't known (a script's
+/// `theme = { ["font.sans"] = "Inter" }`, `ui.theme.tokens`,
+/// `TokenInput::parse`) is read as a theme file reads a font token's word, a
+/// CSS font-family list (quotes and all); anything else is no value. Apart:
+/// a token of the kind it is given pays nothing for it.
+#[cold]
+#[inline(never)]
+fn mistyped(id: TokenId, kind: tokens::TokenKind, value: TokenValue) -> TokenValue {
+    match value {
+        TokenValue::Text(text) if kind == tokens::TokenKind::Font => {
+            TokenValue::Font(super::value::font_family(&text))
+        }
+        value => {
+            warn(&format!("token `{id}` is a {kind:?} token, not {value}"));
+            TokenValue::Unset
+        }
+    }
+}
 impl Evaluator<'_> {
     fn eval(&mut self, id: TokenId) -> TokenValue {
         let i = id.index();
@@ -185,20 +204,7 @@ impl Evaluator<'_> {
             None => TokenValue::Unset,
         };
         let value = match tokens::standard_kind(id) {
-            Some(kind) if value.kind().is_some_and(|k| k != kind) => match value {
-                // A family's name given where the token's kind wasn't known (a
-                // script's `theme = { ["font.sans"] = "Inter" }`, `ui.theme.tokens`,
-                // `TokenInput::parse`): read as a theme file reads a font token's
-                // word, a CSS font-family list (quotes and all). Here, apart:
-                // a token of the kind it is given costs nothing more.
-                TokenValue::Text(text) if kind == tokens::TokenKind::Font => {
-                    TokenValue::Font(super::value::font_family(&text))
-                }
-                value => {
-                    warn(&format!("token `{id}` is a {kind:?} token, not {value}"));
-                    TokenValue::Unset
-                }
-            },
+            Some(kind) if value.kind().is_some_and(|k| k != kind) => mistyped(id, kind, value),
             _ => value,
         };
         self.state[i] = 2;

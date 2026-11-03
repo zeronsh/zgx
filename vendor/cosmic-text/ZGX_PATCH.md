@@ -380,8 +380,10 @@ installed families have Regular and Bold alone, so Medium (500) text in one
 drew in another family: the first in the platform's fallback list that has
 a Medium (Noto Sans on Linux). Failing an exact weight, it now takes the
 face fontdb's query picks for the family (CSS font matching: 500 takes 400
-first). `get_font_matches` puts that face first among the match keys, so it
-is the first key or none, and one look finds it. A face that can't be drawn
+first). `get_font_matches` puts that face first among the match keys and
+marks it (`FontMatchKey::query`, in the key's padding: keys stay 20
+bytes), so it is the first key or none. Where fontdb found none (the family
+isn't installed) nothing more is looked at. A face that can't be drawn
 (`Font::new_at` gives none: a bitmap-only face, or an `hvgl` one off macOS)
 is passed to the script fallbacks, as an exact-weight face is, so Chinese
 falls through to its fonts as before. zgx-gpu's

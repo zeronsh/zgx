@@ -27,7 +27,16 @@ pub struct FontMatchKey {
     pub(crate) font_stretch: u16,
     pub(crate) id: fontdb::ID,
     pub(crate) variable_weight_match: bool,
+    /// zgx patch: the face fontdb's query picks for the family asked for
+    /// (CSS font matching), put first (`get_font_matches`): a family without
+    /// the weight asked for draws in it (`default_font_match_key`). In the
+    /// key's padding: keys are as large as they were.
+    pub(crate) query: bool,
 }
+
+// zgx patch: `query` sits in the key's padding (a fallback looks at keys by
+// the thousand).
+const _: () = assert!(core::mem::size_of::<FontMatchKey>() == 20);
 
 impl FontMatchKey {
     fn new(
@@ -73,6 +82,7 @@ impl FontMatchKey {
             font_stretch,
             id,
             variable_weight_match,
+            query: false,
         }
     }
 }
@@ -628,12 +638,14 @@ impl FontSystem {
                         .map(|(i, _)| i)
                     {
                         // if exists move to front
-                        let match_key = font_match_keys.remove(i);
+                        let mut match_key = font_match_keys.remove(i);
+                        match_key.query = true;
                         font_match_keys.insert(0, match_key);
                     } else if let Some(face) = self.db.face(id) {
                         // else insert in front
-                        let match_key =
+                        let mut match_key =
                             FontMatchKey::new(attrs, face, &self.db, &mut self.weight_axes);
+                        match_key.query = true;
                         font_match_keys.insert(0, match_key);
                     } else {
                         log::error!("Could not get face from db, that should've been there.");
