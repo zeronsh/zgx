@@ -6369,9 +6369,13 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 None => false,
             };
             let (fallback, low3) = (fallback.clone(), low.clone());
+            // How the picture fills its box (`fit`, `object_position`,
+            // `image_rendering`) is the picture's own: the node's styles go
+            // on the switch around it, which draws no picture.
+            let placed = placement(node, vm);
             zgx::compose::switch(shown, move |ready, _| {
                 if ready {
-                    picture().w_full().h_full()
+                    placed(picture().w_full().h_full())
                 } else {
                     lower(&fallback, &low3).w_full().h_full()
                 }
@@ -6379,6 +6383,46 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         }
     };
     view.on_mount(move |handle| handle.retain(sweeper.sweeper()))
+}
+
+/// A `ui.image`'s placement props (`fit`, `object_position`,
+/// `image_rendering`), set on a view of its picture: literal ones once, the
+/// rest as they change. For a picture inside its node's view (a `fallback`'s
+/// switch), which takes the node's styles.
+fn placement(node: &Node, vm: &Rc<Vm>) -> impl Fn(View) -> View + 'static {
+    let placing = |prop: &Prop| {
+        matches!(
+            prop,
+            Prop::Fit | Prop::ObjectPosition | Prop::ImageRendering
+        )
+    };
+    let mut statics = Vec::new();
+    let mut dynamic = Vec::new();
+    for (prop, source) in node.props.iter().filter(|(prop, _)| placing(prop)) {
+        match source {
+            Source::Lit(lit) => statics.push((*prop, lit.clone())),
+            _ => dynamic.push((*prop, resolve_owned(source))),
+        }
+    }
+    let (statics, dynamic, vm) = (Rc::new(statics), Rc::new(dynamic), vm.clone());
+    move |mut view: View| {
+        for (prop, lit) in statics.iter() {
+            view = apply(view, *prop, lit);
+        }
+        if dynamic.is_empty() {
+            return view;
+        }
+        let (dynamic, vm) = (dynamic.clone(), vm.clone());
+        view.reactive_style(move || {
+            let mut styles = Styles::new();
+            for (prop, source) in dynamic.iter() {
+                if let Some(lit) = resolve_style(source, *prop, None, &vm) {
+                    apply(&mut styles, *prop, &lit);
+                }
+            }
+            styles
+        })
+    }
 }
 
 /// What a `ui.image` has told its script, so each `src` is told once: its
