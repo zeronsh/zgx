@@ -23,7 +23,10 @@ Under a headless sway, driven with a virtual pointer (`wayland_pointer.py`):
   bottom edge, pointing down at the trigger's centre;
 - on outputs scaled 2× and 1.5× (fractional, through the viewporter), the
   menu's buffer is its size in the output's pixels, it shows where the
-  scene put it in those pixels, and its last item takes a click.
+  scene put it in those pixels, and its last item takes a click;
+- in a window zoomed 90% and 125% (`POPUP_PROBE_ZOOM`), the menu shows
+  where the scene put it and its size, both times the zoom, and its last
+  item takes a click there.
 
 Under a headless Weston, whose windows winit decorates itself (the window
 geometry starts at its title bar, above the content), the menu opened by the
@@ -157,6 +160,76 @@ def main():
         click(menu[0] + px(100), menu[3] - px(17))
         until(f"the choice on {name}", lambda: 'CHOSEN "Item 8"' in log.read_text())
         checks[f"{name}: chosen outside the window"] = True
+        pointer.close()
+        stop(app)
+        stop(sway)
+
+    def zoomed(zoom):
+        """popup_probe's window zoomed `zoom` (`POPUP_PROBE_ZOOM`) on an
+        unscaled sway output: its menu's popup at the scene's place and size
+        times the zoom, and its last item taking a click there."""
+        name = f"sway zoom {zoom}"
+        at = lambda points: round(points * zoom)
+        env = dict(base, WLR_BACKENDS="headless", WLR_RENDERER="pixman", WLR_LIBINPUT_NO_DEVICES="1")
+        runtime = pathlib.Path(base["XDG_RUNTIME_DIR"], f"zoomed-{zoom}")
+        runtime.mkdir(mode=0o700)
+        env["XDG_RUNTIME_DIR"] = str(runtime)
+        config = runtime / "sway.conf"
+        sway_config(config, "output * mode %dx%d\ndefault_border none\n"
+                          "for_window [app_id=\".*\"] floating enable, move position 0 0\n" % OUTPUT)
+        sway, _ = launch(f"sway-zoom-{zoom}", ["sway", "--unsupported-gpu", "-c", str(config)], env)
+        sockets = lambda: [p for p in runtime.glob("wayland-*") if p.suffix != ".lock"]
+        display = until(f"{name}'s socket", sockets, 10)[0].name
+        env["WAYLAND_DISPLAY"] = display
+        app, log = launch(f"sway-zoom-{zoom}-app", [str(args.probe)], dict(env, POPUP_PROBE_ZOOM=str(zoom)))
+        until(f"the probe on {name}", lambda: "READY" in log.read_text())
+
+        def shot(stage):
+            path = args.output / f"zoom-{zoom}-{stage}.png"
+            subprocess.run(["grim", str(path)], env=env, check=True)
+            return Image.open(path).convert("RGB")
+
+        content = until(f"the window on {name}", lambda: box(shot("start"), CONTENT))
+        pointer = VirtualPointer(str(runtime), display)
+
+        def click(x, y):
+            pointer.move_to(x, y, *OUTPUT)
+            time.sleep(.2)
+            pointer.click()
+
+        # The File button, where the zoom draws it: its scene box times the
+        # zoom (the zoomed window lays out taller, in more scene points).
+        rect = lambda line: [float(v) for v in line.split(",")]
+        file_at = until(f"the File button on {name}", lambda: re.search(r"^FILE (\S+)$", log.read_text(), re.M))
+        fx, fy, fw, fh = rect(file_at.group(1))
+        click(content[0] + at(fx + fw / 2), content[1] + at(fy + fh / 2))
+        until(f"the menu on {name}", lambda: "popup configured" in log.read_text())
+        scene_menu = until(f"the menu's box on {name}", lambda: re.search(r"^MENU (\S+)$", log.read_text(), re.M))
+        mx, my, mw, mh = rect(scene_menu.group(1))
+        time.sleep(.3)
+        image = shot("open")
+        below = content[1] + at(fy + fh + 2)
+        menu = box(image.crop((0, below, image.width, image.height)), MENU)
+        assert menu, f"{name}: no menu drawn"
+        menu = (menu[0], menu[1] + below, menu[2], menu[3] + below)
+        expected = (at(mx), at(my), at(mw), at(mh))
+        measured = (menu[0] - content[0], menu[1] - content[1], menu[2] - menu[0], menu[3] - menu[1])
+        checks[name] = {"content": content, "menu": menu, "expected": expected, "scene": [mx, my, mw, mh]}
+        # What zgx asked the compositor for: the scene's box times the zoom,
+        # to the pixel.
+        configured = re.search(r"popup configured at (-?\d+),(-?\d+) (\d+)x(\d+)", log.read_text())
+        asked = tuple(int(v) for v in configured.groups()) if configured else None
+        checks[f"{name}: configured"] = asked
+        checks[f"{name}: configured where the scene put it, at the zoom, its size"] = asked is not None and all(
+            abs(a - b) <= 1 for a, b in zip(asked, expected))
+        # Drawn there: within two pixels, a fractional zoom anti-aliasing the
+        # fill's edges on both sides.
+        checks[f"{name}: drawn where the scene put it, at the zoom, its size"] = all(
+            abs(a - b) <= 2 for a, b in zip(measured, expected))
+        # Its last item, where the zoom draws it.
+        click(menu[0] + at(100), menu[3] - at(17))
+        until(f"the choice on {name}", lambda: 'CHOSEN "Item 8"' in log.read_text())
+        checks[f"{name}: its last item takes a click there"] = True
         pointer.close()
         stop(app)
         stop(sway)
@@ -335,6 +408,10 @@ def main():
             for scale in (2, 1.5):
                 scaled(scale)
 
+            # A zoomed window: its popups at the zoom, in place and in size.
+            for zoom in (0.9, 1.25):
+                zoomed(zoom)
+
             # Weston: winit's title bar above the content.
             env = dict(base, WAYLAND_DISPLAY="zgx-popups")
             weston, _ = launch("weston", ["weston", "--backend=headless", "--renderer=pixman", "--width=%d" % OUTPUT[0],
@@ -363,7 +440,7 @@ def main():
         print("PASS: Wayland popups: past the window on sway and Weston, chosen from, closed, flipped at the output's "
               "edge, a submenu beside its flipped menu, a menu taller than the output cut to it and scrolled, "
               "a flipped popover's arrow facing its trigger, "
-              "and on outputs scaled 2x and 1.5x")
+              "on outputs scaled 2x and 1.5x, and in a window zoomed 90% and 125%")
     finally:
         for process in reversed(processes):
             stop(process)

@@ -14,7 +14,12 @@ and other apps are never touched). Checks that:
 - the menu shows on screen (a screenshot of it open differs from one of its
   place once closed);
 - it moves with its window, and closes as the app deactivates and on a press
-  on the title bar.
+  on the title bar;
+- it is where the scene puts it, its size, at the window's scale and zoom
+  (`--zoom z` zooms the probe's window; its clicks go where the zoom draws).
+
+`--place-only` checks only the last: the probe opens its menu itself and
+reports its window's place, with no input posted and no need to be in front.
 
 `--idle` also waits through the probe's idle spans (about a minute) and
 reports its CPU time before any popup and after one closed.
@@ -38,9 +43,15 @@ def main():
     parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("target/windows-popup"))
     parser.add_argument("--idle", action="store_true")
     parser.add_argument("--max-open-ms", type=float, default=50.0)
+    parser.add_argument("--zoom", type=float, help="zoom the probe's window (its popups at that zoom too)")
+    parser.add_argument("--place-only", action="store_true", help="only where it is: no input, no activation")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, PROBE_SHOT="1")
+    if args.zoom:
+        env["POPUP_PROBE_ZOOM"] = str(args.zoom)
+    if args.place_only:
+        return place_only(args, env)
     if not args.idle:
         env["PROBE_QUICK"] = "1"
     proc = subprocess.Popen([str(args.bin / "popup_probe.exe")], env=env, stdout=subprocess.PIPE,
@@ -76,6 +87,7 @@ def main():
             raise AssertionError(f"missing {pattern!r} in:\n{out}")
 
     need(r"^POPUP_WINDOWS_BEFORE 0$")
+    check_placed(out)
     # At 100% the window leaves room below it on the screen; larger, the menu
     # may flip above its trigger instead.
     if re.search(r"^POPUP_RECT .* scale=1$", out, re.M):
@@ -101,6 +113,35 @@ def main():
         raise AssertionError(f"the menu did not show on screen: {changed} of {width * height} pixels differ")
     print(f"PASS: popup windows (open {', '.join(f'{ms:.1f}' for ms in latencies)} ms; "
           f"{100 * changed // (width * height)}% of its box drawn)")
+
+
+def check_placed(out):
+    # Where the scene puts it, its size, times scale and zoom (within a
+    # pixel or two: edges round).
+    placed = re.search(r"^ZOOM_PLACED zoom=\S+ got=([\d,-]+) want=([\d,.-]+)$", out, re.M)
+    if not placed:
+        raise AssertionError(f"no ZOOM_PLACED line in:\n{out}")
+    got = [float(v) for v in placed.group(1).split(",")]
+    want = [float(v) for v in placed.group(2).split(",")]
+    if any(abs(g - w) > 2 for g, w in zip(got, want)):
+        raise AssertionError(f"the popup window isn't where the scene puts it at its zoom: got {got}, want {want}")
+    return got, want
+
+
+def place_only(args, env):
+    env["POPUP_PROBE_PLACE_ONLY"] = "1"
+    proc = subprocess.Popen([str(args.bin / "popup_probe.exe")], env=env, stdout=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace")
+    try:
+        out, _ = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    print(out, flush=True)
+    if not re.search(r"^PLACE_ONLY_DONE$", out, re.M):
+        raise AssertionError(f"the probe didn't finish:\n{out}")
+    got, want = check_placed(out)
+    print(f"PASS: popup window placed at zoom {args.zoom or 1} (got {got}, want {want})")
 
 
 if __name__ == "__main__":

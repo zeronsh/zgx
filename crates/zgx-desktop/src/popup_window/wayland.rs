@@ -66,6 +66,9 @@ type Sink = Rc<dyn Fn(PopupInput)>;
 struct Target {
     origin: (f32, f32),
     scale: f64,
+    /// Its parent window's zoom (`zoom_of`): the scene's points are its
+    /// surface's divided by it.
+    zoom: f32,
     send: Sink,
 }
 
@@ -284,6 +287,9 @@ impl Popups {
         if self.shown.is_empty() && scene.popups().is_empty() {
             return Ok(());
         }
+        // Its window's zoom: the scene's points are the window's (and its
+        // popups' surfaces') divided by it.
+        let zoom = super::zoom_of(parent.id()) as f32;
         let wanted: Vec<(NodeId, Rect)> = scene
             .popups()
             .iter()
@@ -371,9 +377,9 @@ impl Popups {
                         });
                         let of =
                             holder.map(|(holder, popup)| (*holder, popup.xdg.clone(), popup.rect));
-                        let Some(popup) =
-                            show(client, parent, of, *root, *bounds, trigger, scale, context)
-                        else {
+                        let Some(popup) = show(
+                            client, parent, of, *root, *bounds, trigger, scale, zoom, context,
+                        ) else {
                             continue;
                         };
                         kept.push((*root, popup));
@@ -393,9 +399,10 @@ impl Popups {
                     limited.retain(|(limited, _)| limited != root);
                     limited.push((*root, (width, height)));
                     zgx_gpu::present_log::log(|| format!("popup cut {root:?} to {width}x{height}"));
+                    // In the scene's points: the surface's over the zoom.
                     (send)(PopupInput::Limit {
                         root: *root,
-                        size: Some((width as f32, height as f32)),
+                        size: Some((width as f32 / zoom, height as f32 / zoom)),
                     });
                 }
                 // Flipped by the compositor to its trigger's other side: the
@@ -443,6 +450,7 @@ impl Popups {
                     Target {
                         origin: (popup.rect.x, popup.rect.y),
                         scale: scale as f64,
+                        zoom,
                         send: send.clone(),
                     },
                 );
@@ -561,8 +569,16 @@ fn show(
     rect: Rect,
     trigger: Option<Rect>,
     scale: f32,
+    zoom: f32,
     context: &GpuContext,
 ) -> Option<Shown> {
+    // The protocol's coordinates are the surfaces', the scene's at the
+    // window's zoom: what is asked, and what the compositor reports back.
+    let zoomed = |r: Rect| super::window_rect(r, zoom);
+    // `scale` is the window's content scale: its output's times its zoom.
+    let display = scale / zoom;
+    let scene_rect = rect;
+    let (rect, trigger) = (zoomed(rect), trigger.map(zoomed));
     let qh = client.queue.handle();
     let (compositor, wm_base) = (
         client.state.compositor.clone()?,
@@ -571,7 +587,10 @@ fn show(
     // Positions relative to the parent's window geometry: a popup's is its
     // surface, which shows its box from the box's top-left.
     let (parent_xdg, (gx, gy)) = match &of {
-        Some((_, xdg, rect)) => (xdg.clone(), (rect.x.round() as i32, rect.y.round() as i32)),
+        Some((_, xdg, rect)) => {
+            let rect = zoomed(*rect);
+            (xdg.clone(), (rect.x.round() as i32, rect.y.round() as i32))
+        }
         None => {
             let (surface, origin) = xdg_surface(parent)?;
             // SAFETY: winit's live xdg_surface on this display, which
@@ -611,13 +630,14 @@ fn show(
     let popup = xdg.get_popup(Some(&parent_xdg), &positioner, &qh, ());
     positioner.destroy();
     xdg.set_window_geometry(0, 0, width, height);
+    // The surface's size in the output's pixels.
     let physical = (
-        (rect.width * scale).round().max(1.) as u32,
-        (rect.height * scale).round().max(1.) as u32,
+        (rect.width * display).round().max(1.) as u32,
+        (rect.height * display).round().max(1.) as u32,
     );
     match &viewport {
         Some(viewport) => viewport.set_destination(width, height),
-        None => surface.set_buffer_scale(scale.round().max(1.) as i32),
+        None => surface.set_buffer_scale(display.round().max(1.) as i32),
     }
     surface.commit();
     // Configured before its first frame, as the protocol asks.
@@ -651,6 +671,7 @@ fn show(
             window,
             physical.0,
             physical.1,
+            // Pixels per scene point.
             scale,
             context,
         )
@@ -673,7 +694,7 @@ fn show(
         xdg,
         viewport,
         surface,
-        rect,
+        rect: scene_rect,
         size: (width, height),
         asked: geometry(rect),
         trigger: trigger.map(geometry),
@@ -748,7 +769,7 @@ impl Dispatch<WlPointer, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         let at = |target: &Target, x: f64, y: f64| {
-            (target.origin.0 + x as f32, target.origin.1 + y as f32)
+            super::scene_point(target.origin, (x as f32, y as f32), target.zoom)
         };
         match event {
             wl_pointer::Event::Enter {
