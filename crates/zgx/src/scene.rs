@@ -8120,12 +8120,21 @@ impl Scene {
             // it may not have changed: laid out alone if they haven't
             // (`relayout_alone`), its siblings left where they are.
             let alone = ALONE && current == stop;
-            let boundary = !first && self.bounds_layout(current);
             // Past `id`, a parent the tree led to (`tree_node_mut`).
             let node = if first {
                 self.node_mut(current)
             } else {
                 self.tree_node_mut(current)
+            };
+            let boundary = !first && Self::is_layout_boundary(node);
+            // An absolute box laid out apart from its parent is one too
+            // (`lays_out_apart`): asked, and looked up again, only for one.
+            let (node, boundary) = match !first && !boundary && node.style.absolute {
+                true => {
+                    let apart = self.lays_out_apart(current);
+                    (self.tree_node_mut(current), apart)
+                }
+                false => (node, boundary),
             };
             // A boundary is laid out as one (`layout_roots`).
             let alone = alone && !boundary;
@@ -9591,12 +9600,12 @@ impl Scene {
         {
             return kept.size;
         }
-        // Probed again this pass, under other constraints (a level of a page
-        // its parents ask its natural, flexed and stretched sizes of): a box
-        // its style sizes answers from that, laying out nothing in it. Its
-        // first probe lays it out as before, the result `arrange` places.
+        // A box its style sizes answers a probe from that, laying out
+        // nothing in it (`fixed_size`): asked only of a box with children
+        // (texts, the most probed, pass at the first test) given a width and
+        // a height, and out of line.
         if !full
-            && node.measurement.as_ref().is_some_and(|m| m.pass == pass)
+            && matches!(node.kind, NodeKind::Container(_) | NodeKind::Panel { .. })
             && style_may_fix(&node.style, constraints)
             && let Some(size) = self.probe_fixed(id, *constraints)
         {
