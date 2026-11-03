@@ -1098,8 +1098,9 @@ impl WindowState {
     /// Make window background blurred
     #[inline]
     pub fn set_blur(&mut self, blurred: bool) {
-        // `ext-background-effect-v1` where the compositor has it (applied on
-        // the surface's next commit), KWin's own protocol otherwise.
+        // zgx patch: `ext-background-effect-v1` where the compositor has it
+        // (applied on the surface's next commit), KWin's own protocol
+        // otherwise.
         if let Some(manager) = self.background_effect_manager.as_ref() {
             if blurred && self.background_effect.is_none() {
                 self.background_effect =

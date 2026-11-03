@@ -1,6 +1,6 @@
-//! Handling of `ext-background-effect-v1`: the compositor blurs what lies
-//! behind a surface's blur region (Hyprland, KWin and others; the standard
-//! successor to `org_kde_kwin_blur`).
+//! zgx patch: handling of `ext-background-effect-v1`: the compositor blurs
+//! what lies behind a surface's blur region (Hyprland, KWin and others; the
+//! standard successor to `org_kde_kwin_blur`). See ZGX_PATCH.md.
 
 use sctk::compositor::{CompositorState, Region};
 use sctk::reexports::client::globals::{BindError, GlobalList};

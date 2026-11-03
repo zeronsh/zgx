@@ -110,7 +110,7 @@ pub struct WinitState {
     /// KWin blur manager.
     pub kwin_blur_manager: Option<KWinBlurManager>,
 
-    /// Background effect (blur) manager, preferred over KWin's.
+    /// zgx patch: background effect (blur) manager, preferred over KWin's.
     pub background_effect_manager: Option<BackgroundEffectManager>,
 
     /// Loop handle to re-register event sources, such as keyboard repeat.
