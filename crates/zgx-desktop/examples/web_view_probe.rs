@@ -10,7 +10,9 @@
 //! (`download`) at (480, 190), two magenta 10 × 10 dots at (300, 150) and
 //! (560, 250) that F8 turns green, a file input (several files) at (20, 300),
 //! an orange card that drags (`text/x-card` "card-1") at (440, 255),
-//! 70 × 30, a purple zone that takes drops at (400, 300), 100 × 50
+//! 70 × 30 (posting `dragging` as its drag starts), a purple zone that
+//! takes drops at (400, 300), 100 × 50 (posting `entered` as a drag comes
+//! over it)
 //! (posting `dropped` and `dropped_files`),
 //! and enough height to scroll.
 //! Beside the page, a gray zgx drop target at (660, 100), 90 × 60, prints
@@ -81,8 +83,9 @@ document.addEventListener('keydown', (e) => {
 }, true);
 addEventListener('resize', () => post({ resized: innerHeight }));
 addEventListener('dragend', () => post({ dragend: true }));
-document.getElementById('card').addEventListener('dragstart', (e) => e.dataTransfer.setData('text/x-card', 'card-1'));
+document.getElementById('card').addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/x-card', 'card-1'); post({ dragging: 'card-1' }); });
 const zone = document.getElementById('zone');
+zone.addEventListener('dragenter', () => post({ entered: 'zone' }));
 zone.addEventListener('dragover', (e) => e.preventDefault());
 zone.addEventListener('drop', (e) => {
   e.preventDefault();
