@@ -1897,6 +1897,39 @@ mod rich_tests {
         }
         FontSystem::new_with_locale_and_db("en-US".into(), db)
     }
+    /// A family without the weight asked for draws in its own nearest
+    /// face, as CSS's font matching does: Medium text in a family with
+    /// Regular alone stays in that family rather than taking another's
+    /// Medium (a custom interface font in an app whose labels are Medium).
+    #[test]
+    fn a_family_without_the_weight_asked_for_draws_in_its_nearest() {
+        // DejaVu Sans's Book alone, under a name no fallback list holds,
+        // and a Medium under the name Linux's fallback list puts first.
+        let mut db = cosmic_text::fontdb::Database::new();
+        let mut renamed = |bytes: &[u8], family: &str| {
+            let mut one = cosmic_text::fontdb::Database::new();
+            one.load_font_data(bytes.to_vec());
+            let mut face = one.faces().next().expect("bundled font").clone();
+            face.families = vec![(family.into(), face.families[0].1)];
+            db.push_face_info(face);
+        };
+        renamed(include_bytes!("../../zgx-desktop/assets/DejaVuSans.ttf"), "zgx test regular");
+        renamed(include_bytes!("../tests/fonts/Geist-500-subset.ttf"), "Noto Sans");
+        let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), db);
+        let width = |fonts: &mut FontSystem, family: &str, weight: u16| {
+            let font = FontStyle {
+                family: zgx::text_layout::FontFamily::Named(family.into()),
+                weight,
+                ..Default::default()
+            };
+            ShapedText::with_font(fonts, "The quick brown fox", 20., None, &font).size().0
+        };
+        let regular = width(&mut fonts, "zgx test regular", 400);
+        let medium = width(&mut fonts, "zgx test regular", 500);
+        let geist = width(&mut fonts, "Noto Sans", 500);
+        assert!((regular - geist).abs() > 1., "the two families differ: {regular} {geist}");
+        assert_eq!(medium, regular, "its own Book, not Geist's Medium");
+    }
     #[test]
     fn display_line_clamp_shapes_ellipsis_and_excludes_hidden_link_geometry() {
         use zgx::text_layout::{TextOptions, TextOverflow};
