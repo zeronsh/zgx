@@ -675,3 +675,79 @@ fn a_fade_inside_a_fade_takes_both() {
         }
     }
 }
+
+/// Pictures stacked in a clip fading at its top and its bottom (Zeron's
+/// wallpaper, a plugin's scene of layered pictures): each band draws into a
+/// texture of its own, the band's size, not one over both (the page's), and
+/// once the host goes idle (`trim`) the renderer holds none.
+#[test]
+fn bands_apart_take_textures_their_size_and_go_at_rest() {
+    let _gpu_fixture = gpu_fixture();
+    let mut scene = Scene::new(SIZE as f32, SIZE as f32);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let clip = scene.append(
+        scene.root(),
+        NodeKind::Container(Layout::Overlay),
+        Style {
+            width: Some(160.),
+            height: Some(160.),
+            clip: true,
+            fade_edges: [20., 20.],
+            ..Default::default()
+        },
+    );
+    scene.set_transform(clip, Transform { x: 20., y: 20. });
+    for shade in [200u8, 120, 40] {
+        let art = zgx::image::ImageData::new(4, 4, [shade, shade, 80, 255].repeat(16)).unwrap();
+        scene.append(
+            clip,
+            NodeKind::Image(std::sync::Arc::new(art)),
+            Style {
+                width: Some(160.),
+                height: Some(160.),
+                absolute: true,
+                ..Default::default()
+            },
+        );
+    }
+    scene.flush();
+    for direct in [true, false] {
+        let mut gpu = GpuRenderer::new(SIZE, SIZE).unwrap();
+        gpu.set_direct_metal(direct);
+        gpu.render(&scene, &[Rect::new(0., 0., SIZE as f32, SIZE as f32)])
+            .unwrap();
+        let stats = gpu.debug_cache_stats();
+        // Two bands, 160 by 20 each (in 64-texel steps): under a third of
+        // what one over the clip (160 by 160) took.
+        assert_eq!(stats.layer_textures, 2, "direct {direct}");
+        assert!(
+            stats.layer_bytes <= 2 * 192 * 64 * 4,
+            "direct {direct}: {} bytes",
+            stats.layer_bytes
+        );
+        // Each fades as one, the top band and the bottom.
+        let p = gpu.readback().unwrap();
+        let near = |a: u8, b: u8| a.abs_diff(b) <= 1;
+        for y in [25, 35] {
+            assert!(
+                near(alpha(&p, 100, y), ramp(y as f32 - 20. + 0.5, 20.)),
+                "top {y}"
+            );
+        }
+        for y in [165, 175] {
+            assert!(
+                near(alpha(&p, 100, y), ramp(180. - y as f32 - 0.5, 20.)),
+                "bottom {y}"
+            );
+        }
+        assert_eq!(alpha(&p, 100, 100), 255);
+        // At rest: nothing held.
+        gpu.trim();
+        let stats = gpu.debug_cache_stats();
+        assert_eq!(
+            (stats.layer_textures, stats.layer_bytes),
+            (0, 0),
+            "direct {direct}"
+        );
+    }
+}

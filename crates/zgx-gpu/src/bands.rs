@@ -48,6 +48,22 @@ pub(crate) struct BandPhase<'a> {
     pub(crate) draws: Vec<Draw>,
 }
 
+/// `strips` in groups that touch (a fade's top and left bands meet at a
+/// corner, drawn once through one texture), groups apart from each other.
+fn apart(strips: Vec<Pixels>) -> Vec<Vec<Pixels>> {
+    let mut groups: Vec<Vec<Pixels>> = Vec::new();
+    for strip in strips {
+        let touching: Vec<usize> = (0..groups.len())
+            .filter(|&at| groups[at].iter().any(|other| !other.meet(strip).empty()))
+            .collect();
+        let mut group = vec![strip];
+        for at in touching.into_iter().rev() {
+            group.extend(groups.swap_remove(at));
+        }
+        groups.push(group);
+    }
+    groups
+}
 /// A box in device pixels: left, top, right, bottom.
 #[derive(Clone, Copy, PartialEq)]
 struct Pixels([f32; 4]);
@@ -129,6 +145,13 @@ impl GpuRenderer {
         }
         true
     }
+    /// The band textures, pooled or a frame's, let go (`GpuRenderer::trim`,
+    /// as the host goes idle): a window at rest holds none; the next frame
+    /// with a band makes one.
+    pub(crate) fn release_bands(&mut self) {
+        self.reclaim_bands();
+        self.band_pool = Vec::new();
+    }
     /// Band textures back into the pool, once the frames drawing them have
     /// been encoded (after `flush_pending`).
     pub(crate) fn reclaim_bands(&mut self) {
@@ -184,17 +207,50 @@ impl GpuRenderer {
             while let Some(item) = items.next_if(|item| item.mask() == Some(mask)) {
                 run.push(item);
             }
-            // An id to key its texture: an item of it that no layer, cached
-            // or not, has (nor another band).
-            let key = run
+            // Ids to key its textures: items of it that no layer, cached or
+            // not, has (nor another band).
+            let keys: Vec<NodeId> = run
                 .iter()
-                .find(|item| {
+                .filter(|item| {
                     !item.isolated && item.id != scene.root() && !self.layers.contains_key(&item.id)
                 })
-                .map(|item| item.id);
-            match (self.band_strips(scene, &run, mask, reach, target), key) {
-                (Some(bands), Some(key)) => {
-                    phases.push(self.band_run(run, mask, bands, key, target, &mut out));
+                .map(|item| item.id)
+                .collect();
+            match (
+                self.band_strips(scene, &run, mask, reach, target),
+                keys.first(),
+            ) {
+                (Some((inner, strips)), Some(&key)) => {
+                    // Bands apart (a fade at the top and one at the bottom)
+                    // each in a texture of their own, as many as it has
+                    // items to key them: one over them all is as large as
+                    // the box (a page-sized texture for two strips).
+                    let groups = apart(strips);
+                    if groups.len() > 1 && keys.len() >= groups.len() {
+                        for (at, (group, key)) in groups.into_iter().zip(keys).enumerate() {
+                            // The interior once, with the first.
+                            let inner = if at == 0 { inner } else { Pixels([0.; 4]) };
+                            let run = run.clone();
+                            phases.push(self.band_run(
+                                run,
+                                mask,
+                                (inner, group),
+                                key,
+                                target,
+                                &mut out,
+                            ));
+                        }
+                    } else {
+                        let strips = groups.into_iter().flatten().collect();
+                        phases.push(self.band_run(
+                            run,
+                            mask,
+                            (inner, strips),
+                            key,
+                            target,
+                            &mut out,
+                        ));
+                    }
                 }
                 // None stacking in a band (rows apart), or something there
                 // it can't draw apart (a backdrop filter, a blend): faded

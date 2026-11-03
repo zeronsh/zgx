@@ -501,6 +501,7 @@ impl zgx::animation::FrameStream for GifStream {
         self.bytes.len() + self.frames.as_ref().map_or(0, |f| f.canvas.len())
     }
 }
+/// A GIF's frames: none without zgx-gpu's `gif` feature, an error saying so.
 #[cfg(not(feature = "gif"))]
 pub fn decode_gif(_: &[u8]) -> Result<Arc<zgx::animation::Animation>, GpuError> {
     Err(GpuError("GIF images need zgx-gpu's `gif` feature".into()))
