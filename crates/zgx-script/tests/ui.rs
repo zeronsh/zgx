@@ -5187,3 +5187,46 @@ fn an_image_with_a_fallback_keeps_its_fit() {
         "contain in {bw}x{bh}"
     );
 }
+
+/// A `theme = …` table's `font.sans` / `font.mono`, families by name (a
+/// quoted one too, as CSS's font-family lists them), reach the text in it,
+/// inherited or in a font token, and follow the state it reads. (They were
+/// read as text, which a font token refused: the theme's own fonts stayed.)
+#[test]
+fn a_theme_tables_font_families_reach_its_text() {
+    let mut h = Harness::inline(
+        r##"local sans = ui.state("sans", "")
+        return ui.column { w = 400, h = 300,
+            theme = function()
+                local s = sans:get()
+                if s == "" then return nil end
+                return { ["font.sans"] = s, ["font.mono"] = '"3270 Mono"' }
+            end,
+            ui.button { id = "change", on_click = function() sans:set("Chosen Sans") end, "change" },
+            ui.button { id = "back", on_click = function() sans:set("") end, "back" },
+            ui.text { id = "plain", "plain" },
+            ui.text { id = "token", font = "$font.sans", "token" },
+            ui.text { id = "mono", font = "$font.mono", "mono" },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    assert_eq!(h.host.error().get(), None);
+    let family = |h: &mut Harness, id: &str| {
+        let node = h.find(id).unwrap();
+        let scene = h.ui.scene.borrow();
+        let text = scene.children(node).first().copied().unwrap_or(node);
+        scene.font(text).family.clone()
+    };
+    use zgx::text_layout::FontFamily;
+    let (plain, mono) = (family(&mut h, "plain"), family(&mut h, "mono"));
+    h.click("change");
+    h.ui.prepare_frame();
+    assert_eq!(h.host.error().get(), None);
+    assert_eq!(family(&mut h, "plain"), FontFamily::from("Chosen Sans"));
+    assert_eq!(family(&mut h, "token"), FontFamily::from("Chosen Sans"));
+    assert_eq!(family(&mut h, "mono"), FontFamily::from("3270 Mono"));
+    h.click("back");
+    h.ui.prepare_frame();
+    assert_eq!(family(&mut h, "plain"), plain);
+    assert_eq!(family(&mut h, "mono"), mono);
+}

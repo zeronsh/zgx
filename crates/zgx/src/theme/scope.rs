@@ -184,12 +184,19 @@ impl Evaluator<'_> {
             Some(expr) => expr.eval(&mut |id| self.eval(id)),
             None => TokenValue::Unset,
         };
-        let value = match tokens::standard_kind(id) {
-            Some(kind) if value.kind().is_some_and(|k| k != kind) => {
+        let value = match (tokens::standard_kind(id), value) {
+            // A family's name given where the token's kind wasn't known (a
+            // script's `theme = { ["font.sans"] = "Inter" }`, `ui.theme.tokens`,
+            // `TokenInput::parse`): read as a theme file reads a font token's
+            // word, a CSS font-family list (quotes and all).
+            (Some(tokens::TokenKind::Font), TokenValue::Text(text)) => {
+                TokenValue::Font(super::value::font_family(&text))
+            }
+            (Some(kind), value) if value.kind().is_some_and(|k| k != kind) => {
                 warn(&format!("token `{id}` is a {kind:?} token, not {value}"));
                 TokenValue::Unset
             }
-            _ => value,
+            (_, value) => value,
         };
         self.state[i] = 2;
         self.values[i] = value.clone();
