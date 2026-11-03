@@ -2266,18 +2266,34 @@ const PROBE_SIZES: usize = 32;
 struct ProbeSize {
     constraints: Constraints,
     size: (f32, f32),
-    pass: u64,
-    /// Its style and the constraints fixed it, whatever the node holds
-    /// (`Scene::fixed_size`): nothing in it changes this answer.
-    fixed: bool,
+    /// The pass it was found in (`pass`), and in the top bit whether its
+    /// style and the constraints fixed it, whatever the node holds
+    /// (`fixed`): kept in one word, so the list of them stays its size.
+    pass_fixed: u64,
+}
+/// `ProbeSize::pass_fixed`'s flag: passes never reach it.
+const PROBE_FIXED: u64 = 1 << 63;
+// A node keeps up to `PROBE_SIZES` of them: one word more each moves its
+// list into a larger allocation.
+const _: () = assert!(std::mem::size_of::<ProbeSize>() == 64);
+impl ProbeSize {
+    #[inline(always)]
+    fn pass(&self) -> u64 {
+        self.pass_fixed & !PROBE_FIXED
+    }
+    /// Its style and the constraints fixed it (`Scene::fixed_size`):
+    /// nothing in the node changes this answer.
+    #[inline(always)]
+    fn fixed(&self) -> bool {
+        self.pass_fixed & PROBE_FIXED != 0
+    }
 }
 impl From<&Measurement> for ProbeSize {
     fn from(m: &Measurement) -> Self {
         Self {
             constraints: m.constraints,
             size: m.size,
-            pass: m.pass,
-            fixed: false,
+            pass_fixed: m.pass,
         }
     }
 }
@@ -8221,7 +8237,7 @@ impl Scene {
         // asked more of (its natural width, to stretch it to the widest)
         // changes what it answers there often, and its parent lays it out.
         if !node.alternates.is_empty()
-            || node.sizes.iter().any(|kept| !kept.fixed)
+            || node.sizes.iter().any(|kept| !kept.fixed())
             || node.measurement.is_none()
             || node.style.absolute
             || node.special.any()
@@ -8241,7 +8257,7 @@ impl Scene {
             && !parent.special.any()
             && parent.measurement.is_some()
             && parent.alternates.is_empty()
-            && parent.sizes.iter().all(|kept| kept.fixed)
+            && parent.sizes.iter().all(|kept| kept.fixed())
     }
     /// `id`, where a walk stopped (`stops_alone`), laid out again under the
     /// one constraint its parent asked it: if it gives what it did, and it
@@ -9596,15 +9612,19 @@ impl Scene {
             && let Some(kept) = node
                 .sizes
                 .iter()
-                .find(|m| (clean || m.pass == pass) && m.constraints == *constraints)
+                .find(|m| (clean || m.pass() == pass) && m.constraints == *constraints)
         {
             return kept.size;
         }
-        // A box its style sizes answers a probe from that, laying out
-        // nothing in it (`fixed_size`): asked only of a box with children
-        // (texts, the most probed, pass at the first test) given a width and
-        // a height, and out of line.
+        // A box its style sizes, unchanged and asked under constraints it
+        // has no answer for (a width change's probes of a page's levels),
+        // answers from its style, laying out nothing in it (`fixed_size`).
+        // A changed box lays out as before: where it is probed is most often
+        // where it is placed, so the result `arrange` reuses. Asked only of a
+        // box with children (texts, the most probed, pass at the kind) given
+        // a width and a height, and out of line.
         if !full
+            && clean
             && matches!(node.kind, NodeKind::Container(_) | NodeKind::Panel { .. })
             && style_may_fix(&node.style, constraints)
             && let Some(size) = self.probe_fixed(id, *constraints)
@@ -9630,8 +9650,7 @@ impl Scene {
             ProbeSize {
                 constraints,
                 size,
-                pass,
-                fixed: true,
+                pass_fixed: pass | PROBE_FIXED,
             },
         );
         node.sizes.truncate(PROBE_SIZES);
@@ -10555,7 +10574,7 @@ impl Scene {
         // from before a zoom, they are in other points.
         if node.dirty & LAYOUT != 0 {
             node.alternates.retain(|m| m.pass == pass);
-            node.sizes.retain(|m| m.pass == pass);
+            node.sizes.retain(|m| m.pass() == pass);
         }
         if let Some(measurement) = &mut node.measurement {
             measurement.constraints = constraints;
@@ -10605,7 +10624,7 @@ impl Scene {
                     .map(|m| ProbeSize::from(&m)),
             );
             node.sizes
-                .retain(|m| m.constraints != constraints && (m.pass == pass || !dirty));
+                .retain(|m| m.constraints != constraints && (m.pass() == pass || !dirty));
             keep_sizes(&mut node.sizes, evicted);
         }
         let overfull = node.alternates.len() == MEASUREMENT_ALTERNATES + 1;
