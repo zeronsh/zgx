@@ -47,20 +47,28 @@ impl Locales {
     /// any were. What their new text changes shows in place, as theme
     /// files' does, without reloading the scripts.
     pub(crate) fn reload_if_changed(&self, files: Files) -> bool {
-        let mut set = self.set.borrow_mut();
-        let Some(set) = set.as_mut() else {
-            return false;
-        };
-        let mut changed = false;
-        for (path, stamp) in &mut set.files {
-            let now = modified(path);
-            if now != *stamp {
-                *stamp = now;
-                read(&set.i18n, files, path, &set.warnings);
-                changed = true;
+        // Note what changed, then read it with the set let go: reading sets
+        // the messages, and what shows them runs again at once, calling
+        // `ui.t` (`handle`) as it does.
+        let (i18n, warnings, edited) = {
+            let mut set = self.set.borrow_mut();
+            let Some(set) = set.as_mut() else {
+                return false;
+            };
+            let mut edited = Vec::new();
+            for (path, stamp) in &mut set.files {
+                let now = modified(path);
+                if now != *stamp {
+                    *stamp = now;
+                    edited.push(path.clone());
+                }
             }
+            (set.i18n.clone(), set.warnings.clone(), edited)
+        };
+        for path in &edited {
+            read(&i18n, files, path, &warnings);
         }
-        changed
+        !edited.is_empty()
     }
     /// Runs `root` (the script's mounted root) the way the locale does,
     /// from now: replaces what an earlier view's root followed.
