@@ -31,16 +31,19 @@
 //! closes them. Pointer input over a popup comes from zgx's own
 //! `wl_pointer`, in the window's coordinates, to its host, which hit-tests
 //! the scene there: over a popup's clear margin, what is under it in the
-//! window is hovered. Only what its panel lays out takes the pointer (its
-//! surface's input region, `input_rect`): not the shadow it paints past
-//! that, nor a popup letting the pointer through (a tooltip), whose surface
-//! takes none. A compositor may still give a popup the pointer as it maps
-//! wherever its surface lies (Hyprland 0.57 does), so the window's own
-//! leave onto one of its popups is not the pointer leaving (`pointer_over_
-//! popup`), nor a popup's leave back onto the window (`leaving`). Either
-//! way a shadow reaching over the trigger took the pointer off the trigger
-//! as the popup showed, which closed it, which put the pointer back on the
-//! trigger, which showed it again.
+//! window is hovered. A popup's window geometry is its panel alone
+//! (`panel_of`), its shadow outside it, as GTK's popups have theirs: the
+//! compositor places the panel where the scene did and keeps it on the
+//! output, the shadow free to reach past the output's edge (with the whole
+//! surface for its geometry, a card whose shadow reached past the output's
+//! foot was slid up from where the scene drew it, unsaid, and the
+//! pointer's moves over it were read that far off). Only what its panel
+//! lays out takes the pointer (its input region, `input_rect`), and none
+//! of a popup letting the pointer through (a tooltip). A compositor may
+//! still give a popup the pointer as it maps where its geometry lies, so
+//! the window's own leave onto one of its popups is not the pointer
+//! leaving (`pointer_over_popup`), nor a popup's leave back onto the window
+//! (`leaving`).
 //! todo(wayland): the grab (`xdg_popup.grab`), with keys through a
 //! `wl_keyboard` of zgx's own.
 use super::PopupInput;
@@ -248,9 +251,16 @@ struct Shown {
     viewport: Option<WpViewport>,
     surface: WlSurface,
     rect: Rect,
-    /// Its positioner's rules as last asked (its size, its box's in whole
-    /// points, among them).
+    /// Its positioner's rules as last asked: its panel's size (whole
+    /// points), its place against its trigger.
     rules: Rules,
+    /// Its panel (`panel_of`, the scene's): its window geometry, what a
+    /// popup of its own opens against.
+    panel: Rect,
+    /// Its surface's size and its window geometry on it (the panel), as
+    /// last set (`surface_and_geometry`).
+    surface_size: (i32, i32),
+    geometry: (i32, i32, i32, i32),
     /// Where it asked to be, and its trigger, if any (its parent's window
     /// geometry's coordinates).
     asked: Rect,
@@ -307,7 +317,8 @@ impl Shown {
     fn reposition(
         &mut self,
         client: &mut Client,
-        rect: Rect,
+        (rect, panel): (Rect, Rect),
+        zoom: f32,
         (rules, asked, trigger): (Rules, Rect, Option<Rect>),
     ) {
         let Some(wm_base) = client.state.wm_base.clone() else {
@@ -319,12 +330,21 @@ impl Shown {
         let token = client.state.token;
         self.popup.reposition(&positioner, token);
         positioner.destroy();
-        if rules.size != self.rules.size {
-            let (width, height) = rules.size;
-            self.xdg.set_window_geometry(0, 0, width, height);
+        // Its surface round its panel, and the panel on it (its window
+        // geometry), in the surfaces' coordinates.
+        let zoomed = |r: Rect| super::window_rect(r, zoom);
+        let (surface_size, geometry) =
+            surface_and_geometry(zoomed(rect), zoomed(panel), rules.size);
+        if geometry != self.geometry {
+            let (x, y, width, height) = geometry;
+            self.xdg.set_window_geometry(x, y, width, height);
+            self.geometry = geometry;
+        }
+        if surface_size != self.surface_size {
             if let Some(viewport) = &self.viewport {
-                viewport.set_destination(width, height);
+                viewport.set_destination(surface_size.0, surface_size.1);
             }
+            self.surface_size = surface_size;
         }
         let id = self.popup.id();
         for _ in 0..2 {
@@ -336,6 +356,7 @@ impl Shown {
             }
         }
         self.rect = rect;
+        self.panel = panel;
         self.rules = rules;
         self.asked = asked;
         self.trigger = trigger;
@@ -357,7 +378,8 @@ struct Rules {
     adjust: ConstraintAdjustment,
 }
 impl Rules {
-    /// Those for a popup at `rect` opened against `trigger` (the surfaces'
+    /// Those for a popup whose panel is at `rect` (its window geometry),
+    /// opened against `trigger` (the surfaces'
     /// coordinates: the scene's at its window's zoom), of a surface whose
     /// window geometry starts at `origin`; and where it asks to be and its
     /// trigger, in that geometry's coordinates.
@@ -506,7 +528,10 @@ impl Popups {
                 .iter()
                 .filter(|(root, popup)| {
                     !wanted.iter().any(|(wanted, bounds)| {
-                        wanted == root && (popup.movable() || rects_match(*bounds, popup.rect))
+                        wanted == root
+                            && (popup.movable()
+                                || rects_match(*bounds, popup.rect)
+                                    && rects_match(panel_of(scene, *root, *bounds), popup.panel))
                     })
                 })
                 .map(|(root, _)| *root)
@@ -538,20 +563,25 @@ impl Popups {
                     // from moved: moved and resized in place.
                     Some(index) if kept[index].1.movable() => {
                         let trigger = scene.popup_anchor(*root).map(|anchor| scene.bounds(anchor));
+                        // A submenu opens against its menu's panel.
                         let holder = kept[index].1.parent.and_then(|holder| {
                             kept.iter()
                                 .find(|(shown, _)| *shown == holder)
-                                .map(|(_, popup)| popup.rect)
+                                .map(|(_, popup)| popup.panel)
                         });
                         let zoomed = |r: Rect| super::window_rect(r, zoom);
                         if let Some(origin) = origin_of(parent, holder, zoom) {
-                            let wants = Rules::of(zoomed(*bounds), trigger.map(zoomed), origin);
+                            let panel = panel_of(scene, *root, *bounds);
+                            let wants = Rules::of(zoomed(panel), trigger.map(zoomed), origin);
                             let popup = &mut kept[index].1;
-                            if wants.0 != popup.rules || !rects_match(*bounds, popup.rect) {
+                            if wants.0 != popup.rules
+                                || !rects_match(*bounds, popup.rect)
+                                || !rects_match(panel, popup.panel)
+                            {
                                 zgx_gpu::present_log::log(|| {
                                     format!("popup reposition {root:?} to {bounds:?}")
                                 });
-                                popup.reposition(client, *bounds, wants);
+                                popup.reposition(client, (*bounds, panel), zoom, wants);
                             }
                         }
                         index
@@ -569,9 +599,18 @@ impl Popups {
                             })
                         });
                         let of =
-                            holder.map(|(holder, popup)| (*holder, popup.xdg.clone(), popup.rect));
+                            holder.map(|(holder, popup)| (*holder, popup.xdg.clone(), popup.panel));
+                        let panel = panel_of(scene, *root, *bounds);
                         let Some(popup) = show(
-                            client, parent, of, *root, *bounds, trigger, scale, zoom, context,
+                            client,
+                            parent,
+                            of,
+                            *root,
+                            (*bounds, panel),
+                            trigger,
+                            scale,
+                            zoom,
+                            context,
                         ) else {
                             continue;
                         };
@@ -758,6 +797,43 @@ fn set_input(client: &Client, surface: &WlSurface, input: Option<Rect>, zoom: f3
     region.destroy();
 }
 
+/// Popup `root`'s panel, shown at `bounds` (the scene's): the box its root
+/// lays out, never the ink it paints past that (a card's shadow, which
+/// reaches far past the card). Its window geometry, as GTK's popups leave
+/// their shadows out of theirs: the compositor places that against the
+/// trigger and keeps it on the output, the shadow free to reach past the
+/// output's edge, and takes it for where the popup is (Hyprland gives a
+/// popup the pointer by its geometry as it maps). With the whole surface
+/// for its geometry, a card whose shadow reached past the output's foot was
+/// slid up off where the scene drew it, unsaid, and the pointer's moves
+/// over it were read that far off: off its trigger, which closed it.
+fn panel_of(scene: &Scene, root: NodeId, bounds: Rect) -> Rect {
+    scene
+        .bounds(root)
+        .intersection(bounds)
+        .filter(|panel| panel.width >= 1. && panel.height >= 1.)
+        .unwrap_or(bounds)
+}
+
+/// A popup's surface size and its window geometry on it (`panel_of`), the
+/// surfaces' coordinates, for its surface at `rect` and its panel at
+/// `panel` (both the surfaces' coordinates) asking `size` for the panel.
+fn surface_and_geometry(
+    rect: Rect,
+    panel: Rect,
+    size: (i32, i32),
+) -> ((i32, i32), (i32, i32, i32, i32)) {
+    let surface = (
+        rect.width.ceil().max(1.) as i32,
+        rect.height.ceil().max(1.) as i32,
+    );
+    let x = ((panel.x - rect.x).round() as i32).clamp(0, surface.0 - 1);
+    let y = ((panel.y - rect.y).round() as i32).clamp(0, surface.1 - 1);
+    let width = size.0.clamp(1, surface.0 - x);
+    let height = size.1.clamp(1, surface.1 - y);
+    (surface, (x, y, width, height))
+}
+
 fn rects_match(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() < 0.5
         && (a.y - b.y).abs() < 0.5
@@ -834,7 +910,7 @@ fn show(
     parent: &Window,
     of: Option<(NodeId, XdgSurface, Rect)>,
     root: NodeId,
-    rect: Rect,
+    (rect, panel): (Rect, Rect),
     trigger: Option<Rect>,
     scale: f32,
     zoom: f32,
@@ -845,8 +921,8 @@ fn show(
     let zoomed = |r: Rect| super::window_rect(r, zoom);
     // `scale` is the window's content scale: its output's times its zoom.
     let display = scale / zoom;
-    let scene_rect = rect;
-    let (rect, trigger) = (zoomed(rect), trigger.map(zoomed));
+    let (scene_rect, scene_panel) = (rect, panel);
+    let (rect, panel, trigger) = (zoomed(rect), zoomed(panel), trigger.map(zoomed));
     let qh = client.queue.handle();
     let (compositor, wm_base) = (
         client.state.compositor.clone()?,
@@ -871,8 +947,9 @@ fn show(
             (xdg, origin)
         }
     };
-    let (rules, asked, trigger) = Rules::of(rect, trigger, (gx, gy));
-    let (width, height) = rules.size;
+    // Asked by its panel (its window geometry), the surface round it.
+    let (rules, asked, trigger) = Rules::of(panel, trigger, (gx, gy));
+    let ((width, height), geometry) = surface_and_geometry(rect, panel, rules.size);
     let surface = compositor.create_surface(&qh, ());
     let viewport = client
         .state
@@ -883,7 +960,7 @@ fn show(
     let positioner = rules.positioner(&wm_base, &qh);
     let popup = xdg.get_popup(Some(&parent_xdg), &positioner, &qh, ());
     positioner.destroy();
-    xdg.set_window_geometry(0, 0, width, height);
+    xdg.set_window_geometry(geometry.0, geometry.1, geometry.2, geometry.3);
     // The surface's size in the output's pixels.
     let physical = (
         (rect.width * display).round().max(1.) as u32,
@@ -950,6 +1027,9 @@ fn show(
         surface,
         rect: scene_rect,
         rules,
+        panel: scene_panel,
+        surface_size: (width, height),
+        geometry,
         asked,
         trigger,
         revision: None,
@@ -1249,7 +1329,37 @@ mod tests {
                 None
             }
         };
+        // Its window geometry is the card's box, the shadow outside it.
+        assert_eq!(panel_of(&scene, root, shown), card);
         (card, shown, input_rect(&scene, root, shown, &takes))
+    }
+
+    #[test]
+    fn a_popups_window_geometry_is_its_panel_its_shadow_outside() {
+        // A 248x91 card in a 416x259 surface, 84 in from its left and 64
+        // down (a shadow offset 20 down).
+        let surface = Rect::new(395., 283., 416., 259.);
+        let card = Rect::new(479., 347., 248., 91.);
+        assert_eq!(
+            surface_and_geometry(surface, card, (248, 91)),
+            ((416, 259), (84, 64, 248, 91))
+        );
+        // Asked against its trigger by its panel: above it, 8 apart, it
+        // opens above it, flipped at the output's edge; by its whole
+        // surface (the shadow overlapping the trigger) it was a point
+        // anchor, only slid.
+        let trigger = Rect::new(703., 446., 24., 24.);
+        let by_panel = position(card, Some(trigger));
+        assert_eq!(
+            (by_panel.1, by_panel.2),
+            (Anchor::TopLeft, Gravity::TopRight)
+        );
+        assert!(by_panel.4.contains(ConstraintAdjustment::FlipY));
+        assert!(
+            !position(surface, Some(trigger))
+                .4
+                .contains(ConstraintAdjustment::FlipY)
+        );
     }
 
     #[test]
