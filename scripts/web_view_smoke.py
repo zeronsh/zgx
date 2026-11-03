@@ -387,12 +387,26 @@ def drop_checks(session):
     another app drags onto the zone drops as a `File`."""
     def dropped(after):
         return [m[0] for m in session.messages() if "dropped" in m[0]][after:]
+    def heard(key):
+        return any(key in m[0] for m in session.messages())
+    def move_until(points, key, what):
+        """Move through `points`, again and again, each move waiting for
+        the page to say `key`: as fast as the page and zgx answer, which
+        a load slows (fixed timings let the drag start after the release)."""
+        for _ in range(8):
+            for x, y in points:
+                session.xdo("mousemove", "--window", session.window, x, y)
+                try:
+                    return session.wait(lambda: heard(key), "", .4)
+                except AssertionError:
+                    pass
+        raise AssertionError(what)
     session.xdo("mousemove", "--window", session.window, 515, 310)
     session.xdo("mousedown", "1")
-    for x, y in ((520, 320), (510, 340), (495, 355), (490, 365)):
-        session.xdo("mousemove", "--window", session.window, x, y)
-        time.sleep(.15)
-    time.sleep(.3)
+    # WebKit's drag of the card begins (its `dragstart`) ...
+    move_until(((520, 316), (524, 320), (520, 324)), "dragging", "the card's drag never began")
+    # ... becomes zgx's at the next move, and goes over the zone.
+    move_until(((510, 340), (495, 355), (490, 365), (492, 367)), "entered", "the card's drag never reached the zone")
     session.xdo("mouseup", "1")
     first = session.wait(lambda: dropped(0), "the card never dropped on the zone")[0]
     if first["dropped"] != "card-1":
