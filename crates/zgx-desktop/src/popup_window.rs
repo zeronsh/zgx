@@ -298,6 +298,9 @@ mod other {
         pub fn showing(&self) -> bool {
             false
         }
+        pub fn deadline(&self) -> Option<std::time::Instant> {
+            None
+        }
         pub fn memory(&self, _: &mut zgx::memory::Report) {}
         #[allow(clippy::too_many_arguments)]
         pub fn update(
@@ -1454,6 +1457,11 @@ mod macos {
         pub fn showing(&self) -> bool {
             !self.shown.is_empty()
         }
+        /// When the loop must turn for a popup's frame (none here: each
+        /// draws as it changes).
+        pub fn deadline(&self) -> Option<std::time::Instant> {
+            None
+        }
         /// After the scene's flush: show each visible popup root in a panel
         /// over `window`, draw it again where it changed (its layer revision,
         /// `Scene::set_popup`; always when `full`), and hide the rest. A drag
@@ -2563,6 +2571,11 @@ mod x11 {
         /// Whether any popup shows.
         pub fn showing(&self) -> bool {
             !self.shown.is_empty() || self.wayland.showing()
+        }
+        /// When the loop must turn for a Wayland popup's frame left
+        /// waiting on the compositor (`wayland::Popups::deadline`).
+        pub fn deadline(&self) -> Option<std::time::Instant> {
+            self.wayland.deadline()
         }
         /// After the scene's flush: show each visible popup root in a window
         /// over `parent`, draw it again where it changed (always when

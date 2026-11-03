@@ -1511,7 +1511,14 @@ struct Host {
     /// What the window last showed, and its scale, for `Ui::snapshot`.
     #[cfg(target_os = "macos")]
     shown: std::rc::Rc<std::cell::RefCell<Option<(zgx_gpu::ShownFrame, f64)>>>,
+    /// The next frame repaints the whole window, and its popups.
     force: bool,
+    /// The next frame repaints the whole window, but its popups only as
+    /// they changed: on Wayland (`frame_paced`), a frame the compositor
+    /// grants (`RedrawRequested`) or one put off until it does. Its popups'
+    /// surfaces keep their contents, and each popup frame drawn again for
+    /// nothing is one more to wait for (`popup_window::wayland`).
+    redraw_whole: bool,
     presentation: Presentation,
     native_occluded: bool,
     frame_paced: bool,
@@ -1956,6 +1963,7 @@ impl Host {
             #[cfg(target_os = "macos")]
             shown,
             force: true,
+            redraw_whole: false,
             presentation: Presentation::default(),
             native_occluded: false,
             frame_paced: false,
@@ -2440,12 +2448,13 @@ impl Host {
         self.accessibility_geometry_dirty |= !report.damage.is_empty()
             || std::mem::replace(&mut self.popup_revisions, popup_revisions) != popup_revisions;
         let full = [scene.bounds(scene.root())];
-        let forced = self.force;
+        let forced = self.force || self.redraw_whole;
+        let popups_forced = self.force;
         // Painting only what changed can be switched off, to compare
         // (`zgx inspect switch partial_repaint off`): a frame that changes
         // anything then paints the whole window.
         let whole = !zgx::switches::PARTIAL_REPAINT.on() && !report.damage.is_empty();
-        let damage = if self.force || whole {
+        let damage = if forced || whole {
             &full[..]
         } else {
             &report.damage
@@ -2461,7 +2470,7 @@ impl Host {
             _ => Vec::new(),
         };
         let extended;
-        let damage = if planned.is_empty() || self.force {
+        let damage = if planned.is_empty() || forced {
             damage
         } else {
             extended = [damage, &planned[..]].concat();
@@ -2475,7 +2484,7 @@ impl Host {
             if self.frame_paced && !self.present_ready {
                 // Layout/model work proceeds, but defer GPU work until a frame
                 // is granted. A full repaint retains damage across scene flushes.
-                self.force = true;
+                self.redraw_whole = true;
                 window.request_redraw();
             } else {
                 // Steady frames render at a time of their own within their
@@ -2532,6 +2541,7 @@ impl Host {
                     }
                 }
                 self.force = undrawn;
+                self.redraw_whole = false;
             }
         }
         // GPU views on planes of their own: their new frames, which damage
@@ -2724,7 +2734,7 @@ impl Host {
         if let Some(renderer) = &self.renderer
             && (self.popups.showing() || !scene.popups().is_empty())
         {
-            let full = forced || report.damage.first() == full.first();
+            let full = popups_forced || report.damage.first() == full.first();
             // Each popup's frame is contained (`contain::run`); what else
             // the host does (placing, materials) is contained as a whole.
             self.frames_tried += 1;
@@ -4225,8 +4235,14 @@ impl Host {
                 self.presentation.expose();
                 // Other platforms may have lost the window's contents; on
                 // macOS a redraw AppKit asks for (as the window first shows)
-                // repaints only what changed.
-                self.force |= !cfg!(target_os = "macos");
+                // repaints only what changed. A frame Wayland's compositor
+                // grants repaints the window's, not its popups': their
+                // surfaces keep theirs.
+                if self.frame_paced {
+                    self.redraw_whole = true;
+                } else {
+                    self.force |= !cfg!(target_os = "macos");
+                }
                 if std::mem::take(&mut self.frame_redraw_requested) {
                     // Wayland: the compositor granted this frame. Let animations
                     // step before painting it.
@@ -5520,7 +5536,7 @@ impl Host {
         #[cfg(not(any(target_os = "macos", windows)))]
         let paced = false;
         // Scene damage accumulates until the refresh paints it in one frame.
-        if !paced || due || self.frame_arrived || self.force {
+        if !paced || due || self.frame_arrived || self.force || self.redraw_whole {
             #[cfg(target_os = "macos")]
             {
                 self.refresh_frame = paced && self.frame_arrived;
@@ -7236,6 +7252,7 @@ impl WindowManager {
                     host.presentation.deadline(),
                     host.context.ui.next_interaction_deadline(),
                     host.frame_deadline,
+                    host.popups.deadline(),
                     host.renderer_retry,
                     host.plane_retry,
                     host.touch.hold_deadline(),
