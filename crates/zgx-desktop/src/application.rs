@@ -6767,7 +6767,12 @@ impl WindowManager {
                 let reserved = self.factory.reserved.borrow().clone();
                 // A menu bar still to be made is made from them then.
                 #[cfg(target_os = "macos")]
-                if self.menu_bar_due.is_none() {
+                if self.menu_bar_due.is_none()
+                    && !self
+                        .native_menu
+                        .as_mut()
+                        .is_some_and(|menu| menu.update_states(&menus))
+                {
                     let replacement = match crate::app_menu::NativeMenu::new(&menus) {
                         Ok(menu) => menu,
                         Err(error) => {
