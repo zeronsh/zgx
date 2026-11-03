@@ -342,8 +342,9 @@ impl<'a> FontFallbackIter<'a> {
             // a family that has Regular and Bold alone) draws in the face
             // fontdb's query picks for it, as CSS's font matching does,
             // rather than in another family that has that weight. The keys
-            // hold the query's face first, then the nearest weights.
-            .or_else(|| self.font_match_keys.iter().find(in_family))
+            // hold the query's face first (`get_font_matches`), so it is the
+            // first key or none: one look, where every key was looked at.
+            .or_else(|| self.font_match_keys.first().filter(in_family))
     }
 
     fn next_item(&mut self, fallbacks: &Fallbacks) -> Option<<Self as Iterator>::Item> {
