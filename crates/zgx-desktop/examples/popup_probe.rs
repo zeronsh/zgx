@@ -71,10 +71,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
             // `POPUP_PROBE_POPOVER`: a popover with an arrow in the menu's
             // place, for `wayland_popups_smoke.py` to see it flipped.
-            let popup = if std::env::var_os("POPUP_PROBE_POPOVER").is_some() {
+            // `POPUP_PROBE_GROW`: that popover opens by itself and grows and
+            // shrinks, a step a frame, as an animated popup does: its popup
+            // is resized in place, never shown anew (on Wayland,
+            // `xdg_popup.reposition`: run with `WAYLAND_DEBUG=1` to see).
+            let grow = std::env::var_os("POPUP_PROBE_GROW").is_some();
+            let size = cx.ui.signal((200_f32, 120_f32));
+            let popup = if grow || std::env::var_os("POPUP_PROBE_POPOVER").is_some() {
                 popover("Details", open.clone(), anchor)
-                    .w(200.)
-                    .h(120.)
+                    .reactive_style({
+                        let size = size.clone();
+                        move || {
+                            let (w, h) = size.get();
+                            Styles::new().w(w).h(h)
+                        }
+                    })
                     .bg(rgb(0x4a3768))
                     .arrow(8.)
             } else {
@@ -141,6 +152,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 reported = false;
                             }
                         }
+                    });
+                }
+                if grow {
+                    let (open, window) = (open.clone(), cx.window.clone());
+                    cx.tasks.spawn(async move {
+                        let sleep = |ms| zgx::timer::sleep(std::time::Duration::from_millis(ms));
+                        sleep(500).await;
+                        open.set(true);
+                        sleep(300).await;
+                        println!("GROW");
+                        // Out to 320x240 and back, twice.
+                        for _ in 0..2 {
+                            for step in (0..=30).chain((0..30).rev()) {
+                                let t = step as f32 / 30.;
+                                size.set((200. + 120. * t, 120. + 120. * t));
+                                sleep(16).await;
+                            }
+                        }
+                        sleep(300).await;
+                        println!("GROWN");
+                        open.set(false);
+                        sleep(200).await;
+                        window.close();
                     });
                 }
                 // `POPUP_PROBE_OPEN`: the menu opens by itself, for a
