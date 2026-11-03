@@ -137,6 +137,25 @@ pub(crate) fn set_zoom(window: winit::window::WindowId, zoom: f64) {
         }
     });
 }
+/// A popup's box `rect`, in the scene's points, in its window's at `zoom`:
+/// where its own window goes (macOS, Wayland; Windows and X11 fold the zoom
+/// into their scale).
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+pub(crate) fn window_rect(rect: zgx::scene::Rect, zoom: f32) -> zgx::scene::Rect {
+    zgx::scene::Rect::new(
+        rect.x * zoom,
+        rect.y * zoom,
+        rect.width * zoom,
+        rect.height * zoom,
+    )
+}
+/// A point `local` in a popup's own window points (from its box's top-left,
+/// at `origin` in the scene's) as the scene's at `zoom`: where its input
+/// goes.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+pub(crate) fn scene_point(origin: (f32, f32), local: (f32, f32), zoom: f32) -> (f32, f32) {
+    (origin.0 + local.0 / zoom, origin.1 + local.1 / zoom)
+}
 /// Window `window`'s zoom: what its content points are of its own.
 pub(crate) fn zoom_of(window: winit::window::WindowId) -> f64 {
     ZOOMS.with(|zooms| {
@@ -171,6 +190,72 @@ pub(crate) fn points_at(at: (f64, f64), origin: (f64, f64), scale: f64) -> (f64,
 /// A window's point `at` (its content at `origin`) in global units.
 pub(crate) fn global_at(at: (f64, f64), origin: (f64, f64), scale: f64) -> (f64, f64) {
     (origin.0 + at.0 * scale, origin.1 + at.1 * scale)
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+    use zgx::{compose::prelude::*, scene::Rect, widgets::Ui};
+
+    /// A window at 90%: a menu the scene has at (500, 400), 200 by 100, has
+    /// its own window at the content's (450, 360), 180 by 90; and a point of
+    /// that window is the scene's where it shows.
+    #[test]
+    fn a_popup_window_is_placed_and_hit_at_its_windows_zoom() {
+        let zoom = 0.9;
+        let placed = window_rect(Rect::new(500., 400., 200., 100.), zoom);
+        assert_eq!(placed, Rect::new(450., 360., 180., 90.));
+        // Its middle, in its own window points, is the scene's middle.
+        assert_eq!(scene_point((500., 400.), (90., 45.), zoom), (600., 450.));
+        assert_eq!(scene_point((500., 400.), (90., 45.), 1.), (590., 445.));
+    }
+
+    /// An open menu shown in a window of its own, its window at 90% and at
+    /// 125%: a click on its second item, in that window's points, reaches
+    /// that item.
+    #[test]
+    fn a_click_in_a_zoomed_popup_window_lands_on_its_item() {
+        for zoom in [0.9, 1.25] {
+            let mut ui = Ui::new(400., 200.);
+            ui.set_popup_screens(vec![Rect::new(0., 0., 1000., 800.)]);
+            let open = ui.signal(true);
+            let view = ui.mount(
+                column().p(20.).child(
+                    menu(
+                        "Actions",
+                        open,
+                        button().size(80., 20.).child(text("Actions")),
+                    )
+                    .children([
+                        menu_item("First").id("first"),
+                        menu_item("Second").id("second"),
+                    ]),
+                ),
+            );
+            ui.prepare_frame();
+            let scene = ui.scene.borrow();
+            let root = *scene
+                .popups()
+                .first()
+                .expect("shown in a window of its own");
+            let bounds = scene.popup_bounds(root).unwrap();
+            let window = window_rect(bounds, zoom);
+            assert!((window.width - bounds.width * zoom).abs() < 1e-3);
+            let second = view.find("second").unwrap();
+            let item = scene.bounds(second);
+            // The item's middle, in the popup window's own points.
+            let local = (
+                (item.x + item.width / 2. - bounds.x) * zoom,
+                (item.y + item.height / 2. - bounds.y) * zoom,
+            );
+            let (x, y) = scene_point((bounds.x, bounds.y), local, zoom);
+            let hit = scene.hit_test(x, y).expect("something under it");
+            assert!(
+                hit == second || scene.is_within(hit, second),
+                "at {zoom}: the click lands on the second item"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -317,8 +402,27 @@ mod macos {
     #[derive(Default)]
     pub(crate) struct Target {
         origin: Cell<(f32, f32)>,
+        /// Its parent window's zoom (`zoom_of`): the scene's points are the
+        /// window's divided by it. Unset (0) is 1.
+        zoom: Cell<f32>,
         send: RefCell<Option<Sink>>,
         parent: RefCell<Option<Retained<NSWindow>>>,
+    }
+    impl Target {
+        fn zoom(&self) -> f32 {
+            match self.zoom.get() {
+                zoom if zoom > 0. => zoom,
+                _ => 1.,
+            }
+        }
+    }
+    /// `rect`, in the scene's points, in its window's at `zoom`.
+    fn local(rect: Rect, zoom: f32) -> NSRect {
+        let rect = super::window_rect(rect, zoom);
+        NSRect::new(
+            NSPoint::new(rect.x as f64, rect.y as f64),
+            NSSize::new(rect.width as f64, rect.height as f64),
+        )
     }
     // SAFETY: an NSView subclass, main-thread only as views are, with nothing
     // to clean up beyond its ivars; each method has NSView's or NSResponder's
@@ -405,11 +509,15 @@ mod macos {
                 send(input);
             }
         }
-        /// `event`'s point in the parent window's coordinates.
+        /// `event`'s point in the parent window's scene coordinates (its
+        /// points divided by its zoom).
         fn point(&self, event: &NSEvent) -> (f32, f32) {
             let point = self.convertPoint_fromView(event.locationInWindow(), None);
-            let (x, y) = self.ivars().origin.get();
-            (x + point.x as f32, y + point.y as f32)
+            super::scene_point(
+                self.ivars().origin.get(),
+                (point.x as f32, point.y as f32),
+                self.ivars().zoom(),
+            )
         }
         fn button(&self, event: &NSEvent, button: MouseButton, pressed: bool) {
             let (x, y) = self.point(event);
@@ -555,6 +663,18 @@ mod macos {
             })
         }
         /// Moved by `(dx, dy)`.
+        /// In its window's points at `zoom`, from the scene's.
+        fn zoomed(mut self, zoom: f32) -> Self {
+            self.rect = super::window_rect(self.rect, zoom);
+            self.radius *= zoom;
+            if let Some(arrow) = &mut self.arrow {
+                for (x, y) in arrow {
+                    *x *= zoom;
+                    *y *= zoom;
+                }
+            }
+            self
+        }
         fn moved(mut self, dx: f32, dy: f32) -> Self {
             self.rect.x += dx;
             self.rect.y += dy;
@@ -672,8 +792,11 @@ mod macos {
         material: Option<Material>,
         host: Retained<CALayer>,
         renderer: Option<GpuRenderer>,
-        /// The scale its renderer was made for.
+        /// The scale its renderer was made for: its screen's (`backing`)
+        /// times its window's zoom.
         scale: f32,
+        /// Its screen's backing scale, found as it showed.
+        backing: f32,
         /// Its frame in its parent window's coordinates, as last placed.
         rect: Option<Rect>,
         /// Its popup root's layer revision it last drew.
@@ -774,6 +897,7 @@ mod macos {
                 host,
                 renderer: None,
                 scale: 0.,
+                backing: 1.,
                 rect: None,
                 revision: None,
                 fault: None,
@@ -807,7 +931,10 @@ mod macos {
                 return;
             }
             self.material = material;
-            match material {
+            // Drawn in the window's points, at its zoom.
+            let zoom = self.view.ivars().zoom();
+            let rect = super::window_rect(rect, zoom);
+            match material.map(|material| material.zoomed(zoom)) {
                 None => self.effect.setHidden(true),
                 Some(material) => {
                     self.effect.setMaterial(material.material);
@@ -841,17 +968,15 @@ mod macos {
                 }
             }
         }
-        /// Place it at `rect` (its parent's coordinates) over `parent`.
+        /// Place it at `rect` (its parent's scene coordinates, the window's
+        /// at its zoom) over `parent`.
         fn place(&mut self, parent: &NSWindow, content: &NSView, rect: Rect) {
             self.sync();
             if self.rect == Some(rect) {
                 return;
             }
             self.rect = Some(rect);
-            let local = NSRect::new(
-                NSPoint::new(rect.x as f64, rect.y as f64),
-                NSSize::new(rect.width as f64, rect.height as f64),
-            );
+            let local = local(rect, self.view.ivars().zoom());
             let screen = parent.convertRectToScreen(content.convertRect_toView(local, None));
             self.window.setFrame_display(screen, false);
             self.view.ivars().origin.set((rect.x, rect.y));
@@ -1064,10 +1189,7 @@ mod macos {
     /// with the duration and ease of AppKit's drag images sliding back, then
     /// put it back in the pool.
     fn slide_back(panel: Panel, parent: &NSWindow, content: &NSView, to: Rect) {
-        let local = NSRect::new(
-            NSPoint::new(to.x as f64, to.y as f64),
-            NSSize::new(to.width as f64, to.height as f64),
-        );
+        let local = local(to, panel.view.ivars().zoom());
         let target = parent.convertRectToScreen(content.convertRect_toView(local, None));
         let window = panel.window.clone();
         let id = NEXT_FADE.with(|next| {
@@ -1289,11 +1411,11 @@ mod macos {
     }
     /// The backing scale of the screen holding `rect`'s centre (the
     /// parent's coordinates): a popup draws at the scale it shows at.
-    fn scale_at(parent: &NSWindow, content: &NSView, rect: Rect) -> Option<f32> {
+    fn scale_at(parent: &NSWindow, content: &NSView, rect: Rect, zoom: f32) -> Option<f32> {
         let local = NSRect::new(
             NSPoint::new(
-                (rect.x + rect.width / 2.) as f64,
-                (rect.y + rect.height / 2.) as f64,
+                ((rect.x + rect.width / 2.) * zoom) as f64,
+                ((rect.y + rect.height / 2.) * zoom) as f64,
             ),
             NSSize::new(0., 0.),
         );
@@ -1357,6 +1479,9 @@ mod macos {
             let Some((parent, content)) = parent_of(window) else {
                 return Ok(());
             };
+            // Its window's zoom: the scene's points are the window's divided
+            // by it, for each panel's frame, renderer and input.
+            let zoom = super::zoom_of(window.id()) as f32;
             // A drag moving its window shows no preview: the window is it.
             let unshown = drag
                 .filter(|drag| drag.moves_window)
@@ -1429,11 +1554,16 @@ mod macos {
                     .find(|(shown, _)| *shown == root)
                     .expect("pushed above")
                     .1;
-                // Its screen's scale, found as it shows.
-                let scale = match new {
-                    true => scale_at(&parent, &content, bounds).unwrap_or(scale),
-                    false => panel.scale,
-                };
+                // Its screen's scale, found as it shows, times the window's
+                // zoom: the scene's points are the window's divided by it.
+                panel.view.ivars().zoom.set(zoom);
+                if new {
+                    // `scale` is the window's content scale: its screen's
+                    // times its zoom.
+                    panel.backing =
+                        scale_at(&parent, &content, bounds, zoom).unwrap_or(scale / zoom);
+                }
+                let scale = panel.backing * zoom;
                 // Popups are small: one that changed is drawn whole.
                 let revision = scene.layer_revision(root);
                 let changed = new || full || panel.revision != Some(revision);
@@ -1581,10 +1711,7 @@ mod macos {
             if panel.rect == Some(frame) {
                 return;
             }
-            let local = NSRect::new(
-                NSPoint::new(frame.x as f64, frame.y as f64),
-                NSSize::new(frame.width as f64, frame.height as f64),
-            );
+            let local = local(frame, panel.view.ivars().zoom());
             let screen = parent.convertRectToScreen(content.convertRect_toView(local, None));
             let top = flip_height(MainThreadMarker::from(&*parent))
                 - (screen.origin.y + screen.size.height);
@@ -1609,8 +1736,12 @@ mod macos {
                 width,
                 height,
                 bgra,
-                scale: panel.scale,
-                grab: (drag.x - rect.x, drag.y - rect.y),
+                // Pixels per window point, the grab in window points.
+                scale: panel.backing,
+                grab: {
+                    let zoom = panel.view.ivars().zoom();
+                    ((drag.x - rect.x) * zoom, (drag.y - rect.y) * zoom)
+                },
             })
         }
         /// Show the drag preview, or not (`None`: AppKit shows the drag's

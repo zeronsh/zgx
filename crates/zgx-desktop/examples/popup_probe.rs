@@ -20,7 +20,8 @@
 //! Each click follows the pointer moving onto the trigger, as a real one
 //! does, which readies a popup window (`Ui::on_popup_soon`); `PROBE_COLD=1`
 //! clicks the first time without it. `ZGX_POPUP_POOL=n` sets how many
-//! closed popup windows are kept.
+//! closed popup windows are kept. `POPUP_PROBE_ZOOM=z` zooms the window
+//! (`Ui::set_zoom`): its popups show at that zoom too.
 use zgx::compose::prelude::*;
 use zgx_desktop::{Application, WindowOptions};
 
@@ -34,6 +35,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         })
         .run(|cx| {
+            if let Some(zoom) = std::env::var("POPUP_PROBE_ZOOM")
+                .ok()
+                .and_then(|zoom| zoom.parse().ok())
+            {
+                cx.ui.set_zoom(zoom);
+            }
             let open = cx.ui.signal(false);
             let chosen = cx.ui.signal(String::new());
             let anchor = button()
@@ -99,7 +106,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (`scripts/popup_windows_smoke.py`): it reports the menu.
             #[cfg(not(any(target_os = "macos", windows)))]
             {
-                let _ = view;
+                // Zoomed (`POPUP_PROBE_ZOOM`): the File button's box, and
+                // the menu's as it opens, in the scene's points (`FILE`,
+                // `MENU` x,y,w,h), where the zoom draws them these times it.
+                // Only then: the polling would keep an idle window awake.
+                if std::env::var_os("POPUP_PROBE_ZOOM").is_some() {
+                    let (ui, opened) = (cx.ui.downgrade(), open.clone());
+                    cx.tasks.spawn(async move {
+                        let sleep = |ms| zgx::timer::sleep(std::time::Duration::from_millis(ms));
+                        let line = |what: &str, r: zgx::scene::Rect| {
+                            println!("{what} {},{},{},{}", r.x, r.y, r.width, r.height)
+                        };
+                        sleep(300).await;
+                        if let (Some(ui), Some(file)) = (ui.upgrade(), view.find("file")) {
+                            line("FILE", ui.scene.borrow().bounds(file));
+                        }
+                        let mut reported = false;
+                        loop {
+                            sleep(100).await;
+                            let Some(ui) = ui.upgrade() else {
+                                return;
+                            };
+                            let open = opened.get();
+                            if open && !reported {
+                                sleep(200).await;
+                                let scene = ui.scene.borrow();
+                                let menu =
+                                    scene.popups().first().and_then(|r| scene.popup_bounds(*r));
+                                if let Some(menu) = menu {
+                                    line("MENU", menu);
+                                    reported = true;
+                                }
+                            } else if !open {
+                                reported = false;
+                            }
+                        }
+                    });
+                }
                 // `POPUP_PROBE_OPEN`: the menu opens by itself, for a
                 // compositor no script can click in (Weston).
                 if std::env::var_os("POPUP_PROBE_OPEN").is_some() {
@@ -221,6 +264,14 @@ mod win32 {
         // SAFETY: reads a window of this thread's DPI.
         f64::from(unsafe { GetDpiForWindow(hwnd) }.max(96)) / 96.
     }
+    /// The window's zoom (`POPUP_PROBE_ZOOM`): its points are the scene's
+    /// times it.
+    fn zoom() -> f64 {
+        std::env::var("POPUP_PROBE_ZOOM")
+            .ok()
+            .and_then(|zoom| zoom.parse().ok())
+            .unwrap_or(1.)
+    }
     fn client_origin(hwnd: HWND) -> (i32, i32) {
         let mut point = POINT::default();
         // SAFETY: converts into a local, for a window of this thread.
@@ -254,7 +305,8 @@ mod win32 {
     /// Post `message` at `point` in the probe window's coordinates (logical),
     /// to `to`: the probe window or one of its popups.
     fn post_at(main: HWND, to: HWND, message: u32, (x, y): (f64, f64), buttons: usize) {
-        let scale_main = scale(main);
+        // Scene points to the window's pixels: its scale times its zoom.
+        let scale_main = scale(main) * zoom();
         let origin = client_origin(main);
         let (sx, sy) = (
             origin.0 as f64 + x * scale_main,
@@ -269,6 +321,37 @@ mod win32 {
             buttons,
         );
     }
+    /// Where popup window `popup` is against `main`'s content, in pixels,
+    /// beside where the scene puts its menu times scale and zoom
+    /// (`ZOOM_PLACED`).
+    fn report_placed(ui: &WeakUi, main: HWND, popup: HWND) {
+        let placed = ui.upgrade().and_then(|ui| {
+            let scene = ui.scene.borrow();
+            scene
+                .popups()
+                .first()
+                .and_then(|root| scene.popup_bounds(*root))
+        });
+        let Some(bounds) = placed else {
+            println!("ZOOM_PLACED none");
+            return;
+        };
+        let rect = screen_rect(popup);
+        let (at, origin) = (client_origin(popup), client_origin(main));
+        let px = scale(main) * zoom();
+        println!(
+            "ZOOM_PLACED zoom={} got={},{},{},{} want={:.0},{:.0},{:.0},{:.0}",
+            zoom(),
+            at.0 - origin.0,
+            at.1 - origin.1,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            bounds.x as f64 * px,
+            bounds.y as f64 * px,
+            bounds.width as f64 * px,
+            bounds.height as f64 * px,
+        );
+    }
     fn center(rect: Rect) -> (f64, f64) {
         (
             (rect.x + rect.width / 2.) as f64,
@@ -281,6 +364,22 @@ mod win32 {
         let start = seconds();
         sleep(3000).await;
         println!("READY {:.3}", seconds());
+        // `POPUP_PROBE_PLACE_ONLY`: the menu opened by the app itself, its
+        // window's place and size reported (`ZOOM_PLACED`), and nothing
+        // else: no posted input and no need to be in front.
+        if std::env::var_os("POPUP_PROBE_PLACE_ONLY").is_some() {
+            open.set(true);
+            sleep(1000).await;
+            let main = windows().0;
+            match windows().1.first() {
+                Some(&popup) => report_placed(&ui, main, popup),
+                None => println!("PLACE_ONLY no popup window"),
+            }
+            open.set(false);
+            sleep(500).await;
+            println!("PLACE_ONLY_DONE");
+            return;
+        }
         let bounds = |id: &str| {
             let ui = ui.upgrade().unwrap();
             let node = view.find(id).unwrap();
@@ -345,6 +444,7 @@ mod win32 {
                     rect.bottom > window.bottom,
                     scale(main)
                 );
+                report_placed(&ui, main, popup);
                 sleep(300).await;
                 if shot {
                     // A screenshot of it open, then of its place closed.

@@ -3510,8 +3510,11 @@ impl Host {
             .and_then(crate::zoom_store::load)
         {
             self.context.ui.set_zoom(zoom);
-            crate::popup_window::set_zoom(window.id(), self.context.ui.zoom());
         }
+        // Its zoom, for its popups' windows: restored, or set by the app
+        // before its window was made (which `apply_zoom` then finds already
+        // applied, and returns before telling them).
+        crate::popup_window::set_zoom(window.id(), self.context.ui.zoom());
         self.scale_factor = self.content_scale();
         renderer.set_scale_factor(self.scale_factor as f32);
         self.context

@@ -813,7 +813,9 @@ pub(crate) fn popup_screens(window: &winit::window::Window) -> Vec<Rect> {
     let Some(hwnd) = hwnd_of(window) else {
         return Vec::new();
     };
-    screens_in(client_origin(hwnd), window_scale(hwnd), &work_areas())
+    // In the content's points, its zoom's.
+    let scale = window_scale(hwnd) * super::zoom_of(window.id()) as f32;
+    screens_in(client_origin(hwnd), scale, &work_areas())
 }
 
 /// Monitors' work `areas` (physical pixels) in the coordinates of a window
