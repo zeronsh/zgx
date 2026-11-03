@@ -72,7 +72,12 @@ class Session:
     def __init__(self, output, env, window, origin=(0, 0), wayland=None):
         self.output, self.env, self.window, self.origin = output, env, window, origin
         self.wayland = wayland
+        # The probe's own lines (stdout), apart from its stderr: GLib's
+        # warnings come in pieces, and one of ours landing between two
+        # started no line of its own (`PAGE` mid-way through an Avahi
+        # warning). The `WEB_` diagnostics are written to stderr in one go.
         self.log = output / "application.log"
+        self.stderr = output / "stderr.log"
 
     def xdo(self, *parts):
         subprocess.run(["xdotool", *map(str, parts)], env=self.env, check=True)
@@ -114,7 +119,9 @@ class Session:
         return found.stdout if text is None else None
 
     def lines(self, prefix):
-        return [line[len(prefix):] for line in self.log.read_text().splitlines() if line.startswith(prefix)]
+        log = self.stderr if prefix.startswith("WEB_") else self.log
+        text = log.read_text(errors="replace") if log.exists() else ""
+        return [line[len(prefix):] for line in text.splitlines() if line.startswith(prefix)]
 
     def messages(self):
         out = []
@@ -130,7 +137,7 @@ class Session:
             if found:
                 return found
             if time.monotonic() > deadline:
-                raise AssertionError(f"{what}; see application.log")
+                raise AssertionError(f"{what}; see application.log and stderr.log")
             time.sleep(.1)
 
 
@@ -668,8 +675,8 @@ def drag_checks(session):
         raise AssertionError(f"zgx's target got {found['onto zgx']!r}")
     # The page hears its drag end, and GTK never tried a drag of its own.
     session.wait(lambda: any(m[0].get("dragend") for m in session.messages()), "the page never heard its drag end")
-    if "gtk_drag" in session.log.read_text():
-        raise AssertionError("GTK warned of a drag: see application.log")
+    if "gtk_drag" in session.stderr.read_text(errors="replace"):
+        raise AssertionError("GTK warned of a drag: see stderr.log")
     script = str(pathlib.Path(__file__).resolve().parent / "xdnd_target.py")
     for name, start, extra in (("link", link, []), ("image", image, ["--image"])):
         x, y = screen(790, 100)
@@ -705,8 +712,8 @@ def drag_checks(session):
         if name == "image" and not got.startswith("RECEIVED image/png 82 bytes 89504e47"):
             raise AssertionError(f"the app got {got!r} for the image")
         found[f"{name} onto an app"] = got[len("RECEIVED "):]
-    if "gtk_drag" in session.log.read_text():
-        raise AssertionError("GTK warned of a drag: see application.log")
+    if "gtk_drag" in session.stderr.read_text(errors="replace"):
+        raise AssertionError("GTK warned of a drag: see stderr.log")
     return found
 
 
@@ -996,8 +1003,8 @@ def x11(args, output, private):
         if args.unaccelerated:
             extra.append("--unaccelerated")
             env["ZGX_WEB_DAMAGE"] = "1"
-        with (output / "application.log").open("w") as log:
-            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=env, stdout=log, stderr=subprocess.STDOUT)
+        with (output / "application.log").open("w") as log, (output / "stderr.log").open("w") as errors:
+            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=env, stdout=log, stderr=errors)
         owned.append(app)
         deadline = time.monotonic() + 20
         while True:
@@ -1006,7 +1013,7 @@ def x11(args, output, private):
                 window = found.stdout.split()[0]
                 break
             if time.monotonic() > deadline or app.poll() is not None:
-                raise RuntimeError("the probe's window never opened; see application.log")
+                raise RuntimeError("the probe's window never opened; see application.log and stderr.log")
             time.sleep(.1)
         subprocess.run(["xdotool", "windowactivate", "--sync", window], env=env, check=True)
         info = subprocess.check_output(["xwininfo", "-id", window], env=env, text=True)
@@ -1115,12 +1122,12 @@ def wayland(args, output, private):
                 if time.monotonic() > deadline or ime.poll() is not None:
                     raise RuntimeError("Fcitx startup failed")
                 time.sleep(.1)
-        with (output / "application.log").open("w") as log:
+        with (output / "application.log").open("w") as log, (output / "stderr.log").open("w") as errors:
             extra = (["--transparent"] if args.transparent else []) + (["--large-page"] if args.inspector else [])
             if args.unaccelerated:
                 extra.append("--unaccelerated")
                 native["ZGX_WEB_DAMAGE"] = "1"
-            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=native, stdout=log, stderr=subprocess.STDOUT)
+            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=native, stdout=log, stderr=errors)
         owned.append(app)
         subprocess.run(["xdotool", "windowfocus", "--sync", window], env=env, check=False)
         info = subprocess.check_output(["xwininfo", "-id", str(window)], env=env, text=True)

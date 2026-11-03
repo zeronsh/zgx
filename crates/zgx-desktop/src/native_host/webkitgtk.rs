@@ -2704,7 +2704,12 @@ unsafe extern "C" fn on_context_menu(
         }
         if zgx::env::var_os("ZGX_WEB_MENU").is_some_and(|v| v != "0") {
             let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
-            eprintln!("WEB_MENU {}", labels.join("|"));
+            // One write: GLib's warnings share stderr, and a line written in
+            // pieces could take one in its middle.
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                format!("WEB_MENU {}\n", labels.join("|")).as_bytes(),
+            );
         }
         let uri = |get: unsafe extern "C" fn(Ptr) -> *const c_char| {
             if hit.is_null() {
@@ -4854,7 +4859,11 @@ impl Viewport for Painter {
                         .iter()
                         .map(|(x, y, w, h)| format!("{x},{y},{w}x{h}"))
                         .collect();
-                    eprintln!("WEB_DAMAGE {}", rects.join(" "));
+                    // One write, as `WEB_MENU`'s.
+                    let _ = std::io::Write::write_all(
+                        &mut std::io::stderr(),
+                        format!("WEB_DAMAGE {}\n", rects.join(" ")).as_bytes(),
+                    );
                 }
                 let row = size.0 * 4;
                 if let Some((texture, ..)) = &blit.texture {
