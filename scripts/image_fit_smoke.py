@@ -52,6 +52,16 @@ def check_pixels(picture, width, mode):
     return dict(mode=mode, window_width=width, fitted_size=[fitted_width, fitted_height], checked_pixels=tested, colors_visible=len(seen))
 
 
+def wait_for_clicks(log, count, timeout=10.):
+    """Wait until the app has logged `count` mode clicks."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if log.read_text().count("FIT ") >= count:
+            return
+        time.sleep(.02)
+    raise RuntimeError(f"the app took {log.read_text().count('FIT ')} of {count} clicks in {timeout:g} s")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=pathlib.Path)
@@ -97,6 +107,11 @@ def main():
                         xdo("windowsize", "--sync", window, width, 320)
                         current_width = width
                     xdo("mousemove", "--window", window, 70, 72 + MODES.index(mode) * 38, "click", 1)
+                    # The app says each click as it takes it (`FIT <mode>`):
+                    # under load (CI runs eight smokes at once) a fixed
+                    # sleep captured the last mode's picture before this
+                    # click was handled. Wait for it, then for its frame.
+                    wait_for_clicks(args.output / "image-fit.log", index)
                     time.sleep(.25)
                     path = args.output / f"image-fit-{index}.png"
                     subprocess.run(["import", "-window", window, str(path)], env=env, check=True, timeout=10)
