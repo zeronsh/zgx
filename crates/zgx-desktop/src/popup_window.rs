@@ -310,6 +310,7 @@ mod other {
             _: bool,
             _: Option<&zgx::input::DragState>,
             _: Option<zgx::input::DragEnded>,
+            _: &dyn Fn(zgx::scene::NodeId) -> Option<bool>,
         ) -> Result<(), zgx_gpu::GpuError> {
             Ok(())
         }
@@ -1469,6 +1470,8 @@ mod macos {
             full: bool,
             drag: Option<&DragState>,
             ended: Option<DragEnded>,
+            // (AppKit lets the pointer through a panel's clear pixels.)
+            _takes: &dyn Fn(NodeId) -> Option<bool>,
         ) -> Result<(), GpuError> {
             if self.shown.is_empty() && scene.popups().is_empty() {
                 return Ok(());
@@ -1974,6 +1977,8 @@ mod macos {
 mod wayland;
 #[cfg(target_os = "linux")]
 pub(crate) use wayland::dispatch as dispatch_wayland;
+#[cfg(target_os = "linux")]
+pub(crate) use wayland::pointer_over_popup;
 
 #[cfg(target_os = "linux")]
 mod x11 {
@@ -2573,10 +2578,13 @@ mod x11 {
             full: bool,
             drag: Option<&zgx::input::DragState>,
             ended: Option<zgx::input::DragEnded>,
+            takes: &dyn Fn(NodeId) -> Option<bool>,
         ) -> Result<(), GpuError> {
             reap();
             if !x11(parent) {
-                return self.wayland.update(parent, scene, context, scale, full);
+                return self
+                    .wayland
+                    .update(parent, scene, context, scale, full, takes);
             }
             if self.shown.is_empty() && scene.popups().is_empty() {
                 return Ok(());
