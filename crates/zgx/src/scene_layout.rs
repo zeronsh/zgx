@@ -873,6 +873,84 @@ impl Scene {
         self.store_measurement(id, constraints, (0., 0.), children);
         (0., 0.)
     }
+    /// The size a container with children takes under `constraints` when
+    /// its style and them fix it on both axes, whatever it holds: its width
+    /// and height (in points, forced, or a percentage of a basis it has),
+    /// within its limits, and for one taffy lays out, no less than its
+    /// padding and border. What `measure_uncached` would answer, without
+    /// laying its children out: a probe needs no more, and the layout that
+    /// places them (`arrange`'s) asks for them. `None` for any other node.
+    pub(super) fn fixed_size(&self, id: NodeId, constraints: Constraints) -> Option<(f32, f32)> {
+        let node = self.tree_node(id);
+        if !matches!(node.kind, NodeKind::Container(_) | NodeKind::Panel { .. })
+            || node.special.any()
+            || self.children_raw(node).is_empty()
+        {
+            return None;
+        }
+        let style = &node.style;
+        let width = constraints
+            .force_width
+            .or(style.width)
+            .or_else(|| percentage(style.width_percent, constraints.percent_width))?;
+        let height = constraints
+            .force_height
+            .or(style.height)
+            .or_else(|| percentage(style.height_percent, constraints.percent_height))?;
+        let (mut min_width, mut max_width, mut min_height, mut max_height) = (
+            style.min_width,
+            style.max_width,
+            style.min_height,
+            style.max_height,
+        );
+        if let Some(options) = style.layout_options.as_deref() {
+            // Hidden, it takes no room; sized by what it holds, it isn't
+            // fixed.
+            if options.display == Some(ViewDisplay::None) || self.size_calcs(id).is_some() {
+                return None;
+            }
+            // Its limits as `resolved_leaf_style` works them out.
+            let resolve = |value: Length, basis: Option<f32>| match value {
+                Length::Auto => None,
+                Length::Px(value) => Some(finite(value)),
+                Length::Percent(value) => percentage(Some(value), basis),
+            };
+            for (target, value, basis) in [
+                (&mut min_width, options.min_width, constraints.percent_width),
+                (&mut max_width, options.max_width, constraints.percent_width),
+                (
+                    &mut min_height,
+                    options.min_height,
+                    constraints.percent_height,
+                ),
+                (
+                    &mut max_height,
+                    options.max_height,
+                    constraints.percent_height,
+                ),
+            ] {
+                if let Some(value) = value {
+                    *target = resolve(value, basis);
+                }
+            }
+        }
+        let mut size = (
+            dimension(width, min_width, max_width),
+            dimension(height, min_height, max_height),
+        );
+        if self.uses_advanced_layout(id) {
+            // Taffy keeps a box at least as large as its padding and border.
+            let padding = self.resolved_padding(id, constraints);
+            let border = self.layout_border(id);
+            size.0 = size
+                .0
+                .max(padding.left.max(0.) + padding.right.max(0.) + border.left + border.right);
+            size.1 = size
+                .1
+                .max(padding.top.max(0.) + padding.bottom.max(0.) + border.top + border.bottom);
+        }
+        Some(size)
+    }
     pub(super) fn measure_advanced(
         &mut self,
         id: NodeId,

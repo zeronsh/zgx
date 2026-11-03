@@ -2267,6 +2267,9 @@ struct ProbeSize {
     constraints: Constraints,
     size: (f32, f32),
     pass: u64,
+    /// Its style and the constraints fixed it, whatever the node holds
+    /// (`Scene::fixed_size`): nothing in it changes this answer.
+    fixed: bool,
 }
 impl From<&Measurement> for ProbeSize {
     fn from(m: &Measurement) -> Self {
@@ -2274,6 +2277,7 @@ impl From<&Measurement> for ProbeSize {
             constraints: m.constraints,
             size: m.size,
             pass: m.pass,
+            fixed: false,
         }
     }
 }
@@ -8182,7 +8186,7 @@ impl Scene {
         // asked more of (its natural width, to stretch it to the widest)
         // changes what it answers there often, and its parent lays it out.
         if !node.alternates.is_empty()
-            || !node.sizes.is_empty()
+            || node.sizes.iter().any(|kept| !kept.fixed)
             || node.measurement.is_none()
             || node.style.absolute
             || node.special.any()
@@ -8202,7 +8206,7 @@ impl Scene {
             && !parent.special.any()
             && parent.measurement.is_some()
             && parent.alternates.is_empty()
-            && parent.sizes.is_empty()
+            && parent.sizes.iter().all(|kept| kept.fixed)
     }
     /// `id`, where a walk stopped (`stops_alone`), laid out again under the
     /// one constraint its parent asked it: if it gives what it did, and it
@@ -9527,6 +9531,20 @@ impl Scene {
                 .find(|m| (clean || m.pass == pass) && m.constraints == *constraints)
         {
             return kept.size;
+        }
+        if !full && let Some(size) = self.fixed_size(id, *constraints) {
+            let node = self.tree_node_mut(id);
+            node.sizes.insert(
+                0,
+                ProbeSize {
+                    constraints: *constraints,
+                    size,
+                    pass,
+                    fixed: true,
+                },
+            );
+            node.sizes.truncate(PROBE_SIZES);
+            return size;
         }
         // Measuring recurses into the children: one level of the tree more.
         self.measure_depth += 1;
@@ -13332,6 +13350,312 @@ mod measure_work_tests {
         scene.set_style(fixed, style);
         scene.flush();
         assert_eq!(scene.bounds(fixed).height, 900.);
+    }
+    fn wrapping(scene: &mut Scene, parent: NodeId, words: &str) -> NodeId {
+        scene.append(
+            parent,
+            NodeKind::Text {
+                text: words.into(),
+                color: Color(255, 255, 255, 255),
+                font_size: 14.,
+            },
+            Style {
+                text_wrap: true,
+                ..Default::default()
+            },
+        )
+    }
+    /// A page as an app's shell nests it: a row of a fixed sidebar, the
+    /// page and a panel; in the page, a layer its insets place under a
+    /// title bar, `depth` one-cell grids filling it, each around a column
+    /// filling it, and a centred column of wrapping text at most 320 wide.
+    /// The panel widens `steps` times (one layout each); returns the
+    /// measures a width change took.
+    fn measures_per_width_change(depth: usize, steps: usize) -> u64 {
+        let mut scene = Scene::new(900., 500.);
+        let fill = Style {
+            width_percent: Some(1.),
+            height_percent: Some(1.),
+            ..Default::default()
+        };
+        let pinned = |top: f32, bottom: Option<f32>| {
+            Some(Arc::new(LayoutOptions {
+                inset: crate::layout::EdgeLengths {
+                    top: Some(Length::Px(top)),
+                    right: Some(Length::Px(0.)),
+                    bottom: bottom.map(Length::Px),
+                    left: Some(Length::Px(0.)),
+                },
+                ..Default::default()
+            }))
+        };
+        // The shell: a column under a title bar its insets place (which
+        // lays the column out by taffy), a row growing into the rest of it,
+        // and in that, beside the sidebar, a screen holding the page and
+        // the panel.
+        let shell = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style {
+                relative: true,
+                ..fill.clone()
+            },
+        );
+        scene.append(
+            shell,
+            NodeKind::Container(Layout::Column),
+            Style {
+                absolute: true,
+                height: Some(38.),
+                layout_options: pinned(0., None),
+                ..Default::default()
+            },
+        );
+        let body = scene.append(
+            shell,
+            NodeKind::Container(Layout::Row),
+            Style {
+                width_percent: Some(1.),
+                flex_grow: 1.,
+                min_height: Some(0.),
+                ..Default::default()
+            },
+        );
+        let row = scene.append(
+            body,
+            NodeKind::Container(Layout::Row),
+            Style {
+                height_percent: Some(1.),
+                flex_grow: 1.,
+                min_width: Some(0.),
+                ..Default::default()
+            },
+        );
+        scene.append(
+            row,
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(120.),
+                height_percent: Some(1.),
+                flex_shrink: 0.,
+                ..Default::default()
+            },
+        );
+        let page = scene.append(
+            row,
+            NodeKind::Container(Layout::Column),
+            Style {
+                relative: true,
+                clip: true,
+                height_percent: Some(1.),
+                flex_grow: 1.,
+                min_width: Some(0.),
+                ..Default::default()
+            },
+        );
+        let panel = scene.append(
+            row,
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(200.),
+                height_percent: Some(1.),
+                flex_shrink: 0.,
+                ..Default::default()
+            },
+        );
+        let mut parent = scene.append(
+            page,
+            NodeKind::Container(Layout::Column),
+            Style {
+                absolute: true,
+                layout_options: pinned(38., Some(0.)),
+                ..Default::default()
+            },
+        );
+        for _ in 0..depth {
+            let grid = scene.append(
+                parent,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    layout_options: Some(Arc::new(LayoutOptions {
+                        display: Some(crate::layout::Display::Grid),
+                        columns: Some(1),
+                        rows: Some(1),
+                        ..Default::default()
+                    })),
+                    ..fill.clone()
+                },
+            );
+            parent = scene.append(grid, NodeKind::Container(Layout::Column), fill.clone());
+        }
+        let line = scene.append(
+            parent,
+            NodeKind::Container(Layout::Row),
+            Style {
+                width_percent: Some(1.),
+                justify: Justify::Center,
+                ..Default::default()
+            },
+        );
+        let column = scene.append(
+            line,
+            NodeKind::Container(Layout::Column),
+            Style {
+                width_percent: Some(1.),
+                max_width: Some(320.),
+                min_width: Some(0.),
+                ..Default::default()
+            },
+        );
+        for i in 0..6 {
+            wrapping(
+                &mut scene,
+                column,
+                &format!("paragraph {i} of a reply, long enough to wrap"),
+            );
+        }
+        scene.flush();
+        let before = scene.measure_calls;
+        for step in 1..=steps {
+            let mut style = scene.style(panel);
+            style.width = Some(200. + 10. * step as f32);
+            scene.set_style(panel, style);
+            scene.flush();
+        }
+        let calls = (scene.measure_calls - before) / steps as u64;
+        println!("measures a width change: {calls}");
+        calls
+    }
+    /// A width change lays each level of the page out a few times, not once
+    /// for each way each level above it probes: a box whose size its style
+    /// and the room given fix (the grids and columns filling their parents)
+    /// answers a probe from those, and lays out what it holds only where it
+    /// is placed.
+    #[test]
+    fn a_width_change_lays_a_deep_page_out_a_few_times_a_level() {
+        let shallow = measures_per_width_change(2, 8);
+        let deep = measures_per_width_change(8, 8);
+        // Each level of grid and column: a handful more measures, however
+        // many ways the levels above it ask.
+        let per_level = (deep - shallow) as f64 / 12.;
+        assert!(
+            per_level <= 6.,
+            "{per_level} measures a level ({shallow}, {deep})"
+        );
+    }
+    #[test]
+    fn a_probe_of_a_box_its_style_sizes_lays_out_nothing_in_it() {
+        let mut scene = Scene::new(400., 300.);
+        let boxed = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style {
+                width_percent: Some(0.5),
+                height: Some(120.),
+                padding: 4.,
+                ..Default::default()
+            },
+        );
+        let lines: Vec<_> = (0..10)
+            .map(|i| {
+                wrapping(
+                    &mut scene,
+                    boxed,
+                    &format!("line {i} of a box sized by its style"),
+                )
+            })
+            .collect();
+        scene.flush();
+        let before = scene.measure_calls;
+        let probe = Constraints {
+            width: Some(300.),
+            percent_width: Some(300.),
+            ..Default::default()
+        };
+        assert_eq!(scene.measure(boxed, probe), (150., 120.));
+        assert_eq!(scene.measure(boxed, probe), (150., 120.));
+        // The box twice, answered by its style; none of its lines.
+        assert_eq!(scene.measure_calls - before, 2);
+        // A layout at that width places its lines in it.
+        scene.resize(300., 300.);
+        scene.flush();
+        assert_eq!(scene.bounds(boxed), Rect::new(0., 0., 150., 120.));
+        for line in &lines {
+            let bounds = scene.bounds(*line);
+            assert_eq!(bounds.x, 4.);
+            assert!(bounds.width > 0. && bounds.width <= 142., "{bounds:?}");
+        }
+    }
+    /// What a box its style sizes answers a probe with is what laying it out
+    /// gives: its limits, percentages, and for one taffy lays out, a
+    /// padding wider than the room it is given.
+    #[test]
+    fn a_box_its_style_sizes_answers_as_laying_it_out_does() {
+        let mut scene = Scene::new(400., 300.);
+        let grid = Some(Arc::new(LayoutOptions {
+            display: Some(crate::layout::Display::Grid),
+            columns: Some(1),
+            rows: Some(1),
+            ..Default::default()
+        }));
+        let cases = [
+            Style {
+                width: Some(80.),
+                height: Some(40.),
+                min_width: Some(100.),
+                max_height: Some(30.),
+                ..Default::default()
+            },
+            Style {
+                width_percent: Some(0.25),
+                height_percent: Some(0.5),
+                padding: 6.,
+                ..Default::default()
+            },
+            Style {
+                width_percent: Some(1.),
+                height_percent: Some(1.),
+                padding: 30.,
+                layout_options: grid.clone(),
+                ..Default::default()
+            },
+            Style {
+                height: Some(10.),
+                layout_options: Some(Arc::new(LayoutOptions {
+                    max_width: Some(Length::Percent(0.1)),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        ];
+        let probes = [
+            Constraints {
+                width: Some(20.),
+                height: Some(10.),
+                percent_width: Some(20.),
+                percent_height: Some(10.),
+                force_width: Some(20.),
+                ..Default::default()
+            },
+            Constraints {
+                width: Some(300.),
+                percent_width: Some(300.),
+                percent_height: Some(200.),
+                force_width: Some(250.),
+                ..Default::default()
+            },
+        ];
+        for style in cases {
+            let id = scene.append(scene.root(), NodeKind::Container(Layout::Column), style);
+            wrapping(&mut scene, id, "what it holds is laid out, or not");
+            scene.flush();
+            for probe in probes {
+                let probe = scene.relevant(id, probe);
+                if let Some(size) = scene.fixed_size(id, probe) {
+                    assert_eq!(size, scene.measure_uncached(id, probe), "{probe:?}");
+                }
+            }
+        }
     }
     #[test]
     fn arranging_children_asks_again_only_for_those_it_did_not_just_measure() {

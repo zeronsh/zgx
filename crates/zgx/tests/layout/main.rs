@@ -40,6 +40,8 @@ mod layout_fit_content;
 mod layout_growing_boxes;
 #[path = "../layout_history.rs"]
 mod layout_history;
+#[path = "../layout_width_changes.rs"]
+mod layout_width_changes;
 #[path = "../panel_layout.rs"]
 mod panel_layout;
 #[path = "../resize_regions.rs"]
