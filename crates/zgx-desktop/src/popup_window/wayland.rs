@@ -654,16 +654,21 @@ impl Popups {
                         });
                     }
                 }
-                // Where it takes the pointer: set before its frame, which
-                // commits it (or committed alone, with no frame to draw).
-                let input = input_rect(scene, *root, *bounds, takes);
-                let input_changed = popup.input != Some(input);
-                if input_changed {
-                    set_input(client, &popup.surface, input, zoom);
-                    popup.input = Some(input);
-                }
                 let revision = scene.layer_revision(*root);
                 let draw = full || popup.revision != Some(revision);
+                // Where it takes the pointer: set before its frame, which
+                // commits it (or committed alone, with no frame to draw).
+                // Found again only as it shows or draws (what it lays out
+                // changed): a walk of all it holds, not for every frame.
+                let mut input_changed = false;
+                if draw || popup.input.is_none() {
+                    let input = input_rect(scene, *root, *bounds, takes);
+                    if popup.input != Some(input) {
+                        set_input(client, &popup.surface, input, zoom);
+                        popup.input = Some(input);
+                        input_changed = true;
+                    }
+                }
                 if input_changed && !draw {
                     popup.surface.commit();
                 }
