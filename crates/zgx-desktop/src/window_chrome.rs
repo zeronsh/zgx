@@ -1866,6 +1866,10 @@ mod mac {
         }
     }
 
+    /// The inset title bar's toolbar's identifier (`inset_buttons`), by which
+    /// full screen finds it (`watch_fullscreen`).
+    const INSET_TOOLBAR: &str = "zgx.titlebar.inset";
+
     /// An empty compact unified toolbar: it centres the traffic lights in a
     /// 40-point strip.
     fn inset_buttons(window: &NSWindow) {
@@ -1877,7 +1881,7 @@ mod mac {
         // and NSWindowToolbarStyle (NSInteger) setters; the window retains
         // its toolbar.
         unsafe {
-            let id = NSString::from_str("zgx.titlebar.inset");
+            let id = NSString::from_str(INSET_TOOLBAR);
             let toolbar: Retained<AnyObject> =
                 msg_send![msg_send![class, alloc], initWithIdentifier: &*id];
             let _: () = msg_send![&*toolbar, setShowsBaselineSeparator: false];
@@ -1886,6 +1890,70 @@ mod mac {
             let _: () = msg_send![window, setToolbarStyle: 4_isize];
         }
         toolbar_passes_through();
+        watch_fullscreen();
+    }
+
+    /// In full screen AppKit moves a window's toolbar into a window of its
+    /// own above it (NSToolbarFullScreenWindow), which the title bar's
+    /// transparency doesn't reach: the inset title bar's empty toolbar showed
+    /// there as an opaque 40-point bar over the content's top. It is hidden as
+    /// a window goes into full screen (the green button, `set_fullscreen`)
+    /// and shown again once it is out, where it centres the traffic lights
+    /// again. Once per process; only zgx's inset toolbar is touched.
+    fn watch_fullscreen() {
+        use objc2_app_kit::{
+            NSWindowDidExitFullScreenNotification, NSWindowWillEnterFullScreenNotification,
+        };
+        use objc2_foundation::{NSNotification, NSNotificationCenter};
+        thread_local! {
+            static WATCHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        if WATCHING.replace(true) {
+            return;
+        }
+        let center = NSNotificationCenter::defaultCenter();
+        for (name, visible) in [
+            // SAFETY: AppKit's own notification names, constant statics.
+            (unsafe { NSWindowWillEnterFullScreenNotification }, false),
+            (unsafe { NSWindowDidExitFullScreenNotification }, true),
+        ] {
+            let block = block2::RcBlock::new(move |note: std::ptr::NonNull<NSNotification>| {
+                // SAFETY: AppKit passes a valid notification for the
+                // block's duration; a window's notification's object is
+                // that NSWindow.
+                let note = unsafe { note.as_ref() };
+                let Some(object) = note.object() else {
+                    return;
+                };
+                let Ok(window) = object.downcast::<NSWindow>() else {
+                    return;
+                };
+                inset_toolbar_visible(&window, visible);
+            });
+            // SAFETY: with no queue given the block runs where AppKit posts
+            // the notification (the main thread); the observers live as
+            // long as the app.
+            let observer = unsafe {
+                center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
+            };
+            std::mem::forget(observer);
+        }
+    }
+
+    /// Show or hide `window`'s toolbar if it is the inset title bar's.
+    fn inset_toolbar_visible(window: &NSWindow, visible: bool) {
+        // SAFETY: `-toolbar` returns the window's NSToolbar or nil, retained
+        // here; `-identifier` an NSString; `-setVisible:` takes a BOOL.
+        unsafe {
+            let toolbar: Option<Retained<AnyObject>> = msg_send![window, toolbar];
+            let Some(toolbar) = toolbar else {
+                return;
+            };
+            let id: Option<Retained<NSString>> = msg_send![&*toolbar, identifier];
+            if id.is_some_and(|id| id.to_string() == INSET_TOOLBAR) {
+                let _: () = msg_send![&*toolbar, setVisible: visible];
+            }
+        }
     }
 
     /// The empty toolbar is only there to centre the traffic lights: presses
