@@ -663,3 +663,23 @@ fn a_scopes_font_family_restyles_the_text_in_it() {
     assert_eq!(family(&ui, "body"), body);
     assert_eq!(family(&ui, "code"), code);
 }
+
+#[test]
+fn a_font_token_given_a_name_where_its_kind_isnt_known_is_that_family() {
+    use zgx::{text_layout::FontFamily, theme::TokenInput};
+    let mut ui = Ui::new(400., 400.);
+    // As a script's `theme = { ["font.mono"] = … }` parses it: text, which
+    // a font token takes as a CSS family list.
+    let handle = ui.mount(theme_scope(
+        ThemeOverride::new()
+            .with(tok::FONT_SANS, TokenInput::parse("Chosen Sans").unwrap())
+            .with(tok::FONT_MONO, TokenInput::parse("\"3270 Mono\", monospace").unwrap()),
+        column()
+            .child(text("Body").id("body"))
+            .child(text("Code").id("code").font_family(tok::FONT_MONO)),
+    ));
+    ui.scene.borrow_mut().flush();
+    let family = |id: &str| ui.scene.borrow().font(handle.find(id).unwrap()).family.clone();
+    assert_eq!(family("body"), FontFamily::from("Chosen Sans"));
+    assert_eq!(family("code"), FontFamily::from("3270 Mono"));
+}
