@@ -430,6 +430,21 @@ def main():
             checks["weston: below winit's title bar, where the scene put it"] = placed(
                 "weston", Image.open(screenshot).convert("RGB"))
             stop(app)
+
+            # A popover grown and shrunk a step a frame, as an animated one
+            # is: one popup the whole time, moved and resized in place
+            # (`xdg_popup.reposition`), never shown anew (compositors fade
+            # each new popup in: it flashed see-through). On Weston, whose
+            # xdg_wm_base is v5: sway 1.9's is v2, which has no reposition
+            # (there it shows anew, as before).
+            app, log = launch("weston-grow", [str(args.probe)], dict(env, POPUP_PROBE_GROW="1"))
+            until("the popover grown and shrunk", lambda: "GROWN" in log.read_text(), 30)
+            said = log.read_text()
+            grow = {"shows": said.count("popup show "), "repositions": said.count("popup reposition ")}
+            checks["weston: grow"] = grow
+            checks["weston: a growing popover is one popup, resized in place"] = (
+                grow["shows"] == 1 and grow["repositions"] >= 60)
+            stop(app)
             stop(weston)
 
         (args.output / "result.json").write_text(json.dumps(checks, indent=2) + "\n")
@@ -439,7 +454,7 @@ def main():
         print(f"tall menu: {crossed} window button(s) heard after a popup's move (#1199's order)")
         print("PASS: Wayland popups: past the window on sway and Weston, chosen from, closed, flipped at the output's "
               "edge, a submenu beside its flipped menu, a menu taller than the output cut to it and scrolled, "
-              "a flipped popover's arrow facing its trigger, "
+              "a flipped popover's arrow facing its trigger, a growing popover resized in place, "
               "on outputs scaled 2x and 1.5x, and in a window zoomed 90% and 125%")
     finally:
         for process in reversed(processes):
