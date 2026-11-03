@@ -411,6 +411,60 @@ fn a_menu_opens_from_its_triggers_start_right_to_left() {
     assert_eq!(panel.x + panel.width, anchor.x + anchor.width, "{panel:?}");
 }
 
+/// A popover's arrow is painted as its panel is, as that changes: a
+/// background, border and opacity following state follow in the arrow.
+#[test]
+fn a_popovers_arrow_follows_its_panels_paint() {
+    use zgx::scene::NodeKind;
+    let mut ui = Ui::new(500., 400.);
+    let open = ui.signal(true);
+    let dark = ui.signal(false);
+    let read = dark.clone();
+    let view = ui.mount(
+        column().p(20.).child(
+            popover("Details", open, button().id("anchor").size(80., 28.))
+                .id("panel")
+                .w(200.)
+                .arrow(8.)
+                .reactive_style(move || {
+                    let (bg, border, opacity) = match read.get() {
+                        true => (rgb(0x202020), rgb(0xffffff), 0.8),
+                        false => (rgb(0xf0f0f0), rgb(0x808080), 1.),
+                    };
+                    Styles::new()
+                        .bg(bg)
+                        .border(1.)
+                        .border_color(border)
+                        .opacity(opacity)
+                }),
+        ),
+    );
+    let paint = |ui: &Ui| {
+        let scene = ui.scene.borrow();
+        let panel = view.find("panel").unwrap();
+        let position = scene.parent(panel).unwrap();
+        let diamond = scene.children(scene.children(position)[1])[0];
+        let quad = |node| match scene.kind(node) {
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
+                Some((quad.fill, quad.border_color, quad.border_width))
+            }
+            _ => None,
+        };
+        (
+            (quad(panel), scene.effects(panel).opacity),
+            (quad(diamond), scene.effects(diamond).opacity),
+        )
+    };
+    for now in [false, true, false] {
+        dark.set(now);
+        ui.prepare_frame();
+        ui.prepare_frame();
+        let (panel, arrow) = paint(&ui);
+        assert!(panel.0.is_some(), "the panel paints");
+        assert_eq!(arrow, panel, "dark {now}: the arrow as the panel");
+    }
+}
+
 /// A popover's arrow (`View::arrow`) sits between it and its trigger,
 /// under the trigger's centre, and the panel opens that much further away.
 #[test]
