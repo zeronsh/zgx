@@ -682,7 +682,11 @@ struct State {
     hover_told: Vec<NodeId>,
     /// Where the pointer last was over the window (None: outside it).
     pointer: Option<(f32, f32)>,
-    file_hovered: Option<NodeId>,
+    /// What files dragged in from outside are over (the hit target), then
+    /// its ancestors as they were: their leave goes to the first of them
+    /// still in the scene, so a zone round a node made again meanwhile
+    /// still hears it.
+    file_hovered: Vec<NodeId>,
     pressed: Option<NodeId>,
     /// What the last press landed on, as its listeners run and after: a
     /// popup opening from a press on its trigger counts it as focused, as a
@@ -1416,7 +1420,7 @@ impl InputDispatcher {
                 .chain(s.clicks.0.map(|click| click.target))
                 .chain(s.hover.iter().copied())
                 .chain(s.hover_told.iter().copied())
-                .chain(s.file_hovered)
+                .chain(s.file_hovered.iter().copied())
                 .chain(s.scroll_latch.map(|(id, ..)| id))
                 .chain(s.drag.iter().flat_map(drag::DragSession::nodes))
                 .chain(s.drag_ending)
@@ -2661,7 +2665,11 @@ impl InputDispatcher {
             | InputEvent::FileDrop { .. }
             | InputEvent::FilesDrop { .. }
             | InputEvent::FilesDropRejected { .. } => hit,
-            InputEvent::FileHoverCancelled => self.state.borrow_mut().file_hovered.take(),
+            InputEvent::FileHoverCancelled => {
+                let hovered = std::mem::take(&mut self.state.borrow_mut().file_hovered);
+                let scene = scene.borrow();
+                hovered.into_iter().find(|id| scene.contains(*id))
+            }
             InputEvent::PointerCancel => capture,
             InputEvent::PointerLeave => None,
             // Empty or disabled modal contents still need dismissal keys.
@@ -2677,22 +2685,36 @@ impl InputDispatcher {
             _ => self.focused(),
         };
         if matches!(event, InputEvent::FileHover { .. }) {
-            let old = self.state.borrow_mut().file_hovered.take();
-            if old != target
-                && let Some(old) = old.filter(|id| scene.borrow().contains(*id))
+            let old = std::mem::take(&mut self.state.borrow_mut().file_hovered);
+            // Gone from the scene (made again as the files hovered), its
+            // nearest ancestor still there hears them go.
+            let live = {
+                let scene = scene.borrow();
+                old.iter().copied().find(|id| scene.contains(*id))
+            };
+            if old.first().copied() != target
+                && let Some(old) = live
             {
-                self.dispatch_to(scene, old, InputEvent::FileHoverCancelled);
+                // Routed as a leave is, whether it shows or not: a zone
+                // hidden meanwhile still hears the files go.
+                self.route(scene, old, InputEvent::FileHoverCancelled);
                 // Its listeners may have removed where the files are now.
                 target = target.filter(|id| scene.borrow().contains(*id));
             }
-            self.state.borrow_mut().file_hovered = target;
+            let hovered = target.map_or_else(Vec::new, |target| {
+                let scene = scene.borrow();
+                std::iter::once(target)
+                    .chain(scene.ancestors(target))
+                    .collect()
+            });
+            self.state.borrow_mut().file_hovered = hovered;
         } else if matches!(
             event,
             InputEvent::FileDrop { .. }
                 | InputEvent::FilesDrop { .. }
                 | InputEvent::FilesDropRejected { .. }
         ) {
-            self.state.borrow_mut().file_hovered = None;
+            self.state.borrow_mut().file_hovered.clear();
         }
         let click_count = if let InputEvent::PointerDown { x, y, button } = &event {
             if modifiers.is_some() {
