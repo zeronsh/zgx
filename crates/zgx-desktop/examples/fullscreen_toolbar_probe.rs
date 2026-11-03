@@ -6,8 +6,11 @@
 //!
 //! `--via green` goes in and out of full screen as the green button does
 //! (`toggleFullScreen:`); `--via borderless` with zgx's
-//! `WindowHandle::set_fullscreen` (winit's borderless full screen). Before,
-//! in and after full screen it prints:
+//! `WindowHandle::set_fullscreen` (winit's borderless full screen);
+//! `--via failed` posts AppKit's will-enter-full-screen notification for the
+//! window without entering, as a transition that fails after it began looks
+//! to zgx (the toolbar hidden, then back once the window is plainly not in
+//! full screen). Before, in and after full screen it prints:
 //! - `STRIP <when> height=<pt> alpha=<a> visible=<bool>`: each toolbar
 //!   full-screen window;
 //! - `WINDOW <when> fullscreen=<bool> frame_h=<pt> layout_h=<pt>
@@ -22,11 +25,14 @@ use zgx_desktop::{Application, Titlebar, WindowOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let green = args
+    let via = args
         .iter()
         .position(|arg| arg == "--via")
         .and_then(|i| args.get(i + 1))
-        .is_none_or(|via| via == "green");
+        .cloned()
+        .unwrap_or_else(|| "green".into());
+    let green = via == "green";
+    let failed = via == "failed";
     Application::new()
         .window(WindowOptions {
             title: "Fullscreen toolbar".into(),
@@ -42,6 +48,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let pause = |ms| zgx::timer::sleep(Duration::from_millis(ms));
                 pause(1500).await;
                 state::report("before");
+                if failed {
+                    state::will_enter();
+                    pause(500).await;
+                    state::report("full");
+                    pause(3000).await;
+                    state::report("after");
+                    println!("FULLSCREEN_TOOLBAR_DONE");
+                    window.close();
+                    return;
+                }
                 if green {
                     state::toggle();
                 } else {
@@ -73,6 +89,22 @@ mod state {
         app.windows()
             .iter()
             .find(|window| window.title().to_string() == "Fullscreen toolbar")
+    }
+
+    /// AppKit's will-enter-full-screen notification for the window, with no
+    /// full screen after it: a transition that failed.
+    pub fn will_enter() {
+        use objc2_foundation::NSNotificationCenter;
+        let Some(window) = ours() else {
+            println!("NO_WINDOW");
+            return;
+        };
+        // SAFETY: AppKit's own notification name (a constant static), posted
+        // on the main thread with the window as its object, as AppKit does.
+        unsafe {
+            let name = objc2_app_kit::NSWindowWillEnterFullScreenNotification;
+            NSNotificationCenter::defaultCenter().postNotificationName_object(name, Some(&window));
+        }
     }
 
     /// What the green button does.
@@ -133,6 +165,7 @@ mod state {
 
 #[cfg(not(target_os = "macos"))]
 mod state {
+    pub fn will_enter() {}
     pub fn toggle() {}
     pub fn report(_: &str) {
         println!("SKIP macOS only");

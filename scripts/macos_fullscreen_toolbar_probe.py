@@ -3,9 +3,11 @@
 
     python3 scripts/macos_fullscreen_toolbar_probe.py [--target-dir DIR]
 
-Builds the fullscreen_toolbar_probe example and runs it twice: into and out
-of full screen as the green button does (`toggleFullScreen:`), then with
-zgx's `set_fullscreen` (winit's borderless full screen). In full screen,
+Builds the fullscreen_toolbar_probe example and runs it three times: into
+and out of full screen as the green button does (`toggleFullScreen:`), with
+zgx's `set_fullscreen` (winit's borderless full screen), and as a transition
+that fails after it began (AppKit's will-enter notification with no full
+screen after it: the toolbar must come back). In full screen,
 AppKit's toolbar window above it (NSToolbarFullScreenWindow) must show
 nothing (alpha 0, or not visible), the inset toolbar must be hidden and the
 content layout rect must be the window's whole height. After, the toolbar
@@ -44,7 +46,7 @@ def main():
         shutil.copy2(pathlib.Path(args.target_dir) / 'debug/examples/fullscreen_toolbar_probe', binary)
         clean = {key: os.environ[key] for key in ('HOME', 'TMPDIR', 'USER') if key in os.environ}
         clean['PATH'] = '/usr/bin:/bin'
-        for via in ('green', 'borderless'):
+        for via in ('green', 'borderless', 'failed'):
             out = subprocess.run([str(binary), '--via', via], cwd='/tmp', env=clean, capture_output=True,
                                  text=True, timeout=60).stdout
             print(f'== {via}')
@@ -59,6 +61,14 @@ def main():
                 continue
             checks[f'{via}: before, the inset strip leaves the layout rect short'] = (
                 before[1] == 'false' and int(before[3]) < int(before[2]) and before[5] == 'true')
+            if via == 'failed':
+                # Will-enter with no full screen after it: hidden at first,
+                # back once the window is plainly not in full screen.
+                checks[f'{via}: going in, the inset toolbar is hidden'] = full[1] == 'false' and full[5] == 'false'
+                checks[f'{via}: not in full screen after all, the toolbar is back'] = (
+                    after[1] == 'false' and after[5] == 'true' and after[4] == 'false')
+                checks[f'{via}: and the inset strip with it'] = after[3] == before[3] and after[2] == before[2]
+                continue
             checks[f'{via}: in full screen'] = full[1] == 'true'
             checks[f'{via}: in full screen, the inset toolbar is hidden'] = full[5] == 'false'
             checks[f'{via}: in full screen, the content layout rect is the whole window'] = full[3] == full[2]
