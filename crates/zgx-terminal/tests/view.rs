@@ -534,7 +534,9 @@ fn a_windows_programs_output_shows_in_rows() {
     app.until("the output", |app| app.shows("hello world"));
     let state = term.state().get();
     assert!(state.columns > 10 && state.rows > 5, "{state:?}");
-    assert!(term.needs_confirm_close(), "ping runs in front");
+    // cmd starts ping after its echo shows: closing asks first once ping
+    // is in front (cmd's newest child), not as soon as the echo is read.
+    app.until("ping in front", |_| term.needs_confirm_close());
 }
 
 #[cfg(unix)]
