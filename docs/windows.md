@@ -100,6 +100,15 @@ an RTX 4090, the lab scene's first text, medians of 5 launches:
 name. Direct3D 11 (`ZGX_D3D11`) takes its shaders compiled ahead of time
 and never compiles at run time. Shipping DXC is described below.
 
+An app's own shader fills and layer shaders, which no gate of zgx's has
+compiled, compile with FXC in a process of their own: the app's executable
+started again as a compiler (`ZGX_FXC_CHILD`, answered before its `main`),
+the bytecode handed to Direct3D 12 as a passthrough module and kept in
+`%LOCALAPPDATA%\zgx\fxc` (256 shaders at most). A shader FXC can't survive
+fails alone and draws nothing. `crates/zgx-gpu/tests/app_shaders_d3d12.rs`
+checks the bytecode draws what wgpu's own build draws, byte for byte, which
+also catches a wgpu update moving the registers `dx12_fill` writes for.
+
 Most of the rest is the GPU driver opening its device (about 160 ms for a
 Direct3D 11 device and 180 ms for Direct3D 12, alone in a process), a floor
 any app on this GPU pays.
