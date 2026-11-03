@@ -1790,6 +1790,29 @@ impl InputDispatcher {
                 .iter()
                 .any(|scope| scope.root == root)
     }
+    /// Each modal scope's root, and the nodes it gives focus back to as it
+    /// closes: what had focus as it opened, and what opened it.
+    pub(crate) fn scope_returns(&self) -> Vec<(NodeId, Option<NodeId>, Option<NodeId>)> {
+        let s = self.state.borrow();
+        let scopes = s.scopes.iter();
+        scopes
+            .map(|scope| (scope.root, scope.previous, scope.trigger))
+            .collect()
+    }
+    /// The scope at `root` gives focus back to `previous`, else `trigger`:
+    /// what a reload built in place of those it had.
+    pub(crate) fn set_scope_returns(
+        &self,
+        root: NodeId,
+        previous: Option<NodeId>,
+        trigger: Option<NodeId>,
+    ) {
+        let mut s = self.state.borrow_mut();
+        if let Some(scope) = s.scopes.iter_mut().find(|scope| scope.root == root) {
+            scope.previous = previous;
+            scope.trigger = trigger;
+        }
+    }
     /// Close the innermost scope and give focus back, as browsers and native
     /// toolkits do: to what had it as the scope opened, else (that gone) to
     /// what opened it if that was from the keyboard, else to nothing. Never
