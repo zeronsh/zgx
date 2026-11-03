@@ -463,6 +463,9 @@ struct Offer {
     text: Option<usize>,
     /// Whether it offers `image/png`.
     png: bool,
+    /// The compositor's action for it, as last said. Hyprland says it once,
+    /// as it makes the offer: before the enter that names it.
+    action: Option<DndAction>,
 }
 struct Seat {
     name: u32,
@@ -528,7 +531,8 @@ struct Drag {
     read: Option<Transfer>,
     paths: Option<Arc<[PathBuf]>>,
     dropped: bool,
-    copy: bool,
+    /// The compositor's action for it (`wl_data_offer.action`), if said.
+    action: Option<DndAction>,
     left: bool,
 }
 /// The app's own drag, the compositor's now.
@@ -1073,7 +1077,7 @@ impl State {
             return;
         }
         let drag = self.drag.take().unwrap();
-        if drag.copy {
+        if takes_drop(drag.offer.version(), drag.action) {
             let (accepted, reply) = std::sync::mpsc::channel();
             (self.handler)(
                 drag.token,
@@ -1093,6 +1097,11 @@ impl State {
                 deadline: Instant::now() + Duration::from_secs(3),
             });
         } else {
+            // Not taken: the window hears the files go, as it heard them
+            // come (it would show them over it for good otherwise).
+            if !drag.left {
+                (self.handler)(drag.token, FileEvent::Leave);
+            }
             drag.offer.destroy();
         }
     }
@@ -1506,10 +1515,14 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for State {
                 }
             }
             wl_data_offer::Event::Action { dnd_action } => {
+                let action = dnd_action.into_result().ok();
+                if let Some(saved) = state.offers.get_mut(&offer.id().protocol_id()) {
+                    saved.action = action;
+                }
                 if let Some(drag) = &mut state.drag
                     && drag.offer == *offer
                 {
-                    drag.copy = dnd_action.into_result().is_ok_and(|a| a == DndAction::Copy);
+                    drag.action = action;
                 }
             }
             _ => {}
@@ -1540,6 +1553,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                         uris: false,
                         text: None,
                         png: false,
+                        action: None,
                     },
                 );
             }
@@ -1638,7 +1652,6 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                 }
                 offer.proxy.receive("text/uri-list".into(), write.as_fd());
                 drop(write);
-                let copy = offer.proxy.version() < 3;
                 state.drag = Some(Drag {
                     offer: offer.proxy,
                     token,
@@ -1651,7 +1664,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                     }),
                     paths: None,
                     dropped: false,
-                    copy,
+                    action: offer.action,
                     left: false,
                 });
                 let _ = connection.flush();
@@ -1790,6 +1803,21 @@ impl Transfer {
         }
     }
 }
+/// Whether a drop the compositor delivered is taken (read, and finished).
+/// Before version 3 there are no actions. A copy is what was asked for
+/// (`set_actions(copy, copy)`); a move too, as Hyprland chooses move for
+/// any source that allows it and never answers `set_actions`: the files
+/// are only read, and refusing left its drag under way, the window showing
+/// the files over it and the next client the pointer reached taking them.
+/// None said (Hyprland, for a source naming no actions) takes it as
+/// version 2 did; only an action that can't be finished (none, ask) is
+/// refused.
+fn takes_drop(version: u32, action: Option<DndAction>) -> bool {
+    version < 3
+        || action.is_none_or(|action| {
+            action.contains(DndAction::Copy) || action.contains(DndAction::Move)
+        })
+}
 fn decode_uris(bytes: &[u8]) -> Result<Vec<PathBuf>, zgx::input::FileDropError> {
     use zgx::input::FileDropError;
     let text = std::str::from_utf8(bytes).map_err(|_| FileDropError::InvalidData)?;
@@ -1814,6 +1842,17 @@ fn decode_uris(bytes: &[u8]) -> Result<Vec<PathBuf>, zgx::input::FileDropError> 
 mod tests {
     use super::*;
     use zgx::input::FileDropError;
+    #[test]
+    fn a_drop_is_taken_unless_its_action_cannot_finish() {
+        assert!(takes_drop(2, None));
+        assert!(takes_drop(3, Some(DndAction::Copy)));
+        // Hyprland's choice for any source allowing a move.
+        assert!(takes_drop(3, Some(DndAction::Move)));
+        // Said before the enter (Hyprland), or never.
+        assert!(takes_drop(3, None));
+        assert!(!takes_drop(3, Some(DndAction::empty())));
+        assert!(!takes_drop(3, Some(DndAction::Ask)));
+    }
     #[test]
     fn a_uri_list_gives_its_files() {
         assert_eq!(
