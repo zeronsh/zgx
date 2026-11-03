@@ -609,6 +609,30 @@ impl EditorHint {
             .is_some_and(|lines| lines.highlighted())
     }
 }
+/// An editor's blur (`build_text_input_inner`): none, its window going to
+/// the back, or a context menu taking its focus (`context_menu_holds`).
+const AWAY_NOT: u8 = 0;
+const AWAY_WINDOW: u8 = 1;
+const AWAY_MENU: u8 = 2;
+/// Whether a context menu that took `editor`'s focus as it opened shows
+/// (`Ui::set_context_menu`): its own, or the app's on it or on a view
+/// holding it. The selection it opened on stays drawn while it shows, as
+/// AppKit's does. `tracked`: a draw reading it is drawn again as the menu
+/// closes.
+fn context_menu_holds(storage: &std::rc::Weak<UiStorage>, editor: NodeId, tracked: bool) -> bool {
+    let Some(storage) = storage.upgrade() else {
+        return false;
+    };
+    let Some((from, shown)) = storage.context_menu.borrow().clone() else {
+        return false;
+    };
+    from == editor
+        && if tracked {
+            shown.get()
+        } else {
+            shown.with_untracked(|shown| *shown)
+        }
+}
 /// What an editor tells its first line in view (`EditorHandle::on_top_line`).
 type TopLineListener = Box<dyn FnMut(usize)>;
 /// What an editor tells where its caret is (`EditorHandle::on_caret`).
@@ -1510,6 +1534,10 @@ pub(crate) struct UiStorage {
     popups: RefCell<Vec<(NodeId, Signal<bool>)>>,
     /// Portals' owners and overlays, in the order they mounted (`Ui::portals`).
     portals: RefCell<Vec<(NodeId, NodeId)>>,
+    /// The context menu opened last: the node it took the focus from, and
+    /// whether it shows. An editor it took the focus from keeps its
+    /// selection drawn while it does.
+    context_menu: RefCell<Option<(NodeId, Signal<bool>)>>,
     /// The host's hook for a popup about to open (`Ui::on_popup_soon`), and
     /// whether it was called and not yet heard (`popup_soon_heard`).
     popup_soon: RefCell<Option<Rc<dyn Fn()>>>,
@@ -1808,6 +1836,7 @@ impl Ui {
             popup_flips: runtime.signal(Vec::new()),
             popups: RefCell::new(Vec::new()),
             portals: RefCell::new(Vec::new()),
+            context_menu: RefCell::new(None),
             popup_soon: RefCell::new(None),
             popup_soon_sent: Cell::new(false),
             snapshotter: RefCell::new(None),
@@ -3189,6 +3218,11 @@ impl Ui {
         let mut popups = self.storage.popups.borrow_mut();
         popups.retain(|(node, _)| scene.contains(*node));
         popups.push((root, open));
+    }
+    /// A context menu opening, showing while `shown` is
+    /// (`compose_context_menu`): it takes the focus from what has it.
+    pub(crate) fn set_context_menu(&self, shown: Signal<bool>) {
+        *self.storage.context_menu.borrow_mut() = self.input.focused().map(|from| (from, shown));
     }
     pub(crate) fn add_portal(&self, owner: NodeId, overlay: NodeId) {
         self.storage.portals.borrow_mut().push((owner, overlay));
@@ -4838,8 +4872,10 @@ impl Ui {
         );
         let editor = Rc::new(RefCell::new(TextEditor::with_value(initial)));
         let focused = Rc::new(RefCell::new(false));
-        // Blurred only because its window went to the back: still the focused field.
-        let window_blurred = Rc::new(Cell::new(false));
+        // Blurred only because its window went to the back (`AWAY_WINDOW`):
+        // still the focused field. Or blurred by a context menu that took
+        // its focus (`AWAY_MENU`): its selection drawn while that shows.
+        let window_blurred = Rc::new(Cell::new(AWAY_NOT));
         let draw_window_blurred = window_blurred.clone();
         let scroll = Rc::new(RefCell::new((0f32, 0f32)));
         // Carries the selection's highlight, made when one first shows.
@@ -5398,10 +5434,15 @@ impl Ui {
                 draw_blink.release(caret);
             }
             // An editable field shows its selection only while it has the focus (or its
-            // window merely went to the back), as AppKit's do: the selection is kept, and
-            // shows again when the focus comes back. Read-only text gives its up on blur.
+            // window merely went to the back, or a context menu opened on it has the
+            // focus), as AppKit's do: the selection is kept, and shows again when the
+            // focus comes back. Read-only text gives its up on blur.
+            let away = draw_window_blurred.get();
+            let held = away == AWAY_MENU
+                && !*focus.borrow()
+                && context_menu_holds(&draw_storage, root, true);
             let shows_selection =
-                *focus.borrow() || draw_window_blurred.get() || draw_read_only.get();
+                *focus.borrow() || away == AWAY_WINDOW || draw_read_only.get() || held;
             // With a line more each way, so the lines in view know what they
             // meet: a selection running on past the edge is not rounded off.
             let rects: Vec<_> =
@@ -5597,7 +5638,12 @@ impl Ui {
                 style.padding = 1.;
                 s.set_style(id, style);
                 let highlight = crate::scene::TextHighlight {
-                    color: theme.color_untracked(tok::SELECTION),
+                    // In the back while a menu has the focus.
+                    color: theme.color_untracked(if held {
+                        tok::SELECTION_INACTIVE
+                    } else {
+                        tok::SELECTION
+                    }),
                     rects: rects
                         .into_iter()
                         .map(|(x, y, w, h)| Rect::new(x, y, w, h))
@@ -6291,7 +6337,11 @@ impl Ui {
                     }
                     // Focus coming to it, not its window coming back.
                     let dropped = gesture.dropped.replace(false);
-                    if hint.select_on_focus.get() && !window_blurred.replace(false) && !dropped {
+                    // Back from its window or a menu: its selection as it was.
+                    if hint.select_on_focus.get()
+                        && window_blurred.replace(AWAY_NOT) == AWAY_NOT
+                        && !dropped
+                    {
                         let mut edit = editor.borrow_mut();
                         edit.select_all();
                         position.set(TextPosition {
@@ -6303,18 +6353,25 @@ impl Ui {
                     }
                 }
                 InputEvent::Blur => {
-                    // Still focused: its window went to the back.
-                    window_blurred.set(
-                        input_storage
-                            .upgrade()
-                            .is_some_and(|storage| storage.input.focused() == Some(root)),
-                    );
+                    // Still focused: its window went to the back. Else, to a
+                    // context menu that took the focus from it?
+                    let still = input_storage
+                        .upgrade()
+                        .is_some_and(|storage| storage.input.focused() == Some(root));
+                    window_blurred.set(if still {
+                        AWAY_WINDOW
+                    } else if context_menu_holds(&input_storage, root, false) {
+                        AWAY_MENU
+                    } else {
+                        AWAY_NOT
+                    });
                     *focused.borrow_mut() = false;
                     gesture.cancel();
                     editor.borrow_mut().cancel_preedit();
                     // Read-only text gives up its selection with the focus, as a
-                    // selectable label does, unless only its window went back.
-                    if read_only.get() && !window_blurred.get() {
+                    // selectable label does, unless only its window went back
+                    // or a menu opened on it took the focus.
+                    if read_only.get() && window_blurred.get() == AWAY_NOT {
                         let mut edit = editor.borrow_mut();
                         let end = edit.selection().focus;
                         edit.set_selection(end, end);

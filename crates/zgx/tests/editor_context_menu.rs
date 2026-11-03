@@ -394,6 +394,107 @@ impl zgx::platform::Platform for Dictionary {
     }
 }
 
+/// The colour the selection inside `node` is drawn in, if it draws one.
+fn drawn_selection(ui: &Ui, node: zgx::scene::NodeId) -> Option<zgx::scene::Color> {
+    let scene = ui.scene.borrow();
+    let mut stack = vec![node];
+    while let Some(id) = stack.pop() {
+        if let Some(highlight) = scene.text_highlight(id).filter(|h| !h.rects.is_empty()) {
+            return Some(highlight.color);
+        }
+        stack.extend(scene.children(id).iter().copied());
+    }
+    None
+}
+
+/// A context menu, the editor's own or the app's, takes the focus as it
+/// opens; the selection it was opened on stays drawn (in the colour of a
+/// selection in the back) while it shows, as AppKit's does, and is drawn as
+/// before once it closes and the focus comes back.
+#[test]
+fn a_context_menu_keeps_the_selection_it_opened_on_drawn_while_it_shows() {
+    for apps in [false, true] {
+        let mut ui = Ui::new(400., 200.);
+        let value = ui.signal("alpha serendipity".to_owned());
+        let field = text_input("Name", value).text_size(14.);
+        let field = if apps {
+            field.context_menu(|_| vec![menu_item("Define").id("define")])
+        } else {
+            field
+        };
+        let (view, _) = mount(&mut ui, field);
+        let node = view.find("field").unwrap();
+        ui.input.focus(&ui.scene, Some(node));
+        ui.prepare_frame();
+        let editor = ui.editor(node).unwrap();
+        editor.set_selection(6, 17);
+        ui.prepare_frame();
+        let active = drawn_selection(&ui, node).expect("drawn while focused");
+        let at = ui.scene.borrow().bounds(node);
+        context_click(&mut ui, at.x + 60., at.y + at.height / 2.);
+        assert!(
+            view.find(if apps { "define" } else { "editor-copy" })
+                .is_some()
+        );
+        assert_ne!(ui.input.focused(), Some(node), "the menu has the focus");
+        let held = drawn_selection(&ui, node);
+        assert!(held.is_some(), "drawn while its menu shows (apps: {apps})");
+        assert_ne!(
+            held,
+            Some(active),
+            "as a selection in the back (apps: {apps})"
+        );
+        assert_eq!(editor.selection(), (6, 17), "the selection it opened on");
+        // Closed: the focus back, and the selection drawn as it was.
+        ui.dispatch(InputEvent::KeyDown {
+            key: zgx::input::Key::Escape,
+            modifiers: Default::default(),
+            repeat: false,
+        });
+        ui.prepare_frame();
+        assert_eq!(ui.input.focused(), Some(node));
+        assert_eq!(drawn_selection(&ui, node), Some(active), "apps: {apps}");
+    }
+}
+
+/// A menu that took no editor's focus (a row's, around a field that didn't
+/// have it) draws no selection the field kept from before.
+#[test]
+fn a_menu_opened_elsewhere_draws_no_kept_selection() {
+    let mut ui = Ui::new(400., 200.);
+    let value = ui.signal("alpha serendipity".to_owned());
+    let view = ui.mount(
+        column()
+            .size(400., 200.)
+            .child(
+                row()
+                    .id("row")
+                    .w(400.)
+                    .h(60.)
+                    .context_menu(|_| vec![menu_item("Row").id("row-item")])
+                    .child(text_input("Name", value).id("field").w(200.).h(32.)),
+            )
+            .child(button().id("other").size(80., 30.).child(text("Other"))),
+    );
+    ui.prepare_frame();
+    let (field, other) = (view.find("field").unwrap(), view.find("other").unwrap());
+    ui.input.focus(&ui.scene, Some(field));
+    ui.prepare_frame();
+    ui.editor(field).unwrap().set_selection(6, 17);
+    ui.prepare_frame();
+    ui.input.focus(&ui.scene, Some(other));
+    ui.prepare_frame();
+    assert_eq!(drawn_selection(&ui, field), None, "not focused");
+    // The row's menu, from beside the field.
+    context_click(&mut ui, 300., 30.);
+    assert!(view.find("row-item").is_some());
+    assert_eq!(
+        drawn_selection(&ui, field),
+        None,
+        "its menu took no focus from it"
+    );
+}
+
 /// An editor shown a line at a time (a text area's lines) looks up the
 /// selection at its baseline, on the line holding it: its text is laid out
 /// in its lines' nodes, not its own.
