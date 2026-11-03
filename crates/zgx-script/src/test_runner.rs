@@ -371,13 +371,13 @@ impl Mounted {
     }
     /// The node `target` names, as devtools find it.
     fn node(app: &mut TestApp, target: &str) -> mlua::Result<zgx::scene::NodeId> {
-        app.ui.prepare_frame();
+        app.lay_out();
         crate::driver::find(&app.ui, &app.handle, target).map_err(mlua::Error::runtime)
     }
     /// The same for an action: what of it a person can reach, inside its
     /// clips and uncovered, or why not.
     fn reach(app: &mut TestApp, target: &str) -> mlua::Result<(zgx::scene::NodeId, Rect)> {
-        app.ui.prepare_frame();
+        app.lay_out();
         crate::driver::reach(&app.ui, &app.handle, target).map_err(mlua::Error::runtime)
     }
 }
@@ -501,14 +501,14 @@ impl UserData for Mounted {
         });
         methods.add_method("has", |_, m, target: String| {
             let app = m.app()?;
-            app.ui.prepare_frame();
+            app.lay_out();
             let target = crate::driver::parse(&target).map_err(mlua::Error::runtime)?;
             let found = crate::driver::find_all(&app.ui, &app.handle, &target);
             Ok(found.is_ok_and(|found| !found.is_empty()))
         });
         methods.add_method("count", |_, m, target: String| {
             let app = m.app()?;
-            app.ui.prepare_frame();
+            app.lay_out();
             let target = crate::driver::parse(&target).map_err(mlua::Error::runtime)?;
             let found = crate::driver::find_all(&app.ui, &app.handle, &target);
             Ok(found.map_or(0, |found| found.len()))

@@ -1017,3 +1017,88 @@ return ui.column {
     assert_eq!(code, Some(0), "{text}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn a_pane_settled_in_ui_after_0_reads_settled_at_once() {
+    // Zeron's editor in `zgx test`: a pane rebuilt and read straight away
+    // (no frame between) showed its layout before `ui.after(0)` from its
+    // `on_resize` settled it, as a window never draws it.
+    let dir = app(
+        "after-0-read",
+        &[(
+            "pane.test.luau",
+            r##"
+test("a rebuilt pane reads settled", function()
+    local app = mount()
+    expect(app:text("#lines")).to_be("30")
+    app:command("rebuild")
+    expect(app:text("#lines")).to_be("30")
+end)
+"##,
+        )],
+    );
+    std::fs::write(
+        dir.join("app.luau"),
+        r##"local lines = ui.state("lines", 80)
+local which = ui.state("which", "a")
+ui.command { id = "rebuild", title = "Rebuild", run = function()
+    lines:set(80)
+    which:set(if which:peek() == "a" then "b" else "a")
+end }
+local function pane()
+    return ui.column { w = 200, h = 240,
+        on_resize = function(size)
+            ui.after(0, function() lines:set(math.floor(size.h / 8)) end)
+        end,
+        ui.text { id = "lines", "{lines}" } }
+end
+return ui.column { ui.switch(function() return which:get() end, { a = pane(), b = pane() }) }
+"##,
+    )
+    .unwrap();
+    let (code, text) = run(&dir, &[]);
+    assert_eq!(code, Some(0), "{text}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_presence_rebuilt_by_set_state_reads_settled_after_one_frame() {
+    // Zeron's files fixture: the pane comes back through a `ui.presence`
+    // keyed on a state the test sets, then one frame, then `tree`.
+    let dir = app(
+        "after-0-presence",
+        &[(
+            "pane.test.luau",
+            r##"
+test("a pane a presence brings back reads settled", function()
+    local app = mount()
+    app:frames(1)
+    expect(app:tree("#lines")).to_contain('"30"')
+    app:set_state("generation", 2)
+    app:frames(1)
+    expect(app:has("#lines")).to_be(true)
+    expect(app:tree("#lines")).to_contain('"30"')
+end)
+"##,
+        )],
+    );
+    std::fs::write(
+        dir.join("app.luau"),
+        r##"local generation = ui.state("generation", 1)
+return ui.column { w = 200, h = 300,
+    ui.presence(generation, function(n)
+        local lines = ui.use_state(80)
+        return ui.column { w = 200, h = 240,
+            on_resize = function(size)
+                ui.after(0, function() lines:set(math.floor(size.h / 8)) end)
+            end,
+            ui.text { id = "lines", function() return tostring(lines:get()) end } }
+    end),
+}
+"##,
+    )
+    .unwrap();
+    let (code, text) = run(&dir, &[]);
+    assert_eq!(code, Some(0), "{text}");
+    std::fs::remove_dir_all(dir).unwrap();
+}

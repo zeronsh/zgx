@@ -609,7 +609,8 @@ fn timers_fire_on_their_clock_and_stop() {
 
 /// A test's timers keep its time, which its frames advance: one fires
 /// between the frames it falls between, however long the test takes, never
-/// mid-step on the wall clock. `ui.after(0)` runs on the next frame.
+/// mid-step on the wall clock. `ui.after(0)` runs as the test next lays out
+/// (a read, or a frame), and asks for no frame of its own.
 #[test]
 fn timers_keep_a_tests_time_not_the_wall_clock() {
     let mut h = Harness::inline(
@@ -626,18 +627,16 @@ fn timers_keep_a_tests_time_not_the_wall_clock() {
     // A slow step: the wall clock passes every timer, the test's time none.
     std::thread::sleep(std::time::Duration::from_millis(50));
     h.settle();
-    assert_eq!(h.text("log"), "", "nothing fires mid-step");
-    assert!(h.clock.wants_frame(), "`ui.after(0)` asks for a frame");
+    assert!(!h.clock.wants_frame(), "an idle window sleeps");
+    // A read lays out as a frame does before it is drawn: `ui.after(0)`
+    // runs there, and nothing that waits on time.
+    assert_eq!(h.text("log"), "next ", "nothing on the wall clock");
     h.frame();
-    assert_eq!(h.text("log"), "every next ", "the frame at 16.7 ms");
-    assert!(
-        !h.clock.wants_frame(),
-        "and only one: an idle window sleeps"
-    );
+    assert_eq!(h.text("log"), "next every ", "the frame at 16.7 ms");
     h.frame();
     assert_eq!(
         h.text("log"),
-        "every next every 30 every ",
+        "next every every 30 every ",
         "at 20, 30 and 33.3 ms"
     );
 }
@@ -765,4 +764,53 @@ fn a_path_picks_an_item_by_its_fields_and_append_adds_text() {
     h.frames(1);
     assert_eq!(h.text("said"), "Hello|One two|new|false|true|false|true");
     assert_eq!(h.error(), None);
+}
+
+/// A wait moves the test's time from where its frames left it: a frame
+/// when one is asked for (`ui.after(0)`), else the time that passes.
+#[test]
+fn a_wait_fires_timers_after_frames_ran_ahead_of_the_wall_clock() {
+    let mut h = Harness::inline(
+        r#"local out = ui.state("out", "")
+        ui.command { id = "go", run = function()
+            ui.after(0, function() ui.after(30, function() out:set("done") end) end)
+        end }
+        return ui.column { ui.text { "{out}", id = "out" } }"#,
+    );
+    // Ten seconds of frames in far less: the test's time is ahead.
+    h.frames(600);
+    h.host.run_command("go");
+    assert!(
+        h.wait_until(|app| app.text("out") == "done"),
+        "{}",
+        h.text("out")
+    );
+}
+
+/// Zeron's code editor: a layout settled in `ui.after(0)` from `on_resize`
+/// shows settled on the frame that laid it out, mounted or reloaded, as in
+/// a window, where `ui.after(0)` runs before the next frame is drawn.
+#[test]
+fn an_after_0_from_on_resize_settles_before_the_frame_is_drawn() {
+    let dir = std::env::temp_dir().join(format!("zgx-after-0-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("app.luau");
+    std::fs::write(
+        &path,
+        r#"local lines = ui.state("lines", 80)
+        -- As an editor guesses before it knows its height.
+        lines:set(80)
+        return ui.column { w = 200, h = 240,
+            on_resize = function(size)
+                ui.after(0, function() lines:set(math.floor(size.h / 8)) end)
+            end,
+            ui.text { "{lines}", id = "lines" } }"#,
+    )
+    .unwrap();
+    let mut h = Harness::new(move |runtime| zgx_script::ScriptHost::new(runtime, path.clone()));
+    h.frame();
+    assert_eq!(h.text("lines"), "30", "mounted");
+    h.host.reload().expect("it reloads");
+    h.frame();
+    assert_eq!(h.text("lines"), "30", "the first frame after a reload");
 }
