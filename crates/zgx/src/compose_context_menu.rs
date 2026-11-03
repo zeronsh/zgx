@@ -214,6 +214,8 @@ pub(crate) fn mount(
         }
         current.close();
         let shown = ui.runtime.signal(true);
+        // An editor it takes the focus from keeps its selection drawn.
+        ui.set_context_menu(shown.clone());
         let anchor = if below {
             div().w(origin.width).h(origin.height)
         } else {
