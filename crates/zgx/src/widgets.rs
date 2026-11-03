@@ -640,10 +640,24 @@ impl EditorHandle {
             return false;
         }
         let start = self.editor.borrow().selection().range().start;
-        let Some((at, size)) = self.scene.borrow().text_baseline(self.text, start) else {
+        let Some((at, size)) = self.baseline_at(start) else {
             return false;
         };
         platform.0.look_up(&text, at, size)
+    }
+    /// Where the text's baseline is at byte `at`, in the window's points,
+    /// and the text's size there (`Scene::text_baseline`). An editor shown a
+    /// line at a time (`editor_lines`) takes it from the line node holding
+    /// `at`, as `text_area` takes its pieces.
+    fn baseline_at(&self, at: usize) -> Option<((f32, f32), f32)> {
+        let scene = self.scene.borrow();
+        let Some(lines) = self.hint.shown_lines() else {
+            return scene.text_baseline(self.text, at);
+        };
+        let (line, node) = lines
+            .into_iter()
+            .find(|(line, _)| line.start <= at && at <= line.end)?;
+        scene.text_baseline(node, at - line.start)
     }
     /// Where an input method's candidate window goes: under the clause it
     /// is converting (Japanese, Chinese), as a native field puts it, in the

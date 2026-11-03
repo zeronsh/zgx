@@ -394,6 +394,39 @@ impl zgx::platform::Platform for Dictionary {
     }
 }
 
+/// An editor shown a line at a time (a text area's lines) looks up the
+/// selection at its baseline, on the line holding it: its text is laid out
+/// in its lines' nodes, not its own.
+#[test]
+fn a_text_area_shown_a_line_at_a_time_looks_the_selection_up() {
+    let mut ui = Ui::new(400., 200.);
+    let dictionary = Rc::new(Dictionary::default());
+    let text = "alpha\nbeta serendipity\ngamma";
+    let value = ui.signal(text.to_owned());
+    let view = ui.mount(
+        text_area("Notes", value)
+            .id("notes")
+            .w(300.)
+            .h(120.)
+            .text_size(10.)
+            .line_height(20.),
+    );
+    ui.prepare_frame();
+    let editor = ui.editor(view.find("notes").unwrap()).unwrap();
+    let start = text.find("serendipity").unwrap();
+    editor.set_selection(start, start + "serendipity".len());
+    ui.prepare_frame();
+    let platform = zgx::platform::PlatformService(dictionary.clone());
+    assert!(editor.look_up(&platform), "looked up");
+    let asked = dictionary.0.borrow().clone();
+    let (looked, (_, y), size) = &asked[0];
+    assert_eq!(looked, "serendipity");
+    assert_eq!(*size, 10.);
+    // On its line, the second, not the first.
+    let line = editor.text_area(start..start + 1).unwrap();
+    assert!(*y > line.y && *y <= line.y + line.height, "{y} on {line:?}");
+}
+
 /// Where the platform looks words up, an editor's menu, and a selectable
 /// region's, offer Look Up first, as AppKit's do: the selection's text at
 /// its first character's baseline. A password offers none; a platform that
