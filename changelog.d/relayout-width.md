@@ -1,0 +1,4 @@
+---
+section: performance
+---
+- **A page's width changing lays each level of it out a few times, not once for each way the levels above probe it** (zgx): a box whose width and height its style and the room it is given fix (points, percentages of a size it has, within its limits; for one taffy lays out, no less than its padding and border) answers a layout's probe from those and lays out what it holds only where it is placed; a change inside an absolute box its parent doesn't size by lays out that box alone; and absolute boxes placed by a block further up are sorted once a pass. `width_bench`, a chat page in transitions' one-cell grids beside a panel whose width steps a frame at a time: 10.5 M → 6.0 M instructions a width change (−43%). Zeron's chat page, its panel's width stepping a frame at a time: 13.5 M → 7.8 M layout instructions a frame (−42%; 1.6 → 1.0 ms median), half the nodes measured.
