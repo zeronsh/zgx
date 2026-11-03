@@ -332,11 +332,18 @@ impl<'a> FontFallbackIter<'a> {
     fn default_font_match_key(&self) -> Option<&FontMatchKey> {
         let default_family = self.default_families[self.default_i - 1];
         let default_family_name = self.font_system.db().family_name(default_family);
+        let in_family = |m_key: &&FontMatchKey| self.face_contains_family(m_key.id, default_family_name);
 
         self.font_match_keys
             .iter()
             .filter(|m_key| m_key.font_weight_diff == 0 || m_key.variable_weight_match)
-            .find(|m_key| self.face_contains_family(m_key.id, default_family_name))
+            .find(in_family)
+            // zgx patch: a family without the weight asked for (a Medium of
+            // a family that has Regular and Bold alone) draws in the face
+            // fontdb's query picks for it, as CSS's font matching does,
+            // rather than in another family that has that weight. The keys
+            // hold the query's face first, then the nearest weights.
+            .or_else(|| self.font_match_keys.iter().find(in_family))
     }
 
     fn next_item(&mut self, fallbacks: &Fallbacks) -> Option<<Self as Iterator>::Item> {
