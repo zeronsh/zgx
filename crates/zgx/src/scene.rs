@@ -2579,6 +2579,23 @@ fn contents_style(mut own: Style, lead: &Style) -> Style {
     };
     own
 }
+/// Whether absolute `style` fixes its box on both axes whatever it holds:
+/// a width (or both side insets) and a height (or both top and bottom).
+/// Taffy sizes such a box by its style alone, so the size it last gave it
+/// (the constraints its parent keeps) is the one it gives it again.
+fn placed_whole(style: &Style) -> bool {
+    use crate::layout::Length;
+    let options = style.layout_options.as_deref().copied().unwrap_or_default();
+    let set = |inset: Option<Length>| matches!(inset, Some(Length::Px(_) | Length::Percent(_)));
+    let wide = style.width.is_some()
+        || style.width_percent.is_some()
+        || (set(options.inset.left) && set(options.inset.right))
+        || (set(options.inset_inline.start) && set(options.inset_inline.end));
+    let tall = style.height.is_some()
+        || style.height_percent.is_some()
+        || (set(options.inset.top) && set(options.inset.bottom));
+    wide && tall && options.aspect_ratio.is_none()
+}
 fn dimension(value: f32, min: Option<f32>, max: Option<f32>) -> f32 {
     value
         .max(0.0)
@@ -8094,13 +8111,13 @@ impl Scene {
             // it may not have changed: laid out alone if they haven't
             // (`relayout_alone`), its siblings left where they are.
             let alone = ALONE && current == stop;
+            let boundary = !first && self.bounds_layout(current);
             // Past `id`, a parent the tree led to (`tree_node_mut`).
             let node = if first {
                 self.node_mut(current)
             } else {
                 self.tree_node_mut(current)
             };
-            let boundary = !first && Self::is_layout_boundary(node);
             // A boundary is laid out as one (`layout_roots`).
             let alone = alone && !boundary;
             let parent = node.parent;
@@ -8266,7 +8283,7 @@ impl Scene {
             };
             if node.dirty & LAYOUT == 0
                 || self.tree_node(parent).dirty & LAYOUT != 0
-                || Self::is_layout_boundary(node)
+                || self.bounds_layout(id)
             {
                 continue;
             }
@@ -8285,6 +8302,39 @@ impl Scene {
             }
         }
         self.alone_pending = false;
+    }
+    /// Whether a change within `id` stops at it (a layout boundary, laid
+    /// out alone as one of `layout_roots`): its size fixed whatever it holds
+    /// (`is_layout_boundary`), or an absolute box whose parent's own size
+    /// and other children's places it changes nothing of
+    /// (`lays_out_apart`).
+    #[inline]
+    fn bounds_layout(&self, id: NodeId) -> bool {
+        let node = self.tree_node(id);
+        Self::is_layout_boundary(node) || (node.style.absolute && self.lays_out_apart(id))
+    }
+    /// Whether absolute container `id` is laid out apart from its parent:
+    /// nothing it holds weighs in its parent's size or its siblings'
+    /// places, and the constraints it was last laid out under are the ones
+    /// it is asked under whatever it holds, so laid out again under them
+    /// (`layout_roots`) it answers as its parent would have it. True of one
+    /// a plain row, column or overlay places (by the room inside it) or its
+    /// containing block further up does (`place_escaped`); not of one taffy
+    /// places, which keeps the size it gave it as the constraints. Where its
+    /// size then changes, it is laid out from the root as before.
+    #[cold]
+    #[inline(never)]
+    fn lays_out_apart(&self, id: NodeId) -> bool {
+        let node = self.tree_node(id);
+        let Some(parent) = node.parent else {
+            return false;
+        };
+        matches!(node.kind, NodeKind::Container(_) | NodeKind::Panel { .. })
+            && node.measurement.is_some()
+            && !node.special.any()
+            && (self.tree_node(parent).advanced_layout.is_none()
+                || self.containing_block(id).is_some()
+                || placed_whole(&node.style))
     }
     /// A laid-out container with an explicit width and height: parents measure
     /// it from those (or from their own flex allocation), never from its
@@ -13542,6 +13592,65 @@ mod measure_work_tests {
             per_level <= 6.,
             "{per_level} measures a level ({shallow}, {deep})"
         );
+    }
+    /// A box placed by insets on every side holds what changes in it:
+    /// nothing it holds moves its parent or its siblings, so it alone is
+    /// laid out again (unless its size changes).
+    #[test]
+    fn a_change_inside_an_absolute_box_its_insets_fix_lays_out_that_box_alone() {
+        let mut scene = Scene::new(400., 300.);
+        let page = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style {
+                relative: true,
+                width_percent: Some(1.),
+                height_percent: Some(1.),
+                ..Default::default()
+            },
+        );
+        for i in 0..20 {
+            wrapping(&mut scene, page, &format!("line {i} beside the box"));
+        }
+        let pinned = scene.append(
+            page,
+            NodeKind::Container(Layout::Column),
+            Style {
+                absolute: true,
+                layout_options: Some(Arc::new(LayoutOptions {
+                    inset: crate::layout::EdgeLengths {
+                        top: Some(Length::Px(10.)),
+                        right: Some(Length::Px(10.)),
+                        bottom: Some(Length::Px(10.)),
+                        left: Some(Length::Percent(0.5)),
+                    },
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        );
+        let held = wrapping(&mut scene, pinned, "what it holds");
+        scene.flush();
+        let box_was = scene.bounds(pinned);
+        let before = scene.measure_calls;
+        scene.set_kind(
+            held,
+            NodeKind::Text {
+                text: "what it holds, now long enough to wrap onto more lines".into(),
+                color: Color(255, 255, 255, 255),
+                font_size: 14.,
+            },
+        );
+        scene.flush();
+        // The box, laid out where it is, and its text: not the page.
+        assert!(
+            scene.measure_calls - before <= 3,
+            "{}",
+            scene.measure_calls - before
+        );
+        assert_eq!(scene.bounds(pinned), box_was);
+        assert_eq!(scene.bounds(held).x, box_was.x);
+        assert!(scene.bounds(held).height > 20.);
     }
     #[test]
     fn a_probe_of_a_box_its_style_sizes_lays_out_nothing_in_it() {

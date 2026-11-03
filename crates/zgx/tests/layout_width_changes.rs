@@ -1,8 +1,8 @@
 //! A page whose width changes a step at a time (a side panel's edge
 //! dragged), and what changes inside it meanwhile, must lay out exactly as a
 //! fresh layout of the same tree at that width: probes answered by a box's
-//! size alone (its style fixing it) place every node where the full layout
-//! would.
+//! size alone (its style fixing it), and absolute boxes laid out apart from
+//! their parents, place every node where the full layout would.
 use std::sync::Arc;
 use zgx::layout::{Display, EdgeLengths, LayoutOptions, Length};
 use zgx::scene::{Align, Color, Insets, Justify, Layout, NodeId, NodeKind, Scene, Style};
