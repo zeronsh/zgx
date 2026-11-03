@@ -88,19 +88,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let shade = cx.ui.signal(0_u32);
             let popup =
                 if grow || tint.is_some() || std::env::var_os("POPUP_PROBE_POPOVER").is_some() {
-                    popover("Details", open.clone(), anchor)
-                        .reactive_style({
-                            let (size, shade) = (size.clone(), shade.clone());
-                            move || {
-                                let (w, h) = size.get();
+                    let tinted = tint.is_some();
+                    let popover = popover("Details", open.clone(), anchor).reactive_style({
+                        let (size, shade) = (size.clone(), shade.clone());
+                        move || {
+                            let (w, h) = size.get();
+                            let styles = Styles::new().w(w).h(h);
+                            if tinted {
                                 let step = shade.get() % 64;
-                                Styles::new()
-                                    .w(w)
-                                    .h(h)
-                                    .bg(rgb(0x4a3768 + (step << 16) + (step << 8)))
+                                styles.bg(rgb(0x4a3768 + (step << 16) + (step << 8)))
+                            } else {
+                                styles
                             }
-                        })
-                        .arrow(8.)
+                        }
+                    });
+                    // Its colour stays put but for the tint: its arrow takes
+                    // the panel's styles as it mounts, not a reactive style's.
+                    let popover = if tinted {
+                        popover
+                    } else {
+                        popover.bg(rgb(0x4a3768))
+                    };
+                    popover.arrow(8.)
                 } else {
                     menu("File", open.clone(), anchor)
                         .w(200.)
