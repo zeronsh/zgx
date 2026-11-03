@@ -77,5 +77,21 @@ class WarmTests(unittest.TestCase):
                 gate.count(self.head, {})
 
 
+class WorkDirTests(unittest.TestCase):
+    def test_each_checkout_has_a_work_directory_of_its_own(self):
+        # Two worktrees' gates at once never count each other's binaries.
+        one = gate.work_dir('/home/a/gate/wt-one', {})
+        two = gate.work_dir('/home/a/gate/wt-two', {})
+        self.assertNotEqual(one, two)
+        self.assertEqual(one.parent, pathlib.Path('/tmp/zgx-perf'))
+        # The same checkout finds it again: its target, its cached base, and
+        # what `--stage head` built for `--stage run`.
+        self.assertEqual(one, gate.work_dir('/home/a/gate/wt-one', {}))
+
+    def test_zgx_perf_dir_still_chooses_it(self):
+        self.assertEqual(gate.work_dir('/home/a/gate/wt-one', {'ZGX_PERF_DIR': '/tmp/mine'}),
+                         pathlib.Path('/tmp/mine'))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -57,7 +57,24 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-WORK = pathlib.Path(os.environ.get('ZGX_PERF_DIR', '/tmp/zgx-perf'))
+
+
+def work_dir(root, environ=os.environ):
+    """Where a gate keeps its binaries, build target and caches:
+    `ZGX_PERF_DIR`, else a directory of the checkout's own under
+    /tmp/zgx-perf, named for its path as `base_checkout` names the base. Two
+    checkouts' gates at once (lanes sharing a machine) shared one, and one's
+    build replaced the binaries the other was counting: a scene crashed in
+    the loader. One checkout keeps its directory from run to run, so its
+    target and cached base binaries are kept, and `--stage run` finds what
+    `--stage head` built."""
+    if environ.get('ZGX_PERF_DIR'):
+        return pathlib.Path(environ['ZGX_PERF_DIR'])
+    tag = hashlib.sha1(str(pathlib.Path(root).resolve()).encode()).hexdigest()[:12]
+    return pathlib.Path('/tmp/zgx-perf') / tag
+
+
+WORK = work_dir(ROOT)
 # Where the cells that grew are explained function by function (`by_function`),
 # if anywhere: CI's perf job sets it and keeps it as an artifact. The most
 # cells explained, the largest first, each two more runs.
