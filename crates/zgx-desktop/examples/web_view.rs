@@ -771,7 +771,9 @@ fn run_fixture(cx: &mut zgx_desktop::WindowContext, web: WebView, fixture: Fixtu
             // Downloads: the app's handler hears each, with its name and
             // type. A `download` link it saves (here, in a temporary folder);
             // a response the page can't show (an iframe's octet stream) it
-            // cancels, which saves nothing.
+            // cancels, which saves nothing. It decides by name: WebKit names
+            // and types the octet stream as its version sniffs it
+            // (`application/octet-stream`, or `text/plain` as `Unknown.txt`).
             let folder = std::env::temp_dir().join(format!("zgx-fixture-downloads-{}", std::process::id()));
             let _ = std::fs::create_dir_all(&folder);
             let asked = Rc::new(RefCell::new(Vec::new()));
@@ -780,7 +782,7 @@ fn run_fixture(cx: &mut zgx_desktop::WindowContext, web: WebView, fixture: Fixtu
                 let (asked, statuses, folder) = (asked.clone(), statuses.clone(), folder.clone());
                 web.set_download_handler(move |request, responder| {
                     asked.borrow_mut().push((request.name.clone(), request.mime.clone()));
-                    if request.mime == "text/plain" {
+                    if request.name == "zgx-fixture.txt" {
                         let statuses = statuses.clone();
                         responder.save_to(folder.join(&request.name), move |status| {
                             statuses.borrow_mut().push(status)
@@ -815,7 +817,7 @@ fn run_fixture(cx: &mut zgx_desktop::WindowContext, web: WebView, fixture: Fixtu
             check(
                 "a download is the app's: saved where it says, or nothing",
                 asked.borrow().first() == Some(&("zgx-fixture.txt".into(), "text/plain".into()))
-                    && asked.borrow().get(1).is_some_and(|(_, mime)| mime == "application/octet-stream")
+                    && asked.borrow().get(1).is_some_and(|(name, _)| name != "zgx-fixture.txt")
                     && saved.as_deref() == Some("saved by the app")
                     && others == 1
                     && statuses.borrow().last() == Some(&zgx::web_view::DownloadStatus::Finished),
