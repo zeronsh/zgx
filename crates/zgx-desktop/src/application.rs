@@ -1083,7 +1083,7 @@ impl Application {
             #[cfg(target_os = "linux")]
             last_focused: None,
             #[cfg(target_os = "linux")]
-            pending_move: None,
+            pending_move: HeldMove::default(),
             factory,
             active: false,
             error: None,
@@ -5990,7 +5990,7 @@ struct WindowManager {
     /// The last pointer move heard and not yet handled (Linux): see
     /// `ApplicationHandler::window_event`.
     #[cfg(target_os = "linux")]
-    pending_move: Option<(WindowId, WindowEvent)>,
+    pending_move: HeldMove<WindowId, WindowEvent>,
     factory: WindowFactory,
     active: bool,
     error: Option<String>,
@@ -6017,6 +6017,33 @@ impl WindowManager {
         if let Some((id, event)) = self.pending_move.take() {
             self.window_event_now(event_loop, id, event);
         }
+    }
+}
+/// The pointer moves of one turn of the event loop, as one (Linux): the
+/// last move heard, for window `W`, not yet handled.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct HeldMove<W, E>(Option<(W, E)>);
+impl<W, E> Default for HeldMove<W, E> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl<W: PartialEq, E> HeldMove<W, E> {
+    /// A move for window `id`, held in place of the one before; that one is
+    /// handed back to handle now if it was another window's (each window
+    /// hears its own last move, in order).
+    fn moved(&mut self, id: W, event: E) -> Option<(W, E)> {
+        let before = self.0.replace((id, event));
+        match before {
+            Some((window, _)) if Some(&window) == self.0.as_ref().map(|(id, _)| id) => None,
+            before => before,
+        }
+    }
+    /// The move held, to handle now: before another event, or as the turn
+    /// ends.
+    fn take(&mut self) -> Option<(W, E)> {
+        self.0.take()
     }
 }
 /// The app's window a drag is over, and the pointer in its coordinates.
@@ -7247,14 +7274,9 @@ impl ApplicationHandler<Event> for WindowManager {
         #[cfg(target_os = "linux")]
         {
             if matches!(event, WindowEvent::CursorMoved { .. }) {
-                if self
-                    .pending_move
-                    .as_ref()
-                    .is_some_and(|(pending, _)| *pending != id)
-                {
-                    self.flush_move(event_loop);
+                if let Some((other, moved)) = self.pending_move.moved(id, event) {
+                    self.window_event_now(event_loop, other, moved);
                 }
-                self.pending_move = Some((id, event));
                 return;
             }
             self.flush_move(event_loop);
@@ -7914,6 +7936,31 @@ impl WindowCursor {
 
 #[cfg(test)]
 mod tests {
+    /// A turn's pointer moves come as one, its last (Linux, where every
+    /// motion a mouse reports arrives, up to 1000 a second): a burst of a
+    /// thousand is handled once, at the last place.
+    #[test]
+    fn a_turns_pointer_moves_come_as_its_last() {
+        let mut held = super::HeldMove::default();
+        for x in 0..1000 {
+            assert_eq!(held.moved(1, x), None);
+        }
+        assert_eq!(held.take(), Some((1, 999)));
+        assert_eq!(held.take(), None);
+    }
+
+    /// Moves for two windows come apart, each window's last, in order: the
+    /// first's is handed back as the second's arrives.
+    #[test]
+    fn a_move_for_another_window_hands_back_the_first_windows() {
+        let mut held = super::HeldMove::default();
+        assert_eq!(held.moved(1, "a1"), None);
+        assert_eq!(held.moved(1, "a2"), None);
+        assert_eq!(held.moved(2, "b1"), Some((1, "a2")));
+        assert_eq!(held.moved(2, "b2"), None);
+        assert_eq!(held.take(), Some((2, "b2")));
+    }
+
     /// Every `on_closed` handler runs, in order: a window's own state and
     /// its `open` state each had one, and the second dropped the first.
     #[test]
@@ -8465,7 +8512,7 @@ mod tests {
             #[cfg(target_os = "linux")]
             last_focused: None,
             #[cfg(target_os = "linux")]
-            pending_move: None,
+            pending_move: HeldMove::default(),
             factory,
             active: false,
             error: None,
@@ -8874,7 +8921,7 @@ mod tests {
             drag_over: Cell::new(None),
             carrying: None,
             last_focused: None,
-            pending_move: None,
+            pending_move: HeldMove::default(),
             factory,
             active: false,
             error: None,
