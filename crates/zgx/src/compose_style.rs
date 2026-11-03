@@ -575,9 +575,10 @@ struct Settled {
     parent_version: u64,
     intrinsic: Option<(f32, f32)>,
     content: Option<NodeId>,
-    /// A text node's size and family as inherited (tokens, maybe): a
-    /// paint-only run resolves them again, to follow their tokens.
-    text: Option<(Themed<f32>, Option<crate::theme::TokenId>)>,
+    /// A text node's size, family and colour as inherited (tokens, maybe):
+    /// a paint-only run resolves them again, to follow their tokens (a
+    /// theme switched, its parent's typography holding the same token).
+    text: Option<(Themed<f32>, Option<crate::theme::TokenId>, Themed<Color>)>,
 }
 /// A dynamic style setting box sizes alone (a bar growing): its shape, so
 /// that a run in the same shape compares its five size fields directly.
@@ -1086,9 +1087,10 @@ pub(crate) fn mount_style_with_intrinsic(
                 && (!last.parent || inherited.version() == last.parent_version)
                 && intrinsic.as_ref().map(|size| size.get()) == last.intrinsic
                 && layout_target.as_ref().and_then(|target| target.get()) == last.content
-                && last.text.as_ref().is_none_or(|(size, family)| {
+                && last.text.as_ref().is_none_or(|(size, family, color)| {
                     let scope = scope.as_deref();
-                    resolve_size(*size, scope) == Typography::size_value(applied.1.size)
+                    matches!(applied.1.color, Themed::Value(shown) if shown == resolve_color(*color, scope))
+                        && resolve_size(*size, scope) == Typography::size_value(applied.1.size)
                         && family.is_none_or(|token| {
                             family_is(token, scope, &applied.1.font.family, &mut body_subscribed)
                         })
@@ -1408,7 +1410,7 @@ pub(crate) fn mount_style_with_intrinsic(
                 parent_version,
                 intrinsic: intrinsic_size,
                 content: content_layout,
-                text: is_text.then_some((current.size, current.family)),
+                text: is_text.then_some((current.size, current.family, current.color)),
             });
             memo.box_plan = None;
         }

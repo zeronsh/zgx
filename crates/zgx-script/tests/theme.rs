@@ -456,3 +456,60 @@ fn a_token_margin_takes_its_sides_as_a_number_does() {
     assert_eq!(outer(&mut h, "m-num"), (2., 0.));
     assert_eq!(outer(&mut h, "m-token"), (2., 0.));
 }
+
+/// Text taking `$text.primary` or `$text.secondary` from the row around it
+/// follows every theme switch, not only the first: switched by the script
+/// (light, dark, light, dark) and by the system while the app follows it.
+/// (After the first, a text's paint-only style run resolved its inherited
+/// size and family again but not its colour, which stayed the first
+/// switch's.)
+#[test]
+fn inherited_token_text_colours_follow_every_theme_switch() {
+    use zgx::theme::{Appearance, tok};
+    let mut h = Harness::inline(
+        r##"ui.theme.current:set("zgx-dark")
+local function switch(id, name)
+    return ui.button { id = id, on_click = function() ui.theme.current:set(name) end, color = "#ff0000ff", "x" }
+end
+return ui.column {
+    switch("light", "zgx-light"), switch("dark", "zgx-dark"),
+    ui.row { id = "primary", color = "$text.primary", "Continue" },
+    ui.row { id = "secondary", color = "$text.secondary", "Later" },
+}"##,
+    );
+    h.frame();
+    // The theme's own colours, and which theme it is.
+    let check = |h: &mut Harness, when: &str, dark: bool| {
+        let scope = h.ui.theme_scope();
+        let primary = scope.color(tok::TEXT_PRIMARY);
+        let secondary = scope.color(tok::TEXT_SECONDARY);
+        let theme = if dark { DARK_TEXT } else { LIGHT_TEXT };
+        assert_eq!(primary, theme, "{when}: the theme");
+        assert_eq!(h.ink("primary"), primary, "{when}: text.primary");
+        assert_eq!(h.ink("secondary"), secondary, "{when}: text.secondary");
+    };
+    check(&mut h, "at first", true);
+    for (i, id) in ["light", "dark", "light", "dark"].into_iter().enumerate() {
+        h.click(id);
+        h.frame();
+        check(&mut h, &format!("switch {i} to {id}"), id == "dark");
+    }
+    // Following the system (dark, light), its appearance changing again
+    // and again.
+    h.ui.theme().follow_system(Some(("zgx-dark", "zgx-light")));
+    let appearances = [
+        Appearance::Light,
+        Appearance::Dark,
+        Appearance::Light,
+        Appearance::Dark,
+    ];
+    for (i, appearance) in appearances.into_iter().enumerate() {
+        h.ui.theme().set_system_appearance(appearance);
+        h.frame();
+        check(
+            &mut h,
+            &format!("system change {i}"),
+            appearance == Appearance::Dark,
+        );
+    }
+}
