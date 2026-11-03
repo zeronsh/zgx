@@ -121,6 +121,50 @@ fn a_locale_file_edited_changes_its_text_without_reloading_the_script() {
     assert_eq!(h.calls(), calls, "the script didn't run again");
 }
 
+/// Writes `text` to the locale file, dated later than it was read (mtime
+/// granularity), `secs` from now.
+fn edit(file: &Path, text: &str, secs: u64) {
+    std::fs::write(file, text).unwrap();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(secs);
+    std::fs::File::options()
+        .write(true)
+        .open(file)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+}
+
+#[test]
+fn a_locale_file_reloads_while_what_shows_it_calls_ui_t_again() {
+    // A function that makes its message as it runs: when the file's text
+    // changes it runs again, calling `ui.t` while the file is being read.
+    let code = r#"
+ui.i18n { dir = "locales", source = "en" }
+return ui.column {
+    ui.text { function() return ui.t("search"):get() end, id = "label" },
+}
+"#;
+    let path = app("reenter", code, &[("en", EN)]);
+    let mut h = harness(&path);
+    assert_eq!(h.text("label"), "Search");
+    let file = path.parent().unwrap().join("locales/en.json");
+    // A merge's conflict markers: the file doesn't parse, its keys fall
+    // back (here, to the key).
+    let conflicted = EN.replace(
+        "  \"search\": \"Search\"",
+        "<<<<<<< HEAD\n  \"search\": \"Search\"\n=======\n  \"search\": \"Find\"\n>>>>>>> branch",
+    );
+    edit(&file, &conflicted, 5);
+    assert!(h.host.reload_if_changed());
+    h.settle();
+    assert_eq!(h.text("label"), "search");
+    // Resolved: read again, and shown.
+    edit(&file, &EN.replace("\"Search\"", "\"Find\""), 10);
+    assert!(h.host.reload_if_changed());
+    h.settle();
+    assert_eq!(h.text("label"), "Find");
+}
+
 #[test]
 fn an_arabic_locale_runs_the_script_right_to_left() {
     let code = COUNTER.replace(
