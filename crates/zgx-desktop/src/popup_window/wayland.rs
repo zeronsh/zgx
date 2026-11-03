@@ -26,6 +26,14 @@
 //! other side is placed there by the scene (`Ui::set_popup_flipped`), so a
 //! popover's arrow faces its trigger.
 //!
+//! A popup's frames are paced by its surface's frame callbacks, as the
+//! window's are (winit's `pre_present_notify`): one drawn while the
+//! compositor has yet to take the last waits for it (`Popups::deadline`
+//! wakes the loop should its callback be missed). Its swap chain presents
+//! in FIFO, so a frame presented sooner blocked the event loop in the next
+//! acquire until the compositor took one, a refresh or more (7 to 20 ms a
+//! frame, as a slider dragged in a popup draws on each pointer move).
+//!
 //! The popup takes no grab: keys stay the window's, which drives menus as
 //! before, and a press on another app takes the window's focus, which
 //! closes them. Pointer input over a popup comes from zgx's own
@@ -47,12 +55,18 @@
 //! todo(wayland): the grab (`xdg_popup.grab`), with keys through a
 //! `wl_keyboard` of zgx's own.
 use super::PopupInput;
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
     backend::ObjectId,
     delegate_noop,
     protocol::{
+        wl_callback::{self, WlCallback},
         wl_compositor::WlCompositor,
         wl_pointer::{self, WlPointer},
         wl_region::WlRegion,
@@ -80,6 +94,11 @@ use zgx::scene::{NodeId, Rect, Scene};
 use zgx_gpu::{GpuContext, GpuError, GpuRenderer};
 
 type Sink = Rc<dyn Fn(PopupInput)>;
+
+/// How long a popup's frame waits for the compositor to take its last
+/// (its surface's frame callback) before it is drawn anyway: a callback
+/// missed, or withheld from a surface not shown, never stalls it.
+const FRAME_WAIT: Duration = Duration::from_millis(25);
 
 /// Where a popup's pointer input goes: its box's origin in its parent
 /// window (the scene's), and the parent's host.
@@ -121,6 +140,9 @@ struct State {
     /// one answered (`repositioned`).
     token: u32,
     repositioned: HashMap<ObjectId, u32>,
+    /// Popup surfaces whose last frame the compositor has yet to take
+    /// (its `wl_surface.frame` callback), and when it was presented.
+    framing: HashMap<ObjectId, Instant>,
 }
 
 /// zgx's queue on winit's display.
@@ -285,6 +307,7 @@ impl Shown {
         } = self;
         drop(renderer);
         client.state.targets.remove(&surface.id());
+        client.state.framing.remove(&surface.id());
         if client
             .state
             .over
@@ -448,6 +471,9 @@ pub(super) struct Popups {
     /// close: once each, so a popup with room on neither side settles.
     flipped: Vec<NodeId>,
     send: Sink,
+    /// When a popup's frame, waiting for the compositor to take its last,
+    /// is drawn anyway (`FRAME_WAIT`).
+    wake: Option<Instant>,
 }
 impl Popups {
     pub fn new(send: Sink) -> Self {
@@ -456,10 +482,17 @@ impl Popups {
             limited: Vec::new(),
             flipped: Vec::new(),
             send,
+            wake: None,
         }
     }
     pub fn showing(&self) -> bool {
         !self.shown.is_empty()
+    }
+    /// When the loop must turn for a popup's frame left waiting on its last
+    /// (`update`): drawn as its frame callback comes, which wakes the loop,
+    /// or at this at the latest.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.wake
     }
     /// After the scene's flush: show each visible popup root in an
     /// `xdg_popup` of `parent`, draw it again where it changed (always when
@@ -476,6 +509,7 @@ impl Popups {
         full: bool,
         takes: &dyn Fn(NodeId) -> Option<bool>,
     ) -> Result<(), GpuError> {
+        self.wake = None;
         if self.shown.is_empty() && scene.popups().is_empty() {
             return Ok(());
         }
@@ -491,7 +525,12 @@ impl Popups {
         let limited = &mut self.limited;
         let flipped = &mut self.flipped;
         let send = self.send.clone();
+        let wake = &mut self.wake;
         with_client(parent, |client| {
+            // Frame callbacks read off the socket since the loop dispatched
+            // (by the window's present, say).
+            let _ = client.queue.dispatch_pending(&mut client.state);
+            let qh = client.queue.handle();
             // Closed: no longer cut to the room it had.
             limited.retain(|(root, _)| {
                 let open = wanted.iter().any(|(wanted, _)| wanted == root);
@@ -655,7 +694,13 @@ impl Popups {
                     }
                 }
                 let revision = scene.layer_revision(*root);
-                let draw = full || popup.revision != Some(revision);
+                let due = full || popup.revision != Some(revision);
+                // The compositor yet to take its last frame: this one waits
+                // for it (its frame callback wakes the loop), drawn then.
+                let surface = popup.surface.id();
+                let waiting = waits(client.state.framing.get(&surface).copied(), Instant::now())
+                    .filter(|_| due);
+                let draw = due && waiting.is_none();
                 // Where it takes the pointer: set before its frame, which
                 // commits it (or committed alone, with no frame to draw).
                 // Found again only as it shows or draws (what it lays out
@@ -672,27 +717,40 @@ impl Popups {
                 if input_changed && !draw {
                     popup.surface.commit();
                 }
-                if draw {
+                if let Some(until) = waiting {
+                    popup.revision = None;
+                    *wake = Some(wake.map_or(until, |wake| wake.min(until)));
+                } else if draw {
                     popup.revision = Some(revision);
                     popup.renderer.set_popup(*root, *bounds);
                     let renderer = &mut popup.renderer;
+                    let (wl_surface, framing) = (&popup.surface, &mut client.state.framing);
+                    let started = Instant::now();
                     let status = crate::contain::run_frame(
                         &mut popup.fault,
                         revision,
-                        std::time::Instant::now(),
+                        started,
                         "a popup's frame",
                         crate::contain::queue,
                         || {
                             renderer.repaint_all();
-                            renderer
-                                .render(scene, &[])
-                                .and_then(|_| renderer.present_with_status())
+                            renderer.render(scene, &[])?;
+                            // Its frame callback, on the commit presenting it.
+                            renderer.present_with_notify(|| {
+                                wl_surface.frame(&qh, surface.clone());
+                                framing.insert(surface.clone(), Instant::now());
+                            })
                         },
                     );
                     for issue in popup.renderer.take_issues() {
                         crate::contain::queue_issue(issue);
                     }
-                    zgx_gpu::present_log::log(|| format!("popup draw {root:?} {status:?}"));
+                    zgx_gpu::present_log::log(|| {
+                        format!(
+                            "popup draw {root:?} {status:?} in {} us",
+                            started.elapsed().as_micros()
+                        )
+                    });
                 }
                 client.state.targets.insert(
                     popup.surface.id(),
@@ -715,6 +773,7 @@ impl Popups {
         self.shown.iter().map(|(_, popup)| &popup.renderer)
     }
     pub fn hide_all(&mut self, parent: &Window) {
+        self.wake = None;
         let shown = std::mem::take(&mut self.shown);
         with_client(parent, |client| {
             // The newest first: children before their parents.
@@ -837,6 +896,15 @@ fn surface_and_geometry(
     let width = size.0.clamp(1, surface.0 - x);
     let height = size.1.clamp(1, surface.1 - y);
     (surface, (x, y, width, height))
+}
+
+/// Until when a popup's next frame waits, its last presented at
+/// `presented` and not yet taken by the compositor (its frame callback
+/// outstanding): `FRAME_WAIT` on at most. `None`: it draws now.
+fn waits(presented: Option<Instant>, now: Instant) -> Option<Instant> {
+    presented
+        .map(|presented| presented + FRAME_WAIT)
+        .filter(|until| *until > now)
 }
 
 fn rects_match(a: Rect, b: Rect) -> bool {
@@ -1277,6 +1345,21 @@ impl Dispatch<XdgPopup, ()> for State {
         }
     }
 }
+impl Dispatch<WlCallback, ObjectId> for State {
+    fn event(
+        state: &mut Self,
+        _: &WlCallback,
+        event: wl_callback::Event,
+        surface: &ObjectId,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // The compositor took the frame: the next may be presented.
+        if let wl_callback::Event::Done { .. } = event {
+            state.framing.remove(surface);
+        }
+    }
+}
 delegate_noop!(State: ignore WlCompositor);
 delegate_noop!(State: ignore WlSurface);
 delegate_noop!(State: ignore WlRegion);
@@ -1459,6 +1542,19 @@ mod tests {
             Rules::of(Rect::new(16., 458., 200., 120.), Some(trigger), (0, -30)).0,
             small
         );
+    }
+
+    #[test]
+    fn a_popup_frame_waits_for_the_compositor_to_take_its_last_a_while_at_most() {
+        let now = Instant::now();
+        // Its last taken (the callback came), or none yet: drawn at once.
+        assert_eq!(waits(None, now), None);
+        // Presented 3 ms ago, not yet taken: it waits, until FRAME_WAIT on.
+        let presented = now - Duration::from_millis(3);
+        assert_eq!(waits(Some(presented), now), Some(presented + FRAME_WAIT));
+        // A callback that never came stalls it no longer than that.
+        assert_eq!(waits(Some(now - FRAME_WAIT), now), None);
+        assert_eq!(waits(Some(now - 2 * FRAME_WAIT), now), None);
     }
 
     #[test]

@@ -991,6 +991,11 @@ impl PopupHost {
     pub fn showing(&self) -> bool {
         !self.shown.is_empty()
     }
+    /// When the loop must turn for a popup's frame (none here: each draws
+    /// as it changes).
+    pub fn deadline(&self) -> Option<std::time::Instant> {
+        None
+    }
     /// No popup window can be made: popups go back inside the window.
     fn unsupported(&mut self, error: impl std::fmt::Display) {
         eprintln!("zgx: popups stay inside their window: {error}");
