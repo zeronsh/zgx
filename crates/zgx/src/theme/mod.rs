@@ -43,7 +43,7 @@ pub use file::{Theme, ThemeError, ThemeKind, ThemeOverride, TokenInput};
 pub(crate) use scope::Body;
 pub use scope::{Appearance, DARK, LIGHT, SystemPreferences, ThemeReader, ThemeScope, Themes};
 pub use tokens::{
-    ColorToken, FontToken, NumberToken, ShadowToken, TextToken, TokenId, TokenKind, interned,
-    lookup, standard, standard_kind, tok, token,
+    ColorToken, FontToken, NumberToken, ShadowToken, TERMINAL_ANSI, TextToken, TokenId, TokenKind,
+    interned, lookup, standard, standard_kind, standard_unset, tok, token,
 };
 pub use value::{TokenValue, alpha, family_name, font_family, hex, mix, over, parse_color};

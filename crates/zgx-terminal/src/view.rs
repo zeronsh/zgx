@@ -32,7 +32,9 @@ use zgx::{
     platform::PlatformService,
     reactive::{Runtime, Signal},
     semantics::{Live, Role},
-    terminal::{Terminal, TerminalBackend, TerminalCommand, TerminalEvent, WeakTerminal},
+    terminal::{
+        Terminal, TerminalBackend, TerminalColors, TerminalCommand, TerminalEvent, WeakTerminal,
+    },
 };
 
 /// Around the grid, in points (as the Ghostty backend's padding).
@@ -80,7 +82,9 @@ struct Engine {
     /// The grid's font: its family the theme's `font.mono` where the view
     /// is shown (`follow_theme_font`).
     font: RefCell<zgx::text_layout::FontStyle>,
-    look: Look,
+    /// The colours it draws in: its palette, with the theme's `terminal.*`
+    /// colours over it where the view is shown (`set_colors`).
+    look: Signal<Look>,
     /// Where the hidden editor sits: the cursor's cell, in points.
     caret: Signal<(f32, f32)>,
     /// An input method's composition, drawn at the cursor.
@@ -180,7 +184,7 @@ impl EngineTerminal {
             }),
             generation: Cell::new(0),
             font: RefCell::new(font),
-            look: Look::default(),
+            look: runtime.signal(Look::default()),
             caret: runtime.signal((PAD_X, PAD_Y)),
             preedit: runtime.signal(String::new()),
             news: runtime.signal(String::new()),
@@ -233,7 +237,7 @@ impl EngineTerminal {
                 }
             },
         )?;
-        session.set_palette(engine.look.palette.clone());
+        session.set_palette(engine.look.with_untracked(|look| look.palette.clone()));
         *engine.session.borrow_mut() = Some(session);
         engine.listen();
         engine.check_process();
@@ -477,20 +481,22 @@ impl Engine {
                     *row = true;
                 }
             }
-            for (row, damaged) in damaged.into_iter().enumerate() {
-                if !(all || damaged) {
-                    continue;
+            self.look.with_untracked(|look| {
+                for (row, damaged) in damaged.into_iter().enumerate() {
+                    if !(all || damaged) {
+                        continue;
+                    }
+                    let cursor = (cursor_row == Some(row)).then_some(CursorAt {
+                        column: point.column.0,
+                        shape,
+                        focused,
+                    });
+                    changed.push((
+                        row,
+                        paint::row(&term, row, look, metrics, cursor, selection.as_ref()),
+                    ));
                 }
-                let cursor = (cursor_row == Some(row)).then_some(CursorAt {
-                    column: point.column.0,
-                    shape,
-                    focused,
-                });
-                changed.push((
-                    row,
-                    paint::row(&term, row, &self.look, metrics, cursor, selection.as_ref()),
-                ));
-            }
+            });
             term.reset_damage();
         }
         self.fit_slots(screen_rows);
@@ -716,6 +722,19 @@ impl Engine {
             self.measure(&scene.borrow());
             self.fit(self.size.get());
         }
+    }
+
+    /// Draw in the theme's `colors` over the palette: every row repaints,
+    /// and programs asking the colours (OSC 4, 10, 11) are told these.
+    fn set_colors(&self, colors: &TerminalColors) {
+        let look = Look::themed(colors);
+        if self.look.with_untracked(|old| *old == look) {
+            return;
+        }
+        self.with_session(|session| session.set_palette(look.palette.clone()));
+        self.look.set(look);
+        self.full.set(true);
+        self.paint();
     }
 
     fn set_font_size(&self, size: f32) {
@@ -1408,6 +1427,9 @@ impl TerminalBackend for EngineTerminal {
             }
         }
     }
+    fn set_colors(&self, colors: &TerminalColors) {
+        self.0.set_colors(colors);
+    }
     fn needs_confirm_close(&self) -> bool {
         self.0
             .with_session(|session| {
@@ -1486,6 +1508,7 @@ pub fn terminal_view(term: &Terminal) -> View {
             *engine.frames.borrow_mut() = Some((*frames).clone());
         }
         follow_theme_font(cx, &engine);
+        zgx::terminal::follow_theme_colors(cx, &term);
         engine.views.set(engine.views.get() + 1);
         engine.full.set(true);
         let id = engine.latest_view.get() + 1;
@@ -1613,15 +1636,21 @@ fn view(engine: Rc<Engine>) -> View {
         let text = engine.preedit.clone();
         let caret = engine.caret.clone();
         let metrics = engine.metrics.get();
-        let font_color = paint::color(engine.look.palette.foreground);
+        let look = engine.look.clone();
         let shown = engine.preedit.clone();
         let font = engine.clone();
         text_signal(move || text.get())
             .absolute()
             .text_size(metrics.font_size)
-            .text_color(font_color)
-            .bg(rgba(0x2020_20ff))
             .reactive_style(move || {
+                // The composition in the terminal's own colours.
+                let (ink, behind) = look.with(|look| {
+                    let palette = &look.palette;
+                    (
+                        paint::color(palette.foreground),
+                        paint::color(palette.background),
+                    )
+                });
                 let (x, y) = caret.get();
                 let hidden = shown.with(String::is_empty);
                 // (In the grid's font: a new one makes a new generation.)
@@ -1630,6 +1659,8 @@ fn view(engine: Rc<Engine>) -> View {
                 Styles::new()
                     .left(x)
                     .top(y)
+                    .text_color(ink)
+                    .bg(behind)
                     .font_family(family)
                     .opacity(if hidden { 0. } else { 1. })
             })

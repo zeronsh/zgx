@@ -111,10 +111,16 @@ fn themes_extend_and_fall_back_to_their_type() {
     themes.register(Theme::new("test-base", ThemeKind::Dark).with(tok::RADIUS_MD, 3.));
     assert_eq!(themes.number(tok::RADIUS_MD), 3.);
     assert!(themes.set("no-such-theme").is_err());
-    // Every built-in theme defines every standard token.
+    // Every built-in theme defines every standard token but those unset
+    // unless a theme sets them.
     for name in [DARK, LIGHT] {
         themes.set(name).unwrap();
         for (id, token, _) in zgx::theme::standard() {
+            if zgx::theme::standard_unset(id) {
+                assert!(!themes.root().is_defined(id), "{name} sets {token}");
+                assert_eq!(themes.root().get_untracked(id), TokenValue::Unset);
+                continue;
+            }
             assert!(themes.root().is_defined(id), "{name} lacks {token}");
             assert_ne!(
                 themes.root().get_untracked(id),
@@ -462,6 +468,17 @@ fn vscode_themes_import_onto_tokens() {
     assert_eq!(hex(tok::SURFACE_BASE), "#181818", "sideBar.background");
     assert_eq!(hex(tok::INPUT_BG), "#313131", "input.background");
     assert_eq!(hex(tok::DANGER), "#f85149", "errorForeground");
+    // Its terminal colours, where it names them; the rest stay unset (the
+    // terminal's own).
+    assert_eq!(
+        hex(tok::TERMINAL_FOREGROUND),
+        "#cccccc",
+        "terminal.foreground"
+    );
+    assert_eq!(
+        themes.root().get_untracked(tok::TERMINAL_ANSI_1),
+        TokenValue::Unset
+    );
     // A colour it clears (`button.secondaryBackground: #00000000`) leaves
     // the button to the next candidate: the raised surface.
     assert_eq!(
@@ -480,6 +497,11 @@ fn vscode_themes_import_onto_tokens() {
         hex(tok::SELECTION_ITEM),
         "#e8e8e8",
         "list.activeSelectionBackground"
+    );
+    assert_eq!(
+        hex(tok::TERMINAL_CURSOR),
+        "#005fb8",
+        "terminalCursor.foreground"
     );
     // What VS Code has no colour for comes from zgx's theme of its type.
     assert_eq!(themes.number(tok::RADIUS_MD), 6.);
