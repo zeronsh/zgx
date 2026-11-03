@@ -905,8 +905,13 @@ impl Scene {
         );
         if let Some(options) = style.layout_options.as_deref() {
             // Hidden, it takes no room; sized by what it holds, it isn't
-            // fixed.
-            if options.display == Some(ViewDisplay::None) || self.size_calcs(id).is_some() {
+            // fixed; and an aspect ratio carries a limit on one axis over to
+            // the other (80 by 40 at least 100 wide, 2:1, lays out 100 by
+            // 50), which the clamps below don't.
+            if options.display == Some(ViewDisplay::None)
+                || self.size_calcs(id).is_some()
+                || options.aspect_ratio.is_some()
+            {
                 return None;
             }
             // Its limits as `resolved_leaf_style` works them out.

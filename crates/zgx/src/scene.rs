@@ -13770,6 +13770,155 @@ mod measure_work_tests {
             }
         }
     }
+    /// The same across the inputs a box's own size reads: each layout (a
+    /// row, column and overlay laid out here, a grid and a wrapping row by
+    /// taffy, a panel's border), points, percentages with and without a
+    /// basis, forced sizes, limits from the style and from its options (an
+    /// `auto` one clearing the style's), limits crossing the size, padding
+    /// wider than the box, baseline alignment and an aspect ratio. Wherever
+    /// `fixed_size` answers, it answers what laying the box out gives.
+    #[test]
+    fn a_style_sized_box_answers_any_probe_as_laying_it_out_does() {
+        use crate::layout::{Display, FlexWrap};
+        let mut scene = Scene::new(400., 300.);
+        let mut answered = 0;
+        let mut wrong = Vec::new();
+        let kinds = [
+            NodeKind::Container(Layout::Column),
+            NodeKind::Container(Layout::Row),
+            NodeKind::Container(Layout::Overlay),
+            NodeKind::Panel {
+                layout: Layout::Column,
+                quad: QuadStyle {
+                    border_width: 3.,
+                    border_color: Color(0, 0, 0, 255),
+                    ..QuadStyle::default()
+                },
+            },
+        ];
+        let options = [
+            None,
+            Some(LayoutOptions {
+                display: Some(Display::Grid),
+                columns: Some(1),
+                rows: Some(1),
+                ..Default::default()
+            }),
+            Some(LayoutOptions {
+                wrap: Some(FlexWrap::Wrap),
+                ..Default::default()
+            }),
+            Some(LayoutOptions {
+                min_width: Some(Length::Percent(0.5)),
+                max_height: Some(Length::Px(25.)),
+                ..Default::default()
+            }),
+            Some(LayoutOptions {
+                min_width: Some(Length::Auto),
+                max_width: Some(Length::Percent(0.1)),
+                ..Default::default()
+            }),
+            Some(LayoutOptions {
+                aspect_ratio: Some(2.),
+                ..Default::default()
+            }),
+        ];
+        let sizes = [
+            (Some(80.), None, Some(40.), None),
+            (None, Some(0.25), None, Some(0.5)),
+            (None, Some(1.), Some(10.), None),
+        ];
+        let limits = [
+            (None, None, None, None),
+            (Some(100.), None, None, Some(30.)),
+            (Some(50.), Some(20.), Some(60.), Some(5.)),
+        ];
+        let probes = [
+            Constraints {
+                width: Some(300.),
+                percent_width: Some(300.),
+                percent_height: Some(200.),
+                ..Default::default()
+            },
+            Constraints {
+                width: Some(20.),
+                height: Some(10.),
+                percent_width: Some(20.),
+                percent_height: Some(10.),
+                force_width: Some(20.),
+                ..Default::default()
+            },
+            Constraints {
+                force_width: Some(250.),
+                force_height: Some(7.),
+                ..Default::default()
+            },
+            Constraints {
+                width: Some(120.),
+                ..Default::default()
+            },
+        ];
+        for kind in &kinds {
+            for option in &options {
+                for &(width, width_percent, height, height_percent) in &sizes {
+                    for &(min_width, max_width, min_height, max_height) in &limits {
+                        for padding in [0., 6., 70.] {
+                            for align in [Align::Stretch, Align::Baseline] {
+                                let style = Style {
+                                    width,
+                                    width_percent,
+                                    height,
+                                    height_percent,
+                                    min_width,
+                                    max_width,
+                                    min_height,
+                                    max_height,
+                                    padding,
+                                    align,
+                                    layout_options: option.map(Arc::new),
+                                    ..Default::default()
+                                };
+                                let id = scene.append(scene.root(), kind.clone(), style);
+                                wrapping(&mut scene, id, "what it holds, laid out or not");
+                                scene.append(
+                                    id,
+                                    NodeKind::Rect(Color(1, 2, 3, 255)),
+                                    Style {
+                                        width: Some(500.),
+                                        height: Some(400.),
+                                        ..Default::default()
+                                    },
+                                );
+                                scene.flush();
+                                for probe in probes {
+                                    let probe = scene.relevant(id, probe);
+                                    if let Some(size) = scene.fixed_size(id, probe) {
+                                        answered += 1;
+                                        let laid = scene.measure_uncached(id, probe);
+                                        if size != laid {
+                                            wrong.push(format!(
+                                                "{kind:?} {option:?} {width:?}/{width_percent:?} {height:?}/{height_percent:?} \
+                                                 limits {min_width:?} {max_width:?} {min_height:?} {max_height:?} \
+                                                 padding {padding} {align:?} {probe:?}: {size:?} != {laid:?}"
+                                            ));
+                                        }
+                                    }
+                                }
+                                scene.remove(id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} of {answered}:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
+        assert!(answered > 500, "{answered} probes answered");
+    }
     #[test]
     fn arranging_children_asks_again_only_for_those_it_did_not_just_measure() {
         let mut scene = Scene::new(400., 300.);
