@@ -624,3 +624,42 @@ fn a_scope_with_fixed_text_sizes_keeps_them_under_the_system_text_size() {
     assert_eq!(fixed.number_untracked(tok::FONT_SIZE_MD), base);
     assert_eq!(nested.number_untracked(tok::FONT_SIZE_MD), base);
 }
+
+#[test]
+fn a_scopes_font_family_restyles_the_text_in_it() {
+    use zgx::text_layout::FontFamily;
+    let mut ui = Ui::new(400., 400.);
+    let sans = ui.signal(None::<&'static str>);
+    let mono = ui.signal(None::<&'static str>);
+    let (read_sans, read_mono) = (sans.clone(), mono.clone());
+    let handle = ui.mount(theme_scope_with(
+        move || {
+            let mut over = ThemeOverride::new();
+            if let Some(name) = read_sans.get() {
+                over = over.with(tok::FONT_SANS, FontFamily::from(name));
+            }
+            if let Some(name) = read_mono.get() {
+                over = over.with(tok::FONT_MONO, FontFamily::from(name));
+            }
+            over
+        },
+        column()
+            .child(text("Body").id("body"))
+            .child(text("Code").id("code").font_family(tok::FONT_MONO)),
+    ));
+    ui.scene.borrow_mut().flush();
+    let family = |ui: &Ui, id: &str| ui.scene.borrow().font(handle.find(id).unwrap()).family.clone();
+    let (body, code) = (family(&ui, "body"), family(&ui, "code"));
+    sans.set(Some("Chosen Sans"));
+    ui.prepare_frame();
+    assert_eq!(family(&ui, "body"), FontFamily::from("Chosen Sans"), "inherited text");
+    assert_eq!(family(&ui, "code"), code);
+    mono.set(Some("Chosen Mono"));
+    ui.prepare_frame();
+    assert_eq!(family(&ui, "code"), FontFamily::from("Chosen Mono"), "text in a font token");
+    sans.set(None);
+    mono.set(None);
+    ui.prepare_frame();
+    assert_eq!(family(&ui, "body"), body);
+    assert_eq!(family(&ui, "code"), code);
+}
