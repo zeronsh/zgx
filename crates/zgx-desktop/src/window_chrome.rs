@@ -1899,7 +1899,11 @@ mod mac {
     /// there as an opaque 40-point bar over the content's top. It is hidden as
     /// a window goes into full screen (the green button, `set_fullscreen`)
     /// and shown again once it is out, where it centres the traffic lights
-    /// again. Once per process; only zgx's inset toolbar is touched.
+    /// again. A transition that fails after it began (AppKit tells only the
+    /// window's delegate, winit's) would leave it hidden on a window that
+    /// isn't in full screen: `RESTORE_AFTER` on, one not in full screen gets
+    /// it back. One that fails to exit stays in full screen, its toolbar
+    /// rightly hidden. Once per process; only zgx's inset toolbar is touched.
     fn watch_fullscreen() {
         use objc2_app_kit::{
             NSWindowDidExitFullScreenNotification, NSWindowWillEnterFullScreenNotification,
@@ -1929,6 +1933,9 @@ mod mac {
                     return;
                 };
                 inset_toolbar_visible(&window, visible);
+                if !visible {
+                    restore_unless_fullscreen(window.windowNumber());
+                }
             });
             // SAFETY: with no queue given the block runs where AppKit posts
             // the notification (the main thread); the observers live as
@@ -1938,6 +1945,30 @@ mod mac {
             };
             std::mem::forget(observer);
         }
+    }
+
+    /// How long after a window began going into full screen its transition
+    /// is over, if it is: AppKit's animation takes about half a second.
+    const RESTORE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// `RESTORE_AFTER` on, the window numbered `number` gets its inset
+    /// toolbar back unless it is in full screen (its transition failed).
+    fn restore_unless_fullscreen(number: isize) {
+        let Ok(when) = dispatch2::DispatchTime::try_from(RESTORE_AFTER) else {
+            return;
+        };
+        let _ = dispatch2::DispatchQueue::main().after(when, move || {
+            let Some(mtm) = objc2::MainThreadMarker::new() else {
+                return;
+            };
+            let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+            let Some(window) = app.windowWithWindowNumber(number) else {
+                return;
+            };
+            if !window.styleMask().contains(NSWindowStyleMask::FullScreen) {
+                inset_toolbar_visible(&window, true);
+            }
+        });
     }
 
     /// Show or hide `window`'s toolbar if it is the inset title bar's.
