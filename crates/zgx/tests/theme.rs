@@ -648,15 +648,29 @@ fn a_scopes_font_family_restyles_the_text_in_it() {
             .child(text("Code").id("code").font_family(tok::FONT_MONO)),
     ));
     ui.scene.borrow_mut().flush();
-    let family = |ui: &Ui, id: &str| ui.scene.borrow().font(handle.find(id).unwrap()).family.clone();
+    let family = |ui: &Ui, id: &str| {
+        ui.scene
+            .borrow()
+            .font(handle.find(id).unwrap())
+            .family
+            .clone()
+    };
     let (body, code) = (family(&ui, "body"), family(&ui, "code"));
     sans.set(Some("Chosen Sans"));
     ui.prepare_frame();
-    assert_eq!(family(&ui, "body"), FontFamily::from("Chosen Sans"), "inherited text");
+    assert_eq!(
+        family(&ui, "body"),
+        FontFamily::from("Chosen Sans"),
+        "inherited text"
+    );
     assert_eq!(family(&ui, "code"), code);
     mono.set(Some("Chosen Mono"));
     ui.prepare_frame();
-    assert_eq!(family(&ui, "code"), FontFamily::from("Chosen Mono"), "text in a font token");
+    assert_eq!(
+        family(&ui, "code"),
+        FontFamily::from("Chosen Mono"),
+        "text in a font token"
+    );
     sans.set(None);
     mono.set(None);
     ui.prepare_frame();
@@ -673,13 +687,22 @@ fn a_font_token_given_a_name_where_its_kind_isnt_known_is_that_family() {
     let handle = ui.mount(theme_scope(
         ThemeOverride::new()
             .with(tok::FONT_SANS, TokenInput::parse("Chosen Sans").unwrap())
-            .with(tok::FONT_MONO, TokenInput::parse("\"3270 Mono\", monospace").unwrap()),
+            .with(
+                tok::FONT_MONO,
+                TokenInput::parse("\"3270 Mono\", monospace").unwrap(),
+            ),
         column()
             .child(text("Body").id("body"))
             .child(text("Code").id("code").font_family(tok::FONT_MONO)),
     ));
     ui.scene.borrow_mut().flush();
-    let family = |id: &str| ui.scene.borrow().font(handle.find(id).unwrap()).family.clone();
+    let family = |id: &str| {
+        ui.scene
+            .borrow()
+            .font(handle.find(id).unwrap())
+            .family
+            .clone()
+    };
     assert_eq!(family("body"), FontFamily::from("Chosen Sans"));
     assert_eq!(family("code"), FontFamily::from("3270 Mono"));
 }

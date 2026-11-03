@@ -73,6 +73,7 @@ impl Harness {
         self.texts().iter().any(|shown| shown == text)
     }
     /// The family `text` is drawn in, where it shows.
+    #[cfg(unix)]
     fn family_of(&self, text: &str) -> Option<zgx::text_layout::FontFamily> {
         let scene = self.ui.scene.borrow();
         scene.paint_items().find_map(|item| match item.kind {
