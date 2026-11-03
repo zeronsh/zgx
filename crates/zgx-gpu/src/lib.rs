@@ -13134,6 +13134,8 @@ impl GpuRenderer {
             format!("{plane} trim")
         });
         self.flush_pending();
+        // Fade bands' textures: a window at rest shows none being drawn.
+        self.release_bands();
         // The font cache read at launch, checked as the host first goes idle.
         font_cache_check();
         self.blur_scratch = None;
