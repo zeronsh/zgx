@@ -7,7 +7,12 @@
 //! for both, so the queue costs no wakeup of its own. A popup is a
 //! `wl_surface` with an `xdg_surface` and its `xdg_popup` role, made as it
 //! shows and destroyed as it hides, drawn by a renderer of its own on the
-//! window's device. Its positioner anchors it where the scene placed it (the
+//! window's device. One that moves or changes size (an animated popover) is
+//! moved and resized in place (`xdg_popup.reposition`), never shown anew:
+//! compositors fade popups in and out (Hyprland's `fadePopups`), so a new
+//! surface each frame flashed it see-through. (A compositor before
+//! `xdg_wm_base` v3 has no reposition: there it shows anew.) Its
+//! positioner anchors it where the scene placed it (the
 //! window geometry's coordinates, which start above the content by any title
 //! bar winit draws), against its trigger where it has one
 //! (`Scene::popup_anchor`): the compositor flips it to the trigger's other
@@ -17,7 +22,7 @@
 //! popup taller (or wider) than the output has room for is cut to it by the
 //! compositor, which says so in its configure: the scene lays its panel out
 //! no bigger (`Ui::set_popup_limit`), a menu scrolling its items, and it
-//! shows anew at that size. One the compositor flipped to its trigger's
+//! takes that size. One the compositor flipped to its trigger's
 //! other side is placed there by the scene (`Ui::set_popup_flipped`), so a
 //! popover's arrow faces its trigger.
 //!
@@ -93,6 +98,10 @@ struct State {
     /// Each `xdg_popup`'s place and size as last configured (its parent's
     /// window geometry's coordinates).
     placed: HashMap<ObjectId, (i32, i32, i32, i32)>,
+    /// The last `xdg_popup.reposition` token asked, and each popup's last
+    /// one answered (`repositioned`).
+    token: u32,
+    repositioned: HashMap<ObjectId, u32>,
 }
 
 /// zgx's queue on winit's display.
@@ -206,8 +215,9 @@ struct Shown {
     viewport: Option<WpViewport>,
     surface: WlSurface,
     rect: Rect,
-    /// The size it asked for (its box's, in whole points).
-    size: (i32, i32),
+    /// Its positioner's rules as last asked (its size, its box's in whole
+    /// points, among them).
+    rules: Rules,
     /// Where it asked to be, and its trigger, if any (its parent's window
     /// geometry's coordinates).
     asked: Rect,
@@ -240,6 +250,7 @@ impl Shown {
         }
         client.state.live.remove(&xdg.id());
         client.state.placed.remove(&popup.id());
+        client.state.repositioned.remove(&popup.id());
         popup.destroy();
         xdg.destroy();
         if let Some(viewport) = viewport {
@@ -247,6 +258,126 @@ impl Shown {
         }
         surface.destroy();
         let _ = client.connection.flush();
+    }
+    /// Whether it can be moved and resized in place (`xdg_popup` v3).
+    fn movable(&self) -> bool {
+        self.popup.version() >= 3
+    }
+    /// Move and resize it in place to `rect` (the scene's), by `rules`
+    /// (`xdg_popup.reposition`): the same surface, so no compositor fades
+    /// it out and a new one in, and the pointer stays over it. Its window
+    /// geometry and viewport take the new size, and its new place comes in
+    /// a configure, acked as it comes (it is live): its next frame, drawn at
+    /// that size, commits them all at once.
+    fn reposition(
+        &mut self,
+        client: &mut Client,
+        rect: Rect,
+        (rules, asked, trigger): (Rules, Rect, Option<Rect>),
+    ) {
+        let Some(wm_base) = client.state.wm_base.clone() else {
+            return;
+        };
+        let qh = client.queue.handle();
+        let positioner = rules.positioner(&wm_base, &qh);
+        client.state.token = client.state.token.wrapping_add(1);
+        let token = client.state.token;
+        self.popup.reposition(&positioner, token);
+        positioner.destroy();
+        if rules.size != self.rules.size {
+            let (width, height) = rules.size;
+            self.xdg.set_window_geometry(0, 0, width, height);
+            if let Some(viewport) = &self.viewport {
+                viewport.set_destination(width, height);
+            }
+        }
+        let id = self.popup.id();
+        for _ in 0..2 {
+            if client.state.repositioned.get(&id) == Some(&token) {
+                break;
+            }
+            if client.queue.roundtrip(&mut client.state).is_err() {
+                break;
+            }
+        }
+        self.rect = rect;
+        self.rules = rules;
+        self.asked = asked;
+        self.trigger = trigger;
+        // Drawn at its new size.
+        self.revision = None;
+    }
+}
+
+/// A popup's `xdg_positioner` rules (its parent's window geometry's
+/// coordinates): its size, anchor rectangle, anchor, gravity, offset and
+/// adjustments.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Rules {
+    size: (i32, i32),
+    anchor_rect: (i32, i32, i32, i32),
+    anchor: Anchor,
+    gravity: Gravity,
+    offset: (i32, i32),
+    adjust: ConstraintAdjustment,
+}
+impl Rules {
+    /// Those for a popup at `rect` opened against `trigger` (the surfaces'
+    /// coordinates: the scene's at its window's zoom), of a surface whose
+    /// window geometry starts at `origin`; and where it asks to be and its
+    /// trigger, in that geometry's coordinates.
+    fn of(rect: Rect, trigger: Option<Rect>, origin: (i32, i32)) -> (Self, Rect, Option<Rect>) {
+        let geometry = |r: Rect| {
+            Rect::new(
+                r.x - origin.0 as f32,
+                r.y - origin.1 as f32,
+                r.width,
+                r.height,
+            )
+        };
+        let (asked, trigger) = (geometry(rect), trigger.map(geometry));
+        let (anchor_rect, anchor, gravity, offset, adjust) = position(asked, trigger);
+        let rules = Rules {
+            size: (
+                rect.width.ceil().max(1.) as i32,
+                rect.height.ceil().max(1.) as i32,
+            ),
+            anchor_rect: (
+                anchor_rect.x as i32,
+                anchor_rect.y as i32,
+                anchor_rect.width as i32,
+                anchor_rect.height as i32,
+            ),
+            anchor,
+            gravity,
+            offset,
+            adjust,
+        };
+        (rules, asked, trigger)
+    }
+    fn positioner(&self, wm_base: &XdgWmBase, qh: &QueueHandle<State>) -> XdgPositioner {
+        let positioner = wm_base.create_positioner(qh, ());
+        positioner.set_size(self.size.0, self.size.1);
+        let (x, y, width, height) = self.anchor_rect;
+        positioner.set_anchor_rect(x, y, width, height);
+        positioner.set_anchor(self.anchor);
+        positioner.set_gravity(self.gravity);
+        positioner.set_offset(self.offset.0, self.offset.1);
+        positioner.set_constraint_adjustment(self.adjust);
+        positioner
+    }
+}
+
+/// Where the window geometry of the surface a popup opens from starts (the
+/// surfaces' coordinates): `holder`'s box (the scene's) where it opens from
+/// a popup, else `parent`'s, below any title bar winit draws.
+fn origin_of(parent: &Window, holder: Option<Rect>, zoom: f32) -> Option<(i32, i32)> {
+    match holder {
+        Some(rect) => {
+            let rect = super::window_rect(rect, zoom);
+            Some((rect.x.round() as i32, rect.y.round() as i32))
+        }
+        None => xdg_surface(parent).map(|(_, origin)| origin),
     }
 }
 
@@ -327,16 +458,17 @@ impl Popups {
                     (send)(PopupInput::Dismiss);
                 }
             }
-            // What goes: popups no longer wanted, or moved or resized (to
-            // show anew), and the popups of those (a parent goes after its
-            // children, as the protocol has it).
+            // What goes: popups no longer wanted, or moved or resized where
+            // the compositor cannot do that in place (`xdg_popup` before v3:
+            // to show anew), and the popups of those (a parent goes after
+            // its children, as the protocol has it).
             let mut kept = shown;
             let mut going: Vec<NodeId> = kept
                 .iter()
                 .filter(|(root, popup)| {
-                    !wanted
-                        .iter()
-                        .any(|(wanted, bounds)| wanted == root && rects_match(*bounds, popup.rect))
+                    !wanted.iter().any(|(wanted, bounds)| {
+                        wanted == root && (popup.movable() || rects_match(*bounds, popup.rect))
+                    })
                 })
                 .map(|(root, _)| *root)
                 .collect();
@@ -363,6 +495,28 @@ impl Popups {
             }
             for (root, bounds) in &wanted {
                 let index = match kept.iter().position(|(shown, _)| shown == root) {
+                    // Moved or resized, or its trigger or the popup it opens
+                    // from moved: moved and resized in place.
+                    Some(index) if kept[index].1.movable() => {
+                        let trigger = scene.popup_anchor(*root).map(|anchor| scene.bounds(anchor));
+                        let holder = kept[index].1.parent.and_then(|holder| {
+                            kept.iter()
+                                .find(|(shown, _)| *shown == holder)
+                                .map(|(_, popup)| popup.rect)
+                        });
+                        let zoomed = |r: Rect| super::window_rect(r, zoom);
+                        if let Some(origin) = origin_of(parent, holder, zoom) {
+                            let wants = Rules::of(zoomed(*bounds), trigger.map(zoomed), origin);
+                            let popup = &mut kept[index].1;
+                            if wants.0 != popup.rules || !rects_match(*bounds, popup.rect) {
+                                zgx_gpu::present_log::log(|| {
+                                    format!("popup reposition {root:?} to {bounds:?}")
+                                });
+                                popup.reposition(client, *bounds, wants);
+                            }
+                        }
+                        index
+                    }
                     Some(index) => index,
                     None => {
                         let anchor = scene.popup_anchor(*root);
@@ -388,12 +542,12 @@ impl Popups {
                 };
                 let popup = &mut kept[index].1;
                 // Cut by the compositor to the room on its output: the scene
-                // lays it out no bigger, and it shows anew at that size.
+                // lays it out no bigger, and it takes that size.
                 let placed = client.state.placed.get(&popup.popup.id()).copied();
                 if let Some((_, _, width, height)) = placed
                     && width > 0
                     && height > 0
-                    && (width < popup.size.0 || height < popup.size.1)
+                    && (width < popup.rules.size.0 || height < popup.rules.size.1)
                     && !limited.contains(&(*root, (width, height)))
                 {
                     limited.retain(|(limited, _)| limited != root);
@@ -406,7 +560,7 @@ impl Popups {
                     });
                 }
                 // Flipped by the compositor to its trigger's other side: the
-                // scene places it there, and it shows anew.
+                // scene places it there, and it moves there.
                 if let Some((x, y, width, height)) = placed
                     && let Some(trigger) = popup.trigger
                     && !flipped.contains(root)
@@ -603,8 +757,8 @@ fn show(
             (xdg, origin)
         }
     };
-    let width = rect.width.ceil().max(1.) as i32;
-    let height = rect.height.ceil().max(1.) as i32;
+    let (rules, asked, trigger) = Rules::of(rect, trigger, (gx, gy));
+    let (width, height) = rules.size;
     let surface = compositor.create_surface(&qh, ());
     let viewport = client
         .state
@@ -612,21 +766,7 @@ fn show(
         .as_ref()
         .map(|viewporter| viewporter.get_viewport(&surface, &qh, ()));
     let xdg = wm_base.get_xdg_surface(&surface, &qh, ());
-    let positioner = wm_base.create_positioner(&qh, ());
-    positioner.set_size(width, height);
-    // In the window geometry's coordinates.
-    let geometry = |r: Rect| Rect::new(r.x - gx as f32, r.y - gy as f32, r.width, r.height);
-    let (anchor, edge, gravity, (dx, dy), adjust) = position(geometry(rect), trigger.map(geometry));
-    positioner.set_anchor_rect(
-        anchor.x as i32,
-        anchor.y as i32,
-        anchor.width as i32,
-        anchor.height as i32,
-    );
-    positioner.set_anchor(edge);
-    positioner.set_gravity(gravity);
-    positioner.set_offset(dx, dy);
-    positioner.set_constraint_adjustment(adjust);
+    let positioner = rules.positioner(&wm_base, &qh);
     let popup = xdg.get_popup(Some(&parent_xdg), &positioner, &qh, ());
     positioner.destroy();
     xdg.set_window_geometry(0, 0, width, height);
@@ -695,9 +835,9 @@ fn show(
         viewport,
         surface,
         rect: scene_rect,
-        size: (width, height),
-        asked: geometry(rect),
-        trigger: trigger.map(geometry),
+        rules,
+        asked,
+        trigger,
         revision: None,
         fault: None,
         parent: of.map(|(holder, ..)| holder),
@@ -920,6 +1060,9 @@ impl Dispatch<XdgPopup, ()> for State {
                 });
                 state.placed.insert(popup.id(), (x, y, width, height));
             }
+            xdg_popup::Event::Repositioned { token } => {
+                state.repositioned.insert(popup.id(), token);
+            }
             xdg_popup::Event::PopupDone => state.done.push(popup.id()),
             _ => {}
         }
@@ -974,6 +1117,35 @@ mod tests {
         assert_eq!(
             position(Rect::new(5., 6., 7., 8.), None).0,
             Rect::new(5., 6., 1., 1.)
+        );
+    }
+
+    #[test]
+    fn a_popup_growing_against_its_trigger_asks_only_a_new_size() {
+        // In the window geometry, which starts 30 above the content (a title
+        // bar winit draws).
+        let trigger = Rect::new(16., 426., 120., 28.);
+        let (small, asked, seen) =
+            Rules::of(Rect::new(16., 458., 200., 120.), Some(trigger), (0, -30));
+        assert_eq!(asked, Rect::new(16., 488., 200., 120.));
+        assert_eq!(seen, Some(Rect::new(16., 456., 120., 28.)));
+        assert_eq!(small.size, (200, 120));
+        assert_eq!(small.anchor_rect, (16, 452, 120, 36));
+        // Opened out, below the trigger as before: the same rules but its
+        // size, whole points rounded up. Repositioned in place.
+        let (large, ..) = Rules::of(Rect::new(16., 458., 320.4, 240.), Some(trigger), (0, -30));
+        assert_eq!(large.size, (321, 240));
+        assert_eq!(
+            Rules {
+                size: small.size,
+                ..large
+            },
+            small
+        );
+        // The same box asks the same: nothing to do.
+        assert_eq!(
+            Rules::of(Rect::new(16., 458., 200., 120.), Some(trigger), (0, -30)).0,
+            small
         );
     }
 
