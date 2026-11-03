@@ -1,4 +1,0 @@
----
-section: fixed
----
-- **A list in a box easing shut lays out** (zgx): a `ui.list` (or scroll view) of a set height in a column, in a box that clips while its height eases (a fold), never settled once its rows held a percentage height (`h_full`): the column's floor counted the list as nothing, so it squeezed the list, which built no rows, and the next pass all of them. A list's or scroll view's set height now counts toward its column's min-content height, as CSS counts a scroll container's: the column keeps the list's height and the box clips it, with or without percentages inside. What moves: a list or scroll view with its own height, in a column with no height of its own that is shrunk and holds percentage heights, used to be squeezed below its height and now keeps it, clipped by what clips above it (as it already did without percentages inside).
