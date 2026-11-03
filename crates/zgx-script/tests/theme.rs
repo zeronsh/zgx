@@ -369,3 +369,90 @@ fn ui_prefers_follows_the_systems_display_settings() {
     h.frames(1);
     assert_eq!(h.text("p"), "true false true", "as the system changes");
 }
+
+/// A box's corner radii (top left, top right, bottom right, bottom left)
+/// and border widths (top, right, bottom, left) as painted.
+fn quad_of(h: &mut Harness, id: &str) -> ([f32; 4], [f32; 4]) {
+    let node = h.find(id).unwrap_or_else(|| panic!("no node `{id}`"));
+    match h.ui.scene.borrow().kind(node) {
+        NodeKind::Panel { quad, .. } | NodeKind::Quad(quad) => {
+            let d = quad.decoration.as_ref();
+            let corners = d.and_then(|d| d.corners).map_or([quad.radius; 4], |c| {
+                [c.top_left, c.top_right, c.bottom_right, c.bottom_left]
+            });
+            let borders = d
+                .and_then(|d| d.border_widths)
+                .map_or([quad.border_width; 4], |b| {
+                    [b.top, b.right, b.bottom, b.left]
+                });
+            (corners, borders)
+        }
+        other => panic!("`{id}` is not a box: {other:?}"),
+    }
+}
+
+const SHORTHANDS: &str = r##"
+ui.theme.tokens { app = { r = 24, s = 10, b = 3 } }
+local function box(p) p.w, p.h, p.bg = 160, 80, "#3a3a44"; return ui.div(p) end
+local function holder(p) p.bg = "#3a3a44"; p[1] = ui.div { id = p.id .. "-in", w = 20, h = 20 }; return ui.column(p) end
+return ui.column { gap = 4,
+    box { id = "r-token", rounded = "$app.r", rounded_tl = 0, rounded_tr = 0 },
+    box { id = "r-num", rounded = 24, rounded_tl = 0, rounded_tr = 0 },
+    box { id = "r-token-corners", rounded = "$app.r", corners = { 1, 2, 3, 4 } },
+    box { id = "b-token", border = "$app.b", border_color = "#ffffff", border_sides = { 0, 1, 0, 1 } },
+    box { id = "b-num", border = 3, border_color = "#ffffff", border_sides = { 0, 1, 0, 1 } },
+    holder { id = "p-token", p = "$app.s", pt = 0, pl = 2 },
+    holder { id = "p-num", p = 10, pt = 0, pl = 2 },
+    ui.row { id = "m-token-row", holder { id = "m-token", m = "$app.s", mt = 0, ml = 2 } },
+    ui.row { id = "m-num-row", holder { id = "m-num", m = 10, mt = 0, ml = 2 } },
+}"##;
+
+/// `rounded = "$app.r", rounded_tl = 0, rounded_tr = 0` rounds the
+/// bottom corners by the token, as `rounded = 24` does: the token resolves
+/// first and the single corners lie over it. `corners` replaces it whole.
+#[test]
+fn a_token_radius_takes_its_single_corners_as_a_number_does() {
+    let mut h = Harness::inline(SHORTHANDS);
+    assert_eq!(h.error(), None);
+    assert_eq!(quad_of(&mut h, "r-num").0, [0., 0., 24., 24.]);
+    assert_eq!(quad_of(&mut h, "r-token").0, [0., 0., 24., 24.]);
+    assert_eq!(quad_of(&mut h, "r-token-corners").0, [1., 2., 3., 4.]);
+}
+
+/// `border = "$app.b", border_sides = { … }` gives the sides, as
+/// `border = 3` does.
+#[test]
+fn a_token_border_takes_its_sides_as_a_number_does() {
+    let mut h = Harness::inline(SHORTHANDS);
+    assert_eq!(quad_of(&mut h, "b-num").1, [0., 1., 0., 1.]);
+    assert_eq!(quad_of(&mut h, "b-token").1, [0., 1., 0., 1.]);
+}
+
+/// Where a box's first child lies inside it: its padding at the left and
+/// top.
+fn inner(h: &mut Harness, id: &str) -> (f32, f32) {
+    let (outer, inner) = (h.bounds(id), h.bounds(&format!("{id}-in")));
+    (inner.x - outer.x, inner.y - outer.y)
+}
+
+/// `p = "$app.s", pt = 0, pl = 2` pads the top 0 and the left 2, as
+/// `p = 10` does.
+#[test]
+fn a_token_padding_takes_its_sides_as_a_number_does() {
+    let mut h = Harness::inline(SHORTHANDS);
+    assert_eq!(inner(&mut h, "p-num"), (2., 0.));
+    assert_eq!(inner(&mut h, "p-token"), (2., 0.));
+}
+
+/// `m = "$app.s", mt = 0, ml = 2` sets the top margin 0 and the left 2,
+/// as `m = 10` does.
+#[test]
+fn a_token_margin_takes_its_sides_as_a_number_does() {
+    let mut h = Harness::inline(SHORTHANDS);
+    let outer = |h: &mut Harness, id: &str| {
+        let (row, b) = (h.bounds(&format!("{id}-row")), h.bounds(id));
+        (b.x - row.x, b.y - row.y)
+    };
+    assert_eq!(outer(&mut h, "m-num"), (2., 0.));
+    assert_eq!(outer(&mut h, "m-token"), (2., 0.));
+}
