@@ -9616,32 +9616,33 @@ impl Scene {
         {
             return kept.size;
         }
-        // A box its style sizes, unchanged and asked under constraints it
-        // has no answer for (a width change's probes of a page's levels),
-        // answers from its style, laying out nothing in it (`fixed_size`).
-        // A changed box lays out as before: where it is probed is most often
-        // where it is placed, so the result `arrange` reuses. Asked only of a
-        // box with children (texts, the most probed, pass at the kind) given
-        // a width and a height, and out of line.
-        if !full
-            && clean
-            && matches!(node.kind, NodeKind::Container(_) | NodeKind::Panel { .. })
-            && style_may_fix(&node.style, constraints)
-            && let Some(size) = self.probe_fixed(id, *constraints)
-        {
-            return size;
-        }
         // Measuring recurses into the children: one level of the tree more.
         self.measure_depth += 1;
         let size = crate::deep(self.measure_depth, || {
-            self.measure_uncached(id, *constraints)
+            self.measure_uncached(id, *constraints, full)
         });
         self.measure_depth -= 1;
         size
     }
-    /// `fixed_size`'s answer to a probe, kept as one (`sizes`, `fixed`).
+    /// A probe of a box its style sizes, under constraints other than the
+    /// ones it was last laid out under (a width change's probes of a page's
+    /// levels, its natural, flexed and stretched sizes), answered from its
+    /// style, laying out nothing in it (`fixed_size`), and kept as one
+    /// (`sizes`, `fixed`). Under the ones it was last laid out under, where
+    /// it is most often placed again, it lays out as before: the result
+    /// `arrange` reuses.
     #[inline(never)]
     fn probe_fixed(&mut self, id: NodeId, constraints: Constraints) -> Option<(f32, f32)> {
+        let node = self.tree_node(id);
+        if !matches!(node.kind, NodeKind::Container(_) | NodeKind::Panel { .. })
+            || !style_may_fix(&node.style, &constraints)
+            || node
+                .measurement
+                .as_ref()
+                .is_some_and(|m| m.constraints == constraints)
+        {
+            return None;
+        }
         let size = self.fixed_size(id, constraints)?;
         let pass = self.layout_pass;
         let node = self.tree_node_mut(id);
@@ -9656,9 +9657,13 @@ impl Scene {
         node.sizes.truncate(PROBE_SIZES);
         Some(size)
     }
-    /// `measured`, when nothing kept serves.
+    /// `measured`, when nothing kept serves: a probe (`!full`) of a box its
+    /// style sizes answered so (`probe_fixed`).
     /// A contents or zoomed node goes to `measure_special`.
-    fn measure_uncached(&mut self, id: NodeId, constraints: Constraints) -> (f32, f32) {
+    fn measure_uncached(&mut self, id: NodeId, constraints: Constraints, full: bool) -> (f32, f32) {
+        if !full && let Some(size) = self.probe_fixed(id, constraints) {
+            return size;
+        }
         // Timed for devtools' layout attribution while they trace.
         let _traced = crate::profile::layout_span(id);
         // Checked by `measured`, its one caller.
@@ -13817,7 +13822,7 @@ mod measure_work_tests {
             for probe in probes {
                 let probe = scene.relevant(id, probe);
                 if let Some(size) = scene.fixed_size(id, probe) {
-                    assert_eq!(size, scene.measure_uncached(id, probe), "{probe:?}");
+                    assert_eq!(size, scene.measure_uncached(id, probe, true), "{probe:?}");
                 }
             }
         }
@@ -13946,7 +13951,7 @@ mod measure_work_tests {
                                     let probe = scene.relevant(id, probe);
                                     if let Some(size) = scene.fixed_size(id, probe) {
                                         answered += 1;
-                                        let laid = scene.measure_uncached(id, probe);
+                                        let laid = scene.measure_uncached(id, probe, true);
                                         if size != laid {
                                             wrong.push(format!(
                                                 "{kind:?} {option:?} {width:?}/{width_percent:?} {height:?}/{height_percent:?} \
