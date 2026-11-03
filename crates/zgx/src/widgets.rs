@@ -1549,7 +1549,7 @@ pub(crate) struct UiStorage {
     /// Focus to find again in what replaced the subtree it was in, once the
     /// frame settles (`switch_keeping_focus`): the new subtree's root, and
     /// where focus was.
-    refocus_trail: RefCell<Option<Box<(NodeId, FocusTrail)>>>,
+    refocus_trail: RefCell<Option<Box<(NodeId, Refocus)>>>,
     /// Tab going on into a list's row, while the key is handled
     /// (`tab_into_next_row`).
     row_focus: Cell<Option<RowFocus>>,
@@ -3352,14 +3352,45 @@ impl Ui {
     pub fn contain_layout_feedback(&self) {
         self.storage.contains_layout.set(true);
     }
-    /// Where focus is inside `root`, if it is: to find again in what
+    /// Where focus is inside `root`, and where each modal scope gives it
+    /// back to as it closes, if any is there: to find again in what
     /// replaces `root` (`refocus_trail`).
-    pub(crate) fn focus_trail(&self, root: NodeId) -> Option<FocusTrail> {
-        let focused = self.input.focused()?;
-        let scene = self.scene.borrow();
-        if !scene.contains(focused) {
-            return None;
+    pub(crate) fn focus_trail(&self, root: NodeId) -> Option<Refocus> {
+        let inside = |node: NodeId| {
+            let scene = self.scene.borrow();
+            scene.contains(node) && (node == root || scene.ancestors(node).any(|a| a == root))
+        };
+        let focus = (self.input.focused())
+            .filter(|node| inside(*node))
+            .and_then(|node| self.trail_of(root, node));
+        // Scopes in `root` (built again, as a modal open across a reload),
+        // and those that give focus back to a node in it.
+        let mut scopes = Vec::new();
+        for (scope, previous, trigger) in self.input.scope_returns() {
+            let gone = |node: Option<NodeId>| node.is_some_and(inside);
+            if !inside(scope) && !gone(previous) && !gone(trigger) {
+                continue;
+            }
+            let at = scope;
+            let back = |node: Option<NodeId>| match node {
+                Some(node) if inside(node) => {
+                    self.trail_of(root, node).map_or(Back::Nowhere, Back::Trail)
+                }
+                Some(node) => Back::Kept(node),
+                None => Back::Nowhere,
+            };
+            scopes.push(ScopeTrail {
+                at,
+                previous: back(previous),
+                trigger: back(trigger),
+            });
         }
+        (focus.is_some() || !scopes.is_empty()).then_some(Refocus { focus, scopes })
+    }
+    /// Where `focused`, inside `root`, is: its place, its row if in a
+    /// list's, its role and name.
+    fn trail_of(&self, root: NodeId, focused: NodeId) -> Option<FocusTrail> {
+        let scene = self.scene.borrow();
         let path = index_path(&scene, root, focused)?;
         // In a list's row: the row by its index in the list (its place
         // among the mounted rows is the order they were built in).
@@ -3404,7 +3435,9 @@ impl Ui {
     /// at the same place in it; else the one focusable node of the same
     /// role and accessible name, if only one has them; else the node at
     /// the same place.
-    pub(crate) fn refocus_trail(&self, root: NodeId, trail: FocusTrail) {
+    /// Each modal scope's node to give focus back to, found again the
+    /// same way.
+    pub(crate) fn refocus_trail(&self, root: NodeId, trail: Refocus) {
         *self.storage.refocus_trail.borrow_mut() = Some(Box::new((root, trail)));
     }
     #[cold]
@@ -3413,29 +3446,80 @@ impl Ui {
         let Some(pending) = self.storage.refocus_trail.borrow_mut().take() else {
             return;
         };
-        let (root, mut trail) = *pending;
+        let (root, mut refocus) = *pending;
         if !self.scene.borrow().contains(root) {
             return;
         }
+        // Where scopes give focus back, at once (a row not built: by name
+        // or place).
+        // A scope whose root is gone was built again (a modal open across
+        // the reload, wherever it shows): the scopes opened since, in the
+        // order they were.
+        let mut built = {
+            let returns = self.input.scope_returns();
+            let before: Vec<NodeId> = refocus.scopes.iter().map(|scope| scope.at).collect();
+            (returns.into_iter().map(|(scope, ..)| scope))
+                .filter(|scope| !before.contains(scope))
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        for scope in std::mem::take(&mut refocus.scopes) {
+            let at = match self.scene.borrow().contains(scope.at) {
+                true => Some(scope.at),
+                false => built.next(),
+            };
+            let back = |back: &Back| match back {
+                Back::Kept(node) => Some(*node),
+                Back::Trail(trail) => self.find_trail(root, trail, false).ok().flatten(),
+                Back::Nowhere => None,
+            };
+            if let Some(at) = at {
+                let (previous, trigger) = (back(&scope.previous), back(&scope.trigger));
+                self.input.set_scope_returns(at, previous, trigger);
+            }
+        }
+        let Some(trail) = refocus.focus.as_mut() else {
+            return;
+        };
+        let found = match self.find_trail(root, trail, trail.tries < 3) {
+            Ok(found) => found,
+            // Not built: shown, and looked for again as it is.
+            Err((list, row)) => {
+                if let Some(reveal) = self.storage.list_reveals.borrow().get(&list) {
+                    let serial = reveal.with_untracked(|r| r.0).wrapping_add(1);
+                    reveal.set((serial, row, crate::compose::RowAlign::Nearest));
+                }
+                trail.tries += 1;
+                *self.storage.refocus_trail.borrow_mut() = Some(Box::new((root, refocus)));
+                return;
+            }
+        };
+        if let Some(node) = found {
+            self.storage.refocus.set(None);
+            self.input.focus(&self.scene, Some(node));
+        }
+    }
+    /// What in `root` stands where `trail` says: in a list's row, the row
+    /// with the same index, at the same place in it; else the one
+    /// focusable node of the same role and accessible name, if only one
+    /// has them; else the node at the same place. A row not built is
+    /// `Err` (its list and index) if `wait`, else passed over.
+    fn find_trail(
+        &self,
+        root: NodeId,
+        trail: &FocusTrail,
+        wait: bool,
+    ) -> Result<Option<NodeId>, (NodeId, usize)> {
         let focusable = |id: NodeId| self.input.options(id).is_some_and(|o| o.focusable);
         let found = match &trail.row {
             Some(step) => match self.find_row(root, step) {
                 Ok(found) => found.filter(|id| focusable(*id)),
-                // Not built: shown, and looked for again as it is.
-                Err(list) if trail.tries < 3 => {
-                    if let Some(reveal) = self.storage.list_reveals.borrow().get(&list) {
-                        let serial = reveal.with_untracked(|r| r.0).wrapping_add(1);
-                        reveal.set((serial, step.row, crate::compose::RowAlign::Nearest));
-                    }
-                    trail.tries += 1;
-                    *self.storage.refocus_trail.borrow_mut() = Some(Box::new((root, trail)));
-                    return;
-                }
+                Err(list) if wait => return Err((list, step.row)),
                 Err(_) => None,
             },
             None => None,
         };
-        let found = found.or_else(|| {
+        Ok(found.or_else(|| {
             let scene = self.scene.borrow();
             // Named alike by no other: that one.
             if !trail.label.is_empty() {
@@ -3460,11 +3544,7 @@ impl Ui {
             }
             // Else the node at the same place.
             follow_path(&scene, root, &trail.path).filter(|id| focusable(*id))
-        });
-        if let Some(node) = found {
-            self.storage.refocus.set(None);
-            self.input.focus(&self.scene, Some(node));
-        }
+        }))
     }
     /// Tab from `focused` would go to `next`, out of the list `focused` is
     /// in a row of: if the list has a row on that side it hasn't built (or
@@ -8201,7 +8281,27 @@ mod mount_initialization_tests {
     }
 }
 
-/// Where focus was in a subtree replaced (`Ui::focus_trail`): the focused
+/// Where focus was in a subtree replaced, and where modal scopes give it
+/// back to there (`Ui::focus_trail`).
+pub(crate) struct Refocus {
+    focus: Option<FocusTrail>,
+    scopes: Vec<ScopeTrail>,
+}
+/// A modal scope in a subtree replaced, or giving focus back into it: its
+/// root as it was, and where it gives focus back to.
+struct ScopeTrail {
+    at: NodeId,
+    previous: Back,
+    trigger: Back,
+}
+enum Back {
+    /// Outside the subtree, as it was.
+    Kept(NodeId),
+    /// In it: found again.
+    Trail(FocusTrail),
+    Nowhere,
+}
+/// Where a node was in a subtree replaced (`Ui::focus_trail`): the focused
 /// node's role and accessible name, its place (each node's index among its
 /// parent's children from the subtree's root down), and, in a list's row,
 /// that row.

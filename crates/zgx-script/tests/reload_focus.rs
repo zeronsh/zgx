@@ -155,3 +155,64 @@ fn a_reload_scrolls_a_list_back_to_its_focused_row() {
     h.frames(30);
     assert!(focused(&mut h).contains("\"r30\""), "{}", focused(&mut h));
 }
+
+const PALETTE: &str = r#"
+local open = ui.state("open", false)
+ui.command { id = "open", title = "Open", run = function() open:set(true) end }
+return ui.column { w = 400, h = 300,
+    ui.button { id = "first", "First" }, ui.button { id = "second", "Second" },
+    ui.input { id = "field", value = "" },
+    ui.modal { open = open, build = function() return ui.input { id = "search", value = "" } end } }
+"#;
+
+/// The palette, from a file so it reloads.
+fn palette(test: &str) -> Harness {
+    let dir = std::env::temp_dir().join(format!("zgx-reload-focus-{}-{test}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("app.luau");
+    std::fs::write(&path, PALETTE).unwrap();
+    let h = Harness::new(move |runtime| ScriptHost::new(runtime, path.clone()));
+    h.frames(10);
+    h
+}
+fn focused_is(h: &mut Harness, id: &str) -> bool {
+    let node = h.find(id);
+    node.is_some() && h.ui.input.focused() == node
+}
+
+/// Zeron's "Escape randomly focuses an element when you close the command
+/// palette": a reload dropped focus to the first Tab stop, and closing the
+/// palette then gave it back there.
+#[test]
+fn a_reload_then_a_palette_opened_and_closed_leaves_focus_where_it_was() {
+    let mut h = palette("palette-after");
+    h.click("field");
+    h.frames(5);
+    h.host.reload().expect("it reloads");
+    h.frames(10);
+    assert!(focused_is(&mut h, "field"), "after the reload");
+    assert!(h.host.run_command("open"));
+    h.frames(10);
+    assert!(focused_is(&mut h, "search"), "the palette takes focus");
+    h.key(zgx::input::Key::Escape);
+    h.frames(10);
+    assert!(focused_is(&mut h, "field"), "after Escape");
+}
+
+/// A reload while the palette is open: closing it gives focus back to what
+/// had it before it opened, found again in what the reload built.
+#[test]
+fn a_reload_while_a_palette_is_open_still_closes_back_to_where_focus_was() {
+    let mut h = palette("palette-during");
+    h.click("field");
+    h.frames(5);
+    assert!(h.host.run_command("open"));
+    h.frames(10);
+    assert!(focused_is(&mut h, "search"), "the palette takes focus");
+    h.host.reload().expect("it reloads");
+    h.frames(10);
+    assert!(focused_is(&mut h, "search"), "still in the palette");
+    h.key(zgx::input::Key::Escape);
+    h.frames(10);
+    assert!(focused_is(&mut h, "field"), "after Escape");
+}
