@@ -1904,7 +1904,15 @@ mod rich_tests {
     #[test]
     fn a_family_without_the_weight_asked_for_draws_in_its_nearest() {
         // DejaVu Sans's Book alone, under a name no fallback list holds,
-        // and a Medium under the name Linux's fallback list puts first.
+        // and a Medium under the name this platform's fallback list puts
+        // first (where a run without its family's weight went).
+        let first_fallback = if cfg!(target_os = "macos") {
+            ".SF NS"
+        } else if cfg!(windows) {
+            "Segoe UI"
+        } else {
+            "Noto Sans"
+        };
         let mut db = cosmic_text::fontdb::Database::new();
         let mut renamed = |bytes: &[u8], family: &str| {
             let mut one = cosmic_text::fontdb::Database::new();
@@ -1913,8 +1921,14 @@ mod rich_tests {
             face.families = vec![(family.into(), face.families[0].1)];
             db.push_face_info(face);
         };
-        renamed(include_bytes!("../../zgx-desktop/assets/DejaVuSans.ttf"), "zgx test regular");
-        renamed(include_bytes!("../tests/fonts/Geist-500-subset.ttf"), "Noto Sans");
+        renamed(
+            include_bytes!("../../zgx-desktop/assets/DejaVuSans.ttf"),
+            "zgx test regular",
+        );
+        renamed(
+            include_bytes!("../tests/fonts/Geist-500-subset.ttf"),
+            first_fallback,
+        );
         let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), db);
         let width = |fonts: &mut FontSystem, family: &str, weight: u16| {
             let font = FontStyle {
@@ -1922,12 +1936,17 @@ mod rich_tests {
                 weight,
                 ..Default::default()
             };
-            ShapedText::with_font(fonts, "The quick brown fox", 20., None, &font).size().0
+            ShapedText::with_font(fonts, "The quick brown fox", 20., None, &font)
+                .size()
+                .0
         };
         let regular = width(&mut fonts, "zgx test regular", 400);
         let medium = width(&mut fonts, "zgx test regular", 500);
-        let geist = width(&mut fonts, "Noto Sans", 500);
-        assert!((regular - geist).abs() > 1., "the two families differ: {regular} {geist}");
+        let geist = width(&mut fonts, first_fallback, 500);
+        assert!(
+            (regular - geist).abs() > 1.,
+            "the two families differ: {regular} {geist}"
+        );
         assert_eq!(medium, regular, "its own Book, not Geist's Medium");
     }
     #[test]
