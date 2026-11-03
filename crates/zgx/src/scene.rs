@@ -10845,14 +10845,18 @@ impl Scene {
         loop {
             // Placing one lays its subtree out, which can find more.
             let mut batch = std::mem::take(&mut self.escaped);
+            // Each once: a node is found each time its parent is laid out
+            // (`escapes`), probes too, so most come many times a pass.
+            batch.sort_unstable_by_key(|id| (id.index, id.generation));
+            batch.dedup();
             batch.retain(|id| {
                 self.contains(*id) && !placed.contains(id) && self.containing_block(*id).is_some()
             });
             if batch.is_empty() {
                 break;
             }
-            batch.sort_by_key(|id| (self.depth(*id), id.index, id.generation));
-            batch.dedup();
+            // Each one's depth worked out once, not at every comparison.
+            batch.sort_by_cached_key(|id| (self.depth(*id), id.index, id.generation));
             for id in batch {
                 placed.push(id);
                 let Some(block) = self.containing_block(id) else {
