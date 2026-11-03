@@ -158,8 +158,8 @@ fn token_of(styles: &Styles, field: crate::theme::Field) -> Option<crate::theme:
         .0
         .iter()
         .rev()
-        .find(|(bound, _, _)| *bound == field)
-        .and_then(|(_, token, mix)| mix.is_none().then_some(*token))
+        .find(|(bound, _, _, _)| *bound == field)
+        .and_then(|(_, token, mix, _)| mix.is_none().then_some(*token))
 }
 /// A resolved text colour as typography carries it: the token if one set it.
 fn themed_color(styles: &Styles) -> Option<Themed<Color>> {

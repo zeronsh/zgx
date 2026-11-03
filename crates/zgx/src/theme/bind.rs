@@ -130,10 +130,20 @@ themed!(FontFamily:
     tokens FontToken, TokenId);
 themed!(BoxShadow: BoxShadow => |s| s; tokens ShadowToken, TokenId);
 
-/// The token bindings of one `Styles`: each field's token, and for a colour
-/// mid-way to another (an animation between theme colours), the blend.
+/// The token bindings of one `Styles`: each field's token, for a colour
+/// mid-way to another (an animation between theme colours) the blend, and
+/// for the radius the corners literals keep (`Corner` bits; 0: none, the
+/// token rounds every corner). The last fits the tuple's padding.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Bindings(pub(crate) Vec<(Field, TokenId, Option<Mix>)>);
+pub(crate) struct Bindings(pub(crate) Vec<(Field, TokenId, Option<Mix>, u8)>);
+
+/// A corner's bit in a radius binding's kept corners (`bind_corners`).
+pub(crate) mod corner {
+    pub(crate) const TOP_LEFT: u8 = 1;
+    pub(crate) const TOP_RIGHT: u8 = 2;
+    pub(crate) const BOTTOM_RIGHT: u8 = 4;
+    pub(crate) const BOTTOM_LEFT: u8 = 8;
+}
 
 /// A token's colour `t` of the way to `to` (a colour or another token).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -149,7 +159,7 @@ pub(crate) fn unbind(styles: &mut Styles, field: Field) {
     };
     let sides = field.sides();
     let bindings = Arc::make_mut(bindings);
-    bindings.0.retain_mut(|(bound, _, _)| {
+    bindings.0.retain_mut(|(bound, _, _, _)| {
         if !bound.same(field) {
             return true;
         }
@@ -176,7 +186,7 @@ pub(crate) fn bind_mix(
     t: f32,
 ) {
     bind_in(styles, field, from);
-    if let Some((_, _, mix)) = styles
+    if let Some((_, _, mix, _)) = styles
         .fields_mut(crate::style::bit::TOKENS)
         .tokens
         .as_mut()
@@ -246,8 +256,62 @@ pub(crate) fn rebind(styles: &mut Styles, field: Field, token: Option<TokenId>) 
                 .get_or_insert_with(Default::default),
         )
         .0
-        .push((field, token, None));
+        .push((field, token, None, 0));
     }
+}
+/// Round the corners `kept` leaves out by `token`, and the kept ones as
+/// `corners` has them (`Styled::rounded_token_except`): a token radius that
+/// single corners refine. The token's corners hold 0 until it resolves.
+pub(crate) fn bind_corners(
+    styles: &mut Styles,
+    token: TokenId,
+    corners: crate::decoration::Corners,
+    kept: u8,
+) {
+    let placed = with_corners(corners, kept, 0.);
+    styles.fields_mut(crate::style::bit::CORNERS).corners = Some(Some(placed));
+    rebind(styles, Field::Radius, Some(token));
+    if let Some(binding) = styles
+        .fields_mut(crate::style::bit::TOKENS)
+        .tokens
+        .as_mut()
+        .and_then(|b| Arc::make_mut(b).0.last_mut())
+    {
+        binding.3 = kept;
+    }
+}
+/// `corners` with every corner but the `kept` ones `radius`.
+fn with_corners(
+    mut corners: crate::decoration::Corners,
+    kept: u8,
+    radius: f32,
+) -> crate::decoration::Corners {
+    use corner::*;
+    for (bit, at) in [
+        (TOP_LEFT, &mut corners.top_left),
+        (TOP_RIGHT, &mut corners.top_right),
+        (BOTTOM_RIGHT, &mut corners.bottom_right),
+        (BOTTOM_LEFT, &mut corners.bottom_left),
+    ] {
+        if kept & bit == 0 {
+            *at = radius;
+        }
+    }
+    corners
+}
+/// A binding's value written into `field`: the radius's to the corners
+/// literals don't keep, any other through its setter (`apply`).
+fn resolve_one(styles: &mut Styles, field: Field, value: &TokenValue, kept: u8) {
+    if field == Field::Radius
+        && kept != 0
+        && let Some(Some(corners)) = styles.corners
+    {
+        let radius = value.number().unwrap_or(0.);
+        styles.fields_mut(crate::style::bit::CORNERS).corners =
+            Some(Some(with_corners(corners, kept, radius)));
+        return;
+    }
+    apply(styles, field, value);
 }
 /// Write `value` into `field` through its setter (which drops any binding
 /// for it; resolution takes the bindings out first).
@@ -377,8 +441,8 @@ pub(crate) fn resolve(styles: &mut Styles, scope: &ThemeScope) {
     let Some(bindings) = styles.fields_mut(crate::style::bit::TOKENS).tokens.take() else {
         return;
     };
-    for (field, token, mix) in &bindings.0 {
-        apply(styles, *field, &value(scope, *token, *mix));
+    for (field, token, mix, kept) in &bindings.0 {
+        resolve_one(styles, *field, &value(scope, *token, *mix), *kept);
     }
     styles.fields_mut(crate::style::bit::TOKENS).tokens = Some(bindings);
 }
@@ -422,7 +486,7 @@ pub(crate) fn merge(target: &mut Styles, other: &Styles) {
     if target.tokens.is_some() {
         let mut replaced = Vec::new();
         if let Some(bindings) = &target.tokens {
-            for (field, _, _) in &bindings.0 {
+            for (field, _, _, _) in &bindings.0 {
                 let mask = sets(other, *field) & field.sides();
                 if mask != 0 {
                     replaced.push(field.with_sides(mask));
@@ -504,9 +568,9 @@ impl StyleTheme {
             return false;
         };
         let stale = self.fresh & (1 << slot) == 0;
-        for (field, token, mix) in &bindings.0 {
+        for (field, token, mix, kept) in &bindings.0 {
             if stale {
-                apply(patch, *field, &value(&self.scope, *token, *mix));
+                resolve_one(patch, *field, &value(&self.scope, *token, *mix), *kept);
             } else {
                 self.scope.track(*token);
                 if let Some(Mix {
@@ -553,7 +617,7 @@ mod tests {
         let s = Styles::new().p(tok::SPACE_3).px(4.);
         assert_eq!(
             s.tokens.as_ref().unwrap().0,
-            vec![(Field::Padding(5), tok::SPACE_3.0, None)]
+            vec![(Field::Padding(5), tok::SPACE_3.0, None, 0)]
         );
         let s = Styles::new().bg(tok::ACCENT).bg(Color(1, 2, 3, 255));
         assert!(s.tokens.is_none());
@@ -562,14 +626,51 @@ mod tests {
         base.merge(&Styles::new().bg(Color(9, 9, 9, 255)));
         assert_eq!(
             base.tokens.as_ref().unwrap().0,
-            vec![(Field::Radius, tok::RADIUS_MD.0, None)]
+            vec![(Field::Radius, tok::RADIUS_MD.0, None, 0)]
         );
         let mut base = Styles::new().bg(Color(9, 9, 9, 255));
         base.merge(&Styles::new().bg(tok::ACCENT));
         assert_eq!(
             base.tokens.as_ref().unwrap().0,
-            vec![(Field::Background, tok::ACCENT.0, None)]
+            vec![(Field::Background, tok::ACCENT.0, None, 0)]
         );
+    }
+    #[test]
+    fn a_bindings_kept_corners_take_no_room() {
+        assert_eq!(
+            std::mem::size_of::<(Field, TokenId, Option<Mix>, u8)>(),
+            std::mem::size_of::<(Field, TokenId, Option<Mix>)>()
+        );
+    }
+    #[test]
+    fn a_token_radius_rounds_the_corners_literals_leave_each_time_it_resolves() {
+        use crate::decoration::Corners;
+        let runtime = crate::reactive::Runtime::new();
+        let themes = Themes::of(&runtime);
+        let radius = themes
+            .root()
+            .get(TokenId::from(tok::RADIUS_MD))
+            .number()
+            .unwrap();
+        let top = Corners {
+            top_left: 1.,
+            top_right: 2.,
+            ..Corners::all(0.)
+        };
+        let mut s = Styles::new()
+            .rounded(4.)
+            .rounded_token_except(tok::RADIUS_MD, top, 3);
+        for _ in 0..2 {
+            resolve(&mut s, themes.root());
+            let c = s.corners.unwrap().unwrap();
+            assert_eq!(
+                [c.top_left, c.top_right, c.bottom_right, c.bottom_left],
+                [1., 2., radius, radius]
+            );
+        }
+        // Corners written whole replace the token radius.
+        let s = s.rounded_corners(Corners::all(7.));
+        assert!(s.tokens.is_none());
     }
     #[test]
     fn bindings_resolve_from_the_scope() {

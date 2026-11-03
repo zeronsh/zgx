@@ -2254,13 +2254,36 @@ pub trait Styled: Sized {
             .shader_uniforms = Some(uniforms);
         self
     }
-    /// Round each corner by its own radius; replaces `rounded`.
+    /// Round each corner by its own radius; replaces `rounded`, a token
+    /// radius too.
     fn rounded_corners(mut self, corners: crate::decoration::Corners) -> Self {
+        if self.styles_mut().tokens.is_some() {
+            self = crate::theme::rebound(self, crate::theme::Field::Radius, None);
+        }
         self.styles_mut().fields_mut(bit::CORNERS).corners = Some(Some(corners));
         self
     }
-    /// A border with its own width on each side; replaces `border`.
+    /// Round the corners `kept` leaves out by the theme token `token`, and
+    /// the kept ones as `corners` has them (top left 1, top right 2, bottom
+    /// right 4, bottom left 8): a token radius that single corners refine,
+    /// as `rounded` then a corner would be for a number. Scripts use it for
+    /// `rounded = "$r", rounded_tl = 0`.
+    #[doc(hidden)]
+    fn rounded_token_except(
+        mut self,
+        token: impl Into<crate::theme::TokenId>,
+        corners: crate::decoration::Corners,
+        kept: u8,
+    ) -> Self {
+        crate::theme::bind_corners(self.styles_mut(), token.into(), corners, kept & 15);
+        self
+    }
+    /// A border with its own width on each side; replaces `border`, a
+    /// token width too.
     fn border_edges(mut self, widths: Insets) -> Self {
+        if self.styles_mut().tokens.is_some() {
+            self = crate::theme::rebound(self, crate::theme::Field::BorderWidth, None);
+        }
         self.styles_mut().fields_mut(bit::BORDER_EDGES).border_edges = Some(Some(widths));
         self
     }

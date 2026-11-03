@@ -7819,6 +7819,32 @@ fn literal_transform(
     }
     (translate, local)
 }
+/// The radius or corners `lits` set, refined by the single corners set
+/// with them. A token radius rounds the corners none of them sets, as a
+/// number does: the token resolves first and the corners lie over it.
+#[cold]
+#[inline(never)]
+fn refine_corners(styles: &mut Styles, lits: &[(Prop, Lit)]) {
+    let mut c = zgx::decoration::Corners::all(0.);
+    let (mut token, mut kept) = (None, 0u8);
+    for (prop, lit) in lits {
+        match (prop, lit) {
+            (Prop::Rounded, Lit::Num(r)) => (c, token) = (zgx::decoration::Corners::all(*r), None),
+            (Prop::Rounded, Lit::Token(t)) => (token, kept) = (Some(*t), 0),
+            (Prop::Corners, Lit::Corners(all)) => (c, token) = (*all, None),
+            (Prop::RoundedTl, Lit::Num(r)) => (c.top_left, kept) = (*r, kept | 1),
+            (Prop::RoundedTr, Lit::Num(r)) => (c.top_right, kept) = (*r, kept | 2),
+            (Prop::RoundedBr, Lit::Num(r)) => (c.bottom_right, kept) = (*r, kept | 4),
+            (Prop::RoundedBl, Lit::Num(r)) => (c.bottom_left, kept) = (*r, kept | 8),
+            _ => {}
+        }
+    }
+    let rounded = std::mem::replace(styles, Styles::new());
+    *styles = match token {
+        Some(token) => rounded.rounded_token_except(token, c, kept),
+        None => rounded.rounded_corners(c),
+    };
+}
 fn is_corner(prop: Prop) -> bool {
     matches!(
         prop,
@@ -7862,19 +7888,7 @@ fn apply_in(styles: &mut Styles, lits: &[(Prop, Lit)]) {
     }
     // Single corners refine the radius or corners set with them.
     if lits.iter().any(|(p, _)| is_corner(*p)) {
-        let mut c = zgx::decoration::Corners::all(0.);
-        for (prop, lit) in lits {
-            match (prop, lit) {
-                (Prop::Rounded, Lit::Num(r)) => c = zgx::decoration::Corners::all(*r),
-                (Prop::Corners, Lit::Corners(all)) => c = *all,
-                (Prop::RoundedTl, Lit::Num(r)) => c.top_left = *r,
-                (Prop::RoundedTr, Lit::Num(r)) => c.top_right = *r,
-                (Prop::RoundedBr, Lit::Num(r)) => c.bottom_right = *r,
-                (Prop::RoundedBl, Lit::Num(r)) => c.bottom_left = *r,
-                _ => {}
-            }
-        }
-        styles.rounded_corners(c);
+        refine_corners(styles, lits);
     }
     let (translate, local) = literal_transform(lits);
     if translate.is_some() || local.is_some() {

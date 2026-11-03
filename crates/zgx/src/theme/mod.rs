@@ -35,7 +35,9 @@ mod tokens;
 mod value;
 mod vscode;
 
-pub(crate) use bind::{Bindings, StyleTheme, bind_in, bind_mix, merge, rebound, resolve, split};
+pub(crate) use bind::{
+    Bindings, StyleTheme, bind_corners, bind_in, bind_mix, merge, rebound, resolve, split,
+};
 pub use bind::{Field, Themed};
 pub use file::{Theme, ThemeError, ThemeKind, ThemeOverride, TokenInput};
 pub(crate) use scope::Body;
