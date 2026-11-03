@@ -1082,6 +1082,8 @@ impl Application {
             carrying: None,
             #[cfg(target_os = "linux")]
             last_focused: None,
+            #[cfg(target_os = "linux")]
+            pending_move: None,
             factory,
             active: false,
             error: None,
@@ -5985,10 +5987,37 @@ struct WindowManager {
     /// The window last focused: the one another launch raises (Linux).
     #[cfg(target_os = "linux")]
     last_focused: Option<u64>,
+    /// The last pointer move heard and not yet handled (Linux): see
+    /// `ApplicationHandler::window_event`.
+    #[cfg(target_os = "linux")]
+    pending_move: Option<(WindowId, WindowEvent)>,
     factory: WindowFactory,
     active: bool,
     error: Option<String>,
     timers: zgx::timer::Hosted,
+}
+impl WindowManager {
+    /// A window event, handled now.
+    fn window_event_now(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let token = self.native.get(&id).copied();
+        self.contain(event_loop, token, |this| {
+            this.window_event_turn(event_loop, id, event)
+        });
+        // Focus in a node recording a shortcut takes every key from the
+        // menu bar, as it moves there and away.
+        #[cfg(target_os = "macos")]
+        crate::app_menu::capture_keys(self.hosts.values().any(|host| {
+            let ui = &host.context.ui;
+            ui.input.captures_keys(&ui.scene.borrow())
+        }));
+    }
+    /// The pointer move held back (`pending_move`), handled now.
+    #[cfg(target_os = "linux")]
+    fn flush_move(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some((id, event)) = self.pending_move.take() {
+            self.window_event_now(event_loop, id, event);
+        }
+    }
 }
 /// The app's window a drag is over, and the pointer in its coordinates.
 type Over = (u64, f32, f32);
@@ -7201,24 +7230,40 @@ impl ApplicationHandler<Event> for WindowManager {
         self.contain(event_loop, None, |this| this.suspended_turn());
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
+        #[cfg(target_os = "linux")]
+        self.flush_move(event_loop);
         self.contain(event_loop, None, |this| {
             this.user_event_turn(event_loop, event)
         });
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        let token = self.native.get(&id).copied();
-        self.contain(event_loop, token, |this| {
-            this.window_event_turn(event_loop, id, event)
-        });
-        // Focus in a node recording a shortcut takes every key from the
-        // menu bar, as it moves there and away.
-        #[cfg(target_os = "macos")]
-        crate::app_menu::capture_keys(self.hosts.values().any(|host| {
-            let ui = &host.context.ui;
-            ui.input.captures_keys(&ui.scene.borrow())
-        }));
+        // Pointer moves come as often as the mouse reports them (Wayland
+        // and X11 pass each on, up to 1000 a second), and each is handled
+        // on laid-out content: a move that changes layout (a pane's edge
+        // dragged) lays the window out again for every one. AppKit and
+        // Windows hand an app one move per turn; here the moves of one turn
+        // of the loop come as one, the last, handled before any other event
+        // (keeping their order) and before the loop waits.
+        #[cfg(target_os = "linux")]
+        {
+            if matches!(event, WindowEvent::CursorMoved { .. }) {
+                if self
+                    .pending_move
+                    .as_ref()
+                    .is_some_and(|(pending, _)| *pending != id)
+                {
+                    self.flush_move(event_loop);
+                }
+                self.pending_move = Some((id, event));
+                return;
+            }
+            self.flush_move(event_loop);
+        }
+        self.window_event_now(event_loop, id, event);
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "linux")]
+        self.flush_move(event_loop);
         self.contain(event_loop, None, |this| this.about_to_wait_turn(event_loop));
     }
     /// The windows still open (`Application::quit`, a failure) close while
@@ -8419,6 +8464,8 @@ mod tests {
             carrying: None,
             #[cfg(target_os = "linux")]
             last_focused: None,
+            #[cfg(target_os = "linux")]
+            pending_move: None,
             factory,
             active: false,
             error: None,
@@ -8827,6 +8874,7 @@ mod tests {
             drag_over: Cell::new(None),
             carrying: None,
             last_focused: None,
+            pending_move: None,
             factory,
             active: false,
             error: None,
