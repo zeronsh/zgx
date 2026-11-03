@@ -72,6 +72,16 @@ impl Harness {
     fn shows(&self, text: &str) -> bool {
         self.texts().iter().any(|shown| shown == text)
     }
+    /// The family `text` is drawn in, where it shows.
+    fn family_of(&self, text: &str) -> Option<zgx::text_layout::FontFamily> {
+        let scene = self.ui.scene.borrow();
+        scene.paint_items().find_map(|item| match item.kind {
+            NodeKind::Text { text: shown, .. } if &**shown == text => {
+                Some(item.font.family.clone())
+            }
+            _ => None,
+        })
+    }
 }
 
 fn session(command: &str) -> TerminalOptions {
@@ -430,6 +440,43 @@ fn the_session_outlives_its_view() {
     );
     term.close();
     assert!(term.backend().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_grid_is_in_the_themes_monospaced_font_and_follows_it() {
+    use zgx::{
+        text_layout::FontFamily,
+        theme::{ThemeOverride, tok},
+    };
+    let mut app = Harness::new();
+    let term = Terminal::new(&app.ui.runtime, session(r"printf 'fonts\r\n'; sleep 30"));
+    // An app's own code font, over its theme's (none at first).
+    let chosen = app.ui.runtime.signal(None::<&'static str>);
+    let over = chosen.clone();
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        theme_scope_with(
+            move || match over.get() {
+                Some(name) => ThemeOverride::new().with(tok::FONT_MONO, FontFamily::from(name)),
+                None => ThemeOverride::new(),
+            },
+            zgx::terminal::terminal(&term).w(600.).h(300.),
+        ),
+    ));
+    app.until("the output", |app| app.shows("fonts"));
+    // zgx's own themes name the platform's monospaced font.
+    assert_eq!(app.family_of("fonts"), Some(FontFamily::Monospace));
+    chosen.set(Some("Test Mono"));
+    app.until("the rows in the chosen font", |app| {
+        app.family_of("fonts") == Some(FontFamily::from("Test Mono"))
+    });
+    chosen.set(None);
+    app.until("the rows in the theme's font again", |app| {
+        app.family_of("fonts") == Some(FontFamily::Monospace)
+    });
+    term.close();
 }
 
 #[cfg(unix)]

@@ -77,7 +77,9 @@ struct Engine {
     layout: Signal<(u16, u32)>,
     metrics: Cell<Metrics>,
     generation: Cell<u32>,
-    font: zgx::text_layout::FontStyle,
+    /// The grid's font: its family the theme's `font.mono` where the view
+    /// is shown (`follow_theme_font`).
+    font: RefCell<zgx::text_layout::FontStyle>,
     look: Look,
     /// Where the hidden editor sits: the cursor's cell, in points.
     caret: Signal<(f32, f32)>,
@@ -177,7 +179,7 @@ impl EngineTerminal {
                 cell_height: 0.,
             }),
             generation: Cell::new(0),
-            font,
+            font: RefCell::new(font),
             look: Look::default(),
             caret: runtime.signal((PAD_X, PAD_Y)),
             preedit: runtime.signal(String::new()),
@@ -686,13 +688,33 @@ impl Engine {
     /// Measure the cell for the font size (on mounting, and as it changes).
     fn measure(&self, scene: &zgx::scene::Scene) {
         let mut metrics = self.metrics.get();
-        let (width, height) =
-            scene.measure_text_with_font("0000000000", metrics.font_size, None, &self.font);
+        let (width, height) = scene.measure_text_with_font(
+            "0000000000",
+            metrics.font_size,
+            None,
+            &self.font.borrow(),
+        );
         metrics.cell_width = width / 10.;
         metrics.cell_height = height.ceil();
         if metrics != self.metrics.get() {
             self.metrics.set(metrics);
             self.generation.set(self.generation.get().wrapping_add(1));
+        }
+    }
+
+    /// Draw the grid in `family` from now on: the cell measured again and
+    /// every row made again in it.
+    fn set_font_family(&self, family: zgx::text_layout::FontFamily) {
+        if self.font.borrow().family == family {
+            return;
+        }
+        self.font.borrow_mut().family = family;
+        // (Rows are made again for a new generation, in the new font, even
+        // where the cell measures as it did.)
+        self.generation.set(self.generation.get().wrapping_add(1));
+        if let Some(scene) = self.root.borrow().as_ref().and_then(NodeHandle::scene) {
+            self.measure(&scene.borrow());
+            self.fit(self.size.get());
         }
     }
 
@@ -1463,6 +1485,7 @@ pub fn terminal_view(term: &Terminal) -> View {
         if let Some(frames) = cx.try_service::<zgx::frame::FrameClock>() {
             *engine.frames.borrow_mut() = Some((*frames).clone());
         }
+        follow_theme_font(cx, &engine);
         engine.views.set(engine.views.get() + 1);
         engine.full.set(true);
         let id = engine.latest_view.get() + 1;
@@ -1470,6 +1493,28 @@ pub fn terminal_view(term: &Terminal) -> View {
         cx.retain(Shown(Rc::downgrade(&engine), id));
         view(engine)
     })
+}
+
+/// The grid in the theme's monospaced font (`font.mono`) where the view
+/// mounts, following it as it changes (a theme switched, a scope's override:
+/// an app's own code font); the platform's monospaced font where the theme
+/// names none.
+fn follow_theme_font(cx: &mut Context, engine: &Rc<Engine>) {
+    let theme = cx.theme();
+    let family = move || {
+        theme
+            .get(zgx::theme::tok::FONT_MONO)
+            .font()
+            .unwrap_or(zgx::text_layout::FontFamily::Monospace)
+    };
+    let follow = Rc::downgrade(engine);
+    let effect = engine.runtime.effect(move || {
+        let family = family();
+        if let Some(engine) = follow.upgrade() {
+            engine.set_font_family(family);
+        }
+    });
+    cx.retain(effect);
 }
 
 /// Keeps a view's count while it is mounted.
@@ -1570,18 +1615,22 @@ fn view(engine: Rc<Engine>) -> View {
         let metrics = engine.metrics.get();
         let font_color = paint::color(engine.look.palette.foreground);
         let shown = engine.preedit.clone();
+        let font = engine.clone();
         text_signal(move || text.get())
             .absolute()
             .text_size(metrics.font_size)
-            .font_family(zgx::text_layout::FontFamily::Monospace)
             .text_color(font_color)
             .bg(rgba(0x2020_20ff))
             .reactive_style(move || {
                 let (x, y) = caret.get();
                 let hidden = shown.with(String::is_empty);
+                // (In the grid's font: a new one makes a new generation.)
+                let _ = font.layout.get();
+                let family = font.font.borrow().family.clone();
                 Styles::new()
                     .left(x)
                     .top(y)
+                    .font_family(family)
                     .opacity(if hidden { 0. } else { 1. })
             })
     };
@@ -1673,7 +1722,7 @@ fn view(engine: Rc<Engine>) -> View {
 fn row_view(engine: &Rc<Engine>, slot: usize) -> View {
     let (paint, line) = engine.slot(slot);
     let metrics = engine.metrics.get();
-    let font = engine.font.clone();
+    let font = engine.font.borrow().clone();
     let label = paint.clone();
     canvas(move |_| paint::draw(&paint.get(), metrics, &font))
         .absolute()
