@@ -1033,6 +1033,75 @@ pub fn debug_key_before_menu_bar(menus: &[AppMenu], key: &str) -> Result<bool, A
     .ok_or_else(|| AppMenuError("no key event".into()))?;
     Ok(offer_key(&event))
 }
+/// What `debug_menu_change` saw.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct MenuChange {
+    /// Shown in place (`NativeMenu::update_states`).
+    pub in_place: bool,
+    /// The main menu AppKit shows is still the one it was: no new bar drawn.
+    pub kept: bool,
+    /// Each item of the bar's menus after, as (title, enabled, checked).
+    pub items: Vec<(String, bool, bool)>,
+}
+/// Test hook: install `first` as the application's menu bar, then show
+/// `second` as a change of the app's menus does (`Event::MenusChanged`).
+/// Main thread only.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn debug_menu_change(
+    first: &[AppMenu],
+    second: &[AppMenu],
+) -> Result<MenuChange, AppMenuError> {
+    let mut menu = NativeMenu::new(first)?;
+    menu.install();
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return Ok(MenuChange {
+            in_place: false,
+            kept: false,
+            items: Vec::new(),
+        });
+    };
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    let before = app.mainMenu();
+    let in_place = menu.update_states(second);
+    if !in_place {
+        // As the host does: the old menu leaves NSApp as it drops.
+        drop(menu);
+        menu = NativeMenu::new(second)?;
+        menu.install();
+    }
+    let after = app.mainMenu();
+    let kept = before
+        .as_ref()
+        .zip(after.as_ref())
+        .is_some_and(|(before, after)| {
+            objc2::rc::Retained::as_ptr(before) == objc2::rc::Retained::as_ptr(after)
+        });
+    let mut items = Vec::new();
+    if let Some(bar) = &after {
+        for top in (0..bar.numberOfItems()).filter_map(|i| bar.itemAtIndex(i)) {
+            let Some(submenu) = top.submenu() else {
+                continue;
+            };
+            for item in (0..submenu.numberOfItems()).filter_map(|i| submenu.itemAtIndex(i)) {
+                // NSControlStateValueOn.
+                items.push((
+                    item.title().to_string(),
+                    item.isEnabled(),
+                    item.state() == 1,
+                ));
+            }
+        }
+    }
+    drop(menu);
+    Ok(MenuChange {
+        in_place,
+        kept,
+        items,
+    })
+}
 /// Test hook: install `menus` as the application's menu bar, and the titles
 /// of the menus it shows, in order. Main thread only.
 #[cfg(target_os = "macos")]

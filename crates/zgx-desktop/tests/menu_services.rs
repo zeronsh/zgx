@@ -13,7 +13,7 @@ fn main() {
         use zgx::input::Key;
         use zgx_desktop::app_menu::{
             AppMenu, AppMenuEntry, MenuAccelerator, debug_key_before_menu_bar,
-            debug_menu_bar_services_filled, debug_menu_bar_titles,
+            debug_menu_bar_services_filled, debug_menu_bar_titles, debug_menu_change,
         };
         for install in ["installed", "replaced"] {
             assert!(
@@ -60,5 +60,43 @@ fn main() {
             ["Application", "Edit", "View", "Window"]
         );
         println!("menu_services: each of the app's menus shows once");
+
+        // The app's menus changing only their items' titles and states are
+        // shown in place: AppKit keeps the bar it shows (a new main menu is
+        // drawn again, a flash across the bar), its items as asked. Any other
+        // change makes a new one.
+        let view = |back: &str, enabled: bool, sidebar: bool| {
+            [AppMenu::new(
+                "View",
+                [
+                    AppMenuEntry::item(back, "back").enabled(enabled),
+                    AppMenuEntry::item("Sidebar", "sidebar").checked(sidebar),
+                ],
+            )]
+        };
+        let zgx_desktop::app_menu::MenuChange {
+            in_place,
+            kept,
+            items,
+        } = debug_menu_change(&view("Back", false, false), &view("Go Back", true, true)).unwrap();
+        assert!(in_place && kept, "in place {in_place}, bar kept {kept}");
+        assert!(
+            items.contains(&("Go Back".into(), true, false))
+                && items.contains(&("Sidebar".into(), true, true)),
+            "{items:?}"
+        );
+        let mut more = view("Back", true, true);
+        more[0].entries.push(AppMenuEntry::item("Reload", "reload"));
+        let zgx_desktop::app_menu::MenuChange {
+            in_place,
+            kept,
+            items,
+        } = debug_menu_change(&view("Back", true, true), &more).unwrap();
+        assert!(!in_place && !kept, "in place {in_place}, bar kept {kept}");
+        assert!(
+            items.iter().any(|(title, ..)| title == "Reload"),
+            "{items:?}"
+        );
+        println!("menu_services: menus changing only their items' titles and states keep the bar");
     }
 }
