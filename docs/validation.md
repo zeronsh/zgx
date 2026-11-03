@@ -1152,6 +1152,22 @@ focused, though the page takes ⌘K and Ghostty binds it, and the page never
 hears them, while ⌘U, not reserved, is still the page's first and then the
 app's. Passed on macOS 26 (M5), 2026-10-28.
 
+## macOS Ghostty colours following the theme
+
+The ghostty_theme_probe example (`--features ghostty`) runs a program that
+prints a row of full blocks in the default colour and one in ANSI red, once,
+then sleeps. Three times over, it switches to a theme setting
+`terminal.foreground` and `terminal.ansi.1`, scopes `terminal.foreground`
+alone over the terminal, takes the scope away, and goes back to zgx's dark
+theme, which sets no terminal colours. Each time it reads Ghostty's own last
+frame (`Terminal::snapshot`). The printed blocks repaint in each step's
+colours: the scope's text colour with the theme's red, and the user's own
+Ghostty colours again at the end, as at first. The surface is the same
+throughout (its backend kept). Ghostty draws in Display P3, so a colour
+matches as given or converted to P3. It prints `GHOSTTY_THEME_DONE ok=true`,
+or exits 1. Passed three times out of three on macOS 26.0.1 (M1 Max),
+2026-11-03.
+
 ## macOS glass and appearance set while a window shows
 
 `glass_counter --appearance-fixture` replaces the window's glass with

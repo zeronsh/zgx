@@ -30,13 +30,52 @@ pub(crate) struct Look {
     pub palette: Palette,
     /// Behind selected cells.
     pub selection: Color,
+    /// Selected text; `None` keeps each cell's own colour.
+    pub selection_text: Option<Color>,
+    /// Text under a block cursor; `None` is the background.
+    pub cursor_text: Option<Color>,
 }
 impl Default for Look {
     fn default() -> Self {
         Self {
             palette: Palette::default(),
             selection: Color(0x4a, 0x78, 0xc0, 0x88),
+            selection_text: None,
+            cursor_text: None,
         }
+    }
+}
+impl Look {
+    /// The default look with the theme's `colors` over it, each `None`
+    /// keeping the default.
+    pub fn themed(colors: &zgx::terminal::TerminalColors) -> Self {
+        let mut look = Self::default();
+        let rgb = |color: Color| Rgb {
+            r: color.0,
+            g: color.1,
+            b: color.2,
+        };
+        let palette = &mut look.palette;
+        for (slot, color) in palette.ansi.iter_mut().zip(colors.ansi) {
+            if let Some(color) = color {
+                *slot = rgb(color);
+            }
+        }
+        if let Some(color) = colors.foreground {
+            palette.foreground = rgb(color);
+        }
+        if let Some(color) = colors.background {
+            palette.background = rgb(color);
+        }
+        if let Some(color) = colors.cursor {
+            palette.cursor = rgb(color);
+        }
+        if let Some(color) = colors.selection_background {
+            look.selection = color;
+        }
+        look.selection_text = colors.selection_foreground;
+        look.cursor_text = colors.cursor_text;
+        look
     }
 }
 
@@ -186,10 +225,11 @@ pub(crate) fn row(
             bg = Some(was);
         }
         let mut fill = bg.map(color);
+        let mut ink = color(fg);
         if selection.is_some_and(|range| range.contains(Point::new(line, Column(column)))) {
             fill = Some(look.selection);
+            ink = look.selection_text.unwrap_or(ink);
         }
-        let mut ink = color(fg);
         // The cursor's cell, or a wide one's second half.
         let under_cursor = cursor.filter(|at| {
             at.column == column
@@ -205,7 +245,7 @@ pub(crate) fn row(
                 (CursorShape::Hidden, _) => {}
                 (CursorShape::Block, true) => {
                     fill = Some(cursor_color);
-                    ink = color(background);
+                    ink = look.cursor_text.unwrap_or(color(background));
                 }
                 (CursorShape::Beam, true) if at.column == column => paint.lines.push(Fill {
                     x,

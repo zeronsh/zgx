@@ -445,7 +445,7 @@ impl ThemeScope {
         }
         let runtime = self.shared.runtime.upgrade()?;
         let value = self.values.borrow().get(i).cloned().unwrap_or_default();
-        if value == TokenValue::Unset {
+        if value == TokenValue::Unset && !tokens::standard_unset(id) {
             warn_unknown(id);
         }
         let signal = runtime.signal(value);

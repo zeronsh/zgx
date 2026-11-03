@@ -198,6 +198,28 @@ export type ColorToken =
 	| "$selection.text.inactive"
 	| "$find.match"
 	| "$find.current"
+	| "$terminal.foreground"
+	| "$terminal.background"
+	| "$terminal.cursor"
+	| "$terminal.cursor_text"
+	| "$terminal.selection_background"
+	| "$terminal.selection_foreground"
+	| "$terminal.ansi.0"
+	| "$terminal.ansi.1"
+	| "$terminal.ansi.2"
+	| "$terminal.ansi.3"
+	| "$terminal.ansi.4"
+	| "$terminal.ansi.5"
+	| "$terminal.ansi.6"
+	| "$terminal.ansi.7"
+	| "$terminal.ansi.8"
+	| "$terminal.ansi.9"
+	| "$terminal.ansi.10"
+	| "$terminal.ansi.11"
+	| "$terminal.ansi.12"
+	| "$terminal.ansi.13"
+	| "$terminal.ansi.14"
+	| "$terminal.ansi.15"
 export type NumberToken =
 	"$glass.blur"
 	| "$font.size.xs"
@@ -330,6 +352,28 @@ export type TokenName =
 	| "find.match"
 	| "find.current"
 	| "mark.radius"
+	| "terminal.foreground"
+	| "terminal.background"
+	| "terminal.cursor"
+	| "terminal.cursor_text"
+	| "terminal.selection_background"
+	| "terminal.selection_foreground"
+	| "terminal.ansi.0"
+	| "terminal.ansi.1"
+	| "terminal.ansi.2"
+	| "terminal.ansi.3"
+	| "terminal.ansi.4"
+	| "terminal.ansi.5"
+	| "terminal.ansi.6"
+	| "terminal.ansi.7"
+	| "terminal.ansi.8"
+	| "terminal.ansi.9"
+	| "terminal.ansi.10"
+	| "terminal.ansi.11"
+	| "terminal.ansi.12"
+	| "terminal.ansi.13"
+	| "terminal.ansi.14"
+	| "terminal.ansi.15"
 
 -- "#rgb", "#rrggbb", "#rrggbbaa", "rgb(…)", "rgba(…)", "hsl(…)", a few
 -- names, 0xrrggbb, or a colour token ("$text.secondary"; `ColorToken`
@@ -472,6 +516,15 @@ export type Tokens = {
 		overlay: string,
 		raised: string,
 		sunken: string,
+	},
+	terminal: {
+		ansi: { string },
+		background: string,
+		cursor: string,
+		cursor_text: string,
+		foreground: string,
+		selection_background: string,
+		selection_foreground: string,
 	},
 	text: {
 		disabled: string,

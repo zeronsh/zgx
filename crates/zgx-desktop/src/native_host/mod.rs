@@ -14,6 +14,8 @@
 mod dcomp;
 #[cfg(all(target_os = "macos", feature = "ghostty"))]
 mod ghostty;
+#[cfg(any(all(target_os = "macos", feature = "ghostty"), test))]
+mod ghostty_colors;
 #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
 mod gtk;
 #[cfg(all(target_os = "linux", feature = "webkitgtk"))]

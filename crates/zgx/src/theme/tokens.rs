@@ -85,7 +85,7 @@ macro_rules! kind_type {
 }
 
 macro_rules! schema {
-    ($($(#[$doc:meta])* $konst:ident: $kind:ident = $name:literal $(=> $default:literal)?),* $(,)?) => {
+    ($($(#[$doc:meta])* $konst:ident: $kind:ident = $name:literal $(=> $default:tt)?),* $(,)?) => {
         #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
         #[repr(u32)]
         enum Index { $($konst),* }
@@ -94,6 +94,9 @@ macro_rules! schema {
         pub(crate) const STANDARD: &[(&str, TokenKind, Option<&str>)] = &[
             $(($name, TokenKind::$kind, schema!(@default $($default)?))),*
         ];
+        /// Which standard tokens are unset unless a theme sets them (`=>
+        /// unset`): what reads one keeps a value of its own where it is.
+        const UNSET: &[bool] = &[$(schema!(@unset $($default)?)),*];
         /// The standard tokens, typed by what they hold. Every theme defines
         /// them (a theme that leaves one out takes it from the built-in theme
         /// of its type), so any app and widget can rely on them.
@@ -102,8 +105,11 @@ macro_rules! schema {
             $($(#[$doc])* pub const $konst: kind_type!($kind) = <kind_type!($kind)>::from_index(Index::$konst as u32);)*
         }
     };
+    (@default unset) => { None };
     (@default $default:literal) => { Some($default) };
     (@default) => { None };
+    (@unset unset) => { true };
+    (@unset $($default:literal)?) => { false };
 }
 
 macro_rules! from_index {
@@ -294,18 +300,92 @@ schema! {
     /// The corner radius of marks behind text (find's matches, an editor's
     /// decorations), drawn as a selection is: its radius by default.
     MARK_RADIUS: Number = "mark.radius" => "{selection.radius}",
+    // Terminals' colours. Unset, as the built-in themes leave them, each
+    // keeps the terminal's own: the user's Ghostty configuration, or the
+    // engine-drawn terminal's palette. A theme sets them to match it.
+    /// A terminal's text where its program names no colour.
+    TERMINAL_FOREGROUND: Color = "terminal.foreground" => unset,
+    /// A terminal's background where its program names none (also the text
+    /// of reversed cells).
+    TERMINAL_BACKGROUND: Color = "terminal.background" => unset,
+    /// A terminal's cursor.
+    TERMINAL_CURSOR: Color = "terminal.cursor" => unset,
+    /// The text under a terminal's block cursor.
+    TERMINAL_CURSOR_TEXT: Color = "terminal.cursor_text" => unset,
+    /// Behind a terminal's selected text.
+    TERMINAL_SELECTION_BACKGROUND: Color = "terminal.selection_background" => unset,
+    /// A terminal's selected text.
+    TERMINAL_SELECTION_FOREGROUND: Color = "terminal.selection_foreground" => unset,
+    /// ANSI colour 0, black; `TERMINAL_ANSI_*` are the sixteen colours
+    /// programs name by number (8-15 the bright forms of 0-7).
+    TERMINAL_ANSI_0: Color = "terminal.ansi.0" => unset,
+    /// ANSI colour 1, red.
+    TERMINAL_ANSI_1: Color = "terminal.ansi.1" => unset,
+    /// ANSI colour 2, green.
+    TERMINAL_ANSI_2: Color = "terminal.ansi.2" => unset,
+    /// ANSI colour 3, yellow.
+    TERMINAL_ANSI_3: Color = "terminal.ansi.3" => unset,
+    /// ANSI colour 4, blue.
+    TERMINAL_ANSI_4: Color = "terminal.ansi.4" => unset,
+    /// ANSI colour 5, magenta.
+    TERMINAL_ANSI_5: Color = "terminal.ansi.5" => unset,
+    /// ANSI colour 6, cyan.
+    TERMINAL_ANSI_6: Color = "terminal.ansi.6" => unset,
+    /// ANSI colour 7, white.
+    TERMINAL_ANSI_7: Color = "terminal.ansi.7" => unset,
+    /// ANSI colour 8, bright black.
+    TERMINAL_ANSI_8: Color = "terminal.ansi.8" => unset,
+    /// ANSI colour 9, bright red.
+    TERMINAL_ANSI_9: Color = "terminal.ansi.9" => unset,
+    /// ANSI colour 10, bright green.
+    TERMINAL_ANSI_10: Color = "terminal.ansi.10" => unset,
+    /// ANSI colour 11, bright yellow.
+    TERMINAL_ANSI_11: Color = "terminal.ansi.11" => unset,
+    /// ANSI colour 12, bright blue.
+    TERMINAL_ANSI_12: Color = "terminal.ansi.12" => unset,
+    /// ANSI colour 13, bright magenta.
+    TERMINAL_ANSI_13: Color = "terminal.ansi.13" => unset,
+    /// ANSI colour 14, bright cyan.
+    TERMINAL_ANSI_14: Color = "terminal.ansi.14" => unset,
+    /// ANSI colour 15, bright white.
+    TERMINAL_ANSI_15: Color = "terminal.ansi.15" => unset,
 }
+
+/// The sixteen `terminal.ansi.*` tokens, by colour number.
+pub const TERMINAL_ANSI: [ColorToken; 16] = [
+    tok::TERMINAL_ANSI_0,
+    tok::TERMINAL_ANSI_1,
+    tok::TERMINAL_ANSI_2,
+    tok::TERMINAL_ANSI_3,
+    tok::TERMINAL_ANSI_4,
+    tok::TERMINAL_ANSI_5,
+    tok::TERMINAL_ANSI_6,
+    tok::TERMINAL_ANSI_7,
+    tok::TERMINAL_ANSI_8,
+    tok::TERMINAL_ANSI_9,
+    tok::TERMINAL_ANSI_10,
+    tok::TERMINAL_ANSI_11,
+    tok::TERMINAL_ANSI_12,
+    tok::TERMINAL_ANSI_13,
+    tok::TERMINAL_ANSI_14,
+    tok::TERMINAL_ANSI_15,
+];
 
 struct Registry {
     names: Vec<Arc<str>>,
-    ids: std::collections::HashMap<Arc<str>, u32>,
+    /// By name, hashed as an app's keys are (fast, seeded per process):
+    /// every standard name is interned as a process starts.
+    ids: std::collections::HashMap<Arc<str>, u32, crate::KeyHasher>,
 }
 fn registry() -> &'static RwLock<Registry> {
     static REGISTRY: OnceLock<RwLock<Registry>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
         let mut registry = Registry {
             names: Vec::with_capacity(STANDARD.len() + 32),
-            ids: Default::default(),
+            ids: std::collections::HashMap::with_capacity_and_hasher(
+                STANDARD.len() + 32,
+                crate::key_hasher(),
+            ),
         };
         for (name, _, _) in STANDARD {
             let name: Arc<str> = (*name).into();
@@ -358,6 +438,12 @@ pub fn interned() -> impl Iterator<Item = TokenId> {
 /// The standard token's kind, or `None` for an app token.
 pub fn standard_kind(id: TokenId) -> Option<TokenKind> {
     STANDARD.get(id.index()).map(|(_, kind, _)| *kind)
+}
+/// Whether the standard token is unset unless a theme sets it (the
+/// `terminal.*` colours): no built-in theme defines it, and what reads it
+/// keeps a value of its own where it is unset.
+pub fn standard_unset(id: TokenId) -> bool {
+    UNSET.get(id.index()).copied().unwrap_or(false)
 }
 /// Every standard token, in order.
 pub fn standard() -> impl Iterator<Item = (TokenId, &'static str, TokenKind)> {

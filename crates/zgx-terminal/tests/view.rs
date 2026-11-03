@@ -72,6 +72,17 @@ impl Harness {
     fn shows(&self, text: &str) -> bool {
         self.texts().iter().any(|shown| shown == text)
     }
+    /// The colour `text` is drawn in, where it shows.
+    #[cfg(unix)]
+    fn color_of(&self, text: &str) -> Option<zgx::scene::Color> {
+        let scene = self.ui.scene.borrow();
+        scene.paint_items().find_map(|item| match item.kind {
+            NodeKind::Text {
+                text: shown, color, ..
+            } if &**shown == text => Some(*color),
+            _ => None,
+        })
+    }
     /// The family `text` is drawn in, where it shows.
     #[cfg(unix)]
     fn family_of(&self, text: &str) -> Option<zgx::text_layout::FontFamily> {
@@ -477,6 +488,72 @@ fn the_grid_is_in_the_themes_monospaced_font_and_follows_it() {
     app.until("the rows in the theme's font again", |app| {
         app.family_of("fonts") == Some(FontFamily::Monospace)
     });
+    term.close();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_rows_are_in_the_themes_terminal_colours_and_follow_each_switch() {
+    use zgx::{
+        scene::Color,
+        theme::{Theme, ThemeOverride, tok},
+    };
+    let mut app = Harness::new();
+    app.ui.theme().register(
+        Theme::from_json(
+            r##"{ "name": "test-paper", "type": "light", "tokens": {
+                "terminal.foreground": "#202124", "terminal.ansi.1": "#b00020" } }"##,
+        )
+        .unwrap(),
+    );
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(
+            r"printf 'plain [31mred[0m
+'; sleep 30",
+        ),
+    );
+    // A scope's own text colour over the theme's (none at first).
+    let scoped = app.ui.runtime.signal(false);
+    let over = scoped.clone();
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        theme_scope_with(
+            move || match over.get() {
+                true => ThemeOverride::new().with(tok::TERMINAL_FOREGROUND, Color(0, 0, 255, 255)),
+                false => ThemeOverride::new(),
+            },
+            zgx::terminal::terminal(&term).w(600.).h(300.),
+        ),
+    ));
+    app.until("the output", |app| app.shows("red"));
+    // zgx's own themes set no terminal colours: the palette's show.
+    let palette = zgx_terminal::Palette::default();
+    let own =
+        |rgb: zgx_terminal::alacritty_terminal::vte::ansi::Rgb| Color(rgb.r, rgb.g, rgb.b, 255);
+    let (text, red) = (own(palette.foreground), own(palette.ansi[1]));
+    let colours = |app: &Harness| (app.color_of("plain"), app.color_of("red"));
+    assert_eq!(colours(&app), (Some(text), Some(red)));
+    let paper = (
+        Some(Color(0x20, 0x21, 0x24, 255)),
+        Some(Color(0xb0, 0x00, 0x20, 255)),
+    );
+    for _ in 0..3 {
+        app.ui.theme().set("test-paper").unwrap();
+        app.until("the paper theme's colours", |app| colours(app) == paper);
+        // A scope's token over it; the unset red stays the theme's.
+        scoped.set(true);
+        app.until("the scope's text colour", |app| {
+            colours(app) == (Some(Color(0, 0, 255, 255)), paper.1)
+        });
+        scoped.set(false);
+        app.until("the theme's again", |app| colours(app) == paper);
+        app.ui.theme().set(zgx::theme::DARK).unwrap();
+        app.until("the palette's own again", |app| {
+            colours(app) == (Some(text), Some(red))
+        });
+    }
     term.close();
 }
 

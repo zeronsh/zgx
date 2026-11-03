@@ -173,6 +173,37 @@ const MAP: &[(&str, &[&str], Option<&str>)] = &[
         &["menu.selectionBackground", "list.hoverBackground"],
         None,
     ),
+    // Terminals' own colours, where the theme names them.
+    ("terminal.foreground", &["terminal.foreground"], None),
+    ("terminal.background", &["terminal.background"], None),
+    ("terminal.cursor", &["terminalCursor.foreground"], None),
+    ("terminal.cursor_text", &["terminalCursor.background"], None),
+    (
+        "terminal.selection_background",
+        &["terminal.selectionBackground"],
+        None,
+    ),
+    (
+        "terminal.selection_foreground",
+        &["terminal.selectionForeground"],
+        None,
+    ),
+    ("terminal.ansi.0", &["terminal.ansiBlack"], None),
+    ("terminal.ansi.1", &["terminal.ansiRed"], None),
+    ("terminal.ansi.2", &["terminal.ansiGreen"], None),
+    ("terminal.ansi.3", &["terminal.ansiYellow"], None),
+    ("terminal.ansi.4", &["terminal.ansiBlue"], None),
+    ("terminal.ansi.5", &["terminal.ansiMagenta"], None),
+    ("terminal.ansi.6", &["terminal.ansiCyan"], None),
+    ("terminal.ansi.7", &["terminal.ansiWhite"], None),
+    ("terminal.ansi.8", &["terminal.ansiBrightBlack"], None),
+    ("terminal.ansi.9", &["terminal.ansiBrightRed"], None),
+    ("terminal.ansi.10", &["terminal.ansiBrightGreen"], None),
+    ("terminal.ansi.11", &["terminal.ansiBrightYellow"], None),
+    ("terminal.ansi.12", &["terminal.ansiBrightBlue"], None),
+    ("terminal.ansi.13", &["terminal.ansiBrightMagenta"], None),
+    ("terminal.ansi.14", &["terminal.ansiBrightCyan"], None),
+    ("terminal.ansi.15", &["terminal.ansiBrightWhite"], None),
 ];
 
 /// Whether a parsed file is a VS Code colour theme rather than a zgx one.

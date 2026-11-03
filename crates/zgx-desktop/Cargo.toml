@@ -140,6 +140,10 @@ name = "terminal"
 required-features = ["ghostty"]
 
 [[example]]
+name = "ghostty_theme_probe"
+required-features = ["ghostty"]
+
+[[example]]
 name = "web_view_probe"
 required-features = ["webkitgtk"]
 
