@@ -2266,34 +2266,14 @@ const PROBE_SIZES: usize = 32;
 struct ProbeSize {
     constraints: Constraints,
     size: (f32, f32),
-    /// The pass it was found in (`pass`), and in the top bit whether its
-    /// style and the constraints fixed it, whatever the node holds
-    /// (`fixed`): kept in one word, so the list of them stays its size.
-    pass_fixed: u64,
-}
-/// `ProbeSize::pass_fixed`'s flag: passes never reach it.
-const PROBE_FIXED: u64 = 1 << 63;
-// A node keeps up to `PROBE_SIZES` of them: one word more each moves its
-// list into a larger allocation.
-const _: () = assert!(std::mem::size_of::<ProbeSize>() == 64);
-impl ProbeSize {
-    #[inline(always)]
-    fn pass(&self) -> u64 {
-        self.pass_fixed & !PROBE_FIXED
-    }
-    /// Its style and the constraints fixed it (`Scene::fixed_size`):
-    /// nothing in the node changes this answer.
-    #[inline(always)]
-    fn fixed(&self) -> bool {
-        self.pass_fixed & PROBE_FIXED != 0
-    }
+    pass: u64,
 }
 impl From<&Measurement> for ProbeSize {
     fn from(m: &Measurement) -> Self {
         Self {
             constraints: m.constraints,
             size: m.size,
-            pass_fixed: m.pass,
+            pass: m.pass,
         }
     }
 }
@@ -8237,7 +8217,7 @@ impl Scene {
         // asked more of (its natural width, to stretch it to the widest)
         // changes what it answers there often, and its parent lays it out.
         if !node.alternates.is_empty()
-            || node.sizes.iter().any(|kept| !kept.fixed())
+            || !node.sizes.is_empty()
             || node.measurement.is_none()
             || node.style.absolute
             || node.special.any()
@@ -8257,7 +8237,7 @@ impl Scene {
             && !parent.special.any()
             && parent.measurement.is_some()
             && parent.alternates.is_empty()
-            && parent.sizes.iter().all(|kept| kept.fixed())
+            && parent.sizes.is_empty()
     }
     /// `id`, where a walk stopped (`stops_alone`), laid out again under the
     /// one constraint its parent asked it: if it gives what it did, and it
@@ -9612,7 +9592,7 @@ impl Scene {
             && let Some(kept) = node
                 .sizes
                 .iter()
-                .find(|m| (clean || m.pass() == pass) && m.constraints == *constraints)
+                .find(|m| (clean || m.pass == pass) && m.constraints == *constraints)
         {
             return kept.size;
         }
@@ -9624,46 +9604,40 @@ impl Scene {
         self.measure_depth -= 1;
         size
     }
-    /// A probe of a box its style sizes, under constraints other than the
-    /// ones it was last laid out under (a width change's probes of a page's
-    /// levels, its natural, flexed and stretched sizes), answered from its
-    /// style, laying out nothing in it (`fixed_size`), and kept as one
-    /// (`sizes`, `fixed`). Under the ones it was last laid out under, where
-    /// it is most often placed again, it lays out as before: the result
-    /// `arrange` reuses.
+    /// Whether a probe of `id`, a box with children its style and
+    /// `constraints` size, may find it at a size other than the one it was
+    /// last laid out at: the room it reads to size itself (forced sizes,
+    /// percentage bases) is not what it was. At that size, laying it out
+    /// finds what it holds laid out there already (a list's row asked its
+    /// natural size, then placed at it), the result `arrange` reuses.
     #[inline(never)]
-    fn probe_fixed(&mut self, id: NodeId, constraints: Constraints) -> Option<(f32, f32)> {
+    fn size_moves(&self, id: NodeId, constraints: Constraints) -> bool {
         let node = self.tree_node(id);
-        if !matches!(node.kind, NodeKind::Container(_) | NodeKind::Panel { .. })
-            || !style_may_fix(&node.style, &constraints)
-            || node
-                .measurement
-                .as_ref()
-                .is_some_and(|m| m.constraints == constraints)
-        {
+        !self.children_raw(node).is_empty()
+            && node.measurement.as_ref().is_none_or(|m| {
+                let (a, b) = (m.constraints, constraints);
+                a.force_width != b.force_width
+                    || a.force_height != b.force_height
+                    || a.percent_width != b.percent_width
+                    || a.percent_height != b.percent_height
+            })
+    }
+    /// A probe of a box taffy lays out, its style sizing it, at a size other
+    /// than the one it was last laid out at (`size_moves`), answered from
+    /// its style, laying out nothing in it (`fixed_size`). Not kept: asking
+    /// again costs less than a list of probes allocated for it.
+    #[inline(never)]
+    fn probe_fixed(&self, id: NodeId, constraints: Constraints) -> Option<(f32, f32)> {
+        let node = self.tree_node(id);
+        if !style_may_fix(&node.style, &constraints) || !self.size_moves(id, constraints) {
             return None;
         }
-        let size = self.fixed_size(id, constraints)?;
-        let pass = self.layout_pass;
-        let node = self.tree_node_mut(id);
-        node.sizes.insert(
-            0,
-            ProbeSize {
-                constraints,
-                size,
-                pass_fixed: pass | PROBE_FIXED,
-            },
-        );
-        node.sizes.truncate(PROBE_SIZES);
-        Some(size)
+        self.fixed_size(id, constraints)
     }
     /// `measured`, when nothing kept serves: a probe (`!full`) of a box its
     /// style sizes answered so (`probe_fixed`).
     /// A contents or zoomed node goes to `measure_special`.
     fn measure_uncached(&mut self, id: NodeId, constraints: Constraints, full: bool) -> (f32, f32) {
-        if !full && let Some(size) = self.probe_fixed(id, constraints) {
-            return size;
-        }
         // Timed for devtools' layout attribution while they trace.
         let _traced = crate::profile::layout_span(id);
         // Checked by `measured`, its one caller.
@@ -9682,6 +9656,11 @@ impl Scene {
         if let NodeKind::Container(layout) | NodeKind::Panel { layout, .. } = node.kind
             && self.uses_advanced_layout(id)
         {
+            // A probe its style answers (`probe_fixed`): taffy lays out
+            // nothing in it.
+            if !full && let Some(size) = self.probe_fixed(id, constraints) {
+                return size;
+            }
             return self.measure_advanced(id, layout, constraints);
         }
         let node = self.tree_node_mut(id);
@@ -9731,6 +9710,21 @@ impl Scene {
             })
             .or(style.max_height)
             .map(|h| (h - vertical_padding).max(0.0));
+        // A probe of a box its style sizes on both axes (what `fixed_size`
+        // answers here: these sizes, within its limits) at a size it wasn't
+        // laid out at: its size, its children laid out only where `arrange`
+        // places it. A width change's probes of a page's levels, each asked
+        // its natural, flexed and stretched sizes at a new width.
+        if !full
+            && let (Some(width), Some(height)) = (explicit_w, explicit_h)
+            && layout.is_some()
+            && self.size_moves(id, constraints)
+        {
+            return (
+                dimension(width, style.min_width, style.max_width),
+                dimension(height, style.min_height, style.max_height),
+            );
+        }
         let percent_width = explicit_w.map(|w| (w - horizontal_padding).max(0.0));
         let percent_height = explicit_h.map(|h| (h - vertical_padding).max(0.0));
         // A changed node's result from an earlier pass is dropped as this
@@ -10579,7 +10573,7 @@ impl Scene {
         // from before a zoom, they are in other points.
         if node.dirty & LAYOUT != 0 {
             node.alternates.retain(|m| m.pass == pass);
-            node.sizes.retain(|m| m.pass() == pass);
+            node.sizes.retain(|m| m.pass == pass);
         }
         if let Some(measurement) = &mut node.measurement {
             measurement.constraints = constraints;
@@ -10629,7 +10623,7 @@ impl Scene {
                     .map(|m| ProbeSize::from(&m)),
             );
             node.sizes
-                .retain(|m| m.constraints != constraints && (m.pass() == pass || !dirty));
+                .retain(|m| m.constraints != constraints && (m.pass == pass || !dirty));
             keep_sizes(&mut node.sizes, evicted);
         }
         let overfull = node.alternates.len() == MEASUREMENT_ALTERNATES + 1;
@@ -13949,6 +13943,16 @@ mod measure_work_tests {
                                 scene.flush();
                                 for probe in probes {
                                     let probe = scene.relevant(id, probe);
+                                    // A probe, however answered, gives
+                                    // what laying it out does.
+                                    let probed = scene.measure_uncached(id, probe, false);
+                                    let laid = scene.measure_uncached(id, probe, true);
+                                    if probed != laid {
+                                        wrong.push(format!(
+                                            "probe {kind:?} {:?} {probe:?}: {probed:?} != {laid:?}",
+                                            scene.style(id)
+                                        ));
+                                    }
                                     if let Some(size) = scene.fixed_size(id, probe) {
                                         answered += 1;
                                         let laid = scene.measure_uncached(id, probe, true);
