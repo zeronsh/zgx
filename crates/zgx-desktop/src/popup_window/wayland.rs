@@ -29,7 +29,18 @@
 //! The popup takes no grab: keys stay the window's, which drives menus as
 //! before, and a press on another app takes the window's focus, which
 //! closes them. Pointer input over a popup comes from zgx's own
-//! `wl_pointer`, in the window's coordinates, to its host.
+//! `wl_pointer`, in the window's coordinates, to its host, which hit-tests
+//! the scene there: over a popup's clear margin, what is under it in the
+//! window is hovered. Only what its panel lays out takes the pointer (its
+//! surface's input region, `input_rect`): not the shadow it paints past
+//! that, nor a popup letting the pointer through (a tooltip), whose surface
+//! takes none. A compositor may still give a popup the pointer as it maps
+//! wherever its surface lies (Hyprland 0.57 does), so the window's own
+//! leave onto one of its popups is not the pointer leaving (`pointer_over_
+//! popup`), nor a popup's leave back onto the window (`leaving`). Either
+//! way a shadow reaching over the trigger took the pointer off the trigger
+//! as the popup showed, which closed it, which put the pointer back on the
+//! trigger, which showed it again.
 //! todo(wayland): the grab (`xdg_popup.grab`), with keys through a
 //! `wl_keyboard` of zgx's own.
 use super::PopupInput;
@@ -41,6 +52,7 @@ use wayland_client::{
     protocol::{
         wl_compositor::WlCompositor,
         wl_pointer::{self, WlPointer},
+        wl_region::WlRegion,
         wl_registry::{self, WlRegistry},
         wl_seat::{self, Capability, WlSeat},
         wl_surface::WlSurface,
@@ -88,6 +100,10 @@ struct State {
     targets: HashMap<ObjectId, Target>,
     /// The popup the pointer is over, and where (its parent's points).
     over: Option<(ObjectId, (f32, f32))>,
+    /// The pointer left a popup, told its host as this dispatch ends unless
+    /// it went onto the window meanwhile, which winit tells (a leave told
+    /// after winit's enter would take the pointer off the window).
+    leaving: Option<Sink>,
     /// `xdg_surface`s configured before they first showed, by the serial
     /// `show` acks.
     configured: HashMap<ObjectId, u32>,
@@ -201,9 +217,26 @@ pub(crate) fn dispatch() {
             && let Some(client) = client.as_deref_mut()
         {
             let _ = client.queue.dispatch_pending(&mut client.state);
+            if let Some(send) = client.state.leaving.take() {
+                (send)(PopupInput::Left);
+            }
             let _ = client.connection.flush();
         }
     });
+}
+
+/// Whether the pointer is over one of the window's popups, as zgx's queue
+/// has heard so far (dispatched first): the window's own leave is then the
+/// pointer going onto it, not away.
+pub(crate) fn pointer_over_popup() -> bool {
+    dispatch();
+    CLIENT.with(|client| {
+        client
+            .try_borrow()
+            .ok()
+            .and_then(|client| client.as_deref().map(|client| client.state.over.is_some()))
+            .unwrap_or(false)
+    })
 }
 
 /// A popup shown.
@@ -227,6 +260,8 @@ struct Shown {
     fault: Option<crate::contain::Fault>,
     /// The popup it is a popup of (a submenu's menu), if not the window's.
     parent: Option<NodeId>,
+    /// Its input region as last set (`input_rect`), once set.
+    input: Option<Option<Rect>>,
 }
 impl Shown {
     fn destroy(self, client: &mut Client) {
@@ -407,6 +442,9 @@ impl Popups {
     /// After the scene's flush: show each visible popup root in an
     /// `xdg_popup` of `parent`, draw it again where it changed (always when
     /// `full`), and hide the rest.
+    /// `takes` says whether a node takes the pointer (listening to it, or
+    /// disabled: `Some(true)`) or lets it through (`View::pointer_events`:
+    /// `Some(false)`), or leaves that to what holds it (`None`).
     pub fn update(
         &mut self,
         parent: &Window,
@@ -414,6 +452,7 @@ impl Popups {
         context: &GpuContext,
         scale: f32,
         full: bool,
+        takes: &dyn Fn(NodeId) -> Option<bool>,
     ) -> Result<(), GpuError> {
         if self.shown.is_empty() && scene.popups().is_empty() {
             return Ok(());
@@ -576,8 +615,20 @@ impl Popups {
                         });
                     }
                 }
+                // Where it takes the pointer: set before its frame, which
+                // commits it (or committed alone, with no frame to draw).
+                let input = input_rect(scene, *root, *bounds, takes);
+                let input_changed = popup.input != Some(input);
+                if input_changed {
+                    set_input(client, &popup.surface, input, zoom);
+                    popup.input = Some(input);
+                }
                 let revision = scene.layer_revision(*root);
-                if full || popup.revision != Some(revision) {
+                let draw = full || popup.revision != Some(revision);
+                if input_changed && !draw {
+                    popup.surface.commit();
+                }
+                if draw {
                     popup.revision = Some(revision);
                     popup.renderer.set_popup(*root, *bounds);
                     let renderer = &mut popup.renderer;
@@ -642,6 +693,69 @@ fn sides_turned(asked: Rect, got: Rect, trigger: Rect) -> (bool, bool) {
     let across = (after(asked.x, right) && before(got.x, got.width, trigger.x))
         || (before(asked.x, asked.width, trigger.x) && after(got.x, right));
     (across, down)
+}
+
+/// Where popup `root`, shown at `bounds`, takes the pointer, from
+/// `bounds`' top-left (the scene's points): round the boxes laid out in it
+/// that take the pointer as the window's hit test has it (`takes`: a node
+/// with listeners of its own takes it, `Some(true)`, one letting it
+/// through gives it to what is under, `Some(false)`, nearest first, else
+/// what holds it decides), and never the ink painted past them (a card's
+/// shadow, which reaches far past the card). `None` where nothing in it
+/// takes it (a tooltip, its card listening to nothing, in its layer that
+/// lets the pointer through). A box clipping its content bounds what it
+/// holds.
+fn input_rect(
+    scene: &Scene,
+    root: NodeId,
+    bounds: Rect,
+    takes: &dyn Fn(NodeId) -> Option<bool>,
+) -> Option<Rect> {
+    // What holds it decides for it, where it says nothing itself.
+    let held = scene
+        .ancestors(root)
+        .filter(|node| *node != scene.root())
+        .find_map(takes)
+        .unwrap_or(false);
+    // Each level's answer down the walk (it goes depth first).
+    let mut answers: Vec<bool> = Vec::new();
+    let mut taken: Option<Rect> = None;
+    scene.walk(root, |item| {
+        answers.truncate(item.depth);
+        let above = answers.last().copied().unwrap_or(held);
+        let answer = takes(item.id).unwrap_or(above);
+        answers.push(answer);
+        let b = item.bounds;
+        if answer && b.width > 0. && b.height > 0. {
+            taken = Some(taken.map_or(b, |taken| taken.union(b)));
+        }
+        scene.clips(item.id) != (true, true)
+    });
+    let taken = taken?.intersection(bounds)?;
+    Some(Rect::new(
+        taken.x - bounds.x,
+        taken.y - bounds.y,
+        taken.width,
+        taken.height,
+    ))
+}
+
+/// Set `surface`'s input region to `input` (the scene's points from its
+/// top-left, at the window's `zoom`), or to nothing.
+fn set_input(client: &Client, surface: &WlSurface, input: Option<Rect>, zoom: f32) {
+    let Some(compositor) = &client.state.compositor else {
+        return;
+    };
+    let region = compositor.create_region(&client.queue.handle(), ());
+    if let Some(input) = input {
+        // Rounded out to whole surface points.
+        let r = super::window_rect(input, zoom);
+        let (x, y) = (r.x.floor(), r.y.floor());
+        let (right, bottom) = ((r.x + r.width).ceil(), (r.y + r.height).ceil());
+        region.add(x as i32, y as i32, (right - x) as i32, (bottom - y) as i32);
+    }
+    surface.set_input_region(Some(&region));
+    region.destroy();
 }
 
 fn rects_match(a: Rect, b: Rect) -> bool {
@@ -841,6 +955,7 @@ fn show(
         revision: None,
         fault: None,
         parent: of.map(|(holder, ..)| holder),
+        input: None,
     })
 }
 
@@ -919,8 +1034,15 @@ impl Dispatch<WlPointer, ()> for State {
                 ..
             } => {
                 let Some(target) = state.targets.get(&surface.id()) else {
+                    // Onto the window (zgx's pointer hears its surfaces
+                    // too): winit tells it, so no leave from a popup goes
+                    // after.
+                    state.leaving = None;
+                    state.over = None;
                     return;
                 };
+                // From one popup straight onto another: no leave between.
+                state.leaving = None;
                 let point = at(target, surface_x, surface_y);
                 (target.send)(PopupInput::Moved {
                     x: point.0,
@@ -946,8 +1068,10 @@ impl Dispatch<WlPointer, ()> for State {
                 });
             }
             wl_pointer::Event::Leave { surface, .. } => {
+                // Told as the dispatch ends (`dispatch`): an enter onto the
+                // window or another popup may follow.
                 if let Some(target) = state.targets.get(&surface.id()) {
-                    (target.send)(PopupInput::Left);
+                    state.leaving = Some(target.send.clone());
                 }
                 state.over = None;
             }
@@ -1070,6 +1194,7 @@ impl Dispatch<XdgPopup, ()> for State {
 }
 delegate_noop!(State: ignore WlCompositor);
 delegate_noop!(State: ignore WlSurface);
+delegate_noop!(State: ignore WlRegion);
 delegate_noop!(State: ignore XdgPositioner);
 delegate_noop!(State: ignore WpViewporter);
 delegate_noop!(State: ignore WpViewport);
@@ -1077,6 +1202,78 @@ delegate_noop!(State: ignore WpViewport);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chip with a tooltip card that paints a wide shadow, hovered so
+    /// the card shows as a popup root: the card's box, where the popup
+    /// root shows (its shadow's ink), and where it takes the pointer.
+    fn hovered_card(interactive: bool) -> (Rect, Rect, Option<Rect>) {
+        use zgx::{
+            compose::{Tooltip, prelude::*},
+            input::InputEvent,
+            scene::{BoxShadow, Transform},
+            widgets::Ui,
+        };
+        let mut ui = Ui::new(400., 300.);
+        ui.set_popup_screens(vec![Rect::new(-1e5, -1e5, 2e5, 2e5)]);
+        let card = column().id("card").w(160.).h(60.).shadow(BoxShadow {
+            color: rgba(0x00000066),
+            offset: Transform { x: 0., y: 20. },
+            blur_radius: 56.,
+            spread: 0.,
+        });
+        let view = ui.mount(
+            column().p(150.).child(
+                row()
+                    .id("chip")
+                    .size(24., 24.)
+                    .tooltip(Tooltip::from(card).interactive(interactive)),
+            ),
+        );
+        ui.prepare_frame();
+        // (No task runner: it shows at once.)
+        ui.dispatch(InputEvent::PointerMove { x: 162., y: 162. });
+        ui.prepare_frame();
+        let scene = ui.scene.borrow();
+        let root = *scene.popups().first().expect("the card shows as a popup");
+        let shown = scene.popup_bounds(root).expect("it paints");
+        let card = scene.bounds(view.find("card").expect("the card"));
+        let takes = |node| {
+            let options = ui.input.options(node);
+            if options.is_some_and(|options| options.pass_through) {
+                Some(false)
+            } else if ui.input.has_listeners(node)
+                || options.is_some_and(|options| options.disabled)
+            {
+                Some(true)
+            } else {
+                None
+            }
+        };
+        (card, shown, input_rect(&scene, root, shown, &takes))
+    }
+
+    #[test]
+    fn a_tooltip_takes_no_pointer_and_a_cards_shadow_none() {
+        // A tooltip lets the pointer through: its surface takes none, so
+        // it never takes the pointer off its trigger as it shows.
+        let (card, shown, input) = hovered_card(false);
+        assert!(
+            shown.width > card.width + 50. && shown.height > card.height + 50.,
+            "the shadow reaches past the card: {shown:?} for {card:?}"
+        );
+        assert_eq!(input, None);
+        // A hover card takes the pointer over the card, not its shadow.
+        let (card, shown, input) = hovered_card(true);
+        assert_eq!(
+            input,
+            Some(Rect::new(
+                card.x - shown.x,
+                card.y - shown.y,
+                card.width,
+                card.height
+            ))
+        );
+    }
 
     #[test]
     fn a_popup_opens_against_its_trigger_on_the_side_the_scene_chose() {

@@ -2745,6 +2745,21 @@ impl Host {
                         full,
                         self.context.ui.input.drag_state().as_ref(),
                         self.context.ui.input.take_drag_ended(),
+                        // Where a popup takes the pointer, as the window's hit
+                        // test has it (`popup_window::wayland::input_rect`).
+                        &|node| {
+                            let input = &self.context.ui.input;
+                            let options = input.options(node);
+                            if options.is_some_and(|options| options.pass_through) {
+                                Some(false)
+                            } else if input.has_listeners(node)
+                                || options.is_some_and(|options| options.disabled)
+                            {
+                                Some(true)
+                            } else {
+                                None
+                            }
+                        },
                     )
                 },
             );
@@ -4392,6 +4407,13 @@ impl Host {
                 }
             }
             WindowEvent::CursorLeft { .. } => {
+                // Onto one of its popups (Wayland): its moves come from
+                // there, so the content keeps the pointer rather than
+                // hearing it leave after (or before) the popup's first move.
+                #[cfg(target_os = "linux")]
+                if crate::popup_window::pointer_over_popup() {
+                    return Ok(());
+                }
                 self.pointer_inside = false;
                 #[cfg(target_os = "linux")]
                 {

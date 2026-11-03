@@ -1015,6 +1015,7 @@ impl PopupHost {
         full: bool,
         drag: Option<&zgx::input::DragState>,
         ended: Option<zgx::input::DragEnded>,
+        _takes: &dyn Fn(NodeId) -> Option<bool>,
     ) -> Result<(), GpuError> {
         if self.shown.is_empty() && scene.popups().is_empty() {
             return Ok(());
