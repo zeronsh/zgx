@@ -370,3 +370,257 @@ fn what_changes_in_an_absolute_box_lays_out_as_a_fresh_layout_does() {
     fresh.flush();
     assert_same(&live, &page, &fresh, &fresh_page, "after narrowing");
 }
+
+/// A tree a builder makes, laid out, edited by `edit` and laid out again,
+/// against the same tree built, edited and laid out once: every node where
+/// the fresh layout puts it. The builder returns every node it made, and
+/// the ones `edit` changes.
+fn live_matches_fresh(
+    what: &str,
+    build: impl Fn(&mut Scene) -> (Vec<NodeId>, Vec<NodeId>),
+    edit: impl Fn(&mut Scene, &[NodeId]),
+) {
+    let mut live = Scene::new(600., 400.);
+    let (all, targets) = build(&mut live);
+    live.flush();
+    edit(&mut live, &targets);
+    live.flush();
+    let mut fresh = Scene::new(600., 400.);
+    let (fresh_all, fresh_targets) = build(&mut fresh);
+    edit(&mut fresh, &fresh_targets);
+    fresh.flush();
+    for (index, (a, b)) in all.iter().zip(&fresh_all).enumerate() {
+        assert_eq!(live.bounds(*a), fresh.bounds(*b), "{what}: node {index}");
+    }
+}
+
+fn grow(scene: &mut Scene, targets: &[NodeId]) {
+    for id in targets {
+        scene.set_kind(*id, text(&format!("{WORDS} {WORDS} {WORDS}")));
+    }
+}
+
+/// Appends, recording each node.
+fn node(
+    scene: &mut Scene,
+    all: &mut Vec<NodeId>,
+    parent: NodeId,
+    kind: NodeKind,
+    style: Style,
+) -> NodeId {
+    let id = scene.append(parent, kind, style);
+    all.push(id);
+    id
+}
+
+fn wrapping() -> Style {
+    Style {
+        text_wrap: true,
+        ..Style::default()
+    }
+}
+
+#[test]
+fn an_absolute_box_its_content_sizes_grows_where_its_parent_places_it() {
+    // Centred in an overlay, held by its foot, and in a column sized by
+    // what it holds: each box's place reads its size, so it grows from
+    // where a fresh layout puts it.
+    for (name, layout, inset_options, parent_width) in [
+        ("centred in an overlay", Layout::Overlay, None, Some(400.)),
+        (
+            "held by its foot",
+            Layout::Column,
+            inset(0., None, 12., 20.).map(|o| {
+                let mut o = *o;
+                o.inset.top = None;
+                Arc::new(o)
+            }),
+            Some(400.),
+        ),
+        ("in a column its content sizes", Layout::Column, None, None),
+    ] {
+        live_matches_fresh(
+            name,
+            |scene| {
+                let mut all = Vec::new();
+                let row = node(
+                    scene,
+                    &mut all,
+                    scene.root(),
+                    NodeKind::Container(Layout::Row),
+                    Style::default(),
+                );
+                let parent = node(
+                    scene,
+                    &mut all,
+                    row,
+                    NodeKind::Container(layout),
+                    Style {
+                        width: parent_width,
+                        height: parent_width.map(|_| 300.),
+                        relative: true,
+                        align: Align::Center,
+                        justify: Justify::Center,
+                        ..Style::default()
+                    },
+                );
+                node(scene, &mut all, parent, text("beside the box"), wrapping());
+                let boxed = node(
+                    scene,
+                    &mut all,
+                    parent,
+                    NodeKind::Container(Layout::Column),
+                    Style {
+                        absolute: true,
+                        max_width: Some(200.),
+                        layout_options: inset_options.clone(),
+                        ..Style::default()
+                    },
+                );
+                let held = node(scene, &mut all, boxed, text("what it holds"), wrapping());
+                (all, vec![held])
+            },
+            grow,
+        );
+    }
+}
+
+#[test]
+fn a_box_a_grid_pins_on_every_side_and_one_it_pins_on_two_lay_out_as_fresh() {
+    for (name, all_sides) in [
+        ("pinned on every side", true),
+        ("pinned at its top left", false),
+    ] {
+        live_matches_fresh(
+            name,
+            |scene| {
+                let mut all = Vec::new();
+                let grid = node(
+                    scene,
+                    &mut all,
+                    scene.root(),
+                    NodeKind::Container(Layout::Column),
+                    {
+                        let mut style = cell();
+                        style.relative = true;
+                        style
+                    },
+                );
+                node(scene, &mut all, grid, text("the grid's cell"), wrapping());
+                let options = if all_sides {
+                    inset(10., Some(10.), 10., 300.)
+                } else {
+                    options(LayoutOptions {
+                        inset: EdgeLengths {
+                            top: Some(Length::Px(10.)),
+                            left: Some(Length::Px(300.)),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                };
+                let boxed = node(
+                    scene,
+                    &mut all,
+                    grid,
+                    NodeKind::Container(Layout::Column),
+                    Style {
+                        absolute: true,
+                        max_width: Some(250.),
+                        layout_options: options,
+                        ..Style::default()
+                    },
+                );
+                let held = node(scene, &mut all, boxed, text("what it holds"), wrapping());
+                (all, vec![held])
+            },
+            grow,
+        );
+    }
+}
+
+#[test]
+fn boxes_placed_by_a_block_further_up_and_nested_lay_out_as_fresh() {
+    // An absolute box whose containing block is two levels up, held by
+    // its foot and right edge; inside it, another absolute box; and the
+    // page's width changing in the same frame as both edits.
+    live_matches_fresh(
+        "escaped and nested",
+        |scene| {
+            let mut all = Vec::new();
+            let page = node(
+                scene,
+                &mut all,
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                Style {
+                    relative: true,
+                    width: Some(500.),
+                    height: Some(350.),
+                    ..Style::default()
+                },
+            );
+            let middle = node(
+                scene,
+                &mut all,
+                page,
+                NodeKind::Container(Layout::Column),
+                fill(),
+            );
+            node(scene, &mut all, middle, text(WORDS), wrapping());
+            let outer = node(
+                scene,
+                &mut all,
+                middle,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    absolute: true,
+                    width_percent: Some(0.5),
+                    padding: 4.,
+                    relative: true,
+                    layout_options: options(LayoutOptions {
+                        inset: EdgeLengths {
+                            right: Some(Length::Px(8.)),
+                            bottom: Some(Length::Px(8.)),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                    ..Style::default()
+                },
+            );
+            let first = node(
+                scene,
+                &mut all,
+                outer,
+                text("the outer box's line"),
+                wrapping(),
+            );
+            let inner = node(
+                scene,
+                &mut all,
+                outer,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    absolute: true,
+                    layout_options: inset(0., Some(0.), 0., 40.),
+                    ..Style::default()
+                },
+            );
+            let second = node(
+                scene,
+                &mut all,
+                inner,
+                text("the inner box's line"),
+                wrapping(),
+            );
+            (all, vec![first, second, page])
+        },
+        |scene, targets| {
+            grow(scene, &targets[..2]);
+            let mut style = scene.style(targets[2]);
+            style.width = Some(420.);
+            scene.set_style(targets[2], style);
+        },
+    );
+}
