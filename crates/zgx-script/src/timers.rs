@@ -3,9 +3,11 @@
 //! `ui.effect`: by the component or builder that made them, else the script,
 //! so a reload or an unmount stops them.
 //!
-//! `ui.after(0, fn)` runs `fn` on the next frame. Under [`crate::testing`],
-//! timers keep the test's time: they fire as its frames advance it, never on
-//! the wall clock in the middle of a step.
+//! `ui.after(0, fn)` runs `fn` before the next frame is drawn (in a window,
+//! a timer of a millisecond). Under [`crate::testing`], timers keep the
+//! test's time: they fire as its frames advance it, never on the wall clock
+//! in the middle of a step; one due at once (`ui.after(0)`) runs before the
+//! frame it was made in ends.
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -29,18 +31,26 @@ pub(crate) struct Timers {
 /// What timers wait on, read as they first run (after the view mounts).
 #[derive(Default)]
 struct Clocks {
-    /// The window's frames, for `ui.after(0)`.
-    frames: RefCell<Option<zgx::frame::FrameClock>>,
     /// A test's time, in place of the wall clock.
     test: RefCell<Option<Rc<TestClock>>>,
 }
 impl Timers {
-    pub fn set_frames(&self, frames: zgx::frame::FrameClock) {
-        *self.clocks.frames.borrow_mut() = Some(frames);
-    }
     /// Keep the test's time from now on: see [`TestClock`].
     pub fn use_test_clock(&self) {
         self.clocks.test.borrow_mut().get_or_insert_default();
+    }
+    /// The test's time: how far its frames and waits have moved it.
+    pub fn test_now(&self) -> Duration {
+        let test = self.clocks.test.borrow();
+        test.as_deref()
+            .map_or(Duration::ZERO, |clock| clock.now.get())
+    }
+    /// Whether a test's timer is due now (`ui.after(0)` made since time last
+    /// moved).
+    pub fn test_due_now(&self) -> bool {
+        let test = self.clocks.test.borrow();
+        test.as_deref()
+            .is_some_and(|clock| clock.next_due(clock.now.get()).is_some())
     }
     /// Move the test's time to `to`, firing each timer due by then at its
     /// own time, in order, `settle` running what each wakes.
@@ -79,13 +89,11 @@ impl Timers {
         let running = alive.clone();
         let clocks = self.clocks.clone();
         self.spawn(async move {
-            let frames = clocks.frames.borrow().clone().filter(|_| period.is_zero());
             let test = clocks.test.borrow().clone();
             loop {
-                match (&frames, &test) {
-                    (Some(frames), _) => drop(frames.next().await),
-                    (None, Some(test)) => test.sleep(period).await,
-                    (None, None) => zgx::timer::sleep(period.max(Duration::from_millis(1))).await,
+                match &test {
+                    Some(test) => test.sleep(period).await,
+                    None => zgx::timer::sleep(period.max(Duration::from_millis(1))).await,
                 }
                 if !running.get() || !fire() || !repeat {
                     return;
@@ -152,12 +160,15 @@ impl TestClock {
         let due = self.now.get() + period;
         let key = (due, self.next.get());
         self.next.set(key.1 + 1);
+        let mut asleep = false;
+        // Done once the test's time moves past it (`advance` takes it out):
+        // never as it is made, so `ui.after(0)` waits for time to move too.
         poll_fn(move |cx| {
-            if self.now.get() >= due {
-                self.sleeping.borrow_mut().remove(&key);
+            let mut sleeping = self.sleeping.borrow_mut();
+            if std::mem::replace(&mut asleep, true) && !sleeping.contains_key(&key) {
                 return Poll::Ready(());
             }
-            self.sleeping.borrow_mut().insert(key, cx.waker().clone());
+            sleeping.insert(key, cx.waker().clone());
             Poll::Pending
         })
     }

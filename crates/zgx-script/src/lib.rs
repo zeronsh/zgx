@@ -3166,7 +3166,6 @@ impl ScriptHost {
             // One frame loop ticks every animation; it idles at rest.
             if let Some(frames) = cx.try_service::<zgx::frame::FrameClock>() {
                 cx.tasks().spawn(engine.run((*frames).clone()));
-                timers.set_frames((*frames).clone());
             }
             // `ui.persist` saves on a timer from here, and `ui.every` runs.
             if cx.try_service::<zgx::compose::TaskRunner>().is_some() {

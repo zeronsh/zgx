@@ -352,7 +352,7 @@ impl TestApp {
         };
         app.settle();
         // A window lays out before its first frame.
-        app.ui.prepare_frame();
+        app.lay_out();
         app.settle();
         Ok(app)
     }
@@ -401,7 +401,7 @@ impl TestApp {
             desktop: self.desktop.clone(),
         };
         app.settle();
-        app.ui.prepare_frame();
+        app.lay_out();
         app.settle();
         Some(app)
     }
@@ -443,17 +443,34 @@ impl TestApp {
         let index = self.frame.get().max(last) + 1;
         self.frame.set(index);
         let interval = Duration::from_secs_f64(1. / 60.);
-        self.run_timers(interval * index as u32);
+        // A frame's time on from where the test's is (a wait may have moved
+        // it further than frames).
+        self.run_timers(self.host.0.timers.test_now() + interval);
         self.clock.deliver(Frame {
             index,
             time: self.start + interval * index as u32,
             interval,
         });
         self.settle();
-        self.ui.prepare_frame();
-        self.settle();
+        self.lay_out();
         // The frame is done, as a renderer's present ends one.
         zgx::profile::frame();
+    }
+    /// Lay out, as a frame does before it is drawn: then what that made
+    /// due at once (`ui.after(0)` from `on_resize`) runs, and it lays out
+    /// again, as a window's timer of a millisecond runs before its next
+    /// frame (a few rounds at most). Every read lays out so.
+    pub(crate) fn lay_out(&self) {
+        self.ui.prepare_frame();
+        self.settle();
+        for _ in 0..4 {
+            if !self.host.0.timers.test_due_now() {
+                break;
+            }
+            self.run_timers(self.host.0.timers.test_now());
+            self.ui.prepare_frame();
+            self.settle();
+        }
     }
     /// Advance the timers' time to `to` since the start, firing each timer
     /// due by then at its own time, in order, as a window's would between
@@ -468,13 +485,24 @@ impl TestApp {
         }
     }
     /// Settle and lay out until `done` holds, or five seconds pass (host
-    /// calls, fetches and timers run in real time); whether it held.
+    /// calls and fetches run in real time); whether it held. Meanwhile,
+    /// as a window waits, a frame comes when one is asked for (an
+    /// animation, `ui.after(0)`), and else the test's time moves on by
+    /// the time that passes, from wherever its frames left it.
     pub fn wait_until(&mut self, mut done: impl FnMut(&mut Self) -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last = Instant::now();
         loop {
-            self.run_timers(self.start.elapsed());
-            self.settle();
-            self.ui.prepare_frame();
+            // As a window waits: a frame when one is asked for (an animation,
+            // `ui.after(0)`), else the test's time on by the time that passed.
+            let passed = std::mem::replace(&mut last, Instant::now()).elapsed();
+            if self.clock.wants_frame() {
+                self.frame();
+            } else {
+                self.run_timers(self.host.0.timers.test_now() + passed);
+                self.settle();
+                self.lay_out();
+            }
             if done(self) {
                 return true;
             }
@@ -490,7 +518,7 @@ impl TestApp {
     /// `"role:button \"Send\""`, `"#list row 3"`, `"@12"`; see
     /// [`crate::driver`]). None if nothing, or more than one, matches.
     pub fn find(&mut self, target: &str) -> Option<NodeId> {
-        self.ui.prepare_frame();
+        self.lay_out();
         if is_plain_id(target) {
             return self.handle.find(target);
         }
@@ -499,7 +527,7 @@ impl TestApp {
     /// [`TestApp::find`], or why it found none: nothing matched, or several
     /// did (each described).
     pub fn target(&mut self, target: &str) -> Result<NodeId, String> {
-        self.ui.prepare_frame();
+        self.lay_out();
         if is_plain_id(target) {
             return self
                 .handle
@@ -510,7 +538,7 @@ impl TestApp {
     }
     /// The interface as `zgx inspect tree` shows it: a node a line.
     pub fn tree(&mut self) -> String {
-        self.ui.prepare_frame();
+        self.lay_out();
         let (lines, hidden) =
             crate::driver::tree_lines(&self.ui, &self.handle, None, &Default::default());
         crate::driver::tree_lines_text(&lines, hidden)
@@ -579,7 +607,7 @@ impl TestApp {
     }
     /// Every text the app shows, in tree order.
     pub fn texts(&mut self) -> Vec<String> {
-        self.ui.prepare_frame();
+        self.lay_out();
         let scene = self.ui.scene.borrow();
         let mut out = Vec::new();
         let mut stack = vec![scene.root()];
