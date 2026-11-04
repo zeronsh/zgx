@@ -2007,8 +2007,11 @@ pub(crate) fn module_name(path: &str) -> String {
 /// `ui.override { module = "@app/…", with = "./mine" }` from a plugin: the
 /// app's module replaced by the plugin's, which runs as the app's own code
 /// and may require the original as `@app-original/…`. Takes
-/// `Capability::Override` of the module as written, or of `"*"`: a trust
-/// grant, not a permission over the interface.
+/// `Capability::OverrideModule` of the module as written, or of `"*"`: a trust
+/// grant, not a permission over the interface. The older
+/// `Capability::Override` of the module as written takes it too; its `"*"`
+/// is for elements alone.
+#[cold]
 fn module_override(env: &Env, table: &Table) -> mlua::Result<(String, ModuleOverride)> {
     let module: String = table.get::<Option<String>>("module")?.ok_or_else(|| {
         mlua::Error::runtime("ui.override: `module` names the app's module (\"@app/…\")")
@@ -2018,9 +2021,10 @@ fn module_override(env: &Env, table: &Table) -> mlua::Result<(String, ModuleOver
             "ui.override {{ module = \"{module}\" }}: only the app's `@app/…` modules are overridden"
         )));
     };
-    let own = crate::Capability::Override(module.clone());
-    let any = crate::Capability::Override("*".into());
-    if !env.grants.allows(&own) && !env.grants.allows(&any) {
+    let own = crate::Capability::OverrideModule(module.clone());
+    let any = crate::Capability::OverrideModule("*".into());
+    let older = crate::Capability::Override(module.clone());
+    if !env.grants.allows(&own) && !env.grants.allows(&any) && !env.grants.allows(&older) {
         return Err(mlua::Error::runtime(format!(
             "ui.override {{ module = \"{module}\" }}: {} needs {own:?}, a trust grant: the \
              module would run as the app's own code",
@@ -2060,7 +2064,7 @@ fn module_override(env: &Env, table: &Table) -> mlua::Result<(String, ModuleOver
 /// `ui.contribute { target, before | after | replace }`: the target read,
 /// one place, and what the script may do there. Adding before or after an
 /// element is open, unless the host asks a capability for that target
-/// (`expose_hook`); replacing one takes `Capability::Override` of the
+/// (`expose_hook`); replacing one takes `Capability::OverrideElement` of the
 /// target as written, or of `"*"`.
 fn hook_contribution(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<HookContribution> {
     let written: String = table
@@ -2114,11 +2118,20 @@ fn contribution_needs(env: &Env, exposed: &str) -> Option<crate::Capability> {
     asked.filter(|needed| !env.grants.allows(needed))
 }
 /// The capability replacing or filtering `written` takes, if the script
-/// lacks it: `Override` of the target as written, or of `"*"`.
+/// lacks it: `OverrideElement` of the target as written, or of `"*"` (or the
+/// older `Override` of either).
 fn overrides(env: &Env, written: &str) -> Option<crate::Capability> {
-    let own = crate::Capability::Override(written.into());
-    let any = crate::Capability::Override("*".into());
-    (!env.grants.allows(&own) && !env.grants.allows(&any)).then_some(own)
+    use crate::Capability::{Override, OverrideElement};
+    let own = OverrideElement(written.into());
+    let granted = [
+        &own,
+        &OverrideElement("*".into()),
+        &Override(written.into()),
+        &Override("*".into()),
+    ]
+    .into_iter()
+    .any(|capability| env.grants.allows(capability));
+    (!granted).then_some(own)
 }
 /// `ui.filter { target, text = fn, … }`: the target read, the props it
 /// passes through functions (`Filtered`), and the capability it takes,
@@ -5776,6 +5789,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 env.permits(&env.exposed_actions, &name, "ui.invoke")?;
                 env.actions.borrow().get(&name).cloned()
             };
+            crate::rules::guard(lua, crate::GuardKind::Action, &name)?;
             match action {
                 Some(action) => {
                     action(arg.unwrap_or(Value::Nil));
@@ -5796,6 +5810,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 env.permits(&env.exposed_actions, &name, "ui.call_sync")?;
                 env.functions.borrow().get(&name).cloned()
             };
+            crate::rules::guard(lua, crate::GuardKind::Function, &name)?;
             match function {
                 Some(function) => Ok(function(arg.unwrap_or(Value::Nil))),
                 None => Err(mlua::Error::runtime(format!(
@@ -5917,6 +5932,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "slot",
         lua.create_function(|lua, (name, table): (String, Option<Table>)| {
+            {
+                let env = env(lua)?;
+                if !matches!(*env.grants, crate::Grants::All) {
+                    crate::rules::plugin_offers(lua, &env.owner, &name)?;
+                }
+            }
             let (context, from) = match &table {
                 Some(table) => {
                     let context: Option<Value> = table.get("context")?;

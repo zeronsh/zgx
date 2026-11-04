@@ -41,6 +41,8 @@ mod plugin_packages;
 mod plugin_report;
 #[path = "../plugin_rows.rs"]
 mod plugin_rows;
+#[path = "../plugin_rules.rs"]
+mod plugin_rules;
 #[path = "../plugin_shared.rs"]
 mod plugin_shared;
 #[path = "../plugin_targets.rs"]

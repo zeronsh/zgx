@@ -4493,6 +4493,10 @@ fn remote_status_in(
             ready
         }
     };
+    if let Err(error) = crate::rules::guard(&vm.lua, crate::GuardKind::Fetch, src) {
+        vm.report(error);
+        return ready.get();
+    }
     let links = assets.links.borrow().clone();
     let fetch = links
         .as_ref()
@@ -5414,7 +5418,13 @@ fn run(
                 }
                 Action::Host(name, arg) => {
                     let action = actions.borrow().get(&**name).cloned();
+                    let guarded = crate::rules::guard(&vm.lua, crate::GuardKind::Action, name);
                     match action {
+                        _ if guarded.is_err() => {
+                            if let Err(error) = guarded {
+                                vm.report(error);
+                            }
+                        }
                         Some(action) => action(arg.clone()),
                         None => vm.report(mlua::Error::runtime(format!(
                             "no host action named `{name}`"

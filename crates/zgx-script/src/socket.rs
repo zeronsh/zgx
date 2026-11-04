@@ -271,6 +271,13 @@ impl Conn {
             ));
             return;
         };
+        if let Some(vm) = self.vm.upgrade() {
+            let url = self.url.borrow().clone();
+            if let Err(error) = crate::rules::guard(&vm.lua, crate::GuardKind::Socket, &url) {
+                self.failed(Failure::new(Kind::Network, error.to_string()));
+                return;
+            }
+        }
         let link = Rc::new(Link {
             conn: Rc::downgrade(self),
             caller: self.caller.clone(),

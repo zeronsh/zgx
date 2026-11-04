@@ -1,5 +1,5 @@
 //! A plugin replacing one of the app's modules (`ui.override`): only the
-//! modules the app requires as `@app/…`, with `Capability::Override` (a trust
+//! modules the app requires as `@app/…`, with `Capability::OverrideModule` (a trust
 //! grant: the replacement runs as the app's own code), reaching the
 //! original as `@app-original/…` from the replacement alone.
 mod common;
@@ -81,7 +81,7 @@ fn a_plugin_replaces_an_app_module_it_is_trusted_with() {
     let mut h = host(
         &app,
         plugin("trusted", OVERRIDE),
-        vec![Capability::Override("@app/card".into())],
+        vec![Capability::OverrideModule("@app/card".into())],
     );
     h.ui.prepare_frame();
     assert_eq!(h.error(), None);
@@ -89,11 +89,11 @@ fn a_plugin_replaces_an_app_module_it_is_trusted_with() {
     assert!(h.find("wrapped").is_some());
     assert_eq!(h.text("badge"), "New");
     assert_eq!(h.text("card"), "Inbox");
-    // `Override("*")` trusts the plugin with every module.
+    // `OverrideModule("*")` trusts the plugin with every module.
     let mut any = host(
         &app,
         plugin("any", OVERRIDE),
-        vec![Capability::Override("*".into())],
+        vec![Capability::OverrideModule("*".into())],
     );
     any.ui.prepare_frame();
     assert!(any.find("wrapped").is_some());
@@ -105,7 +105,7 @@ fn without_the_grant_the_app_keeps_its_module() {
     h.ui.prepare_frame();
     let error = h.error().unwrap_or_default();
     assert!(
-        error.contains("needs Override(\"@app/card\")") && error.contains("trust grant"),
+        error.contains("needs OverrideModule(\"@app/card\")") && error.contains("trust grant"),
         "{error}"
     );
     assert!(h.find("wrapped").is_none());
@@ -118,7 +118,7 @@ fn a_relative_require_stays_the_apps() {
     let mut h = host(
         &app("relative"),
         plugin("relative", OVERRIDE),
-        vec![Capability::Override("*".into())],
+        vec![Capability::OverrideModule("*".into())],
     );
     h.ui.prepare_frame();
     let private = h.find("private").unwrap();
@@ -160,7 +160,7 @@ fn the_original_is_reached_from_its_replacement_alone() {
     let h = host_with(
         "plugin-requires",
         r#"local card = require("@app/card")"#,
-        vec![Capability::Override("*".into())],
+        vec![Capability::OverrideModule("*".into())],
     );
     h.ui.prepare_frame();
     let error = h.error().unwrap_or_default();
@@ -208,7 +208,7 @@ fn an_override_names_an_app_module_and_a_plugin_file() {
             "one of the plugin's own files",
         ),
     ] {
-        let h = host_with("names", code, vec![Capability::Override("*".into())]);
+        let h = host_with("names", code, vec![Capability::OverrideModule("*".into())]);
         h.ui.prepare_frame();
         let error = h.error().unwrap_or_default();
         assert!(error.contains(says), "{code}: {error}");

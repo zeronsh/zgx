@@ -48,9 +48,9 @@ Plugins may also target an element by role and name, as the app writes them (`ro
 | | call | needs |
 |---|---|---|
 | add beside an element | `ui.contribute { target, before = node }`, `after = node` | nothing, unless the host asks a capability for that target (`expose_hook`) or for every contribution (`require_contribution_capability`) |
-| put a node in its place | `ui.contribute { target, replace = node }` | `Capability::Override(target)` |
-| pass a prop through a function | `ui.filter { target, text = fn, … }` (text, label, hidden, disabled, tooltip, items, order) | `Capability::Override(target)` |
-| replace an app module | `ui.override { module = "@app/…", with = "./file" }` | `Capability::Override(module)`, a trust grant (below) |
+| put a node in its place | `ui.contribute { target, replace = node }` | `Capability::OverrideElement(target)` |
+| pass a prop through a function | `ui.filter { target, text = fn, … }` (text, label, hidden, disabled, tooltip, items, order) | `Capability::OverrideElement(target)` |
+| replace an app module | `ui.override { module = "@app/…", with = "./file" }` | `Capability::OverrideModule(module)`, a trust grant (below) |
 | add to a slot the app made | `ui.contribute(name, node)` | nothing, unless the host asks a capability for every contribution (`require_contribution_capability`) |
 
 From the focus plugin:
@@ -79,16 +79,24 @@ What a plugin adds reads what the app provides above where it lands (`provide`, 
 Capabilities are what the host grants each plugin (`Plugin { name, entry, grants }`), and the example's host grants them per plugin:
 
 ```rust
-Plugin { name: "focus".into(), entry, grants: vec![Capability::Override("#tasks".into())] },
+Plugin { name: "focus".into(), entry, grants: vec![Capability::OverrideElement("#tasks".into())] },
 Plugin { name: "stamps".into(), entry, grants: vec![
-    Capability::Override("#empty".into()),
-    Capability::Override("@app/components/task_row".into()),
+    Capability::OverrideElement("#empty".into()),
+    Capability::OverrideModule("@app/components/task_row".into()),
 ] },
 ```
 
-**`Override` on an element** lets a plugin change what that element shows: its replacement or its filtered props. The plugin's code still runs in its own VM, seeing only what it was given. It can change how the element looks and reads, but not reach the app's state or handlers. Grant it for elements whose content you are willing to let the plugin decide.
+**`OverrideElement`** lets a plugin change what that element shows: its replacement or its filtered props. The plugin's code still runs in its own VM, seeing only what it was given. It can change how the element looks and reads, but not reach the app's state or handlers. Grant it for elements whose content you are willing to let the plugin decide.
 
-**`Override` on a module is a trust grant.** The replacement runs in the app's VM as the app's own code, with everything the app's scripts may do: its state, its actions, its packages. That is why stamps' row can `require("@app-original/components/task_row")` (the module it replaces; only the replacement may reach it) and `require("@kit/badge")`. Grant `Override("@app/…")` as you would install the plugin's code into the app, and `Override("*")` only to a plugin you trust with the whole app.
+**`OverrideModule` is a trust grant.** The replacement runs in the app's VM as the app's own code, with everything the app's scripts may do: its state, its actions, its packages. That is why stamps' row can `require("@app-original/components/task_row")` (the module it replaces; only the replacement may reach it) and `require("@kit/badge")`. Grant `OverrideModule("@app/…")` as you would install the plugin's code into the app, and `Override("*")` only to a plugin you trust with the whole app.
+
+`"*"` stands for any target in `OverrideElement("*")`, and for any module in `OverrideModule("*")`, which trusts the plugin with the whole app. The two are apart so that a plugin trusted to restyle elements isn't trusted with the app's code. The older `Override` reads by what it names: a target or `"*"` is an element's, `"@app/…"` that module's.
+
+**What a plugin may call itself.** A plugin offers only slots of its own, `ui.slot("<plugin>.…")`: an app's slot, or another plugin's, can't be posed as to take what is contributed there. Its commands' ids are already its own (`<plugin>/…`). `host.reserve_prefix("acme")` keeps `acme` and `acme.…` for the app's own scripts, whatever a plugin is named or granted: neither a slot nor a command `id` so named.
+
+**A shortcut with no modifier** (`k`, `enter`, `f5`, or Shift alone on a character) would be taken from every field, page and terminal, so a plugin's takes `Capability::Named("zgx.command.bare_keys")`. Without it `ui.command { key = "k" }` is an error; one a state or function says is dropped as it reads so, reported in `host.dropped_shortcuts()`.
+
+**The app's own scripts under a guard.** `host.guard(|kind, name| …)` is asked before the app's VM reaches a host action, async action or function (by name), or a `ui.fetch`, remote picture or `ui.socket` (by URL), each time, and an `Err` stops it with that text as the script's error: for previewing someone's template in the app's own VM. Plugins aren't asked; they reach what their grants say.
 
 **Where a plugin can put something, and what it can read there**, is `host.elements(&ui, &handle)`: the app's named elements (ids, classes, hooks) grouped by the elements that `provide` context, the app's root outermost. Each group gives a selector that reaches it (its id, or its classes inside the nearest element with one: `#sidebar >> .session-row`), the context names it provides and those it inherits, and its named elements down to the next group. Rows a list repeats are one group with a count; a private element is listed with nothing inside it; names the source declares that aren't showing (a page not open) are listed `mounted: false`. `zgx inspect elements` (MCP `zgx_elements`) gives the same, a line each and then as JSON. The mounted tree is kept only while plugins are loaded; without, it lists the source's names (`live: false`).
 
@@ -133,7 +141,7 @@ An app run with `zgx run` has no Rust of its own. Its `zgx.json` sets both sides
   - `actions` names what plugins may call.
   - `hooks` maps a target, or an `@app/…` module, to `"override"` when a plugin may replace or filter it. Adding before and after is open, so `"open"` changes nothing. `"*": "override"` offers every target.
 - **`plugins`** names each plugin's folder (its `init.luau`) or file, and its `allow` list:
-  - `shared:<key>`, `action:<name>` and `override:<target>` for what `expose` offers, and `package:<name>` for a package in `packages` (lent below);
+  - `shared:<key>`, `action:<name>` and `override:<target>` for what `expose` offers (`override:*` is every element; a module is named, `override:@app/…`, or `override-module:*` for all of them), and `package:<name>` for a package in `packages` (lent below);
   - `fetch`, `clipboard`, `files`, `folders`, `terminals`, `web` and `windows` for the sandbox. `folders` is `ui.open_folder`, and the host can refuse it to every script (`ScriptHost::refuse_folders`).
 - **A grant beyond what's exposed is an error as the app loads**, naming the plugin and the grant: ``plugin `focus` is allowed `action:complete`, which the app doesn't expose (add "complete" to expose.actions)``. So is an unknown grant or a missing path.
 - **The app's script defines its actions** with `ui.actions`. Plugins call them as they call a Rust host's: `ui.invoke("complete", id)`, or `ui.action("complete", id)` as a handler. The app calls them the same way. A plugin can't define actions.

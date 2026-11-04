@@ -88,14 +88,16 @@ impl KeySource {
 /// What a load declared, kept to publish again as dynamic shortcuts change.
 struct Declared {
     commands: Vec<(Command, Option<Rc<str>>)>,
-    /// The commands whose shortcut follows what it reads, by index.
-    keys: Vec<(usize, KeySource)>,
+    /// The commands whose shortcut follows what it reads, by index, and
+    /// whether a key alone is refused.
+    keys: Vec<(usize, KeySource, bool)>,
     reserved: Vec<String>,
 }
 pub(crate) struct Commands {
     pending: RefCell<Vec<Pending>>,
-    /// Pending commands' dynamic shortcuts, by id.
-    pending_keys: RefCell<Vec<(String, KeySource)>>,
+    /// Pending commands' dynamic shortcuts, by id, and whether a key alone
+    /// is refused (a plugin's, without the grant).
+    pending_keys: RefCell<Vec<(String, KeySource, bool)>>,
     /// While a load's commands have dynamic shortcuts: what publishes them
     /// again as those change.
     following: RefCell<Option<Effect>>,
@@ -161,10 +163,12 @@ impl Commands {
                 runners.insert(command.id.clone(), runner);
             }
             if !dynamic.is_empty()
-                && let Some(at) = dynamic.iter().position(|(id, _)| *id == command.id)
+                && let Some(at) = dynamic.iter().position(|(id, _, _)| *id == command.id)
             {
-                let (_, source) = dynamic.swap_remove(at);
-                declared.keys.push((declared.commands.len(), source));
+                let (_, source, no_bare) = dynamic.swap_remove(at);
+                declared
+                    .keys
+                    .push((declared.commands.len(), source, no_bare));
             }
             declared.commands.push((command, plugin));
         }
@@ -178,7 +182,7 @@ impl Commands {
                 .into_iter()
                 .map(|(command, plugin)| (command, None, plugin))
                 .collect();
-            self.publish_list(pending, &declared.reserved, false);
+            self.publish_list(pending, &declared.reserved, false, Vec::new());
             return;
         }
         let commands = Rc::downgrade(self);
@@ -199,19 +203,37 @@ impl Commands {
             .iter()
             .map(|(command, plugin)| (command.clone(), None, plugin.clone()))
             .collect();
-        for (at, source) in &declared.keys {
-            pending[*at].0.key = source.read();
+        let mut refused = Vec::new();
+        for (at, source, no_bare) in &declared.keys {
+            let entry = &mut pending[*at];
+            entry.0.key = source.read();
+            if *no_bare && entry.0.key.as_deref().is_some_and(crate::rules::is_bare) {
+                refused.push(DroppedShortcut {
+                    plugin: entry.2.as_deref().unwrap_or_default().to_string(),
+                    command: entry.0.id.clone(),
+                    key: entry.0.key.take().unwrap_or_default(),
+                    reason: bare_refused(),
+                    holder: String::new(),
+                });
+            }
         }
-        self.publish_list(pending, &declared.reserved, true);
+        self.publish_list(pending, &declared.reserved, true, refused);
     }
     /// Publish `pending`. A `rebinding`'s key may be one an earlier command
     /// holds: the app's own are checked then too (as declared, they are the
     /// app's to keep apart).
-    fn publish_list(&self, mut pending: Vec<Pending>, reserved: &[String], rebinding: bool) {
-        let dropped = match rebinding || pending.iter().any(|(_, _, plugin)| plugin.is_some()) {
+    fn publish_list(
+        &self,
+        mut pending: Vec<Pending>,
+        reserved: &[String],
+        rebinding: bool,
+        refused: Vec<DroppedShortcut>,
+    ) {
+        let mut dropped = match rebinding || pending.iter().any(|(_, _, plugin)| plugin.is_some()) {
             false => Vec::new(),
             true => drop_taken(&mut pending, rebinding),
         };
+        dropped.extend(refused);
         if *self.dropped.borrow() != dropped {
             *self.dropped.borrow_mut() = dropped;
         }
@@ -256,6 +278,16 @@ impl Commands {
         }
         true
     }
+}
+
+/// Why a plugin's shortcut that is a key alone is refused.
+#[cold]
+fn bare_refused() -> String {
+    format!(
+        "a plugin's shortcut has a modifier, unless the host grants \
+         `Capability::Named(\"{}\")`: a key alone would be taken from every field",
+        crate::rules::BARE_KEYS
+    )
 }
 
 /// Take each plugin command's shortcut that a command before it holds: the
@@ -364,7 +396,12 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                 .get::<Option<String>>("id")?
                 .ok_or_else(|| mlua::Error::runtime("ui.command needs an `id`"))?;
             let id = match &plugin {
-                Some(plugin) => format!("{plugin}/{id}"),
+                Some(plugin) => {
+                    // Already its own (`<plugin>/…`), but what a host keeps
+                    // for itself isn't for a plugin to write.
+                    crate::rules::not_reserved(lua, plugin, &id, "ui.command")?;
+                    format!("{plugin}/{id}")
+                }
                 None => id,
             };
             let title = table
@@ -388,6 +425,19 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                     }
                 },
             };
+            // A key alone from a plugin would be taken from every field,
+            // page and terminal. One a state says is refused as it's read.
+            let no_bare = plugin.is_some()
+                && !env.grants.allows(&crate::Capability::Named(
+                    crate::rules::BARE_KEYS.to_owned(),
+                ));
+            if no_bare && key.as_deref().is_some_and(crate::rules::is_bare) {
+                return Err(mlua::Error::runtime(format!(
+                    "ui.command `{id}`: `key = \"{}\"`: {}",
+                    key.as_deref().unwrap_or_default(),
+                    bare_refused()
+                )));
+            }
             // The app's alone to keep: a plugin's would take a key from
             // every page and terminal.
             let reserved = table.get::<Option<bool>>(&reserved_key)?.unwrap_or(false);
@@ -407,7 +457,10 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                 commands.pending_reserved.borrow_mut().push(id.clone());
             }
             if let Some(source) = source {
-                commands.pending_keys.borrow_mut().push((id.clone(), source));
+                commands
+                    .pending_keys
+                    .borrow_mut()
+                    .push((id.clone(), source, no_bare));
             }
             pending.push((
                 Command {

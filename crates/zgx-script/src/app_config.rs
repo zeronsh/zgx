@@ -23,7 +23,8 @@
 //! and targets a plugin may replace or filter (`"override"`; adding before
 //! and after is open, `"open"`). Each plugin's side, `allow`, is what it is
 //! granted, never more than `expose` offers: `shared:<key>`,
-//! `action:<name>`, `override:<target or @app/module>`, and the sandbox's
+//! `action:<name>`, `override:<target or @app/module>` (`override:*` is every
+//! element), `override-module:*` (every module: trusts it with the app), and the sandbox's
 //! `fetch`, `clipboard`, `files`, `folders`, `terminals`, `web` and `windows`. A grant
 //! beyond what is exposed is an error as the app loads, naming the plugin
 //! and the grant.
@@ -218,7 +219,18 @@ pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, S
                         if !overridable.iter().any(|t| t == target || t == "*") {
                             return beyond(&format!("\"{target}\": \"override\""), "expose.hooks");
                         }
-                        Capability::Override(target.to_owned())
+                        // `*` is every element: a module is always named,
+                        // here or by `override-module:*`.
+                        match target.starts_with("@app/") {
+                            true => Capability::OverrideModule(target.to_owned()),
+                            false => Capability::OverrideElement(target.to_owned()),
+                        }
+                    }
+                    Some(("override-module", target)) => {
+                        if !overridable.iter().any(|t| t == target || t == "*") {
+                            return beyond(&format!("\"{target}\": \"override\""), "expose.hooks");
+                        }
+                        Capability::OverrideModule(target.to_owned())
                     }
                     _ => match grant {
                         "fetch" => Capability::Fetch,
@@ -231,7 +243,8 @@ pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, S
                         _ => {
                             return Err(format!(
                                 "plugin `{name}`: unknown grant `{grant}` (shared:<key>, \
-                                 action:<name>, override:<target>, package:<name>, fetch, \
+                                 action:<name>, override:<target>, override-module:<@app/module \
+                                 or *>, package:<name>, fetch, \
                                  clipboard, files, terminals, web or windows)"
                             ));
                         }
@@ -353,5 +366,40 @@ impl AppHost {
             host.set_plugins(self.plugins.clone());
         }
         host
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `zgx.json`'s grants, as each reads: `override:*` is every element, a
+    /// module is named or `override-module:*`.
+    #[test]
+    fn grants_override_elements_and_modules_apart() {
+        let dir = std::env::temp_dir().join(format!("zgx-config-grants-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("init.luau"), "").unwrap();
+        for (allow, grant) in [
+            ("override:*", Capability::OverrideElement("*".into())),
+            (
+                "override:#tasks",
+                Capability::OverrideElement("#tasks".into()),
+            ),
+            (
+                "override:@app/row",
+                Capability::OverrideModule("@app/row".into()),
+            ),
+            ("override-module:*", Capability::OverrideModule("*".into())),
+        ] {
+            let config = format!(
+                r#"{{ "expose": {{ "hooks": {{ "*": "override" }} }},
+                    "plugins": {{ "p": {{ "path": ".", "allow": ["{allow}"] }} }} }}"#
+            );
+            let object: Value = serde_json::from_str(&config).unwrap();
+            let app = from_object(&dir, object.as_object().unwrap()).unwrap();
+            assert_eq!(app.plugins[0].grants, [grant], "{allow}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
