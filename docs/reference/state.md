@@ -708,7 +708,7 @@ ui.contribute { target = "#save", before = ui.button { label = "Preview" } }
 - Nothing else is filtered: its handlers, styles and state stay the app's. A filter that fails is reported as the plugin's error, and the value shows as it was.
 
 ```luau
--- file: plugins/shout.luau (granted Capability::Override("#title"))
+-- file: plugins/shout.luau (granted Capability::OverrideElement("#title"))
 ui.filter { target = "#title", text = function(text) return string.upper(text) end }
 ui.filter {
 	target = "#tasks",
@@ -730,12 +730,12 @@ A plugin targeting an `id` that is not a declared `hook` reaches the app's inter
 `ui.override { module = "@app/<path>", with = "<plugin path>" }`, from a plugin, replaces one of the app's modules: wherever the app requires `@app/<path>`, it gets the plugin's module instead.
 
 - `module` is one of the app's `@app/…` modules (`@app` is the app's directory; a relative require is never replaced). `with` is one of the plugin's own files, a directory as its `init.luau`.
-- It needs `Capability::Override(module)` or `Capability::Override("*")`, **a trust grant**: the replacement runs in the app's VM as the app's own code, with all its access. Of several plugins, the last one's wins.
+- It needs `Capability::OverrideModule(module)` or `Capability::OverrideModule("*")`, **a trust grant**: the replacement runs in the app's VM as the app's own code, with all its access. Of several plugins, the last one's wins.
 - The replacement may `require("@app-original/<path>")` for the module it replaces (to wrap it); nothing else may. Its own relative requires reach its plugin's directory.
 - A plugin requires none of the app's modules; a `.luaurc` defining an `app` or `app-original` alias is an error.
 
 ```lua
--- file: plugins/badges/init.luau (granted Capability::Override("@app/components/card"))
+-- file: plugins/badges/init.luau (granted Capability::OverrideModule("@app/components/card"))
 ui.override { module = "@app/components/card", with = "./card" }
 
 -- file: plugins/badges/card.luau

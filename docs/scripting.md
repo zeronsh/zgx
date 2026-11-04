@@ -393,7 +393,7 @@ A key is read from disk the first time a run asks for it, while the script loads
 
 ### Plugins
 
-[Plugins](plugins.md) walks through a worked example: making an app hookable, what plugins may do, the trust model of `Override`, and what they see of the app. In short, a plugin is a script that runs beside the app in a VM of its own and adds to the app's slots: `ui.slot(name, { context, from })` is where contributions go, and `ui.contribute(name, node)` adds one. A contributed component is an instance per slot, and gets the slot's `context` as `props.slot`: one panel component, a panel per pane. `from = "notes"` shows only what the plugin `notes` contributes.
+[Plugins](plugins.md) walks through a worked example: making an app hookable, what plugins may do, the trust model of `OverrideElement` and `OverrideModule`, and what they see of the app. In short, a plugin is a script that runs beside the app in a VM of its own and adds to the app's slots: `ui.slot(name, { context, from })` is where contributions go, and `ui.contribute(name, node)` adds one. A contributed component is an instance per slot, and gets the slot's `context` as `props.slot`: one panel component, a panel per pane. `from = "notes"` shows only what the plugin `notes` contributes.
 
 A plugin can also add next to any element of the app, or in its place, without a slot: `ui.contribute { target = "#save", after = node }` (or `before`, or `replace`). A target is an `id`, a declared `hook = "name"` (`hook:name`), or a role and a name as the app writes them (`role:button "Save"`); `private = true` takes an element and what it holds out of reach. `ui.filter { target, text = fn }` passes an element's text, label, hidden, disabled, tooltip, list items or children's order through a plugin's function. Replacing and filtering ask `Capability::Override`, and `expose_hook(target, capability)` makes adding at a target ask one; what a plugin adds is described to assistive technology as the plugin's ([plugin hooks](design/plugin-hooks.md)). Every `id` is reachable, so a plugin targeting one that is not a declared hook may break with the app's next version.
 
@@ -411,7 +411,7 @@ A plugin can also add next to any element of the app, or in its place, without a
 | windows of its own (`ui.window`) | yes | with `Capability::Windows` (one could pose as the app's, or the system's asking for a password); never the app's title bar (`ui.window.titlebar_area`, `controls`) |
 | files: modules, themes, images | from its directory | from its directory or below, links followed (one pointing outside is outside) |
 | commands (`ui.command`) | yes | yes, as `<plugin>/<id>`; a shortcut the app (or an earlier plugin) has stays theirs, and the plugin's is dropped (`ScriptHost::dropped_shortcuts`) |
-| the app's modules (`@app/…`) | requires them | replaces one with `ui.override` given `Capability::Override(module)` (or `"*"`), **a trust grant**: the replacement runs as the app's own code; never requires them |
+| the app's modules (`@app/…`) | requires them | replaces one with `ui.override` given `Capability::OverrideModule(module)` (or `"*"`), **a trust grant**: the replacement runs as the app's own code; never requires them |
 
 A plugin's files are source, always: Luau checks no bytecode it loads, so a plugin's (or a module's) bytecode is read as source and fails to parse, rather than run. Only an app's bundle carries bytecode, its build's.
 

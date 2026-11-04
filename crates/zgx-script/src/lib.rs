@@ -76,6 +76,7 @@ mod reloads;
 mod reorder;
 mod router;
 mod routes;
+mod rules;
 pub mod scaffold;
 #[cfg(feature = "scene3d")]
 mod scene3d;
@@ -104,6 +105,7 @@ pub use windows::WindowState;
 pub fn window_size_value(width: f32, height: f32) -> Value {
     windows::size(width, height)
 }
+pub use rules::GuardKind;
 pub use value::{ElementHandle, PathKey, Shared, Store, Value, tables_converted, values_converted};
 pub use windows::{Window, WindowExtras};
 
@@ -914,17 +916,25 @@ pub enum Capability {
     /// ones (never `@app/…`), and lends no authority: what it calls is gated
     /// by the plugin's grants, as the plugin's own code is.
     Package(String),
-    /// Replacing an element of the app's (`ui.contribute { target,
-    /// replace }`), or one of its `@app/…` modules (`ui.override`): the
-    /// target or module as the plugin writes it, or `"*"` for any. Adding
-    /// before or after an element is open, as a slot is, unless the host
-    /// asks a capability for that target (`expose_hook`).
+    /// The older spelling of [`OverrideElement`](Self::OverrideElement) and
+    /// [`OverrideModule`](Self::OverrideModule), read by what it names: a
+    /// target or `"*"` is `OverrideElement`, a module (`"@app/…"`) is
+    /// `OverrideModule` of that module. `"*"` no longer reaches modules.
+    Override(String),
+    /// Replacing or filtering an element of the app's (`ui.contribute {
+    /// target, replace }`, `ui.filter`): the target as the plugin writes it,
+    /// or `"*"` for any. Adding before or after an element is open, as a
+    /// slot is, unless the host asks a capability for that target
+    /// (`expose_hook`).
+    OverrideElement(String),
+    /// Replacing one of the app's modules (`ui.override`): `"@app/…"` as the
+    /// plugin writes it, or `"*"` for any.
     ///
     /// **A trust grant, not a permission over the interface:** a module
     /// replacement runs in the app's VM as the app's own code, with all its
-    /// access. `Override("@app/…")` trusts the plugin with that module;
-    /// `Override("*")` trusts it with the app.
-    Override(String),
+    /// access. `OverrideModule("@app/…")` trusts the plugin with that module;
+    /// `OverrideModule("*")` trusts it with the app.
+    OverrideModule(String),
 }
 
 /// A plugin an app loads (`ScriptHost::set_plugins`): its name (what errors
@@ -1972,10 +1982,14 @@ impl ScriptHost {
         *self.0.error_watch.borrow_mut() = Some(Box::new(watch));
     }
     fn configure(self, f: impl FnOnce(&mut Inner)) -> Self {
+        let rules = rules::of(&self.0);
         let mut inner = Rc::try_unwrap(self.0)
             .unwrap_or_else(|_| panic!("configure a ScriptHost before cloning it"));
         f(&mut inner);
         let host = Self(Rc::new(inner));
+        if let Some(rules) = rules {
+            rules::attach(&host.0, rules);
+        }
         // The host is a new `Rc`: what goes idle with it follows it.
         host.trim_when_idle();
         host
@@ -2278,11 +2292,36 @@ impl ScriptHost {
         self.0.read_only_shared.borrow_mut().insert(key.clone());
         self.0.exposed_shared.borrow_mut().insert(key, capability);
     }
+    /// Keep names under `prefix` (`"zeron"`: `zeron` and `zeron.…`) for the
+    /// app's own scripts: a plugin may neither offer a `ui.slot` so named nor
+    /// declare a `ui.command` with such an `id`, whatever it is granted. A
+    /// plugin offers only its own names anyway (`<plugin>.…`); this holds
+    /// even for a plugin itself named under the prefix. From the next load.
+    pub fn reserve_prefix(&self, prefix: &str) {
+        rules::start(&self.0).reserve(prefix);
+    }
+    /// Asks `guard` before the app's own scripts reach the host or the
+    /// network: a host action, async action or function (by its name), or a
+    /// `ui.fetch`, remote picture or `ui.socket` (by its URL), each time. An
+    /// `Err` stops it, its text the script's error: what a preview of
+    /// someone's template runs under. A plugin's VM isn't asked: it reaches
+    /// only what its grants say. The last one set applies, at once.
+    pub fn guard(&self, guard: impl Fn(GuardKind, &str) -> Result<(), String> + 'static) {
+        let rules = rules::start(&self.0);
+        rules.set_guard(Rc::new(guard));
+        // The VM already loaded hears it too; a later load's has it from
+        // the start.
+        if let Some(loaded) = &*self.0.current.borrow()
+            && let Some(vm) = loaded._vms.last()
+        {
+            vm.lua.set_app_data(rules::Guarded(rules));
+        }
+    }
     /// Ask `capability` of a plugin adding before or after an element by
     /// `target`, written as plugins write it (`"#save"`, `"hook:toolbar.save"`):
     /// every target is open to before and after, as a slot is, unless the
     /// host says so. Replacing an element always takes
-    /// `Capability::Override`.
+    /// `Capability::OverrideElement`.
     pub fn expose_hook(&self, target: impl Into<String>, capability: Option<Capability>) {
         self.0
             .exposed_hooks
@@ -3893,6 +3932,14 @@ impl ScriptHost {
             meter: plugin.then(|| meter::Meter::new(&lua, memory, watch)),
             assets: self.0.assets.clone(),
         });
+        // What the host asked of this VM, if anything.
+        if let Some(rules) = rules::of(&self.0) {
+            if plugin {
+                lua.set_app_data(rules::Reserving(rules));
+            } else {
+                lua.set_app_data(rules::Guarded(rules));
+            }
+        }
         // A plugin always loads again in full: nothing of it recorded.
         if !plugin && let Some(tracker) = tracking(&self.0) {
             lua.set_app_data(reloads::Tracked::new(tracker));

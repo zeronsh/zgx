@@ -1056,6 +1056,11 @@ pub(crate) fn install(
             let promise = pending(lua, name.clone())?;
             let action = actions.borrow().get(&name).cloned();
             let plain = env(lua)?.actions.borrow().get(&name).cloned();
+            let kind = match action.is_some() {
+                true => crate::GuardKind::AsyncAction,
+                false => crate::GuardKind::Action,
+            };
+            crate::rules::guard(lua, kind, &name)?;
             if let Some(action) = action {
                 settle_with(lua, &promise, Kind::Action, action(arg))?;
             } else if let Some(action) = plain {
@@ -1072,6 +1077,7 @@ pub(crate) fn install(
     ui.set(
         "fetch",
         lua.create_function(move |lua, (url, opts): (String, Option<Table>)| {
+            crate::rules::guard(lua, crate::GuardKind::Fetch, &url)?;
             let Some(fetcher) = &fetcher else {
                 return Err(mlua::Error::runtime(
                     "ui.fetch: a plugin reaches the network only if the host grants it \

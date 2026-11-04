@@ -54,7 +54,7 @@ have plugins at all. Its `zgx.json` takes the same two sides:
     `Capability` names them;
   - `shared:<key>` and `action:<name>`, for what `expose` asks a
     capability for;
-  - `override:<target or @app/module>`.
+  - `override:<target or @app/module>` (`override:*` is every element), `override-module:*` (every module).
 - **What `allow` can't exceed:** `shared`, `action` and `override` grants
   must name something `expose` offers. Granting more is an error at load,
   naming the plugin and the grant: ``plugin `stamps` is allowed
