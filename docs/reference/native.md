@@ -197,7 +197,7 @@ ui.window.full_screen: State<boolean>
 ui.window.full_screen_transition: State<{ phase: "entering" | "leaving", duration: number }?>
 ```
 
-`ui.window.full_screen` is whether the window is in full screen, however it went in or out: the green button, Ctrl+Cmd+F, the View menu, Mission Control, or a script. `ui.window.full_screen_transition` is the transition while one runs (macOS animates it): `phase` is `"entering"` or `"leaving"`, and `duration` is about how many seconds it takes (AppKit's estimate). It is nil otherwise, and always on Linux and Windows, where `full_screen` changes at once. Both are read-only.
+`ui.window.full_screen` is whether the window is in full screen, however it went in or out: the green button, Ctrl+Cmd+F, the View menu, Mission Control, or a script. On macOS it turns as the window begins going in or out. `ui.window.full_screen_transition` is the transition while one runs (macOS animates it, `set_fullscreen`'s too): `phase` is `"entering"` or `"leaving"`, and `duration` is about how many seconds it takes (AppKit's estimate). It begins just before `full_screen` turns, and is nil once the window is there. It is nil always on Linux and Windows, where `full_screen` changes at once. Both are read-only.
 
 In full screen macOS hides the traffic lights, and `ui.window.controls` is nil. A title bar laid out around them can slide over as they go:
 

@@ -2067,7 +2067,11 @@ mod mac {
                 };
                 note_full_screen((number, phase, duration, seq));
                 if will {
-                    settle_after(number, duration + SETTLE_AFTER, seq);
+                    // Past its animation, and past an inset toolbar's own
+                    // restore (`RESTORE_AFTER`): the buttons read then are
+                    // where they stay.
+                    let after = (duration + SETTLE_AFTER).max(RESTORE_AFTER + SETTLE_MARGIN);
+                    settle_after(number, after, seq);
                 }
             });
             // SAFETY: with no queue given the block runs where AppKit posts
@@ -2080,8 +2084,10 @@ mod mac {
         }
     }
 
-    /// How long past a transition's estimated end its `Settled` comes.
+    /// How long past a transition's estimated end its `Settled` comes, and
+    /// past an inset toolbar's restore at the soonest.
     const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_millis(1500);
+    const SETTLE_MARGIN: std::time::Duration = std::time::Duration::from_millis(250);
 
     fn note_full_screen(note: super::FullScreenNote) {
         FULL_SCREEN.with_borrow_mut(|queue| queue.push(note));

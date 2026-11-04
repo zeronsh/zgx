@@ -5,8 +5,9 @@
 //! runs it and checks the lines.
 //!
 //! `--via green` goes in and out of full screen as the green button does
-//! (`toggleFullScreen:`), `--via button` by clicking it (its
-//! `performClick:`); `--via borderless` with zgx's
+//! (`toggleFullScreen:`), `--via button` in by clicking it (its
+//! `performClick:`; full screen hides it, so out as the green button
+//! does); `--via borderless` with zgx's
 //! `WindowHandle::set_fullscreen` (winit's borderless full screen);
 //! `--via failed` posts AppKit's will-enter-full-screen notification for the
 //! window without entering, as a transition that fails after it began looks
@@ -95,9 +96,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 pause(3000).await;
                 state::report("full");
-                if button {
-                    state::click();
-                } else if green {
+                // Full screen hides the traffic lights: a click on the
+                // hidden green button does nothing.
+                if green {
                     state::toggle();
                 } else {
                     window.set_fullscreen(false);
