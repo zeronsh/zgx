@@ -138,6 +138,31 @@ CI builds only the examples the probes run (`linux_smokes.py --fixtures` prints 
 
 CI runs on every push to main and every pull request (`.github/workflows/ci.yml`): a Linux job (fmt, stylua, clippy, `zgx lint` and `zgx check` over every example script, unit and doc tests (zgx-script's included), Vulkan rendering tests on llvmpipe, zgx-3d's on llvmpipe too (`ZGX_REQUIRE_GPU`, or they'd pass without drawing where there's no GPU), then every native probe above, four at a time), a macOS job (clippy, tests, Metal rendering and readback, component window lifecycle) and a Windows job (check, core and bundle tests, Direct3D 12 border and transform pixel tests on WARP). Probes wait for what they drive (the window manager, IBus's XIM server and engine, a mapped window) rather than sleeping, so a loaded runner slows them without failing them.
 
+## Linux desktops, headless
+
+`scripts/linux_desktops_smoke.py` (`--only linux-desktops`) runs a window and a popup on each desktop a machine has, in software, with no GPU or screen. A desktop not installed is skipped and named, so CI covers only what its packages include. Everything is drawn by llvmpipe, so it says nothing about GPU speed.
+
+| Desktop | How it runs | Checked |
+| --- | --- | --- |
+| KWin 5.27, Wayland | `kwin_wayland --virtual`, GL compositing on llvmpipe, blur effect loaded | popup_probe's menu is drawn; glass_counter's glass blurs hard stripes behind it (2.4% of their roughness kept) |
+| GNOME Shell 46, Wayland | `gnome-shell --headless --unsafe-mode` | the menu is drawn |
+| sway, Wayland | `WLR_BACKENDS=headless`, pixman | the menu is drawn; glass shows the stripes sharp (62.6% kept), as sway has no blur protocol |
+| Weston 13, Wayland | `--backend=headless` | the menu is drawn |
+| Openbox, X11 | Xvfb, no compositor | the menu is drawn |
+| Openbox and picom, X11 | Xvfb, `picom --backend xrender --shadow` | the menu is drawn |
+| xfwm4, X11 | Xvfb, `--compositor=on` | the menu is drawn |
+| KWin 5.27, X11 | Xvfb, `kwin_x11` | the menu is drawn |
+| Mutter 46, X11 | Xvfb, `mutter --x11` | the menu is drawn |
+
+Those results are from an Ubuntu 24.04 arm64 container with no `/dev/dri`. `mutter --headless` also starts, but has no capture of its own, so it isn't in the script. fluxbox and i3 were looked at by hand on X11 and aren't either.
+
+Not run: Wayfire stops without a DRM device, which a container doesn't have. Hyprland has no Ubuntu 24.04 package and wasn't built; it is expected to stop the same way. labwc failed creating its Xwayland socket in that container.
+
+Two things seen only with no GPU, neither of them in zgx as far as these runs show:
+
+- With no DRM device, Mesa's Vulkan device-select layer can wait for ever under KWin as an app enumerates GPUs, so its window never shows. The script disables the layer (`VK_LOADER_LAYERS_DISABLE=*MESA_device_select*`) when there is no `/dev/dri`.
+- KWin 5.27 shows a buffer with padded rows sheared. lavapipe pads an odd width (stride 816 for 201 pixels) and declares it, and the same buffers draw correctly on sway, Weston and GNOME. Real GPUs use dmabuf, which wasn't run here.
+
 ## Platform coverage
 
 Recorded native runs use `scripts/platform_smoke.py`, which creates and cleans up its own Xvfb/Openbox and Weston instances. The [result inventory](platform-validation/results.json) and its adjacent screenshots/native Wayland logs are retained in the repository:
