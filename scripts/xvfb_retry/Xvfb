@@ -7,7 +7,11 @@ probe that just stopped its server has removed the lock while its socket
 lingers, so a new server taking that number fails ("server already running")
 and exits without a display: the probe waiting for one timed out. Here such a
 start is retried; the server that reports passes its number on as Xvfb would,
-and dies with this process (SIGTERM forwarded, or the parent-death signal)."""
+and dies with this process (SIGTERM forwarded, or the parent-death signal). This
+process in turn goes with whatever started it, however that ended: a smoke that
+crashed or was killed left its display taken for good, and enough of them left
+none for anyone on the machine. (The signal comes as the thread that started it
+ends: start it from one that outlives it.)"""
 import ctypes
 import os
 import select
@@ -34,6 +38,12 @@ def die_with_parent():
 
 
 def main():
+    # The signal survives the exec below, so the plain case goes too. Checked
+    # after: a parent gone before this ran sends nothing.
+    parent = os.getppid()
+    die_with_parent()
+    if os.getppid() != parent:
+        sys.exit("Xvfb: what started it has gone")
     real, args = real_xvfb(), sys.argv[1:]
     if "-displayfd" not in args:
         os.execv(real, [real, *args])

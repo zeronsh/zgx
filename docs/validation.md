@@ -147,6 +147,7 @@ CI runs on every push to main and every pull request (`.github/workflows/ci.yml`
 | KWin 5.27, Wayland | `kwin_wayland --virtual`, GL compositing on llvmpipe, blur effect loaded | popup_probe's menu is drawn; glass_counter's glass blurs hard stripes behind it (2.4% of their roughness kept) |
 | GNOME Shell 46, Wayland | `gnome-shell --headless --unsafe-mode` | the menu is drawn |
 | sway, Wayland | `WLR_BACKENDS=headless`, pixman | the menu is drawn; glass shows the stripes sharp (62.6% kept), as sway has no blur protocol |
+| labwc 0.7, Wayland | `WLR_BACKENDS=headless`, pixman | the menu is drawn |
 | Weston 13, Wayland | `--backend=headless` | the menu is drawn |
 | Openbox, X11 | Xvfb, no compositor | the menu is drawn |
 | Openbox and picom, X11 | Xvfb, `picom --backend xrender --shadow` | the menu is drawn |
@@ -156,7 +157,7 @@ CI runs on every push to main and every pull request (`.github/workflows/ci.yml`
 
 On each, `WindowCapabilities::blur_behind` is true on KWin alone, and on each but sway, which doesn't maximize a window that asks, `WindowContext::maximized` follows the system. Those results are from an Ubuntu 24.04 arm64 container with no `/dev/dri`. `mutter --headless` also starts, but has no capture of its own, so it isn't in the script. fluxbox and i3 were looked at by hand on X11 and aren't either.
 
-Not run: Wayfire stops without a DRM device, which a container doesn't have. Hyprland has no Ubuntu 24.04 package and wasn't built; it is expected to stop the same way. labwc failed creating its Xwayland socket in that container.
+Not run: Wayfire stops without a DRM device, which a container doesn't have. Hyprland has no Ubuntu 24.04 package and wasn't built; it is expected to stop the same way.
 
 Two things seen only with no GPU, neither of them in zgx as far as these runs show:
 
