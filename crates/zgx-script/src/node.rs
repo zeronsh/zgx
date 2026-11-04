@@ -1704,6 +1704,8 @@ pub(crate) struct HookContribution {
 pub(crate) struct ContributionStats {
     pub live: std::cell::Cell<usize>,
     pub error: RefCell<Option<String>>,
+    /// What is mounted of it now, for `ScriptHost::contribution_bounds`.
+    pub mounted: RefCell<Vec<zgx::compose::NodeHandle>>,
 }
 pub(crate) enum Adds {
     Node(Place, Rc<Node>),
@@ -1770,7 +1772,8 @@ impl Filtered {
     ];
 }
 /// Each slot's contributions, by slot, with who added each.
-pub(crate) type Slots = std::collections::HashMap<String, Vec<(Rc<str>, Rc<Node>)>>;
+pub(crate) type Slots =
+    std::collections::HashMap<String, Vec<(Rc<str>, Rc<Node>, Rc<ContributionStats>)>>;
 impl Env {
     /// `image` as `host:<name>`, replacing what was there: the `src` that
     /// shows it.
