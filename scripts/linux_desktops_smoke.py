@@ -17,7 +17,7 @@ the difference `Glass` documents. Blur needs KWin's GL compositing, which
 llvmpipe gives it. Nothing here says anything about GPU speed.
 
 The desktops: KWin (`kwin_wayland --virtual`), GNOME Shell (`gnome-shell
---headless`), sway and Weston on Wayland; Openbox alone and with picom, xfwm4
+--headless`), sway, labwc and Weston on Wayland; Openbox alone and with picom, xfwm4
 with its compositor, kwin_x11 and Mutter on X11 under Xvfb."""
 import argparse
 import json
@@ -201,6 +201,15 @@ def grim_shot(desktop, path):
     desktop.run("grim", path)
 
 
+def labwc(desktop):
+    desktop.env.update(WLR_BACKENDS="headless", WLR_RENDERER="pixman", WLR_LIBINPUT_NO_DEVICES="1",
+                       WLR_HEADLESS_OUTPUTS="1")
+    desktop.bus()
+    desktop.start("wm", ["labwc"])
+    desktop.socket()
+    desktop.run("wlr-randr", "--output", "HEADLESS-1", "--custom-mode", "%dx%d" % SCREEN)
+
+
 def weston(desktop):
     desktop.bus()
     desktop.start("wm", ["weston", "--backend=headless", "--renderer=gl", "--width=%d" % SCREEN[0],
@@ -272,6 +281,7 @@ DESKTOPS = [
     ("kwin", ["kwin_wayland", "gdbus"], kwin, kwin_shot),
     ("gnome", ["gnome-shell", "gdbus"], gnome, gnome_shot),
     ("sway", ["sway", "grim"], sway, grim_shot),
+    ("labwc", ["labwc", "grim", "wlr-randr"], labwc, grim_shot),
     ("weston", ["weston", "weston-screenshooter"], weston, weston_shot),
     ("openbox", ["openbox", "Xvfb", "import"], x11(["openbox"]), x11_shot),
     ("openbox-picom", ["openbox", "picom", "Xvfb", "import"],
