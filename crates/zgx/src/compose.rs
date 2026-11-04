@@ -431,6 +431,8 @@ struct PortalOptions {
     placement: Option<crate::compose_popover::Placement>,
     /// `layer`: a non-modal layer (toasts).
     layer: bool,
+    /// `top_layer`: a layer above every other, under the document root.
+    top: bool,
     /// `View::autofocus`.
     autofocus: Option<bool>,
     modal_placement: Option<crate::compose_modal::ModalPlacement>,
@@ -987,6 +989,19 @@ impl View {
     pub fn layer(mut self) -> Self {
         self.rare_mut().portal.get_or_insert_default().layer = true;
         self
+    }
+    /// The host's layer over everything in the window, whatever a script
+    /// opens: a layer (`layer`: no focus taken, no backdrop) filling the
+    /// window, under the document root, above every other layer and dialog,
+    /// and live under them. The pointer passes through but for the controls
+    /// in it. For what no plugin may cover, in a view a host composes at
+    /// `render`. A script's `z` orders its own element among its siblings,
+    /// and can't reach it.
+    pub fn top_layer(mut self) -> Self {
+        let portal = self.rare_mut().portal.get_or_insert_default();
+        portal.layer = true;
+        portal.top = true;
+        self.w_full().h_full()
     }
     /// Open a menu with its item `id` over the trigger, as a pop-up button's
     /// menu (a select's) opens with the chosen item over the button, rather
@@ -3626,15 +3641,23 @@ fn mount_portal_panel(
             *out = Some(styles.unwrap_or_else(Styles::new).min_w(bounds.get().width));
         }));
     }
+    let top = (view.rare.as_ref())
+        .and_then(|r| r.portal.as_ref())
+        .is_some_and(|p| p.top);
     let portal_parent = environment
         .portal
         .as_ref()
+        .filter(|_| !top)
         .map_or(ui.root(), |(node, _)| *node);
     let parent_visible = environment
         .portal
         .as_ref()
+        .filter(|_| !top)
         .map(|(_, visible)| visible.clone());
     let portal = crate::compose_modal::create(ui, owner, portal_parent);
+    if top {
+        ui.scene.borrow_mut().set_z(portal.overlay, i32::MAX);
+    }
     // A layer (`View::layer`, a toast host) or a panel at a caret is no
     // modal: it has no backdrop, and closes nothing as it opens.
     let overlay_only = (view.rare.as_ref())
@@ -3741,7 +3764,11 @@ fn mount_portal_panel(
                 screens.with(|screens| crate::compose_popover::screen_of(screens, anchor))
             })
             .unwrap_or_else(|| viewport.get());
-        let margin = if anchored { 8. } else { 32. };
+        let margin = match (top, anchored) {
+            (true, _) => 0.,
+            (_, true) => 8.,
+            _ => 32.,
+        };
         if !has_max_width && styles.rare().max_width.is_none() {
             styles.rare_mut().max_width = Some((bounds.width - margin).max(0.));
         }
@@ -3946,6 +3973,7 @@ fn mount_portal_panel(
     } else {
         match modal_placement {
             Some(at) => crate::compose_modal::place(ui, owner, portal.position, at),
+            None if top => crate::compose_modal::fill(ui, owner, &portal, panel),
             None => crate::compose_modal::center(ui, owner, portal.position),
         }
     }

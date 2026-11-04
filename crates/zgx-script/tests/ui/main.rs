@@ -29,6 +29,8 @@ mod grid_tracks;
 mod held_modifiers;
 #[path = "../hit_target.rs"]
 mod hit_target;
+#[path = "../host_top_layer.rs"]
+mod host_top_layer;
 #[path = "../i18n_script.rs"]
 mod i18n_script;
 #[path = "../idle_gc.rs"]
