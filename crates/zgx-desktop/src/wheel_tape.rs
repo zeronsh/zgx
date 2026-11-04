@@ -235,7 +235,18 @@ impl Tape {
         if self.playing.front().is_none_or(|(at, _)| *at > now) {
             return None;
         }
-        let (_, e) = self.playing.pop_front()?;
+        let (_, mut e) = self.playing.pop_front()?;
+        // The pointer's moves due by now come as one, the last: a platform
+        // hands an app one move a turn, and each move handled lays out a
+        // window it resizes. A window slower than the tape would otherwise
+        // pay for moves no hand's drag would have sent it.
+        while e.pointer == Some(Press::Moved)
+            && let Some((at, next)) = self.playing.front()
+            && *at <= now
+            && next.pointer == Some(Press::Moved)
+        {
+            e = self.playing.pop_front()?.1;
+        }
         if let Some(press) = e.pointer {
             let at = (self.at.0 + e.delta.0, self.at.1 + e.delta.1);
             return Some(Due::Pointer(at, press));
@@ -360,5 +371,30 @@ mod tests {
             Some(Due::Pointer((109., 48.), Press::Up))
         );
         assert_eq!(tape.deadline(), None, "played");
+    }
+
+    #[test]
+    fn moves_due_at_once_come_as_the_last_and_presses_stay() {
+        let start = Instant::now();
+        let text = "0 pointer 0 0 down\n8 pointer 1 0 moved\n16 pointer 2 0 moved\n\
+                    24 pointer 3 0 moved\n32 pointer 4 0 up\n40 pointer 5 0 moved\n";
+        let mut tape = Tape::default();
+        tape.play(start, parse(text).unwrap(), (0., 0.));
+        let ms = |n: u64| start + Duration::from_millis(n);
+        // A window behind by three moves and a release: the press first, the
+        // last move for the three, the release in its place, and a move not
+        // yet due left for later.
+        let now = ms(35);
+        assert_eq!(tape.due(now, 2.), Some(Due::Pointer((0., 0.), Press::Down)));
+        assert_eq!(
+            tape.due(now, 2.),
+            Some(Due::Pointer((3., 0.), Press::Moved))
+        );
+        assert_eq!(tape.due(now, 2.), Some(Due::Pointer((4., 0.), Press::Up)));
+        assert_eq!(tape.due(now, 2.), None);
+        assert_eq!(
+            tape.due(ms(40), 2.),
+            Some(Due::Pointer((5., 0.), Press::Moved))
+        );
     }
 }
