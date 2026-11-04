@@ -64,15 +64,27 @@ def boxes(png):
     def grow(box, x, y):
         return (min(box[0], x), min(box[1], y), max(box[2], x + 1), max(box[3], y + 1)) if box else (x, y, x + 1, y + 1)
 
-    for row in range(abs(height)):
-        y = abs(height) - 1 - row if height > 0 else row
-        line = start + row * stride
+    def pixel(x, row):
+        return data[start + row * stride + x * depth:start + row * stride + x * depth + 3]
+
+    def row_of(y):
+        return abs(height) - 1 - y if height > 0 else y
+
+    for y in range(abs(height)):
         for x in range(width):
-            blue, grn, red = data[line + x * depth:line + x * depth + 3]
+            blue, grn, red = pixel(x, row_of(y))
+            if grn > 200 and red < 60 and blue < 60:
+                green = grow(green, x, y)
+    if not green:
+        return None, None
+    # Near the still box's rows alone: the title bar's text is as white, and a
+    # misplaced loop is still within a box's height of them.
+    tall = green[3] - green[1]
+    for y in range(max(green[1] - tall, 0), min(green[3] + tall, abs(height))):
+        for x in range(width):
+            blue, grn, red = pixel(x, row_of(y))
             if red > 120 and grn > 120 and blue > 120:
                 white = grow(white, x, y)
-            elif grn > 200 and red < 60 and blue < 60:
-                green = grow(green, x, y)
     return white, green
 
 
