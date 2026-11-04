@@ -218,6 +218,21 @@ While a keyboard modal of a plugin's is up, the pointer reaches a decision but T
 
 See [plugins](../plugins.md) for what a plugin is refused and what a host checks (`ScriptHost::decision_shown`).
 
+## sealed
+
+`ui.sealed { key?, label?, … }` is a region no plugin reaches or draws over, as a [decision](#decision) is, for what is bigger than a few controls: a Settings page. Give it its size (`w_full`, `h_full`). Only the app's own script makes one.
+
+`ui.plugin_page { plugin = name, … }` inside it is that plugin's own page: what that plugin alone gave `ui.contribute("plugin_page", …)`. Everything it draws and opens (a modal, a layer, a popover) is cut to this box, and its popups stay in the window. Outside a `ui.sealed` region it shows nothing, and reports an error.
+
+```lua
+return ui.sealed { w_full = true, h_full = true,
+    ui.column { w_full = true, h_full = true,
+        ui.text { "Settings" },
+        ui.plugin_page { plugin = "spell-check", w_full = true, h = 200 },
+    },
+}
+```
+
 ## toast
 
 `ui.toast { title, body?, kind?, duration?, action? }` shows a short message stacked in the window's bottom corner, at the end of the line (the left, right to left), over everything and taking no focus, as Radix's and the system's notifications; it returns the toast's id, which `ui.dismiss_toast(id)` dismisses. A toast goes after its `duration` (5000 ms, 7000 for a warning), paused while the pointer is over it, or at its ×; an error stays until dismissed. `action = { label = "Undo", run = fn }` puts a button on it, the toast going after `run`. Assistive technology hears each as it comes, an error at once. F8 moves focus into the stack, and Escape (or Delete) dismisses the focused toast. Four show at most; older ones wait. The stack is built while a toast shows, and is nothing otherwise.

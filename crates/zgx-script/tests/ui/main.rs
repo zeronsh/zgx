@@ -77,6 +77,8 @@ mod scene3d;
 mod scene3d_off;
 #[path = "../script_crashes.rs"]
 mod script_crashes;
+#[path = "../sealed.rs"]
+mod sealed;
 #[path = "../selection.rs"]
 mod selection;
 #[path = "../size_calc.rs"]
