@@ -6383,6 +6383,7 @@ fn mount_scroll(
     // end. Only growth moves a pinned view; a new offset (a wheel, a script)
     // is taken as it is and decides whether the view stays pinned.
     let (applied, pinned) = (std::cell::Cell::new(0_f32), std::cell::Cell::new(true));
+    let sized_by_content = std::cell::Cell::new(false);
     let pixel_scale = ui.pixel_scale();
     ui.bind(root, move || {
         // Placed again from where it was asked to be at a new scale.
@@ -6413,16 +6414,23 @@ fn mount_scroll(
             let style = scene.style(root);
             style.height.is_none() && style.height_percent.is_none()
         };
-        scene.set_style(
-            viewport,
-            Style {
-                width: Some(width),
-                height: (!fitted).then_some(height),
-                height_percent: fitted.then_some(1.),
-                clip: true,
-                ..Default::default()
-            },
-        );
+        // (Fitted, it's as tall as what it holds: in its flow. As wide as a
+        // scroll view that knows its width, with no word from here as that
+        // changes; else what it holds is what sizes that.)
+        let follows = fitted && scene.knows_its_size(root, (true, false), &sized_by_content);
+        let style = Style {
+            width: (!follows).then_some(width),
+            width_percent: follows.then_some(1.),
+            height: (!fitted).then_some(height),
+            height_percent: fitted.then_some(1.),
+            clip: true,
+            absolute: !fitted,
+            ..Default::default()
+        };
+        match fitted {
+            true => scene.set_style(viewport, style),
+            false => scene.set_style_within(viewport, style, root),
+        }
         let mut content_style = scene.style(content);
         content_style.width = (!horizontal).then_some(width);
         content_style.height = (horizontal && !fitted).then_some(height);

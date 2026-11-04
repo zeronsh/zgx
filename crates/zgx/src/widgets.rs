@@ -4854,7 +4854,10 @@ impl Ui {
         let selection_layer = self.container(viewport, Layout::Overlay, Style::default());
         // Line numbers (`set_line_numbers`): a clipped column beside the
         // viewport, which moves right to make room.
-        let gutter = self.container(root, Layout::Overlay, fixed(0., 0.));
+        let mut gutter_style = fixed(0., 0.);
+        // (From the start: it's only ever laid out within `root`.)
+        gutter_style.absolute = true;
+        let gutter = self.container(root, Layout::Overlay, gutter_style);
         // The text, caret and selection are placed from the text's own
         // layout, which already runs the way the text does (`editor_font`):
         // the scene must not mirror them again.
@@ -4986,6 +4989,7 @@ impl Ui {
         // Its text's line count and its semantic value, by the revision of
         // the text they are for.
         let draw_line_count: Cell<Option<(u64, usize)>> = Cell::new(None);
+        let sized_by_content = Cell::new(false);
         let draw_semantic_revision: Cell<Option<u64>> = Cell::new(None);
         let watched_theme = theme.clone();
         let refresh: Rc<dyn Fn()> = Rc::new(move || {
@@ -5120,7 +5124,18 @@ impl Ui {
             let inner_height = (bounds.height - padding.top - padding.bottom).max(0.);
             let mut viewport_style = fixed(inner_width, inner_height);
             viewport_style.clip = true;
-            s.set_style(viewport, viewport_style);
+            // In an overlay, nothing shrinks it: a boundary for what it holds,
+            // growing or not.
+            viewport_style.flex_shrink = 0.;
+            // A root that knows its size reads nothing from it. One that
+            // doesn't (a percent of a parent sized by what it holds) takes
+            // its natural size from it, in its flow.
+            if s.knows_its_size(root, (true, true), &sized_by_content) {
+                viewport_style.absolute = true;
+                s.set_style_within(viewport, viewport_style, root);
+            } else {
+                s.set_style(viewport, viewport_style);
+            }
             let origin = if styled { (0., 0.) } else { (8., 6.) };
             s.set_transform(
                 viewport,
@@ -5131,7 +5146,8 @@ impl Ui {
             );
             let mut gutter_style = fixed(gutter_width, if numbered { inner_height } else { 0. });
             gutter_style.clip = true;
-            s.set_style(gutter, gutter_style);
+            gutter_style.absolute = true;
+            s.set_style_within(gutter, gutter_style, root);
             s.set_transform(
                 gutter,
                 Transform {
@@ -5140,7 +5156,9 @@ impl Ui {
                 },
             );
             if let Some(bg) = bg {
-                s.set_style(bg, fixed(bounds.width, bounds.height));
+                let mut bg_style = fixed(bounds.width, bounds.height);
+                bg_style.absolute = true;
+                s.set_style_within(bg, bg_style, root);
             }
             // Empty, the text node shows the placeholder instead (laid out
             // as the empty text it stands for: it sizes nothing).
@@ -8031,6 +8049,99 @@ mod editor_resize_tests {
             ui.prepare_frame();
         }
         (ui.scene.borrow().layout_passes() - before) as f32 / FRAMES as f32
+    }
+
+    /// As `passes_a_frame`, each pane a list over a text area: each viewport's
+    /// resize walked to the root, and came back for another pass.
+    fn passes_a_frame_of_lists(panes: usize) -> f32 {
+        let mut ui = Ui::new(1400., 500.);
+        let children: Vec<View> = (0..panes)
+            .map(|_| {
+                let value = ui.signal(String::new());
+                column()
+                    .flex_grow(1.)
+                    .flex_basis(0.)
+                    .min_w(0.)
+                    .h_full()
+                    .child(
+                        measured_rows(
+                            ui.signal(0.),
+                            crate::compose::VariableHeights::new(&ui.runtime, 0, 40.),
+                            2,
+                            || (0..30).collect::<Vec<usize>>(),
+                            |_, _| 40.,
+                            |_, _, _| div().w_full().h(40.),
+                        )
+                        .w_full()
+                        .grow()
+                        .min_h(0.),
+                    )
+                    .child(text_area("Notes", value).w_full())
+            })
+            .collect();
+        ui.mount(row().w_full().h_full().children(children));
+        ui.prepare_frame();
+        ui.prepare_frame();
+        let before = ui.scene.borrow().layout_passes();
+        const FRAMES: u32 = 20;
+        for frame in 1..=FRAMES {
+            ui.scene
+                .borrow_mut()
+                .resize(1400. - 6. * frame as f32, 500.);
+            ui.prepare_frame();
+        }
+        (ui.scene.borrow().layout_passes() - before) as f32 / FRAMES as f32
+    }
+
+    #[test]
+    fn a_width_change_takes_no_more_passes_for_more_lists() {
+        let (one, four, eight) = (
+            passes_a_frame_of_lists(1),
+            passes_a_frame_of_lists(4),
+            passes_a_frame_of_lists(8),
+        );
+        eprintln!("PASSES a frame: 1 pane {one}, 4 panes {four}, 8 panes {eight}");
+        assert!(
+            four <= one + 0.5 && eight <= one + 0.5,
+            "{one} {four} {eight}"
+        );
+    }
+
+    /// Its insets fix an absolute box's width: what it holds is never measured
+    /// as if it had none, so a text area a percent of it knows its size, and
+    /// its viewport leaves its flow.
+    #[test]
+    fn what_an_absolute_box_holds_knows_the_width_its_insets_give() {
+        let mut ui = Ui::new(1000., 500.);
+        let value = ui.signal(String::from("words"));
+        let mounted = ui.mount(
+            column().w_full().h_full().child(
+                div()
+                    .absolute()
+                    .left(10.)
+                    .right(10.)
+                    .top(0.)
+                    .h(22.)
+                    .child(text_area("Notes", value).id("notes").w_full().h_full()),
+            ),
+        );
+        for frame in 0..6 {
+            ui.scene
+                .borrow_mut()
+                .resize(1000. - 7. * frame as f32, 500.);
+            ui.prepare_frame();
+        }
+        let scene = ui.scene.borrow();
+        let notes = mounted.find("notes").unwrap();
+        let in_flow = scene
+            .children(notes)
+            .iter()
+            .filter(|child| {
+                let style = scene.style(**child);
+                style.clip && !style.absolute
+            })
+            .count();
+        assert_eq!(in_flow, 0);
     }
 
     /// Where each of 4 panes' text areas puts its text's last character, at

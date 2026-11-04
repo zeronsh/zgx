@@ -3009,6 +3009,8 @@ pub struct Scene {
     /// A walk stopped at a child of a row or column (`stops_alone`), to
     /// lay out alone if its parent sees no change (`layout_alone`).
     alone_pending: bool,
+    /// The nodes `set_style_within` stopped walks at, for `relayout_alone`.
+    held_alone: Vec<NodeId>,
     /// How deep the contents syncs running now nest (`sync_contents`).
     syncing: u32,
     /// Nodes holding more than `MEASUREMENT_ALTERNATES` results of this pass,
@@ -3235,6 +3237,7 @@ impl Scene {
             walk_hints: Default::default(),
             layout_roots: Vec::new(),
             alone_pending: false,
+            held_alone: Vec::new(),
             syncing: 0,
             overfull: Vec::new(),
             relative_count: 0,
@@ -7641,11 +7644,83 @@ impl Scene {
     fn apply_style(&mut self, id: NodeId, style: Style) {
         self.restyle(id, style, false);
     }
+    /// Whether `id`'s size, on the axes asked about, doesn't come from what it
+    /// holds: its own, or a percent of a parent that has a definite one in all
+    /// it was asked (placing it always gives a base: sizing a parent by its
+    /// content doesn't). `sized_by_content` remembers the answer no, for a
+    /// parent that won't ask again while it has its answer.
+    pub(crate) fn knows_its_size(
+        &self,
+        id: NodeId,
+        (across, down): (bool, bool),
+        sized_by_content: &std::cell::Cell<bool>,
+    ) -> bool {
+        let node = self.tree_node(id);
+        let Some(current) = node.measurement.as_ref() else {
+            return false;
+        };
+        // (Measured hidden, it was asked nothing: `measure_hidden`.)
+        let asked = std::iter::once(current)
+            .chain(&node.alternates)
+            .filter(|m| m.constraints.force_width != Some(f32::INFINITY));
+        let style = &node.style;
+        let knows = (!across
+            || style.width.is_some()
+            || (style.width_percent.is_some()
+                && asked.clone().all(|m| m.constraints.percent_width.is_some())))
+            && (!down
+                || style.height.is_some()
+                || (style.height_percent.is_some()
+                    && asked
+                        .clone()
+                        .all(|m| m.constraints.percent_height.is_some())));
+        sized_by_content.set(sized_by_content.get() || !knows);
+        !sized_by_content.get()
+    }
+    /// `set_style` for an absolute box its `owner`, its parent, sizes from its
+    /// own bounds (a list's or a scroll's viewport). It adds nothing to what
+    /// `owner` answers, so the change is `owner`'s to lay out alone
+    /// (`relayout_alone`), and its ancestors stand.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn set_style_within(&mut self, id: NodeId, style: Style, owner: NodeId) {
+        // Most calls: nothing changed, and nothing for `owner` to lay out.
+        if self.node(id).style == style {
+            return;
+        }
+        let definite = self.contains(owner) && self.node(id).parent == Some(owner) && {
+            let node = self.tree_node(owner);
+            !node.special.laid_out()
+                && !node.style.absolute
+                && node.parent.is_some()
+                && node.dirty & LAYOUT == 0
+                && node.reads.get() & READS_KNOWN != 0
+                && node.measurement.is_some()
+        };
+        if !definite {
+            return self.set_style(id, style);
+        }
+        if !self.held_alone.contains(&owner) {
+            self.held_alone.push(owner);
+        }
+        self.restyle_as::<true>(id, style, true, owner);
+    }
     /// `set_style` (`given`: the style a caller gave `id`, which a contents
     /// node keeps as its own) or `apply_style`. One function, so that the
     /// style is used where the caller put it rather than moved again.
     #[inline(never)]
-    fn restyle(&mut self, id: NodeId, mut style: Style, given: bool) {
+    fn restyle(&mut self, id: NodeId, style: Style, given: bool) {
+        self.restyle_as::<false>(id, style, given, id);
+    }
+    /// `restyle`; `HELD`: its layout walk stops at `owner` (`set_style_within`).
+    #[inline(always)]
+    fn restyle_as<const HELD: bool>(
+        &mut self,
+        id: NodeId,
+        mut style: Style,
+        given: bool,
+        owner: NodeId,
+    ) {
         if given {
             if let Some(options) = &style.layout_options
                 && !self
@@ -7720,7 +7795,10 @@ impl Scene {
             self.damage_subtree(id);
             self.invalidate(id, PAINT);
         }
-        self.invalidate_layout(id);
+        match HELD {
+            true => self.invalidate_layout_with::<true>(id, false, true, owner),
+            false => self.invalidate_layout(id),
+        }
         if containing {
             self.invalidate_absolute_descendants(id);
         }
@@ -8250,7 +8328,19 @@ impl Scene {
             } => asked.force_width,
             _ => asked.force_height,
         };
-        flexed.is_none() && self.reads_bits(id) == kept_reads && self.measure_full(id, asked) == was
+        // Held (`set_style_within`): its parent chose its size, and it answers
+        // that as it did or isn't let stand.
+        let held = !self.held_alone.is_empty() && self.held_alone.contains(&id);
+        let stands = (held || flexed.is_none())
+            && self.reads_bits(id) == kept_reads
+            && self.measure_full(id, asked) == was;
+        if stands && held {
+            // What it answered to other questions read what just changed.
+            let node = self.tree_node_mut(id);
+            node.alternates.clear();
+            node.sizes.clear();
+        }
+        stands
     }
     /// The children walks stopped at (`stops_alone`), before any other
     /// layout this pass: each measured again (`relayout_alone`) and, if it
@@ -8294,6 +8384,7 @@ impl Scene {
             }
         }
         self.alone_pending = false;
+        self.held_alone.clear();
     }
     /// A laid-out container with an explicit width and height: parents measure
     /// it from those (or from their own flex allocation), never from its
@@ -8378,6 +8469,15 @@ impl Scene {
             self.shrank.resize(i / 64 + 1, 0);
         }
         self.shrank[i / 64] |= 1 << (i % 64);
+    }
+    /// Whether a boundary that changed size changes nothing around it:
+    /// absolute, and placed from its top left (no inset that its size moves
+    /// it from), it is no part of what its parent answers.
+    #[cold]
+    #[inline(never)]
+    fn placed_alone(&self, id: NodeId) -> bool {
+        let style = &self.node(id).style;
+        style.absolute && style.layout_options.is_none()
     }
     /// Mark every ancestor up to the root, ignoring boundaries.
     fn invalidate_layout_to_root(&mut self, mut id: NodeId) {
@@ -10991,7 +11091,7 @@ impl Scene {
                 self.invalidate_layout_to_root(id);
                 continue;
             };
-            if self.measure_full(id, constraints) != size
+            if (self.measure_full(id, constraints) != size && !self.placed_alone(id))
                 || (!self.shrank.is_empty() && self.floor_dropped(id, constraints, size))
             {
                 // Not actually independent of its content: lay out normally.

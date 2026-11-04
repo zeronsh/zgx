@@ -60,6 +60,8 @@ mod sticky;
 mod text_reach;
 #[path = "../text_same_size.rs"]
 mod text_same_size;
+#[path = "../viewports_within.rs"]
+mod viewports_within;
 #[path = "../wrapped_text_in_capped_box.rs"]
 mod wrapped_text_in_capped_box;
 #[path = "../z_order.rs"]
