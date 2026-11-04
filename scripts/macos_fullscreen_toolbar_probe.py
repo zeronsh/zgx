@@ -47,6 +47,14 @@ def main():
                         help='measure instead: what the window draws through each transition (no checks)')
     parser.add_argument('--covered', action='store_true',
                         help='with --frames, also with ZGX_RENDER_WHEN_COVERED=1 (occlusion ignored)')
+    parser.add_argument('--count', type=int,
+                        help='launch it this many times and class each from its log; a launch that did not go '
+                             'in and out counts as invalid, and invalid launches fail the batch')
+    parser.add_argument('--route', default='green', help='with --count: the route (green, button, borderless)')
+    parser.add_argument('--close-button', action='store_true', help='with --count: close by the red button')
+    parser.add_argument('--logs', type=pathlib.Path, help='with --count: keep each log and sample here')
+    parser.add_argument('--live', action='store_true',
+                        help='the window animates itself (WindowOptions::live_full_screen)')
     args = parser.parse_args()
     if sys.platform != 'darwin':
         print('macOS only')
@@ -60,10 +68,13 @@ def main():
         shutil.copy2(pathlib.Path(args.target_dir) / 'debug/examples/fullscreen_toolbar_probe', binary)
         clean = {key: os.environ[key] for key in ('HOME', 'TMPDIR', 'USER') if key in os.environ}
         clean['PATH'] = '/usr/bin:/bin'
+        if args.count:
+            return count(binary, clean, args)
         if args.frames:
-            return frames(binary, clean, args.covered)
+            return frames(binary, clean, args.covered, args.live)
+        live = ['--live'] if args.live else []
         for via in ('green', 'button', 'borderless', 'failed'):
-            out = subprocess.run([str(binary), '--via', via], cwd='/tmp', env=clean, capture_output=True,
+            out = subprocess.run([str(binary), '--via', via, *live], cwd='/tmp', env=clean, capture_output=True,
                                  text=True, timeout=60).stdout
             print(f'== {via}')
             print('\n'.join(line for line in out.splitlines() if re.match(r'(STRIP|WINDOW|NO_WINDOW|STATE) ', line)))
@@ -132,11 +143,11 @@ def main():
                 after[5] == 'true' and after[4] == 'false')
             checks[f'{via}: after, the inset strip is back'] = after[3] == before[3] and after[2] == before[2]
         def animated(via):
-            return subprocess.run([str(binary), '--via', via, '--animate'], cwd='/tmp', env=clean, capture_output=True,
+            return subprocess.run([str(binary), '--via', via, '--animate', *live], cwd='/tmp', env=clean, capture_output=True,
                                   text=True, timeout=60).stdout
 
         def frames_in(out, start, end):
-            return sum(start <= int(at) <= end for at in re.findall(r'^FRAME (\d+)$', out, re.M))
+            return sum(start <= int(at) <= end for at in re.findall(r'^FRAME (\d+) ', out, re.M))
 
         def spans(out):
             found, began = [], None
@@ -161,6 +172,25 @@ def main():
         for start, moving, _, end in spans(out):
             inside = frames_in(out, start, end)
             checks[f'green: drawn through {moving} ({inside} frames in {end - start} ms)'] = inside >= (end - start) / 50
+        if args.live:
+            # The live window goes there a step at a time, on the screen, and
+            # what is drawn is its size at every frame.
+            sized = [(int(at), (int(ww), int(wh)), (int(dw), int(dh))) for at, ww, wh, dw, dh in re.findall(
+                r'^FRAME (\d+) window=(\d+)x(\d+) drawn=(\d+)x(\d+)$', out, re.M)]
+            covered = [int(at) for at in re.findall(r'^OCCLUSION (\d+) visible=false$', out, re.M)]
+            for start, moving, _, end in spans(out):
+                checks[f'live: {moving}, AppKit never counts the window covered'] = not any(
+                    start <= at <= end for at in covered)
+                inside = [row for row in sized if start <= row[0] <= end]
+                windows = [row[1] for row in inside]
+                steps = [abs(b[0] - a[0]) for a, b in zip(windows, windows[1:])]
+                checks[f'live: {moving} goes a step at a time ({len(set(windows))} sizes, largest {max(steps, default=0)} pt)'] = (
+                    len(set(windows)) >= 20 and max(steps, default=9999) <= 200)
+                # A frame's two reads straddle a resize by at most a step.
+                behind = max((abs(w[0] - d[0]) for _, w, d in inside), default=0)
+                checks[f'live: {moving} draws at the window\'s size (at most {behind} pt behind)'] = behind <= 200
+            first, last = sized[0][1:], sized[-1][1:]
+            checks[f'live: back at its size ({first[0]} then {last[0]})'] = last[0] == sized[10][1]
         # Genuinely hidden, it stops drawing, and draws again as it comes back.
         for via, wait in (('hidden', 1000), ('hidden-during', 3000)):
             out = animated(via)
@@ -180,16 +210,67 @@ def main():
     return 0 if checks and all(checks.values()) else 1
 
 
-def frames(binary, clean, covered):
+def count(binary, clean, args):
+    """`args.count` launches of a route, each classed from its log: `ok` only
+    if it went in, was in full screen, came out, and closed by itself."""
+    logs = args.logs or pathlib.Path(tempfile.mkdtemp(prefix='zgx-fullscreen-count-'))
+    logs.mkdir(parents=True, exist_ok=True)
+    flags = ['--via', args.route] + (['--live'] if args.live else []) + (
+        ['--close-button'] if args.close_button else [])
+    tally = {'ok': 0, 'invalid': 0, 'hang-hover': 0, 'hang-other': 0}
+    clean = dict(clean, ZGX_TRACE_ZOOM_HOVER='1')
+    ignored = 0
+    for i in range(1, args.count + 1):
+        log = logs / f'{args.route}-{i}.log'
+        with log.open('w') as out:
+            proc = subprocess.Popen([str(binary), *flags], cwd='/tmp', env=clean, stdout=out, stderr=subprocess.STDOUT)
+            try:
+                proc.wait(timeout=25)
+                hung = False
+            except subprocess.TimeoutExpired:
+                hung = True
+                sample = logs / f'{args.route}-{i}.sample.txt'
+                subprocess.run(['sample', str(proc.pid), '3', '-file', str(sample)], capture_output=True)
+                proc.terminate()
+                proc.wait()
+        text = log.read_text()
+        ignored += 'ZOOM_HOVER ignored' in text
+        went = all(re.search(pattern, text, re.M) for pattern in (
+            r'^STATE \d+ full=\S+ transition=entering ',
+            r'^STATE \d+ full=true transition=none ',
+            r'^STATE \d+ full=\S+ transition=leaving ',
+            r'^STATE \d+ full=false transition=none ',
+            r'^WINDOW full fullscreen=true ',
+            r'^FULLSCREEN_TOOLBAR_DONE$',
+        )) and 'NO_WINDOW' not in text
+        if hung:
+            stack = sample.read_text(errors='replace') if sample.exists() else ''
+            kind = 'hang-hover' if '_hoverTriggeredShowMenuForView' in stack else 'hang-other'
+            tally[kind if went else 'invalid'] += 1
+            print(f'{i}: {kind}{"" if went else " (never went in and out: invalid)"}, {log}', flush=True)
+        elif went and proc.returncode == 0:
+            tally['ok'] += 1
+        else:
+            tally['invalid'] += 1
+            print(f'{i}: invalid, exit {proc.returncode}, {log}', flush=True)
+    print(f'{" ".join(flags)}: {args.count} launches: ' + ', '.join(f'{v} {k}' for k, v in tally.items())
+          + f'; AppKit\'s hover menu stopped in {ignored}')
+    return 0 if tally['ok'] == args.count else 1
+
+
+def frames(binary, clean, covered, live):
     """Each route with `--animate`: for each transition (`STATE` lines from
     its start to its end), the frames drawn inside it, the longest gap
     between frames around it, and AppKit's occlusion changes then."""
-    runs = [('', clean)] + ([('covered', dict(clean, ZGX_RENDER_WHEN_COVERED='1'))] if covered else [])
-    for label, env in runs:
+    runs = [('', clean, [])] + ([('covered', dict(clean, ZGX_RENDER_WHEN_COVERED='1'), [])] if covered else []) + (
+        [('live', clean, ['--live'])] if live else [])
+    for label, env, flags in runs:
         for via in ('green', 'borderless'):
-            out = subprocess.run([str(binary), '--via', via, '--animate'], cwd='/tmp', env=env, capture_output=True,
-                                 text=True, timeout=60).stdout
-            frames_at = [int(m) for m in re.findall(r'^FRAME (\d+)$', out, re.M)]
+            out = subprocess.run([str(binary), '--via', via, '--animate', *flags], cwd='/tmp', env=env,
+                                 capture_output=True, text=True, timeout=60).stdout
+            sized = [(int(at), (int(ww), int(wh)), (int(dw), int(dh))) for at, ww, wh, dw, dh in re.findall(
+                r'^FRAME (\d+) window=(\d+)x(\d+) drawn=(\d+)x(\d+)$', out, re.M)]
+            frames_at = [at for at, _, _ in sized]
             occlusion = re.findall(r'^OCCLUSION (\d+) visible=(\S+)$', out, re.M)
             states = re.findall(r'^STATE (\d+) full=(\S+) transition=(\S+) ([\d.]+) controls=(\S+)$', out, re.M)
             spans, began = [], None
@@ -208,6 +289,14 @@ def frames(binary, clean, covered):
                 print(f'{moving} {start}..{end} ms ({end - start} ms, AppKit says {seconds * 1000:.0f}): '
                       f'{len(inside)} frames inside, longest gap {max(gaps, default=0)} ms, '
                       f'occlusion {" ".join(seen) or "none"}')
+                inside = [row for row in sized if start <= row[0] <= end]
+                windows = [row[1] for row in inside]
+                drawn = [row[2] for row in inside]
+                steps = [abs(b[0] - a[0]) for a, b in zip(windows, windows[1:])]
+                print(f'  window sizes {len(set(windows))}, drawn sizes {len(set(drawn))}, '
+                      f'largest window step {max(steps, default=0)} pt, '
+                      f'drawn behind window by at most {max((abs(w[0] - d[0]) for w, d in zip(windows, drawn)), default=0)} pt, '
+                      f'{windows[0] if windows else None} .. {windows[-1] if windows else None}')
             print('controls: ' + ' '.join(f'{at}:{controls}' for at, _, _, _, controls in states))
     return 0
 

@@ -108,6 +108,12 @@ pub struct WindowOptions {
     /// drawn as it shows. X11 keeps no picture of an unmapped window: there
     /// its background shows from its mapping to its first frame.
     pub visible: bool,
+    /// The window animates itself into full screen and out, live, its
+    /// content drawing and resizing on the screen through the transition
+    /// (macOS; elsewhere nothing changes). Off, the default, AppKit animates
+    /// a snapshot of it and what it draws meanwhile isn't seen. Set later
+    /// with `WindowHandle::set_live_full_screen`.
+    pub live_full_screen: bool,
 }
 impl WindowOptions {
     /// Whether the window is transparent where zgx paints nothing.
@@ -140,6 +146,7 @@ impl Default for WindowOptions {
             shadow: true,
             covers_display: false,
             visible: true,
+            live_full_screen: false,
         }
     }
 }
@@ -211,6 +218,8 @@ enum WindowCommand {
     Minimized(bool),
     Maximized(bool),
     Visible(bool),
+    /// `WindowHandle::set_live_full_screen`.
+    LiveFullScreen(bool),
     Focus,
     MaxFrameRate(Option<f64>),
     LoseGpu,
@@ -268,6 +277,7 @@ impl WindowState {
             WindowCommand::Minimized(value) => self.minimized = *value,
             WindowCommand::Maximized(value) => self.maximized = *value,
             WindowCommand::Visible(value) => self.visible = *value,
+            WindowCommand::LiveFullScreen(value) => options.live_full_screen = *value,
             WindowCommand::Focus => self.focus_requested = true,
             WindowCommand::MaxFrameRate(hz) => options.max_frame_rate = *hz,
         }
@@ -455,6 +465,11 @@ impl WindowHandle {
     /// Request maximization or restoration.
     pub fn set_maximized(&self, maximized: bool) {
         self.command(WindowCommand::Maximized(maximized));
+    }
+    /// Whether the window animates itself into full screen and out, live
+    /// (`WindowOptions::live_full_screen`), from its next transition on.
+    pub fn set_live_full_screen(&self, live: bool) {
+        self.command(WindowCommand::LiveFullScreen(live));
     }
     /// Show or hide this window. Visibility requests persist through native recreation.
     /// Wayland does not support changing visibility after creation.
@@ -3564,6 +3579,11 @@ impl Host {
         );
         // Left maximized, it opens so (`frame_autosave`).
         self.state.maximized |= placed.maximized;
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::WindowExtMacOS;
+            window.set_live_fullscreen(self.options.live_full_screen);
+        }
         let radius =
             crate::window_chrome::apply(&window, self.options.titlebar, self.options.glass);
         // Opened zoomed: its buttons where the zoomed title bar has them.
@@ -4031,6 +4051,15 @@ impl Host {
                     .set_presented(self.state.visible && !value && !self.native_occluded);
             }
             WindowCommand::Maximized(value) => window.set_maximized(value),
+            WindowCommand::LiveFullScreen(live) => {
+                #[cfg(target_os = "macos")]
+                if let Some(window) = &self.window {
+                    use winit::platform::macos::WindowExtMacOS;
+                    window.set_live_fullscreen(live);
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = live;
+            }
             WindowCommand::Visible(value) => {
                 if !value {
                     self.context.ui.cancel_interactions();

@@ -163,6 +163,31 @@ fn the_window_says_it_goes_into_full_screen_and_out() {
     says("full false still buttons 20");
 }
 
+/// `ui.window.live_full_screen` says what the window was made with, and a
+/// script's `set` reaches the host, once for each change.
+#[test]
+fn a_script_sets_whether_its_window_animates_into_full_screen_live() {
+    let h = Harness::inline(
+        r##"local live = ui.window.live_full_screen
+        return ui.text { id = "live", function() return `live {live:get()}` end }"##,
+    );
+    let told = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    h.host.window_live_full_screen(false, {
+        let told = told.clone();
+        move |live| told.borrow_mut().push(live)
+    });
+    h.frames(1);
+    assert!(texts(&h.ui).contains(&"live false".to_owned()));
+    let state = h.host.shared("zgx.window.live_full_screen", false);
+    state.set(true.into());
+    h.frames(1);
+    assert!(texts(&h.ui).contains(&"live true".to_owned()));
+    assert_eq!(*told.borrow(), [true]);
+    state.set(false.into());
+    h.frames(1);
+    assert_eq!(*told.borrow(), [true, false]);
+}
+
 /// `ui.window.zoom` follows the window's zoom and sets it; `zoomable`
 /// turns its keys off. Neither is made until a script reads it.
 #[test]

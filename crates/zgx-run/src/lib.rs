@@ -142,6 +142,9 @@ struct WindowConfig {
     /// (`ui.window.visible:set(true)`): an app showing an intro of its own
     /// first.
     visible: bool,
+    /// `"live_full_screen"`: the window animates itself into full screen and
+    /// out, live (`ui.window.live_full_screen`).
+    live_full_screen: bool,
     /// Its largest size in points (`max_width` and `max_height`): the
     /// same as `min_width` and `min_height`, a window of fixed size that a
     /// window manager can still move.
@@ -189,6 +192,7 @@ impl AppConfig {
                 WindowConfig {
                     frame_autosave: None,
                     visible: true,
+                    live_full_screen: false,
                     max_size: None,
                 },
             ));
@@ -232,6 +236,7 @@ impl AppConfig {
                 "application_id",
                 "frame_autosave",
                 "visible",
+                "live_full_screen",
             ]
             .contains(&key.as_str())
                 && !zgx_script::app_config::KEYS.contains(&key.as_str())
@@ -276,6 +281,12 @@ impl AppConfig {
                 .as_bool()
                 .ok_or_else(|| fail("`visible` is not a boolean".into()))?,
         };
+        let live_full_screen = match object.get("live_full_screen") {
+            None => false,
+            Some(v) => v
+                .as_bool()
+                .ok_or_else(|| fail("`live_full_screen` is not a boolean".into()))?,
+        };
         if let Some(id) = string("app_id")? {
             config.app_id = id;
         }
@@ -295,6 +306,7 @@ impl AppConfig {
             WindowConfig {
                 frame_autosave,
                 visible,
+                live_full_screen,
                 max_size,
             },
         ))
@@ -372,6 +384,7 @@ pub fn run_hosting(
         frame_autosave,
         visible,
         max_size,
+        live_full_screen,
     } = window_config;
     let options = WindowOptions {
         title: config.title.clone(),
@@ -383,6 +396,7 @@ pub fn run_hosting(
         glass: config.glass.then(zgx_desktop::Glass::default),
         frame_autosave,
         visible,
+        live_full_screen,
         ..Default::default()
     };
     let launched: Vec<PathBuf> = args
@@ -452,6 +466,13 @@ pub fn run_hosting(
                         (false, duration.as_secs_f64())
                     }
                 })
+            });
+        }
+        // `ui.window.live_full_screen`: as zgx.json says, and as the script sets it.
+        {
+            let window = cx.window.clone();
+            host.window_live_full_screen(live_full_screen, move |live| {
+                window.set_live_full_screen(live)
             });
         }
         // `ui.window.visible`: shown as zgx.json says, and as the script sets it.
@@ -800,6 +821,22 @@ mod tests {
         let error = AppConfig::read(&script).unwrap_err();
         assert!(error.contains("is not a folder"), "{error}");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_zgx_json_turns_on_live_full_screen() {
+        let dir = std::env::temp_dir().join(format!("zgx-run-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.luau");
+        std::fs::write(&script, "return ui.text 'x'").unwrap();
+        let live = |json: &str| {
+            std::fs::write(dir.join("zgx.json"), json).unwrap();
+            AppConfig::read(&script).map(|(_, _, window)| window.live_full_screen)
+        };
+        assert_eq!(live("{}"), Ok(false), "off unless it says so");
+        assert_eq!(live(r#"{ "live_full_screen": true }"#), Ok(true));
+        assert!(live(r#"{ "live_full_screen": "yes" }"#).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

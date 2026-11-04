@@ -337,3 +337,23 @@ advertised (sway, GNOME, Weston) nothing is sent, as before; X11's
 and again as `WindowHandle::set_glass` changes it.
 `scripts/linux_glass_blur_smoke.py` (zgx) reads the client's Wayland
 requests: sent where the compositor has the protocol, none where it hasn't.
+
+## macOS: a window that animates itself into full screen
+
+`WindowExtMacOS::set_live_fullscreen`. AppKit's standard full-screen animation
+moves a snapshot of the window, and counts the live window covered meanwhile:
+what an app draws through the transition isn't on the screen. With this set,
+the window's delegate answers `customWindowsTo{Enter,Exit}FullScreenForWindow:`
+with the window, and `window:startCustomAnimationTo{Enter,Exit}FullScreenWithDuration:`
+animates its frame to the screen's and back (`animate_frame`), its traffic lights
+hidden meanwhile (`set_buttons_hidden`), so its content
+draws and resizes on the screen throughout. Off by default.
+
+As a window that had done this closes, AppKit's zoom button can start its hover
+timer with the pointer nowhere near, and its tiling menu's event loop then holds
+the app. Cancelling the timer didn't stop it. So once a window has done this,
+the process guards AppKit's private `_hoverTriggeredShowMenuForView:` on
+`_NSThemeZoomWidgetCell` (`guard_zoom_hover`), letting it through only with the
+pointer over a visible button. Found by measuring; what arms it is AppKit's own.
+Looked up by name, so it does nothing where that selector is gone; apps that
+never turn this on never touch it.

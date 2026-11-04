@@ -522,6 +522,10 @@ pub(crate) const ZOOMABLE: &str = "zgx.window.zoomable";
 /// `ui.window.shown`, which a script reads.
 pub(crate) const ACTIVE: &str = "zgx.window.active";
 pub(crate) const SHOWN: &str = "zgx.window.shown";
+/// The shared key holding whether the app's window animates itself into
+/// full screen, live (`ScriptHost::window_live_full_screen`):
+/// `ui.window.live_full_screen`, which a script reads and sets.
+pub(crate) const LIVE_FULL_SCREEN: &str = "zgx.window.live_full_screen";
 /// The shared keys holding whether the app's window is in full screen
 /// and the transition going on, if one is (`ScriptHost::window_full_screen`):
 /// `ui.window.full_screen` and `ui.window.full_screen_transition`, which a
@@ -618,6 +622,9 @@ pub(crate) fn install(
                 Some("zoom") => Some(shared.state(ZOOM, Value::Num(1.))),
                 Some("zoomable") => Some(shared.state(ZOOMABLE, Value::Bool(true))),
                 Some("visible") => Some(shared.state(VISIBLE, Value::Bool(true))),
+                Some("live_full_screen") => {
+                    Some(shared.state(LIVE_FULL_SCREEN, Value::Bool(false)))
+                }
                 Some("active" | "shown" | "full_screen" | "full_screen_transition") => None,
                 _ => return Ok(mlua::Value::Nil),
             };

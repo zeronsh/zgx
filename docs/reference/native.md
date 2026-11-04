@@ -195,6 +195,7 @@ return ui.row {
 ```luau
 ui.window.full_screen: State<boolean>
 ui.window.full_screen_transition: State<{ phase: "entering" | "leaving", duration: number }?>
+ui.window.live_full_screen: State<boolean>
 ```
 
 `ui.window.full_screen` is whether the window is in full screen, however it went in or out: the green button, Ctrl+Cmd+F, the View menu, Mission Control, or a script. On macOS it turns as the window begins going in or out. `ui.window.full_screen_transition` is the transition while one runs (macOS animates it, `set_fullscreen`'s too): `phase` is `"entering"` or `"leaving"`, and `duration` is about how many seconds it takes (AppKit doesn't say: as long as the last one that way took, about 0.55 at first). It begins just before `full_screen` turns, and is nil once the window is there. It is nil always on Linux and Windows, where `full_screen` changes at once. Both are read-only.
@@ -216,6 +217,8 @@ return ui.row {
 Something timed by hand (an `anime` animation) can read the transition's own `duration` as it begins.
 
 AppKit animates a snapshot of the window through the transition, and shows the window itself again as it ends. What is drawn meanwhile keeps the content current, but is not on the screen: a tween runs behind the snapshot, and the window shows it finished. `ui.window.shown` stays true through the transition; a window still covered once it is over counts as covered then.
+
+With `ui.window.live_full_screen` true (`"live_full_screen": true` in `zgx.json`, `WindowOptions::live_full_screen` from Rust; off by default), the window animates itself instead: the live window goes to the screen's frame and back, its content drawing and resizing on the screen throughout, so a tween timed to the transition is seen as it runs. It applies from the next transition, and changes nothing on Linux and Windows.
 
 `zgx run` keeps both; a Rust host passes its window's with `ScriptHost::window_full_screen` (`WindowInfo::fullscreen` and `WindowContext::full_screen_transition`).
 
