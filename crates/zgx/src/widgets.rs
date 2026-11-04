@@ -298,6 +298,10 @@ struct EditorHint {
     /// A selection set by the program shows the next time it is drawn,
     /// focused or not (a search's match, chosen from its field).
     reveal: Cell<bool>,
+    /// Another editor was just refreshed for its new size, in the same step
+    /// of a frame (`refresh_if_resized`): the next draw takes its size from
+    /// the layout that one made, not laying out what that one's draw dirtied.
+    laid_out: Cell<bool>,
     /// A place to scroll into view the next time it is drawn, its caret and
     /// selection left as they are (find in page's match in a field), and
     /// where in the view (`scroll_to_line`).
@@ -506,6 +510,7 @@ impl EditorHint {
             clause: Cell::default(),
             composition_layer: Cell::default(),
             reveal: Cell::default(),
+            laid_out: Cell::default(),
             reveal_at: Cell::default(),
             point: std::cell::OnceCell::new(),
             code: std::cell::OnceCell::default(),
@@ -1033,10 +1038,13 @@ impl EditorHandle {
             scene.set_kind(self.caret, NodeKind::Rect(color));
         }
     }
-    fn refresh_if_resized(&self) {
+    /// Refresh it if its size changed; whether it did. `laid_out`: another
+    /// was refreshed in this step of the frame, which laid out all but what
+    /// its own draw dirtied, which the frame's next pass lays out.
+    fn refresh_if_resized(&self, laid_out: bool) -> bool {
         let scene = self.scene.borrow();
         if !scene.contains(self.node) {
-            return;
+            return false;
         }
         let bounds = scene.bounds(self.node);
         let next = (
@@ -1049,8 +1057,10 @@ impl EditorHandle {
         drop(scene);
         if changed {
             self.preferred_x.set(None);
+            self.hint.laid_out.set(laid_out);
             self.refresh();
         }
+        changed
     }
 
     /// Lay out and repaint the editor from its model again.
@@ -4021,8 +4031,11 @@ impl Ui {
             });
             if layout_changed {
                 let editors: Vec<_> = self.storage.editors.borrow().values().cloned().collect();
+                // One layout for all a size change reached: the first's draw
+                // lays out what hearing the geometry above dirtied.
+                let mut refreshed = false;
                 for editor in editors {
-                    editor.refresh_if_resized();
+                    refreshed |= editor.refresh_if_resized(refreshed);
                 }
                 self.run_layout_listeners();
             }
@@ -5020,7 +5033,9 @@ impl Ui {
             if !s.contains(root) {
                 return;
             }
-            s.prepare_layout();
+            if !draw_hint.laid_out.take() {
+                s.prepare_layout();
+            }
             let bounds = s.bounds(root);
             let root_style = s.style(root);
             *draw_geometry.borrow_mut() = Some((
@@ -7981,6 +7996,98 @@ fn slider_content_bounds(scene: &Scene, root: NodeId) -> (f32, f32) {
         bounds.x + padding.left,
         (bounds.width - padding.left - padding.right).max(0.),
     )
+}
+
+#[cfg(test)]
+mod editor_resize_tests {
+    use super::*;
+    use crate::{compose::prelude::*, style::Styled};
+
+    /// Layout passes a frame as the window narrows 6 points a frame, its
+    /// width shared by `panes` panes each with a wrapped text and a text area.
+    fn passes_a_frame(panes: usize) -> f32 {
+        let mut ui = Ui::new(1200., 400.);
+        let children: Vec<View> = (0..panes)
+            .map(|_| {
+                let value = ui.signal(String::new());
+                column()
+                    .flex_grow(1.)
+                    .flex_basis(0.)
+                    .min_w(0.)
+                    .child(
+                        text("Words that wrap as the pane narrows, line by line").text_wrap(true),
+                    )
+                    .child(text_area("Notes", value).w_full())
+            })
+            .collect();
+        ui.mount(row().w_full().h_full().children(children));
+        ui.prepare_frame();
+        let before = ui.scene.borrow().layout_passes();
+        const FRAMES: u32 = 20;
+        for frame in 1..=FRAMES {
+            ui.scene
+                .borrow_mut()
+                .resize(1200. - 6. * frame as f32, 400.);
+            ui.prepare_frame();
+        }
+        (ui.scene.borrow().layout_passes() - before) as f32 / FRAMES as f32
+    }
+
+    /// Where each of 4 panes' text areas puts its text's last character, at
+    /// `width`, once `narrowed` from a wider window or mounted there.
+    fn last_characters(width: f32, narrowed: bool) -> Vec<Rect> {
+        const TEXT: &str = "Words in a text area that wrap as its pane narrows, line after line";
+        let mut ui = Ui::new(if narrowed { width + 300. } else { width }, 400.);
+        let children: Vec<View> = (0..4)
+            .map(|pane| {
+                let value = ui.signal(TEXT.to_owned());
+                column().flex_grow(1.).flex_basis(0.).min_w(0.).child(
+                    text_area("Notes", value)
+                        .id(format!("area{pane}"))
+                        .text_wrap(true)
+                        .w_full(),
+                )
+            })
+            .collect();
+        let view = ui.mount(row().w_full().h_full().children(children));
+        ui.prepare_frame();
+        if narrowed {
+            for step in (0..300).step_by(50).rev() {
+                ui.scene.borrow_mut().resize(width + step as f32, 400.);
+                ui.prepare_frame();
+            }
+        }
+        (0..4)
+            .map(|pane| {
+                let node = view.find(&format!("area{pane}")).unwrap();
+                let editor = ui.editor(node).unwrap();
+                editor.text_area(TEXT.len() - 1..TEXT.len()).unwrap()
+            })
+            .collect()
+    }
+
+    /// Drawn from the frame's layout, each lays its text out at its own new
+    /// width, as one mounted at that width does.
+    #[test]
+    fn editors_resized_in_a_frame_wrap_at_their_new_width() {
+        let (narrowed, mounted) = (last_characters(500., true), last_characters(500., false));
+        assert_eq!(narrowed, mounted);
+        // It did wrap, in its share of the window.
+        assert!(mounted[0].y > 20., "{mounted:?}");
+    }
+
+    /// Every text input a width change reached is drawn from one layout: what
+    /// their draws dirty is laid out once, by the frame's next pass. (Each
+    /// laid out what the last had dirtied: N inputs, N + 1 passes.)
+    #[test]
+    fn editors_resized_in_a_frame_lay_out_once_however_many() {
+        let passes: Vec<f32> = [1, 2, 4, 8].map(passes_a_frame).to_vec();
+        eprintln!("passes a frame at 1, 2, 4, 8 inputs: {passes:?}");
+        assert!(
+            passes.iter().all(|at| *at == passes[0]),
+            "flat as inputs are added: {passes:?}"
+        );
+    }
 }
 
 #[cfg(test)]
