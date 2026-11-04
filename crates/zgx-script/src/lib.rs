@@ -1552,7 +1552,7 @@ struct Inner {
     /// Keeps the window's zoom and `ui.window.zoom` the same (`window_zoom`).
     zoom: RefCell<Option<zgx::reactive::Effect>>,
     visible: RefCell<Option<zgx::reactive::Effect>>,
-    /// What publishes the window's state (`window_state`).
+    /// What publishes the window's state (`window_state`, `window_maximized`).
     window_state: RefCell<Vec<zgx::reactive::Effect>>,
     elements: Rc<element::Elements>,
     engine: Rc<anime::Engine>,
@@ -2522,6 +2522,22 @@ impl ScriptHost {
             }
         });
         *self.0.full_screen.borrow_mut() = Some(effect);
+    }
+    /// Keep `ui.window.maximized` as whether the window is maximized: pass
+    /// its `WindowContext::maximized`.
+    /// After `window_state` where a host calls both: that starts its list anew.
+    pub fn window_maximized(&self, maximized: Signal<bool>) {
+        let state = self.0.shared.state(
+            windows::MAXIMIZED,
+            Value::Bool(maximized.with_untracked(|now| *now)),
+        );
+        let effect = self.0.runtime.effect(move || {
+            let now = Value::Bool(maximized.get());
+            if state.with_untracked(|was| *was != now) {
+                state.set(now);
+            }
+        });
+        self.0.window_state.borrow_mut().push(effect);
     }
     /// Keep `ui.window.size` as the window's size in points: pass its
     /// `WindowContext::viewport`. For what layout can't say (a sidebar

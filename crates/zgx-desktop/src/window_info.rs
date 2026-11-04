@@ -110,6 +110,11 @@ pub struct WindowCapabilities {
     pub interactive_drag: bool,
     /// The window can enter native fullscreen.
     pub native_fullscreen: bool,
+    /// The system blurs what is behind a window with `glass`. False on Linux
+    /// where the compositor has no protocol for it (GNOME, sway, Weston, and
+    /// X11, where zgx asks for none): glass there shows what is behind it
+    /// sharp, so an app may draw solid. A Wayland session's is read once.
+    pub blur_behind: bool,
 }
 /// A window going into or out of full screen, as AppKit animates it
 /// (macOS): `WindowContext::full_screen_transition`, `ui.window.full_screen_transition`.
@@ -266,9 +271,19 @@ impl WindowInfo {
             placement: !wayland,
             interactive_drag: true,
             native_fullscreen: true,
+            blur_behind: blur_behind(wayland),
         });
         self.ready.set(true);
     }
+}
+/// `WindowCapabilities::blur_behind`.
+#[cfg(target_os = "linux")]
+fn blur_behind(wayland: bool) -> bool {
+    wayland && crate::wayland_blur::offered()
+}
+#[cfg(not(target_os = "linux"))]
+fn blur_behind(_: bool) -> bool {
+    true
 }
 /// A title bar's free area and its window's buttons, in points
 /// (`WindowInfo::titlebar_area`, `controls`).

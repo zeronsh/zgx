@@ -541,6 +541,8 @@ pub(crate) const SHOWN: &str = "zgx.window.shown";
 /// `ui.window.full_screen` and `ui.window.full_screen_transition`, which a
 /// script reads.
 pub(crate) const FULL_SCREEN: &str = "zgx.window.full_screen";
+/// `ui.window.maximized`, kept as the host's window says.
+pub(crate) const MAXIMIZED: &str = "zgx.window.maximized";
 pub(crate) const FULL_SCREEN_TRANSITION: &str = "zgx.window.full_screen_transition";
 
 /// A full-screen transition as `ui.window.full_screen_transition` holds it:
@@ -632,7 +634,9 @@ pub(crate) fn install(
                 Some("zoom") => Some(shared.state(ZOOM, Value::Num(1.))),
                 Some("zoomable") => Some(shared.state(ZOOMABLE, Value::Bool(true))),
                 Some("visible") => Some(shared.state(VISIBLE, Value::Bool(true))),
-                Some("active" | "shown" | "full_screen" | "full_screen_transition") => None,
+                Some(
+                    "active" | "shown" | "full_screen" | "full_screen_transition" | "maximized",
+                ) => None,
                 _ => return Ok(mlua::Value::Nil),
             };
             if let Some(state) = state {
@@ -645,6 +649,7 @@ pub(crate) fn install(
                 "active" => shared.state(ACTIVE, Value::Bool(true)),
                 "shown" => shared.state(SHOWN, Value::Bool(true)),
                 "full_screen" => shared.state(FULL_SCREEN, Value::Bool(false)),
+                "maximized" => shared.state(MAXIMIZED, Value::Bool(false)),
                 "full_screen_transition" => shared.state(FULL_SCREEN_TRANSITION, Value::Nil),
                 _ => shared.state(SIZE, size(0., 0.)),
             });

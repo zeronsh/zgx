@@ -110,6 +110,31 @@ fn the_window_titlebar_area_and_controls_follow_what_the_host_says() {
     assert!(texts(&h.ui).contains(&"none".to_owned()));
 }
 
+/// `ui.window.maximized` follows the host's window, and can't be written.
+#[test]
+fn the_maximized_state_follows_the_host() {
+    let mut h = Harness::inline(
+        r#"
+        local written = pcall(function() ui.window.maximized:set(true) end)
+        return ui.column {
+            ui.text { id = "max", function() return `max {ui.window.maximized:get()}` end },
+            ui.text { id = "written", `written {written}` },
+        }
+        "#,
+    );
+    let maximized = h.ui.signal(false);
+    h.host.window_maximized(maximized.clone());
+    h.settle();
+    assert_eq!(h.text("max"), "max false");
+    assert_eq!(h.text("written"), "written false");
+    maximized.set(true);
+    h.settle();
+    assert_eq!(h.text("max"), "max true");
+    maximized.set(false);
+    h.settle();
+    assert_eq!(h.text("max"), "max false");
+}
+
 /// `ui.window.full_screen` and `full_screen_transition` follow the host
 /// through a round trip into full screen and out (macOS's will and did
 /// notifications), the title bar's `controls` gone while it is there: a

@@ -725,6 +725,8 @@ pub struct WindowContext {
     /// and always on Linux and Windows. `window_info.fullscreen` says
     /// whether it is in full screen, on every platform.
     pub full_screen_transition: Signal<Option<crate::FullScreenTransition>>,
+    /// Whether the window is maximized, as the system says, kept current.
+    pub maximized: Signal<bool>,
     menu_model: Signal<Vec<crate::AppMenu>>,
     /// The window's UI: its scene, input and reactive runtime.
     pub ui: Ui,
@@ -1930,12 +1932,14 @@ impl Host {
             inspector.set_wake(move || handle.request_redraw());
         }
         let full_screen_transition = ui.signal(None);
+        let maximized = ui.signal(false);
         let context = WindowContext {
             inspector,
             natives: native.natives.clone(),
             native_diagnostics: native.diagnostics.clone(),
             window_info,
             full_screen_transition,
+            maximized,
             menu_model,
             dialogs: crate::FileDialogs::new(handle.clone()),
             menu_action: None,
@@ -4378,6 +4382,13 @@ impl Host {
                 self.state.maximized,
                 || window.is_maximized(),
             );
+            if self
+                .context
+                .maximized
+                .with_untracked(|was| *was != maximized)
+            {
+                self.context.maximized.set(maximized);
+            }
             // Into or out of fullscreen: its popups close, as AppKit's do.
             let fullscreen = window.fullscreen().is_some();
             if std::mem::replace(&mut self.popups_fullscreen, fullscreen) != fullscreen {

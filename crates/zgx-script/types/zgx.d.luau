@@ -1560,6 +1560,9 @@ declare extern type WindowApi with
 	-- lights moves over as they go.
 	full_screen: State<boolean>
 	full_screen_transition: State<FullScreenTransition?>
+	-- Whether the window is maximized, read-only and followed. False in full
+	-- screen unless the system keeps it maximized under it.
+	maximized: State<boolean>
 	-- The window's size in points, read-only and followed: for decisions
 	-- layout can't make (a sidebar collapsing to icons below a width).
 	-- Sizes themselves are layout's: percentages, `grow`, `max_w`.
