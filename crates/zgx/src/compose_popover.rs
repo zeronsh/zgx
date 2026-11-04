@@ -73,6 +73,7 @@ pub(crate) struct Arrow {
 /// it flips and clamps to the screen its anchor is on.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn mount(
+    screens: Signal<Vec<Rect>>,
     ui: &mut Ui,
     owner: NodeId,
     anchor: NodeId,
@@ -85,6 +86,7 @@ pub(crate) fn mount(
     arrow: Option<Arrow>,
 ) {
     mount_placement(
+        screens,
         ui,
         owner,
         anchor,
@@ -99,6 +101,7 @@ pub(crate) fn mount(
 
 /// A submenu starts beside its trigger, flipping left when the right side lacks room.
 pub(crate) fn mount_submenu(
+    screens: Signal<Vec<Rect>>,
     ui: &mut Ui,
     owner: NodeId,
     anchor: NodeId,
@@ -107,7 +110,7 @@ pub(crate) fn mount_submenu(
     panel: NodeId,
 ) {
     mount_placement(
-        ui, owner, anchor, overlay, position, panel, None, None, None,
+        screens, ui, owner, anchor, overlay, position, panel, None, None, None,
     );
 }
 
@@ -200,6 +203,7 @@ pub(crate) fn mount_dismissing(
 
 #[allow(clippy::too_many_arguments)]
 fn mount_placement(
+    screens: Signal<Vec<Rect>>,
     ui: &mut Ui,
     owner: NodeId,
     anchor: NodeId,
@@ -215,7 +219,6 @@ fn mount_placement(
     let viewport = ui.observe_bounds(overlay);
     let panel_bounds = ui.observe_bounds(panel);
     let position_bounds = ui.observe_bounds(position);
-    let screens = ui.popup_screens();
     let flips = ui.popup_flips();
     let weak = ui.downgrade();
     let anchor_node = anchor;

@@ -647,8 +647,18 @@ impl Node {
             Kind::Component { .. } => "component",
             Kind::Presence { .. } => "presence",
             Kind::Slot { .. } => "slot",
+            Kind::Decision(_) => "decision",
         }
     }
+}
+
+/// A `ui.decision`: boxed, as few elements are one and every `Kind` is as
+/// large as the largest.
+#[derive(Clone)]
+pub struct Decision {
+    pub key: Rc<str>,
+    pub label: String,
+    pub content: Vec<Rc<Node>>,
 }
 
 /// Script handlers for input and lifecycle events.
@@ -1098,6 +1108,10 @@ pub(crate) enum Kind {
         /// `initial = true`: the first content enters too.
         initial: bool,
     },
+    /// `ui.decision`: controls no plugin reaches or covers, drawn and hit
+    /// over all it opens (`zgx::compose::hoist`), with what holds them in
+    /// flow. Its children are here: a plugin's hooks walk `Node::children`.
+    Decision(Box<Decision>),
     /// A plugin extension point; `context` reaches what is contributed to it
     /// (`props.slot` of a contributed component).
     Slot {
@@ -1123,6 +1137,7 @@ impl Kind {
                 | Kind::Menu { .. }
                 | Kind::Submenu { .. }
                 | Kind::MenuItem(..)
+                | Kind::Decision(_)
         ) || self.library_takes_children()
     }
     /// A component of the library holding children (a disclosure's content,
@@ -4497,6 +4512,45 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
 /// Installs the read-only `ui` global.
 /// `ui.override`, `ui.contribute` and `ui.filter`: what plugins (and an
 /// app's own extensions) hand the app, made once a script names one.
+/// `ui.decision`, set the first time it is read: a script that never asks
+/// makes no function for it.
+pub(crate) fn install_decisions(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+    ui.raw_set(
+        "decision",
+        lua.create_function(|lua, table: Table| {
+            if matches!(&*env(lua)?.grants, crate::Grants::Only(_)) {
+                return Err(mlua::Error::runtime(
+                    "ui.decision: only the app's own script makes a decision control",
+                ));
+            }
+            let key: Rc<str> = table
+                .get::<Option<String>>("key")?
+                .ok_or_else(|| mlua::Error::runtime("ui.decision needs a `key`"))?
+                .into();
+            let label = table
+                .get::<Option<String>>("label")?
+                .unwrap_or_else(|| "Decision".to_owned());
+            let mut node = fill(
+                lua,
+                Node::new(
+                    owner(lua)?,
+                    Kind::Decision(Box::new(Decision {
+                        key,
+                        label,
+                        content: Vec::new(),
+                    })),
+                ),
+                Some(&table),
+            )?;
+            node.private = true;
+            let content = std::mem::take(&mut node.children);
+            if let Kind::Decision(decision) = &mut node.kind {
+                decision.content = content;
+            }
+            node_ud(lua, node)
+        })?,
+    )
+}
 pub(crate) fn install_plugins(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     ui.set(
         "override",

@@ -1584,6 +1584,7 @@ struct Inner {
     /// (`components/card` for `@app/components/card`): gathered as the
     /// plugins load, before the app, and read by the app's `require`.
     overrides: RefCell<HashMap<String, node::ModuleOverride>>,
+    decisions: Rc<lower::Decisions>,
     /// Terminal sessions (`ui.term`): they outlive reloads.
     terms: Rc<term::Terms>,
     /// Web pages by id (`ui.web(id)`): they outlive reloads too.
@@ -1766,6 +1767,7 @@ impl ScriptHost {
             lent_compiles: Cell::new(0),
             sources: sources::Sources::default(),
             overrides: RefCell::default(),
+            decisions: Rc::new(lower::Decisions::new(runtime)),
             terms: Rc::default(),
             webs: Rc::default(),
             commands: Rc::new(command::Commands::new(runtime)),
@@ -2534,6 +2536,17 @@ impl ScriptHost {
     /// terminal (`WindowFactory::set_reserved_shortcuts`).
     pub fn reserved_keys(&self) -> Signal<Vec<String>> {
         self.0.commands.reserved.clone()
+    }
+    /// Whether decision control `key` (`ui.decision`) is on screen: at least
+    /// half of it shows in the window, and no plugin has a window open
+    /// (`Capability::Windows`), which nothing in this window can be above.
+    /// Followed where read reactively. A host holding a pending decision shows
+    /// its own fallback in its top layer (`View::top_layer`) while this is
+    /// false: a plugin replacing what a builder makes (a row, a component)
+    /// takes the control away where no refusal can see it.
+    pub fn decision_shown(&self, key: &str) -> bool {
+        let shown = self.0.decisions.shown(key).get();
+        !self.0.windows.plugin_window_open() && shown
     }
     /// The windows the scripts declare (`ui.window`), as of the last good
     /// load: open each while its `open` state is true, showing
@@ -3621,6 +3634,7 @@ impl ScriptHost {
             // Boxed, and none without plugins adding at the app's elements.
             hooks: (!hooks.is_empty()).then(|| Box::new(hooks)),
             sealed: Default::default(),
+            decisions: self.0.decisions.clone(),
             actions: self.0.actions.clone(),
             elements: self.0.elements.clone(),
             runtime: self.0.runtime.clone(),
@@ -4030,6 +4044,7 @@ impl ScriptHost {
             theme::install(lua, ui, dir, packages)
         });
         lazy.ui(&["form"], form::install);
+        lazy.ui(&["decision"], node::install_decisions);
         lazy.ui(&["modifiers"], modifiers::install);
         lazy.ui(&["editor"], element::install_editor);
         lazy.ui(&["router"], router::install);

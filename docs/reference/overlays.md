@@ -196,6 +196,28 @@ return ui.popover {
 
 `ui.layer { open?, placement?, … }` is a non-modal layer over the window, for toasts and other heads-up content: it takes no focus and has no backdrop, the pointer passes through it except over what it holds, and what it holds stays clickable while a dialog holds focus. It is raised over everything (dialogs included) each time it opens, so toasts shown while a dialog is open draw over the dialog's backdrop. `open` is a state (open when not given); `placement` sits it in the window as a modal's does (`{ x = "end", y = "end", inset = { 0, 24, 16, 0 } }` for a bottom-right stack).
 
+## decision
+
+`ui.decision { key, label?, … }` holds controls no plugin may reach or cover: tool approval, sign-in, keeping or reverting a template. Only the app's own script makes one (from a plugin it is an error).
+
+```lua
+local answer = ui.state("answer", "")
+return ui.decision { key = "approve",
+    ui.row { gap = 8,
+        ui.button { "Allow", on_click = function() answer:set("allow") end },
+        ui.button { "Deny", on_click = function() answer:set("deny") end },
+    },
+}
+```
+
+What it holds is drawn and hit over everything in the window, a plugin's `ui.modal` and `ui.layer` included, and stays live under them. It stays out of plugins' reach however it builds: no contribution, replacement, filter or slot gets in, rows and components included.
+
+The element itself stays in flow and holds the room its content takes, across and down; give it `w`, `h`, `w_full` or `h_full` and its content takes that size instead. The content scrolls with it and is cut to what shows of it. Its own props style only that box in flow: put what paints (a background) on what it holds. Effects on its ancestors (a fade, a filter) don't reach its content.
+
+While a keyboard modal of a plugin's is up, the pointer reaches a decision but Tab stays in the modal.
+
+See [plugins](../plugins.md) for what a plugin is refused and what a host checks (`ScriptHost::decision_shown`).
+
 ## toast
 
 `ui.toast { title, body?, kind?, duration?, action? }` shows a short message stacked in the window's bottom corner, at the end of the line (the left, right to left), over everything and taking no focus, as Radix's and the system's notifications; it returns the toast's id, which `ui.dismiss_toast(id)` dismisses. A toast goes after its `duration` (5000 ms, 7000 for a warning), paused while the pointer is over it, or at its ×; an error stays until dismissed. `action = { label = "Undo", run = fn }` puts a button on it, the toast going after `run`. Assistive technology hears each as it comes, an error at once. F8 moves focus into the stack, and Escape (or Delete) dismisses the focused toast. Four show at most; older ones wait. The stack is built while a toast shows, and is nothing otherwise.

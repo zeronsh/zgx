@@ -433,6 +433,8 @@ struct PortalOptions {
     layer: bool,
     /// `top_layer`: a layer above every other, under the document root.
     top: bool,
+    /// `hoist`: in that layer, over its parent.
+    hoist: Option<Box<crate::compose_modal::Hoist>>,
     /// `View::autofocus`.
     autofocus: Option<bool>,
     modal_placement: Option<crate::compose_modal::ModalPlacement>,
@@ -2337,6 +2339,68 @@ pub fn scroll_x(offset: Signal<f32>) -> View {
         horizontal: true,
     })
 }
+/// `content` in a top layer (`View::top_layer`), drawn and hit over `holder`
+/// and cut to what shows of it, wherever `holder` is in the window, as it
+/// scrolls: `holder` stays in flow, taking the room `content` takes, across
+/// and down, but where `fills` says `holder` has a size of its own, which
+/// `content` then takes. `shown` holds whether at least half of it shows.
+pub fn hoist(
+    runtime: &Runtime,
+    holder: View,
+    content: View,
+    label: impl Into<String>,
+    fills: (bool, bool),
+    shown: Option<Signal<bool>>,
+) -> View {
+    let natural = runtime.signal((0f32, 0f32));
+    let sized = natural.clone();
+    let mut room = div();
+    room.reactive_style = Some(Box::new(move |out: &mut Option<Styles>| {
+        let (width, height) = sized.get();
+        let mut styles = Styles::new();
+        if !fills.0 {
+            styles = styles.w(width);
+        }
+        if !fills.1 {
+            styles = styles.h(height);
+        }
+        *out = Some(styles);
+    }));
+    let mut layer = modal(label, runtime.signal(true)).absolute();
+    let portal = layer.rare_mut().portal.get_or_insert_default();
+    portal.layer = true;
+    portal.top = true;
+    portal.hoist = Some(Box::new(crate::compose_modal::Hoist {
+        fills,
+        natural,
+        shown,
+    }));
+    holder.child(room).child(layer.child(content))
+}
+/// Whether popups opened in a subtree stay in the window for now, under its
+/// top layer, rather than in windows of their own (`Ui::set_popup_screens`),
+/// which nothing in the window can be above. A service: `provide` it around
+/// what may not cover the window's top layer.
+pub struct PopupsInWindow(pub Signal<bool>);
+/// The screens popups opened under `held` may reach: none while it holds.
+#[cold]
+#[inline(never)]
+fn held_screens(
+    ui: &mut Ui,
+    owner: NodeId,
+    held: Rc<PopupsInWindow>,
+) -> Signal<Vec<crate::scene::Rect>> {
+    let all = ui.popup_screens();
+    let screens = ui.signal(Vec::new());
+    let out = screens.clone();
+    ui.bind(owner, move || {
+        out.set(match held.0.get() {
+            true => Vec::new(),
+            false => all.get(),
+        });
+    });
+    screens
+}
 /// A signal-controlled modal portal. Children and fluent styles describe its panel.
 pub fn modal(label: impl Into<String>, open: Signal<bool>) -> View {
     View::new(Kind::Modal {
@@ -3655,6 +3719,30 @@ fn mount_portal_panel(
         .filter(|_| !top)
         .map(|(_, visible)| visible.clone());
     let portal = crate::compose_modal::create(ui, owner, portal_parent);
+    let screens = match environment.services.get::<PopupsInWindow>() {
+        Some(held) if anchored => held_screens(ui, owner, held),
+        _ => ui.popup_screens(),
+    };
+    let hoist = (view.rare.as_mut())
+        .and_then(|r| r.portal.as_mut())
+        .and_then(|p| p.hoist.take());
+    if let Some(at) = &hoist
+        && let Some(over) = ui.scene.borrow().parent(owner)
+    {
+        let bounds = ui.observe_bounds(over);
+        let fills = at.fills;
+        view.reactive_style = Some(Box::new(move |out: &mut Option<Styles>| {
+            let bounds = bounds.get();
+            let mut styles = Styles::new();
+            if fills.0 {
+                styles = styles.w(bounds.width);
+            }
+            if fills.1 {
+                styles = styles.h(bounds.height);
+            }
+            *out = Some(styles);
+        }));
+    }
     if top {
         ui.scene.borrow_mut().set_z(portal.overlay, i32::MAX);
     }
@@ -3748,7 +3836,7 @@ fn mount_portal_panel(
     let viewport = ui.observe_bounds(ui.root());
     // Anchored, it may reach past the window, to the screen's edges, and be
     // cut to the room there by the platform (`Ui::set_popup_limit`).
-    let area = anchor.map(|anchor| (ui.popup_screens(), ui.observe_bounds(anchor)));
+    let area = anchor.map(|anchor| (screens.clone(), ui.observe_bounds(anchor)));
     let limit = anchor.map(|_| (ui.popup_limits(), portal.position));
     let mut dynamic = view.reactive_style.take();
     view.reactive_style = Some(Box::new(move |out: &mut Option<Styles>| {
@@ -3875,6 +3963,7 @@ fn mount_portal_panel(
     if let Some(anchor) = anchor {
         if is_submenu {
             crate::compose_popover::mount_submenu(
+                screens.clone(),
                 ui,
                 owner,
                 anchor,
@@ -3959,6 +4048,7 @@ fn mount_portal_panel(
                 false => anchor,
             };
             crate::compose_popover::mount(
+                screens.clone(),
                 ui,
                 owner,
                 placed_at,
@@ -3973,7 +4063,10 @@ fn mount_portal_panel(
     } else {
         match modal_placement {
             Some(at) => crate::compose_modal::place(ui, owner, portal.position, at),
-            None if top => crate::compose_modal::fill(ui, owner, &portal, panel),
+            None if top => match hoist {
+                Some(at) => crate::compose_modal::hoist(ui, owner, &portal, panel, *at),
+                None => crate::compose_modal::fill(ui, owner, &portal, panel),
+            },
             None => crate::compose_modal::center(ui, owner, portal.position),
         }
     }
@@ -4055,8 +4148,7 @@ fn mount_portal_panel(
     // a window of its own (`Scene::set_popup`). Closed, it is none, so a
     // list's hundred row menus cost the host nothing.
     if anchored {
-        let (screens, visible, position) =
-            (ui.popup_screens(), portal.visible.clone(), portal.position);
+        let (screens, visible, position) = (screens, portal.visible.clone(), portal.position);
         let weak = ui.downgrade();
         ui.bind(owner, move || {
             let popup = visible.get() && screens.with(|screens| !screens.is_empty());
