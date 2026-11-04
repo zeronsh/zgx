@@ -35,6 +35,8 @@ ui.button { id = "add", hook = "toolbar.add", "Add", on_click = add }
 ui.button { id = "clear", hook = false, "Clear done", on_click = ui.action("clear_done") }
 ```
 
+**Keep the host's own controls on top.** A view a host composes around the app's (`render`) can hold `modal(label, open).top_layer()` (`View::top_layer`): a layer filling the window, above whatever a plugin opens (`ui.modal`, `ui.layer`, a popover, a fixed node at any `z`), and live under them, so its controls take the pointer while a plugin's modal is up. The pointer passes through it but for its controls, and it takes no focus. A script's `z` orders its element among its siblings and can't reach it.
+
 Plugins may also target an element by role and name, as the app writes them (`role:button "Add"`, or `"Add"`). That is convenient and the most fragile form; prefer declared hooks.
 
 **Classes and chains.** `.session-row` targets every element with that class (`class = "session-row"`), and a contribution goes beside or in place of each. `#sidebar >> .session-row` targets those inside `#sidebar`, at any depth: each part before a `>>` is an element above the one before it. Parts combine as one element's (`#save .primary`, `role:button "Add"`). A chain is checked as the element mounts, so one in a row of a `ui.each` inside the sidebar matches, and the same class elsewhere doesn't. `ui.filter` takes the same targets.

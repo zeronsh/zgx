@@ -330,6 +330,32 @@ impl ModalPlacement {
 pub(crate) fn center(ui: &mut Ui, owner: NodeId, position: NodeId) {
     place(ui, owner, position, ModalPlacement::centered());
 }
+/// A top layer's panel, the whole of the window from its corner: blank, it
+/// is no hit boundary, as a dialog's panel is.
+pub(crate) fn fill(ui: &mut Ui, owner: NodeId, portal: &Portal, panel: NodeId) {
+    use crate::compose_popover::Edge;
+    ui.scene.borrow_mut().set_style(
+        portal.position,
+        Style {
+            width_percent: Some(100.),
+            height_percent: Some(100.),
+            ..Default::default()
+        },
+    );
+    let mut options = ui.input.options(panel).unwrap_or_default();
+    options.pass_through = true;
+    ui.input.set_options(panel, options);
+    place(
+        ui,
+        owner,
+        portal.position,
+        ModalPlacement {
+            x: Edge::Start,
+            y: Edge::Start,
+            insets: [0.; 4],
+        },
+    );
+}
 pub(crate) fn place(ui: &mut Ui, owner: NodeId, position: NodeId, at: ModalPlacement) {
     use crate::compose_popover::Edge;
     let viewport = ui.observe_bounds(ui.root());
