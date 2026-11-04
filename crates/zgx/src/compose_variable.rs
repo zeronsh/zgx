@@ -832,16 +832,21 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                         let mut scene = ui.scene.borrow_mut();
                         // Scrolled with the view around it: as tall as its
                         // rows, unclipped, in place.
-                        scene.set_style(
-                            viewport,
-                            match ancestor {
-                                true => crate::widgets::fixed(width, total),
-                                false => crate::scene::Style {
+                        match ancestor {
+                            true => scene.set_style(viewport, crate::widgets::fixed(width, total)),
+                            false => scene.set_style_within(
+                                viewport,
+                                crate::scene::Style {
                                     clip: true,
+                                    absolute: true,
+                                    // In an overlay, nothing shrinks it: a boundary
+                                    // for its rows, growing or not.
+                                    flex_shrink: 0.,
                                     ..crate::widgets::fixed(width, height)
                                 },
-                            },
-                        );
+                                root,
+                            ),
+                        }
                         scene.set_style(content, crate::widgets::fixed(width, total));
                         stretch.place(&mut scene, if ancestor { 0. } else { position });
                         order.clear();
