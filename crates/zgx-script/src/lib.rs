@@ -1552,8 +1552,9 @@ struct Inner {
     /// Keeps the window's zoom and `ui.window.zoom` the same (`window_zoom`).
     zoom: RefCell<Option<zgx::reactive::Effect>>,
     visible: RefCell<Option<zgx::reactive::Effect>>,
-    /// What publishes the window's state (`window_state`, `window_maximized`).
-    window_state: RefCell<Vec<zgx::reactive::Effect>>,
+    /// What publishes the window's state: `window_maximized`'s (true) and
+    /// `window_state`'s, each starting only its own anew.
+    window_state: RefCell<Vec<(bool, zgx::reactive::Effect)>>,
     elements: Rc<element::Elements>,
     engine: Rc<anime::Engine>,
     assets: Rc<lower::Assets>,
@@ -2472,7 +2473,7 @@ impl ScriptHost {
     /// `ui.window.active` and `ui.window.shown`: an app tells someone of
     /// what arrives while they are away (a system notification, a badge).
     pub fn window_state(&self, ui: &zgx::widgets::Ui) {
-        self.0.window_state.borrow_mut().clear();
+        (self.0.window_state.borrow_mut()).retain(|(maximized, _)| *maximized);
         for (key, source) in [
             (windows::ACTIVE, ui.observe_window_active()),
             (windows::SHOWN, ui.observe_shown()),
@@ -2487,7 +2488,7 @@ impl ScriptHost {
                     state.set(now);
                 }
             });
-            self.0.window_state.borrow_mut().push(effect);
+            self.0.window_state.borrow_mut().push((false, effect));
         }
     }
     /// Keep `ui.window.full_screen` as whether the window is in full
@@ -2525,7 +2526,6 @@ impl ScriptHost {
     }
     /// Keep `ui.window.maximized` as whether the window is maximized: pass
     /// its `WindowContext::maximized`.
-    /// After `window_state` where a host calls both: that starts its list anew.
     pub fn window_maximized(&self, maximized: Signal<bool>) {
         let state = self.0.shared.state(
             windows::MAXIMIZED,
@@ -2537,7 +2537,9 @@ impl ScriptHost {
                 state.set(now);
             }
         });
-        self.0.window_state.borrow_mut().push(effect);
+        let mut effects = self.0.window_state.borrow_mut();
+        effects.retain(|(maximized, _)| !*maximized);
+        effects.push((true, effect));
     }
     /// Keep `ui.window.size` as the window's size in points: pass its
     /// `WindowContext::viewport`. For what layout can't say (a sidebar
