@@ -466,22 +466,11 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
             // there by its key. Beside the anchor, not in it, so that other
             // lists' passes neither move nor drop a key.
             let mut anchor_key: Option<K> = None;
-            // Built twice, `ancestor` a constant in each: a list that scrolls itself
-            // runs none of the other's tests (`virtualize_in_ancestor`).
-            macro_rules! rows {
-                ($ancestor:literal) => {
-                    move || {
-                        let ancestor: bool = $ancestor;
+            ui.bind(root, move || {
                 heights.revision.get();
                 mounted_revision.get();
                 let (width, mut height) = size.get();
                 let requested = offset.get();
-                let around = match ancestor {
-                    true => window
-                        .as_ref()
-                        .and_then(|window| Some((window, weak.upgrade()?))),
-                    false => None,
-                };
                 let mut pending_measurement = false;
                 let mut measurement_changed = false;
                 if measured {
@@ -586,8 +575,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                                 .min(limit);
                     }
                     // The part the view around it shows.
-                    if let Some((window, ui)) = &around {
-                        (position, height) = window.window(ui, total);
+                    if let Some(window) = &window
+                        && let Some(shown) = window.shown(&weak, total)
+                    {
+                        (position, height) = shown;
                     }
                     // A row asked for, else the keyboard's, else one followed.
                     let target = asked
@@ -605,10 +596,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     if let Some((index, align, _)) = target {
                         let top = model.row_offset(index);
                         let row_height = model.row_height(index).unwrap();
-                        match &around {
+                        match &window {
                             // The view around it scrolls to it; built as it
                             // shows.
-                            Some((window, ui)) => window.reveal(ui, top, row_height),
+                            Some(window) => window.reveal_from(&weak, top, row_height),
                             None => {
                                 position = align
                                     .position(top, row_height, height, position)
@@ -920,13 +911,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             (index, align, position, ui.input.focused(), keys)
                         });
                 });
-                    }
-                };
-            }
-            match ancestor {
-                true => ui.bind(root, rows!(true)),
-                false => ui.bind(root, rows!(false)),
-            }
+            });
         },
     )))
     .row_text(text)
