@@ -54,6 +54,8 @@ mod rtl_layout;
 mod rtl_scroll;
 #[path = "../size_calc.rs"]
 mod size_calc;
+#[path = "../snap_held_width.rs"]
+mod snap_held_width;
 #[path = "../sticky.rs"]
 mod sticky;
 #[path = "../text_reach.rs"]
