@@ -6924,9 +6924,10 @@ impl ListKey {
 
 /// The keys of a list's `count` rows: `key` called for each in a Luau loop
 /// (a call from Rust for each would cost ten times as much), its reads
-/// tracked. A row whose key is not a number, string or boolean, or every
-/// row if `key` fails, keys by its index.
-fn list_keys(vm: &Vm, key: &mlua::Function, count: usize) -> Vec<ListKey> {
+/// tracked. A row whose key is not a number, string or boolean keys by its
+/// index. If `key` fails, rows keep the keys they last had (`last`), so a
+/// slip doesn't remake the list; rows past those key by their index.
+fn list_keys(vm: &Vm, key: &mlua::Function, count: usize, last: &mut Vec<ListKey>) -> Vec<ListKey> {
     const LOOP: &str = "zgx_list_keys";
     let lua = &vm.lua;
     let all = lua
@@ -6949,10 +6950,12 @@ fn list_keys(vm: &Vm, key: &mlua::Function, count: usize) -> Vec<ListKey> {
         Ok(keys) => keys,
         Err(e) => {
             vm.report(e);
-            return (0..count).map(ListKey::Index).collect();
+            return (0..count)
+                .map(|i| last.get(i).cloned().unwrap_or(ListKey::Index(i)))
+                .collect();
         }
     };
-    (0..count)
+    let keys: Vec<ListKey> = (0..count)
         .map(|i| {
             let key = match keys.raw_get::<mlua::Value>(i + 1) {
                 Ok(mlua::Value::Number(n)) => Some(ListKey::of(&Value::Num(n))),
@@ -6965,7 +6968,9 @@ fn list_keys(vm: &Vm, key: &mlua::Function, count: usize) -> Vec<ListKey> {
             };
             key.flatten().unwrap_or(ListKey::Index(i))
         })
-        .collect()
+        .collect();
+    last.clone_from(&keys);
+    keys
 }
 
 /// What `builder` describes for `args`, built as a row is but not mounted,
@@ -7342,7 +7347,8 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
             // one Luau loop.
             Some(key) => {
                 let (key, vm) = (key.clone(), vm.clone());
-                let keys = move || list_keys(&vm, &key, count());
+                let mut last = Vec::new();
+                let keys = move || list_keys(&vm, &key, count(), &mut last);
                 // Nothing better than `height` for the rows not yet mounted.
                 let estimate = |_: &[ListKey], _: usize| f32::NAN;
                 measured_rows(offset, rows, *overscan, keys, estimate, row)
@@ -7445,6 +7451,7 @@ fn item_keys(vm: &Vm, key: &mlua::Function, items: &Value, kept: &mut KeptKeys) 
     let list = items.list();
     let mut keys: Vec<Option<ListKey>> = list.iter().map(|item| kept.get(item)).collect();
     let missing: Vec<usize> = (0..list.len()).filter(|&i| keys[i].is_none()).collect();
+    let mut unknown = Vec::new();
     if missing.len() <= 8 {
         for &i in &missing {
             keys[i] = Some(item_key(vm, key, &list[i], i));
@@ -7496,14 +7503,23 @@ fn item_keys(vm: &Vm, key: &mlua::Function, items: &Value, kept: &mut KeptKeys) 
                 }
             }
             Err(e) => {
+                // Rows it knows keep their keys, so they keep their nodes:
+                // only the ones it never asked about go by index.
                 vm.report(e);
-                return (0..list.len()).map(ListKey::Index).collect();
+                for &i in &missing {
+                    keys[i] = Some(ListKey::Index(i));
+                }
+                unknown = missing;
             }
         }
     }
     let keys: Vec<ListKey> = keys.into_iter().map(|k| k.unwrap()).collect();
     kept.0.clear();
-    for (item, key) in list.iter().zip(&keys) {
+    for (i, (item, key)) in list.iter().zip(&keys).enumerate() {
+        // (An index given only because `key` failed isn't the item's key.)
+        if unknown.binary_search(&i).is_ok() {
+            continue;
+        }
         kept.keep(item, key);
     }
     keys
