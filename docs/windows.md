@@ -445,8 +445,15 @@ they span an app's title bar at any zoom. What is drawn, what `WM_NCHITTEST`
 answers (snap layouts included) and `WindowInfo::controls` read one geometry in
 physical pixels (`windows_caption.rs`), and agree. A window that isn't resizable,
 or whose smallest and largest sizes are the same, has no Maximize and no resize
-bands. The glyphs follow the window's light or dark (`WindowHandle::set_theme`),
-not the system's. `scripts/windows_caption_smoke.py` checks all of it in a real
+bands. The glyphs are inked from the app's theme, as its own title bar controls
+are: `text.secondary` at rest, `text.primary` under the pointer and
+`text.tertiary` while the window is in the back, over the theme's `hover` and
+`pressed`, with Close's red and white glyph kept (in a contrast theme, the
+highlight's own text under the pointer). So they follow the app's light
+or dark, not the system's, from the window's root theme: a `theme` scoped over
+an app's title bar alone doesn't reach them. Their line is an outline icon's
+weight (1.75 at 24 points, drawn at 16), in whole pixels: 1 at 100% and 125%, 2
+at 150% to 200%. `scripts/windows_caption_smoke.py` checks all of it in a real
 window at 100% and 150% zoom, light and dark.
 
 Windows take the executable's own icon (its first icon group, the one

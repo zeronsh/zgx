@@ -1024,6 +1024,14 @@ mod win {
                 }
                 self.look.maximized.set(window.is_maximized());
                 self.look.active.set(window.has_focus());
+                let high_contrast = ui.theme().system_preferences().increased_contrast;
+                if self
+                    .look
+                    .high_contrast
+                    .with_untracked(|old| *old != high_contrast)
+                {
+                    self.look.high_contrast.set(high_contrast);
+                }
                 let fullscreen = window.fullscreen().is_some();
                 self.look.fullscreen.set(fullscreen);
                 self.caption.shown.set(!fullscreen);
