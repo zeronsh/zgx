@@ -4854,7 +4854,10 @@ impl Ui {
         let selection_layer = self.container(viewport, Layout::Overlay, Style::default());
         // Line numbers (`set_line_numbers`): a clipped column beside the
         // viewport, which moves right to make room.
-        let gutter = self.container(root, Layout::Overlay, fixed(0., 0.));
+        let mut gutter_style = fixed(0., 0.);
+        // (From the start: it's only ever laid out within `root`.)
+        gutter_style.absolute = true;
+        let gutter = self.container(root, Layout::Overlay, gutter_style);
         // The text, caret and selection are placed from the text's own
         // layout, which already runs the way the text does (`editor_font`):
         // the scene must not mirror them again.

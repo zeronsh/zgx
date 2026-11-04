@@ -7669,6 +7669,10 @@ impl Scene {
     #[cold]
     #[inline(never)]
     pub(crate) fn set_style_within(&mut self, id: NodeId, style: Style, owner: NodeId) {
+        // Most calls: nothing changed, and nothing for `owner` to lay out.
+        if self.node(id).style == style {
+            return;
+        }
         let definite = self.contains(owner) && self.node(id).parent == Some(owner) && {
             let node = self.tree_node(owner);
             !node.special.laid_out()
