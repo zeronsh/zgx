@@ -3420,8 +3420,8 @@ fn mount_confined(
         Layout::Overlay,
         crate::scene::Style {
             clip: true,
-            width_percent: Some(100.),
-            height_percent: Some(100.),
+            width_percent: Some(1.),
+            height_percent: Some(1.),
             ..Default::default()
         },
     );

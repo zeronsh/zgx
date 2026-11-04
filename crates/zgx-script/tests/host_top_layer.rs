@@ -86,6 +86,15 @@ fn a_hosts_top_layer_fills_the_window_from_its_corner() {
     assert_eq!((filled.x, filled.y), (window.x, window.y));
     let root = app.ui.scene.borrow().bounds(app.ui.root());
     assert_eq!((filled.width, filled.height), (root.width, root.height));
+    // Nor does what holds it reach past the window.
+    let filled = app.find("filled").unwrap();
+    let held = {
+        let scene = app.ui.scene.borrow();
+        let panel = scene.parent(filled).unwrap();
+        let position = scene.parent(panel).unwrap();
+        scene.bounds(position)
+    };
+    assert_eq!((held.width, held.height), (root.width, root.height));
 }
 
 #[test]

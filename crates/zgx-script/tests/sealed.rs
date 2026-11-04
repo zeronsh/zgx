@@ -156,3 +156,58 @@ fn a_page_outside_a_sealed_region_shows_nothing_and_says_so() {
     let error = h.error().unwrap_or_default();
     assert!(error.contains("ui.sealed region"), "{error}");
 }
+
+const BESIDE_THE_PAGE: &str = r##"
+return ui.column { w_full = true, h_full = true,
+    ui.sealed { id = "settings", w = 300, h = 200,
+        ui.row { w_full = true, h_full = true,
+            ui.plugin_page { plugin = "mine", w = 100, h = 100 },
+            ui.div { id = "blank", w = 200, h = 200 },
+        },
+    },
+}
+"##;
+
+/// The page's box is what cuts it, on every side: past its right and bottom,
+/// where nothing painted after it covers it, it neither shows nor takes the
+/// pointer, and a modal it opens is cut the same.
+#[test]
+fn a_page_is_cut_to_its_box_on_every_side() {
+    let code = r##"
+local open = ui.state("open", true)
+ui.contribute("plugin_page", ui.column {
+    ui.div { id = "too-big", absolute = true, left = 0, top = 0, w = 3000, h = 3000,
+        on_click = function() end },
+    ui.modal { open = open,
+        ui.div { id = "page-modal", w = 3000, h = 3000, on_click = function() end } },
+})
+"##;
+    let entry = entry("cut", code);
+    let mut h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(runtime, "app", BESIDE_THE_PAGE);
+        host.set_plugins(vec![Plugin {
+            name: "mine".into(),
+            entry,
+            grants: Vec::new(),
+        }]);
+        host
+    });
+    h.frames(5);
+    let (page, modal) = (h.find("too-big").unwrap(), h.find("page-modal").unwrap());
+    for (id, node) in [("too-big", page), ("page-modal", modal)] {
+        let shown = h.ui.scene.borrow().visible_bounds(node).expect(id);
+        assert!(
+            shown.width <= 100. && shown.height <= 100.,
+            "{id} shows as {shown:?}"
+        );
+    }
+    // Past the page's right and its bottom: nothing of the plugin's takes it.
+    for (x, y) in [(150., 50.), (50., 150.), (250., 150.)] {
+        let scene = h.ui.scene.borrow();
+        let target = h.ui.input.pointer_target(&scene, x, y);
+        assert!(
+            target.is_none_or(|t| !scene.is_within(t, page) && !scene.is_within(t, modal)),
+            "at {x},{y}: {target:?}"
+        );
+    }
+}
