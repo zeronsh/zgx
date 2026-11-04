@@ -894,6 +894,20 @@ mod win {
                     return LRESULT(hit as isize);
                 }
             }
+            // Every window's, buttons or not.
+            WM_NCDESTROY => {
+                release_icons(hwnd);
+                // SAFETY: removes this subclass and takes back its reference.
+                unsafe {
+                    let _ = RemoveWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID);
+                    drop(Rc::from_raw(data as *const Caption));
+                }
+                CAPTIONS.with(|captions| {
+                    captions
+                        .borrow_mut()
+                        .retain(|(window, _)| *window != hwnd.0 as usize)
+                });
+            }
             // A standard frame's own buttons are the frame's.
             _ if !caption.buttons => {}
             WM_NCMOUSEMOVE => {
@@ -950,19 +964,6 @@ mod win {
                     }
                     return LRESULT(0);
                 }
-            }
-            WM_NCDESTROY => {
-                release_icons(hwnd);
-                // SAFETY: removes this subclass and takes back its reference.
-                unsafe {
-                    let _ = RemoveWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID);
-                    drop(Rc::from_raw(data as *const Caption));
-                }
-                CAPTIONS.with(|captions| {
-                    captions
-                        .borrow_mut()
-                        .retain(|(window, _)| *window != hwnd.0 as usize)
-                });
             }
             _ => {}
         }
@@ -1023,11 +1024,6 @@ mod win {
                 }
                 self.look.maximized.set(window.is_maximized());
                 self.look.active.set(window.has_focus());
-                // The window's light or dark, what its backdrop shows, which
-                // an app may have asked over the system's.
-                self.look
-                    .dark
-                    .set(window.theme() != Some(winit::window::Theme::Light));
                 let fullscreen = window.fullscreen().is_some();
                 self.look.fullscreen.set(fullscreen);
                 self.caption.shown.set(!fullscreen);

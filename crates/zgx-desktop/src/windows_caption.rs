@@ -9,7 +9,9 @@
 //! title bar, which does zoom.
 //!
 //! The glyphs are boxes and bars, whole pixels each, not text: no icon font
-//! to be missing (Windows 10 showed Segoe's as empty boxes).
+//! to be missing (Windows 10 showed Segoe's as empty boxes). They are inked
+//! from the app's theme as its own title bar controls are, quiet at rest, so
+//! they sit with the app's icons rather than over them.
 //!
 //! Apart from the window procedure (`window_chrome::win`), so what they work
 //! out is tested on every platform.
@@ -18,6 +20,7 @@ use zgx::{
     reactive::Signal,
     scene::{Color, Rect},
     style::Styled,
+    theme::{Themed, tok},
     widgets::Ui,
 };
 
@@ -28,9 +31,12 @@ const BUTTON_HEIGHT: f64 = 32.;
 /// it has no frame outside them to take the pointer.
 const RESIZE_BAND: f64 = 5.;
 /// WinUI's caption glyphs, in points of the display: a 10-point square (the
-/// restored window's two 8-point ones in it), of 1-point strokes.
+/// restored window's two 8-point ones in it).
 const GLYPH: f64 = 10.;
 const RESTORE_BOX: f64 = 8.;
+/// Their line: an outline icon's (1.75 at 24 points) at 16, so they weigh
+/// what the app's own icons do. 1 pixel at 100% and 125%, 2 at 150-200%.
+const STROKE: f64 = 7. / 6.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CaptionButton {
@@ -161,9 +167,9 @@ impl Geometry {
             Some(Rect::new(rest, 0., side, height)),
         )
     }
-    /// A stroke's pixels: whole, as the glyphs are drawn crisp, 1 up to 150%.
+    /// A stroke's pixels: whole, as the glyphs are drawn crisp.
     fn stroke(&self) -> f64 {
-        (self.scale + 0.25).floor().max(1.)
+        (STROKE * self.scale).round().max(1.)
     }
     /// The glyph's square side, in pixels.
     fn side(&self) -> f64 {
@@ -184,26 +190,30 @@ impl Geometry {
     }
 }
 
-/// WinUI's caption button brush for a button in `kind`'s state.
-fn fill(kind: CaptionButton, hover: bool, down: bool, dark: bool) -> Color {
-    match (kind, hover, down, dark) {
-        (_, false, ..) => Color(0, 0, 0, 0),
-        (CaptionButton::Close, _, false, _) => Color(196, 43, 28, 255),
-        (CaptionButton::Close, _, true, _) => Color(196, 43, 28, 230),
-        (_, _, false, true) => Color(255, 255, 255, 15),
-        (_, _, true, true) => Color(255, 255, 255, 10),
-        (_, _, false, false) => Color(0, 0, 0, 9),
-        (_, _, true, false) => Color(0, 0, 0, 6),
+/// Close's red under the pointer (WinUI's), and pressed.
+const CLOSE_RED: Color = Color(196, 43, 28, 255);
+const CLOSE_RED_PRESSED: Color = Color(196, 43, 28, 230);
+
+/// The wash under a button in `kind`'s state: the app's theme's `hover` and
+/// `pressed`, as under its own controls; Close's red.
+fn fill(kind: CaptionButton, hover: bool, down: bool) -> Themed<Color> {
+    match (kind, hover, down) {
+        (_, false, _) => Color(0, 0, 0, 0).into(),
+        (CaptionButton::Close, _, false) => CLOSE_RED.into(),
+        (CaptionButton::Close, _, true) => CLOSE_RED_PRESSED.into(),
+        (_, _, false) => tok::HOVER.into(),
+        (_, _, true) => tok::PRESSED.into(),
     }
 }
-/// WinUI's caption glyph brush: `red`, a glyph over Close's red.
-fn ink(red: bool, dark: bool, active: bool) -> Color {
-    match (red, dark, active) {
-        (true, ..) => Color(255, 255, 255, 255),
-        (_, true, true) => Color(255, 255, 255, 255),
-        (_, true, false) => Color(255, 255, 255, 93),
-        (_, false, true) => Color(0, 0, 0, 228),
-        (_, false, false) => Color(0, 0, 0, 92),
+/// The glyph's ink, from the app's theme as its title bar's other controls:
+/// secondary at rest, primary under the pointer, tertiary in a window in the
+/// back; white over Close's red (`red`).
+fn ink(red: bool, hover: bool, active: bool) -> Themed<Color> {
+    match (red, hover, active) {
+        (true, ..) => Color(255, 255, 255, 255).into(),
+        (_, true, _) => tok::TEXT_PRIMARY.into(),
+        (_, _, true) => tok::TEXT_SECONDARY.into(),
+        (_, _, false) => tok::TEXT_TERTIARY.into(),
     }
 }
 
@@ -214,7 +224,6 @@ pub(crate) struct CaptionLook {
     pub(crate) pressed: Signal<Option<CaptionButton>>,
     pub(crate) maximized: Signal<bool>,
     pub(crate) active: Signal<bool>,
-    pub(crate) dark: Signal<bool>,
     pub(crate) fullscreen: Signal<bool>,
     pub(crate) geometry: Signal<Geometry>,
 }
@@ -225,15 +234,19 @@ impl CaptionLook {
             pressed: ui.signal(None),
             maximized: ui.signal(false),
             active: ui.signal(true),
-            dark: ui.signal(true),
             fullscreen: ui.signal(false),
             geometry: ui.signal(geometry),
         }
     }
     /// The glyph's colour on `kind`'s button now.
-    fn ink(&self, kind: CaptionButton) -> Color {
-        let red = kind == CaptionButton::Close && self.hovered.get() == Some(kind);
-        ink(red, self.dark.get(), self.active.get())
+    fn ink(&self, kind: CaptionButton) -> Themed<Color> {
+        let hover = self.hovered.get() == Some(kind);
+        ink(kind == CaptionButton::Close && hover, hover, self.active.get())
+    }
+    /// The wash under `kind`'s button now.
+    fn fill(&self, kind: CaptionButton) -> Themed<Color> {
+        let hover = self.hovered.get() == Some(kind);
+        fill(kind, hover, hover && self.pressed.get() == Some(kind))
     }
     /// The buttons, over the content's top right, or top left right to left:
     /// there the row runs from the right, Close outermost still.
@@ -279,11 +292,9 @@ impl CaptionLook {
                 } else {
                     geometry.points(f64::from(geometry.button))
                 };
-                let hover = look.hovered.get() == Some(kind);
-                let down = hover && look.pressed.get() == Some(kind);
                 Styles::new()
                     .size(width, geometry.points(f64::from(geometry.height)))
-                    .bg(fill(kind, hover, down, look.dark.get()))
+                    .bg(look.fill(kind))
             })
             .child(inside.children(glyph))
     }
@@ -664,8 +675,10 @@ mod tests {
         assert_eq!((g.side(), g.stroke()), (10., 1.));
         assert_eq!(g.glyph_at(), (18., 11.));
         assert_eq!(g.restore(), (8., 2.));
+        let g = flat(1.25);
+        assert_eq!((g.side(), g.stroke()), (13., 1.));
         let g = flat(1.5);
-        assert_eq!((g.side(), g.stroke()), (15., 1.));
+        assert_eq!((g.side(), g.stroke()), (15., 2.));
         assert_eq!(g.glyph_at(), (27., 16.));
         let g = flat(2.);
         assert_eq!((g.side(), g.stroke()), (20., 2.));
@@ -697,19 +710,28 @@ mod tests {
         );
     }
 
-    /// Light on a dark system: dark ink, seen on the light window.
+    /// The glyphs take the app's text colours and washes, as its own title
+    /// bar controls do, so a light app on a dark system has dark glyphs:
+    /// secondary at rest, primary under the pointer, tertiary in the back;
+    /// Close's red and white glyph kept.
     #[test]
-    fn the_ink_follows_the_windows_theme() {
-        assert_eq!(ink(false, false, true), Color(0, 0, 0, 228));
-        assert_eq!(ink(false, true, true), Color(255, 255, 255, 255));
-        assert_eq!(ink(true, false, true), Color(255, 255, 255, 255), "on red");
+    fn the_ink_is_the_apps_text_and_washes() {
+        assert_eq!(ink(false, false, true), Themed::from(tok::TEXT_SECONDARY));
+        assert_eq!(ink(false, true, true), Themed::from(tok::TEXT_PRIMARY));
+        assert_eq!(ink(false, false, false), Themed::from(tok::TEXT_TERTIARY));
+        assert_eq!(ink(true, true, true), Themed::from(Color(255, 255, 255, 255)), "on red");
+        assert_eq!(fill(Minimize, true, false), Themed::from(tok::HOVER));
+        assert_eq!(fill(Maximize, true, true), Themed::from(tok::PRESSED));
+        assert_eq!(fill(Close, true, false), Themed::from(CLOSE_RED));
+        assert_eq!(fill(Close, false, false), Themed::from(Color(0, 0, 0, 0)));
         let mut ui = Ui::new(800., 600.);
         let look = CaptionLook::new(&ui, flat(1.));
         ui.mount(look.view(false));
         ui.prepare_frame();
-        assert_eq!(look.ink(Minimize), Color(255, 255, 255, 255));
-        look.dark.set(false);
+        assert_eq!(look.ink(Minimize), Themed::from(tok::TEXT_SECONDARY));
+        look.hovered.set(Some(Minimize));
         ui.prepare_frame();
-        assert_eq!(look.ink(Minimize), Color(0, 0, 0, 228));
+        assert_eq!(look.ink(Minimize), Themed::from(tok::TEXT_PRIMARY));
+        assert_eq!(look.fill(Minimize), Themed::from(tok::HOVER));
     }
 }
