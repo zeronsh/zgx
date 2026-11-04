@@ -2086,6 +2086,43 @@ impl CanvasLabels {
     }
 }
 
+/// A virtual list's root and region where it scrolls with the scroll view
+/// around it (`View::virtualize_in_ancestor`): as a scroll view's, but as
+/// tall as its rows, clipping nothing. Out of `open_element`'s line: few
+/// lists are.
+#[cold]
+#[inline(never)]
+fn mount_ancestor_list(
+    ui: &mut Ui,
+    parent: NodeId,
+    view: &mut View,
+    rare: Option<&mut Rare>,
+    build: VirtualBuilder,
+    scrollbar: bool,
+    keyboard_navigation: bool,
+) -> (NodeId, RegionBuilder) {
+    let mut defaults = Styles::new();
+    defaults.merge(&view.styles);
+    view.styles = defaults;
+    if keyboard_navigation && view.variants.focus.is_none() {
+        view.variants.defaults[2] = Some(focus_ring(&view.styles));
+    }
+    let (contain, edges) = match rare {
+        Some(rare) => (rare.overscroll_contain, rare.edges.take()),
+        None => (false, None),
+    };
+    let region = virtual_region(build, scrollbar, keyboard_navigation, contain, edges);
+    let size = crate::scene::Style {
+        height: None,
+        intrinsic_height: false,
+        ..scroll_default_size(false)
+    };
+    let root = ui.container(parent, Layout::Overlay, size);
+    ui.semantics
+        .borrow_mut()
+        .set(root, SemanticNode::new(Role::ScrollView, ""));
+    (root, region)
+}
 fn scroll_default_size(horizontal: bool) -> crate::scene::Style {
     crate::scene::Style {
         width: Some(320.),
@@ -3033,7 +3070,9 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     requested.clamp(0.0, limit)
                 };
                 // The part the view around it shows.
-                let around = window.as_ref().zip(weak.upgrade());
+                let around = window
+                    .as_ref()
+                    .and_then(|window| Some((window, weak.upgrade()?)));
                 if let Some((window, ui)) = &around {
                     (position, height) = window.window(ui, model.content_height());
                 }
@@ -4954,43 +4993,44 @@ fn open_element(
                 view.children.is_empty(),
                 "virtual lists build children through their row factory"
             );
-            // As a scroll view: 320 by 240 unless something sizes it (a
-            // parent stretching it across, `grow`, its own `w`/`h`). One
-            // scrolled with the view around it is as tall as its rows, and
-            // clips nothing.
-            let ancestor = rare
+            if rare
                 .as_deref()
                 .and_then(|r| r.edges.as_deref())
-                .is_some_and(|edges| edges.ancestor);
-            let mut defaults = match ancestor {
-                true => Styles::new(),
-                false => Styles::new().overflow_hidden(),
-            };
-            defaults.merge(&view.styles);
-            view.styles = defaults;
-            if keyboard_navigation && view.variants.focus.is_none() {
-                view.variants.defaults[2] = Some(focus_ring(&view.styles));
+                .is_some_and(|edges| edges.ancestor)
+            {
+                let (root, built) = mount_ancestor_list(
+                    ui,
+                    parent,
+                    &mut view,
+                    rare.as_deref_mut(),
+                    build,
+                    scrollbar,
+                    keyboard_navigation,
+                );
+                region = Some(built);
+                root
+            } else {
+                // As a scroll view: 320 by 240 unless something sizes it (a
+                // parent stretching it across, `grow`, its own `w`/`h`).
+                let mut defaults = Styles::new().overflow_hidden();
+                defaults.merge(&view.styles);
+                view.styles = defaults;
+                if keyboard_navigation && view.variants.focus.is_none() {
+                    view.variants.defaults[2] = Some(focus_ring(&view.styles));
+                }
+                region = Some(virtual_region(
+                    build,
+                    scrollbar,
+                    keyboard_navigation,
+                    rare.as_deref().is_some_and(|r| r.overscroll_contain),
+                    rare.as_deref_mut().and_then(|r| r.edges.take()),
+                ));
+                let root = ui.container(parent, Layout::Overlay, scroll_default_size(false));
+                ui.semantics
+                    .borrow_mut()
+                    .set(root, SemanticNode::new(Role::ScrollView, ""));
+                root
             }
-            region = Some(virtual_region(
-                build,
-                scrollbar,
-                keyboard_navigation,
-                rare.as_deref().is_some_and(|r| r.overscroll_contain),
-                rare.as_deref_mut().and_then(|r| r.edges.take()),
-            ));
-            let size = match ancestor {
-                true => crate::scene::Style {
-                    height: None,
-                    intrinsic_height: false,
-                    ..scroll_default_size(false)
-                },
-                false => scroll_default_size(false),
-            };
-            let root = ui.container(parent, Layout::Overlay, size);
-            ui.semantics
-                .borrow_mut()
-                .set(root, SemanticNode::new(Role::ScrollView, ""));
-            root
         }
         Kind::Region(build) => {
             region = Some(build);
