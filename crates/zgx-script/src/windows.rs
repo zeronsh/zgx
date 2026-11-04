@@ -197,6 +197,18 @@ impl Windows {
         self.pending.borrow_mut().clear();
         self.pending_groups.borrow_mut().clear();
     }
+    /// Where the load's declarations are, before a script runs.
+    pub fn mark(&self) -> (usize, usize) {
+        (
+            self.pending.borrow().len(),
+            self.pending_groups.borrow().len(),
+        )
+    }
+    /// A script failed as it loaded: what it declared since `mark` goes.
+    pub fn discard_since(&self, (windows, groups): (usize, usize)) {
+        self.pending.borrow_mut().truncate(windows);
+        self.pending_groups.borrow_mut().truncate(groups);
+    }
     /// The load succeeded: publish what it declared. What failed to build
     /// as it did (an item's window), for the load's error.
     pub fn publish(self: &Rc<Self>) -> Vec<String> {
