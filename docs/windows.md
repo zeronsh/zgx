@@ -518,6 +518,9 @@ window whatever its title bar:
   accent, selections and hover take the contrast theme's system colours.
 - Animation effects off (Accessibility, Visual effects): the motion duration
   tokens are zero, so what animates with them changes at once.
+- Transparency effects off (Personalization, Colors; `EnableTransparency`):
+  `SystemPreferences::reduced_transparency` and `ui.prefers.reduced_transparency`
+  are true, `glass.tint` is the raised surface and `glass.blur` zero, as on macOS.
 - Text size (Accessibility): the font size and line height tokens scale with
   it, 100% to 225%, and spacing and icons keep their size. A subtree whose
   layout depends on fixed text, like a terminal grid, opts out with
