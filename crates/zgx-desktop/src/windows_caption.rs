@@ -18,6 +18,7 @@ use zgx::{
     reactive::Signal,
     scene::{Color, Rect},
     style::Styled,
+    theme::{Themed, tok},
     widgets::Ui,
 };
 
@@ -63,28 +64,42 @@ pub(crate) struct Geometry {
     /// One button's width and the strip's height.
     button: i32,
     height: i32,
+    /// The glyph's square's side and its strokes, whole pixels.
+    glyph: f64,
+    stroke: f64,
     /// The person can resize it: it has resize bands and a Maximize button.
     resizable: bool,
     /// Windows run right to left: the buttons are at its top left.
     rtl: bool,
 }
 impl Geometry {
-    /// For a window at display `scale` and `zoom`. `caption_height` is in the
-    /// content's points, so the strip spans a title bar of that height at
-    /// any zoom; without one it is Windows' 32 points of the display.
+    /// For a window at display `scale` and `zoom`, its buttons as `style`
+    /// asks: what it gives in the content's points (so they span a title bar
+    /// of that size at any zoom), the rest Windows' in points of the display.
     pub(crate) fn new(
         scale: f64,
         zoom: f64,
-        caption_height: Option<f64>,
+        style: &crate::CaptionStyle,
         resizable: bool,
         rtl: bool,
     ) -> Self {
-        let height = caption_height.map_or(BUTTON_HEIGHT * scale, |h| h * scale * zoom);
+        let pixels = |given: Option<f64>, windows: f64| given.map_or(windows * scale, |p| p * scale * zoom);
+        let height = pixels(style.height, BUTTON_HEIGHT);
+        let button = pixels(style.button_width, BUTTON_WIDTH);
+        let glyph = pixels(style.glyph, GLYPH).round().max(1.);
+        // 1 pixel up to 150% (WinUI's), 2 at 200%; one given, its nearest
+        // whole pixels.
+        let stroke = style
+            .stroke
+            .map_or((scale + 0.25).floor(), |s| (s * scale * zoom).round())
+            .max(1.);
         Self {
             scale,
             zoom,
-            button: ((BUTTON_WIDTH * scale).round() as i32).max(1),
+            button: (button.round() as i32).max(1),
             height: (height.round() as i32).max(1),
+            glyph,
+            stroke,
             resizable,
             rtl,
         }
@@ -161,13 +176,13 @@ impl Geometry {
             Some(Rect::new(rest, 0., side, height)),
         )
     }
-    /// A stroke's pixels: whole, as the glyphs are drawn crisp, 1 up to 150%.
+    /// A stroke's pixels: whole, as the glyphs are drawn crisp.
     fn stroke(&self) -> f64 {
-        (self.scale + 0.25).floor().max(1.)
+        self.stroke
     }
     /// The glyph's square side, in pixels.
     fn side(&self) -> f64 {
-        (GLYPH * self.scale).round().max(1.)
+        self.glyph
     }
     /// The glyph's square's top left in its button, on a whole pixel.
     fn glyph_at(&self) -> (f64, f64) {
@@ -179,7 +194,7 @@ impl Geometry {
     /// The restored window's front box's side, and how far its back box
     /// stands up and to the right of it, in pixels.
     fn restore(&self) -> (f64, f64) {
-        let front = (RESTORE_BOX * self.scale).round().min(self.side());
+        let front = (self.side() * RESTORE_BOX / GLYPH).round().min(self.side());
         (front, self.side() - front)
     }
 }
@@ -207,6 +222,33 @@ fn ink(red: bool, dark: bool, active: bool) -> Color {
     }
 }
 
+/// Close's red under the pointer (WinUI's), and pressed.
+const CLOSE_RED: Color = Color(196, 43, 28, 255);
+const CLOSE_RED_PRESSED: Color = Color(196, 43, 28, 230);
+
+/// The wash under a button in `kind`'s state, from the app's theme
+/// (`CaptionStyle::themed`): its `hover` and `pressed`, as its own controls'.
+fn themed_fill(kind: CaptionButton, hover: bool, down: bool) -> Themed<Color> {
+    match (kind, hover, down) {
+        (_, false, _) => Color(0, 0, 0, 0).into(),
+        (CaptionButton::Close, _, false) => CLOSE_RED.into(),
+        (CaptionButton::Close, _, true) => CLOSE_RED_PRESSED.into(),
+        (_, _, false) => tok::HOVER.into(),
+        (_, _, true) => tok::PRESSED.into(),
+    }
+}
+/// The glyph's ink from the app's theme: as its title bar's other controls,
+/// secondary at rest, primary under the pointer, tertiary in a window in the
+/// back; white over Close's red.
+fn themed_ink(red: bool, hover: bool, active: bool) -> Themed<Color> {
+    match (red, hover, active) {
+        (true, ..) => Color(255, 255, 255, 255).into(),
+        (_, true, _) => tok::TEXT_PRIMARY.into(),
+        (_, _, true) => tok::TEXT_SECONDARY.into(),
+        (_, _, false) => tok::TEXT_TERTIARY.into(),
+    }
+}
+
 /// What the buttons show, set by their host before a frame.
 #[derive(Clone)]
 pub(crate) struct CaptionLook {
@@ -217,9 +259,11 @@ pub(crate) struct CaptionLook {
     pub(crate) dark: Signal<bool>,
     pub(crate) fullscreen: Signal<bool>,
     pub(crate) geometry: Signal<Geometry>,
+    /// Inked from the app's theme (`CaptionStyle::themed`), not WinUI's.
+    themed: bool,
 }
 impl CaptionLook {
-    pub(crate) fn new(ui: &Ui, geometry: Geometry) -> Self {
+    pub(crate) fn new(ui: &Ui, geometry: Geometry, themed: bool) -> Self {
         Self {
             hovered: ui.signal(None),
             pressed: ui.signal(None),
@@ -228,12 +272,28 @@ impl CaptionLook {
             dark: ui.signal(true),
             fullscreen: ui.signal(false),
             geometry: ui.signal(geometry),
+            themed,
         }
     }
     /// The glyph's colour on `kind`'s button now.
-    fn ink(&self, kind: CaptionButton) -> Color {
-        let red = kind == CaptionButton::Close && self.hovered.get() == Some(kind);
-        ink(red, self.dark.get(), self.active.get())
+    fn ink(&self, kind: CaptionButton) -> Themed<Color> {
+        let hover = self.hovered.get() == Some(kind);
+        let red = kind == CaptionButton::Close && hover;
+        if self.themed {
+            themed_ink(red, hover, self.active.get())
+        } else {
+            ink(red, self.dark.get(), self.active.get()).into()
+        }
+    }
+    /// The wash under `kind`'s button now.
+    fn fill(&self, kind: CaptionButton) -> Themed<Color> {
+        let hover = self.hovered.get() == Some(kind);
+        let down = hover && self.pressed.get() == Some(kind);
+        if self.themed {
+            themed_fill(kind, hover, down)
+        } else {
+            fill(kind, hover, down, self.dark.get()).into()
+        }
     }
     /// The buttons, over the content's top right, or top left right to left:
     /// there the row runs from the right, Close outermost still.
@@ -279,11 +339,9 @@ impl CaptionLook {
                 } else {
                     geometry.points(f64::from(geometry.button))
                 };
-                let hover = look.hovered.get() == Some(kind);
-                let down = hover && look.pressed.get() == Some(kind);
                 Styles::new()
                     .size(width, geometry.points(f64::from(geometry.height)))
-                    .bg(fill(kind, hover, down, look.dark.get()))
+                    .bg(look.fill(kind))
             })
             .child(inside.children(glyph))
     }
@@ -380,6 +438,7 @@ impl CaptionLook {
 #[cfg(test)]
 mod tests {
     use super::{CaptionButton::*, *};
+    use crate::CaptionStyle;
 
     /// Display scales and zooms the buttons must agree at.
     const SCALES: [f64; 4] = [1., 1.25, 1.5, 2.];
@@ -389,7 +448,7 @@ mod tests {
         geometry.hit((x, y), (width, 2000), false, true)
     }
     fn flat(scale: f64) -> Geometry {
-        Geometry::new(scale, 1., None, true, false)
+        Geometry::new(scale, 1., &CaptionStyle::default(), true, false)
     }
 
     /// Each drawn button's left, top, width and height in physical pixels,
@@ -403,7 +462,7 @@ mod tests {
             let root = scene.root();
             scene.set_direction(root, Some(zgx::scene::Direction::Rtl));
         }
-        let look = CaptionLook::new(&ui, geometry);
+        let look = CaptionLook::new(&ui, geometry, false);
         let view = ui.mount(look.view(geometry.rtl));
         ui.prepare_frame();
         let scene = ui.scene.borrow();
@@ -436,7 +495,7 @@ mod tests {
             for resizable in [true, false] {
                 for scale in SCALES {
                     for zoom in ZOOMS {
-                        let g = Geometry::new(scale, zoom, None, resizable, rtl);
+                        let g = Geometry::new(scale, zoom, &CaptionStyle::default(), resizable, rtl);
                         let case = format!("{scale} × {zoom} rtl={rtl} resizable={resizable}");
                         let buttons = drawn(g, width);
                         assert_eq!(buttons.len(), if resizable { 3 } else { 2 }, "{case}");
@@ -506,7 +565,7 @@ mod tests {
     /// hit-tested 138, and reported 92 points.
     #[test]
     fn zoomed_150_percent_they_are_138_pixels_drawn_hit_and_reported() {
-        let g = Geometry::new(1., 1.5, None, true, false);
+        let g = Geometry::new(1., 1.5, &CaptionStyle::default(), true, false);
         let width = 1860;
         let buttons = drawn(g, width);
         let span = buttons.last().unwrap().1.0 + buttons.last().unwrap().1.2 - buttons[0].1.0;
@@ -570,7 +629,7 @@ mod tests {
     #[test]
     fn a_fixed_size_window_has_no_maximize_and_no_resize_bands() {
         let size = (800, 600);
-        let g = Geometry::new(1., 1., None, false, false);
+        let g = Geometry::new(1., 1., &CaptionStyle::default(), false, false);
         let at = |x, y| g.hit((x, y), size, false, true);
         assert_eq!(at(790, 10), Some(Hit::Button(Close)));
         assert_eq!(at(799, 0), Some(Hit::Button(Close)), "to the very corner");
@@ -612,7 +671,7 @@ mod tests {
     fn right_to_left_the_buttons_and_the_titlebar_area_mirror() {
         // As Windows lays out a mirrored window's: the buttons at the top
         // left, Close outermost.
-        let g = Geometry::new(1., 1., None, true, true);
+        let g = Geometry::new(1., 1., &CaptionStyle::default(), true, true);
         let size = (800, 600);
         let at = |x, y| g.hit((x, y), size, false, true);
         assert_eq!(at(10, 10), Some(Hit::Button(Close)));
@@ -637,7 +696,7 @@ mod tests {
     #[test]
     fn a_caption_height_spans_a_title_bar_of_that_height_at_any_zoom() {
         for (scale, zoom) in [(1., 1.), (1.25, 1.), (1., 1.5), (1.5, 0.9), (2., 1.25)] {
-            let g = Geometry::new(scale, zoom, Some(38.), true, false);
+            let g = Geometry::new(scale, zoom, &CaptionStyle { height: Some(38.), ..Default::default() }, true, false);
             let tall = (38. * scale * zoom).round() as i32;
             assert_eq!(g.height, tall);
             let width = 2000;
@@ -654,7 +713,7 @@ mod tests {
             assert_eq!(at(g, width - 30, tall, width), None);
         }
         // Without one: 32 points of the display, whatever the zoom.
-        assert_eq!(Geometry::new(1.5, 1.5, None, true, false).height, 48);
+        assert_eq!(Geometry::new(1.5, 1.5, &CaptionStyle::default(), true, false).height, 48);
     }
 
     /// Whole pixels, centred, at the sizes WinUI's are at 100%.
@@ -675,7 +734,7 @@ mod tests {
             assert_eq!((x.fract(), y.fract()), (0., 0.));
             // Not moved by the zoom: the same pixels at 150%.
             assert_eq!(
-                Geometry::new(scale, 1.5, None, true, false).glyph_at(),
+                Geometry::new(scale, 1.5, &CaptionStyle::default(), true, false).glyph_at(),
                 (x, y)
             );
         }
@@ -685,7 +744,7 @@ mod tests {
     #[test]
     fn the_glyphs_draw_no_text() {
         let mut ui = Ui::new(800., 600.);
-        let look = CaptionLook::new(&ui, flat(1.));
+        let look = CaptionLook::new(&ui, flat(1.), false);
         ui.mount(look.view(false));
         ui.prepare_frame();
         let scene = ui.scene.borrow();
@@ -704,12 +763,60 @@ mod tests {
         assert_eq!(ink(false, true, true), Color(255, 255, 255, 255));
         assert_eq!(ink(true, false, true), Color(255, 255, 255, 255), "on red");
         let mut ui = Ui::new(800., 600.);
-        let look = CaptionLook::new(&ui, flat(1.));
+        let look = CaptionLook::new(&ui, flat(1.), false);
         ui.mount(look.view(false));
         ui.prepare_frame();
-        assert_eq!(look.ink(Minimize), Color(255, 255, 255, 255));
+        assert_eq!(look.ink(Minimize), Themed::from(Color(255, 255, 255, 255)));
         look.dark.set(false);
         ui.prepare_frame();
-        assert_eq!(look.ink(Minimize), Color(0, 0, 0, 228));
+        assert_eq!(look.ink(Minimize), Themed::from(Color(0, 0, 0, 228)));
+    }
+
+    /// An app's own sizes are its title bar's, in the content's points: they
+    /// zoom with it, drawn and hit-tested alike, the glyph and its strokes
+    /// kept to whole pixels.
+    #[test]
+    fn a_styled_caption_is_the_apps_size_at_any_zoom() {
+        let style = CaptionStyle { height: Some(32.), button_width: Some(40.), glyph: Some(10.), stroke: Some(1.), themed: true };
+        for (scale, zoom) in [(1., 1.), (1.5, 1.), (1., 1.25), (2., 1.)] {
+            let g = Geometry::new(scale, zoom, &style, true, false);
+            let px = scale * zoom;
+            assert_eq!(g.button, (40. * px).round() as i32, "{scale} × {zoom}");
+            assert_eq!(g.height, (32. * px).round() as i32, "{scale} × {zoom}");
+            assert_eq!(g.side(), (10. * px).round(), "{scale} × {zoom}");
+            assert_eq!(g.stroke(), px.round().max(1.), "{scale} × {zoom}");
+            let (x, y) = g.glyph_at();
+            assert_eq!((x.fract(), y.fract()), (0., 0.), "{scale} × {zoom}");
+            let width = 2000;
+            let edge = width - 1;
+            let row = g.height / 2;
+            assert_eq!(at(g, edge - g.button + 1, row, width), Some(Hit::Button(Close)));
+            assert_eq!(at(g, edge - g.button, row, width), Some(Hit::Button(Maximize)));
+            assert_eq!(at(g, edge - 3 * g.button, row, width), None);
+        }
+    }
+
+    /// Themed, the glyphs take the app's text colours and its washes, as its
+    /// own title bar controls do: secondary at rest, primary under the
+    /// pointer, tertiary in the back; Close's red and white glyph kept.
+    #[test]
+    fn themed_ink_is_the_apps_text_and_washes() {
+        assert_eq!(themed_ink(false, false, true), Themed::from(tok::TEXT_SECONDARY));
+        assert_eq!(themed_ink(false, true, true), Themed::from(tok::TEXT_PRIMARY));
+        assert_eq!(themed_ink(false, false, false), Themed::from(tok::TEXT_TERTIARY));
+        assert_eq!(themed_ink(true, true, true), Themed::from(Color(255, 255, 255, 255)));
+        assert_eq!(themed_fill(Minimize, true, false), Themed::from(tok::HOVER));
+        assert_eq!(themed_fill(Maximize, true, true), Themed::from(tok::PRESSED));
+        assert_eq!(themed_fill(Close, true, false), Themed::from(CLOSE_RED));
+        assert_eq!(themed_fill(Close, false, false), Themed::from(Color(0, 0, 0, 0)));
+        let mut ui = Ui::new(800., 600.);
+        let look = CaptionLook::new(&ui, flat(1.), true);
+        ui.mount(look.view(false));
+        ui.prepare_frame();
+        assert_eq!(look.ink(Minimize), Themed::from(tok::TEXT_SECONDARY));
+        look.hovered.set(Some(Minimize));
+        ui.prepare_frame();
+        assert_eq!(look.ink(Minimize), Themed::from(tok::TEXT_PRIMARY));
+        assert_eq!(look.fill(Minimize), Themed::from(tok::HOVER));
     }
 }

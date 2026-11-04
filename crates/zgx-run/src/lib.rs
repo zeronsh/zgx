@@ -393,7 +393,7 @@ pub fn run_hosting(
         min_size: config.min_size,
         max_size,
         titlebar: config.titlebar,
-        caption_height,
+        caption: zgx_desktop::CaptionStyle { height: caption_height, ..Default::default() },
         glass: config.glass.then(zgx_desktop::Glass::default),
         frame_autosave,
         visible,

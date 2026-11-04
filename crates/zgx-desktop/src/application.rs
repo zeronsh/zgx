@@ -108,12 +108,10 @@ pub struct WindowOptions {
     /// drawn as it shows. X11 keeps no picture of an unmapped window: there
     /// its background shows from its mapping to its first frame.
     pub visible: bool,
-    /// How tall `Titlebar::Inset`'s caption buttons are on Windows, and its
-    /// caption strip (`WindowInfo::titlebar_area`), in the content's points,
-    /// so they span a title bar of this height at any zoom: drawn, hit-tested
-    /// and reported alike. `None` (the default) is Windows' 32 points of the
-    /// display, whatever the zoom. Other platforms place their own.
-    pub caption_height: Option<f64>,
+    /// How `Titlebar::Inset` draws Windows' caption buttons: their size,
+    /// glyphs and ink (`CaptionStyle`). The default is Windows 11's own.
+    /// Other platforms draw their own.
+    pub caption: crate::CaptionStyle,
 }
 /// A window's smallest and largest sizes are the same.
 #[cfg(any(windows, test))]
@@ -151,7 +149,7 @@ impl Default for WindowOptions {
             shadow: true,
             covers_display: false,
             visible: true,
-            caption_height: None,
+            caption: crate::CaptionStyle::default(),
         }
     }
 }
@@ -3580,7 +3578,7 @@ impl Host {
             &window,
             self.options.titlebar,
             self.options.glass,
-            self.options.caption_height,
+            self.options.caption,
         );
         // Opened zoomed: its buttons where the zoomed title bar has them.
         let zoom = self.context.ui.zoom();

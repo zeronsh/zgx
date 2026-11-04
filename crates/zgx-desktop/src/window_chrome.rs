@@ -18,7 +18,7 @@ pub enum Titlebar {
     /// points, the traffic lights centred in it (`zoom_buttons`). Mark the strip `View::window_drag` so it
     /// moves the window. On Windows, zgx draws Windows 11's caption buttons
     /// over the content's top right (46 by 32 points of the display each,
-    /// whatever the window's zoom, or as tall as `WindowOptions::caption_height`;
+    /// whatever the window's zoom, or as `WindowOptions::caption` asks;
     /// a window the person can't resize has no Maximize) and Windows takes
     /// them for its own: their tooltips, and snap layouts on maximize. On
     /// Linux the window is undecorated, as a GTK header bar's, and zgx
@@ -29,6 +29,33 @@ pub enum Titlebar {
     /// The window keeps its rounded corners and shadow; on Windows and Linux
     /// its edges resize it (5 points in from them).
     Hidden,
+}
+
+/// How `Titlebar::Inset` draws Windows' caption buttons (other platforms draw
+/// their own). The default is Windows 11's own: 46 by 32 points of the
+/// display each whatever the window's zoom, a 10-point glyph of whole-pixel
+/// strokes, WinUI's brushes in the window's light or dark. An app sizing its
+/// own title bar sets what it needs: sizes it gives are in the content's
+/// points, so they zoom with its title bar (drawn, hit-tested and reported
+/// alike), and `themed` inks them from its theme.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CaptionStyle {
+    /// The buttons' height and the caption strip's
+    /// (`WindowInfo::titlebar_area`), so they span a title bar this tall.
+    pub height: Option<f64>,
+    /// One button's width.
+    pub button_width: Option<f64>,
+    /// The glyphs' square's side (the restored window's front box is four
+    /// fifths of it).
+    pub glyph: Option<f64>,
+    /// The glyphs' strokes, kept to whole pixels so they stay crisp.
+    pub stroke: Option<f64>,
+    /// Ink from the window's theme, as the app's own title bar controls are:
+    /// the glyphs `text.secondary` at rest, `text.primary` under the pointer
+    /// and pressed, `text.tertiary` while the window is in the back; the
+    /// washes the theme's `hover` and `pressed`. Close still turns red, its
+    /// glyph white.
+    pub themed: bool,
 }
 
 /// A blurred desktop behind a translucent window (macOS's behind-window
@@ -127,21 +154,37 @@ pub(crate) fn apply(
     window: &winit::window::Window,
     titlebar: Titlebar,
     glass: Option<Glass>,
-    caption_height: Option<f64>,
+    caption: CaptionStyle,
 ) -> f64 {
     #[cfg(target_os = "macos")]
     {
-        let _ = caption_height;
+        let _ = caption;
         mac::apply(window, titlebar, glass)
     }
     #[cfg(windows)]
     {
-        win::apply(window, titlebar, glass, caption_height)
+        win::apply(window, titlebar, glass, caption)
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
-        let _ = (window, titlebar, glass, caption_height);
+        let _ = (window, titlebar, glass, caption);
         0.
+    }
+}
+
+/// The window's corner radius now, in the content's points, where it follows
+/// the window's state: on Windows 11 a frameless window's 8, square while it
+/// is maximized or in full screen (Windows rounds neither) and on Windows 10.
+/// `None` where it is fixed when the window is made (`apply`'s).
+pub(crate) fn corner_radius(window: &winit::window::Window) -> Option<f64> {
+    #[cfg(windows)]
+    {
+        win::corner_radius(window)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        None
     }
 }
 
@@ -309,8 +352,11 @@ mod win {
         rtl: bool,
         /// The buttons show: not in fullscreen, where a window has none.
         shown: Cell<bool>,
-        /// `WindowOptions::caption_height`.
-        height: Option<f64>,
+        /// `WindowOptions::caption`.
+        style: super::CaptionStyle,
+        /// DWM rounds the window's corners (Windows 11 took
+        /// `DWMWCP_ROUND`).
+        rounded: bool,
         /// The window's zoom, and whether the person can resize it, as of
         /// its last frame: what the geometry hit-tests by.
         zoom: Cell<f64>,
@@ -335,7 +381,7 @@ mod win {
             Geometry::new(
                 scale,
                 self.zoom.get(),
-                self.height,
+                &self.style,
                 self.resizable.get() && !self.fixed_size.get(),
                 self.rtl,
             )
@@ -571,10 +617,11 @@ mod win {
         titlebar: Titlebar,
     ) -> (Option<zgx::scene::Rect>, Option<zgx::scene::Rect>) {
         let caption = hwnd(window).and_then(|hwnd| caption_of(hwnd.0 as usize));
+        let style = caption.as_ref().map(|caption| caption.style).unwrap_or_default();
         let geometry = Geometry::new(
             window.scale_factor(),
             crate::popup_window::zoom_of(window.id()),
-            caption.as_ref().and_then(|caption| caption.height),
+            &style,
             window.is_resizable() && !caption.is_some_and(|caption| caption.fixed_size.get()),
             rtl(),
         );
@@ -742,7 +789,7 @@ mod win {
         window: &Window,
         titlebar: Titlebar,
         glass: Option<Glass>,
-        caption_height: Option<f64>,
+        style: super::CaptionStyle,
     ) -> f64 {
         let Some(hwnd) = hwnd(window) else {
             return 0.;
@@ -777,7 +824,8 @@ mod win {
             buttons: titlebar == Titlebar::Inset,
             rtl: rtl(),
             shown: Cell::new(true),
-            height: caption_height,
+            style,
+            rounded,
             zoom: Cell::new(crate::popup_window::zoom_of(window.id())),
             resizable: Cell::new(window.is_resizable()),
             fixed_size: Cell::new(false),
@@ -820,6 +868,17 @@ mod win {
                 .find(|(window, _)| *window == hwnd)
                 .map(|(_, caption)| caption.clone())
         })
+    }
+
+    /// The window's corner radius now, in the content's points: 8 while DWM
+    /// rounds it, square while maximized or in full screen (DWM rounds
+    /// neither), and where it never rounds (Windows 10, a window with the
+    /// platform's frame).
+    pub(super) fn corner_radius(window: &Window) -> Option<f64> {
+        let caption = caption_of(hwnd(window)?.0 as usize)?;
+        let square = !caption.rounded || window.is_maximized() || window.fullscreen().is_some();
+        let zoom = crate::popup_window::zoom_of(window.id()).max(0.01);
+        Some(if square { 0. } else { CORNER_RADIUS / zoom })
     }
 
     fn scale(hwnd: HWND) -> f64 {
@@ -894,6 +953,22 @@ mod win {
                     return LRESULT(hit as isize);
                 }
             }
+            // Every window's, buttons or not (ahead of the arm below, which
+            // kept a window without buttons from giving its reference and
+            // icons back, and its entry in `CAPTIONS` stale).
+            WM_NCDESTROY => {
+                release_icons(hwnd);
+                // SAFETY: removes this subclass and takes back its reference.
+                unsafe {
+                    let _ = RemoveWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID);
+                    drop(Rc::from_raw(data as *const Caption));
+                }
+                CAPTIONS.with(|captions| {
+                    captions
+                        .borrow_mut()
+                        .retain(|(window, _)| *window != hwnd.0 as usize)
+                });
+            }
             // A standard frame's own buttons are the frame's.
             _ if !caption.buttons => {}
             WM_NCMOUSEMOVE => {
@@ -951,19 +1026,6 @@ mod win {
                     return LRESULT(0);
                 }
             }
-            WM_NCDESTROY => {
-                release_icons(hwnd);
-                // SAFETY: removes this subclass and takes back its reference.
-                unsafe {
-                    let _ = RemoveWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID);
-                    drop(Rc::from_raw(data as *const Caption));
-                }
-                CAPTIONS.with(|captions| {
-                    captions
-                        .borrow_mut()
-                        .retain(|(window, _)| *window != hwnd.0 as usize)
-                });
-            }
             _ => {}
         }
         // SAFETY: forwards to the next procedure in the chain (winit's).
@@ -990,7 +1052,11 @@ mod win {
         ) -> Option<Self> {
             let caption = caption_of(hwnd(window)?.0 as usize)?;
             *caption.wake.borrow_mut() = Some(Box::new(wake));
-            let look = CaptionLook::new(ui, caption.geometry(window.scale_factor()));
+            let look = CaptionLook::new(
+                ui,
+                caption.geometry(window.scale_factor()),
+                caption.style.themed,
+            );
             Some(Self {
                 caption,
                 window: Arc::downgrade(window),
@@ -1130,7 +1196,8 @@ mod win {
                 buttons: false,
                 rtl: false,
                 shown: Cell::new(true),
-                height: None,
+                style: crate::CaptionStyle::default(),
+                rounded: false,
                 zoom: Cell::new(1.),
                 resizable: Cell::new(true),
                 fixed_size: Cell::new(false),

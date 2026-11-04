@@ -135,7 +135,7 @@ pub use file_dialog::{
 pub use native_events::{ApplicationEvent, ApplicationEventError};
 pub use native_prompt::{PromptButtons, PromptLevel, PromptOptions, PromptResponse};
 pub use url::{OpenUrlError, open_url};
-pub use window_chrome::{Glass, GlassMaterial, Titlebar};
+pub use window_chrome::{CaptionStyle, Glass, GlassMaterial, Titlebar};
 pub use window_info::{
     DisplayInfo, DisplaySelector, FullScreenTransition, WindowBounds, WindowCapabilities,
     WindowInfo, WindowLevel,

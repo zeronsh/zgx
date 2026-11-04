@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             resizable: !has("--fixed"),
             min_size: limits,
             max_size: limits,
-            caption_height,
+            caption: zgx_desktop::CaptionStyle { height: caption_height, themed: has("--themed"), ..Default::default() },
             ..Default::default()
         })
         .run(move |cx| {
