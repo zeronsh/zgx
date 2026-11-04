@@ -29,7 +29,13 @@ caches as they were.
 2. In `src/tree/taffy_tree.rs`, `TaffyTree::set_style` clears the caches
    of a node's children when its `display` changes (rare: a few nodes'
    caches, which the change dirties anyway).
+3. In `src/compute/leaf.rs`, laying a leaf out (`RunMode::PerformLayout`)
+   gives its measure function the sizes it knows, as sizing it does. With
+   none, a box whose insets fix its width was laid out as one that has none
+   (everything it holds measured again, its percentages of nothing) before
+   zgx placed it at that width.
 
 Drop the fork when a taffy release keeps the gaps and keys children's
-results by their parent's layout mode (the zgx tests are
-`crates/zgx/tests/layout_gaps.rs` and `layout_history.rs`).
+results by their parent's layout mode and passes known sizes to a leaf's
+layout (the zgx tests are `crates/zgx/tests/layout_gaps.rs`,
+`layout_history.rs` and `viewports_within.rs`).
