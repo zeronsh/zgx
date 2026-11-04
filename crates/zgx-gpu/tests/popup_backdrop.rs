@@ -34,6 +34,12 @@ impl Window {
     /// Red on its left half, blue on its right; over them, as a popup root,
     /// a clear 100-point panel that blurs what's behind it at (`x`, 50).
     fn new(x: f32, scale: f32) -> Self {
+        Self::shaped(x, scale, 0., false)
+    }
+    /// As `new`, the panel rounded by `radius`, the popup's frames drawn into
+    /// its target and its drawable at once (`single_pass`, as a window's on
+    /// Windows are), where blending can't mix the blur over its target.
+    fn shaped(x: f32, scale: f32, radius: f32, single_pass: bool) -> Self {
         let pixels = (WIDTH * scale) as u32;
         let mut gpu = GpuRenderer::new(pixels, pixels).unwrap();
         gpu.set_scale_factor(scale);
@@ -43,6 +49,9 @@ impl Window {
         popup.set_scale_factor(scale);
         #[cfg(target_os = "macos")]
         popup.set_direct_metal(false);
+        if single_pass {
+            popup.debug_enable_single_pass();
+        }
         let mut scene = Scene::new(WIDTH, WIDTH);
         scene.set_pixel_scale(scale);
         let root = scene.root();
@@ -68,6 +77,7 @@ impl Window {
                 layout: Layout::Overlay,
                 quad: QuadStyle {
                     fill: Color(0, 0, 0, 0),
+                    radius,
                     ..Default::default()
                 },
             },
@@ -173,4 +183,27 @@ fn a_new_frame_under_it_shows_when_taken_again() {
     window.draw();
     let [r, g, _, _] = window.pixel(90., 50.);
     assert!(g > 240 && r < 10, "green {r} {g}");
+}
+
+/// Past a rounded panel's curve nothing of the window shows: the popup's own
+/// target stays (clear here; its shadow, in an app), however the blur is
+/// drawn back. Copied from the window's frame, each corner held a wedge of it,
+/// opaque, over the popup's shadow.
+#[test]
+fn a_rounded_popup_keeps_its_own_pixels_past_its_curve() {
+    let _gpu_fixture = gpu_fixture();
+    for single_pass in [false, true] {
+        for scale in [1., 2.] {
+            let window = Window::shaped(50., scale, 24., single_pass);
+            let case = format!("single_pass {single_pass}, scale {scale}");
+            for (x, y) in [(1., 1.), (98., 1.), (1., 98.), (98., 98.)] {
+                assert_eq!(window.pixel(x, y)[3], 0, "{case}: corner {x},{y}");
+            }
+            // Inside the curve it blurs the window's red, as ever.
+            let [r, _, b, a] = window.pixel(50., 50.);
+            assert!(r > 200 && b < 60 && a == 255, "{case}: middle {r} {b} {a}");
+            let [r, _, _, a] = window.pixel(10., 10.);
+            assert!(r > 200 && a == 255, "{case}: inside the curve {r} {a}");
+        }
+    }
 }

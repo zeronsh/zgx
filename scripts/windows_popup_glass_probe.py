@@ -8,6 +8,8 @@ A Luau app shows hard stripes with a popover over them, open from the start,
 its fill translucent. Read from the popup window's own capture, which holds
 that window's pixels alone: with `backdrop_blur` its middle row is even and
 brighter than the fill (the stripes, blurred); without, it is only the fill.
+Past its rounded corners the popup keeps nothing of the window: they stay
+empty, where a copy of the window's frame once showed (stripes, opaque).
 Then the same with a box moving under the popup every 16 ms, to say what it
 costs: the process's CPU time over `--seconds`, glass against no glass.
 
@@ -79,6 +81,23 @@ def cpu_seconds(proc):
     return (times[2].value + times[3].value) / 1e7
 
 
+def corner_ink(width, height, data):
+    """The brightest pixel past the curve of the box's corners: the box found
+    from the capture's middle row and column, the few pixels at each corner
+    that an 8-point radius leaves out (nothing, in a transparent window)."""
+    lit = lambda x, y: max(data[(y * width + x) * 4:(y * width + x) * 4 + 3])
+    xs = [x for x in range(width) if lit(x, height // 2)]
+    ys = [y for y in range(height) if lit(width // 2, y)]
+    left, right, top, bottom = xs[0], xs[-1], ys[0], ys[-1]
+    return max(
+        lit(x, y)
+        for across in range(3)
+        for down in range(3 - across)
+        for x in (left + across, right - across)
+        for y in (top + down, bottom - down)
+    )
+
+
 def run(binary, stage, name, blur, moving, seconds):
     app_dir = stage / name
     app_dir.mkdir()
@@ -109,7 +128,7 @@ def run(binary, stage, name, blur, moving, seconds):
         width, height, data = win.capture_window(popups[0])
         row = height // 2
         levels = [data[(row * width + x) * 4 + 1] for x in range(width // 4, width * 3 // 4)]
-        return min(levels), max(levels), width, height
+        return min(levels), max(levels), width, height, corner_ink(width, height, data)
     finally:
         job.close()
         proc.wait()
@@ -123,8 +142,8 @@ def main():
     binary = str(pathlib.Path(args.binary).resolve())
     with tempfile.TemporaryDirectory() as stage:
         stage = pathlib.Path(stage)
-        low, high, width, height = run(binary, stage, 'glass', 24, False, 0)
-        print(f'glass: popup {width}x{height}, its middle row {low}..{high}')
+        low, high, width, height, corners = run(binary, stage, 'glass', 24, False, 0)
+        print(f'glass: popup {width}x{height}, its middle row {low}..{high}, past its corners {corners}')
         sharp_low, sharp_high, *_ = run(binary, stage, 'clear', 0, False, 0)
         print(f'no blur: its middle row {sharp_low}..{sharp_high}')
         glass = run(binary, stage, 'glass-moving', 24, True, args.seconds)
@@ -132,6 +151,8 @@ def main():
         print(f'CPU, a box moving under it: glass {glass * 100:.1f}%, no blur {clear * 100:.1f}% of a core')
     if high - low > 12:
         sys.exit('FAIL: the glass shows the stripes sharp')
+    if corners > 8:
+        sys.exit('FAIL: the window shows past the rounded corners of the popup')
     if low - sharp_high < 20:
         sys.exit('FAIL: the glass holds nothing of its window: no brighter than its fill alone')
     print('PASS')

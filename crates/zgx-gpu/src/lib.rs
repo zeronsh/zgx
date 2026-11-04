@@ -11018,14 +11018,18 @@ impl GpuRenderer {
         // so a partly damaged filter matches a fresh frame. Copies land in
         // the first atlas with the averages and stay there.
         let copies = slots.iter().any(|slot| !slot.2);
-        let source = self.backdrop.as_ref().map_or(&self.view, |(_, view)| view);
+        // A popup blurs its window's frame (`set_backdrop`), but what it mixes
+        // the blur over stays its own: past a rounded box's curve, its target
+        // (its shadow), not the window's pixels.
+        let backdrop = self.backdrop.as_ref().map(|(_, view)| view);
+        let source = backdrop.unwrap_or(&self.view);
         let passes = [
             (
                 "blur reduce",
                 &pipelines.reduce,
                 bind(source, &views[1]),
                 &views[0],
-                false,
+                backdrop.is_some(),
                 false,
             ),
             (
@@ -11076,6 +11080,35 @@ impl GpuRenderer {
         }
         stats.render_passes += passes.len();
         stats.blur_passes += passes.len();
+        if backdrop.is_some() && copies {
+            let group = bind(&self.view, &views[1]);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blur originals"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &views[0],
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&pipelines.reduce);
+            pass.set_bind_group(0, &group, &[]);
+            for (k, (record, (w, h), blurred)) in slots.iter().enumerate() {
+                if *w == 0 || *h == 0 || *blurred {
+                    continue;
+                }
+                pass.set_scissor_rect(record.atlas[0] as u32, record.atlas[1] as u32, *w, *h);
+                pass.draw(0..3, k as u32..k as u32 + 1);
+                stats.draw_calls += 1;
+            }
+            drop(pass);
+            stats.render_passes += 1;
+            stats.blur_passes += 1;
+        }
         Some(VerticalBlur {
             bind: bind(&views[0], &views[0]),
             draws: draws.clone(),
