@@ -447,6 +447,7 @@ impl UserData for FolderUd {
         // `folder:file(path)`: a file inside it as a `File`, which `ui.image`,
         // `ui.read_file` and `drag_export` take as they do a dialog's.
         methods.add_method("file", |lua, folder, path: String| {
+            crate::rules::guard(lua, crate::GuardKind::Folder, &path)?;
             let root = folder.0.root.clone();
             let picked = crate::node::env(lua)?.picked.clone();
             off_thread(
@@ -468,6 +469,7 @@ impl UserData for FolderUd {
             )
         });
         methods.add_method("read", |lua, folder, path: String| {
+            crate::rules::guard(lua, crate::GuardKind::Folder, &path)?;
             let root = folder.0.root.clone();
             off_thread(
                 lua,
@@ -482,6 +484,7 @@ impl UserData for FolderUd {
             )
         });
         methods.add_method("write", |lua, folder, (path, text): (String, String)| {
+            crate::rules::guard(lua, crate::GuardKind::Folder, &path)?;
             let root = folder.0.root.clone();
             off_thread(
                 lua,
@@ -516,6 +519,7 @@ pub(crate) fn install(
                     "{WHAT}: a plugin keeps no folders"
                 )));
             }
+            crate::rules::guard(lua, crate::GuardKind::Folder, &key)?;
             let key = key_of(WHAT, key)?;
             let promise = pending(lua, "remembered_folder".into())?;
             let access = remembering.clone();
@@ -539,6 +543,7 @@ pub(crate) fn install(
             if !allowed {
                 return Err(crate::io::denied("ui.open_folder", "Folders"));
             }
+            crate::rules::guard(lua, crate::GuardKind::Dialog, "open_folder")?;
             let remember = match &opts {
                 Some(opts) => opts.raw_get::<Option<String>>("remember")?,
                 None => None,

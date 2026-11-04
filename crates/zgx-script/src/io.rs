@@ -234,10 +234,11 @@ pub(crate) fn install(
         let shared = shared.clone();
         board.set(
             "read",
-            lua.create_function(move |_, ()| {
+            lua.create_function(move |lua, ()| {
                 if !clipboard {
                     return Err(denied("ui.clipboard.read", "Clipboard"));
                 }
+                crate::rules::guard(lua, crate::GuardKind::Clipboard, "read")?;
                 Ok(platform(&shared, "ui.clipboard.read")?.0.clipboard_text())
             })?,
         )?;
@@ -246,10 +247,11 @@ pub(crate) fn install(
         let shared = shared.clone();
         board.set(
             "write",
-            lua.create_function(move |_, text: String| {
+            lua.create_function(move |lua, text: String| {
                 if !clipboard {
                     return Err(denied("ui.clipboard.write", "Clipboard"));
                 }
+                crate::rules::guard(lua, crate::GuardKind::Clipboard, "write")?;
                 Ok(platform(&shared, "ui.clipboard.write")?
                     .0
                     .set_clipboard_text(text))
@@ -265,6 +267,7 @@ pub(crate) fn install(
                 if !clipboard {
                     return Err(denied("ui.clipboard.read_image", "Clipboard"));
                 }
+                crate::rules::guard(lua, crate::GuardKind::Clipboard, "read_image")?;
                 let promise = pending(lua, "clipboard.read_image".into())?;
                 let shared = shared.clone();
                 settle_with(lua, &promise, crate::errors::Kind::Io, async move {
@@ -289,6 +292,7 @@ pub(crate) fn install(
                     if !clipboard {
                         return Err(denied("ui.clipboard.write_image", "Clipboard"));
                     }
+                    crate::rules::guard(lua, crate::GuardKind::Clipboard, "write_image")?;
                     let (image, shared) = (image.0.clone(), shared.clone());
                     let promise = pending(lua, "clipboard.write_image".into())?;
                     settle_with(lua, &promise, crate::errors::Kind::Io, async move {
@@ -310,6 +314,7 @@ pub(crate) fn install(
                 if !files {
                     return Err(denied("ui.open_files", "Files"));
                 }
+                crate::rules::guard(lua, crate::GuardKind::Dialog, "open_files")?;
                 let picker = picker(opts, "Open")?;
                 let promise = pending(lua, "open_files".into())?;
                 let (shared, picked) = (shared.clone(), picked.clone());
@@ -348,6 +353,7 @@ pub(crate) fn install(
                 let title: String = opts
                     .get::<Option<String>>("title")?
                     .ok_or_else(|| mlua::Error::runtime("ui.notify needs a `title`"))?;
+                crate::rules::guard(lua, crate::GuardKind::Notification, &title)?;
                 let body = opts.get::<Option<String>>("body")?.unwrap_or_default();
                 // Its tag, the script's or one of its own: what a click is
                 // told by.
@@ -397,12 +403,13 @@ pub(crate) fn install(
         let shared = shared.clone();
         ui.set(
             "badge",
-            lua.create_function(move |_, badge: mlua::Value| {
+            lua.create_function(move |lua, badge: mlua::Value| {
                 if !app {
                     return Err(mlua::Error::runtime(
                         "ui.badge: the app's own, not a plugin's",
                     ));
                 }
+                crate::rules::guard(lua, crate::GuardKind::Notification, "badge")?;
                 let badge = match badge {
                     mlua::Value::Nil => None,
                     mlua::Value::Integer(0) => None,
@@ -427,6 +434,7 @@ pub(crate) fn install(
                 if !files {
                     return Err(denied("ui.save_file", "Files"));
                 }
+                crate::rules::guard(lua, crate::GuardKind::Dialog, "save_file")?;
                 let picker = picker(opts, "Save")?;
                 let promise = pending(lua, "save_file".into())?;
                 let (shared, picked) = (shared.clone(), picked.clone());
@@ -453,6 +461,7 @@ pub(crate) fn install(
                     return Err(denied("ui.read_file", "Files"));
                 }
                 let path = chosen(&picked, &file, "ui.read_file")?;
+                crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
                 off_thread(lua, format!("read {}", path.display()), move || {
                     std::fs::read(&path)
                         .map(|bytes| Some(String::from_utf8_lossy(&bytes).into_owned()))
@@ -468,6 +477,7 @@ pub(crate) fn install(
                 return Err(denied("ui.write_file", "Files"));
             }
             let path = chosen(&picked, &file, "ui.write_file")?;
+            crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
             off_thread(lua, format!("write {}", path.display()), move || {
                 // Beside it, then over it: never half a file.
                 let temp = path.with_extension("zgx-write");

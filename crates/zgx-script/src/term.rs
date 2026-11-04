@@ -105,6 +105,17 @@ impl Terms {
         id: &str,
         opts: Option<&Table>,
     ) -> mlua::Result<(Terminal, Rc<Fields>)> {
+        // Before anything is made: what it asks of the guard is what would
+        // run, as given here or as the session was made.
+        let given = opts
+            .map(|opts| opts.get::<Option<String>>("command"))
+            .transpose()?
+            .flatten();
+        let running = self.entries.borrow().get(id).and_then(|entry| {
+            let started = entry.term.options().command;
+            (!entry.term.is_closed()).then_some(started).flatten()
+        });
+        crate::rules::guard_term(lua, given.as_deref().or(running.as_deref()))?;
         let env = env(lua)?;
         let mut handlers = Handlers {
             vm: env.vm.clone(),
@@ -399,16 +410,19 @@ impl UserData for TermUd {
             t.term.blur();
             Ok(())
         });
-        methods.add_method("input", |_, t, text: String| {
+        methods.add_method("input", |lua, t, text: String| {
+            crate::rules::guard(lua, crate::GuardKind::TermInput, &t.id)?;
             t.term.input(text);
             Ok(())
         });
-        methods.add_method("paste", |_, t, text: String| {
+        methods.add_method("paste", |lua, t, text: String| {
+            crate::rules::guard(lua, crate::GuardKind::TermInput, &t.id)?;
             t.term.paste(text);
             Ok(())
         });
         // A Ghostty binding action: "copy_to_clipboard", "clear_screen", ...
-        methods.add_method("binding", |_, t, action: String| {
+        methods.add_method("binding", |lua, t, action: String| {
+            crate::rules::guard(lua, crate::GuardKind::TermInput, &t.id)?;
             t.term.binding(action);
             Ok(())
         });

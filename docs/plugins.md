@@ -108,7 +108,25 @@ Plugin { name: "stamps".into(), entry, grants: vec![
 
 **A shortcut with no modifier** (`k`, `enter`, `f5`, or Shift alone on a character) would be taken from every field, page and terminal, so a plugin's takes `Capability::Named("zgx.command.bare_keys")`. Without it `ui.command { key = "k" }` is an error; one a state or function says is dropped as it reads so, reported in `host.dropped_shortcuts()`.
 
-**The app's own scripts under a guard.** `host.guard(|kind, name| …)` is asked before the app's VM reaches a host action, async action or function (by name), or a `ui.fetch`, remote picture or `ui.socket` (by URL), each time, and an `Err` stops it with that text as the script's error: for previewing someone's template in the app's own VM. Plugins aren't asked; they reach what their grants say.
+**The app's own scripts under a guard.** `host.guard(|kind, name| …)` is asked before the app's VM leaves the interface, each time, and an `Err` stops it with that text as the script's error: for previewing someone's template in the app's own VM. Plugins aren't asked; they reach what their grants say.
+
+| `GuardKind` | Asked before | `name` |
+| --- | --- | --- |
+| `Action`, `AsyncAction`, `Function` | a host action, async action or function | its name |
+| `Fetch` | `ui.fetch`, a remote picture | the URL |
+| `Socket` | `ui.socket`, each time it opens | the URL |
+| `Term` | `ui.term`, which raises when refused: nothing starts | the command, or the login shell |
+| `TermInput` | a terminal's `:input`, `:paste`, `:binding` | the session's id |
+| `Web` | a page: `src`, `:load`, `:html`, `html`, and each navigation the platform starts | the URL (`html`'s base, or `about:blank`) |
+| `Clipboard` | `ui.clipboard` | `read`, `write`, `read_image`, `write_image` |
+| `Dialog` | `ui.open_files`, `ui.save_file`, `ui.open_folder` | the function |
+| `File` | `ui.read_file`, `ui.write_file` | the path |
+| `Folder` | `ui.remembered_folder`; a folder's `:read`, `:write`, `:file` | the key, or the path |
+| `Notification` | `ui.notify`, `ui.badge` | the title, or `badge` |
+
+A refused `src` leaves the page where it was (blank, the first time), and a refused navigation is cancelled and reported. Redirects, links, forms, a page's script setting `location`, and history go through the platform's navigation policy, which WebKit, WebKitGTK and WebView2 ask before each. **What no platform shows it:** what a page loaded on its own fetches once it is there (scripts, pictures, `fetch`, WebSockets, workers), and in-page steps (`history.pushState`, and on some platforms a `#fragment`). To keep a preview off the network, refuse the page, or give it content that has nothing to reach.
+
+**Not asked of the guard:** clicking a link in text (`href`, or Open Link on its menu), which opens in the browser on the person's click; a page's `on_download`, whose `d:ask()` opens a save dialog of its own; `ui.persist`, which writes the script's own keys under the host's storage; `ui.window`; `ui.image` and `ui.svg` of a local file, which read it to draw it.
 
 **Where a plugin can put something, and what it can read there**, is `host.elements(&ui, &handle)`: the app's named elements (ids, classes, hooks) grouped by the elements that `provide` context, the app's root outermost. Each group gives a selector that reaches it (its id, or its classes inside the nearest element with one: `#sidebar >> .session-row`), the context names it provides and those it inherits, and its named elements down to the next group. Rows a list repeats are one group with a count; a private element is listed with nothing inside it; names the source declares that aren't showing (a page not open) are listed `mounted: false`. `zgx inspect elements` (MCP `zgx_elements`) gives the same, a line each and then as JSON. The mounted tree is kept only while plugins are loaded; without, it lists the source's names (`live: false`).
 
