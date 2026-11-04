@@ -89,6 +89,12 @@ pub enum GuardKind {
 
 type Guard = dyn Fn(GuardKind, &str) -> Result<(), String>;
 
+/// A `ui.persist` key the guard refused: what a run holds of it, and what
+/// that began as.
+pub(crate) struct Held {
+    pub value: Signal<Value>,
+    pub start: Value,
+}
 /// A host's rules.
 #[derive(Default)]
 pub(crate) struct Rules {
@@ -96,7 +102,7 @@ pub(crate) struct Rules {
     reserved: RefCell<Vec<String>>,
     guard: RefCell<Option<Rc<Guard>>>,
     /// What `ui.persist` keys the guard refused hold, by script and key.
-    held: RefCell<HashMap<(String, String), Signal<Value>>>,
+    held: RefCell<HashMap<(String, String), Held>>,
 }
 impl Rules {
     pub fn reserve(&self, prefix: &str) {
@@ -122,7 +128,7 @@ impl Rules {
             .cloned()
     }
     /// The values held, let go of.
-    pub fn take_held(&self) -> HashMap<(String, String), Signal<Value>> {
+    pub fn take_held(&self) -> HashMap<(String, String), Held> {
         std::mem::take(&mut *self.held.borrow_mut())
     }
     /// What the guard says of reaching `name`. It runs with nothing here
@@ -264,7 +270,7 @@ fn held_persist_asked(
     let why = rules.check(GuardKind::Persist, key).err()?;
     let id = (env.persist_as.to_string(), key.to_owned());
     if let Some(held) = rules.held.borrow().get(&id) {
-        return Some(held.clone());
+        return Some(held.value.clone());
     }
     crate::warning(
         Some(&env.warnings),
@@ -274,9 +280,13 @@ fn held_persist_asked(
         .persist
         .saved(&id.0, key)
         .unwrap_or_else(|| initial.clone());
-    let held = env.runtime.signal(start);
-    rules.held.borrow_mut().insert(id, held.clone());
-    Some(held)
+    let value = env.runtime.signal(start.clone());
+    let held = Held {
+        value: value.clone(),
+        start,
+    };
+    rules.held.borrow_mut().insert(id, held);
+    Some(value)
 }
 
 /// What a host's view is told for its links, if it has rules: a refusal

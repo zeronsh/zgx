@@ -2393,8 +2393,11 @@ impl ScriptHost {
             .take_held()
             .into_iter()
             .filter(|((script, key), held)| {
-                let value = held.with_untracked(Clone::clone);
-                self.0.persist.state(script, key, value.clone()).set(value)
+                let value = held.value.with_untracked(Clone::clone);
+                // Told where the hold began, as a key with no file starts a
+                // run there: what it became is then a change, and saved.
+                let kept = self.0.persist.state(script, key, held.start.clone());
+                kept.set(value)
             })
             .count()
     }
