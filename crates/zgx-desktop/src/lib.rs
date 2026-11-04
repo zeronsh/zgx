@@ -135,12 +135,14 @@ pub use file_dialog::{
 pub use native_events::{ApplicationEvent, ApplicationEventError};
 pub use native_prompt::{PromptButtons, PromptLevel, PromptOptions, PromptResponse};
 pub use url::{OpenUrlError, open_url};
-pub use window_chrome::{Glass, GlassMaterial, Titlebar};
+pub use window_chrome::{CaptionStyle, Glass, GlassMaterial, Titlebar};
 pub use window_info::{
     DisplayInfo, DisplaySelector, FullScreenTransition, WindowBounds, WindowCapabilities,
     WindowInfo, WindowLevel,
 };
 mod native_host;
+#[cfg(any(windows, test))]
+mod windows_caption;
 #[cfg(target_os = "macos")]
 pub use native_host::{BackdropReport, NativeDiagnostics, NativeViewReport};
 pub use zgx::web_view::{WebProfile, WebView, WebViewEvent, WebViewOptions, WebViewState};

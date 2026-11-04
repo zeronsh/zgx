@@ -170,9 +170,11 @@ pub struct WindowInfo {
     pub capabilities: Signal<WindowCapabilities>,
     /// The most recent rejected explicit placement/drag request, if any.
     pub last_request_error: Signal<Option<String>>,
-    /// The window's corner radius in points, once it is made (macOS; 0
-    /// elsewhere): content inset from the window's edge keeps its corners
-    /// concentric with it.
+    /// The window's corner radius in the content's points: content inset from
+    /// the window's edge keeps its corners concentric with it. macOS's, once
+    /// the window is made; on Windows 11 a frameless window's 8, kept as it
+    /// is (0 while maximized or in full screen, which Windows doesn't round);
+    /// 0 on Windows 10 and elsewhere.
     pub corner_radius: Signal<f64>,
     /// Where an app may draw in the title bar, in points: the strip a
     /// `Titlebar::Inset` or `Hidden` window's content runs under, less the
@@ -250,7 +252,7 @@ impl WindowInfo {
         self.fullscreen.set(window.fullscreen().is_some());
         let (area, controls) = crate::window_chrome::titlebar_area(window, titlebar);
         // In the content's points, its zoom's (a custom title bar's content
-        // zooms; the platform's own buttons do not).
+        // zooms; the buttons' own places, which `titlebar_area` gives, do not).
         let zoom = crate::popup_window::zoom_of(window.id()) as f32;
         let unzoom = |r: zgx::scene::Rect| {
             zgx::scene::Rect::new(r.x / zoom, r.y / zoom, r.width / zoom, r.height / zoom)
@@ -261,6 +263,13 @@ impl WindowInfo {
             (area.map(unzoom), controls.map(unzoom))
         };
         self.set_chrome(hold.unwrap_or((area, controls)));
+        // Where the corners follow the window's state (Windows: square while
+        // maximized or in full screen), as they are now.
+        if let Some(radius) = crate::window_chrome::corner_radius(window)
+            && self.corner_radius.with_untracked(|old| *old != radius)
+        {
+            self.corner_radius.set(radius);
+        }
         self.capabilities.set(WindowCapabilities {
             global_position: !wayland,
             placement: !wayland,

@@ -146,6 +146,9 @@ struct WindowConfig {
     /// same as `min_width` and `min_height`, a window of fixed size that a
     /// window manager can still move.
     max_size: Option<(f64, f64)>,
+    /// How tall `titlebar: "inset"`'s caption buttons are on Windows, in the
+    /// content's points (`caption_height`; `WindowOptions::caption_height`).
+    caption_height: Option<f64>,
 }
 impl AppConfig {
     /// The config for the script at `script`: its directory's `zgx.json`
@@ -190,6 +193,7 @@ impl AppConfig {
                     frame_autosave: None,
                     visible: true,
                     max_size: None,
+                    caption_height: None,
                 },
             ));
         };
@@ -227,6 +231,7 @@ impl AppConfig {
                 "max_height",
                 "min_height",
                 "titlebar",
+                "caption_height",
                 "glass",
                 "app_id",
                 "application_id",
@@ -253,6 +258,12 @@ impl AppConfig {
             (Some(w), Some(h)) => Some((w, h)),
             (None, None) => None,
             _ => return Err(fail("`max_width` and `max_height` go together".into())),
+        };
+        let caption_height = match number("caption_height")? {
+            Some(height) if !(height.is_finite() && height > 0.) => {
+                return Err(fail(format!("`caption_height` is {height}: not positive")));
+            }
+            height => height,
         };
         config.titlebar = match string("titlebar")?.as_deref() {
             None | Some("standard") => zgx_desktop::Titlebar::Standard,
@@ -296,6 +307,7 @@ impl AppConfig {
                 frame_autosave,
                 visible,
                 max_size,
+                caption_height,
             },
         ))
     }
@@ -372,6 +384,7 @@ pub fn run_hosting(
         frame_autosave,
         visible,
         max_size,
+        caption_height,
     } = window_config;
     let options = WindowOptions {
         title: config.title.clone(),
@@ -380,6 +393,7 @@ pub fn run_hosting(
         min_size: config.min_size,
         max_size,
         titlebar: config.titlebar,
+        caption: zgx_desktop::CaptionStyle { height: caption_height, ..Default::default() },
         glass: config.glass.then(zgx_desktop::Glass::default),
         frame_autosave,
         visible,
