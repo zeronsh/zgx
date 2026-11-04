@@ -889,7 +889,7 @@ fn set_input(client: &Client, surface: &WlSurface, input: Option<Rect>, zoom: f3
 /// for its geometry, a card whose shadow reached past the output's foot was
 /// slid up off where the scene drew it, unsaid, and the pointer's moves
 /// over it were read that far off: off its trigger, which closed it.
-fn panel_of(scene: &Scene, root: NodeId, bounds: Rect) -> Rect {
+pub(super) fn panel_of(scene: &Scene, root: NodeId, bounds: Rect) -> Rect {
     scene
         .bounds(root)
         .intersection(bounds)

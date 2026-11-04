@@ -2019,7 +2019,7 @@ mod x11 {
         window::{Window, WindowId},
     };
     use zgx::{
-        scene::{NodeId, Rect, Scene},
+        scene::{NodeId, NodeKind, Rect, Scene},
         semantics::{Role, Semantics},
     };
     use zgx_gpu::{GpuContext, GpuError, GpuRenderer};
@@ -2059,6 +2059,9 @@ mod x11 {
         /// A drag preview's: its box's offset from where the scene lays the
         /// preview out (its shadow's margin), to move it with the drag.
         preview: Option<(f32, f32)>,
+        /// With no compositor, its corners cut (`cut_corners`): its size in
+        /// pixels and their radius.
+        cut: Option<(u32, u32, u32)>,
     }
     thread_local! {
         static HIDDEN: RefCell<Vec<Popup>> = const { RefCell::new(Vec::new()) };
@@ -2488,6 +2491,7 @@ mod x11 {
                 let Ok(window) = event_loop.create_window(attributes) else {
                     return;
                 };
+                no_shadow_of_a_compositors(&window);
                 hidden.push(Popup {
                     window: Arc::new(window),
                     renderer: None,
@@ -2496,6 +2500,7 @@ mod x11 {
                     fault: None,
                     rect: None,
                     preview: None,
+                    cut: None,
                 });
             }
         });
@@ -2566,6 +2571,9 @@ mod x11 {
         grabbed: Option<usize>,
         /// A Wayland window's popups.
         wayland: super::wayland::Popups,
+        /// Whether a compositor shows what these popups leave transparent:
+        /// asked as the first opens.
+        composited: bool,
     }
     impl PopupHost {
         pub fn new(send: impl Fn(PopupInput) + 'static) -> Self {
@@ -2575,6 +2583,7 @@ mod x11 {
                 wayland: super::wayland::Popups::new(send.clone()),
                 send,
                 grabbed: None,
+                composited: true,
             }
         }
         /// Hold the pointer for `parent`, or let go of it.
@@ -2623,10 +2632,24 @@ mod x11 {
             if self.shown.is_empty() && scene.popups().is_empty() {
                 return Ok(());
             }
+            if self.shown.is_empty() {
+                self.composited = crate::x11_settings::composited();
+            }
+            let composited = self.composited;
             let wanted: Vec<(NodeId, Rect)> = scene
                 .popups()
                 .iter()
-                .filter_map(|root| scene.popup_bounds(*root).map(|bounds| (*root, bounds)))
+                .filter_map(|root| {
+                    // With no compositor to show them, a shadow's margin and
+                    // what it leaves clear are black: the panel alone.
+                    let bounds = scene.popup_bounds(*root)?;
+                    let bounds = if composited {
+                        bounds
+                    } else {
+                        super::wayland::panel_of(scene, *root, bounds)
+                    };
+                    Some((*root, bounds))
+                })
                 .collect();
             let mut index = 0;
             while index < self.shown.len() {
@@ -2723,6 +2746,17 @@ mod x11 {
                         (rect.height * scale).round() as u32,
                     );
                     let _ = popup.window.request_inner_size(size);
+                    let radius = if composited {
+                        0
+                    } else {
+                        (corner_radius(scene, root) * scale).round() as u32
+                    };
+                    cut_corners(
+                        &popup.window,
+                        &mut popup.cut,
+                        (size.width, size.height),
+                        radius,
+                    );
                 }
                 // Popups are small: one that changed is drawn whole. One that
                 // only moved (a drag preview) is not drawn again.
@@ -2875,6 +2909,160 @@ mod x11 {
             let mut hidden = hidden.borrow_mut();
             if hidden.len() < POOL {
                 hidden.push(popup);
+            }
+        });
+    }
+    /// A popup's panel's corner radius, in points: its root's, or that of the
+    /// box filling it that paints.
+    fn corner_radius(scene: &Scene, root: NodeId) -> f32 {
+        let bounds = scene.bounds(root);
+        let mut node = root;
+        for _ in 0..4 {
+            if let NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } = scene.kind(node)
+                && quad.radius > 0.
+            {
+                return quad.radius;
+            }
+            let filling = scene.children(node).iter().copied().find(|child| {
+                let child = scene.bounds(*child);
+                (child.width - bounds.width).abs() < 1. && (child.height - bounds.height).abs() < 1.
+            });
+            match filling {
+                Some(child) => node = child,
+                None => break,
+            }
+        }
+        0.
+    }
+    /// The rows of a box `width` by `height` with corners of `radius`, all in
+    /// pixels: a row each across the corners, the rest in one.
+    fn rounded_rows(
+        width: u32,
+        height: u32,
+        radius: u32,
+    ) -> Vec<x11rb::protocol::xproto::Rectangle> {
+        use x11rb::protocol::xproto::Rectangle;
+        let radius = radius.min(width / 2).min(height / 2);
+        let row = |y: u32, inset: u32| Rectangle {
+            x: inset as i16,
+            y: y as i16,
+            width: (width - 2 * inset) as u16,
+            height: 1,
+        };
+        let mut rows = Vec::with_capacity(2 * radius as usize + 1);
+        for y in 0..radius {
+            let r = radius as f32;
+            let up = r - y as f32 - 0.5;
+            let inset = (r - (r * r - up * up).sqrt()).round() as u32;
+            rows.push(row(y, inset));
+            rows.push(row(height - 1 - y, inset));
+        }
+        rows.push(Rectangle {
+            x: 0,
+            y: radius as i16,
+            width: width as u16,
+            height: (height - 2 * radius) as u16,
+        });
+        rows
+    }
+    #[cfg(test)]
+    #[test]
+    fn rounded_rows_cover_the_box_but_its_corners() {
+        let rows = rounded_rows(200, 100, 10);
+        let covers = |x: i16, y: i16| {
+            rows.iter().any(|r| {
+                (r.x..r.x + r.width as i16).contains(&x)
+                    && (r.y..r.y + r.height as i16).contains(&y)
+            })
+        };
+        for (x, y) in [(0, 0), (199, 0), (0, 99), (199, 99)] {
+            assert!(!covers(x, y), "corner {x},{y} is cut");
+        }
+        for (x, y) in [(10, 0), (189, 0), (10, 99), (0, 10), (199, 89), (100, 50)] {
+            assert!(covers(x, y), "{x},{y} stays");
+        }
+        // No two rows overlap, and none leaves the box.
+        let area: u32 = rows.iter().map(|r| r.width as u32 * r.height as u32).sum();
+        assert!(area < 200 * 100 && area > 200 * 100 - 4 * 100);
+        assert!(rows.iter().all(|r| r.x >= 0 && r.x as u16 + r.width <= 200));
+        // A radius too big for the box takes half its short side.
+        assert_eq!(rounded_rows(20, 10, 99).last().unwrap().height, 0);
+    }
+    /// Cut `popup`'s window to its panel's rounded box: with no compositor
+    /// what its corners leave clear is black. A radius of 0 puts its whole
+    /// window back.
+    fn cut_corners(
+        window: &Window,
+        cut: &mut Option<(u32, u32, u32)>,
+        (width, height): (u32, u32),
+        radius: u32,
+    ) {
+        use x11rb::{
+            connection::Connection,
+            protocol::{
+                shape::{self, SK, SO},
+                xproto::ClipOrdering,
+            },
+        };
+        let wanted = (radius > 0).then_some((width, height, radius));
+        if *cut == wanted {
+            return;
+        }
+        *cut = wanted;
+        let Some(id) = xid(window) else {
+            return;
+        };
+        CONNECTION.with(|connection| {
+            let Some(connection) = connection else {
+                return;
+            };
+            let _ = match wanted {
+                Some(_) => shape::rectangles(
+                    connection,
+                    SO::SET,
+                    SK::BOUNDING,
+                    ClipOrdering::UNSORTED,
+                    id,
+                    0,
+                    0,
+                    &rounded_rows(width, height, radius),
+                )
+                .map(|_| ()),
+                None => shape::mask(connection, SO::SET, SK::BOUNDING, id, 0, 0, x11rb::NONE)
+                    .map(|_| ()),
+            };
+            let _ = connection.flush();
+        });
+    }
+    /// Keep a compositor's own shadow off `window`, as menus' are: picom's
+    /// and compton's would go round the whole window, the clear margin zgx
+    /// draws the popup's shadow in, a box round nothing.
+    fn no_shadow_of_a_compositors(window: &Window) {
+        use x11rb::{
+            connection::Connection,
+            protocol::xproto::{AtomEnum, ConnectionExt as _, PropMode},
+            wrapper::ConnectionExt as _,
+        };
+        let Some(id) = xid(window) else {
+            return;
+        };
+        CONNECTION.with(|connection| {
+            let Some(connection) = connection else {
+                return;
+            };
+            let atom = connection
+                .intern_atom(false, b"_COMPTON_SHADOW")
+                .ok()
+                .and_then(|atom| atom.reply().ok());
+            if let Some(atom) = atom {
+                let _ = connection.change_property32(
+                    PropMode::REPLACE,
+                    id,
+                    atom.atom,
+                    AtomEnum::CARDINAL,
+                    &[0],
+                );
+                let _ = connection.flush();
             }
         });
     }

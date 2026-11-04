@@ -246,7 +246,9 @@ contrast makes `border.subtle` and `border` as strong as `text.secondary`,
 `border.strong` as `text.primary`, and `text.tertiary` as `text.secondary`.
 Reduce transparency makes `glass.tint` the raised surface and `glass.blur` zero,
 and any view with a backdrop blur paints its background opaque without the blur
-(a clear one gets the raised surface). The host follows changes as they happen
+(a clear one gets the raised surface). On X11 with no compositor zgx reports it
+too, as nothing can show through a window there, re-read as a window is
+activated. The host follows changes as they happen
 (`NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`). Windows reports
 its animation and contrast settings with the tokens it already sets.
 

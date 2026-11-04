@@ -20,7 +20,7 @@ def main():
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "results.json").unlink(missing_ok=True)
-    xvfb = wm = app = None
+    xvfb = wm = compositor = app = None
     with tempfile.TemporaryDirectory(prefix="zgx-effects-") as runtime:
         try:
             with (args.output / "xvfb.log").open("w") as log:
@@ -34,6 +34,14 @@ def main():
             with (args.output / "openbox.log").open("w") as log:
                 wm = subprocess.Popen(["openbox"], env=env, stdout=log, stderr=log)
             wait_for_wm(env)
+            # A compositor: with none, the system reports reduced transparency,
+            # and a backdrop blur paints opaque, unblurred.
+            config = args.output / "picom.conf"
+            config.write_text('backend = "xrender"; shadow = false; fading = false; unredir-if-possible = false;\n')
+            with (args.output / "picom.log").open("w") as log:
+                compositor = subprocess.Popen(["picom", "--config", str(config)], env=env, stdout=log, stderr=log)
+            time.sleep(.5)
+            assert compositor.poll() is None, "picom exited"
             output = args.output / "effects.log"
             with output.open("w") as log:
                 app = subprocess.Popen([str(args.binary.resolve()), "--smoke-test"], env=env, stdout=log, stderr=log)
@@ -146,7 +154,7 @@ def main():
             (args.output / "results.json").write_text(json.dumps(dict(passed=True, backend="owned X11/Xvfb/Openbox", timed_close=True, reports=reports, changed_pixels=changes), indent=2) + "\n")
             print("Native declarative effects checks passed")
         finally:
-            for process in (app, wm, xvfb):
+            for process in (app, compositor, wm, xvfb):
                 stop(process)
 
 
