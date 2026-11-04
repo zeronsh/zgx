@@ -9,7 +9,9 @@
 //!
 //! `--sealed`: the same against a sealed page (`ui.sealed`): a plugin's modal
 //! over it, then one the plugin opens in its own page there, which stays in
-//! that page's box.
+//! that page's box. What the plugin draws in its page, and that modal, show
+//! no further than the box, and clicks past its right and bottom edges, where
+//! nothing else paints over them, reach nothing of the plugin's.
 //!
 //! Clicks go through the input routing, this process alone (the user's pointer
 //! is never moved), unless `DECISION_PROBE_EXTERNAL` is set: then it prints
@@ -66,11 +68,12 @@ const SEALED_APP: &str = r##"
 local clicked = ui.shared("clicked", 0)
 return ui.column { w_full = true, h_full = true, p = 12,
     ui.text { id = "after", "After" },
-    ui.sealed { key = "settings", w = 300, h = 200,
+    ui.sealed { key = "settings", w = 300, h = 260,
         ui.column { w_full = true, h_full = true,
             ui.button { id = "app-setting", w = 300, h = 40, "Setting",
                 on_click = function() clicked:set(clicked:peek() + 1) end },
-            ui.plugin_page { plugin = "plugin", w = 300, h = 100 },
+            ui.plugin_page { id = "page-box", plugin = "plugin", w = 200, h = 100 },
+            ui.div { h = 60 },
             ui.button { id = "app-below", w = 300, h = 40, "Below",
                 on_click = function() clicked:set(clicked:peek() + 1) end },
         },
@@ -82,6 +85,10 @@ const SEALED_PLUGIN: &str = r##"
 local over = ui.state("over", false)
 local in_page = ui.state("in_page", false)
 local nested = ui.state("nested", true)
+local past = ui.state("past", false)
+local function clicked_it()
+    past:set(true)
+end
 ui.contribute { target = "#after", after = ui.button { id = "open-over", w = 60, h = 24, "Over",
     on_click = function() over:set(true) end } }
 ui.contribute { target = "#after", after = ui.modal { open = over, z = 2147483647,
@@ -90,10 +97,13 @@ ui.contribute { target = "#after", after = ui.modal { open = over, z = 214748364
             anchor = ui.button { id = "nested-trigger", w = 60, h = 24, "Nested" },
             ui.div { id = "nested-panel", w = 300, h = 900 } } } } }
 ui.contribute("plugin_page", ui.column {
+    -- All the plugin can reach for: drawn and clicked past its box, if it may.
+    ui.div { id = "page-past", absolute = true, left = 0, top = 0, w = 3000, h = 3000, on_click = clicked_it },
     ui.button { id = "page-button", w = 100, h = 24, "Page",
         on_click = function() in_page:set(true) end },
+    ui.show(past, ui.text { id = "page-was-clicked", "Clicked" }),
     ui.modal { open = in_page, z = 2147483647,
-        ui.div { id = "page-modal", w = 3000, h = 3000, on_click = function() end } },
+        ui.div { id = "page-modal", w = 3000, h = 3000, on_click = clicked_it } },
 })
 "##;
 
@@ -197,6 +207,60 @@ impl Probe {
             _ => 0.,
         })
     }
+    /// A plugin's page: `node` shows no further than its box, and past its
+    /// right and bottom edges the pointer finds nothing of the plugin's, and a
+    /// click there reaches nothing of it.
+    async fn cut_to_its_box(&self, node: &str) {
+        let (Some(page), Some(held)) = (self.view.find("page-box"), self.view.find(node)) else {
+            return self.check("the page and what it holds", false);
+        };
+        let ui = self.ui();
+        let (edge, shown) = {
+            let scene = ui.scene.borrow();
+            (scene.visible_bounds(page), scene.visible_bounds(held))
+        };
+        let (Some(edge), Some(shown)) = (edge, shown) else {
+            return self.check("the page and what it holds show", false);
+        };
+        println!(
+            "PAST {node} box={:.0}x{:.0} shows={:.0}x{:.0}",
+            edge.width, edge.height, shown.width, shown.height
+        );
+        self.check(
+            "it shows no further than its box",
+            shown.width <= edge.width && shown.height <= edge.height,
+        );
+        let past = [
+            (edge.x + edge.width + 40., edge.y + 50.),
+            (edge.x + 50., edge.y + edge.height + 30.),
+        ];
+        for (x, y) in past {
+            let target = {
+                let scene = ui.scene.borrow();
+                ui.input.pointer_target(&scene, x, y)
+            };
+            let theirs = {
+                let scene = ui.scene.borrow();
+                target.is_some_and(|t| scene.is_within(t, page))
+            };
+            println!("PAST at {x:.0},{y:.0}: theirs={theirs}");
+            self.check("past its edge, the pointer finds nothing of its", !theirs);
+            if self.external {
+                println!("CLICK {x} {y}");
+            } else {
+                let button = PointerButton::Primary;
+                let mut ui = self.ui();
+                ui.dispatch(InputEvent::PointerMove { x, y });
+                ui.dispatch(InputEvent::PointerDown { x, y, button });
+                ui.dispatch(InputEvent::PointerUp { x, y, button });
+            }
+            zgx::timer::sleep(self.dwell).await;
+            self.check(
+                "a click past its edge reaches nothing of its",
+                self.view.find("page-was-clicked").is_none(),
+            );
+        }
+    }
     /// Click `id` from inside: what the plugin does on its own.
     fn poke(&self, id: &str) {
         let Some((x, y)) = self.at(id) else {
@@ -271,6 +335,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     probe.check("the pointer finds the setting", probe.finds("app-setting"));
                     probe.check("no popup in a window", scene == 0);
                     probe.check("none on the system's list", !macos || native == 0);
+                    probe.cut_to_its_box("page-past").await;
                     probe.poke("open-over");
                     sleep(wait).await;
                     probe.check("the modal shows", probe.view.find("plugin-modal").is_some());
@@ -297,6 +362,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         probe.finds("app-below"),
                     );
                     probe.click("app-below", 2.).await;
+                    probe.cut_to_its_box("page-modal").await;
+                    probe.check(
+                        "its modal stayed open",
+                        probe.view.find("page-modal").is_some(),
+                    );
                     let failed = probe.failed.get();
                     println!("RESULT {}", if failed { "fail" } else { "pass" });
                     std::process::exit(i32::from(failed));
