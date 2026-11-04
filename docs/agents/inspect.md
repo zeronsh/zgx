@@ -225,7 +225,7 @@ The summary adds them up over the interaction (`layout`: `measured`, `micros`, a
 
 The JSON gives the work's `p50`, `p90`, `p95`, `p99`, `max` and `mean` (`work_ms`), the input events (`events`) and each one's share of the frame it came in (`per_event_ms`: a drag's moves, one a frame, cost what their frames did), and each phase's spread and total, the costliest at p95 first (`phases`). Each frame of `frames` says the input it took (`2 input events`; `events` in its JSON). A command's own fields can be given as `key=value` words (`frames n=300`, `mark name=drag`), and a field that takes a number refuses anything else rather than falling back to its default.
 
-A tape can move the pointer as well as the wheel, for an interaction a script plays the same way each time: `pointer`, where from the target's centre in points (across, down), and `down`, `moved` or `up` (the primary button). Each event comes at its time, so a move a frame apart lands in a frame of its own, through the window's own input path:
+A tape can move the pointer as well as the wheel, for an interaction a script plays the same way each time: `pointer`, where from the target's centre in points (across, down), and `down`, `moved` or `up` (the primary button). Each event comes at its time, so a move a frame apart lands in a frame of its own, through the window's own input path; moves due at once, in a window running behind them, come as one, the last, as a platform's do:
 
 ```text
 0 pointer 0 0 down
