@@ -14890,7 +14890,7 @@ mod set_box_tests {
         both(|style| style.height = None);
         both(|style| {
             style.width = None;
-            style.width_percent = Some(50.);
+            style.width_percent = Some(0.5);
         });
     }
     #[test]
