@@ -660,6 +660,7 @@ pub(crate) fn install(
             let id: String = table
                 .get::<Option<String>>("id")?
                 .ok_or_else(|| mlua::Error::runtime("ui.window needs an `id`"))?;
+            crate::rules::guard(lua, crate::GuardKind::Window, &id)?;
             let what = |field: &str| format!("ui.window `{id}`'s `{field}`");
             let open = expect_state(&table.get::<mlua::Value>("open")?, &what("open"))?;
             let runtime = crate::node::env(lua)?.runtime.clone();

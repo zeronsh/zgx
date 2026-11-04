@@ -4712,13 +4712,23 @@ fn remote_status_in(
     }
     let key = remote_key(vm, src);
     let existing = assets.remote.borrow().get(&*key).cloned();
+    if let Some(status) = &existing {
+        if status.get() != FAILED {
+            return status.get();
+        }
+        let failed = (assets.failed.borrow().get(&*key)).map(|(at, times, _)| (*at, *times));
+        if failed.is_some_and(|(at, times)| at.elapsed() < backoff(times)) {
+            return FAILED;
+        }
+    }
+    // Before anything is recorded: refused, it is asked again the next time,
+    // and a picture that can't be shown shows what such a picture does.
+    if let Err(error) = crate::rules::guard(&vm.lua, crate::GuardKind::Picture, src) {
+        vm.report(error);
+        return FAILED;
+    }
     let ready = match existing {
-        Some(status) if status.get() != FAILED => return status.get(),
         Some(status) => {
-            let failed = (assets.failed.borrow().get(&*key)).map(|(at, times, _)| (*at, *times));
-            if failed.is_some_and(|(at, times)| at.elapsed() < backoff(times)) {
-                return FAILED;
-            }
             status.set(LOADING);
             status
         }
@@ -4731,10 +4741,6 @@ fn remote_status_in(
             ready
         }
     };
-    if let Err(error) = crate::rules::guard(&vm.lua, crate::GuardKind::Fetch, src) {
-        vm.report(error);
-        return ready.get();
-    }
     let links = assets.links.borrow().clone();
     let fetch = links
         .as_ref()

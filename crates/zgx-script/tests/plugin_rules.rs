@@ -420,13 +420,15 @@ fn what_the_guard_refuses_never_reaches_the_host_and_says_why() {
     }
     assert!(ran.borrow().is_empty(), "{:?}", ran.borrow());
     let out = h.text("out");
-    for name in ["invoke", "sync", "call", "plain", "fetch"] {
+    for name in ["invoke", "sync", "call", "plain"] {
         assert!(
             out.contains(&format!("{name}=")) && !out.contains(&format!("{name}=ok")),
             "{out}"
         );
     }
-    assert_eq!(out.matches("not in a preview").count(), 5, "{out}");
+    assert_eq!(out.matches("not in a preview").count(), 4, "{out}");
+    // A fetch doesn't raise: its promise rejects.
+    assert!(out.contains("fetch=ok"), "{out}");
     // A button's `ui.action` reports it, as an error in a handler is.
     h.click("action");
     h.settle();
@@ -520,7 +522,7 @@ fn the_guard_is_asked_of_a_remote_picture_and_a_socket() {
     assert!(ran.borrow().is_empty(), "{:?}", ran.borrow());
     let asked = asked.borrow();
     assert!(
-        asked.contains(&(GuardKind::Fetch, "https://x.test/a.png".to_owned())),
+        asked.contains(&(GuardKind::Picture, "https://x.test/a.png".to_owned())),
         "{asked:?}"
     );
     assert!(

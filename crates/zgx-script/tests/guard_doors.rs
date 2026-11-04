@@ -444,3 +444,309 @@ fn with_no_guard_nothing_is_asked() {
     h.settle();
     assert!(!h.text("said").contains("=no"), "{}", h.text("said"));
 }
+
+// A link's click, a window, a kept value and a download's own dialog.
+
+const LINK: &str = r##"return ui.rich {
+    id = "para", w = 120,
+    ui.span { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", href = "https://evil.test/" },
+}"##;
+
+#[test]
+fn a_link_clicked_is_asked_for_and_refused_stays_shut() {
+    let (mut h, asked) = guarded(LINK, none);
+    let desktop = h.desktop.clone().unwrap();
+    h.ui.prepare_frame();
+    h.click("para");
+    h.settle();
+    assert!(desktop.opened().is_empty(), "{:?}", desktop.opened());
+    assert!(was_asked(&asked, GuardKind::OpenLink, "https://evil.test/"));
+    assert!(h.error().unwrap_or_default().contains("not in a preview"));
+    // Allowed, and with no guard, it opens.
+    let (mut h, _) = guarded(LINK, all);
+    let desktop = h.desktop.clone().unwrap();
+    h.ui.prepare_frame();
+    h.click("para");
+    h.settle();
+    assert_eq!(desktop.opened(), ["https://evil.test/"]);
+    let mut h = Harness::with_desktop(|runtime| ScriptHost::inline(runtime, "app", LINK));
+    let desktop = h.desktop.clone().unwrap();
+    h.ui.prepare_frame();
+    h.click("para");
+    h.settle();
+    assert_eq!(desktop.opened(), ["https://evil.test/"]);
+}
+
+#[test]
+fn a_links_open_item_is_asked_for_and_refused_stays_shut() {
+    let (mut h, asked) = guarded(LINK, none);
+    let desktop = h.desktop.clone().unwrap();
+    h.ui.prepare_frame();
+    let bounds = h.bounds("para");
+    zgx_script::driver::right_click_at(
+        &mut h.ui,
+        (bounds.x + bounds.width / 2., bounds.y + bounds.height / 2.),
+    );
+    h.settle();
+    h.ui.prepare_frame();
+    h.click("link-open");
+    h.settle();
+    assert!(desktop.opened().is_empty(), "{:?}", desktop.opened());
+    assert!(was_asked(&asked, GuardKind::OpenLink, "https://evil.test/"));
+}
+
+#[test]
+fn a_window_a_script_declares_is_asked_for() {
+    let code = r##"local open = ui.state("open", true)
+    ui.window { id = "fake-login", open = open, title = "Sign in", ui.text { "password?" } }
+    return ui.text { "app" }"##;
+    let (error, asked) = refused_load(code);
+    assert!(was_asked(&asked, GuardKind::Window, "fake-login"));
+    assert!(error.contains("not in a preview"), "{error}");
+    let (h, _) = guarded(code, all);
+    assert_eq!(h.error(), None);
+}
+
+const PERSIST: &str = r##"local kept = ui.persist("token", "initial")
+return ui.column {
+    ui.text { id = "kept", function() return kept:get() end },
+    ui.button { id = "set", w = 10, h = 10, on_click = ui.set(kept, "overwritten") },
+}"##;
+
+/// The app's saved `token`, in a storage of its own, and a host of `PERSIST`
+/// on it under a guard refusing everything.
+struct Kept {
+    dir: std::path::PathBuf,
+    file: std::path::PathBuf,
+}
+impl Kept {
+    fn new(name: &str) -> Self {
+        let dir =
+            std::env::temp_dir().join(format!("zgx-guard-persist-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let file = dir.join("app").join("token.json");
+        std::fs::write(&file, "\"the app's own\"").unwrap();
+        Self { dir, file }
+    }
+    fn on_disk(&self) -> String {
+        std::fs::read_to_string(&self.file).unwrap()
+    }
+    fn refusing(&self) -> Harness {
+        let store = self.dir.clone();
+        Harness::new(move |runtime| {
+            let host = ScriptHost::inline(runtime, "app", PERSIST).storage(store);
+            host.guard(|_, _| Err("not in a preview".into()));
+            host
+        })
+    }
+}
+impl Drop for Kept {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// A preview in the app's VM names the app's keys: refused, it looks as the
+/// app does, and what it writes is held, reaching nothing saved.
+#[test]
+fn a_kept_value_refused_starts_from_what_is_saved_and_saves_nothing() {
+    let kept = Kept::new("held");
+    let mut h = kept.refusing();
+    assert_eq!(h.text("kept"), "the app's own", "as the app shows it");
+    assert!(
+        h.host
+            .warnings()
+            .iter()
+            .any(|w| w.contains("not in a preview"))
+    );
+    h.click("set");
+    h.settle();
+    assert_eq!(h.text("kept"), "overwritten", "the preview's own");
+    // Held across a reload of the preview.
+    h.host.reload().unwrap();
+    h.settle();
+    assert_eq!(h.text("kept"), "overwritten");
+    h.host.save();
+    drop(h);
+    // Quit: never saved.
+    assert_eq!(kept.on_disk(), "\"the app's own\"");
+}
+
+#[test]
+fn what_is_held_is_saved_when_the_person_keeps_it() {
+    let kept = Kept::new("keep");
+    let mut h = kept.refusing();
+    h.click("set");
+    h.settle();
+    assert_eq!(h.host.keep_held_state(), 1);
+    h.host.save();
+    assert_eq!(kept.on_disk(), "\"overwritten\"");
+    assert_eq!(h.host.keep_held_state(), 0, "nothing left held");
+    drop(h);
+    // Next run, with no guard: the kept value.
+    let store = kept.dir.clone();
+    let mut h =
+        Harness::new(move |runtime| ScriptHost::inline(runtime, "app", PERSIST).storage(store));
+    assert_eq!(h.text("kept"), "overwritten");
+}
+
+#[test]
+fn a_held_value_read_and_never_changed_saves_nothing_when_kept() {
+    let kept = Kept::new("unchanged");
+    let h = kept.refusing();
+    assert_eq!(h.host.keep_held_state(), 0);
+    h.host.save();
+    assert_eq!(kept.on_disk(), "\"the app's own\"");
+}
+
+#[test]
+fn what_is_held_is_gone_when_the_person_reverts() {
+    let kept = Kept::new("drop");
+    let mut h = kept.refusing();
+    h.click("set");
+    h.settle();
+    h.host.drop_held_state();
+    h.host.reload().unwrap();
+    h.settle();
+    assert_eq!(h.text("kept"), "the app's own");
+    assert_eq!(h.host.keep_held_state(), 0);
+    h.host.save();
+    assert_eq!(kept.on_disk(), "\"the app's own\"");
+}
+
+/// A host can let pictures show and keep scripts off the network.
+#[test]
+fn a_remote_picture_is_asked_apart_from_a_fetch() {
+    let asked: Asked = Rc::default();
+    let urls: Rc<RefCell<Vec<String>>> = Rc::default();
+    let (told, fetched) = (asked.clone(), urls.clone());
+    let mut h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r##"local said = ui.state("said", "")
+            ui.task(function()
+                local ok, failure = ui.try(function() return ui.fetch("https://api.test/x"):await() end)
+                said:set(if ok then "fetched" else failure.kind .. ": " .. failure.message)
+            end)
+            return ui.column {
+                ui.image { src = "https://img.test/a.png", id = "a", w = 20, h = 20 },
+                ui.text { id = "said", "{said}" },
+            }"##,
+        );
+        host.fetcher(move |request: zgx_script::Request| {
+            fetched.borrow_mut().push(request.url.clone());
+            async { Err("no answer here".to_string()) }
+        });
+        host.guard(move |kind, name| {
+            told.borrow_mut().push((kind, name.to_owned()));
+            match kind {
+                GuardKind::Fetch => Err("not in a preview".into()),
+                _ => Ok(()),
+            }
+        });
+        host
+    });
+    h.settle();
+    h.frames(2);
+    assert!(was_asked(
+        &asked,
+        GuardKind::Picture,
+        "https://img.test/a.png"
+    ));
+    assert!(was_asked(&asked, GuardKind::Fetch, "https://api.test/x"));
+    assert_eq!(
+        *urls.borrow(),
+        ["https://img.test/a.png"],
+        "the picture alone"
+    );
+    // A refused fetch rejects: what handles a failure says so, in its words.
+    let said = h.text("said");
+    assert!(said.starts_with("network: "), "{said}");
+    assert!(said.contains("not in a preview"), "{said}");
+    assert_eq!(h.error(), None);
+}
+
+/// A refused fetch at a file's top level doesn't fail its load.
+#[test]
+fn a_refused_fetch_at_the_top_level_leaves_the_load_standing() {
+    let (mut h, asked) = guarded(
+        r##"local answer = ui.fetch("https://api.test/x")
+        return ui.text { id = "shown", "here" }"##,
+        none,
+    );
+    assert_eq!(h.text("shown"), "here");
+    assert!(was_asked(&asked, GuardKind::Fetch, "https://api.test/x"));
+}
+
+#[test]
+fn a_downloads_own_dialog_is_asked_for() {
+    let (mut h, asked) = guarded(
+        r##"local said = ui.state("said", "")
+        return ui.column {
+            ui.webview { id = "page", w = 100, h = 50, on_download = function(d)
+                local ok = pcall(function() return d:ask() end)
+                said:set(if ok then "asked" else "refused")
+                d:cancel()
+            end },
+            ui.text { id = "said", "{said}" },
+        }"##,
+        |kind, _| kind != GuardKind::Dialog,
+    );
+    let web = web_of(&mut h);
+    let desktop = h.desktop.clone().unwrap();
+    web.download(
+        zgx::web_view::DownloadRequest::new("https://page.test/a.txt", "a.txt", "text/plain"),
+        zgx::web_view::DownloadResponder::new(|_| {}),
+    );
+    h.settle();
+    assert_eq!(h.text("said"), "refused");
+    assert!(was_asked(&asked, GuardKind::Dialog, "ask"));
+    assert!(desktop.asked().is_empty(), "no dialog");
+}
+
+/// A refused picture leaves nothing behind: allowed later (the person kept
+/// the template), the next load fetches it. Refused, it isn't left "loading",
+/// and what a picture that can't be shown does, it does.
+#[test]
+fn a_picture_refused_then_allowed_is_fetched_on_the_next_load() {
+    let allowed = Rc::new(std::cell::Cell::new(false));
+    let urls: Rc<RefCell<Vec<String>>> = Rc::default();
+    let (open, fetched) = (allowed.clone(), urls.clone());
+    let mut h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r##"return ui.image {
+                src = "https://img.test/a.png", id = "art", w = 20, h = 20,
+                fallback = ui.text { id = "instead", "no picture" },
+            }"##,
+        );
+        host.fetcher(move |request: zgx_script::Request| {
+            fetched.borrow_mut().push(request.url.clone());
+            async { Err("no answer here".to_string()) }
+        });
+        host.guard(
+            move |kind, _| match kind == GuardKind::Picture && !open.get() {
+                true => Err("not in a preview".into()),
+                false => Ok(()),
+            },
+        );
+        host
+    });
+    h.settle();
+    h.frames(2);
+    assert!(urls.borrow().is_empty(), "{:?}", urls.borrow());
+    assert_eq!(h.text("instead"), "no picture");
+    // Asked again, still refused: nothing reaches the network.
+    h.host.reload().unwrap();
+    h.settle();
+    assert!(urls.borrow().is_empty(), "{:?}", urls.borrow());
+    // Allowed: the next load asks, and it goes.
+    allowed.set(true);
+    h.host.reload().unwrap();
+    h.settle();
+    h.frames(2);
+    assert_eq!(*urls.borrow(), ["https://img.test/a.png"]);
+}

@@ -113,20 +113,26 @@ Plugin { name: "stamps".into(), entry, grants: vec![
 | `GuardKind` | Asked before | `name` |
 | --- | --- | --- |
 | `Action`, `AsyncAction`, `Function` | a host action, async action or function | its name |
-| `Fetch` | `ui.fetch`, a remote picture | the URL |
+| `Fetch` | `ui.fetch`; refused, its promise rejects | the URL |
+| `Picture` | a remote picture (`ui.image`, `ui.svg`, `bg_image`) | the URL |
 | `Socket` | `ui.socket`, each time it opens | the URL |
 | `Term` | `ui.term`, which raises when refused: nothing starts | the command, or the login shell |
 | `TermInput` | a terminal's `:input`, `:paste`, `:binding` | the session's id |
 | `Web` | a page: `src`, `:load`, `:html`, `html`, and each navigation the platform starts | the URL (`html`'s base, or `about:blank`) |
 | `Clipboard` | `ui.clipboard` | `read`, `write`, `read_image`, `write_image` |
-| `Dialog` | `ui.open_files`, `ui.save_file`, `ui.open_folder` | the function |
+| `Dialog` | `ui.open_files`, `ui.save_file`, `ui.open_folder`, a download's `d:ask()` | the function (`ask`) |
 | `File` | `ui.read_file`, `ui.write_file` | the path |
 | `Folder` | `ui.remembered_folder`; a folder's `:read`, `:write`, `:file` | the key, or the path |
 | `Notification` | `ui.notify`, `ui.badge` | the title, or `badge` |
+| `OpenLink` | a link in text opening, on a click or its Open Link item | the URL |
+| `Window` | `ui.window`, which raises when refused: nothing opens | its `id` |
+| `Persist` | `ui.persist`; refused, it starts from what is saved, and its writes are held | the key |
 
 A refused `src` leaves the page where it was (blank, the first time), and a refused navigation is cancelled and reported. Redirects, links, forms, a page's script setting `location`, and history go through the platform's navigation policy, which WebKit, WebKitGTK and WebView2 ask before each. **What no platform shows it:** what a page loaded on its own fetches once it is there (scripts, pictures, `fetch`, WebSockets, workers), and in-page steps (`history.pushState`, and on some platforms a `#fragment`). To keep a preview off the network, refuse the page, or give it content that has nothing to reach.
 
-**Not asked of the guard:** clicking a link in text (`href`, or Open Link on its menu), which opens in the browser on the person's click; a page's `on_download`, whose `d:ask()` opens a save dialog of its own; `ui.persist`, which writes the script's own keys under the host's storage; `ui.window`; `ui.image` and `ui.svg` of a local file, which read it to draw it.
+A script in the app's VM shares the app's `ui.persist` keys, so a preview could overwrite what the app keeps: refuse `Persist` and it looks as the app does, starting from what is saved, while what it writes is held in memory. `host.keep_held_state()` saves those values when the person keeps what they previewed; `host.drop_held_state()`, or quitting, lets them go. **A refused `Persist` still reads:** a preview sees every saved value by its key, and a remote picture's URL, if `Picture` is allowed, can carry what it reads off the machine. Keep secrets out of `ui.persist`, or refuse `Picture`, where that matters. `OpenLink` is asked of any link in the host's view, a plugin's too, if the host had a guard as its view was made; one set later isn't asked for links.
+
+**Not asked of the guard:** `ui.state`, which a preview in the app's VM shares with the app, in memory; a web view's `:run_js` and `:open_devtools`, which reach only a page already allowed, though its script can then fetch; `ui.image` and `ui.svg` of a local file, which read it to draw it. A script can't read those pixels back (a bitmap says only its size, and `:snapshot` gives only a `src`), but `ui.image_size` and `on_load` tell any picture's size, and so whether it exists, and it shows on screen.
 
 **Where a plugin can put something, and what it can read there**, is `host.elements(&ui, &handle)`: the app's named elements (ids, classes, hooks) grouped by the elements that `provide` context, the app's root outermost. Each group gives a selector that reaches it (its id, or its classes inside the nearest element with one: `#sidebar >> .session-row`), the context names it provides and those it inherits, and its named elements down to the next group. Rows a list repeats are one group with a count; a private element is listed with nothing inside it; names the source declares that aren't showing (a page not open) are listed `mounted: false`. `zgx inspect elements` (MCP `zgx_elements`) gives the same, a line each and then as JSON. The mounted tree is kept only while plugins are loaded; without, it lists the source's names (`live: false`).
 

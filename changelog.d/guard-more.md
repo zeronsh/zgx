@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **`ScriptHost::guard` is asked of links, pictures, windows, kept values and a download's dialog** (zgx-script, zgx): new `GuardKind`s `OpenLink` (a link in text opening, on a click or its Open Link item, through zgx's new `platform::LinkGuard` service), `Picture` (a remote picture, apart from `Fetch`), `Window` (`ui.window`: refused, it raises and nothing opens) and `Persist` (`ui.persist`: refused, it starts from what is saved and its writes are held in memory, so a preview in the app's VM looks as the app does and overwrites nothing), and a download's `d:ask()` under `Dialog`. `ScriptHost::keep_held_state` saves what was held, when the person keeps what they previewed; `ScriptHost::drop_held_state` or quitting lets it go. A refused `ui.fetch` rejects its promise rather than raising, so a top level isn't failed and what handles a failure says so.

@@ -146,6 +146,18 @@ impl Persist {
         entry.signal.clone()
     }
 
+    /// What is kept for `script`'s `key` now, without holding it: the value
+    /// a run holds, else what its file says.
+    pub fn saved(&self, script: &str, key: &str) -> Option<Value> {
+        if let Some(held) = self.get(script, key) {
+            return Some(held.with_untracked(Clone::clone));
+        }
+        let dir = self.dir.borrow().clone()?;
+        let path = dir
+            .join(file_name(script))
+            .join(format!("{}.json", file_name(key)));
+        load(&path, key, &self.warnings)
+    }
     /// `script`'s saved state for `key`, if a run asked for it (templates
     /// such as `"{count}"` find it by name).
     /// Every value held, by key (scripts' keys, without their script), in
