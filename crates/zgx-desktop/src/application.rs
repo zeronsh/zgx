@@ -2675,6 +2675,31 @@ impl Host {
                         let stats = stats?;
                         first_mark(&FIRST_RENDER, "first frame rendered");
                         self.native.render(&scene, damage)?;
+                        if let Some(dir) = std::env::var_os("ZGX_FRAME_DUMP") {
+                            use std::sync::atomic::{AtomicU64, Ordering};
+                            static N: AtomicU64 = AtomicU64::new(0);
+                            let n = N.fetch_add(1, Ordering::Relaxed);
+                            let limit = std::env::var("ZGX_FRAME_DUMP_MAX")
+                                .ok()
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(1500);
+                            if n < limit
+                                && std::path::Path::new(&dir).join("on").exists()
+                                && let Ok(pixels) = renderer.readback()
+                            {
+                                let width = size.width as usize;
+                                let height = pixels.len() / 4 / width.max(1);
+                                let ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map_or(0, |t| t.as_millis());
+                                let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+                                ppm.extend(pixels.as_chunks::<4>().0.iter().flat_map(|p| &p[..3]));
+                                let _ = std::fs::write(
+                                    std::path::Path::new(&dir).join(format!("{n:05}-{ms}.ppm")),
+                                    ppm,
+                                );
+                            }
+                        }
                         if let Some(frame) = &mut self.damage_check {
                             *frame += 1;
                             check_damage(
