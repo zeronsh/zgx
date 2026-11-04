@@ -108,6 +108,17 @@ pub struct WindowOptions {
     /// drawn as it shows. X11 keeps no picture of an unmapped window: there
     /// its background shows from its mapping to its first frame.
     pub visible: bool,
+    /// How tall `Titlebar::Inset`'s caption buttons are on Windows, and its
+    /// caption strip (`WindowInfo::titlebar_area`), in the content's points,
+    /// so they span a title bar of this height at any zoom: drawn, hit-tested
+    /// and reported alike. `None` (the default) is Windows' 32 points of the
+    /// display, whatever the zoom. Other platforms place their own.
+    pub caption_height: Option<f64>,
+}
+/// A window's smallest and largest sizes are the same.
+#[cfg(any(windows, test))]
+fn fixed_size(options: &WindowOptions) -> bool {
+    options.min_size.is_some() && options.min_size == options.max_size
 }
 impl WindowOptions {
     /// Whether the window is transparent where zgx paints nothing.
@@ -140,6 +151,7 @@ impl Default for WindowOptions {
             shadow: true,
             covers_display: false,
             visible: true,
+            caption_height: None,
         }
     }
 }
@@ -3499,8 +3511,12 @@ impl Host {
         );
         // Left maximized, it opens so (`frame_autosave`).
         self.state.maximized |= placed.maximized;
-        let radius =
-            crate::window_chrome::apply(&window, self.options.titlebar, self.options.glass);
+        let radius = crate::window_chrome::apply(
+            &window,
+            self.options.titlebar,
+            self.options.glass,
+            self.options.caption_height,
+        );
         // Opened zoomed: its buttons where the zoomed title bar has them.
         let zoom = self.context.ui.zoom();
         if zoom != 1. {
@@ -3559,6 +3575,9 @@ impl Host {
                 crate::window_chrome::CaptionHost::new(&window, &self.context.ui, move || {
                     let _ = proxy.send_event(Event::Wake(token));
                 });
+            if let Some(caption) = &self.caption {
+                caption.set_fixed_size(fixed_size(&self.options));
+            }
         }
         #[cfg(target_os = "linux")]
         {
@@ -3830,6 +3849,20 @@ impl Host {
         self.draw_hidden = false;
         drawn
     }
+    /// Whether the size limits now make the window one of fixed size: its
+    /// caption shows no Maximize and answers no resize bands.
+    #[cfg(windows)]
+    fn size_limits_changed(&mut self) {
+        if let Some(caption) = &self.caption {
+            caption.set_fixed_size(fixed_size(&self.options));
+        }
+        if let Some(window) = &self.window {
+            self.context
+                .window_info
+                .refresh(window, self.options.titlebar);
+            window.request_redraw();
+        }
+    }
     fn command(&mut self, command: WindowCommand) {
         self.state.apply(&mut self.options, &command);
         if matches!(command, WindowCommand::Title(_)) {
@@ -3890,6 +3923,8 @@ impl Host {
                 if let Some(appearance) = theme.or_else(|| window.theme().map(appearance_of)) {
                     self.context.ui.theme().set_system_appearance(appearance);
                 }
+                // What is drawn for the window's own (Windows' caption buttons).
+                window.request_redraw();
             }
             WindowCommand::Decorations(value) => window.set_decorations(value),
             WindowCommand::PointerPassthrough(value) => {
@@ -3898,10 +3933,14 @@ impl Host {
             WindowCommand::Level(level) => window.set_window_level(level.winit()),
             WindowCommand::Shadow(value) => crate::window_info::set_shadow(window, value),
             WindowCommand::MaxSize(value) => {
-                window.set_max_inner_size(value.map(|(w, h)| LogicalSize::new(w, h)))
+                window.set_max_inner_size(value.map(|(w, h)| LogicalSize::new(w, h)));
+                #[cfg(windows)]
+                self.size_limits_changed();
             }
             WindowCommand::MinSize(value) => {
-                window.set_min_inner_size(value.map(|(w, h)| LogicalSize::new(w, h)))
+                window.set_min_inner_size(value.map(|(w, h)| LogicalSize::new(w, h)));
+                #[cfg(windows)]
+                self.size_limits_changed();
             }
             WindowCommand::Drag => {
                 #[cfg(target_os = "macos")]
@@ -8077,6 +8116,25 @@ impl WindowCursor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_same_smallest_and_largest_size_is_a_fixed_size() {
+        let options = |min, max| super::WindowOptions {
+            min_size: min,
+            max_size: max,
+            ..Default::default()
+        };
+        assert!(!super::fixed_size(&options(None, None)));
+        assert!(!super::fixed_size(&options(Some((400., 300.)), None)));
+        assert!(!super::fixed_size(&options(
+            Some((400., 300.)),
+            Some((800., 600.))
+        )));
+        assert!(super::fixed_size(&options(
+            Some((400., 300.)),
+            Some((400., 300.))
+        )));
+    }
+
     /// A turn's pointer moves come as one, its last (Linux, where every
     /// motion a mouse reports arrives, up to 1000 a second): a burst of a
     /// thousand is handled once, at the last place.

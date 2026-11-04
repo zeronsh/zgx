@@ -17,7 +17,9 @@ pub enum Titlebar {
     /// Electron's `hiddenInset`; a zoomed window's strip is 40 of its zoomed
     /// points, the traffic lights centred in it (`zoom_buttons`). Mark the strip `View::window_drag` so it
     /// moves the window. On Windows, zgx draws Windows 11's caption buttons
-    /// over the content's top right (46 by 32 points each) and Windows takes
+    /// over the content's top right (46 by 32 points of the display each,
+    /// whatever the window's zoom, or as tall as `WindowOptions::caption_height`;
+    /// a window the person can't resize has no Maximize) and Windows takes
     /// them for its own: their tooltips, and snap layouts on maximize. On
     /// Linux the window is undecorated, as a GTK header bar's, and zgx
     /// draws libadwaita's window buttons over the strip, in the order the
@@ -125,18 +127,20 @@ pub(crate) fn apply(
     window: &winit::window::Window,
     titlebar: Titlebar,
     glass: Option<Glass>,
+    caption_height: Option<f64>,
 ) -> f64 {
     #[cfg(target_os = "macos")]
     {
+        let _ = caption_height;
         mac::apply(window, titlebar, glass)
     }
     #[cfg(windows)]
     {
-        win::apply(window, titlebar, glass)
+        win::apply(window, titlebar, glass, caption_height)
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
-        let _ = (window, titlebar, glass);
+        let _ = (window, titlebar, glass, caption_height);
         0.
     }
 }
@@ -187,7 +191,8 @@ pub(crate) fn titlebar_area(
     let size = window.inner_size().to_logical::<f32>(window.scale_factor());
     #[cfg(windows)]
     {
-        win::titlebar_area(size.width, titlebar)
+        let _ = size;
+        win::titlebar_area(window, titlebar)
     }
     #[cfg(target_os = "linux")]
     {
@@ -219,7 +224,9 @@ mod win {
     //! (`WM_NCHITTEST`), so it shows the maximize button's snap layouts and
     //! the buttons' tooltips. Windows' own handling of a press on them draws
     //! classic buttons into the window, so the subclass handles them itself.
+    //! Where they are and what shows them is `crate::windows_caption`'s.
     use super::{Glass, GlassMaterial, Titlebar};
+    use crate::windows_caption::{CaptionButton, CaptionLook, Geometry, Hit};
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
@@ -255,35 +262,40 @@ mod win {
         raw_window_handle::{HasWindowHandle, RawWindowHandle},
         window::Window,
     };
-    use zgx::{compose::prelude::*, scene::Color, style::Styled, widgets::Ui};
+    use zgx::widgets::Ui;
 
-    /// Windows 11's caption buttons, in logical pixels.
-    const BUTTON_WIDTH: f64 = 46.;
-    const BUTTON_HEIGHT: f64 = 32.;
-    /// Resize bands inside a frameless window's edges, in logical pixels:
-    /// it has no frame outside them to take the pointer.
-    const RESIZE_BAND: f64 = 5.;
     /// Windows 11's window corner radius, in logical pixels.
     const CORNER_RADIUS: f64 = 8.;
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) enum CaptionButton {
-        Minimize,
-        Maximize,
-        Close,
-    }
-    impl CaptionButton {
-        fn hit(self) -> u32 {
-            match self {
-                Self::Minimize => HTMINBUTTON,
-                Self::Maximize => HTMAXBUTTON,
-                Self::Close => HTCLOSE,
-            }
+    /// What `WM_NCHITTEST` answers for `button`, as Windows' own buttons do.
+    fn button_hit(button: CaptionButton) -> u32 {
+        match button {
+            CaptionButton::Minimize => HTMINBUTTON,
+            CaptionButton::Maximize => HTMAXBUTTON,
+            CaptionButton::Close => HTCLOSE,
         }
-        fn from_hit(hit: usize) -> Option<Self> {
-            [Self::Minimize, Self::Maximize, Self::Close]
-                .into_iter()
-                .find(|button| button.hit() as usize == hit)
+    }
+    fn button_of(hit: usize) -> Option<CaptionButton> {
+        [
+            CaptionButton::Minimize,
+            CaptionButton::Maximize,
+            CaptionButton::Close,
+        ]
+        .into_iter()
+        .find(|button| button_hit(*button) as usize == hit)
+    }
+    /// What `WM_NCHITTEST` answers for `hit`.
+    fn hit_code(hit: Hit) -> u32 {
+        match hit {
+            Hit::Button(button) => button_hit(button),
+            Hit::Left => HTLEFT,
+            Hit::Right => HTRIGHT,
+            Hit::Top => HTTOP,
+            Hit::Bottom => HTBOTTOM,
+            Hit::TopLeft => HTTOPLEFT,
+            Hit::TopRight => HTTOPRIGHT,
+            Hit::BottomLeft => HTBOTTOMLEFT,
+            Hit::BottomRight => HTBOTTOMRIGHT,
         }
     }
 
@@ -297,6 +309,16 @@ mod win {
         rtl: bool,
         /// The buttons show: not in fullscreen, where a window has none.
         shown: Cell<bool>,
+        /// `WindowOptions::caption_height`.
+        height: Option<f64>,
+        /// The window's zoom, and whether the person can resize it, as of
+        /// its last frame: what the geometry hit-tests by.
+        zoom: Cell<f64>,
+        resizable: Cell<bool>,
+        /// Its smallest and largest sizes are the same: a window of fixed
+        /// size, though window managers can still move it (`CaptionHost::
+        /// set_fixed_size`).
+        fixed_size: Cell<bool>,
         /// The system's settings or colours changed (high contrast, the
         /// accent, animations) since the host last read them.
         settings_changed: Cell<bool>,
@@ -307,6 +329,17 @@ mod win {
         wake: RefCell<Option<Box<dyn Fn()>>>,
     }
     impl Caption {
+        /// Where its buttons are, at display `scale`: the same for what
+        /// draws them, hit-tests them and reports them.
+        fn geometry(&self, scale: f64) -> Geometry {
+            Geometry::new(
+                scale,
+                self.zoom.get(),
+                self.height,
+                self.resizable.get() && !self.fixed_size.get(),
+                self.rtl,
+            )
+        }
         fn set(&self, hovered: Option<CaptionButton>, pressed: Option<CaptionButton>) {
             let hover_changed = self.hovered.replace(hovered) != hovered;
             let press_changed = self.pressed.replace(pressed) != pressed;
@@ -530,36 +563,24 @@ mod win {
         }
     }
 
-    /// The caption strip of a frameless window `width` points wide, and the
-    /// caption buttons `Inset` draws at its right, or its left where windows
-    /// run right to left (none for `Hidden`).
+    /// The caption strip of a frameless window, and the caption buttons
+    /// `Inset` draws at its right, or its left where windows run right to
+    /// left (none for `Hidden`), in points of the display.
     pub(super) fn titlebar_area(
-        width: f32,
+        window: &Window,
         titlebar: Titlebar,
     ) -> (Option<zgx::scene::Rect>, Option<zgx::scene::Rect>) {
-        caption_strip(width, titlebar, rtl())
-    }
-    fn caption_strip(
-        width: f32,
-        titlebar: Titlebar,
-        rtl: bool,
-    ) -> (Option<zgx::scene::Rect>, Option<zgx::scene::Rect>) {
-        use zgx::scene::Rect;
-        let height = BUTTON_HEIGHT as f32;
-        if titlebar != Titlebar::Inset {
-            return (Some(Rect::new(0., 0., width, height)), None);
-        }
-        let buttons = (3. * BUTTON_WIDTH as f32).min(width);
-        if rtl {
-            return (
-                Some(Rect::new(buttons, 0., width - buttons, height)),
-                Some(Rect::new(0., 0., buttons, height)),
-            );
-        }
-        (
-            Some(Rect::new(0., 0., width - buttons, height)),
-            Some(Rect::new(width - buttons, 0., buttons, height)),
-        )
+        let caption = hwnd(window).and_then(|hwnd| caption_of(hwnd.0 as usize));
+        let geometry = Geometry::new(
+            window.scale_factor(),
+            crate::popup_window::zoom_of(window.id()),
+            caption.as_ref().and_then(|caption| caption.height),
+            window.is_resizable() && !caption.is_some_and(|caption| caption.fixed_size.get()),
+            rtl(),
+        );
+        let width = window.inner_size().width as i32;
+        let (area, controls) = geometry.strip(width, titlebar == Titlebar::Inset);
+        (Some(area), controls)
     }
 
     /// Fit a new window to its monitor's work area (the screen less the
@@ -717,7 +738,12 @@ mod win {
         }
     }
 
-    pub(super) fn apply(window: &Window, titlebar: Titlebar, glass: Option<Glass>) -> f64 {
+    pub(super) fn apply(
+        window: &Window,
+        titlebar: Titlebar,
+        glass: Option<Glass>,
+        caption_height: Option<f64>,
+    ) -> f64 {
         let Some(hwnd) = hwnd(window) else {
             return 0.;
         };
@@ -751,6 +777,10 @@ mod win {
             buttons: titlebar == Titlebar::Inset,
             rtl: rtl(),
             shown: Cell::new(true),
+            height: caption_height,
+            zoom: Cell::new(crate::popup_window::zoom_of(window.id())),
+            resizable: Cell::new(window.is_resizable()),
+            fixed_size: Cell::new(false),
             settings_changed: Cell::new(false),
             hovered: Cell::new(None),
             pressed: Cell::new(None),
@@ -781,6 +811,17 @@ mod win {
         static CAPTIONS: RefCell<Vec<(usize, Rc<Caption>)>> = const { RefCell::new(Vec::new()) };
     }
 
+    /// The caption of the window at `hwnd`, if `apply` subclassed it.
+    fn caption_of(hwnd: usize) -> Option<Rc<Caption>> {
+        CAPTIONS.with(|captions| {
+            captions
+                .borrow()
+                .iter()
+                .find(|(window, _)| *window == hwnd)
+                .map(|(_, caption)| caption.clone())
+        })
+    }
+
     fn scale(hwnd: HWND) -> f64 {
         // SAFETY: reads our own window's DPI.
         f64::from(unsafe { GetDpiForWindow(hwnd) }.max(96)) / 96.
@@ -801,65 +842,20 @@ mod win {
         }
         // SAFETY: reads our own window's state.
         let maximized = unsafe { IsZoomed(hwnd) }.as_bool();
-        hit(
-            (point.x, point.y),
-            (client.right, client.bottom),
-            scale(hwnd),
-            maximized,
-            caption.buttons && caption.shown.get(),
-            caption.rtl,
-        )
+        caption
+            .geometry(scale(hwnd))
+            .hit(
+                (point.x, point.y),
+                (client.right, client.bottom),
+                maximized,
+                caption.buttons && caption.shown.get(),
+            )
+            .map(hit_code)
     }
     /// Whether windows run right to left (the user's language,
     /// `ZGX_DIRECTION`), as their title bars then do.
     fn rtl() -> bool {
         crate::system_colors::locale_direction() == zgx::scene::Direction::Rtl
-    }
-
-    /// What client point (`x`, `y`) of a frameless window `width` by
-    /// `height` physical pixels is at `scale`, if not its content: a resize
-    /// band or one of its caption buttons (`buttons`), at its top right, or
-    /// top left where the window runs right to left (`rtl`), as Windows lays
-    /// out a mirrored (`WS_EX_LAYOUTRTL`) window's.
-    fn hit(
-        (x, y): (i32, i32),
-        (width, height): (i32, i32),
-        scale: f64,
-        maximized: bool,
-        buttons: bool,
-        rtl: bool,
-    ) -> Option<u32> {
-        let band = if maximized {
-            0
-        } else {
-            (RESIZE_BAND * scale).round() as i32
-        };
-        let (left, right) = (x < band, x >= width - band);
-        let (top, bottom) = (y < band, y >= height - band);
-        // The caption buttons keep all but the window's outermost pixels.
-        if buttons && y >= band.min(1) && f64::from(y) < BUTTON_HEIGHT * scale {
-            let button = (BUTTON_WIDTH * scale).round() as i32;
-            // Close nearest the edge they sit at.
-            let from_edge = if rtl { x } else { width - 1 - x };
-            if (band.min(1)..3 * button).contains(&from_edge) {
-                return Some(match from_edge / button {
-                    0 => HTCLOSE,
-                    1 => HTMAXBUTTON,
-                    _ => HTMINBUTTON,
-                });
-            }
-        }
-        Some(match (top, bottom, left, right) {
-            (true, _, true, _) => HTTOPLEFT,
-            (true, _, _, true) => HTTOPRIGHT,
-            (_, true, true, _) => HTBOTTOMLEFT,
-            (_, true, _, true) => HTBOTTOMRIGHT,
-            (true, ..) => HTTOP,
-            (_, true, ..) => HTBOTTOM,
-            (.., true, _) => HTLEFT,
-            (.., true) => HTRIGHT,
-            _ => return None,
-        })
     }
 
     /// # Safety
@@ -911,7 +907,7 @@ mod win {
                     // SAFETY: tracks our own window.
                     let _ = unsafe { TrackMouseEvent(&mut track) };
                 }
-                let hovered = CaptionButton::from_hit(wparam.0);
+                let hovered = button_of(wparam.0);
                 let pressed = caption.pressed.get().filter(|_| hovered.is_some());
                 caption.set(hovered, pressed);
             }
@@ -921,13 +917,13 @@ mod win {
             }
             WM_MOUSEMOVE => caption.set(None, None),
             WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => {
-                if let Some(button) = CaptionButton::from_hit(wparam.0) {
+                if let Some(button) = button_of(wparam.0) {
                     caption.set(Some(button), Some(button));
                     return LRESULT(0);
                 }
             }
             WM_NCLBUTTONUP => {
-                if let Some(button) = CaptionButton::from_hit(wparam.0) {
+                if let Some(button) = button_of(wparam.0) {
                     let pressed = caption.pressed.get() == Some(button);
                     caption.set(Some(button), None);
                     if pressed {
@@ -982,12 +978,7 @@ mod win {
     pub(crate) struct CaptionHost {
         caption: Rc<Caption>,
         window: std::sync::Weak<Window>,
-        hovered: zgx::reactive::Signal<Option<CaptionButton>>,
-        pressed: zgx::reactive::Signal<Option<CaptionButton>>,
-        maximized: zgx::reactive::Signal<bool>,
-        active: zgx::reactive::Signal<bool>,
-        dark: zgx::reactive::Signal<bool>,
-        fullscreen: zgx::reactive::Signal<bool>,
+        look: CaptionLook,
         view: Option<zgx::compose::ViewHandle>,
     }
     impl CaptionHost {
@@ -997,26 +988,21 @@ mod win {
             ui: &Ui,
             wake: impl Fn() + 'static,
         ) -> Option<Self> {
-            let hwnd = hwnd(window)?.0 as usize;
-            let caption = CAPTIONS.with(|captions| {
-                captions
-                    .borrow()
-                    .iter()
-                    .find(|(window, _)| *window == hwnd)
-                    .map(|(_, caption)| caption.clone())
-            })?;
+            let caption = caption_of(hwnd(window)?.0 as usize)?;
             *caption.wake.borrow_mut() = Some(Box::new(wake));
+            let look = CaptionLook::new(ui, caption.geometry(window.scale_factor()));
             Some(Self {
                 caption,
                 window: Arc::downgrade(window),
-                hovered: ui.signal(None),
-                pressed: ui.signal(None),
-                maximized: ui.signal(false),
-                active: ui.signal(true),
-                dark: ui.signal(true),
-                fullscreen: ui.signal(false),
+                look,
                 view: None,
             })
+        }
+        /// The window's smallest and largest sizes are the same (or no
+        /// longer are): no resize bands and no Maximize, as for one that
+        /// isn't resizable.
+        pub(crate) fn set_fixed_size(&self, fixed: bool) {
+            self.caption.fixed_size.set(fixed);
         }
         /// Before a frame: bring the buttons up to date, and back if the
         /// content was rendered again over them.
@@ -1029,101 +1015,28 @@ mod win {
                 return;
             }
             if let Some(window) = self.window.upgrade() {
-                self.maximized.set(window.is_maximized());
-                self.active.set(window.has_focus());
-                self.dark
+                self.caption.zoom.set(ui.zoom());
+                self.caption.resizable.set(window.is_resizable());
+                let geometry = self.caption.geometry(window.scale_factor());
+                if self.look.geometry.with_untracked(|old| *old != geometry) {
+                    self.look.geometry.set(geometry);
+                }
+                self.look.maximized.set(window.is_maximized());
+                self.look.active.set(window.has_focus());
+                // The window's light or dark, what its backdrop shows, which
+                // an app may have asked over the system's.
+                self.look
+                    .dark
                     .set(window.theme() != Some(winit::window::Theme::Light));
                 let fullscreen = window.fullscreen().is_some();
-                self.fullscreen.set(fullscreen);
+                self.look.fullscreen.set(fullscreen);
                 self.caption.shown.set(!fullscreen);
             }
-            self.hovered.set(self.caption.hovered.get());
-            self.pressed.set(self.caption.pressed.get());
+            self.look.hovered.set(self.caption.hovered.get());
+            self.look.pressed.set(self.caption.pressed.get());
             if !self.view.as_ref().is_some_and(|view| view.is_mounted()) {
-                self.view = Some(ui.mount(self.buttons()));
+                self.view = Some(ui.mount(self.look.view(self.caption.rtl)));
             }
-        }
-        fn buttons(&self) -> View {
-            // Windows 11's icon font; Windows 10's has the same glyphs.
-            let font = if std::path::Path::new(r"C:\Windows\Fonts\SegoeIcons.ttf").exists() {
-                "Segoe Fluent Icons"
-            } else {
-                "Segoe MDL2 Assets"
-            };
-            let button = |kind: CaptionButton| {
-                let (hovered, pressed, dark) = (
-                    self.hovered.clone(),
-                    self.pressed.clone(),
-                    self.dark.clone(),
-                );
-                let (glyph_hovered, glyph_dark, active, maximized) = (
-                    self.hovered.clone(),
-                    self.dark.clone(),
-                    self.active.clone(),
-                    self.maximized.clone(),
-                );
-                div()
-                    .size(BUTTON_WIDTH as f32, BUTTON_HEIGHT as f32)
-                    .items_center()
-                    .justify_center()
-                    .reactive_style(move || {
-                        let hover = hovered.get() == Some(kind);
-                        let down = hover && pressed.get() == Some(kind);
-                        // WinUI's caption button brushes.
-                        let fill = match (kind, hover, down, dark.get()) {
-                            (_, false, ..) => Color(0, 0, 0, 0),
-                            (CaptionButton::Close, _, false, _) => Color(196, 43, 28, 255),
-                            (CaptionButton::Close, _, true, _) => Color(196, 43, 28, 230),
-                            (_, _, false, true) => Color(255, 255, 255, 15),
-                            (_, _, true, true) => Color(255, 255, 255, 10),
-                            (_, _, false, false) => Color(0, 0, 0, 9),
-                            (_, _, true, false) => Color(0, 0, 0, 6),
-                        };
-                        Styles::new().bg(fill)
-                    })
-                    .child(
-                        text_signal(move || {
-                            match kind {
-                                CaptionButton::Minimize => "\u{e921}",
-                                CaptionButton::Maximize if maximized.get() => "\u{e923}",
-                                CaptionButton::Maximize => "\u{e922}",
-                                CaptionButton::Close => "\u{e8bb}",
-                            }
-                            .to_owned()
-                        })
-                        .font_family(font)
-                        .text_size(10.)
-                        .reactive_style(move || {
-                            let red =
-                                kind == CaptionButton::Close && glyph_hovered.get() == Some(kind);
-                            let color = match (red, glyph_dark.get(), active.get()) {
-                                (true, ..) => Color(255, 255, 255, 255),
-                                (_, true, true) => Color(255, 255, 255, 255),
-                                (_, true, false) => Color(255, 255, 255, 93),
-                                (_, false, true) => Color(0, 0, 0, 228),
-                                (_, false, false) => Color(0, 0, 0, 92),
-                            };
-                            Styles::new().text_color(color)
-                        }),
-                    )
-            };
-            let fullscreen = self.fullscreen.clone();
-            // At the top right, or the top left right to left: there the
-            // row runs from the right, Close outermost still.
-            let strip = row().absolute().top(0.);
-            let strip = if self.caption.rtl {
-                strip.left(0.)
-            } else {
-                strip.right(0.)
-            };
-            strip
-                .pointer_events(false)
-                .reactive_style(move || {
-                    Styles::new().opacity(if fullscreen.get() { 0. } else { 1. })
-                })
-                .child(button(CaptionButton::Minimize))
-                .child(button(CaptionButton::Maximize))
-                .child(button(CaptionButton::Close))
         }
     }
 
@@ -1202,86 +1115,58 @@ mod win {
             }
         }
 
+        /// The system's settings changing reaches the host (`Caption::
+        /// settings_changed`, then `system_colors::sync`): how Windows' colour
+        /// settings, transparency effects among them, are read again.
         #[test]
-        fn a_frameless_windows_edges_resize_and_its_corner_buttons_answer() {
-            let size = (800, 600);
-            let at = |x, y| hit((x, y), size, 1., false, true, false);
-            assert_eq!(at(400, 300), None, "content");
-            assert_eq!(at(0, 300), Some(HTLEFT));
-            assert_eq!(at(799, 300), Some(HTRIGHT));
-            assert_eq!(at(400, 599), Some(HTBOTTOM));
-            assert_eq!(at(0, 0), Some(HTTOPLEFT));
-            assert_eq!(at(799, 599), Some(HTBOTTOMRIGHT));
-            // The buttons, 46 wide from the right, 32 tall; the outermost
-            // pixel stays the resize band.
-            assert_eq!(at(790, 10), Some(HTCLOSE));
-            assert_eq!(at(799, 10), Some(HTRIGHT));
-            assert_eq!(at(799, 2), Some(HTTOPRIGHT));
-            assert_eq!(at(740, 10), Some(HTMAXBUTTON));
-            assert_eq!(at(700, 10), Some(HTMINBUTTON));
-            assert_eq!(at(640, 10), None, "left of the buttons");
-            assert_eq!(at(790, 40), None, "below the buttons");
-            // Without buttons (`Titlebar::Hidden`) the corner resizes.
-            assert_eq!(hit((790, 2), size, 1., false, false, false), Some(HTTOP));
-        }
-
-        #[test]
-        fn bands_and_buttons_scale_and_a_maximized_window_has_no_bands() {
-            let size = (1600, 1200);
-            // At 200% the band is 10 pixels and the buttons 92 by 64.
-            assert_eq!(hit((9, 600), size, 2., false, false, false), Some(HTLEFT));
-            assert_eq!(hit((10, 600), size, 2., false, false, false), None);
-            assert_eq!(
-                hit((1599 - 91, 60), size, 2., false, true, false),
-                Some(HTCLOSE)
-            );
-            assert_eq!(
-                hit((1599 - 92, 60), size, 2., false, true, false),
-                Some(HTMAXBUTTON)
-            );
-            // Maximized, the edges are the screen's: nothing resizes, and the
-            // buttons reach the very corner.
-            assert_eq!(hit((0, 600), size, 1., true, true, false), None);
-            assert_eq!(hit((1599, 0), size, 1., true, true, false), Some(HTCLOSE));
-        }
-
-        #[test]
-        fn the_titlebar_area_is_the_caption_strip_less_the_buttons() {
-            use zgx::scene::Rect;
-            assert_eq!(
-                caption_strip(800., Titlebar::Inset, false),
-                (
-                    Some(Rect::new(0., 0., 662., 32.)),
-                    Some(Rect::new(662., 0., 138., 32.))
+        fn a_settings_change_wakes_the_host_to_read_them_again() {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP,
+            };
+            let woken = Rc::new(Cell::new(0));
+            let wake = woken.clone();
+            let caption = Rc::new(Caption {
+                frameless: false,
+                buttons: false,
+                rtl: false,
+                shown: Cell::new(true),
+                height: None,
+                zoom: Cell::new(1.),
+                resizable: Cell::new(true),
+                fixed_size: Cell::new(false),
+                settings_changed: Cell::new(false),
+                hovered: Cell::new(None),
+                pressed: Cell::new(None),
+                tracking: Cell::new(false),
+                wake: RefCell::new(Some(Box::new(move || wake.set(wake.get() + 1)))),
+            });
+            // SAFETY: a plain window of a system class, made and destroyed
+            // here, with the subclass `apply` installs and its reference,
+            // which it takes back on WM_NCDESTROY.
+            unsafe {
+                let hwnd = CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    windows::core::w!("STATIC"),
+                    None,
+                    WS_POPUP,
+                    0,
+                    0,
+                    10,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
                 )
-            );
-            // `Hidden` has no buttons: the whole strip is the app's.
-            assert_eq!(
-                caption_strip(800., Titlebar::Hidden, false),
-                (Some(Rect::new(0., 0., 800., 32.)), None)
-            );
-        }
-
-        #[test]
-        fn right_to_left_the_buttons_and_the_titlebar_area_mirror() {
-            use zgx::scene::Rect;
-            // As Windows lays out a mirrored window's: the buttons at the
-            // top left, Close outermost.
-            let size = (800, 600);
-            let at = |x, y| hit((x, y), size, 1., false, true, true);
-            assert_eq!(at(10, 10), Some(HTCLOSE));
-            assert_eq!(at(60, 10), Some(HTMAXBUTTON));
-            assert_eq!(at(100, 10), Some(HTMINBUTTON));
-            assert_eq!(at(160, 10), None, "right of the buttons");
-            assert_eq!(at(798, 10), Some(HTRIGHT), "the right edge only resizes");
-            assert_eq!(at(0, 10), Some(HTLEFT), "the outermost pixel still resizes");
-            assert_eq!(
-                caption_strip(800., Titlebar::Inset, true),
-                (
-                    Some(Rect::new(138., 0., 662., 32.)),
-                    Some(Rect::new(0., 0., 138., 32.))
-                )
-            );
+                .unwrap();
+                let data = Rc::into_raw(caption.clone()) as usize;
+                assert!(SetWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID, data).as_bool());
+                SendMessageW(hwnd, WM_SETTINGCHANGE, None, None);
+                assert!(caption.settings_changed.get());
+                assert_eq!(woken.get(), 1);
+                let _ = DestroyWindow(hwnd);
+            }
+            assert_eq!(Rc::strong_count(&caption), 1, "given back with the window");
         }
 
         #[test]

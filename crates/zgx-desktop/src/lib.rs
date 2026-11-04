@@ -141,6 +141,8 @@ pub use window_info::{
     WindowInfo, WindowLevel,
 };
 mod native_host;
+#[cfg(any(windows, test))]
+mod windows_caption;
 #[cfg(target_os = "macos")]
 pub use native_host::{BackdropReport, NativeDiagnostics, NativeViewReport};
 pub use zgx::web_view::{WebProfile, WebView, WebViewEvent, WebViewOptions, WebViewState};
