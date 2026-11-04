@@ -470,6 +470,13 @@ behind one never activated; a popup must not take activation from its window,
 which keeps the keyboard. The undocumented `SetWindowCompositionAttribute`
 acrylic is not used.
 
+A popup's `backdrop_blur` blurs the app's own pixels: what its window last drew
+under the popup, copied into a texture of the popup's size while it shows
+(`GpuRenderer::set_backdrop`), and copied and drawn again when the window
+repaints under it. Where the popup reaches past its window, or over another
+popup, there is nothing of that window's to blur and what is behind it shows
+through its fill.
+
 No popup window exists before the pointer first reaches something that opens
 one, and a closed one is kept hidden for the next: an app that never opens a
 popup has none. `ZGX_POPUP_WINDOWS=0` keeps popups inside their window, as
@@ -1003,6 +1010,11 @@ The probes for the rest of Windows:
   switches the app mode both ways while a window runs (`primary_selection`,
   whose theme follows the system's): its title bar and content must follow
   within seconds. The user's own settings are restored after.
+- `windows_popup_glass_probe.py <zgx-run.exe>`: a popover's glass over hard
+  stripes, read from the popup's own capture: even and brighter than its fill
+  with `backdrop_blur`, only the fill without; and the CPU time of each with a
+  box moving under it. `crates/zgx-gpu/tests/popup_backdrop.rs` covers the crop, the scale,
+  past the window's edge and a new frame under it.
 - `windows_popup_smoke.py` (`popup_probe`): no popup window before the first
   popup; a menu opens past its window's bottom edge within milliseconds of
   the click and shows on screen; hovering and clicking, or pressing the

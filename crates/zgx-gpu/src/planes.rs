@@ -90,6 +90,99 @@ impl GpuRenderer {
         }
         self.set_plane_rect(rect);
     }
+    /// What this popup's backdrop filters blur: `window`'s last frame under
+    /// its box, or (`None`) its own target, which holds nothing of the app's.
+    /// A popup in a window of its own can't see the window under it; what
+    /// that window last drew can be copied, its renderer on this one's
+    /// context and at its scale. Taken now, before this renderer's next
+    /// frame: call it again when the window repaints under the popup. Past
+    /// the window's edge there is nothing to blur, and what's behind shows
+    /// through the popup's fill. (macOS's popups have AppKit's material; its
+    /// frames encoded with Metal directly don't read this.)
+    pub fn set_backdrop(&mut self, window: Option<&GpuRenderer>) {
+        let (Some(window), Some(rect)) = (window, self.plane_rect()) else {
+            self.backdrop = None;
+            return;
+        };
+        window.flush_pending();
+        let (width, height) = (self.width, self.height);
+        let fits = self
+            .backdrop
+            .as_ref()
+            .is_some_and(|(texture, _)| (texture.width(), texture.height()) == (width, height));
+        if !fits {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("popup backdrop"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: crate::FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            self.backdrop = Some((texture, view));
+        }
+        let (texture, view) = self.backdrop.as_ref().expect("made above");
+        // Whole pixels of the window, as `set_plane_rect` snapped its box.
+        let left = (rect.x * self.scale).round() as i64;
+        let top = (rect.y * self.scale).round() as i64;
+        let right = (left + i64::from(width)).min(i64::from(window.width));
+        let bottom = (top + i64::from(height)).min(i64::from(window.height));
+        let (from_x, from_y) = (left.max(0), top.max(0));
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        // Nothing where the window doesn't reach, as it last was or not.
+        drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("popup backdrop clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        }));
+        if right > from_x && bottom > from_y {
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &window.target,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: from_x as u32,
+                        y: from_y as u32,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: (from_x - left) as u32,
+                        y: (from_y - top) as u32,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: (right - from_x) as u32,
+                    height: (bottom - from_y) as u32,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        self.queue.submit([encoder.finish()]);
+    }
     /// The popup root this draws (`set_popup`).
     pub(crate) fn plane_popup(&self) -> Option<NodeId> {
         self.plane.as_ref().and_then(|state| state.popup)

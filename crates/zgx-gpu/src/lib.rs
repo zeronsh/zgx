@@ -3943,6 +3943,9 @@ pub struct GpuRenderer {
     /// points don't.
     #[cfg(target_os = "macos")]
     zoom: f64,
+    /// What a popup's backdrop filters blur in place of its own target, the
+    /// size of it (`set_backdrop`).
+    backdrop: Option<(wgpu::Texture, wgpu::TextureView)>,
     #[cfg(target_os = "macos")]
     native_surfaces: Option<native_surface::SurfaceCache>,
     /// The next present joins the Core Animation transaction that resized the layer.
@@ -4577,6 +4580,7 @@ impl GpuRenderer {
             views: None,
             #[cfg(target_os = "macos")]
             plane_wake: None,
+            backdrop: None,
             #[cfg(target_os = "macos")]
             zoom: 1.,
             #[cfg(target_os = "macos")]
@@ -11014,11 +11018,12 @@ impl GpuRenderer {
         // so a partly damaged filter matches a fresh frame. Copies land in
         // the first atlas with the averages and stay there.
         let copies = slots.iter().any(|slot| !slot.2);
+        let source = self.backdrop.as_ref().map_or(&self.view, |(_, view)| view);
         let passes = [
             (
                 "blur reduce",
                 &pipelines.reduce,
-                bind(&self.view, &views[1]),
+                bind(source, &views[1]),
                 &views[0],
                 false,
                 false,
@@ -13140,6 +13145,7 @@ impl GpuRenderer {
     /// its last frame; the next frame recreates whatever it uses. Call when a
     /// window has stopped presenting for a while.
     pub fn trim(&mut self) {
+        self.backdrop = None;
         present_log::log(|| {
             #[cfg(target_os = "macos")]
             let plane = self.layer_present.as_ref().map_or("none", |p| p.plane());
