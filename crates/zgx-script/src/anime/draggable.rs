@@ -345,7 +345,7 @@ impl Draggable {
     fn attach(self: &Rc<Self>, element: Rc<Element>) {
         let this = self.clone();
         let listener: crate::element::Listener = Rc::new(move |event| this.on_event(event));
-        element.listeners.borrow_mut().push(listener.clone());
+        element.listen(listener.clone());
         if self.cursor {
             element.set_style(Prop::Cursor, Lit::Str("grab".into()));
             self.engine.set_now(Vec::new());

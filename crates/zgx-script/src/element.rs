@@ -118,6 +118,10 @@ pub(crate) struct Element {
     scene: OnceCell<std::rc::Weak<RefCell<Scene>>>,
     /// Pointer and key listeners added after mount (`createDraggable`).
     pub listeners: RefCell<Vec<Listener>>,
+    /// Whether the node has the listener that runs `listeners`: from the
+    /// first, for a node takes the pointer once it listens, and `id` or
+    /// `on_mount` alone should not make it (`pointer_events = "none"`).
+    forwards: Cell<bool>,
     /// A scroll view's offset (points), for scroll observers.
     pub scroll: OnceCell<(Signal<f32>, bool)>,
     /// What the node's literals set: where an animation starts from before
@@ -159,6 +163,7 @@ impl Element {
             owners: RefCell::default(),
             scene: OnceCell::new(),
             listeners: RefCell::default(),
+            forwards: Cell::new(false),
             scroll: OnceCell::new(),
             base: Cell::new((None, None)),
             base_effects: Cell::new((1., 0.)),
@@ -428,6 +433,23 @@ impl Element {
             let _ = self.scene.set(Rc::downgrade(&scene));
         }
         let _ = self.handle.set(handle);
+    }
+    /// Adds a pointer and key listener to the mounted node.
+    pub fn listen(self: &Rc<Self>, listener: Listener) {
+        self.listeners.borrow_mut().push(listener);
+        let Some(handle) = self.handle.get() else {
+            return;
+        };
+        if self.forwards.replace(true) {
+            return;
+        }
+        let element = self.clone();
+        handle.on_event(move |event| {
+            let listeners = element.listeners.borrow().clone();
+            for listener in listeners {
+                listener(event);
+            }
+        });
     }
     /// It's leaving, gone from the data it showed: while its exit plays it
     /// takes no input (`NodeHandle::leave`), so a second click or a key acts

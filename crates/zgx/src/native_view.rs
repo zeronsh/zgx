@@ -1061,6 +1061,9 @@ impl PlaneSplit {
         }
         let root = scene.root();
         'hits: for hit in scene.hit_test_all(x, y) {
+            if input.boxless(scene, hit) {
+                continue;
+            }
             // Content the pointer passes through (`pointer_events = "none"`,
             // up to the first node with listeners) is not there for input,
             // even painted over the native view.

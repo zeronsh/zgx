@@ -4473,12 +4473,25 @@ impl Scene {
     }
     /// The cursor at `x`, `y`: a selectable text's, or the topmost node's.
     pub fn cursor_at(&self, x: f32, y: f32) -> Option<crate::cursor::Cursor> {
-        if self.cursor_styles == 0 && !self.selectable.any() {
+        if !self.has_cursors() {
             return None;
         }
         self.hit_test_all(x, y)
             .first()
-            .and_then(|id| self.selection_cursor(*id).or_else(|| self.cursor_for(*id)))
+            .and_then(|id| self.cursor_over(*id))
+    }
+    /// Whether any node says a cursor, or text is selectable here.
+    pub(crate) fn has_cursors(&self) -> bool {
+        self.cursor_styles != 0 || self.selectable.any()
+    }
+    /// The cursor over `id`, itself hit: selectable text's, or its own or
+    /// its nearest ancestor's.
+    pub(crate) fn cursor_over(&self, id: NodeId) -> Option<crate::cursor::Cursor> {
+        self.selection_cursor(id).or_else(|| self.cursor_for(id))
+    }
+    /// The cursor `id` itself says, not an ancestor's.
+    pub(crate) fn own_cursor(&self, id: NodeId) -> Option<crate::cursor::Cursor> {
+        self.node(id).cursor
     }
     /// `id`'s parent; `None` for the root.
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
