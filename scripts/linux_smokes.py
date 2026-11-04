@@ -71,6 +71,7 @@ SMOKES = [
     ("sealed-regions", "python3 scripts/decision_probe_smoke.py {bin}/decision_probe --sealed --output {out}", False),
     ("wayland-popups", "python3 scripts/wayland_popups_smoke.py {bin}/popup_probe --output {out}", False),
     ("popup-glass", "python3 scripts/popup_glass_smoke.py {bin}/popup_probe --output {out}", False),
+    ("linux-desktops", "python3 scripts/linux_desktops_smoke.py {bin} --output {out}", False),
     ("drag-preview", "python3 scripts/drag_preview_smoke.py {bin}/drag_drop --output {out}", False),
     ("drag-windows", "python3 scripts/drag_windows_smoke.py {bin} --output {out}", False),
     ("window-frames", "python3 scripts/window_frames_smoke.py {bin}/window_probe --output {out}", False),
