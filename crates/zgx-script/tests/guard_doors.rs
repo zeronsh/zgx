@@ -592,6 +592,38 @@ fn what_is_held_is_saved_when_the_person_keeps_it() {
 }
 
 #[test]
+fn what_is_held_of_a_key_with_no_file_yet_is_saved_when_kept() {
+    let kept = Kept::new("keep-new");
+    std::fs::remove_file(&kept.file).unwrap();
+    let mut h = kept.refusing();
+    assert_eq!(h.text("kept"), "initial");
+    h.click("set");
+    h.settle();
+    assert_eq!(h.host.keep_held_state(), 1);
+    h.host.save();
+    assert_eq!(kept.on_disk(), "\"overwritten\"");
+    drop(h);
+    // Next run, with no guard: the kept value.
+    let store = kept.dir.clone();
+    let mut h =
+        Harness::new(move |runtime| ScriptHost::inline(runtime, "app", PERSIST).storage(store));
+    assert_eq!(h.text("kept"), "overwritten");
+}
+
+#[test]
+fn a_held_value_with_no_file_never_changed_writes_none_when_kept() {
+    let kept = Kept::new("unchanged-new");
+    std::fs::remove_file(&kept.file).unwrap();
+    let h = kept.refusing();
+    assert_eq!(h.host.keep_held_state(), 0);
+    h.host.save();
+    assert!(
+        !kept.file.exists(),
+        "its initial stays the script's to change"
+    );
+}
+
+#[test]
 fn a_held_value_read_and_never_changed_saves_nothing_when_kept() {
     let kept = Kept::new("unchanged");
     let h = kept.refusing();
