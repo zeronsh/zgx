@@ -1,13 +1,16 @@
 //! A `Titlebar::Inset` window for `scripts/windows_caption_smoke.py`: its
-//! caption buttons at a zoom, in a light or dark window, over a plain
-//! background. Prints where `WindowInfo::controls` reports them, in the
+//! caption buttons at a zoom, in an app of zgx's light or dark theme, on the
+//! theme's background. Prints where `WindowInfo::controls` reports them, in the
 //! content's points, then stays open until `--seconds` pass or it is closed.
 //!
 //! `--theme light|dark`, `--zoom Z`, `--fixed` (not resizable),
 //! `--fixed-limits` (resizable, its smallest and largest sizes the same),
 //! `--caption-height H`, `--seconds S`.
 use std::time::Duration;
-use zgx::{compose::prelude::*, theme::Appearance};
+use zgx::{
+    compose::prelude::*,
+    theme::{Appearance, DARK, LIGHT, tok},
+};
 use zgx_desktop::{Application, Titlebar, WindowOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,8 +45,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 Appearance::Dark
             }));
-            let background = if light { 0xfafafaff } else { 0x202020ff };
-            cx.render(div().w_full().h_full().bg(rgba(background)));
+            // The buttons' ink is the app's theme's, whatever the system's.
+            cx.ui
+                .theme()
+                .set(if light { LIGHT } else { DARK })
+                .expect("a built-in theme");
+            cx.render(div().w_full().h_full().bg(tok::BACKGROUND));
             let controls = cx.window_info.controls.clone();
             let window = cx.window.clone();
             cx.tasks.spawn(async move {

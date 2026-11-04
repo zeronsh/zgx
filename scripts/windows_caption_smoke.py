@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """`Titlebar::Inset`'s caption buttons in a real window (`caption_probe`):
 what is drawn, what `WM_NCHITTEST` answers (what snap layouts read) and what
-`WindowInfo::controls` reports agree, at each zoom, in the window's own light
-or dark whatever the system's.
+`WindowInfo::controls` reports agree, at each zoom, in the app's theme's ink,
+light or dark whatever the system's.
 
     cargo build -p zgx-desktop --example caption_probe
     python scripts/windows_caption_smoke.py target/debug/examples/caption_probe.exe --output target/caption
@@ -90,13 +90,15 @@ def luminance(capture, x, y):
 
 def ink_box(capture, span, height, light):
     """The bounds of the glyph's ink inside a button: pixels well off the
-    window's background, the way the theme has them (dark on light)."""
+    theme's background, the way the theme has them (dark on light). zgx's
+    themes' text is about 100-140 on 246 light, 110-150 on 20 dark, resting or
+    in a window in the back."""
     left, right = span
     xs, ys = [], []
     for y in range(height):
         for x in range(left, right + 1):
             value = luminance(capture, x, y)
-            if (light and value < 170) or (not light and value > 110):
+            if (light and value < 170) or (not light and value > 70):
                 xs.append(x)
                 ys.append(y)
     return (min(xs), min(ys), max(xs), max(ys)) if xs else None

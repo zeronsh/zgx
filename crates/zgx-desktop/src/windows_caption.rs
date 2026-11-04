@@ -207,10 +207,13 @@ fn fill(kind: CaptionButton, hover: bool, down: bool) -> Themed<Color> {
 }
 /// The glyph's ink, from the app's theme as its title bar's other controls:
 /// secondary at rest, primary under the pointer, tertiary in a window in the
-/// back; white over Close's red (`red`).
-fn ink(red: bool, hover: bool, active: bool) -> Themed<Color> {
+/// back; white over Close's red (`red`). In a contrast theme `hover` is the
+/// opaque highlight, which its window text doesn't read on (white on Night
+/// sky's cyan): under the pointer then, the highlight's own text, `accent.text`.
+fn ink(red: bool, hover: bool, active: bool, high_contrast: bool) -> Themed<Color> {
     match (red, hover, active) {
         (true, ..) => Color(255, 255, 255, 255).into(),
+        (_, true, _) if high_contrast => tok::ACCENT_TEXT.into(),
         (_, true, _) => tok::TEXT_PRIMARY.into(),
         (_, _, true) => tok::TEXT_SECONDARY.into(),
         (_, _, false) => tok::TEXT_TERTIARY.into(),
@@ -226,6 +229,8 @@ pub(crate) struct CaptionLook {
     pub(crate) active: Signal<bool>,
     pub(crate) fullscreen: Signal<bool>,
     pub(crate) geometry: Signal<Geometry>,
+    /// A contrast theme is on (`SystemPreferences::increased_contrast`).
+    pub(crate) high_contrast: Signal<bool>,
 }
 impl CaptionLook {
     pub(crate) fn new(ui: &Ui, geometry: Geometry) -> Self {
@@ -236,12 +241,18 @@ impl CaptionLook {
             active: ui.signal(true),
             fullscreen: ui.signal(false),
             geometry: ui.signal(geometry),
+            high_contrast: ui.signal(false),
         }
     }
     /// The glyph's colour on `kind`'s button now.
     fn ink(&self, kind: CaptionButton) -> Themed<Color> {
         let hover = self.hovered.get() == Some(kind);
-        ink(kind == CaptionButton::Close && hover, hover, self.active.get())
+        ink(
+            kind == CaptionButton::Close && hover,
+            hover,
+            self.active.get(),
+            self.high_contrast.get(),
+        )
     }
     /// The wash under `kind`'s button now.
     fn fill(&self, kind: CaptionButton) -> Themed<Color> {
@@ -716,10 +727,32 @@ mod tests {
     /// Close's red and white glyph kept.
     #[test]
     fn the_ink_is_the_apps_text_and_washes() {
-        assert_eq!(ink(false, false, true), Themed::from(tok::TEXT_SECONDARY));
-        assert_eq!(ink(false, true, true), Themed::from(tok::TEXT_PRIMARY));
-        assert_eq!(ink(false, false, false), Themed::from(tok::TEXT_TERTIARY));
-        assert_eq!(ink(true, true, true), Themed::from(Color(255, 255, 255, 255)), "on red");
+        let ink_of = |red, hover, active| ink(red, hover, active, false);
+        assert_eq!(
+            ink_of(false, false, true),
+            Themed::from(tok::TEXT_SECONDARY)
+        );
+        assert_eq!(ink_of(false, true, true), Themed::from(tok::TEXT_PRIMARY));
+        assert_eq!(
+            ink_of(false, false, false),
+            Themed::from(tok::TEXT_TERTIARY)
+        );
+        assert_eq!(
+            ink_of(true, true, true),
+            Themed::from(Color(255, 255, 255, 255)),
+            "on red"
+        );
+        // A contrast theme's hover is its highlight: its own text on it, and
+        // Close keeps its red and white.
+        assert_eq!(ink(false, true, true, true), Themed::from(tok::ACCENT_TEXT));
+        assert_eq!(
+            ink(false, false, true, true),
+            Themed::from(tok::TEXT_SECONDARY)
+        );
+        assert_eq!(
+            ink(true, true, true, true),
+            Themed::from(Color(255, 255, 255, 255))
+        );
         assert_eq!(fill(Minimize, true, false), Themed::from(tok::HOVER));
         assert_eq!(fill(Maximize, true, true), Themed::from(tok::PRESSED));
         assert_eq!(fill(Close, true, false), Themed::from(CLOSE_RED));
@@ -733,5 +766,8 @@ mod tests {
         ui.prepare_frame();
         assert_eq!(look.ink(Minimize), Themed::from(tok::TEXT_PRIMARY));
         assert_eq!(look.fill(Minimize), Themed::from(tok::HOVER));
+        look.high_contrast.set(true);
+        ui.prepare_frame();
+        assert_eq!(look.ink(Minimize), Themed::from(tok::ACCENT_TEXT));
     }
 }
