@@ -411,8 +411,8 @@ pub(crate) fn fill(ui: &mut Ui, owner: NodeId, portal: &Portal, panel: NodeId) {
     ui.scene.borrow_mut().set_style(
         portal.position,
         Style {
-            width_percent: Some(100.),
-            height_percent: Some(100.),
+            width_percent: Some(1.),
+            height_percent: Some(1.),
             ..Default::default()
         },
     );
