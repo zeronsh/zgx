@@ -134,8 +134,7 @@ where
     // Measure node
     let measured_size = measure_function(
         match run_mode {
-            RunMode::ComputeSize => known_dimensions,
-            RunMode::PerformLayout => Size::NONE,
+            RunMode::ComputeSize | RunMode::PerformLayout => known_dimensions,
             RunMode::PerformHiddenLayout => unreachable!(),
         },
         available_space,
