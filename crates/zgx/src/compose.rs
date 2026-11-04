@@ -3056,230 +3056,207 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 Rc::new(move |y: f32| Some((y / row_height).round().max(0.) as usize)),
             );
             let mut handled_reveal = 0;
-            // Built twice, `ancestor` a constant in each: a list that scrolls itself
-            // runs none of the other's tests (`virtualize_in_ancestor`).
-            macro_rules! rows {
-                ($ancestor:literal) => {
-                    move || {
-                        let ancestor: bool = $ancestor;
-                        let length = count();
-                        let (width, mut height) = size.get();
-                        let model =
-                            crate::virtual_list::VirtualList::new(length, row_height, overscan);
-                        let requested = offset.get();
-                        // As a scroll view takes it: past the end (`math.huge`) is
-                        // the end; NaN, the top.
-                        let limit = (model.content_height() - height).max(0.0);
-                        let mut position = if requested.is_nan() {
-                            0.0
-                        } else {
-                            requested.clamp(0.0, limit)
-                        };
-                        // The part the view around it shows.
-                        let around = match ancestor {
-                            true => window
-                                .as_ref()
-                                .and_then(|window| Some((window, weak.upgrade()?))),
-                            false => None,
-                        };
-                        if let Some((window, ui)) = &around {
-                            (position, height) = window.window(ui, model.content_height());
+            ui.bind(root, move || {
+                let length = count();
+                let (width, mut height) = size.get();
+                let model = crate::virtual_list::VirtualList::new(length, row_height, overscan);
+                let requested = offset.get();
+                // As a scroll view takes it: past the end (`math.huge`) is
+                // the end; NaN, the top.
+                let limit = (model.content_height() - height).max(0.0);
+                let mut position = if requested.is_nan() {
+                    0.0
+                } else {
+                    requested.clamp(0.0, limit)
+                };
+                // The part the view around it shows.
+                if let Some(window) = &window
+                    && let Some(shown) = window.shown(&weak, model.content_height())
+                {
+                    (position, height) = shown;
+                }
+                let request = navigation
+                    .as_ref()
+                    .map(|navigation| navigation.request.get());
+                let target = request
+                    .filter(|(serial, _)| *serial != handled_request)
+                    .and_then(|(_, index)| {
+                        (length > 0).then_some(index.min(length.saturating_sub(1)))
+                    });
+                // A row asked for, placed as asked; else the keyboard's.
+                let (serial, row, align) = reveal.get();
+                let asked = (serial != handled_reveal && length > 0)
+                    .then_some((row.min(length.saturating_sub(1)), align));
+                handled_reveal = serial;
+                if let Some((index, align)) = asked.or(target.map(|i| (i, RowAlign::Nearest))) {
+                    let top = model.row_offset(index);
+                    if let Some(window) = &window {
+                        // The view around it scrolls to it; built as it shows.
+                        window.reveal_from(&weak, top, row_height);
+                    } else {
+                        position = align
+                            .position(top, row_height, height, position)
+                            .max(0.)
+                            .min((model.content_height() - height).max(0.));
+                    }
+                }
+                let range = model.visible_range(position, height);
+                keys.clear();
+                keys.extend(range.map(|index| (key(index), index)));
+                // Rows kept are stamped with this run: one shown twice is a
+                // key repeated, and those left unstamped go below.
+                run += 1;
+                let mut fresh = 0;
+                for (key, _) in &keys {
+                    match entries.get_mut(key) {
+                        Some((.., placed)) => {
+                            assert!(placed.run != run, "duplicate virtual list child key");
+                            placed.run = run;
                         }
-                        let request = navigation
-                            .as_ref()
-                            .map(|navigation| navigation.request.get());
-                        let target = request
-                            .filter(|(serial, _)| *serial != handled_request)
-                            .and_then(|(_, index)| {
-                                (length > 0).then_some(index.min(length.saturating_sub(1)))
-                            });
-                        // A row asked for, placed as asked; else the keyboard's.
-                        let (serial, row, align) = reveal.get();
-                        let asked = (serial != handled_reveal && length > 0)
-                            .then_some((row.min(length.saturating_sub(1)), align));
-                        handled_reveal = serial;
-                        if let Some((index, align)) =
-                            asked.or(target.map(|i| (i, RowAlign::Nearest)))
-                        {
-                            let top = model.row_offset(index);
-                            if let Some((window, ui)) = &around {
-                                // The view around it scrolls to it; built as it shows.
-                                window.reveal(ui, top, row_height);
-                            } else {
-                                position = align
-                                    .position(top, row_height, height, position)
-                                    .max(0.)
-                                    .min((model.content_height() - height).max(0.));
-                            }
+                        None => fresh += 1,
+                    }
+                }
+                if fresh > 1 {
+                    let mut new: std::collections::HashSet<&K, rustc_hash::FxBuildHasher> =
+                        Default::default();
+                    for (key, _) in &keys {
+                        if !entries.contains_key(key) {
+                            assert!(new.insert(key), "duplicate virtual list child key");
                         }
-                        let range = model.visible_range(position, height);
-                        keys.clear();
-                        keys.extend(range.map(|index| (key(index), index)));
-                        // Rows kept are stamped with this run: one shown twice is a
-                        // key repeated, and those left unstamped go below.
-                        run += 1;
-                        let mut fresh = 0;
-                        for (key, _) in &keys {
-                            match entries.get_mut(key) {
-                                Some((.., placed)) => {
-                                    assert!(placed.run != run, "duplicate virtual list child key");
-                                    placed.run = run;
-                                }
-                                None => fresh += 1,
+                    }
+                }
+                let Some(mut ui) = weak.upgrade() else {
+                    return;
+                };
+                if !ui.scene.borrow().contains(root) {
+                    return;
+                }
+                runtime.untracked(|| {
+                    let _theme = ui.enter_theme(&environment.theme);
+                    let mut transaction = MountTransaction::new(&ui, content);
+                    // Construct first: a failed row constructor leaves old rows intact.
+                    if fresh != 0 {
+                        let mut added = Vec::new();
+                        for (key, index) in &keys {
+                            if entries.contains_key(key) {
+                                continue;
                             }
-                        }
-                        if fresh > 1 {
-                            let mut new: std::collections::HashSet<&K, rustc_hash::FxBuildHasher> =
-                                Default::default();
-                            for (key, _) in &keys {
-                                if !entries.contains_key(key) {
-                                    assert!(new.insert(key), "duplicate virtual list child key");
-                                }
-                            }
-                        }
-                        let Some(mut ui) = weak.upgrade() else {
-                            return;
-                        };
-                        if !ui.scene.borrow().contains(root) {
-                            return;
-                        }
-                        runtime.untracked(|| {
-                            let _theme = ui.enter_theme(&environment.theme);
-                            let mut transaction = MountTransaction::new(&ui, content);
-                            // Construct first: a failed row constructor leaves old rows intact.
-                            if fresh != 0 {
-                                let mut added = Vec::new();
-                                for (key, index) in &keys {
-                                    if entries.contains_key(key) {
-                                        continue;
-                                    }
-                                    let index_signal = ui.signal(*index);
-                                    let mut cx = Context::new(runtime.clone(), environment.clone());
-                                    let view = build(index_signal.clone(), key.clone(), &mut cx);
-                                    let row =
-                                        ui.container(content, Layout::Overlay, Default::default());
-                                    crate::selection::mount_row(&mut ui, row, &index_signal);
-                                    let node = mount(&mut ui, row, view, environment.clone());
-                                    cx.finish(&mut ui, node);
-                                    if let Some(navigation) = &navigation {
-                                        navigation.mount_row(&mut ui, row, row_height);
-                                    }
-                                    added.push((
-                                        key.clone(),
-                                        (row, index_signal, Placed { run, at: None }),
-                                    ));
-                                }
-                                entries.extend(added);
-                            }
-                            let mut removed_focus = false;
-                            if entries.len() > keys.len() {
-                                entries.retain(|_, (node, _, placed)| {
-                                    if placed.run == run {
-                                        true
-                                    } else {
-                                        if navigation.is_some()
-                                            && let Some(focused) = ui.input.focused()
-                                        {
-                                            let scene = ui.scene.borrow();
-                                            removed_focus |= focused == *node
-                                                || (scene.contains(focused)
-                                                    && scene
-                                                        .ancestors(focused)
-                                                        .any(|ancestor| ancestor == *node));
-                                        }
-                                        ui.remove(*node);
-                                        false
-                                    }
-                                });
-                            }
-                            for (key, index) in &keys {
-                                entries[key].1.set(*index);
-                            }
-                            {
-                                let mut scene = ui.scene.borrow_mut();
-                                // Scrolled with the view around it: as tall as its
-                                // rows, unclipped, in place.
-                                scene.set_style(
-                                    viewport,
-                                    match ancestor {
-                                        true => {
-                                            crate::widgets::fixed(width, model.content_height())
-                                        }
-                                        false => crate::scene::Style {
-                                            clip: true,
-                                            ..crate::widgets::fixed(width, height)
-                                        },
-                                    },
-                                );
-                                scene.set_style(
-                                    content,
-                                    crate::widgets::fixed(width, model.content_height()),
-                                );
-                                stretch.place(&mut scene, if ancestor { 0. } else { position });
-                                order.clear();
-                                for (key, index) in &keys {
-                                    let (node, _, placed) = entries.get_mut(key).expect("a row");
-                                    // A row placed as it was, at the same width, stays.
-                                    let at = Some((*index, width.to_bits()));
-                                    if placed.at != at {
-                                        placed.at = at;
-                                        // Its root fills its width, as a block does.
-                                        scene.set_style(
-                                            *node,
-                                            crate::scene::Style {
-                                                align: crate::scene::Align::Stretch,
-                                                ..crate::widgets::fixed(width, row_height)
-                                            },
-                                        );
-                                        scene.set_transform(
-                                            *node,
-                                            crate::scene::Transform {
-                                                x: 0.0,
-                                                y: model.row_offset(*index),
-                                            },
-                                        );
-                                    }
-                                    order.push(*node);
-                                }
-                                assert!(scene.reorder_children(content, &order));
-                            }
-                            transaction.commit();
-                            extent.set(model.content_height());
-                            let unchanged_request = offset.get().to_bits() == requested.to_bits();
-                            if unchanged_request && !ancestor {
-                                offset.set(position);
-                            }
+                            let index_signal = ui.signal(*index);
+                            let mut cx = Context::new(runtime.clone(), environment.clone());
+                            let view = build(index_signal.clone(), key.clone(), &mut cx);
+                            let row = ui.container(content, Layout::Overlay, Default::default());
+                            crate::selection::mount_row(&mut ui, row, &index_signal);
+                            let node = mount(&mut ui, row, view, environment.clone());
+                            cx.finish(&mut ui, node);
                             if let Some(navigation) = &navigation {
-                                navigation.update(
-                                    &ui,
-                                    root,
-                                    length,
-                                    keys.iter()
-                                        .map(|(key, index)| (*index, entries[key].0))
-                                        .collect(),
-                                );
-                                if let Some((serial, _)) = request {
-                                    handled_request = serial;
+                                navigation.mount_row(&mut ui, row, row_height);
+                            }
+                            added
+                                .push((key.clone(), (row, index_signal, Placed { run, at: None })));
+                        }
+                        entries.extend(added);
+                    }
+                    let mut removed_focus = false;
+                    if entries.len() > keys.len() {
+                        entries.retain(|_, (node, _, placed)| {
+                            if placed.run == run {
+                                true
+                            } else {
+                                if navigation.is_some()
+                                    && let Some(focused) = ui.input.focused()
+                                {
+                                    let scene = ui.scene.borrow();
+                                    removed_focus |= focused == *node
+                                        || (scene.contains(focused)
+                                            && scene
+                                                .ancestors(focused)
+                                                .any(|ancestor| ancestor == *node));
                                 }
-                                if let Some(index) = target.filter(|_| unchanged_request) {
-                                    if let Some((key, _)) =
-                                        keys.iter().find(|(_, candidate)| *candidate == index)
-                                    {
-                                        let item = navigation.item(entries[key].0);
-                                        ui.input.focus(&ui.scene, Some(item));
-                                    }
-                                } else if removed_focus && ui.input.focused().is_none() {
-                                    ui.input.focus(&ui.scene, Some(root));
-                                }
+                                ui.remove(*node);
+                                false
                             }
                         });
                     }
-                };
-            }
-            match ancestor {
-                true => ui.bind(root, rows!(true)),
-                false => ui.bind(root, rows!(false)),
-            }
+                    for (key, index) in &keys {
+                        entries[key].1.set(*index);
+                    }
+                    {
+                        let mut scene = ui.scene.borrow_mut();
+                        // Scrolled with the view around it: as tall as its
+                        // rows, unclipped, in place.
+                        scene.set_style(
+                            viewport,
+                            match ancestor {
+                                true => crate::widgets::fixed(width, model.content_height()),
+                                false => crate::scene::Style {
+                                    clip: true,
+                                    ..crate::widgets::fixed(width, height)
+                                },
+                            },
+                        );
+                        scene.set_style(
+                            content,
+                            crate::widgets::fixed(width, model.content_height()),
+                        );
+                        stretch.place(&mut scene, if ancestor { 0. } else { position });
+                        order.clear();
+                        for (key, index) in &keys {
+                            let (node, _, placed) = entries.get_mut(key).expect("a row");
+                            // A row placed as it was, at the same width, stays.
+                            let at = Some((*index, width.to_bits()));
+                            if placed.at != at {
+                                placed.at = at;
+                                // Its root fills its width, as a block does.
+                                scene.set_style(
+                                    *node,
+                                    crate::scene::Style {
+                                        align: crate::scene::Align::Stretch,
+                                        ..crate::widgets::fixed(width, row_height)
+                                    },
+                                );
+                                scene.set_transform(
+                                    *node,
+                                    crate::scene::Transform {
+                                        x: 0.0,
+                                        y: model.row_offset(*index),
+                                    },
+                                );
+                            }
+                            order.push(*node);
+                        }
+                        assert!(scene.reorder_children(content, &order));
+                    }
+                    transaction.commit();
+                    extent.set(model.content_height());
+                    let unchanged_request = offset.get().to_bits() == requested.to_bits();
+                    if unchanged_request && !ancestor {
+                        offset.set(position);
+                    }
+                    if let Some(navigation) = &navigation {
+                        navigation.update(
+                            &ui,
+                            root,
+                            length,
+                            keys.iter()
+                                .map(|(key, index)| (*index, entries[key].0))
+                                .collect(),
+                        );
+                        if let Some((serial, _)) = request {
+                            handled_request = serial;
+                        }
+                        if let Some(index) = target.filter(|_| unchanged_request) {
+                            if let Some((key, _)) =
+                                keys.iter().find(|(_, candidate)| *candidate == index)
+                            {
+                                let item = navigation.item(entries[key].0);
+                                ui.input.focus(&ui.scene, Some(item));
+                            }
+                        } else if removed_focus && ui.input.focused().is_none() {
+                            ui.input.focus(&ui.scene, Some(root));
+                        }
+                    }
+                });
+            });
         },
     )))
     .row_text(text)
@@ -6022,6 +5999,19 @@ impl AncestorWindow {
             }
             // Past it: below the view, its start; above, its end.
             _ => (if list.y > around.y { 0. } else { total }, 0.),
+        }
+    }
+    /// `window`, for a list's rows binding: out of its line, the `Ui`
+    /// upgraded here.
+    #[inline(never)]
+    pub(crate) fn shown(&self, ui: &crate::widgets::WeakUi, total: f32) -> Option<(f32, f32)> {
+        Some(self.window(&ui.upgrade()?, total))
+    }
+    /// `reveal`, for a list's rows binding: out of its line.
+    #[inline(never)]
+    pub(crate) fn reveal_from(&self, ui: &crate::widgets::WeakUi, top: f32, height: f32) {
+        if let Some(ui) = ui.upgrade() {
+            self.reveal(&ui, top, height);
         }
     }
     /// Scroll the views around it so its points `top` to `top + height`
