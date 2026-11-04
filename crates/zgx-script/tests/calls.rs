@@ -768,6 +768,116 @@ fn remote_images_tell_whether_they_came() {
     assert_eq!(h.host.error().get(), None);
 }
 
+/// An app showing a picture, once `show` is clicked or from the start, and
+/// a plugin showing the same one; a transport refusing the plugin's request
+/// after `refused_after`, each ask's caller in the log.
+fn refused_plugin_image(
+    shown: bool,
+    refused_after: Duration,
+    asked: std::rc::Rc<std::cell::RefCell<Vec<Option<String>>>>,
+) -> Harness {
+    Harness::new(move |runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            format!(
+                r#"local shown = ui.state("shown", {shown})
+                local loaded = ui.state("loaded", "")
+                return ui.column {{
+                    ui.button {{ id = "show", on_click = function() shown:set(true) end, "s" }},
+                    ui.slot("bar"),
+                    ui.show(shown, ui.image {{ src = "https://img.test/shared.png", w = 20, h = 20,
+                        on_load = function(size) loaded:set(`{{size.w}}`) end }}),
+                    ui.text {{ id = "loaded", function() return loaded:get() end }},
+                }}"#
+            ),
+        )
+        .plugin(
+            "pics.luau",
+            r#"local why = ui.state("why", "")
+            ui.contribute("bar", ui.column {
+                ui.image { src = "https://img.test/shared.png", w = 20, h = 20,
+                    on_error = function(e) why:set(e) end },
+                ui.text { id = "why", function() return why:get() end },
+            })"#,
+        )
+        .grant("pics.luau", zgx_script::Capability::Fetch);
+        host.streaming_fetcher(move |_, body| {
+            let caller = body.caller().map(str::to_owned);
+            asked.borrow_mut().push(caller.clone());
+            async move {
+                if caller.is_some() {
+                    zgx::timer::sleep(refused_after).await;
+                    return Err("not for plugins".to_string());
+                }
+                zgx::timer::sleep(Duration::from_millis(2)).await;
+                Ok(zgx_script::Response {
+                    status: 200,
+                    headers: vec![],
+                    body: PNG.to_vec(),
+                })
+            }
+        });
+        host
+    })
+}
+
+/// Settle until `done`, for less than the five seconds of a failure's backoff.
+fn within_a_backoff(h: &mut Harness, done: impl Fn(&mut Harness) -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !done(h) && Instant::now() < deadline {
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    done(h)
+}
+
+#[test]
+fn a_plugins_refused_image_leaves_the_app_loading_it_at_once() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = refused_plugin_image(false, Duration::from_millis(2), asked.clone());
+    assert!(within_a_backoff(&mut h, |h| !h.text("why").is_empty()));
+    // The refusal is the plugin's, and says why.
+    assert!(
+        h.text("why").contains("not for plugins"),
+        "{}",
+        h.text("why")
+    );
+    let plugin = Some("pics.luau".to_string());
+    assert_eq!(*asked.borrow(), std::slice::from_ref(&plugin));
+
+    // The app shows the same URL: asked at once, not held to the plugin's backoff.
+    h.click("show");
+    h.settle();
+    assert_eq!(*asked.borrow(), [plugin.clone(), None]);
+    assert!(
+        within_a_backoff(&mut h, |h| h.text("loaded") == "2"),
+        "the app's picture: {:?}",
+        h.text("loaded")
+    );
+    assert_eq!(*asked.borrow(), [plugin, None], "no one else asks again");
+}
+
+#[test]
+fn a_plugins_request_on_its_way_does_not_hold_up_the_apps() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    // Refused long after the app's picture has come, whichever asked first.
+    let mut h = refused_plugin_image(true, Duration::from_secs(30), asked.clone());
+    assert!(
+        within_a_backoff(&mut h, |h| h.text("loaded") == "2"),
+        "the app's picture: {:?}",
+        h.text("loaded")
+    );
+    let mut asked = asked.borrow().clone();
+    asked.sort();
+    assert_eq!(
+        asked,
+        [None, Some("pics.luau".to_string())],
+        "each asks for itself: the policy hears the plugin's request"
+    );
+}
+
 #[test]
 fn a_failed_remote_image_is_fetched_again_when_shown_after_a_backoff() {
     let fetched = std::rc::Rc::new(std::cell::Cell::new(0));

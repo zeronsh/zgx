@@ -49,12 +49,16 @@ pub(crate) struct Assets {
     files: std::cell::RefCell<HashMap<String, (std::path::PathBuf, Option<std::time::SystemTime>)>>,
     /// Where they are read from: the disk, or the app's bundle.
     source: std::cell::Cell<Option<crate::Files>>,
-    /// Remote sources (`https://…`) by URL: fetched once, whoever shows
-    /// them; what shows one follows its status (`LOADING`, `READY`, `FAILED`).
+    /// Remote sources (`https://…`) by `remote_key`: fetched once by each
+    /// asking (the app, or a plugin), so each request is its own to allow, and
+    /// what comes is shared (`images`, `svgs`). What shows one follows its
+    /// status (`LOADING`, `READY`, `FAILED`).
     remote: std::cell::RefCell<HashMap<String, zgx::reactive::Signal<u8>>>,
-    /// Failed remote sources: when, how many times in a row, why. Asked
-    /// for again after a backoff, they're fetched again (as a browser
-    /// retries a broken image when a new element shows it).
+    /// Failed remote sources by `remote_key`: when, how many times in a row,
+    /// why. Asked for again after a backoff, they're fetched again (as a
+    /// browser retries a broken image when a new element shows it). A plugin's
+    /// failure is its own: refused by the app's policy, or without the proxy
+    /// the app's requests take, it holds up no one else showing the URL.
     failed: std::cell::RefCell<HashMap<String, Failure>>,
     /// The host's tasks and transport, which remote sources go through.
     links: std::cell::RefCell<
@@ -4442,6 +4446,14 @@ const FAILED: u8 = 2;
 fn backoff(times: u32) -> std::time::Duration {
     std::time::Duration::from_secs((5u64 << times.saturating_sub(1).min(6)).min(300))
 }
+/// Remote `src`'s key in `Assets::remote` and `failed`: its URL for the app,
+/// apart for each plugin (a URL starts `http`, never with this `\0`).
+fn remote_key<'a>(vm: &Vm, src: &'a str) -> std::borrow::Cow<'a, str> {
+    match crate::fetch_policy::caller_of(&vm.lua) {
+        None => src.into(),
+        Some(plugin) => format!("\0{plugin}\0{src}").into(),
+    }
+}
 fn remote_ready(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> bool {
     remote_status(vm, low, src, svg) == READY
 }
@@ -4473,11 +4485,12 @@ fn remote_status_in(
         )));
         return FAILED;
     }
-    let existing = assets.remote.borrow().get(src).cloned();
+    let key = remote_key(vm, src);
+    let existing = assets.remote.borrow().get(&*key).cloned();
     let ready = match existing {
         Some(status) if status.get() != FAILED => return status.get(),
         Some(status) => {
-            let failed = (assets.failed.borrow().get(src)).map(|(at, times, _)| (*at, *times));
+            let failed = (assets.failed.borrow().get(&*key)).map(|(at, times, _)| (*at, *times));
             if failed.is_some_and(|(at, times)| at.elapsed() < backoff(times)) {
                 return FAILED;
             }
@@ -4489,7 +4502,7 @@ fn remote_status_in(
             assets
                 .remote
                 .borrow_mut()
-                .insert(src.to_owned(), ready.clone());
+                .insert(key.clone().into_owned(), ready.clone());
             ready
         }
     };
@@ -4519,10 +4532,11 @@ fn remote_status_in(
         },
         body.clone(),
     );
-    let (assets, vm, src, runtime) = (
+    let (assets, vm, src, key, runtime) = (
         assets.clone(),
         Rc::downgrade(vm),
         src.to_owned(),
+        key.into_owned(),
         runtime.clone(),
     );
     let arriving = ready.clone();
@@ -4558,11 +4572,11 @@ fn remote_status_in(
         };
         match decoded {
             Ok(Decoded::Image(image)) => {
-                assets.failed.borrow_mut().remove(&src);
+                assets.failed.borrow_mut().remove(&key);
                 assets.keep_image(src, image);
             }
             Ok(Decoded::Svg(svg)) => {
-                assets.failed.borrow_mut().remove(&src);
+                assets.failed.borrow_mut().remove(&key);
                 assets.keep_svg(src, svg);
             }
             Err(error) => {
@@ -4575,7 +4589,7 @@ fn remote_status_in(
                 let times = assets
                     .failed
                     .borrow_mut()
-                    .entry(src)
+                    .entry(key)
                     .and_modify(|(at, times, reason)| {
                         (*at, *times, *reason) = (now, *times + 1, why.clone())
                     })
@@ -4640,7 +4654,12 @@ pub(crate) fn try_load_image_in(
     }
     if is_remote(src) {
         if remote_status_in(vm, assets, runtime, src, false) == FAILED {
-            let why = assets.failed.borrow().get(src).map(|(.., why)| why.clone());
+            let key = remote_key(vm, src);
+            let why = assets
+                .failed
+                .borrow()
+                .get(&*key)
+                .map(|(.., why)| why.clone());
             return Err(format!(
                 "{src} didn't load: {}",
                 why.as_deref().unwrap_or("refused")
