@@ -59,6 +59,8 @@ mod list_in_easing_box;
 mod list_in_scroll;
 #[path = "../list_tab_rows.rs"]
 mod list_tab_rows;
+#[path = "../list_thin_rows.rs"]
+mod list_thin_rows;
 #[path = "../markdown_lazy.rs"]
 mod markdown_lazy;
 #[path = "../mentions.rs"]

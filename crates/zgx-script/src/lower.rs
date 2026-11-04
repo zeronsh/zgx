@@ -7061,6 +7061,8 @@ fn list_heights(
         };
         let values = value.list().iter().map(|v| match v {
             Value::Num(n) if n.is_finite() && *n > 0. => *n as f32,
+            // No room, and not built (`heights` takes positive numbers).
+            Value::Num(n) if *n == 0. => f32::MIN_POSITIVE,
             _ => 1.,
         });
         let _ = r.replace(values);

@@ -177,7 +177,12 @@ pub struct HeightIndex {
     tree: Vec<HeightSum>,
     estimate: f32,
     minimum: f32,
+    /// Whether a row may be under `THINNEST_ROW`: a list with none looks at no
+    /// row's height for it.
+    thin: bool,
 }
+/// A row given less height than this shows nothing, and isn't built.
+pub(crate) const THINNEST_ROW: f32 = 0.01;
 impl HeightIndex {
     /// `count` rows, each `estimate` tall until set. Panics if `estimate` isn't
     /// finite and positive.
@@ -193,6 +198,7 @@ impl HeightIndex {
             tree: Vec::new(),
             estimate,
             minimum: 0.,
+            thin: false,
         };
         index.resize(count)?;
         Ok(index)
@@ -207,6 +213,10 @@ impl HeightIndex {
     /// The number of rows.
     pub fn count(&self) -> usize {
         self.heights.len()
+    }
+    /// Whether a row may be too thin to show.
+    pub(crate) fn may_have_thin_rows(&self) -> bool {
+        self.thin
     }
     /// The height rows take until they are given one.
     pub(crate) fn estimate(&self) -> f32 {
@@ -230,6 +240,7 @@ impl HeightIndex {
         }
         let previous = *old;
         *old = height;
+        self.thin |= height < THINNEST_ROW;
         let mut node = index + 1;
         while node < self.tree.len() {
             self.tree[node].add(-f64::from(previous));
@@ -267,6 +278,7 @@ impl HeightIndex {
             .into_iter()
             .map(|height| Self::validate(height).map(|()| height.max(minimum)))
             .collect::<Result<Vec<_>, _>>()?;
+        self.thin = heights.iter().any(|height| *height < THINNEST_ROW);
         self.heights = heights;
         self.rebuild();
         Ok(())
@@ -300,6 +312,7 @@ impl HeightIndex {
             .map_err(|_| HeightError::Capacity)?;
         let previous = self.count();
         self.heights.resize(count, self.estimate);
+        self.thin |= self.estimate < THINNEST_ROW;
         if count < previous {
             self.tree.truncate(slots);
         } else {
