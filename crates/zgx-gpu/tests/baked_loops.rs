@@ -266,6 +266,69 @@ fn a_sheet_goes_with_its_node_and_its_loop() {
     assert_eq!(window.pixel(50, 50), (255, 0), "back in the frames");
 }
 
+/// A loop's layer goes where layout now puts its box: a row's first text
+/// arriving above it moves it down, a frame's damage reaching only what
+/// changed. The frames show the row in its new place; the layer must too.
+#[cfg(target_os = "macos")]
+fn a_loop_moved_by_layout_above_it_moves_its_layer(drawables: bool) {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    let host = objc2_quartz_core::CALayer::new();
+    host.setGeometryFlipped(true);
+    host.setBounds(CGRect::new(CGPoint::new(0., 0.), CGSize::new(200., 200.)));
+    let mut gpu = GpuRenderer::debug_for_layer(host.clone(), 400, 400).unwrap();
+    gpu.set_scale_factor(2.);
+    gpu.debug_present_drawable(drawables);
+    let mut scene = Scene::new(200., 200.);
+    gpu.install_text(&mut scene);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    scene.append(root, NodeKind::Rect(BLUE), fixed(200., 200.));
+    // A column at (30, 20): what it has written, then a lane holding the loop.
+    let column = scene.append(root, NodeKind::Container(Layout::Column), fixed(100., 150.));
+    scene.set_transform(column, Transform { x: 30., y: 20. });
+    let written = scene.append(column, NodeKind::Rect(BLUE), fixed(100., 0.));
+    let lane = scene.append(
+        column,
+        NodeKind::Container(Layout::Column),
+        fixed(100., 30.),
+    );
+    let spinner = scene.append(lane, NodeKind::Rect(RED), fixed(20., 20.));
+    let show = |scene: &mut Scene, gpu: &mut GpuRenderer| {
+        let damage = scene.flush().damage;
+        gpu.render(scene, &damage).unwrap();
+        gpu.present().unwrap();
+    };
+    show(&mut scene, &mut gpu);
+    let frames = (0..30).map(|at| (1. - at as f32 / 60., 0.)).collect();
+    let baked = BakedLoop::new(frames, 30., Box::new(|| {}));
+    scene.set_baked_loop(spinner, Some(Rc::new(baked)));
+    show(&mut scene, &mut gpu);
+    show(&mut scene, &mut gpu);
+    assert!(!gpu.debug_loop_sheets().is_empty(), "no sheet");
+    let layer = || {
+        // SAFETY: this thread made the layer; nothing else changes its list.
+        let sublayers = unsafe { host.sublayers() }.expect("sublayers");
+        (sublayers.iter())
+            .find(|layer| layer.zPosition() == 0.5 && !layer.isHidden())
+            .expect("the loop's layer")
+            .frame()
+            .origin
+    };
+    let at = layer();
+    assert_eq!((at.x, at.y), (30., 20.), "where it starts");
+    // The first text lands: 26 points written above the lane.
+    scene.set_style(written, fixed(100., 26.));
+    show(&mut scene, &mut gpu);
+    assert_eq!(scene.bounds(spinner).y, 46., "layout moved it");
+    let at = layer();
+    assert_eq!((at.x, at.y), (30., 46.), "its layer with it");
+    // And by a word more with nothing else changed but what's written.
+    scene.set_style(written, fixed(100., 40.));
+    show(&mut scene, &mut gpu);
+    let at = layer();
+    assert_eq!((at.x, at.y), (30., 60.), "again");
+}
+
 #[cfg(target_os = "macos")]
 fn a_large_loop_stays_in_the_frames() {
     let mut window = Window::plain(40., 40.);
@@ -297,6 +360,68 @@ fn loops_that_look_alike_share_a_sheet() {
     assert_eq!(window.gpu.debug_loop_sheets(), sheets[..1]);
 }
 
+/// A frame drawn twice stays one frame to a loop: a layer whose content grows
+/// past its corner draws the frame again (`render_once`), and that second
+/// pass, finding the loop where the first put it, must not cost the layer the
+/// move. No later frame would send it again.
+#[cfg(target_os = "macos")]
+fn a_frame_drawn_again_for_a_shifted_layer_still_moves_a_loop() {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    let host = objc2_quartz_core::CALayer::new();
+    host.setGeometryFlipped(true);
+    host.setBounds(CGRect::new(CGPoint::new(0., 0.), CGSize::new(200., 200.)));
+    let mut gpu = GpuRenderer::debug_for_layer(host.clone(), 400, 400).unwrap();
+    gpu.set_scale_factor(2.);
+    let mut scene = Scene::new(200., 200.);
+    gpu.install_text(&mut scene);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    scene.append(root, NodeKind::Rect(BLUE), fixed(200., 200.));
+    // Elsewhere in the window, a layer holding a child that will pass its edge.
+    let group = scene.append(root, NodeKind::Container(Layout::Overlay), fixed(40., 40.));
+    scene.set_transform(group, Transform { x: 150., y: 150. });
+    scene.set_isolated(group, true);
+    let child = scene.append(group, NodeKind::Rect(BLUE), fixed(20., 20.));
+    let column = scene.append(root, NodeKind::Container(Layout::Column), fixed(100., 150.));
+    scene.set_transform(column, Transform { x: 30., y: 20. });
+    let written = scene.append(column, NodeKind::Rect(BLUE), fixed(100., 0.));
+    let spinner = scene.append(column, NodeKind::Rect(RED), fixed(20., 20.));
+    let show = |scene: &mut Scene, gpu: &mut GpuRenderer| {
+        let damage = scene.flush().damage;
+        gpu.render(scene, &damage).unwrap();
+        gpu.present().unwrap();
+    };
+    show(&mut scene, &mut gpu);
+    let frames = (0..30).map(|at| (1. - at as f32 / 60., 0.)).collect();
+    let baked = BakedLoop::new(frames, 30., Box::new(|| {}));
+    scene.set_baked_loop(spinner, Some(Rc::new(baked)));
+    show(&mut scene, &mut gpu);
+    show(&mut scene, &mut gpu);
+    assert!(!gpu.debug_loop_sheets().is_empty(), "no sheet");
+    let layer = || {
+        // SAFETY: this thread made the layer; nothing else changes its list.
+        let sublayers = unsafe { host.sublayers() }.expect("sublayers");
+        (sublayers.iter())
+            .find(|layer| layer.zPosition() == 0.5 && !layer.isHidden())
+            .expect("the loop's layer")
+            .frame()
+            .origin
+    };
+    let at = layer();
+    assert_eq!((at.x, at.y), (30., 20.), "where it starts");
+    // In one frame: the loop's row moves, and the layer draws from a new corner.
+    scene.set_style(written, fixed(100., 26.));
+    scene.set_transform(child, Transform { x: -10., y: 0. });
+    show(&mut scene, &mut gpu);
+    assert_eq!(scene.bounds(spinner).y, 46., "layout moved it");
+    let at = layer();
+    assert_eq!((at.x, at.y), (30., 46.), "its layer with it");
+    // And the frame after, with nothing moving: still there.
+    show(&mut scene, &mut gpu);
+    let at = layer();
+    assert_eq!((at.x, at.y), (30., 46.), "and stays");
+}
+
 fn main() {
     #[cfg(target_os = "macos")]
     {
@@ -306,6 +431,9 @@ fn main() {
         a_new_look_or_scale_draws_the_sheet_again();
         a_sheet_goes_with_its_node_and_its_loop();
         a_large_loop_stays_in_the_frames();
+        a_loop_moved_by_layout_above_it_moves_its_layer(false);
+        a_loop_moved_by_layout_above_it_moves_its_layer(true);
+        a_frame_drawn_again_for_a_shifted_layer_still_moves_a_loop();
         loops_that_look_alike_share_a_sheet();
     }
 }
