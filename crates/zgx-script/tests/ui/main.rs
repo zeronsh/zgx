@@ -51,6 +51,8 @@ mod layout_unsettled;
 mod lazy_ui;
 #[path = "../list_edges.rs"]
 mod list_edges;
+#[path = "../list_failed_key.rs"]
+mod list_failed_key;
 #[path = "../list_focus_scroll.rs"]
 mod list_focus_scroll;
 #[path = "../list_in_easing_box.rs"]
