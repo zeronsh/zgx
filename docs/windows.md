@@ -437,6 +437,18 @@ GPU time a frame on a zgx window than on an opaque one, more than on GPUI's
 (`windows_compare.py` reads the compositor's share).
 `scripts/windows_chrome_smoke.py` checks the buttons and the resize bands.
 
+`Titlebar::Inset`'s caption buttons are drawn by zgx as boxes and bars of whole
+pixels, not a font, so they show on any Windows. Like the buttons Windows would
+draw, they don't zoom with the content: 46 by 32 points of the display each.
+`WindowOptions::caption_height` sets their height, in the content's points, so
+they span an app's title bar at any zoom. What is drawn, what `WM_NCHITTEST`
+answers (snap layouts included) and `WindowInfo::controls` read one geometry in
+physical pixels (`windows_caption.rs`), and agree. A window that isn't resizable,
+or whose smallest and largest sizes are the same, has no Maximize and no resize
+bands. The glyphs follow the window's light or dark (`WindowHandle::set_theme`),
+not the system's. `scripts/windows_caption_smoke.py` checks all of it in a real
+window at 100% and 150% zoom, light and dark.
+
 Windows take the executable's own icon (its first icon group, the one
 Explorer shows) for the title bar, the taskbar and Alt+Tab, sized for the
 window's DPI. Embed one as a resource from the app's build script, for
