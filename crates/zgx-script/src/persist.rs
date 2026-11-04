@@ -61,6 +61,8 @@ struct Entry {
 enum Job {
     /// Write the JSON to the file.
     Write(PathBuf, String),
+    /// Remove a script's folder, and any write of it not yet made.
+    Remove(PathBuf),
     /// Reply once everything sent before it is on disk.
     Barrier(mpsc::Sender<()>),
 }
@@ -128,9 +130,15 @@ impl Persist {
             path,
         });
         self.entries.borrow_mut().insert(id.clone(), entry.clone());
+        let watch = self.watch(id, &entry);
+        self.watches.borrow_mut().push(watch);
+        entry.signal.clone()
+    }
+    /// What marks entry `id` dirty as its value changes.
+    fn watch(&self, id: String, entry: &Rc<Entry>) -> Effect {
         let me = self.me.clone();
-        let watched = Rc::downgrade(&entry);
-        let watch = self.runtime.untracked(|| {
+        let watched = Rc::downgrade(entry);
+        self.runtime.untracked(|| {
             self.runtime.effect(move || {
                 let Some(entry) = watched.upgrade() else {
                     return;
@@ -141,9 +149,7 @@ impl Persist {
                     persist.mark(&id);
                 }
             })
-        });
-        self.watches.borrow_mut().push(watch);
-        entry.signal.clone()
+        })
     }
 
     /// What is kept for `script`'s `key` now, without holding it: the value
@@ -178,6 +184,48 @@ impl Persist {
     pub fn get(&self, script: &str, key: &str) -> Option<Signal<Value>> {
         let id = format!("{script}\n{key}");
         self.entries.borrow().get(&id).map(|e| e.signal.clone())
+    }
+
+    /// Forgets all of `script`'s saved state: what is held, what waits to be
+    /// saved and its folder, gone by the time this returns. The next run
+    /// that asks starts from its `initial`.
+    pub fn forget(&self, script: &str) {
+        let prefix = format!("{script}\n");
+        let held = |id: &String| id.starts_with(&prefix);
+        self.entries.borrow_mut().retain(|id, _| !held(id));
+        self.dirty.borrow_mut().retain(|id| !held(id));
+        // Watches say nothing of their entry (one more word for each, on a
+        // path every `ui.persist` runs, moves what the heap places after
+        // it): on this rare one, the others' are made anew.
+        drop(std::mem::take(&mut *self.watches.borrow_mut()));
+        let remaining: Vec<(String, Rc<Entry>)> = self
+            .entries
+            .borrow()
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.clone()))
+            .collect();
+        let watches = remaining
+            .into_iter()
+            .map(|(id, entry)| self.watch(id, &entry))
+            .collect();
+        *self.watches.borrow_mut() = watches;
+        let Some(dir) = self
+            .dir
+            .borrow()
+            .as_ref()
+            .map(|d| d.join(file_name(script)))
+        else {
+            return;
+        };
+        if self.writer.borrow().is_none() {
+            remove(&dir);
+            return;
+        }
+        // After what is queued: a write already sent can't bring it back.
+        self.send(Job::Remove(dir));
+        let (tx, rx) = mpsc::channel();
+        self.send(Job::Barrier(tx));
+        let _ = rx.recv();
     }
 
     fn mark(&self, id: &str) {
@@ -300,6 +348,10 @@ fn write_all(jobs: mpsc::Receiver<Job>) {
                     Some(slot) => slot.1 = json,
                     None => latest.push((path, json)),
                 },
+                Job::Remove(dir) => {
+                    latest.retain(|(path, _)| !path.starts_with(&dir));
+                    remove(&dir);
+                }
                 Job::Barrier(reply) => barriers.push(reply),
             }
         }
@@ -311,6 +363,14 @@ fn write_all(jobs: mpsc::Receiver<Job>) {
         for reply in barriers {
             let _ = reply.send(());
         }
+    }
+}
+/// Removes a script's folder; one that isn't there is what was asked.
+fn remove(dir: &Path) {
+    if let Err(e) = std::fs::remove_dir_all(dir)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("ui.persist: {}: {e}", dir.display());
     }
 }
 /// Replaces the file at `path` whole: a temporary file renamed over it.

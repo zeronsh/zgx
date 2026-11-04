@@ -1906,6 +1906,50 @@ impl ScriptHost {
     pub(crate) fn expose_classes(&self) {
         element::Classes::register(&self.0.runtime, &self.0.elements);
     }
+    /// Where what `plugin` adds shows in the window now, in points, through
+    /// whatever transforms and zooms it lies under: a box for each mounted
+    /// `ui.contribute` into a slot or before, after or in place of an
+    /// element. What a `ui.filter` changes stays the app's own element, and
+    /// a box with no area is left out. For a host to say what is whose (a
+    /// click on a plugin's control, a preview outlining it).
+    pub fn contribution_bounds(&self, plugin: &str) -> Vec<zgx::scene::Rect> {
+        let current = self.0.current.borrow();
+        let Some(loaded) = current.as_ref() else {
+            return Vec::new();
+        };
+        let lowering = &loaded.lowering;
+        let added = lowering
+            .hooks
+            .as_deref()
+            .map(|hooks| hooks.all())
+            .unwrap_or_default()
+            .iter()
+            .filter(|hook| &*hook.owner == plugin && matches!(hook.adds, node::Adds::Node(..)))
+            .map(|hook| &hook.stats);
+        let slotted = lowering
+            .slots
+            .values()
+            .flatten()
+            .filter(|(owner, _, _)| &**owner == plugin)
+            .map(|(_, _, stats)| stats);
+        added
+            .chain(slotted)
+            .flat_map(|stats| stats.mounted.borrow().clone())
+            .filter_map(|handle| handle.window_bounds())
+            .filter(|bounds| bounds.width > 0. && bounds.height > 0.)
+            .collect()
+    }
+    /// Forgets a script's state: its `ui.state` and `ui.persist` values held
+    /// here, what waits to be saved, and its saved files, gone by the time
+    /// this returns. `script` names it as state is kept: `"plugin:<name>"`
+    /// for a plugin of [`set_plugins`](Self::set_plugins). For uninstalling
+    /// a plugin: call it once the plugin is no longer loaded (a VM still
+    /// running keeps what it holds until it goes); the next load that asks
+    /// starts from its `initial`.
+    pub fn forget_state(&self, script: &str) {
+        self.0.stores.borrow_mut().remove(script);
+        self.0.persist.forget(script);
+    }
     /// What each plugin adds at the app's elements (`ui.contribute { target
     /// }`, `ui.filter`), in the order they made them: its target, where it
     /// goes, how many elements it applies at now, and its latest error. A
@@ -3603,7 +3647,10 @@ impl ScriptHost {
                 continue;
             }
             for (slot, owner, node) in contributions {
-                slots.entry(slot).or_default().push((owner, node));
+                slots
+                    .entry(slot)
+                    .or_default()
+                    .push((owner, node, Rc::default()));
             }
             hooks.extend(added);
             vms.push(vm);
@@ -3641,7 +3688,10 @@ impl ScriptHost {
             hooks.set_app(vm);
         }
         for (slot, owner, node) in contributions {
-            slots.entry(slot).or_default().push((owner, node));
+            slots
+                .entry(slot)
+                .or_default()
+                .push((owner, node, Rc::default()));
         }
         hooks.extend(added);
         let root = root.ok_or_else(|| {

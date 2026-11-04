@@ -851,8 +851,8 @@ fn plugin_page(plugin: &Rc<str>, node: &Node, low: &Rc<Lowering>) -> View {
     let page = column().w_full().h_full().children(
         pages
             .iter()
-            .filter(|(owner, _)| **owner == **plugin)
-            .map(|(_, n)| lower(n, low)),
+            .filter(|(owner, _, _)| **owner == **plugin)
+            .map(|(_, n, stats)| counted(lower(n, low), stats)),
     );
     div().child(zgx::compose::confined(plugin_view(page, low)))
 }
@@ -2534,16 +2534,19 @@ fn rebuilt(node: &Rc<Node>, low: &Rc<Lowering>) -> Rc<Node> {
 /// `view`, where a contribution applies, counted among its live matches
 /// (`ScriptHost::contributions`) while it is mounted.
 fn counted(view: View, stats: &Rc<crate::node::ContributionStats>) -> View {
-    struct Live(Rc<crate::node::ContributionStats>);
+    struct Live(Rc<crate::node::ContributionStats>, zgx::scene::NodeId);
     impl Drop for Live {
         fn drop(&mut self) {
             self.0.live.set(self.0.live.get().saturating_sub(1));
+            self.0.mounted.borrow_mut().retain(|h| h.node() != self.1);
         }
     }
     let stats = stats.clone();
     view.on_mount(move |handle| {
         stats.live.set(stats.live.get() + 1);
-        handle.retain(Live(stats));
+        stats.mounted.borrow_mut().push(handle.clone());
+        let node = handle.node();
+        handle.retain(Live(stats, node));
     })
 }
 /// `view`, an element plugins filter, counted for each filtering script.
@@ -3606,8 +3609,8 @@ fn kind_view(
                 .get(name)
                 .into_iter()
                 .flatten()
-                .filter(|(owner, _)| from.as_deref().is_none_or(|from| **owner == *from))
-                .map(|(_, n)| slot_item(n, context.as_ref(), low)),
+                .filter(|(owner, _, _)| from.as_deref().is_none_or(|from| **owner == *from))
+                .map(|(_, n, stats)| counted(slot_item(n, context.as_ref(), low), stats)),
         ),
         Kind::Decision(held) => decision(node, held, low),
         Kind::PluginPage(plugin) => plugin_page(plugin, node, low),

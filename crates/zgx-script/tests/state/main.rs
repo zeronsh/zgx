@@ -27,6 +27,8 @@ mod ownership;
 mod packages;
 #[path = "../paged.rs"]
 mod paged;
+#[path = "../plugin_bounds_forget.rs"]
+mod plugin_bounds_forget;
 #[path = "../plugin_branches.rs"]
 mod plugin_branches;
 #[path = "../plugin_context.rs"]

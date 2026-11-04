@@ -7453,6 +7453,15 @@ impl NodeHandle {
     pub fn node(&self) -> NodeId {
         self.node
     }
+    /// Where the node shows in the window, in points, through whatever
+    /// transforms and zooms it lies under; `None` once it or its UI is gone.
+    pub fn window_bounds(&self) -> Option<crate::scene::Rect> {
+        let ui = self.ui.upgrade()?;
+        let scene = ui.scene.borrow();
+        scene
+            .contains(self.node)
+            .then(|| scene.window_rect(self.node, scene.bounds(self.node)))
+    }
     /// The `Ui` it is mounted in.
     pub(crate) fn ui_handle(&self) -> &WeakUi {
         &self.ui
