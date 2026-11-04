@@ -337,3 +337,14 @@ advertised (sway, GNOME, Weston) nothing is sent, as before; X11's
 and again as `WindowHandle::set_glass` changes it.
 `scripts/linux_glass_blur_smoke.py` (zgx) reads the client's Wayland
 requests: sent where the compositor has the protocol, none where it hasn't.
+
+## Windows: `set_theme` is what `theme()` answers
+
+`Window::set_theme` set the window's dark mode (`try_theme`) and nothing else:
+`theme()` went on answering the system's, and a system change put the window
+back to it (`WM_SETTINGCHANGE` follows the system unless `preferred_theme` is
+set). So a window asked to be light on a dark system had light Mica and
+zgx's caption glyphs, which read `theme()`, white: unseen. It now sets
+`preferred_theme` and `current_theme`, as making a window with a theme does
+(`platform_impl/windows/window.rs`). `scripts/windows_caption_smoke.py` (zgx)
+checks the window, with its buttons drawn.
