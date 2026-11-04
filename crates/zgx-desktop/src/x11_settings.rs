@@ -58,19 +58,42 @@ pub(crate) fn current() -> Settings {
     if !ON_X11.load(Ordering::Relaxed) {
         return Settings::default();
     }
-    // The connection and the two atoms, kept: a read is then two requests.
-    thread_local! {
-        static CONNECTION: Option<(RustConnection, u32, u32)> = connect();
-    }
     CONNECTION
         .with(|connection| {
-            let (connection, selection, property) = connection.as_ref()?;
+            let (connection, selection, property, _) = connection.as_ref()?;
             read(connection, *selection, *property)
         })
         .unwrap_or_default()
 }
 
-fn connect() -> Option<(RustConnection, u32, u32)> {
+/// Whether what a window leaves transparent shows what is behind it: on X11,
+/// whether a compositing manager holds the screen's `_NET_WM_CM_S<n>`, as
+/// the EWMH has it. Without one the X server shows a window's pixels as they
+/// are, so a translucent colour is drawn over black. Read with the settings
+/// (a manager started later is heard as a window is activated). True off
+/// X11: a Wayland compositor always composites.
+pub(crate) fn composited() -> bool {
+    if !ON_X11.load(Ordering::Relaxed) {
+        return true;
+    }
+    CONNECTION.with(|connection| {
+        let Some((connection, _, _, manager)) = connection.as_ref() else {
+            return true;
+        };
+        connection
+            .get_selection_owner(*manager)
+            .ok()
+            .and_then(|owner| owner.reply().ok())
+            .is_none_or(|reply| reply.owner != x11rb::NONE)
+    })
+}
+
+// The connection and the three atoms, kept: a read is then a request or two.
+thread_local! {
+    static CONNECTION: Option<(RustConnection, u32, u32, u32)> = connect();
+}
+
+fn connect() -> Option<(RustConnection, u32, u32, u32)> {
     let (connection, screen) = x11rb::connect(None).ok()?;
     let atom = |name: &str| {
         Some(
@@ -84,7 +107,8 @@ fn connect() -> Option<(RustConnection, u32, u32)> {
     };
     let selection = atom(&format!("_XSETTINGS_S{screen}"))?;
     let property = atom("_XSETTINGS_SETTINGS")?;
-    Some((connection, selection, property))
+    let manager = atom(&format!("_NET_WM_CM_S{screen}"))?;
+    Some((connection, selection, property, manager))
 }
 
 /// The settings on the window owning `selection`, the manager's.

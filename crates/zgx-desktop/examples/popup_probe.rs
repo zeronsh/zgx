@@ -136,10 +136,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 popover.arrow(8.)
             } else {
-                menu("File", open.clone(), anchor)
+                let menu = menu("File", open.clone(), anchor)
                     .w(200.)
                     .p(5.)
-                    .children(items)
+                    .children(items);
+                // `POPUP_PROBE_SHADOW`: rounded and with a wide shadow, for
+                // `popup_windows_smoke.py` to see it with no compositor and
+                // under one.
+                if std::env::var_os("POPUP_PROBE_SHADOW").is_some() {
+                    menu.rounded(10.).shadow(zgx::scene::BoxShadow {
+                        color: rgba(0x00000066),
+                        offset: zgx::scene::Transform { x: 0., y: 8. },
+                        blur_radius: 40.,
+                        spread: 0.,
+                    })
+                } else {
+                    menu
+                }
             };
             // `POPUP_PROBE_INSET`: its content inset this much, so the popup
             // opens between pixels (`wayland_popups_smoke.py`).
@@ -286,6 +299,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("OPEN {} CHOSEN {:?}", open.get(), chosen.get());
                 });
                 cx.on_closed(move || drop(report));
+                // `POPUP_PROBE_SHADOW`: what the system says of transparency,
+                // once its settings are read.
+                if std::env::var_os("POPUP_PROBE_SHADOW").is_some() {
+                    let ui = cx.ui.downgrade();
+                    cx.tasks.spawn(async move {
+                        zgx::timer::sleep(std::time::Duration::from_millis(100)).await;
+                        if let Some(ui) = ui.upgrade() {
+                            let preferences = ui.theme().system_preferences();
+                            println!("TRANSPARENCY reduced={}", preferences.reduced_transparency);
+                        }
+                    });
+                }
                 println!("READY");
             }
         })

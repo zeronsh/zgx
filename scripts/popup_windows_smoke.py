@@ -6,9 +6,12 @@ its rows past the parent's edge drawn and chosen there; a press on the bare
 desktop closes it (the pointer grab a menu holds); and no popup window
 exists before one is wanted, nor shows once it closed. A popup whose frame
 panics every time it is drawn (`ZGX_PANIC_IN`, debug builds) is reported
-once and skipped while the app runs on and still closes it. At a scale of 2
-(`WINIT_X11_SCALE_FACTOR`), its window is its size in the screen's pixels,
-where the scene put it in them, and its last item is chosen there."""
+once and skipped while the app runs on and still closes it. With no compositor
+a menu's window is its panel alone, corners cut, and the system reports reduced
+transparency; under picom it keeps its shadow's margin, with no shadow of
+picom's round it. At a scale of 2 (`WINIT_X11_SCALE_FACTOR`), its window is its
+size in the screen's pixels, where the scene put it in them, and its last item
+is chosen there."""
 import argparse
 import json
 import os
@@ -180,6 +183,66 @@ def main():
         checks["a panicking popup frame reported once"] = text.count("contained a panic in a popup's frame") == 1
         assert checks["running with a panicking popup frame"], checks
         assert checks["a panicking popup frame reported once"], (checks, text[-3000:])
+
+        # A menu with a wide shadow and round corners, with no compositor to
+        # show what it leaves clear: a window the panel's size, not the
+        # shadow's margin in black, its corners cut to what is under them.
+        # The system says nothing shows through.
+        def shadowed(name):
+            nonlocal app
+            log = args.output / f"application-{name}.log"
+            app = launch(f"application-{name}", [str(args.binary.resolve())],
+                         dict(env, POPUP_PROBE_SHADOW="1"), stdout=log.open("w"))
+            until(f"READY {name}", lambda: "READY" in log.read_text())
+            main_window = until(f"the window {name}", lambda: (windows(True) or [None])[0])
+            run("xdotool", "windowactivate", "--sync", main_window)
+            x, y, w, h = geometry(main_window)
+            run("xdotool", "mousemove", x + 76, y + h - 30)
+            time.sleep(.3)
+            run("xdotool", "click", 1)
+            popup = until(f"the menu's window {name}",
+                          lambda: next((win for win in windows(True) if win != main_window), None))
+            time.sleep(.5)
+            shot = args.output / f"{name}.png"
+            run("import", "-window", "root", str(shot))
+            return app, log, popup, geometry(popup), shot
+
+        from PIL import Image
+        run("xsetroot", "-solid", "#3060c0")
+        app, log, popup, (px, py, pw, ph), shot = shadowed("no-compositor")
+        image = Image.open(shot).convert("RGB")
+        checks["no compositor: the menu's window"] = [pw, ph]
+        checks["no compositor: the window is the panel, no shadow's margin"] = [pw, ph] == list(MENU_SIZE)
+        below = image.getpixel((max(px, 0), min(py + ph - 1, image.height - 1)))
+        checks["no compositor: its bottom corner is the desktop's, not black"] = below == (0x30, 0x60, 0xc0)
+        checks["no compositor: the system reports reduced transparency"] = until(
+            "transparency reported", lambda: "TRANSPARENCY reduced=true" in log.read_text(), 5)
+        stop(app)
+        # Under picom, with its shadows on: the window keeps the margin zgx
+        # draws its shadow in, and asks picom for no shadow of its own, a box
+        # round all of it. Once it composites, the system says so.
+        picom = launch("picom", ["picom", "--backend", "xrender", "--shadow", "--shadow-radius=14",
+                                 "--shadow-opacity=0.9"], env)
+        time.sleep(1.5)
+        assert picom.poll() is None, (args.output / "picom.log").read_text()[-1000:]
+        app, log, popup, (px, py, pw, ph), shot = shadowed("picom")
+        checks["picom: the menu's window"] = [pw, ph]
+        checks["picom: the window keeps its shadow's margin"] = pw > MENU_SIZE[0] and ph > MENU_SIZE[1]
+        checks["picom: no shadow of picom's round it"] = "= 0" in run("xprop", "-id", popup, "_COMPTON_SHADOW")
+        image = Image.open(shot).convert("RGB")
+        # Just above its window, over the app's: picom's shadow would darken
+        # it. (The desktop is no use: picom paints it black, with no wallpaper.)
+        x, y, w, h = geometry(until("the window under picom", lambda: (windows(True) or [None])[0]))
+        checks["picom: the app just above the window is unshaded"] = (
+            image.getpixel((px + pw // 2, py - 3)) == image.getpixel((x + w - 40, y + 40)))
+        checks["picom: the system reports transparency"] = until(
+            "transparency reported", lambda: "TRANSPARENCY reduced=false" in log.read_text(), 5)
+        stop(app)
+        stop(picom)
+        (args.output / "result.json").write_text(json.dumps(checks, indent=2) + "\n")
+        failed = [key for key in checks if key.startswith(("no compositor:", "picom:")) and checks[key] is False]
+        assert not failed, f"failed: {failed}\n{json.dumps(checks, indent=2)}"
+        run("xsetroot", "-solid", "#000000")
 
         # At a scale of 2, on a screen twice the size: the same layout in
         # points, in twice the pixels.

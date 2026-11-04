@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A popup's glass on Linux blurs what its window drew under it
 (`GpuRenderer::set_backdrop`): popup_probe's translucent popover over hard
-stripes (`POPUP_PROBE_GLASS`), on X11 (Xvfb/Openbox) and Wayland (headless
+stripes (`POPUP_PROBE_GLASS`), on X11 (Xvfb/Openbox/picom) and Wayland (headless
 sway), read from the screen.
 
 Over the window, a row of the popover is even, and brighter than its fill
@@ -103,6 +103,13 @@ def main():
             env["DISPLAY"] = ":" + xvfb.stdout.readline().strip()
             openbox = launch("openbox", ["openbox"], env)
             wait_for_wm(env)
+            # A compositor: with none, the system reports reduced transparency,
+            # and glass paints opaque, unblurred.
+            config = args.output / "picom.conf"
+            config.write_text('backend = "xrender"; shadow = false; fading = false; unredir-if-possible = false;\n')
+            picom = launch("picom", ["picom", "--config", str(config)], env)
+            time.sleep(.5)
+            assert picom.poll() is None, "picom exited"
 
             def x_shot(name):
                 path = args.output / f"{name}.png"
@@ -123,6 +130,7 @@ def main():
                 subprocess.run(["xdotool", "windowactivate", "--sync", found[0]], env=env, check=True)
 
             shots("x11", env, x_shot, x_origin, x_focus)
+            stop(picom)
             stop(openbox)
             stop(xvfb)
             processes.clear()

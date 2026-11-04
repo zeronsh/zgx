@@ -341,7 +341,8 @@ fn preferences() -> SystemPreferences {
         SystemPreferences {
             reduced_motion: settings.reduced_motion,
             increased_contrast: settings.contrast,
-            reduced_transparency: false,
+            // On X11 with no compositor, nothing shows through a window.
+            reduced_transparency: !crate::x11_settings::composited(),
         }
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
@@ -381,7 +382,7 @@ fn preference_tokens(preferences: SystemPreferences) -> Vec<(TokenId, TokenInput
 
 /// What transparency turned off makes of the themes' tokens: glass opaque,
 /// unblurred. An app's theme that sets them keeps its own.
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux", test))]
 fn transparency_tokens(preferences: SystemPreferences) -> Vec<(TokenId, TokenInput)> {
     if !preferences.reduced_transparency {
         return Vec::new();
@@ -516,11 +517,14 @@ pub(crate) fn sync(ui: &zgx::widgets::Ui) {
             (direction == zgx::scene::Direction::Rtl).then_some(direction),
         );
     }
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    #[cfg_attr(
+        not(any(target_os = "macos", windows, target_os = "linux")),
+        allow(unused_mut)
+    )]
     let mut tokens = tokens();
     #[cfg(target_os = "macos")]
     tokens.extend(preference_tokens(preferences));
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     tokens.extend(transparency_tokens(preferences));
     ui.theme().set_system_tokens(tokens);
     ui.theme().set_system_preferences(preferences);
