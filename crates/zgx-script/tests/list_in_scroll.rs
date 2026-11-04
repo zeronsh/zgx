@@ -256,3 +256,62 @@ fn a_keyed_lists_rows_stay_as_the_scroll_around_it_moves() {
     );
     assert!(built(&mut h).contains(&21));
 }
+
+/// Zeron's panel section: the list in a clipping box that eases open and
+/// shut. The rows it builds follow the box, not only the scroll: folded
+/// none, opened again (the scroll not moved) the rows it shows, and the box
+/// shrinking keeps only those it still shows.
+#[test]
+fn a_list_in_a_box_easing_open_builds_the_rows_the_box_shows() {
+    let app = r#"local mounted = ui.state("mounted", true)
+        local amount = ui.state("amount", 1)
+        ui.command { id = "fold", run = function() amount:set(0) end }
+        ui.command { id = "unmount", run = function() mounted:set(false) end }
+        ui.command { id = "mount", run = function() mounted:set(true) end }
+        ui.command { id = "step", run = function() amount:set(math.min(1, amount:peek() + 0.25)) end }
+        ui.command { id = "nearly", run = function() amount:set(0.01) end }
+        return ui.column { w = 400, h = 700,
+            ui.scroll { id = "view", w = 400, h = 600,
+                ui.column { w_full = true,
+                    ui.button { id = "above", w = 80, h = 20, "Above" },
+                    ui.show(mounted, ui.div { overflow = "hidden", w_full = true,
+                        h = function() return math.floor(9000 * amount:get()) end,
+                        ui.list { id = "chats", count = 300, virtualize = "ancestor", w_full = true,
+                            heights = (function()
+                                local out = {}
+                                for i = 1, 300 do out[i] = 30 end
+                                return out
+                            end)(),
+                            row = function(i)
+                                return ui.button { label = `row {i}`, w = 120, h = 28, `row {i}` }
+                            end },
+                    }),
+                },
+            },
+        }"#;
+    let mut h = mount(app);
+    let first = built(&mut h);
+    assert!(first.len() >= 19 && first.contains(&19), "{first:?}");
+    for command in ["fold", "unmount"] {
+        assert!(h.host.run_command(command));
+        h.frames(3);
+    }
+    assert_eq!(built(&mut h), Vec::<usize>::new(), "folded");
+    assert!(h.host.run_command("mount"));
+    h.frames(3);
+    for _ in 0..4 {
+        assert!(h.host.run_command("step"));
+        h.frames(3);
+    }
+    // Open again, the scroll where it was: the rows it shows.
+    let reopened = built(&mut h);
+    assert_eq!(reopened, first, "reopened");
+    // Nearly shut: 90 points of it, three rows and the overscan.
+    assert!(h.host.run_command("nearly"));
+    h.frames(3);
+    let shut = built(&mut h);
+    assert!(
+        !shut.is_empty() && shut.len() <= 3 + 2 && shut.first() == Some(&1),
+        "{shut:?}"
+    );
+}
