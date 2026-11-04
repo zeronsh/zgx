@@ -82,9 +82,11 @@ impl View {
             let span = crate::compose_rich::locate_for(at.ui, at.node, at.target, event.x, event.y);
             let items = build(event, span.as_ref());
             match span.and_then(|span| span.href) {
-                Some(url) if items.is_empty() => {
-                    crate::compose_rich::link_items(url, at.environment.services.get())
-                }
+                Some(url) if items.is_empty() => crate::compose_rich::link_items(
+                    url,
+                    at.environment.services.get(),
+                    at.environment.services.get(),
+                ),
                 _ => items,
             }
         }));

@@ -275,3 +275,9 @@ pub struct Substitutions {
 /// The platform, as a service components find.
 #[derive(Clone)]
 pub struct PlatformService(pub Rc<dyn Platform>);
+
+/// Asked before a link in text opens, on a click or its Open Link menu item,
+/// where a view provides one (`compose::provide`): `false` leaves it unopened.
+/// Told the URL.
+#[derive(Clone)]
+pub struct LinkGuard(pub Rc<dyn Fn(&str) -> bool>);

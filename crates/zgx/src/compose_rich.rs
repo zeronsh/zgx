@@ -429,6 +429,7 @@ impl LinkTarget {
 pub(crate) fn link_items(
     url: Arc<str>,
     platform: Option<Rc<crate::platform::PlatformService>>,
+    guard: Option<Rc<crate::platform::LinkGuard>>,
 ) -> Vec<View> {
     let (open, copy) = (platform.clone(), platform);
     let opened = url.clone();
@@ -438,7 +439,9 @@ pub(crate) fn link_items(
             crate::compose::menu_item("Open Link")
                 .id("link-open")
                 .on_click(move || {
-                    if let Some(platform) = &open {
+                    if let Some(platform) = &open
+                        && guard.as_ref().is_none_or(|guard| (guard.0)(&opened))
+                    {
                         platform.0.open_url(&opened);
                     }
                 }),
@@ -469,6 +472,7 @@ fn mount_link_menu(
     environment: crate::compose::Environment,
 ) {
     let weak = ui.downgrade();
+    let services = environment.services.clone();
     crate::compose_context_menu::mount(
         ui,
         node,
@@ -487,7 +491,7 @@ fn mount_link_menu(
                 return (menu.0.borrow_mut())(event);
             }
             match href {
-                Some(url) if !deferred => link_items(url, platform.clone()),
+                Some(url) if !deferred => link_items(url, platform.clone(), services.get()),
                 _ => Vec::new(),
             }
         }),
@@ -775,6 +779,9 @@ pub(crate) fn mount_links(
                 let weak = ui.downgrade();
                 let ring = theme.clone();
                 let open = platform.clone();
+                // Read as a link opens: most views provide no guard, and
+                // looking for what is not there walks every scope.
+                let services = environment.services.clone();
                 // A click's: its own action with the keys held, then its
                 // `href` opened, unless the action handled it.
                 let activate = move |link: &LinkTarget, held| {
@@ -785,6 +792,9 @@ pub(crate) fn mount_links(
                     if !handled
                         && let (Some(url), Some(platform)) = (&link.href, &open)
                         && opens(url)
+                        && services
+                            .get::<crate::platform::LinkGuard>()
+                            .is_none_or(|guard| (guard.0)(url))
                     {
                         platform.0.open_url(url);
                     }

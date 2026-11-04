@@ -6097,6 +6097,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (key, initial): (String, Value)| {
             let env = env(lua)?;
             let key = module_key(lua, &env, key);
+            if let Some(held) = crate::rules::held_persist(lua, &env, &key, &initial) {
+                return Ok(State::new(held));
+            }
             if let Some(meter) = &env.meter
                 && env.persist.get(&env.persist_as, &key).is_none()
             {

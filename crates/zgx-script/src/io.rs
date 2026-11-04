@@ -574,6 +574,7 @@ impl mlua::UserData for DownloadUd {
         // The save dialog, suggesting the download's name: a promise of
         // the file saved to (`{ path, … }`), or nil if the person cancelled.
         methods.add_method("ask", |lua, d, opts: Option<Table>| {
+            crate::rules::guard(lua, crate::GuardKind::Dialog, "ask")?;
             let env = crate::node::env(lua)?;
             if !env.grants.allows(&crate::Capability::Files) {
                 return Err(denied("d:ask", "Files"));

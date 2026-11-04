@@ -1102,7 +1102,15 @@ pub(crate) fn install(
     ui.set(
         "fetch",
         lua.create_function(move |lua, (url, opts): (String, Option<Table>)| {
-            crate::rules::guard(lua, crate::GuardKind::Fetch, &url)?;
+            // Refused, its promise rejects, as a request the network refused:
+            // what handles those says so, and a top level isn't failed.
+            if let Err(error) = crate::rules::guard(lua, crate::GuardKind::Fetch, &url) {
+                let promise = pending(lua, format!("fetch {url}"))?;
+                settle_with(lua, &promise, Kind::Network, async move {
+                    Err(error.to_string())
+                })?;
+                return Ok(PromiseUd(promise));
+            }
             let Some(fetcher) = &fetcher else {
                 return Err(mlua::Error::runtime(
                     "ui.fetch: a plugin reaches the network only if the host grants it \

@@ -2336,6 +2336,32 @@ impl ScriptHost {
             vm.lua.set_app_data(rules::Guarded(rules));
         }
     }
+    /// Saves what `ui.persist` keys the guard refused hold
+    /// ([`GuardKind::Persist`]): the person kept what they previewed. How
+    /// many changed what is kept. It saves as any change does, 250 ms after
+    /// (or [`save`](Self::save)); what shows goes on holding its own copy
+    /// until the next load.
+    pub fn keep_held_state(&self) -> usize {
+        let Some(rules) = rules::of(&self.0) else {
+            return 0;
+        };
+        rules
+            .take_held()
+            .into_iter()
+            .filter(|((script, key), held)| {
+                let value = held.with_untracked(Clone::clone);
+                self.0.persist.state(script, key, value.clone()).set(value)
+            })
+            .count()
+    }
+    /// Lets go of what `ui.persist` keys the guard refused hold: the person
+    /// reverted. The next load starts from what is saved. Quitting does the
+    /// same: nothing held is ever saved on its own.
+    pub fn drop_held_state(&self) {
+        if let Some(rules) = rules::of(&self.0) {
+            drop(rules.take_held());
+        }
+    }
     /// Ask `capability` of a plugin adding before or after an element by
     /// `target`, written as plugins write it (`"#save"`, `"hook:toolbar.save"`):
     /// every target is open to before and after, as a slot is, unless the
@@ -3366,7 +3392,9 @@ impl ScriptHost {
         let persist = self.0.persist.clone();
         let timers = self.0.timers.clone();
         let host = self.clone();
-        component(move |cx| {
+        // A host with rules is asked of the links in its view.
+        let links = rules::of(&self.0).map(|rules| rules::link_guard(rules, self.0.error.clone()));
+        let view = component(move |cx| {
             // One frame loop ticks every animation; it idles at rest.
             if let Some(frames) = cx.try_service::<zgx::frame::FrameClock>() {
                 cx.tasks().spawn(engine.run((*frames).clone()));
@@ -3453,7 +3481,11 @@ impl ScriptHost {
                     error_layer(banner, cx)
                 },
             )
-        })
+        });
+        match links {
+            Some(links) => zgx::compose::provide(links, view),
+            None => view,
+        }
     }
 
     fn scripts(&self) -> Vec<Script> {

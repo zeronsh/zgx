@@ -4,11 +4,14 @@
 //! (`ScriptHost::guard`). Kept here, keyed by host, rather than in the host,
 //! whose size a host asking neither would pay for (where the heap places what
 //! follows it). Until a host on this thread asks, each check reads one flag.
+use crate::value::Value;
 use mlua::Lua;
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     rc::{Rc, Weak},
 };
+use zgx::reactive::Signal;
 
 thread_local! {
     /// Whether a host on this thread has asked for anything here.
@@ -27,9 +30,14 @@ pub enum GuardKind {
     AsyncAction,
     /// A host function (`ui.call_sync`).
     Function,
-    /// A request through the host's fetcher (`ui.fetch`, a remote `ui.image`):
-    /// named by its URL.
+    /// A request through the host's fetcher (`ui.fetch`): named by its URL.
+    /// Refused, its promise rejects, with the guard's text.
     Fetch,
+    /// A remote picture (`ui.image`, `ui.svg`, `bg_image`), through the same
+    /// fetcher: named by its URL. Apart from `Fetch` so a host can let
+    /// pictures show while keeping scripts off the network, knowing a picture's
+    /// URL can carry what a script puts in it.
+    Picture,
     /// A connection through the host's connector (`ui.socket`): named by its
     /// URL, asked each time it opens.
     Socket,
@@ -62,6 +70,21 @@ pub enum GuardKind {
     /// A system notification (`ui.notify`, by its title) or the app's badge
     /// (`ui.badge`, named `badge`).
     Notification,
+    /// A link in text opening in the browser, on a click or its Open Link
+    /// item: named by its URL. Any link in the host's view, a plugin's too;
+    /// asked only if the host had a guard (or `reserve_prefix`) as its view
+    /// was made.
+    OpenLink,
+    /// A window a script declares (`ui.window`): named by its `id`. Refused,
+    /// `ui.window` raises and nothing opens.
+    Window,
+    /// A value kept across runs (`ui.persist`): named by its key. A script
+    /// in the app's VM shares the app's keys. Refused, it starts from what is
+    /// saved and what it writes is held, in memory: saved by
+    /// `ScriptHost::keep_held_state`, else gone with
+    /// `ScriptHost::drop_held_state` or the app. So a preview looks as the app
+    /// does and overwrites nothing; it can read what is saved.
+    Persist,
 }
 
 type Guard = dyn Fn(GuardKind, &str) -> Result<(), String>;
@@ -72,6 +95,8 @@ pub(crate) struct Rules {
     /// Prefixes only the app's VM may use, without their last dot.
     reserved: RefCell<Vec<String>>,
     guard: RefCell<Option<Rc<Guard>>>,
+    /// What `ui.persist` keys the guard refused hold, by script and key.
+    held: RefCell<HashMap<(String, String), Signal<Value>>>,
 }
 impl Rules {
     pub fn reserve(&self, prefix: &str) {
@@ -95,6 +120,10 @@ impl Rules {
                     .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
             })
             .cloned()
+    }
+    /// The values held, let go of.
+    pub fn take_held(&self) -> HashMap<(String, String), Signal<Value>> {
+        std::mem::take(&mut *self.held.borrow_mut())
     }
     /// What the guard says of reaching `name`. It runs with nothing here
     /// borrowed: it may set another.
@@ -205,6 +234,66 @@ pub(crate) fn guard_term(lua: &Lua, command: Option<&str>) -> mlua::Result<()> {
         }
     };
     guarded(lua, GuardKind::Term, name)
+}
+
+/// The state `ui.persist` gives where the app VM's guard refuses `key`: what
+/// is saved (or `initial`), held here so its writes reach nothing saved.
+/// Otherwise (no host asked, a plugin's VM, allowed) `None`, for one
+/// thread-local read when no host asked.
+#[inline]
+pub(crate) fn held_persist(
+    lua: &Lua,
+    env: &crate::node::Env,
+    key: &str,
+    initial: &Value,
+) -> Option<Signal<Value>> {
+    if !ACTIVE.get() {
+        return None;
+    }
+    held_persist_asked(lua, env, key, initial)
+}
+#[cold]
+#[inline(never)]
+fn held_persist_asked(
+    lua: &Lua,
+    env: &crate::node::Env,
+    key: &str,
+    initial: &Value,
+) -> Option<Signal<Value>> {
+    let rules = lua.app_data_ref::<Guarded>()?.0.clone();
+    let why = rules.check(GuardKind::Persist, key).err()?;
+    let id = (env.persist_as.to_string(), key.to_owned());
+    if let Some(held) = rules.held.borrow().get(&id) {
+        return Some(held.clone());
+    }
+    crate::warning(
+        Some(&env.warnings),
+        format!("ui.persist `{key}`: held, not saved: {why}"),
+    );
+    let start = env
+        .persist
+        .saved(&id.0, key)
+        .unwrap_or_else(|| initial.clone());
+    let held = env.runtime.signal(start);
+    rules.held.borrow_mut().insert(id, held.clone());
+    Some(held)
+}
+
+/// What a host's view is told for its links, if it has rules: a refusal
+/// goes where a script's error shows.
+pub(crate) fn link_guard(
+    rules: Rc<Rules>,
+    error: zgx::reactive::Signal<Option<String>>,
+) -> zgx::platform::LinkGuard {
+    zgx::platform::LinkGuard(Rc::new(move |url| {
+        match rules.check(GuardKind::OpenLink, url) {
+            Ok(()) => true,
+            Err(why) => {
+                crate::report(&error, format!("OpenLink `{url}`: {why}"));
+                false
+            }
+        }
+    }))
 }
 
 /// Refuses a plugin's use of a name a host reserved (`what` says which).
