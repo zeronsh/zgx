@@ -128,7 +128,7 @@ pub const RULES: &[(&str, &str)] = &[
     ),
     (
         "update-copy",
-        "state:update(fn) copying the whole value for one change",
+        "state:update(fn), or table.clone(state:peek()) and state:set, copying the whole value for one change",
     ),
     (
         "append-concat",
@@ -1451,7 +1451,98 @@ impl Linter<'_> {
     }
 
     /// Rules about a call or field at `at`, given the frames around it.
+    /// `local copy = table.clone(state:peek())` at `at` (its `table`), one
+    /// change to the copy, then `state:set(copy)`: what `update-copy` says of
+    /// `state:update`, written out. What does the change alone, if it's that.
+    fn cloned_for_one_change(&self, at: usize) -> Option<&'static str> {
+        if !(self.is(at, "table") && self.is(at + 1, ".") && self.is(at + 2, "clone")) {
+            return None;
+        }
+        if !(self.is(at + 3, "(")
+            && self.is(at.checked_sub(1)?, "=")
+            && self.is(at.checked_sub(3)?, "local"))
+        {
+            return None;
+        }
+        let copy = self.name(at - 2)?;
+        // The state: `state` or `a.b`, up to `:peek()` or `:get()`.
+        let path = at + 4;
+        let mut colon = path;
+        while self.name(colon).is_some() && self.is(colon + 1, ".") {
+            colon += 2;
+        }
+        self.name(colon)?;
+        colon += 1;
+        if !(self.is(colon, ":")
+            && (self.is(colon + 1, "peek") || self.is(colon + 1, "get"))
+            && self.is(colon + 2, "(")
+            && self.is(colon + 3, ")")
+            && self.is(colon + 4, ")"))
+        {
+            return None;
+        }
+        let state = &self.tokens[path..colon];
+        let mut next = colon + 5;
+        // The one change, and what does it alone.
+        let method = if self.is(next, copy) && self.is(next + 1, "[") {
+            next = self.closing(next + 1) + 1;
+            "`:set_key({ key }, value)`"
+        } else if self.is(next, copy) && self.is(next + 1, ".") && self.name(next + 2).is_some() {
+            next += 3;
+            "`:set_key({ \"field\" }, value)` or `:patch({ … })`"
+        } else if self.is(next, "table")
+            && self.is(next + 1, ".")
+            && self.is(next + 2, "insert")
+            && self.is(next + 3, "(")
+            && self.is(next + 4, copy)
+        {
+            let close = self.closing(next + 3);
+            // (A move, the value taken from the copy, isn't one insert.)
+            return ((next + 5..close).all(|j| !self.is(j, copy))
+                && self.sets_after(close + 1, state, copy))
+            .then_some("`:push(value)` or `:insert(at, value)`");
+        } else {
+            return None;
+        };
+        // (Taking a key away isn't setting one: no method does it alone.)
+        if !self.is(next, "=") || self.is(next + 1, "nil") {
+            return None;
+        }
+        // Past the value, which never reads the copy, to the write.
+        let end = (next + 1..next + 64).find(|j| self.sets_after(*j, state, copy))?;
+        (next + 1..end)
+            .all(|j| {
+                !self.is(j, copy)
+                    && !["local", "if", "for", "while", "function", "return", "end"]
+                        .iter()
+                        .any(|keyword| self.is(j, keyword))
+            })
+            .then_some(method)
+    }
+    /// Whether `state:set(copy)` starts at `at`.
+    fn sets_after(&self, at: usize, state: &[Token], copy: &str) -> bool {
+        let n = state.len();
+        state
+            .iter()
+            .enumerate()
+            .all(|(i, token)| self.is(at + i, &token.text))
+            && self.is(at + n, ":")
+            && self.is(at + n + 1, "set")
+            && self.is(at + n + 2, "(")
+            && self.is(at + n + 3, copy)
+            && self.is(at + n + 4, ")")
+    }
     fn token_rules(&mut self, at: usize, stack: &[Frame]) {
+        if let Some(method) = self.cloned_for_one_change(at) {
+            self.report(
+                at,
+                "update-copy",
+                format!(
+                    "this copies the whole value into Luau and back for one change; \
+                     {method} copies only what it changes."
+                ),
+            );
+        }
         let function = stack.iter().rposition(|f| f.open == Open::Function);
         let inside = |from: Option<usize>| &stack[from.map_or(0, |f| f + 1)..];
         // `state:get()` built into an element, with no function between.
@@ -2345,6 +2436,64 @@ items:update(function(list) return sort(list) end)
                 (4, "update-copy".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn a_clone_for_one_change_is_an_update_written_out() {
+        let source = r##"
+local a = table.clone(map:peek())
+a[key] = value
+map:set(a)
+local b = table.clone(config:get())
+b.theme = "dark"
+config:set(b)
+local c = table.clone(items:peek())
+table.insert(c, row)
+items:set(c)
+local d = table.clone(state.volumes:peek())
+d[id] = level + 1
+state.volumes:set(d)
+"##;
+        assert_eq!(
+            rules(source),
+            [
+                (2, "update-copy".to_string()),
+                (5, "update-copy".to_string()),
+                (8, "update-copy".to_string()),
+                (11, "update-copy".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_clone_for_more_than_one_change_is_a_clone() {
+        // Two changes, a loop, a key taken away, a value read from the copy,
+        // a copy written elsewhere, or kept: none does it alone.
+        let source = r##"
+local a = table.clone(map:peek())
+a.x = 1
+a.y = 2
+map:set(a)
+local b = table.clone(map:peek())
+for k in other do b[k] = true end
+map:set(b)
+local c = table.clone(map:peek())
+c[key] = nil
+map:set(c)
+local d = table.clone(map:peek())
+d.x = d.y
+map:set(d)
+local e = table.clone(map:peek())
+e[key] = value
+other:set(e)
+local f = table.clone(map:peek())
+f[key] = value
+return f
+local g = table.clone(list:peek())
+table.insert(g, to, table.remove(g, from))
+list:set(g)
+"##;
+        assert_eq!(rules(source), Vec::<(u32, String)>::new());
     }
 
     #[test]
