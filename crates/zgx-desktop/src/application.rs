@@ -2862,6 +2862,12 @@ impl Host {
                         eprintln!("zgx: {mark}");
                     }
                 });
+                #[cfg(target_os = "macos")]
+                if std::env::var_os("ZGX_LOOP_CHECK").is_some() {
+                    for line in renderer.debug_check_loops(&scene) {
+                        eprintln!("ZGX_LOOP_CHECK {line}");
+                    }
+                }
                 // Commits the transaction (macOS; elsewhere there is none).
                 #[allow(dropping_copy_types)]
                 drop(transaction);

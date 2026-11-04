@@ -1574,6 +1574,23 @@ impl Layer {
             }
         }
     }
+    /// Diagnostic: each loop's layer's frame, in the host's points.
+    pub(crate) fn debug_loop_frames(&self) -> Vec<(u64, f64, f64, f64, f64, bool)> {
+        self.loops
+            .iter()
+            .map(|(key, layer, _)| {
+                let frame = layer.frame();
+                (
+                    *key,
+                    frame.origin.x,
+                    frame.origin.y,
+                    frame.size.width,
+                    frame.size.height,
+                    layer.isHidden(),
+                )
+            })
+            .collect()
+    }
     /// `set_loops`' changes, where no tile showed to carry them.
     pub(crate) fn flush_loops(&mut self) {
         if self.loops_due.is_some() {

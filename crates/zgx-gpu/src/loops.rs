@@ -238,6 +238,46 @@ impl GpuRenderer {
         }
         over
     }
+    /// Diagnostic: loops' layers that don't lie on their nodes' boxes, a line
+    /// each, for a host to log after a present.
+    pub fn debug_check_loops(&self, scene: &Scene) -> Vec<String> {
+        let Some(layer) = self
+            .layer_present
+            .as_ref()
+            .and_then(|present| present.layer.as_ref())
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (key, x, y, width, height, hidden) in layer.debug_loop_frames() {
+            let node = self.loop_sheets.iter().find(|sheet| sheet.key() == key);
+            let Some(sheet) = node else {
+                out.push(format!("layer {key} has no sheet at ({x:.1},{y:.1}) hidden={hidden}"));
+                continue;
+            };
+            if !scene.contains(sheet.node) {
+                out.push(format!("layer {key}'s node is gone, at ({x:.1},{y:.1})"));
+                continue;
+            }
+            let bounds = scene.bounds(sheet.node);
+            if std::env::var("ZGX_LOOP_CHECK").is_ok_and(|mode| mode == "all") {
+                out.push(format!(
+                    "seen layer {key} at ({x:.1},{y:.1}) node ({:.1},{:.1})",
+                    bounds.x, bounds.y
+                ));
+            }
+            if (x - f64::from(bounds.x)).abs() > 1. || (y - f64::from(bounds.y)).abs() > 1. {
+                out.push(format!(
+                    "layer {key} at ({x:.1},{y:.1} {width:.1}x{height:.1}) hidden={hidden}, its node at ({:.1},{:.1} {:.1}x{:.1}); sheet says ({:.1},{:.1}) seen ({:.1},{:.1}); patched={} kept={} baked={} refused={}",
+                    bounds.x, bounds.y, bounds.width, bounds.height,
+                    sheet.frame.0, sheet.frame.1, sheet.seen.x, sheet.seen.y,
+                    self.patched, self.kept.is_some(), scene.baked_loops().len(),
+                    sheet.baked.refused(),
+                ));
+            }
+        }
+        out
+    }
     /// Test hook: the frame shown, without what layers show over it.
     #[doc(hidden)]
     pub fn debug_bare_pixels(&self) -> Option<(u32, u32, Vec<u8>)> {
