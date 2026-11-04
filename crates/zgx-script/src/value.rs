@@ -2388,15 +2388,37 @@ impl UserData for ReadState {
         }
     }
 }
+/// A list this long costs more to make into a table than a call's budget
+/// should be charged for.
+const OFF_THE_CLOCK_FROM: usize = 256;
+/// A value a script read, as a table if it is one. A long list's first
+/// conversion is the host's work, off the script's clock: a chat's whole
+/// transcript took more than the 50 ms a call has, so the script's next
+/// instruction, whatever it was, stopped with its budget spent.
+fn read(value: Value, lua: &Lua) -> mlua::Result<mlua::Value> {
+    if value.list().len() < OFF_THE_CLOCK_FROM {
+        return value.into_lua(lua);
+    }
+    if let Some(table) = cached(lua, &value)? {
+        return Ok(mlua::Value::Table(table));
+    }
+    let vm = crate::node::env(lua).ok().and_then(|env| env.vm.upgrade());
+    match vm {
+        Some(vm) => vm.off_clock(|| value.into_lua(lua)),
+        None => value.into_lua(lua),
+    }
+}
 /// What a state's script handle reads: the same for a state and for a
 /// read-only one (`ReadState`).
 fn add_reads<T: 'static, M: UserDataMethods<T>>(
     methods: &mut M,
     state: impl Fn(&T) -> &State + Copy + 'static,
 ) {
-    methods.add_method("get", move |_, s: &T, ()| Ok(state(s).fresh().get()));
-    methods.add_method("peek", move |_, s: &T, ()| {
-        Ok(state(s).fresh().with_untracked(Clone::clone))
+    methods.add_method("get", move |lua, s: &T, ()| {
+        read(state(s).fresh().get(), lua)
+    });
+    methods.add_method("peek", move |lua, s: &T, ()| {
+        read(state(s).fresh().with_untracked(Clone::clone), lua)
     });
     // Of a derived list (a sorted view) as it is now: brought up to date
     // first, as `at` is, inside a batch that wrote what it derives from.
