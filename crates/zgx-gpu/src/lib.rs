@@ -47,6 +47,7 @@ mod native_surface;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod phase_watch;
 mod planes;
+pub use planes::plane_size;
 pub mod present_log;
 mod surface;
 #[cfg(target_os = "macos")]
