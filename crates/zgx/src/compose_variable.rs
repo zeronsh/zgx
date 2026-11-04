@@ -471,7 +471,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 mounted_revision.get();
                 let (width, mut height) = size.get();
                 let requested = offset.get();
-                let around = window.as_ref().zip(weak.upgrade());
+                let around = window
+                    .as_ref()
+                    .and_then(|window| Some((window, weak.upgrade()?)));
                 let mut pending_measurement = false;
                 let mut measurement_changed = false;
                 if measured {
