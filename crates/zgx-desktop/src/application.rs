@@ -1267,6 +1267,22 @@ fn align_wait(
 /// presents on the plain layer for as long: `zgx_gpu`'s `RESIZE_SETTLE`).
 #[cfg(target_os = "macos")]
 const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+/// How long after a move of the pointer or the wheel a window's frames are a
+/// hand's, handed over as they are drawn (`refresh_grid`). Past two refreshes
+/// of the slowest pointer, and short enough that what follows, a stream or
+/// an animation, has its grid back at once.
+#[cfg(target_os = "macos")]
+const HAND_FRAMES: std::time::Duration = std::time::Duration::from_millis(100);
+/// Whether a frame drawn at `now` is a hand's: the pointer or the wheel moved
+/// a moment ago, or a scroll it started still runs.
+#[cfg(target_os = "macos")]
+fn under_hand(
+    input_at: Option<std::time::Instant>,
+    scrolling: bool,
+    now: std::time::Instant,
+) -> bool {
+    scrolling || input_at.is_some_and(|at| now.duration_since(at) < HAND_FRAMES)
+}
 /// How long after input frames stay at the display's full rate: a press's
 /// release spring or a hover fade that follows input keeps its frames too.
 #[cfg(any(target_os = "macos", windows))]
@@ -1641,6 +1657,9 @@ struct Host {
     /// would hold the next resize step back.
     #[cfg(target_os = "macos")]
     resized_at: Option<std::time::Instant>,
+    /// When the pointer or the wheel last moved in this window (`refresh_grid`).
+    #[cfg(target_os = "macos")]
+    input_at: Option<std::time::Instant>,
     /// The window's size as AppKit last reported it (`Resized`, sent for
     /// every change of the content view's frame): asking every frame
     /// costs a walk of the window's frame views. None until reported.
@@ -2067,6 +2086,8 @@ impl Host {
             caret_applied: None,
             #[cfg(target_os = "macos")]
             resized_at: None,
+            #[cfg(target_os = "macos")]
+            input_at: None,
             #[cfg(target_os = "macos")]
             reported_size: None,
             #[cfg(target_os = "macos")]
@@ -4334,6 +4355,13 @@ impl Host {
         Ok(())
     }
     fn window_event(&mut self, event: WindowEvent) -> Result<(), Box<dyn Error>> {
+        #[cfg(target_os = "macos")]
+        if matches!(
+            event,
+            WindowEvent::CursorMoved { .. } | WindowEvent::MouseWheel { .. }
+        ) {
+            self.input_at = Some(std::time::Instant::now());
+        }
         // On Wayland the compositor holds the pointer while it has the drag,
         // and gives it back at the drop, before the drop's target finishes
         // with it: a press then is a new gesture, which that drag's end must
@@ -5882,6 +5910,12 @@ impl Host {
             .resized_at
             .is_some_and(|at| now.duration_since(at) < RESIZE_SETTLE)
         {
+            self.latch = Latch::default();
+            return None;
+        }
+        // A hand's frames: the grid's fixed point would cost a frame near a
+        // refresh's length a whole refresh, and what the hand moves lags it.
+        if under_hand(self.input_at, self.scroll.active(now), now) {
             self.latch = Latch::default();
             return None;
         }
@@ -8427,6 +8461,19 @@ mod tests {
         for left in [1.9, 2.5, 3.2, 8.0, 15.0] {
             assert_eq!(align_wait(ms(left), slow), None, "{left} ms at 60 Hz");
         }
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_hands_frames_are_off_the_grid_and_a_streams_are_on_it() {
+        let now = std::time::Instant::now();
+        let ago = |ms: u64| Some(now - std::time::Duration::from_millis(ms));
+        assert!(under_hand(ago(8), false, now), "a pointer moving");
+        assert!(under_hand(None, true, now), "a scroll still running");
+        assert!(
+            !under_hand(ago(100), false, now),
+            "a hand gone a moment ago"
+        );
+        assert!(!under_hand(None, false, now), "no hand at all: a stream");
     }
     #[cfg(target_os = "macos")]
     #[test]

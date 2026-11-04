@@ -277,7 +277,7 @@ zgx inspect replay '#messages' fling.tape --repeat 3
 zgx inspect switch scroll_copy on
 ```
 
-`scroll_copy` (a scroll moves what is drawn and paints the strip scrolled in), `refresh_grid` (macOS: steady frames hand over at a set point before a refresh; off, as soon as drawn) and `partial_repaint` (a frame paints only what changed; off, the whole window).
+`scroll_copy` (a scroll moves what is drawn and paints the strip scrolled in), `refresh_grid` (macOS: steady frames hand over at a set point before a refresh; off, as soon as drawn; frames within 100 ms of the pointer or the wheel moving hand over as drawn) and `partial_repaint` (a frame paints only what changed; off, the whole window).
 
 ## As MCP tools
 
