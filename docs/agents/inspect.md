@@ -124,6 +124,7 @@ zgx inspect drag '#card' '#done'                       # from one to another
 zgx inspect drag '#slider' 340,120                     # or to a point, window points
 zgx inspect type '#composer' 'Write me a function'     # clicks it, then types
 zgx inspect key Enter                                  # Escape, Tab, cmd+k, alt+ArrowDown, shift+Tab, F5…
+zgx inspect key alt                                    # modifiers alone (ctrl+shift): held, then let go, as a window reports a tap
 zgx inspect scroll '#transcript' 400                   # points; down is positive
 zgx inspect command new                                # a ui.command, as its menu item or shortcut runs it
 zgx inspect set current '"c1"'                         # a named state, the value as JSON

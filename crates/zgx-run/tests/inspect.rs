@@ -1000,3 +1000,32 @@ return ui.text { id = "main", "main" }
     let listed = text(&ask(&app, &session, r#"{"cmd":"windows"}"#));
     assert!(!listed.contains(&id), "{listed}");
 }
+
+/// `key` with modifiers alone taps them, as a window reports a tap: what
+/// watches them (an Alt-to-show menu bar) sees them held, then let go. Any
+/// other key, and a name that is neither, are as they were.
+#[test]
+fn key_with_modifiers_alone_taps_them() {
+    const APP: &str = r##"
+local seen = ui.state("seen", "")
+ui.effect(function()
+    local held = ui.modifiers.alt:get()
+    seen:set(seen:peek() .. (if held then "held " else "up "))
+end)
+return ui.column { ui.text { id = "seen", "{seen}" } }
+"##;
+    let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", APP));
+    let session = Session::new(&app.ui, app.handle.clone(), &app.host, None);
+    let seen = || text(&ask(&app, &session, r#"{"cmd":"state","name":"seen"}"#));
+    assert!(seen().contains("up"), "{}", seen());
+    let tapped = text(&ask(&app, &session, r#"{"cmd":"key","keys":"alt"}"#));
+    assert!(tapped.contains("alone"), "{tapped}");
+    assert!(seen().contains("up held up"), "{}", seen());
+    // A key with a modifier still presses that key: no tap.
+    text(&ask(&app, &session, r#"{"cmd":"key","keys":"alt+x"}"#));
+    assert!(seen().contains("up held up"), "{}", seen());
+    assert!(!seen().contains("up held up held"), "{}", seen());
+    // And a name that is neither is still an error.
+    let wrong = ask(&app, &session, r#"{"cmd":"key","keys":"altt"}"#);
+    assert!(!wrong.field("ok").is_some_and(Value::truthy));
+}
