@@ -53,9 +53,9 @@ hyphens = ["zgx-desktop/hyphens"]
 gltf = ["zgx-script/gltf"]
 
 [dependencies]
-zgx = { path = "../zgx", version = "0.1.9", default-features = false }
-zgx-desktop = { path = "../zgx-desktop", version = "0.1.9" }
-zgx-script = { path = "../zgx-script", version = "0.1.9" }
+zgx = { path = "../zgx", version = "0.1.10", default-features = false }
+zgx-desktop = { path = "../zgx-desktop", version = "0.1.10" }
+zgx-script = { path = "../zgx-script", version = "0.1.10" }
 serde_json = "1"
 # `~3.5`: the fetcher's connector uses `ureq::unversioned`, which a minor
 # release may change.
