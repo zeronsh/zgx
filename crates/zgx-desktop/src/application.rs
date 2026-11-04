@@ -1310,8 +1310,25 @@ impl Latch {
     /// row, before a later cadence gives way to the coming point: a stream
     /// ready near a point, some frames just before and some just after, all
     /// wait for the next.
-    const KEEP: std::time::Duration = std::time::Duration::from_micros(1500);
-    const RETURN: u8 = 8;
+    fn keep() -> std::time::Duration {
+        // Diagnostic only: ZGX_LATCH_KEEP_US and ZGX_LATCH_RETURN.
+        static KEEP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        std::time::Duration::from_micros(*KEEP.get_or_init(|| {
+            std::env::var("ZGX_LATCH_KEEP_US")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1500)
+        }))
+    }
+    fn returns() -> u8 {
+        static RETURN: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        *RETURN.get_or_init(|| {
+            std::env::var("ZGX_LATCH_RETURN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8)
+        })
+    }
     /// How far frames the GPU held up move their successors (`ran`).
     const STEP: std::time::Duration = std::time::Duration::from_millis(2);
     /// Frames rendered at once after a held one missed its refresh.
@@ -1348,8 +1365,8 @@ impl Latch {
                 format!(
                     "waited a refresh more to keep the last frame's cadence, until {} frames \
                      in a row are ready {:.1} ms before their refresh ({early} so far)",
-                    Self::RETURN,
-                    Self::KEEP.as_secs_f64() * 1e3
+                    Self::returns(),
+                    Self::keep().as_secs_f64() * 1e3
                 )
             });
         }
@@ -1411,12 +1428,12 @@ impl Latch {
             let cadence = at + period.mul_f64(refreshes);
             cadence > first + period / 2 && cadence < first + period * 3 / 2
         });
-        let early = if late && first - ready >= Self::KEEP {
+        let early = if late && first - ready >= Self::keep() {
             self.early + 1
         } else {
             0
         };
-        if late && early < Self::RETURN {
+        if late && early < Self::returns() {
             (first + period, early, true)
         } else {
             (first, 0, false)
@@ -1446,7 +1463,7 @@ impl Latch {
         let (point, _, _) = self.choose(ready, origin, period);
         self.room = point
             .saturating_duration_since(ready)
-            .saturating_sub(Self::KEEP);
+            .saturating_sub(Self::keep());
         if self.offset > self.room || self.resting > 0 {
             self.offset = std::time::Duration::ZERO;
         }
