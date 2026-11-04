@@ -1513,7 +1513,17 @@ impl Layer {
     /// The loops' layers (loops.rs) to keep (`alive`) and to place
     /// (`shown`) with the next frame, in its transaction: a layer and the
     /// frame's content move together.
-    pub(crate) fn set_loops(&mut self, alive: Vec<u64>, shown: Vec<LoopShown>) {
+    pub(crate) fn set_loops(&mut self, alive: Vec<u64>, mut shown: Vec<LoopShown>) {
+        // Set again before they apply (a frame drawn twice, `render_once`):
+        // the first's places stand, whatever the second finds unchanged. Its
+        // sheets hold them as sent, and nothing would send them again.
+        if let Some((_, due)) = self.loops_due.take() {
+            for loop_ in due {
+                if alive.contains(&loop_.key) && !shown.iter().any(|s| s.key == loop_.key) {
+                    shown.push(loop_);
+                }
+            }
+        }
         self.loops_due = Some((alive, shown));
     }
     /// What `set_loops` left for this frame; in the caller's transaction.
