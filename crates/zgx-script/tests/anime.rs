@@ -1567,3 +1567,98 @@ fn an_unrelated_restyle_keeps_what_animate_set() {
     close(h.x("box"), 100., "x after the colour changed");
     close(h.opacity("box"), 0.5, "opacity after the colour changed");
 }
+
+/// One property animated leaves the node's others alone: a function among
+/// them runs when what it reads changes, not on each frame of the animation.
+const ANIMATED_WITH_FUNCTIONS: &str = r##"
+local tint = ui.shared("tint", "#ff0000")
+anime.animate("#box", { w = 200, duration = 1000 })
+return ui.column {
+    ui.div { id = "box", w = 100, h = 20,
+        bg = function() return tint:get() end,
+        rounded = function() return 4 end,
+    },
+}"##;
+
+#[test]
+fn a_frame_of_an_animation_runs_none_of_the_nodes_functions() {
+    let mut h = Harness::inline(ANIMATED_WITH_FUNCTIONS);
+    h.run_ms(50.);
+    let before = h.host.script_calls();
+    h.run_ms(500.);
+    assert_eq!(h.host.script_calls(), before, "the engine moves it alone");
+    let w = {
+        let node = h.find("box").unwrap();
+        h.ui.scene.borrow().bounds(node).width
+    };
+    assert!(w > 100. && w < 200., "on its way: {w}");
+}
+
+#[test]
+fn a_function_on_an_animating_node_still_follows_what_it_reads() {
+    let mut h = Harness::inline(ANIMATED_WITH_FUNCTIONS);
+    h.run_ms(50.);
+    assert_eq!(h.fill("box"), Color(255, 0, 0, 255));
+    let before = h.host.script_calls();
+    h.host
+        .shared("tint", "#ff0000")
+        .set(zgx_script::Value::Str("#00ff00".into()));
+    h.run_ms(100.);
+    assert_eq!(h.fill("box"), Color(0, 255, 0, 255));
+    assert_eq!(
+        h.host.script_calls(),
+        before + 2,
+        "the node's two functions, once, as any node's on a change"
+    );
+    // And the animation is still its own, to its end.
+    h.run_ms(1000.);
+    let node = h.find("box").unwrap();
+    assert_eq!(h.ui.scene.borrow().bounds(node).width, 200.);
+}
+
+/// What an animation holds wins over a function for the same property, as
+/// over a literal.
+#[test]
+fn an_animated_value_wins_over_the_nodes_function_for_it() {
+    let mut h = Harness::inline(
+        r##"anime.animate("#box", { w = 200, duration = 100 })
+        return ui.column { ui.div { id = "box", w = function() return 100 end, h = 20 } }"##,
+    );
+    h.run_ms(500.);
+    let node = h.find("box").unwrap();
+    assert_eq!(h.ui.scene.borrow().bounds(node).width, 200.);
+}
+
+/// As for a tween beside them: it runs the node on every frame it moves.
+#[test]
+fn a_tween_on_a_node_runs_none_of_its_functions_as_it_moves() {
+    let mut h = Harness::inline(
+        r##"local to = ui.shared("to", 100)
+        local tint = ui.shared("tint", "#ff0000")
+        return ui.column {
+            ui.div { id = "box", h = 20, w = ui.tween(to, { duration = 1000 }),
+                bg = function() return tint:get() end,
+            },
+        }"##,
+    );
+    h.settle();
+    h.host.shared("to", 100.).set(zgx_script::Value::Num(200.));
+    h.run_ms(50.);
+    let before = h.host.script_calls();
+    h.run_ms(500.);
+    assert_eq!(h.host.script_calls(), before, "the tween moves it alone");
+    let width = |h: &mut Harness| {
+        let node = h.find("box").unwrap();
+        h.ui.scene.borrow().bounds(node).width
+    };
+    let w = width(&mut h);
+    assert!(w > 100. && w < 200., "on its way: {w}");
+    // The function still follows what it reads, and the tween goes on.
+    h.host
+        .shared("tint", "#ff0000")
+        .set(zgx_script::Value::Str("#00ff00".into()));
+    h.run_ms(50.);
+    assert_eq!(h.fill("box"), Color(0, 255, 0, 255));
+    h.run_ms(1000.);
+    assert_eq!(width(&mut h), 200.);
+}
