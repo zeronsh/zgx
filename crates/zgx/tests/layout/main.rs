@@ -44,6 +44,8 @@ mod layout_history;
 mod layout_width_changes;
 #[path = "../panel_layout.rs"]
 mod panel_layout;
+#[path = "../percent_fields.rs"]
+mod percent_fields;
 #[path = "../resize_regions.rs"]
 mod resize_regions;
 #[path = "../rtl_layout.rs"]
