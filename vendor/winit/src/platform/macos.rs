@@ -163,6 +163,11 @@ pub trait WindowExtMacOS {
     /// Getter for the [`WindowExtMacOS::set_option_as_alt`].
     fn option_as_alt(&self) -> OptionAsAlt;
 
+    /// zgx patch: whether the window animates itself into native full screen
+    /// and out (`customWindowsToEnterFullScreenForWindow:`), live, rather
+    /// than AppKit animating a snapshot of it.
+    fn set_live_fullscreen(&self, live: bool);
+
     /// Disable the Menu Bar and Dock in Simple or Borderless Fullscreen mode. Useful for games.
     /// The effect is applied when [`WindowExtMacOS::set_simple_fullscreen`] or
     /// [`Window::set_fullscreen`] is called.
@@ -241,6 +246,11 @@ impl WindowExtMacOS for Window {
     #[inline]
     fn option_as_alt(&self) -> OptionAsAlt {
         self.window.maybe_wait_on_main(|w| w.option_as_alt())
+    }
+
+    #[inline]
+    fn set_live_fullscreen(&self, live: bool) {
+        self.window.maybe_queue_on_main(move |w| w.set_live_fullscreen(live))
     }
 
     #[inline]

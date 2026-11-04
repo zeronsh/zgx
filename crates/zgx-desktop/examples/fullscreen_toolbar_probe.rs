@@ -38,6 +38,20 @@
 //! fails) begins: `MARK <ms> hidden|back` around it, with `--animate`, for
 //! what it draws meanwhile.
 //!
+//! The window moves clear of the pointer first: resting on the green button,
+//! the pointer opens AppKit's tiling menu, whose event loop runs until someone
+//! dismisses it, and a probe has no one. `--stay` leaves it where it opened
+//! (`POINTER over_button=<bool>` says, after the last step).
+//!
+//! `--via manual` runs no steps: the window stays until it is closed, for going
+//! in and out by hand (the checklist on a change to full screen).
+//!
+//! `--close-button` closes through the red button (`performClick:`), not
+//! `WindowHandle::close`.
+//!
+//! `--linger <s>` stays open that long after the last step, `BEAT <ms>` four
+//! times a second, then says `LINGERED`: a stall shows when it began.
+//!
 //! Then `FULLSCREEN_TOOLBAR_DONE`.
 use std::time::Duration;
 use zgx::compose::prelude::*;
@@ -55,6 +69,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let green = via == "green" || button;
     let failed = via == "failed";
     let animate = args.iter().any(|arg| arg == "--animate");
+    let live_full_screen = args.iter().any(|arg| arg == "--live");
+    let via_manual = via == "manual";
+    let stay = args.iter().any(|arg| arg == "--stay");
+    let close_button = args.iter().any(|arg| arg == "--close-button");
+    let linger: u64 = args
+        .iter()
+        .position(|arg| arg == "--linger")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|seconds| seconds.parse().ok())
+        .unwrap_or(0);
     let twice = via == "twice";
     let green = green || twice;
     let hidden = via == "hidden";
@@ -65,6 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             width: 640.,
             height: 400.,
             titlebar: Titlebar::Inset,
+            live_full_screen,
             ..Default::default()
         })
         .run(move |cx| {
@@ -79,13 +104,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if animate {
                 state::watch_occlusion(start);
                 let frames = cx.frames.clone();
+                let viewport = cx.viewport.clone();
                 cx.tasks.spawn(async move {
                     let mut n = 0;
                     loop {
                         frames.next().await;
                         n += 1;
                         step.set(n);
-                        println!("FRAME {}", start.elapsed().as_millis());
+                        let (drawn_w, drawn_h) = viewport.with_untracked(|size| *size);
+                        let (w, h) = state::window_size();
+                        println!(
+                            "FRAME {} window={w:.0}x{h:.0} drawn={drawn_w:.0}x{drawn_h:.0}",
+                            start.elapsed().as_millis()
+                        );
                     }
                 });
             }
@@ -111,6 +142,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let window = cx.window.clone();
             cx.tasks.spawn(async move {
                 let pause = |ms| zgx::timer::sleep(Duration::from_millis(ms));
+                if via_manual {
+                    return;
+                }
+                if !stay {
+                    state::clear_of_pointer();
+                }
                 pause(1500).await;
                 state::report("before");
                 if hidden || hidden_during {
@@ -167,8 +204,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     state::toggle();
                     pause(3000).await;
                 }
+                state::report_pointer();
+                for _ in 0..linger * 4 {
+                    pause(250).await;
+                    println!("BEAT {}", start.elapsed().as_millis());
+                }
+                if linger > 0 {
+                    println!("LINGERED");
+                }
                 println!("FULLSCREEN_TOOLBAR_DONE");
-                window.close();
+                if close_button {
+                    state::click_close();
+                } else {
+                    window.close();
+                }
             });
         })
 }
@@ -176,8 +225,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(target_os = "macos")]
 mod state {
     use objc2::{MainThreadMarker, msg_send, rc::Retained, runtime::AnyObject};
-    use objc2_app_kit::{NSApplication, NSWindow, NSWindowStyleMask};
-    use objc2_foundation::NSString;
+    use objc2_app_kit::{NSApplication, NSEvent, NSWindow, NSWindowButton, NSWindowStyleMask};
+    use objc2_foundation::{NSPoint, NSString};
+
+    /// Its window isn't there: nothing that follows would mean anything.
+    fn no_window() -> ! {
+        println!("NO_WINDOW");
+        std::process::exit(3);
+    }
 
     fn ours() -> Option<Retained<NSWindow>> {
         let app = NSApplication::sharedApplication(MainThreadMarker::new()?);
@@ -191,8 +246,7 @@ mod state {
     pub fn will_enter() {
         use objc2_foundation::NSNotificationCenter;
         let Some(window) = ours() else {
-            println!("NO_WINDOW");
-            return;
+            no_window();
         };
         // SAFETY: AppKit's own notification name (a constant static), posted
         // on the main thread with the window as its object, as AppKit does.
@@ -206,8 +260,7 @@ mod state {
     /// press sends; no input posted).
     pub fn click() {
         let Some(window) = ours() else {
-            println!("NO_WINDOW");
-            return;
+            no_window();
         };
         // SAFETY: `-standardWindowButton:` takes an NSUInteger (2: the zoom
         // button) and returns a button or nil; `-performClick:` takes a
@@ -267,8 +320,7 @@ mod state {
     /// full screen for. No notification says so.
     pub fn fail_to_enter() {
         let Some(window) = ours() else {
-            println!("NO_WINDOW");
-            return;
+            no_window();
         };
         let Some(delegate) = window.delegate() else {
             println!("NO_DELEGATE");
@@ -281,11 +333,80 @@ mod state {
         }
     }
 
+    /// The window moved so the pointer isn't over it.
+    pub fn clear_of_pointer() {
+        let Some(window) = ours() else {
+            no_window();
+        };
+        let pointer = NSEvent::mouseLocation();
+        let frame = window.frame();
+        if pointer.x < frame.origin.x
+            || pointer.x > frame.origin.x + frame.size.width
+            || pointer.y < frame.origin.y
+            || pointer.y > frame.origin.y + frame.size.height
+        {
+            return;
+        }
+        let screen = window
+            .screen()
+            .map_or(frame, |screen| screen.visibleFrame());
+        // Below it if there is room, else above it.
+        let y = if pointer.y - frame.size.height - 40. >= screen.origin.y {
+            pointer.y - frame.size.height - 40.
+        } else {
+            pointer.y + 40.
+        };
+        window.setFrameOrigin(NSPoint::new(frame.origin.x, y));
+    }
+
+    /// `POINTER over_button=<bool>`: whether the pointer rests on the green
+    /// button (where AppKit opens its tiling menu after a moment).
+    pub fn report_pointer() {
+        let Some(window) = ours() else {
+            return;
+        };
+        let pointer = NSEvent::mouseLocation();
+        let over = window
+            .standardWindowButton(NSWindowButton::ZoomButton)
+            .is_some_and(|button| {
+                let rect =
+                    window.convertRectToScreen(button.convertRect_toView(button.bounds(), None));
+                pointer.x >= rect.origin.x
+                    && pointer.x <= rect.origin.x + rect.size.width
+                    && pointer.y >= rect.origin.y
+                    && pointer.y <= rect.origin.y + rect.size.height
+            });
+        println!("POINTER over_button={over}");
+    }
+
+    /// A click on the red button (its `performClick:`).
+    pub fn click_close() {
+        let Some(window) = ours() else {
+            no_window();
+        };
+        // SAFETY: `-standardWindowButton:` takes an NSUInteger (0: the close
+        // button) and returns a button or nil; `-performClick:` takes a
+        // sender, which may be nil.
+        unsafe {
+            let close: *mut AnyObject = msg_send![&*window, standardWindowButton: 0usize];
+            if !close.is_null() {
+                let _: () = msg_send![close, performClick: std::ptr::null::<AnyObject>()];
+            }
+        }
+    }
+
+    /// The window's frame size, in points.
+    pub fn window_size() -> (f64, f64) {
+        ours().map_or((0., 0.), |window| {
+            let size = window.frame().size;
+            (size.width, size.height)
+        })
+    }
+
     /// The window minimized, or back.
     pub fn minimize(hide: bool) {
         let Some(window) = ours() else {
-            println!("NO_WINDOW");
-            return;
+            no_window();
         };
         if hide {
             window.miniaturize(None);
@@ -299,7 +420,7 @@ mod state {
         if let Some(window) = ours() {
             window.toggleFullScreen(None);
         } else {
-            println!("NO_WINDOW");
+            no_window();
         }
     }
 
@@ -320,8 +441,7 @@ mod state {
             }
         }
         let Some(window) = ours() else {
-            println!("NO_WINDOW");
-            return;
+            no_window();
         };
         // SAFETY: `-standardWindowButton:` takes an NSUInteger and returns
         // a view or nil, retained here; `-toolbar` the NSToolbar or nil;
@@ -353,6 +473,12 @@ mod state {
 #[cfg(not(target_os = "macos"))]
 mod state {
     pub fn will_enter() {}
+    pub fn click_close() {}
+    pub fn clear_of_pointer() {}
+    pub fn report_pointer() {}
+    pub fn window_size() -> (f64, f64) {
+        (0., 0.)
+    }
     pub fn minimize(_: bool) {}
     pub fn watch_occlusion(_: std::time::Instant) {}
     pub fn fail_to_enter() {}

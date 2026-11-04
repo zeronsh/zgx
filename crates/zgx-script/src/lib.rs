@@ -1546,6 +1546,9 @@ struct Inner {
     /// (`window_chrome`).
     chrome: RefCell<Option<zgx::reactive::Effect>>,
     window_size: RefCell<Option<zgx::reactive::Effect>>,
+    /// Keeps the window's live full screen and its state the same
+    /// (`window_live_full_screen`).
+    live_full_screen: RefCell<Option<zgx::reactive::Effect>>,
     /// `ui.window.full_screen` and `full_screen_transition` kept as the
     /// window says (`ScriptHost::window_full_screen`).
     full_screen: RefCell<Option<zgx::reactive::Effect>>,
@@ -1752,6 +1755,7 @@ impl ScriptHost {
             chrome: RefCell::default(),
             window_size: RefCell::default(),
             full_screen: RefCell::default(),
+            live_full_screen: RefCell::default(),
             zoom: RefCell::default(),
             visible: RefCell::default(),
             window_state: RefCell::default(),
@@ -2524,6 +2528,26 @@ impl ScriptHost {
             }
         });
         *self.0.visible.borrow_mut() = Some(effect);
+    }
+    /// Keep `ui.window.live_full_screen` as the window has it (`live`, as
+    /// it was made) and `set` it as a script does: whether the window
+    /// animates itself into full screen and out, live.
+    pub fn window_live_full_screen(&self, live: bool, set: impl Fn(bool) + 'static) {
+        let state = self
+            .0
+            .shared
+            .state(windows::LIVE_FULL_SCREEN, Value::Bool(live));
+        if state.with_untracked(|was| *was != Value::Bool(live)) {
+            state.set(Value::Bool(live));
+        }
+        let now = std::cell::Cell::new(live);
+        let effect = self.0.runtime.effect_now(move || {
+            let wanted = state.get().truthy();
+            if now.replace(wanted) != wanted {
+                set(wanted);
+            }
+        });
+        *self.0.live_full_screen.borrow_mut() = Some(effect);
     }
     /// The app commands scripts declare (`ui.command`), in declaration
     /// order, as of the last successful load: show them as menu items.

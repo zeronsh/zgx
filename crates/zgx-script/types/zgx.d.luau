@@ -1559,6 +1559,11 @@ declare extern type WindowApi with
 	-- screen `controls` is nil: a title bar laid out around the traffic
 	-- lights moves over as they go.
 	full_screen: State<boolean>
+	-- True: the window animates itself into full screen and out, its content
+	-- drawing and resizing on the screen through the transition (macOS; no
+	-- effect elsewhere). False, the default: AppKit animates a snapshot of it.
+	-- Applies from the next transition.
+	live_full_screen: State<boolean>
 	full_screen_transition: State<FullScreenTransition?>
 	-- The window's size in points, read-only and followed: for decisions
 	-- layout can't make (a sidebar collapsing to icons below a width).

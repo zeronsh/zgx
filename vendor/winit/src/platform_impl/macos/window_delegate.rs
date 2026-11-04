@@ -14,7 +14,7 @@ use objc2_app_kit::{
     NSAppKitVersionNumber, NSAppKitVersionNumber10_12, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSApplication, NSApplicationPresentationOptions, NSBackingStoreType,
     NSColor, NSDraggingDestination, NSFilenamesPboardType, NSPasteboard, NSPasteboardTypeString,
-    NSRequestUserAttentionType, NSScreen, NSView, NSWindowButton, NSWindowDelegate,
+    NSRequestUserAttentionType, NSScreen, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
     NSWindowFullScreenButton, NSWindowLevel, NSWindowOcclusionState, NSWindowOrderingMode,
     NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
 };
@@ -123,12 +123,143 @@ pub(crate) struct State {
     is_simple_fullscreen: Cell<bool>,
     saved_style: Cell<Option<NSWindowStyleMask>>,
     is_borderless_game: Cell<bool>,
+    /// zgx patch: the window animates itself into full screen and out, live
+    /// (`set_live_fullscreen`), and the frame it goes back to.
+    live_fullscreen: Cell<bool>,
+    live_fullscreen_from: Cell<Option<NSRect>>,
+    /// zgx patch: it has animated itself so at least once.
+    live_fullscreen_ran: Cell<bool>,
     /// zgx patch: the drag over the window carries text from another app
     /// (`platform::text_drop`), not files.
     text_drag: Cell<bool>,
     /// zgx patch: where a drag carrying files was last over the window
     /// (`CursorMoved`'s physical pixels), while it is.
     file_point: Cell<Option<(f64, f64)>>,
+}
+
+/// zgx patch: `window`'s traffic lights hidden while its frame animates: on
+/// a frame moving under them, the zoom button's tracking area can start
+/// AppKit's hover timer with the pointer nowhere near, which opens its tiling
+/// menu unasked, in an event loop of its own until someone dismisses it.
+fn set_buttons_hidden(window: &NSWindow, hidden: bool) {
+    for kind in [
+        NSWindowButton::NSWindowCloseButton,
+        NSWindowButton::NSWindowMiniaturizeButton,
+        NSWindowButton::NSWindowZoomButton,
+    ] {
+        if let Some(button) = window.standardWindowButton(kind) {
+            button.setHidden(hidden);
+        }
+    }
+}
+
+/// zgx patch: once a window has animated itself into full screen, AppKit's
+/// zoom button can start its hover timer with the pointer nowhere near, as a
+/// window closes (about 1 close in 40 with the timer cancelled and the button
+/// disabled; never with AppKit's own animation). Its tiling menu then opens
+/// in an event loop of its own that nothing dismisses, and holds the app. What
+/// arms it is AppKit's own and private: found by measuring, not proved. So
+/// from then on, in this process, `_hoverTriggeredShowMenuForView:` goes ahead
+/// only with the pointer really over a visible button; a real hover still
+/// opens the menu. Looked up by name: gone from another macOS, this does
+/// nothing. `ZGX_TRACE_ZOOM_HOVER` says each time it is ignored.
+fn guard_zoom_hover() {
+    static GUARD: std::sync::Once = std::sync::Once::new();
+    GUARD.call_once(|| {
+        let Some(class) = objc2::runtime::AnyClass::get("_NSThemeZoomWidgetCell") else {
+            return;
+        };
+        let selector = sel!(_hoverTriggeredShowMenuForView:);
+        let Some(method) = class.instance_method(selector) else {
+            return;
+        };
+        // SAFETY: the guard has the method's signature (the cell, the
+        // selector, the view), as the samples show it called, and calls on
+        // what it replaced with the same arguments; set once, on the main
+        // thread, before any later fire reads `ZOOM_HOVER`.
+        unsafe {
+            let guard: extern "C" fn(*mut AnyObject, objc2::runtime::Sel, *mut AnyObject) =
+                zoom_hover;
+            let replaced = objc2::ffi::method_setImplementation(
+                method as *const objc2::runtime::Method as *mut objc2::ffi::objc_method,
+                Some(std::mem::transmute::<*const c_void, unsafe extern "C" fn()>(
+                    guard as *const c_void,
+                )),
+            );
+            if let Some(replaced) = replaced {
+                ZOOM_HOVER.store(replaced as *mut c_void, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+}
+
+/// What `guard_zoom_hover` replaced.
+static ZOOM_HOVER: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(ptr::null_mut());
+
+extern "C" fn zoom_hover(cell: *mut AnyObject, selector: objc2::runtime::Sel, view: *mut AnyObject) {
+    if !pointer_over_visible(view) {
+        if std::env::var_os("ZGX_TRACE_ZOOM_HOVER").is_some() {
+            eprintln!("ZOOM_HOVER ignored");
+        }
+        return;
+    }
+    let original = ZOOM_HOVER.load(std::sync::atomic::Ordering::Relaxed);
+    if !original.is_null() {
+        // SAFETY: what `guard_zoom_hover` replaced, with its own signature.
+        unsafe {
+            let original: extern "C" fn(*mut AnyObject, objc2::runtime::Sel, *mut AnyObject) =
+                std::mem::transmute(original);
+            original(cell, selector, view);
+        }
+    }
+}
+
+/// Whether the pointer is over `view`, an NSView (or nil), in a window on the
+/// screen.
+fn pointer_over_visible(view: *mut AnyObject) -> bool {
+    if view.is_null() {
+        return false;
+    }
+    // SAFETY: the view AppKit passes, live for the call; `-window`, `-bounds`,
+    // `-convertRect:toView:`, `-convertRectToScreen:`, `-isVisible` and
+    // `+mouseLocation` as AppKit declares them, on the main thread.
+    unsafe {
+        let window: *mut AnyObject = msg_send![view, window];
+        if window.is_null() {
+            return false;
+        }
+        let visible: bool = msg_send![window, isVisible];
+        if !visible {
+            return false;
+        }
+        let bounds: NSRect = msg_send![view, bounds];
+        let in_window: NSRect = msg_send![view, convertRect: bounds, toView: ptr::null::<AnyObject>()];
+        let rect: NSRect = msg_send![window, convertRectToScreen: in_window];
+        let at: NSPoint = msg_send![objc2::class!(NSEvent), mouseLocation];
+        at.x >= rect.origin.x
+            && at.x <= rect.origin.x + rect.size.width
+            && at.y >= rect.origin.y
+            && at.y <= rect.origin.y + rect.size.height
+    }
+}
+
+/// zgx patch: `window`'s frame animated to `frame` over `duration` seconds
+/// (`NSAnimationContext`, the window's animator): resized a step at a time,
+/// each step a resize its content draws.
+fn animate_frame(window: &NSWindow, frame: NSRect, duration: f64) {
+    // SAFETY: `NSAnimationContext`'s class methods and `-setDuration:`, and
+    // `-animator` / `-setFrame:display:` on a live window, on the main
+    // thread, as AppKit's documentation has them.
+    unsafe {
+        let class = objc2::class!(NSAnimationContext);
+        let _: () = msg_send![class, beginGrouping];
+        let context: *mut AnyObject = msg_send![class, currentContext];
+        let _: () = msg_send![context, setDuration: duration];
+        let animator: *mut AnyObject = msg_send![window, animator];
+        let _: () = msg_send![animator, setFrame: frame, display: true];
+        let _: () = msg_send![class, endGrouping];
+    }
 }
 
 declare_class!(
@@ -297,6 +428,10 @@ declare_class!(
         #[method(windowDidEnterFullScreen:)]
         fn window_did_enter_fullscreen(&self, _: Option<&AnyObject>) {
             trace_scope!("windowDidEnterFullScreen:");
+            // zgx patch: see `start_custom_animation_to_enter_fullscreen`.
+            if self.ivars().live_fullscreen_ran.get() {
+                set_buttons_hidden(self.window(), false);
+            }
             self.ivars().initial_fullscreen.set(false);
             self.ivars().in_fullscreen_transition.set(false);
             if let Some(target_fullscreen) = self.ivars().target_fullscreen.take() {
@@ -308,6 +443,10 @@ declare_class!(
         #[method(windowDidExitFullScreen:)]
         fn window_did_exit_fullscreen(&self, _: Option<&AnyObject>) {
             trace_scope!("windowDidExitFullScreen:");
+            // zgx patch: see `start_custom_animation_to_enter_fullscreen`.
+            if self.ivars().live_fullscreen_ran.get() {
+                set_buttons_hidden(self.window(), false);
+            }
 
             self.restore_state_from_fullscreen();
             self.ivars().in_fullscreen_transition.set(false);
@@ -335,6 +474,10 @@ declare_class!(
         #[method(windowDidFailToEnterFullScreen:)]
         fn window_did_fail_to_enter_fullscreen(&self, _: Option<&AnyObject>) {
             trace_scope!("windowDidFailToEnterFullScreen:");
+            // zgx patch: see `start_custom_animation_to_enter_fullscreen`.
+            if self.ivars().live_fullscreen_ran.get() {
+                set_buttons_hidden(self.window(), false);
+            }
             self.ivars().in_fullscreen_transition.set(false);
             self.ivars().target_fullscreen.replace(None);
             if self.ivars().initial_fullscreen.get() {
@@ -347,6 +490,70 @@ declare_class!(
                 };
             } else {
                 self.restore_state_from_fullscreen();
+            }
+        }
+
+        // zgx patch: a full-screen transition the window animates itself
+        // (`set_live_fullscreen`): the live window, not AppKit's snapshot of
+        // it, goes to the screen's frame and back, so its content goes on
+        // drawing and resizing, on the screen, through the transition.
+        #[method_id(customWindowsToEnterFullScreenForWindow:)]
+        fn custom_windows_to_enter_fullscreen(
+            &self,
+            window: &NSWindow,
+        ) -> Option<Retained<NSArray<NSWindow>>> {
+            self.ivars().live_fullscreen.get().then(|| NSArray::from_slice(&[window]))
+        }
+
+        #[method_id(customWindowsToExitFullScreenForWindow:)]
+        fn custom_windows_to_exit_fullscreen(
+            &self,
+            window: &NSWindow,
+        ) -> Option<Retained<NSArray<NSWindow>>> {
+            self.ivars().live_fullscreen.get().then(|| NSArray::from_slice(&[window]))
+        }
+
+        #[method(window:startCustomAnimationToEnterFullScreenWithDuration:)]
+        fn start_custom_animation_to_enter_fullscreen(&self, window: &NSWindow, duration: f64) {
+            trace_scope!("window:startCustomAnimationToEnterFullScreenWithDuration:");
+            let Some(screen) = window.screen() else {
+                return;
+            };
+            let from = window.frame();
+            self.ivars().live_fullscreen_ran.set(true);
+            guard_zoom_hover();
+            self.ivars().live_fullscreen_from.set(Some(from));
+            set_buttons_hidden(window, true);
+            // The style first, as Apple's example has it. It takes the window
+            // to the screen's frame at once: back, to animate from there.
+            window.setStyleMask(window.styleMask() | NSWindowStyleMask::FullScreen);
+            window.setFrame_display(from, false);
+            animate_frame(window, screen.frame(), duration);
+        }
+
+        #[method(window:startCustomAnimationToExitFullScreenWithDuration:)]
+        fn start_custom_animation_to_exit_fullscreen(&self, window: &NSWindow, duration: f64) {
+            trace_scope!("window:startCustomAnimationToExitFullScreenWithDuration:");
+            self.ivars().live_fullscreen_ran.set(true);
+            guard_zoom_hover();
+            set_buttons_hidden(window, true);
+            let from = self.ivars().live_fullscreen_from.take();
+            let screen = window.screen().map(|screen| screen.visibleFrame());
+            window.setStyleMask(window.styleMask() & !NSWindowStyleMask::FullScreen);
+            // It opened in full screen, with no frame to go back to: most of
+            // the screen, centred.
+            let frame = from.or_else(|| {
+                screen.map(|screen| {
+                    let size = NSSize::new(screen.size.width * 0.75, screen.size.height * 0.75);
+                    let origin = NSPoint::new(
+                        screen.origin.x + (screen.size.width - size.width) / 2.,
+                        screen.origin.y + (screen.size.height - size.height) / 2.,
+                    );
+                    NSRect::new(origin, size)
+                })
+            });
+            if let Some(frame) = frame {
+                animate_frame(window, frame, duration);
             }
         }
 
@@ -844,6 +1051,9 @@ impl WindowDelegate {
             fullscreen: RefCell::new(None),
             target_fullscreen: RefCell::new(None),
             in_fullscreen_transition: Cell::new(false),
+            live_fullscreen: Cell::new(false),
+            live_fullscreen_from: Cell::new(None),
+            live_fullscreen_ran: Cell::new(false),
             standard_frame: Cell::new(None),
             is_simple_fullscreen: Cell::new(false),
             saved_style: Cell::new(None),
@@ -1970,6 +2180,11 @@ impl WindowExtMacOS for WindowDelegate {
 
     fn set_document_edited(&self, edited: bool) {
         self.window().setDocumentEdited(edited)
+    }
+
+    /// zgx patch: see `custom_windows_to_enter_fullscreen`.
+    fn set_live_fullscreen(&self, live: bool) {
+        self.ivars().live_fullscreen.set(live);
     }
 
     fn set_option_as_alt(&self, option_as_alt: OptionAsAlt) {
