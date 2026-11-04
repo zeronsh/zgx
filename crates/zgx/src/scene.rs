@@ -870,9 +870,29 @@ const UNCLIPPED: Rect = Rect {
     width: f32::MAX / 2.,
     height: f32::MAX / 2.,
 };
+/// The platform material behind a node. Blur retains the renderer's Gaussian path;
+/// Liquid requests AppKit's native glass with a Popover fallback on older macOS.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BackdropMaterial {
+    /// Decoration-only native layers; no Gaussian or visual-effect material.
+    None,
+    /// Gaussian backdrop blur, painted by the existing blur path.
+    #[default]
+    Blur,
+    /// Native Liquid Glass, with a platform material fallback.
+    Liquid,
+}
 /// How a node composites: its opacity, blurs, filters and edge fades.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Effects {
+    /// Native backdrop material; Gaussian blur remains the default.
+    pub backdrop_material: BackdropMaterial,
+    /// Tint of a native material, separate from the node's painted fill.
+    pub backdrop_tint: Color,
+    /// A native fill over the material and below its native content.
+    pub backdrop_fill: Color,
+    /// Compositing operation of the native fill.
+    pub backdrop_fill_blend: BlendMode,
     /// Opacity, 0 to 1, multiplied down the tree.
     pub opacity: f32,
     /// Backdrop blur (CSS `backdrop-filter: blur()`), the Gaussian sigma in
@@ -898,6 +918,10 @@ pub struct Effects {
 impl Default for Effects {
     fn default() -> Self {
         Self {
+            backdrop_material: BackdropMaterial::Blur,
+            backdrop_tint: Color(0, 0, 0, 0),
+            backdrop_fill: Color(0, 0, 0, 0),
+            backdrop_fill_blend: BlendMode::Normal,
             opacity: 1.0,
             blur_radius: 0.0,
             edge_fade: 0.0,
@@ -914,6 +938,10 @@ impl Default for Effects {
 /// before blending with the same result as to the subtree as a group.
 pub type ColorMatrix = [[f32; 4]; 3];
 impl Effects {
+    /// Whether it has a backdrop requiring a platform placement.
+    pub fn has_backdrop(&self) -> bool {
+        self.blur_radius > 0. || self.backdrop_material != BackdropMaterial::Blur
+    }
     /// Its colour filters as one matrix (brightness, then contrast, then
     /// saturate, as CSS lists them), or `None` when they change nothing.
     pub fn color_matrix(&self) -> Option<ColorMatrix> {
@@ -1100,6 +1128,13 @@ impl QuadStyle {
                     .translated(shadow.offset),
             )
         });
+        let painted = self
+            .decoration
+            .as_ref()
+            .and_then(|decoration| decoration.surface_recipe.as_ref())
+            .map_or(painted, |recipe| {
+                painted.union(recipe.visual_bounds(bounds))
+            });
         match self.outline.filter(Outline::visible) {
             Some(outline) => painted.union(outline.outer(bounds)),
             None => painted,
@@ -3159,6 +3194,10 @@ impl Scene {
         };
         let node = self.node(id);
         let effects = Effects {
+            backdrop_material: crate::scene::BackdropMaterial::Blur,
+            backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+            backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+            backdrop_fill_blend: crate::scene::BlendMode::Normal,
             opacity: 1.,
             ..node.effects
         };
@@ -3426,6 +3465,10 @@ impl Scene {
     /// effects. Composites only: damaged where the blur reached and reaches.
     pub fn set_filter_blur(&mut self, id: NodeId, sigma: f32) {
         let effects = Effects {
+            backdrop_material: crate::scene::BackdropMaterial::Blur,
+            backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+            backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+            backdrop_fill_blend: crate::scene::BlendMode::Normal,
             filter_blur: sigma,
             ..self.node(id).effects
         };
@@ -5357,7 +5400,7 @@ impl Scene {
         );
         let node = self.slots[id.index as usize].node.take().unwrap();
         self.forget(id, &node);
-        if node.effects.blur_radius > 0.0 {
+        if node.effects.has_backdrop() {
             self.blur_nodes.retain(|entry| *entry != id);
         }
         if !self.popups.is_empty() {
@@ -5708,11 +5751,11 @@ impl Scene {
         if (self.node(id).effects.opacity <= 0.) != (effects.opacity <= 0.) {
             self.geometry_revision = self.geometry_revision.wrapping_add(1);
         }
-        let old_blur = self.node(id).effects.blur_radius > 0.0;
-        if !old_blur && effects.blur_radius > 0.0 {
+        let old_blur = self.node(id).effects.has_backdrop();
+        if !old_blur && effects.has_backdrop() {
             self.blur_nodes.push(id);
         }
-        if old_blur && effects.blur_radius == 0.0 {
+        if old_blur && !effects.has_backdrop() {
             self.blur_nodes.retain(|entry| *entry != id);
         }
         // A content blur's spread damages under the old effects, then the new.
@@ -5791,11 +5834,11 @@ impl Scene {
         if (self.node(id).effects.opacity <= 0.) != (effects.opacity <= 0.) {
             self.geometry_revision = self.geometry_revision.wrapping_add(1);
         }
-        let old_blur = self.node(id).effects.blur_radius > 0.0;
-        if !old_blur && effects.blur_radius > 0.0 {
+        let old_blur = self.node(id).effects.has_backdrop();
+        if !old_blur && effects.has_backdrop() {
             self.blur_nodes.push(id);
         }
-        if old_blur && effects.blur_radius == 0.0 {
+        if old_blur && !effects.has_backdrop() {
             self.blur_nodes.retain(|entry| *entry != id);
         }
     }
@@ -6094,7 +6137,7 @@ impl Scene {
             {
                 pair!(|bounds| Some(self.text_ink(id, bounds)))
             }
-            NodeKind::Container(_) if node.effects.blur_radius <= 0.0 => (None, None),
+            NodeKind::Container(_) if !node.effects.has_backdrop() => (None, None),
             _ => pair!(Some),
         }
     }
@@ -8914,8 +8957,13 @@ impl Scene {
     pub fn content_revision(&self) -> u64 {
         self.content_revision
     }
-    /// True when any node applies a backdrop blur, whose output depends on
-    /// pixels outside its own subtree.
+    /// Whether any node requests a native material rather than a Gaussian blur.
+    pub fn has_native_backdrop(&self) -> bool {
+        self.blur_nodes
+            .iter()
+            .any(|id| self.node(*id).effects.backdrop_material != BackdropMaterial::Blur)
+    }
+    /// Whether any Gaussian or native backdrop depends on pixels beneath it.
     pub fn has_backdrop_blur(&self) -> bool {
         !self.blur_nodes.is_empty()
     }
@@ -9825,6 +9873,10 @@ mod tests {
         scene.set_effects(
             popup,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: 0.,
                 ..Default::default()
             },
@@ -9860,6 +9912,10 @@ mod tests {
         scene.set_effects(
             parent,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: 0.0,
                 ..Effects::default()
             },
@@ -10032,6 +10088,10 @@ mod tests {
         scene.set_effects(
             parent,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: 0.5,
                 ..Effects::default()
             },
@@ -10039,6 +10099,10 @@ mod tests {
         scene.set_effects(
             child,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: 0.5,
                 ..Effects::default()
             },
@@ -10074,6 +10138,10 @@ mod tests {
         scene.set_effects(
             b,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 blur_radius: 4.0,
                 ..Effects::default()
             },
@@ -11491,6 +11559,10 @@ mod hidden_layer_tests {
         scene.set_effects(
             hidden,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: 0.,
                 ..Default::default()
             },
@@ -11542,6 +11614,10 @@ mod hidden_layer_tests {
         scene.set_effects(
             nested,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: 0.,
                 ..Default::default()
             },
@@ -11553,6 +11629,10 @@ mod hidden_layer_tests {
         scene.set_effects(
             root,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: 0.,
                 ..Default::default()
             },
@@ -11584,6 +11664,10 @@ mod nonfinite_effect_tests {
         );
         scene.flush();
         let invalid = Effects {
+            backdrop_material: crate::scene::BackdropMaterial::Blur,
+            backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+            backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+            backdrop_fill_blend: crate::scene::BlendMode::Normal,
             opacity: f32::NAN,
             blur_radius: f32::INFINITY,
             edge_fade: f32::NEG_INFINITY,
@@ -11621,6 +11705,10 @@ mod nonfinite_effect_tests {
         scene.set_effects(
             node,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: 0.5,
                 blur_radius: 4.,
                 edge_fade: 3.,
@@ -11635,6 +11723,10 @@ mod nonfinite_effect_tests {
         scene.set_effects(
             node,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: f32::NEG_INFINITY,
                 blur_radius: f32::NAN,
                 edge_fade: f32::INFINITY,
@@ -11647,6 +11739,10 @@ mod nonfinite_effect_tests {
         assert_eq!(
             scene.effects(node),
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: 0.,
                 ..Default::default()
             }
@@ -11657,6 +11753,10 @@ mod nonfinite_effect_tests {
         scene.set_effects(
             node,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: f32::INFINITY,
                 blur_radius: -2.,
                 edge_fade: -0.,
@@ -11672,6 +11772,10 @@ mod nonfinite_effect_tests {
         scene.set_effects(
             node,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: 2.,
                 blur_radius: f32::NEG_INFINITY,
                 edge_fade: f32::NAN,
@@ -12770,6 +12874,10 @@ mod local_transform_tests {
         scene.set_effects(
             id,
             Effects {
+                backdrop_material: crate::scene::BackdropMaterial::Blur,
+                backdrop_tint: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill: crate::scene::Color(0, 0, 0, 0),
+                backdrop_fill_blend: crate::scene::BlendMode::Normal,
                 opacity: 0.5,
                 filter_blur: 4.,
                 ..Effects::default()

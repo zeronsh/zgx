@@ -42,9 +42,14 @@ PLIST
 # Apple Development identity, else ad-hoc.
 identity=${ZTERM_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null |
   grep '"Apple Development' | grep -v CSSMERR | head -1 | awk '{print $2}')}
-if [ -n "$identity" ] && codesign --force --deep --sign "$identity" "$staging" >/dev/null 2>&1; then
+# The keychain can still list a certificate Apple has revoked; macOS calls
+# an app signed with one malware and moves it to the Trash. Gatekeeper's
+# assessment checks with Apple, so a revoked identity falls back to ad hoc.
+if [ -n "$identity" ] && codesign --force --deep --sign "$identity" "$staging" >/dev/null 2>&1 &&
+  ! spctl --assess -vv "$staging" 2>&1 | grep -q REVOKED; then
   echo "signed with $identity"
 else
+  [ -n "$identity" ] && echo "$identity is revoked or unusable (make a new one in Xcode > Settings > Accounts)"
   codesign --force --deep --sign - "$staging" >/dev/null 2>&1 || true
   echo "signed ad hoc: macOS asks again for its permissions after each install"
 fi

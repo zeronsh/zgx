@@ -85,11 +85,84 @@ fn read_frame(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
 
 // The app's side ---------------------------------------------------------------
 
-/// Start the server unless one is listening.
-pub fn ensure_daemon() {
+fn daemon_file() -> PathBuf {
+    dir().join("daemon.json")
+}
+/// This binary's build: its path and when it was written. A server records
+/// its own; an app built (or installed) since finds it differs.
+fn build() -> String {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let written = std::fs::metadata(&exe)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    format!("{}:{written}", exe.display())
+}
+
+/// Start the server unless one is listening. With `replace_older`, a server
+/// from another build is stopped first and this build's started: the app
+/// asks for this at launch, so a new build always gets its own server (the
+/// old one's shells end with it). Attach clients never replace one.
+pub fn ensure_daemon_with(replace_older: bool) {
     if UnixStream::connect(socket_path()).is_ok() {
-        return;
+        if !replace_older {
+            return;
+        }
+        let recorded: serde_json::Value = std::fs::read(daemon_file())
+            .ok()
+            .and_then(|json| serde_json::from_slice(&json).ok())
+            .unwrap_or_default();
+        if recorded["build"].as_str() == Some(build().as_str()) {
+            return;
+        }
+        stop_daemon(recorded["pid"].as_i64().map(|pid| pid as libc::pid_t));
     }
+    start_daemon();
+}
+/// The app's side: this build's server.
+pub fn ensure_daemon() {
+    ensure_daemon_with(true);
+}
+/// Stop the running server (`pid`, else any that records none: one from
+/// before servers recorded themselves), and wait for its socket to go.
+fn stop_daemon(pid: Option<libc::pid_t>) {
+    let pids = match pid {
+        Some(pid) => vec![pid],
+        None => all_processes()
+            .into_iter()
+            .filter(|&p| p != std::process::id() as libc::pid_t)
+            .filter(|&p| {
+                arguments(p).is_some_and(|args| args.iter().any(|a| a == "--session-daemon"))
+            })
+            .collect(),
+    };
+    for pid in &pids {
+        unsafe { libc::kill(*pid, libc::SIGTERM) };
+    }
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(3) {
+        if pids.iter().all(|&pid| unsafe { libc::kill(pid, 0) } != 0) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    for pid in &pids {
+        unsafe { libc::kill(*pid, libc::SIGKILL) };
+    }
+    let _ = std::fs::remove_file(socket_path());
+}
+/// Every process's pid.
+fn all_processes() -> Vec<libc::pid_t> {
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let mut pids = vec![0 as libc::pid_t; count.max(0) as usize + 64];
+    let bytes = (pids.len() * size_of::<libc::pid_t>()) as libc::c_int;
+    let filled = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    pids.truncate((filled.max(0) as usize).min(pids.len()));
+    pids.retain(|&pid| pid > 0);
+    pids
+}
+fn start_daemon() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
@@ -369,7 +442,7 @@ mod tests {
 /// Relay this terminal to session `id` until it ends (exit with its code)
 /// or the terminal goes.
 pub fn attach(id: &str, cwd: &str) -> ! {
-    ensure_daemon();
+    ensure_daemon_with(false);
     let Ok(mut stream) = UnixStream::connect(socket_path()) else {
         eprintln!("zgx-terminal: no session server");
         std::process::exit(1);
@@ -724,6 +797,9 @@ pub fn daemon() -> ! {
     let Ok(listener) = UnixListener::bind(&path) else {
         std::process::exit(1);
     };
+    // Which build this is, for an app to replace it with its own.
+    let record = serde_json::json!({ "pid": std::process::id(), "build": build() });
+    let _ = std::fs::write(daemon_file(), record.to_string());
     // SAFETY: ignoring a signal installs no handler.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
     let server: Shared = Arc::new(Mutex::new(Server {
