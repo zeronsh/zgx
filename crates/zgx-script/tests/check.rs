@@ -265,7 +265,9 @@ fn the_examples_types_files_are_what_zgx_types_writes() {
     // Committed for editors; a change to zgx's own definitions regenerates
     // them (`zgx types <dir>`), or every run of an example rewrites them.
     // The tracked ones only: an untracked one (an editor's, a host's) is
-    // no one's to keep current.
+    // no one's to keep current. What git holds, not the file on disk: `zgx
+    // check` and a run of an example write the file as they go, which would
+    // pass a stale commit here (CI checks the examples before these tests).
     let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let Ok(listed) = Command::new("git")
         .args(["ls-files", "-z", "--", "*/.zgx/types.d.luau"])
@@ -275,16 +277,17 @@ fn the_examples_types_files_are_what_zgx_types_writes() {
         eprintln!("skipped: no git to list the tracked types files");
         return;
     };
-    let files: Vec<PathBuf> = String::from_utf8_lossy(&listed.stdout)
+    let files: Vec<String> = String::from_utf8_lossy(&listed.stdout)
         .split('\0')
         .filter(|name| !name.is_empty())
-        .map(|name| crates.join(name))
+        .map(str::to_owned)
         .collect();
     if !listed.status.success() || files.is_empty() {
         eprintln!("skipped: not in the repository");
         return;
     }
-    for file in files {
+    for name in files {
+        let file = crates.join(&name);
         let dir = file.parent().and_then(|zgx| zgx.parent()).unwrap();
         let sources: Vec<_> = zgx_script::check::scripts(dir)
             .into_iter()
@@ -293,10 +296,16 @@ fn the_examples_types_files_are_what_zgx_types_writes() {
                 (script, source)
             })
             .collect();
+        let committed = Command::new("git")
+            .args(["show", &format!(":./{name}")])
+            .current_dir(&crates)
+            .output()
+            .unwrap();
+        assert!(committed.status.success(), "git show of {name}");
         assert!(
-            std::fs::read_to_string(&file).unwrap() == zgx_script::app_types::definitions(&sources),
-            "{} is stale: run `zgx types {}`",
-            file.display(),
+            String::from_utf8_lossy(&committed.stdout)
+                == zgx_script::app_types::definitions(&sources),
+            "{name}, as git holds it, is stale: run `zgx types {}` and add it",
             dir.display()
         );
     }
