@@ -1532,6 +1532,9 @@ struct Inner {
     /// (`window_chrome`).
     chrome: RefCell<Option<zgx::reactive::Effect>>,
     window_size: RefCell<Option<zgx::reactive::Effect>>,
+    /// `ui.window.full_screen` and `full_screen_transition` kept as the
+    /// window says (`ScriptHost::window_full_screen`).
+    full_screen: RefCell<Option<zgx::reactive::Effect>>,
     /// Keeps the window's zoom and `ui.window.zoom` the same (`window_zoom`).
     zoom: RefCell<Option<zgx::reactive::Effect>>,
     visible: RefCell<Option<zgx::reactive::Effect>>,
@@ -1732,6 +1735,7 @@ impl ScriptHost {
             shared: Rc::new(Store::new(runtime)),
             chrome: RefCell::default(),
             window_size: RefCell::default(),
+            full_screen: RefCell::default(),
             zoom: RefCell::default(),
             visible: RefCell::default(),
             window_state: RefCell::default(),
@@ -2354,6 +2358,39 @@ impl ScriptHost {
             });
             self.0.window_state.borrow_mut().push(effect);
         }
+    }
+    /// Keep `ui.window.full_screen` as whether the window is in full
+    /// screen (pass its `WindowInfo::fullscreen`), and
+    /// `ui.window.full_screen_transition` as the transition `transition`
+    /// reads while one runs (macOS's animation: going in, `true`, or out,
+    /// and its duration in seconds; `None` otherwise, as it always is on
+    /// Linux and Windows): `{ phase = "entering" | "leaving", duration }`
+    /// or nil. A title bar laid out around the traffic lights moves over
+    /// as they go (`ui.window.controls` is nil in full screen).
+    pub fn window_full_screen(
+        &self,
+        full_screen: Signal<bool>,
+        transition: impl Fn() -> Option<(bool, f64)> + 'static,
+    ) {
+        let full = self.0.shared.state(
+            windows::FULL_SCREEN,
+            Value::Bool(full_screen.with_untracked(|now| *now)),
+        );
+        let moving = self
+            .0
+            .shared
+            .state(windows::FULL_SCREEN_TRANSITION, Value::Nil);
+        let effect = self.0.runtime.effect(move || {
+            let now = Value::Bool(full_screen.get());
+            if full.with_untracked(|was| *was != now) {
+                full.set(now);
+            }
+            let now = windows::full_screen_transition(transition());
+            if moving.with_untracked(|was| *was != now) {
+                moving.set(now);
+            }
+        });
+        *self.0.full_screen.borrow_mut() = Some(effect);
     }
     /// Keep `ui.window.size` as the window's size in points: pass its
     /// `WindowContext::viewport`. For what layout can't say (a sidebar

@@ -164,6 +164,10 @@ enum Event {
     AppearanceChanged,
     #[cfg(target_os = "macos")]
     NativeMenuAction(crate::MenuAction),
+    /// AppKit said a window goes into or out of full screen, or is there
+    /// (`window_chrome::watch_full_screen`).
+    #[cfg(target_os = "macos")]
+    FullScreen,
     Wake(u64),
     /// The window's zoom changed (`Ui::set_zoom`): its content scale follows.
     Zoom(u64),
@@ -683,6 +687,11 @@ pub struct WindowContext {
     pub dialogs: crate::FileDialogs,
     /// The window's bounds, displays and capabilities, kept current.
     pub window_info: crate::WindowInfo,
+    /// While the window goes into or out of full screen (macOS's
+    /// animation), which way and about how long it takes; `None` otherwise,
+    /// and always on Linux and Windows. `window_info.fullscreen` says
+    /// whether it is in full screen, on every platform.
+    pub full_screen_transition: Signal<Option<crate::FullScreenTransition>>,
     menu_model: Signal<Vec<crate::AppMenu>>,
     /// The window's UI: its scene, input and reactive runtime.
     pub ui: Ui,
@@ -1705,6 +1714,10 @@ struct Host {
     /// It was in fullscreen as its geometry last changed: popups close as
     /// it goes in or out.
     popups_fullscreen: bool,
+    /// The full-screen transition it last began (`window_chrome::FullScreenNote`):
+    /// a `Settled` of an earlier one leaves a newer one be.
+    #[cfg(target_os = "macos")]
+    full_screen_seq: u64,
     /// Its content's top-left in global coordinates, and its number with
     /// the window server (macOS), for drags between windows: kept as the
     /// window moves, so a drag asks AppKit nothing as it moves.
@@ -1873,11 +1886,13 @@ impl Host {
             let handle = handle.clone();
             inspector.set_wake(move || handle.request_redraw());
         }
+        let full_screen_transition = ui.signal(None);
         let context = WindowContext {
             inspector,
             natives: native.natives.clone(),
             native_diagnostics: native.diagnostics.clone(),
             window_info,
+            full_screen_transition,
             menu_model,
             dialogs: crate::FileDialogs::new(handle.clone()),
             menu_action: None,
@@ -2050,6 +2065,8 @@ impl Host {
             popups,
             native_drag: Default::default(),
             popups_fullscreen: false,
+            #[cfg(target_os = "macos")]
+            full_screen_seq: 0,
             content_origin: None,
             window_number: None,
             window_grab: None,
@@ -2204,6 +2221,40 @@ impl Host {
                     self.scale_factor,
                 )
             });
+        }
+    }
+    /// What AppKit said of this window's full screen (`phase`, of the
+    /// transition numbered `seq`, its animation about `duration` long):
+    /// `full_screen_transition` begins or ends with it, and once it ends
+    /// the window's full screen and title bar buttons are read again
+    /// (`WindowInfo::fullscreen`, `controls`: none in full screen).
+    #[cfg(target_os = "macos")]
+    fn full_screen(
+        &mut self,
+        phase: crate::window_info::FullScreenPhase,
+        duration: std::time::Duration,
+        seq: u64,
+    ) {
+        use crate::window_info::FullScreenPhase;
+        if matches!(
+            phase,
+            FullScreenPhase::WillEnter | FullScreenPhase::WillExit
+        ) {
+            self.full_screen_seq = seq;
+        } else if phase == FullScreenPhase::Settled && seq != self.full_screen_seq {
+            return;
+        }
+        let transition = phase.transition(duration);
+        let signal = &self.context.full_screen_transition;
+        if signal.with_untracked(|now| *now != transition) {
+            signal.set(transition);
+        }
+        if phase.settles()
+            && let Some(window) = &self.window
+        {
+            self.context
+                .window_info
+                .refresh(window, self.options.titlebar);
         }
     }
     fn sync_ime_cancellation(&mut self) {
@@ -6627,6 +6678,14 @@ impl WindowManager {
         if let Some(events) = &self._native_events {
             events.install();
         }
+        // AppKit's full-screen notifications: `WindowContext::full_screen_transition`.
+        #[cfg(target_os = "macos")]
+        {
+            let proxy = self.factory.proxy.clone();
+            crate::window_chrome::watch_full_screen(move || {
+                let _ = proxy.send_event(Event::FullScreen);
+            });
+        }
         #[cfg(target_os = "macos")]
         if let Some(menu) = &self.native_menu {
             menu.install();
@@ -6704,6 +6763,19 @@ impl WindowManager {
     fn user_event_turn(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         match event {
             Event::Quit => event_loop.exit(),
+            #[cfg(target_os = "macos")]
+            Event::FullScreen => {
+                for (number, phase, duration, seq) in crate::window_chrome::take_full_screen() {
+                    let Some(host) = self
+                        .hosts
+                        .values_mut()
+                        .find(|host| host.window_number == Some(number))
+                    else {
+                        continue;
+                    };
+                    host.full_screen(phase, duration, seq);
+                }
+            }
             Event::Application(event, token) => {
                 // The window this brings up takes the launch's token...
                 #[cfg(target_os = "linux")]

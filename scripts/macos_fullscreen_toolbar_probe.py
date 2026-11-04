@@ -3,8 +3,9 @@
 
     python3 scripts/macos_fullscreen_toolbar_probe.py [--target-dir DIR]
 
-Builds the fullscreen_toolbar_probe example and runs it three times: into
-and out of full screen as the green button does (`toggleFullScreen:`), with
+Builds the fullscreen_toolbar_probe example and runs it four times: into
+and out of full screen as the green button does (`toggleFullScreen:`), by
+clicking it (`performClick:` on the zoom button), with
 zgx's `set_fullscreen` (winit's borderless full screen), and as a transition
 that fails after it began (AppKit's will-enter notification with no full
 screen after it: the toolbar must come back). In full screen,
@@ -13,6 +14,14 @@ nothing (alpha 0, or not visible), the inset toolbar must be hidden and the
 content layout rect must be the window's whole height. After, the toolbar
 and the traffic lights are back and the inset strip leaves the content
 layout rect shorter again.
+
+Each run also checks what the window says as it goes (`STATE` lines:
+`WindowInfo::fullscreen`, `WindowContext::full_screen_transition`, and the
+traffic lights, `controls`). By the green button: entering, then in full
+screen with no transition and no traffic lights, then leaving, then out with
+them back. Borderless: in and out with no transition (AppKit doesn't
+animate it). Failed: entering, then no transition once it has had time to
+end, still out of full screen.
 
 It is launched as a direct child, from /tmp, with a clean environment; it
 sends no input. If a system dialog appears, stop and report it; never click
@@ -46,11 +55,34 @@ def main():
         shutil.copy2(pathlib.Path(args.target_dir) / 'debug/examples/fullscreen_toolbar_probe', binary)
         clean = {key: os.environ[key] for key in ('HOME', 'TMPDIR', 'USER') if key in os.environ}
         clean['PATH'] = '/usr/bin:/bin'
-        for via in ('green', 'borderless', 'failed'):
+        for via in ('green', 'button', 'borderless', 'failed'):
             out = subprocess.run([str(binary), '--via', via], cwd='/tmp', env=clean, capture_output=True,
                                  text=True, timeout=60).stdout
             print(f'== {via}')
-            print('\n'.join(line for line in out.splitlines() if re.match(r'(STRIP|WINDOW|NO_WINDOW) ', line)))
+            print('\n'.join(line for line in out.splitlines() if re.match(r'(STRIP|WINDOW|NO_WINDOW|STATE) ', line)))
+            states = re.findall(r'^STATE \d+ full=(\S+) transition=(\S+) ([\d.]+) controls=(\S+)$', out, re.M)
+            seen = [(full == 'true', moving, controls != 'none') for full, moving, _, controls in states]
+            def went(*steps):
+                # `steps` in order, each a state seen (others between).
+                at = 0
+                for state in seen:
+                    if at < len(steps) and state == steps[at]:
+                        at += 1
+                return at == len(steps)
+            if via in ('green', 'button'):
+                checks[f'{via}: entering, then in full screen, no transition, no traffic lights'] = went(
+                    (False, 'none', True), (False, 'entering', True), (True, 'none', False))
+                checks[f'{via}: then leaving, then out, the traffic lights back'] = went(
+                    (True, 'none', False), (True, 'leaving', False), (False, 'none', True))
+                checks[f'{via}: a transition says how long it takes'] = all(
+                    0 < float(seconds) < 5 for _, moving, seconds, _ in states if moving != 'none')
+            elif via == 'borderless':
+                checks[f'{via}: in and out with no transition'] = went(
+                    (False, 'none', True), (True, 'none', False), (False, 'none', True)) and all(
+                    moving == 'none' for _, moving, _, _ in states)
+            else:
+                checks[f'{via}: entering, then no transition once it had time to end'] = went(
+                    (False, 'entering', True), (False, 'none', True)) and seen[-1] == (False, 'none', True)
             windows = {m[0]: m for m in re.findall(
                 r'^WINDOW (\S+) fullscreen=(\S+) frame_h=(\d+) layout_h=(\d+) buttons_hidden=(\S+) toolbar_visible=(\S+)$',
                 out, re.M)}

@@ -440,6 +440,20 @@ pub fn run_hosting(
         host.window_state(&cx.ui);
         // `ui.window.size`.
         host.window_size(cx.viewport.clone());
+        // `ui.window.full_screen` and `ui.window.full_screen_transition`.
+        {
+            let transition = cx.full_screen_transition.clone();
+            host.window_full_screen(cx.window_info.fullscreen.clone(), move || {
+                transition.get().map(|transition| match transition {
+                    zgx_desktop::FullScreenTransition::Entering(duration) => {
+                        (true, duration.as_secs_f64())
+                    }
+                    zgx_desktop::FullScreenTransition::Leaving(duration) => {
+                        (false, duration.as_secs_f64())
+                    }
+                })
+            });
+        }
         // `ui.window.visible`: shown as zgx.json says, and as the script sets it.
         {
             let window = cx.window.clone();

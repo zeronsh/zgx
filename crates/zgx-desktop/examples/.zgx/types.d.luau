@@ -1677,6 +1677,10 @@ export type ItemWindow = {
 -- A rect in points, from the window's top left.
 export type WindowRect = { x: number, y: number, width: number, height: number }
 
+-- A window going into full screen or out (macOS's animation): which way,
+-- and about how many seconds it takes.
+export type FullScreenTransition = { phase: "entering" | "leaving", duration: number }
+
 -- `ui.window`: called, it declares a window (`WindowOptions`). Its fields
 -- are the app's own window's title bar, as the web's Window Controls
 -- Overlay gives it: `titlebar_area`, where the app may draw in the strip an
@@ -1703,6 +1707,14 @@ declare extern type WindowApi with
 	-- is false is worth a notification or a badge.
 	active: State<boolean>
 	shown: State<boolean>
+	-- Whether the window is in full screen, read-only and followed, however
+	-- it went in or out (the green button, Ctrl+Cmd+F, the menu, Mission
+	-- Control, a script); and while it goes (macOS animates it), which way
+	-- and for how long, nil otherwise (always on Linux and Windows). In full
+	-- screen `controls` is nil: a title bar laid out around the traffic
+	-- lights moves over as they go.
+	full_screen: State<boolean>
+	full_screen_transition: State<FullScreenTransition?>
 	-- The window's size in points, read-only and followed: for decisions
 	-- layout can't make (a sidebar collapsing to icons below a width).
 	-- Sizes themselves are layout's: percentages, `grow`, `max_w`.

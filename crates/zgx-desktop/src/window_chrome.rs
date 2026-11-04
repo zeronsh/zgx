@@ -1791,6 +1791,43 @@ impl TitlebarAction {
     }
 }
 
+/// A window's full-screen notification, queued (`watch_full_screen`): its
+/// window number, what AppKit said, AppKit's estimate of the animation it
+/// began, and the transition it belongs to (a will's number, which its
+/// `Settled` carries).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) type FullScreenNote = (
+    isize,
+    crate::window_info::FullScreenPhase,
+    std::time::Duration,
+    u64,
+);
+
+/// From now on, AppKit's full-screen notifications for every window are
+/// queued for `take_full_screen` and `wake` is called (macOS; elsewhere
+/// none come, and `window_info.fullscreen` follows resizes). Once per
+/// process: a few observers, nothing per frame.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn watch_full_screen(wake: impl Fn() + 'static) {
+    #[cfg(target_os = "macos")]
+    mac::watch_full_screen(wake);
+    #[cfg(not(target_os = "macos"))]
+    let _ = wake;
+}
+
+/// The full-screen notifications queued since the last call.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn take_full_screen() -> Vec<FullScreenNote> {
+    #[cfg(target_os = "macos")]
+    {
+        mac::take_full_screen()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
 pub(crate) fn double_click(window: &winit::window::Window) {
     #[cfg(target_os = "macos")]
     mac::double_click(window);
@@ -1954,6 +1991,123 @@ mod mac {
             };
             std::mem::forget(observer);
         }
+    }
+
+    thread_local! {
+        static FULL_SCREEN: std::cell::RefCell<Vec<super::FullScreenNote>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        static FULL_SCREEN_WAKE: std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>> =
+            const { std::cell::RefCell::new(None) };
+        static FULL_SCREEN_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Every window's `NSWindowWill…`/`NSWindowDid…FullScreen`, queued with
+    /// the window's number (`super::watch_full_screen`). A will also queues
+    /// `Settled` once its animation has had time to end, as a transition
+    /// that fails says so only to winit's delegate.
+    pub(super) fn watch_full_screen(wake: impl Fn() + 'static) {
+        use crate::window_info::FullScreenPhase;
+        use objc2_app_kit::{
+            NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification,
+            NSWindowWillEnterFullScreenNotification, NSWindowWillExitFullScreenNotification,
+        };
+        use objc2_foundation::{NSNotification, NSNotificationCenter};
+        if FULL_SCREEN_WAKE.with_borrow(Option::is_some) {
+            return;
+        }
+        FULL_SCREEN_WAKE.set(Some(std::rc::Rc::new(wake)));
+        let center = NSNotificationCenter::defaultCenter();
+        for (name, phase) in [
+            // SAFETY: AppKit's own notification names, constant statics.
+            (
+                unsafe { NSWindowWillEnterFullScreenNotification },
+                FullScreenPhase::WillEnter,
+            ),
+            (
+                unsafe { NSWindowDidEnterFullScreenNotification },
+                FullScreenPhase::DidEnter,
+            ),
+            (
+                unsafe { NSWindowWillExitFullScreenNotification },
+                FullScreenPhase::WillExit,
+            ),
+            (
+                unsafe { NSWindowDidExitFullScreenNotification },
+                FullScreenPhase::DidExit,
+            ),
+        ] {
+            let block = block2::RcBlock::new(move |note: std::ptr::NonNull<NSNotification>| {
+                // SAFETY: AppKit passes a valid notification for the
+                // block's duration; a window's notification's object is
+                // that NSWindow.
+                let note = unsafe { note.as_ref() };
+                let Some(window) = note
+                    .object()
+                    .and_then(|object| object.downcast::<NSWindow>().ok())
+                else {
+                    return;
+                };
+                let number = window.windowNumber();
+                let will = matches!(
+                    phase,
+                    FullScreenPhase::WillEnter | FullScreenPhase::WillExit
+                );
+                let (duration, seq) = if will {
+                    // To the screen's frame or back: AppKit's estimate of
+                    // the animation.
+                    let frame = window
+                        .screen()
+                        .map_or(window.frame(), |screen| screen.frame());
+                    let seconds = window.animationResizeTime(frame);
+                    let seq = FULL_SCREEN_SEQ.get() + 1;
+                    FULL_SCREEN_SEQ.set(seq);
+                    (std::time::Duration::from_secs_f64(seconds.max(0.)), seq)
+                } else {
+                    (std::time::Duration::ZERO, FULL_SCREEN_SEQ.get())
+                };
+                note_full_screen((number, phase, duration, seq));
+                if will {
+                    settle_after(number, duration + SETTLE_AFTER, seq);
+                }
+            });
+            // SAFETY: with no queue given the block runs where AppKit posts
+            // the notification (the main thread); the observers live as
+            // long as the app.
+            let observer = unsafe {
+                center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
+            };
+            std::mem::forget(observer);
+        }
+    }
+
+    /// How long past a transition's estimated end its `Settled` comes.
+    const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_millis(1500);
+
+    fn note_full_screen(note: super::FullScreenNote) {
+        FULL_SCREEN.with_borrow_mut(|queue| queue.push(note));
+        if let Some(wake) = FULL_SCREEN_WAKE.with_borrow(Clone::clone) {
+            wake();
+        }
+    }
+
+    /// `after` on, the transition `seq` of the window numbered `number` is
+    /// over, if it is not yet.
+    fn settle_after(number: isize, after: std::time::Duration, seq: u64) {
+        let Ok(when) = dispatch2::DispatchTime::try_from(after) else {
+            return;
+        };
+        let _ = dispatch2::DispatchQueue::main().after(when, move || {
+            note_full_screen((
+                number,
+                crate::window_info::FullScreenPhase::Settled,
+                std::time::Duration::ZERO,
+                seq,
+            ));
+        });
+    }
+
+    pub(super) fn take_full_screen() -> Vec<super::FullScreenNote> {
+        FULL_SCREEN.with_borrow_mut(std::mem::take)
     }
 
     /// How long after a window began going into full screen its transition

@@ -110,6 +110,59 @@ fn the_window_titlebar_area_and_controls_follow_what_the_host_says() {
     assert!(texts(&h.ui).contains(&"none".to_owned()));
 }
 
+/// `ui.window.full_screen` and `full_screen_transition` follow the host
+/// through a round trip into full screen and out (macOS's will and did
+/// notifications), the title bar's `controls` gone while it is there: a
+/// title bar laid out around the traffic lights moves over as they go.
+#[test]
+fn the_window_says_it_goes_into_full_screen_and_out() {
+    let h = Harness::inline(
+        r##"return ui.text {
+            id = "full",
+            function()
+                local moving = ui.window.full_screen_transition:get()
+                local buttons = ui.window.controls:get()
+                return `full {ui.window.full_screen:get()} {if moving then `{moving.phase} {moving.duration}` else "still"} buttons {if buttons then buttons.x else "none"}`
+            end,
+        }"##,
+    );
+    let full = h.ui.signal(false);
+    let transition = h.ui.signal(None::<(bool, f64)>);
+    let area = h.ui.signal(Some(zgx::scene::Rect::new(78., 0., 722., 40.)));
+    let controls = h.ui.signal(Some(zgx::scene::Rect::new(20., 14., 52., 12.)));
+    h.host.window_chrome(area.clone(), controls.clone());
+    h.host.window_full_screen(full.clone(), {
+        let transition = transition.clone();
+        move || transition.get()
+    });
+    let says = |text: &str| {
+        h.frames(1);
+        assert!(
+            texts(&h.ui).contains(&text.to_owned()),
+            "{text:?} in {:?}",
+            texts(&h.ui)
+        );
+    };
+    says("full false still buttons 20");
+    // The green button: AppKit's will, its animation half a second.
+    transition.set(Some((true, 0.5)));
+    says("full false entering 0.5 buttons 20");
+    // Its did: in full screen, no title bar, no transition.
+    full.set(true);
+    area.set(None);
+    controls.set(None);
+    transition.set(None);
+    says("full true still buttons none");
+    // ⌃⌘F out: leaving, then out, the traffic lights back.
+    transition.set(Some((false, 0.5)));
+    says("full true leaving 0.5 buttons none");
+    full.set(false);
+    area.set(Some(zgx::scene::Rect::new(78., 0., 722., 40.)));
+    controls.set(Some(zgx::scene::Rect::new(20., 14., 52., 12.)));
+    transition.set(None);
+    says("full false still buttons 20");
+}
+
 /// `ui.window.zoom` follows the window's zoom and sets it; `zoomable`
 /// turns its keys off. Neither is made until a script reads it.
 #[test]
