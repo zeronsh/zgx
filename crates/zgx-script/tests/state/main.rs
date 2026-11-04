@@ -11,6 +11,8 @@ mod async_handlers;
 mod calls;
 #[path = "../form_values.rs"]
 mod form_values;
+#[path = "../guard_doors.rs"]
+mod guard_doors;
 #[path = "../io.rs"]
 mod io;
 #[path = "../large_data.rs"]

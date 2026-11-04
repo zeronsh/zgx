@@ -162,6 +162,20 @@ pub(crate) struct Webs(RefCell<std::collections::HashMap<String, zgx::web_view::
 /// `opts`) the first time. A plugin's pages are its own: its ids and its
 /// stores (cookies, storage) are apart from the app's and other plugins',
 /// so `web` lets it show pages, not reach the user's.
+/// A web view made by a script. The app VM's asks the host's guard of each
+/// navigation the platform starts (a plugin's goes by its grants).
+fn guarded_web(
+    lua: &Lua,
+    options: zgx::web_view::WebViewOptions,
+) -> mlua::Result<zgx::web_view::WebView> {
+    let env = env(lua)?;
+    let web = zgx::web_view::WebView::new(&env.runtime, options);
+    if matches!(*env.grants, crate::Grants::All) {
+        let vm = env.vm.clone();
+        web.set_navigation_policy(move |request| crate::rules::navigation_allowed(&vm, request));
+    }
+    Ok(web)
+}
 pub(crate) fn install_web(lua: &Lua, ui: &Table, webs: Rc<Webs>) -> mlua::Result<()> {
     ui.set(
         "web",
@@ -204,7 +218,7 @@ pub(crate) fn install_web(lua: &Lua, ui: &Table, webs: Rc<Webs>) -> mlua::Result
                         WebProfile::Ephemeral => WebProfile::Ephemeral,
                     };
                 }
-                Ok(zgx::web_view::WebView::new(&env(lua)?.runtime, options))
+                guarded_web(lua, options)
             };
             let Some(id) = id else {
                 return Ok(WebUd(make(lua)?, None));
@@ -255,11 +269,14 @@ impl UserData for WebUd {
         });
     }
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("load", |_, w, url: String| {
+        methods.add_method("load", |lua, w, url: String| {
+            crate::rules::guard(lua, crate::GuardKind::Web, &url)?;
             w.0.load_url(url);
             Ok(())
         });
-        methods.add_method("html", |_, w, (html, base): (String, Option<String>)| {
+        methods.add_method("html", |lua, w, (html, base): (String, Option<String>)| {
+            let name = base.as_deref().unwrap_or("about:blank");
+            crate::rules::guard(lua, crate::GuardKind::Web, name)?;
             w.0.load_html(html, base.as_deref());
             Ok(())
         });
@@ -5715,9 +5732,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, table: Table| {
             env(lua)?.may(crate::Capability::Web, "ui.webview")?;
             let web = match table.get::<mlua::Value>("web")? {
-                mlua::Value::Nil => {
-                    zgx::web_view::WebView::new(&env(lua)?.runtime, web_options(&table)?)
-                }
+                mlua::Value::Nil => guarded_web(lua, web_options(&table)?)?,
                 mlua::Value::UserData(ud) => ud.borrow::<WebUd>()?.0.clone(),
                 other => {
                     return Err(mlua::Error::runtime(format!(

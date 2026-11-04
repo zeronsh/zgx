@@ -33,6 +33,35 @@ pub enum GuardKind {
     /// A connection through the host's connector (`ui.socket`): named by its
     /// URL, asked each time it opens.
     Socket,
+    /// A terminal session reached (`ui.term`): named by its command, or the
+    /// login shell it runs when it has none. Refused, `ui.term` raises and
+    /// nothing starts.
+    Term,
+    /// What a script types into a terminal (`:input`, `:paste`, `:binding`):
+    /// named by the session's id.
+    TermInput,
+    /// A page in a web view (`ui.web`, `ui.webview`): named by its URL, or
+    /// `html`'s base URL (`about:blank` if none). Asked as a script loads one
+    /// (`src`, `:load`, `:html`) and again as the platform starts each
+    /// navigation (a link, a form, a redirect, a page's script, history); see
+    /// `docs/plugins.md` for what no platform shows.
+    Web,
+    /// The clipboard (`ui.clipboard`): named `read`, `write`, `read_image`
+    /// or `write_image`.
+    Clipboard,
+    /// A system dialog (`ui.open_files`, `ui.save_file`, `ui.open_folder`):
+    /// named by the function.
+    Dialog,
+    /// A picked file read or written (`ui.read_file`, `ui.write_file`): named
+    /// by its path.
+    File,
+    /// A folder the host keeps or a script holds, which asks no one
+    /// (`ui.remembered_folder`, by its key; a folder's `:read`, `:write` and
+    /// `:file`, by the path).
+    Folder,
+    /// A system notification (`ui.notify`, by its title) or the app's badge
+    /// (`ui.badge`, named `badge`).
+    Notification,
 }
 
 type Guard = dyn Fn(GuardKind, &str) -> Result<(), String>;
@@ -133,6 +162,49 @@ fn guarded(lua: &Lua, kind: GuardKind, name: &str) -> mlua::Result<()> {
     rules
         .check(kind, name)
         .map_err(|why| mlua::Error::runtime(format!("{kind:?} `{name}`: {why}")))
+}
+
+/// Whether a navigation the platform is about to start may (`WebView`'s
+/// navigation policy, for a web view of the app's VM). Refused, it says so
+/// where a script's error shows. `about:blank` reaches nothing, and is what
+/// a page given as `html` loads under, asked as it was given.
+pub(crate) fn navigation_allowed(
+    vm: &Weak<crate::Vm>,
+    request: &zgx::web_view::NavigationRequest,
+) -> bool {
+    if !ACTIVE.get() || request.url == "about:blank" {
+        return true;
+    }
+    let Some(vm) = vm.upgrade() else {
+        return true;
+    };
+    match guarded(&vm.lua, GuardKind::Web, &request.url) {
+        Ok(()) => true,
+        Err(error) => {
+            vm.report(error);
+            false
+        }
+    }
+}
+/// `ui.term`'s question: the session's command, or the shell it would run.
+/// Otherwise one thread-local read.
+#[inline]
+pub(crate) fn guard_term(lua: &Lua, command: Option<&str>) -> mlua::Result<()> {
+    if !ACTIVE.get() {
+        return Ok(());
+    }
+    let shell;
+    let name = match command {
+        Some(command) => command,
+        None => {
+            shell = ["SHELL", "COMSPEC"]
+                .into_iter()
+                .find_map(|name| std::env::var(name).ok())
+                .unwrap_or_else(|| "shell".to_owned());
+            &shell
+        }
+    };
+    guarded(lua, GuardKind::Term, name)
 }
 
 /// Refuses a plugin's use of a name a host reserved (`what` says which).
