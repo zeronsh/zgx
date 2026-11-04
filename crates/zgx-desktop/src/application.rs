@@ -3479,6 +3479,8 @@ impl Host {
         match self.make_renderer(&window) {
             Ok(mut renderer) => {
                 renderer.set_scale_factor(self.scale_factor as f32);
+                #[cfg(target_os = "macos")]
+                renderer.set_zoom(self.context.ui.zoom());
                 if self.options.is_transparent() {
                     renderer.set_background(zgx::scene::Color(0, 0, 0, 0));
                 } else if let Some(background) = self.applied_background {
@@ -3686,6 +3688,8 @@ impl Host {
         crate::popup_window::set_zoom(window.id(), self.context.ui.zoom());
         self.scale_factor = self.content_scale();
         renderer.set_scale_factor(self.scale_factor as f32);
+        #[cfg(target_os = "macos")]
+        renderer.set_zoom(self.context.ui.zoom());
         self.context
             .ui
             .scene
@@ -5178,6 +5182,8 @@ impl Host {
         self.scale_factor = scale;
         if let Some(renderer) = &mut self.renderer {
             renderer.set_scale_factor(scale as f32);
+            #[cfg(target_os = "macos")]
+            renderer.set_zoom(self.context.ui.zoom());
         }
         self.context
             .ui

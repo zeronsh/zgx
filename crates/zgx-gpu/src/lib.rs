@@ -3939,6 +3939,10 @@ pub struct GpuRenderer {
     /// owes (`set_plane_waker`), from the plane's drawables thread.
     #[cfg(target_os = "macos")]
     plane_wake: Option<PlaneWaker>,
+    /// The window's zoom (`set_zoom`): `scale` holds it, the host layer's
+    /// points don't.
+    #[cfg(target_os = "macos")]
+    zoom: f64,
     #[cfg(target_os = "macos")]
     native_surfaces: Option<native_surface::SurfaceCache>,
     /// The next present joins the Core Animation transaction that resized the layer.
@@ -4574,6 +4578,8 @@ impl GpuRenderer {
             #[cfg(target_os = "macos")]
             plane_wake: None,
             #[cfg(target_os = "macos")]
+            zoom: 1.,
+            #[cfg(target_os = "macos")]
             native_surfaces: None,
             #[cfg(target_os = "macos")]
             transaction_present: false,
@@ -4801,6 +4807,14 @@ impl GpuRenderer {
                 layer.set_caret(caret);
             }
         }
+    }
+    /// The window's zoom (`Ui::zoom`), which `set_scale_factor`'s scale
+    /// holds. Layers placed over the frames (a baked loop's, a GPU view's)
+    /// go in the host layer's points, `scale / zoom` pixels each, where the
+    /// frames' own points are `scale` pixels.
+    #[cfg(target_os = "macos")]
+    pub fn set_zoom(&mut self, zoom: f64) {
+        self.zoom = zoom;
     }
     /// Whether a caret set with `set_caret` can show: frames show through
     /// a layer the renderer presents to.
