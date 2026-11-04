@@ -288,6 +288,9 @@ struct Shown {
     asked: Rect,
     trigger: Option<Rect>,
     revision: Option<u64>,
+    /// Whether what it shows blurs what's behind it (`super::blurs`), as of
+    /// `revision`.
+    glass: bool,
     /// Its frame's last contained panic (`contain::run`).
     fault: Option<crate::contain::Fault>,
     /// The popup it is a popup of (a submenu's menu), if not the window's.
@@ -500,6 +503,7 @@ impl Popups {
     /// `takes` says whether a node takes the pointer (listening to it, or
     /// disabled: `Some(true)`) or lets it through (`View::pointer_events`:
     /// `Some(false)`), or leaves that to what holds it (`None`).
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         parent: &Window,
@@ -508,6 +512,10 @@ impl Popups {
         scale: f32,
         full: bool,
         takes: &dyn Fn(NodeId) -> Option<bool>,
+        // A popup's glass blurs this renderer's last frame (`set_backdrop`),
+        // and shows what `damage` changes under it.
+        under: &GpuRenderer,
+        damage: &[Rect],
     ) -> Result<(), GpuError> {
         self.wake = None;
         if self.shown.is_empty() && scene.popups().is_empty() {
@@ -698,7 +706,12 @@ impl Popups {
                     }
                 }
                 let revision = scene.layer_revision(*root);
-                let due = full || popup.revision != Some(revision);
+                if popup.revision != Some(revision) {
+                    popup.glass = super::blurs(scene, *root);
+                }
+                let due = full
+                    || popup.revision != Some(revision)
+                    || (popup.glass && damage.iter().any(|at| at.intersection(*bounds).is_some()));
                 // The compositor yet to take its last frame: this one waits
                 // for it (its frame callback wakes the loop), drawn then.
                 let surface = popup.surface.id();
@@ -727,6 +740,7 @@ impl Popups {
                 } else if draw {
                     popup.revision = Some(revision);
                     popup.renderer.set_popup(*root, *bounds);
+                    popup.renderer.set_backdrop(popup.glass.then_some(under));
                     let renderer = &mut popup.renderer;
                     let (wl_surface, framing) = (&popup.surface, &mut client.state.framing);
                     let started = Instant::now();
@@ -1126,6 +1140,7 @@ fn show(
         asked,
         trigger,
         revision: None,
+        glass: false,
         fault: None,
         parent: of.map(|(holder, ..)| holder),
         input: None,

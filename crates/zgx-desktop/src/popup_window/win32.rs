@@ -354,14 +354,6 @@ struct Panel {
     glass: bool,
 }
 
-/// Whether anything in `node`'s subtree blurs what's behind it.
-fn blurs(scene: &Scene, node: NodeId) -> bool {
-    scene.effects(node).blur_radius > 0.
-        || scene
-            .children(node)
-            .iter()
-            .any(|child| blurs(scene, *child))
-}
 /// How DWM frames popup root `root`'s window at `rect`: as Windows 11 frames
 /// its menus, with rounded corners, a rim and a shadow, when what it shows is
 /// one rounded panel filling it; otherwise not at all, zgx drawing all of it
@@ -1107,7 +1099,7 @@ impl PopupHost {
             if panel.revision != Some(revision) {
                 // (A preview goes where the drag puts it, not over its box.)
                 panel.glass =
-                    drag.is_none_or(|drag| drag.preview != Some(root)) && blurs(scene, root);
+                    drag.is_none_or(|drag| drag.preview != Some(root)) && super::blurs(scene, root);
             }
             panel.revision = Some(revision);
             // At its window's scale (see `screens_in`).

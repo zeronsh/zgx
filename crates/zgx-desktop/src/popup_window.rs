@@ -85,6 +85,19 @@ pub(crate) use macos::{
     window_at, window_number,
 };
 
+/// Whether anything in `node`'s subtree blurs what's behind it: what a
+/// popup's window then blurs is its parent's last frame
+/// (`GpuRenderer::set_backdrop`), a window of its own holding nothing of the
+/// app's.
+#[cfg(any(windows, target_os = "linux"))]
+fn blurs(scene: &zgx::scene::Scene, node: zgx::scene::NodeId) -> bool {
+    scene.effects(node).blur_radius > 0.
+        || scene
+            .children(node)
+            .iter()
+            .any(|child| blurs(scene, *child))
+}
+
 /// One line of a memory report for the popups' renderers, however a
 /// backend holds them: each has textures of its own.
 #[allow(dead_code)]
@@ -2033,6 +2046,9 @@ mod x11 {
         send: Sink,
     }
     struct Popup {
+        /// Whether what it shows blurs what's behind it (`blurs`), as of
+        /// `revision`.
+        glass: bool,
         window: Arc<Window>,
         renderer: Option<GpuRenderer>,
         revision: Option<u64>,
@@ -2475,6 +2491,7 @@ mod x11 {
                 hidden.push(Popup {
                     window: Arc::new(window),
                     renderer: None,
+                    glass: false,
                     revision: None,
                     fault: None,
                     rect: None,
@@ -2592,12 +2609,16 @@ mod x11 {
             drag: Option<&zgx::input::DragState>,
             ended: Option<zgx::input::DragEnded>,
             takes: &dyn Fn(NodeId) -> Option<bool>,
+            // The window's renderer, its frame just presented, and what
+            // changed in it: a popup's glass blurs that frame.
+            under: &GpuRenderer,
+            damage: &[Rect],
         ) -> Result<(), GpuError> {
             reap();
             if !x11(parent) {
                 return self
                     .wayland
-                    .update(parent, scene, context, scale, full, takes);
+                    .update(parent, scene, context, scale, full, takes, under, damage);
             }
             if self.shown.is_empty() && scene.popups().is_empty() {
                 return Ok(());
@@ -2706,9 +2727,18 @@ mod x11 {
                 // Popups are small: one that changed is drawn whole. One that
                 // only moved (a drag preview) is not drawn again.
                 let revision = scene.layer_revision(root);
-                if new || full || resized || popup.revision != Some(revision) {
+                if popup.revision != Some(revision) {
+                    // (A preview goes where the drag puts it, not over its box.)
+                    popup.glass = drag.is_none_or(|drag| drag.preview != Some(root))
+                        && super::blurs(scene, root);
+                }
+                // Glass shows the window's new pixels under it.
+                let under_changed =
+                    popup.glass && damage.iter().any(|at| at.intersection(rect).is_some());
+                if new || full || resized || under_changed || popup.revision != Some(revision) {
                     popup.revision = Some(revision);
                     zgx_gpu::present_log::log(|| format!("popup draw {root:?}"));
+                    renderer.set_backdrop(popup.glass.then_some(under));
                     let drawn = crate::contain::run_frame(
                         &mut popup.fault,
                         revision,
