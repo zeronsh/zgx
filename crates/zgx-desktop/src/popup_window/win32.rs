@@ -349,8 +349,19 @@ struct Panel {
     preview: Option<(f32, f32)>,
     /// How DWM rounds it, as last set.
     corner: Option<DWM_WINDOW_CORNER_PREFERENCE>,
+    /// Whether what it shows blurs what's behind it (`blurs`), as of
+    /// `revision`.
+    glass: bool,
 }
 
+/// Whether anything in `node`'s subtree blurs what's behind it.
+fn blurs(scene: &Scene, node: NodeId) -> bool {
+    scene.effects(node).blur_radius > 0.
+        || scene
+            .children(node)
+            .iter()
+            .any(|child| blurs(scene, *child))
+}
 /// How DWM frames popup root `root`'s window at `rect`: as Windows 11 frames
 /// its menus, with rounded corners, a rim and a shadow, when what it shows is
 /// one rounded panel filling it; otherwise not at all, zgx drawing all of it
@@ -428,6 +439,7 @@ impl Panel {
                 fault: None,
                 preview: None,
                 corner: None,
+                glass: false,
             })
         }
     }
@@ -1021,6 +1033,10 @@ impl PopupHost {
         drag: Option<&zgx::input::DragState>,
         ended: Option<zgx::input::DragEnded>,
         _takes: &dyn Fn(NodeId) -> Option<bool>,
+        // The window's renderer, its frame just presented, and what changed
+        // in it: a popup's glass blurs that frame (`set_backdrop`).
+        under: &GpuRenderer,
+        damage: &[Rect],
     ) -> Result<(), GpuError> {
         if self.shown.is_empty() && scene.popups().is_empty() {
             return Ok(());
@@ -1086,7 +1102,13 @@ impl PopupHost {
             // Popups are small: one that changed is drawn whole (and at a
             // new scale, by a new renderer).
             let revision = scene.layer_revision(root);
-            let changed = new || full || panel.revision != Some(revision) || panel.scale != scale;
+            let mut changed =
+                new || full || panel.revision != Some(revision) || panel.scale != scale;
+            if panel.revision != Some(revision) {
+                // (A preview goes where the drag puts it, not over its box.)
+                panel.glass =
+                    drag.is_none_or(|drag| drag.preview != Some(root)) && blurs(scene, root);
+            }
             panel.revision = Some(revision);
             // At its window's scale (see `screens_in`).
             let renderer = match panel.renderer(context, scale) {
@@ -1101,8 +1123,12 @@ impl PopupHost {
             let resized = panel
                 .rect
                 .is_none_or(|old| (old.width, old.height) != (rect.width, rect.height));
+            // Glass shows the window's new pixels under it.
+            let glass = panel.glass;
+            changed |= glass && damage.iter().any(|at| at.intersection(rect).is_some());
             if changed || resized {
                 let renderer = panel.renderer.as_mut().expect("made above");
+                renderer.set_backdrop(glass.then_some(under));
                 let drawn = crate::contain::run_frame(
                     &mut panel.fault,
                     revision,

@@ -2912,6 +2912,10 @@ impl Host {
                                 None
                             }
                         },
+                        #[cfg(windows)]
+                        renderer,
+                        #[cfg(windows)]
+                        &report.damage,
                     )
                 },
             );
