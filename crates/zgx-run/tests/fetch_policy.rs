@@ -379,6 +379,113 @@ fn a_plugins_remote_image_goes_through_the_policy() {
     assert_eq!(server.hits.load(Ordering::SeqCst), 0);
 }
 
+/// Refused to any plugin, whatever it asks for.
+#[derive(Clone)]
+struct NotForPlugins;
+impl FetchPolicy for NotForPlugins {
+    fn url(&self, caller: Option<&str>, _: &Url) -> Result<(), String> {
+        match caller {
+            Some(plugin) => Err(format!("not for {plugin}")),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A plugin's refused image is its own: the app showing the same URL loads
+/// it at once, not after the plugin's backoff.
+#[test]
+fn a_plugins_refused_image_leaves_the_app_loading_it_at_once() {
+    // A 2×2 PNG, however it is asked for.
+    const PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6,
+        0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 17, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240,
+        31, 132, 25, 96, 12, 0, 71, 202, 7, 249, 103, 89, 110, 183, 0, 0, 0, 0, 73, 69, 78, 68,
+        174, 66, 96, 130,
+    ];
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counted = hits.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let mut asked = Vec::new();
+            let mut buffer = [0; 4096];
+            while !asked.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(n) if n > 0 => asked.extend_from_slice(&buffer[..n]),
+                    _ => break,
+                }
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                PNG.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(PNG);
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}/pic.png");
+    let dir = std::env::temp_dir().join(format!("zgx-run-image-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("init.luau");
+    std::fs::write(
+        &entry,
+        format!(
+            r#"local why = ui.state("why", "")
+ui.contribute("bar", ui.column {{
+    ui.image {{ src = "{url}", w = 10, h = 10, on_error = function(e) why:set(e) end }},
+    ui.text {{ id = "why", function() return why:get() end }},
+}})"#
+        ),
+    )
+    .unwrap();
+    let code = format!(
+        r#"local shown = ui.state("shown", false)
+local loaded = ui.state("loaded", "")
+return ui.column {{
+    ui.button {{ id = "show", on_click = function() shown:set(true) end, "s" }},
+    ui.slot("bar"),
+    ui.show(shown, ui.image {{ src = "{url}", w = 10, h = 10,
+        on_load = function(size) loaded:set(`{{size.w}}`) end }}),
+    ui.text {{ id = "loaded", function() return loaded:get() end }},
+}}"#
+    );
+    let mut app = TestApp::new(move |runtime| {
+        let host = ScriptHost::inline(runtime, "app", code);
+        zgx_run::install_fetcher(&host);
+        host.fetch_policy(NotForPlugins);
+        host.set_plugins(vec![Plugin {
+            name: "plug".into(),
+            entry,
+            grants: vec![Capability::Fetch],
+        }]);
+        host
+    });
+    assert!(
+        app.wait_until(|app| !app.text("why").is_empty()),
+        "{:?}",
+        app.error()
+    );
+    assert!(
+        app.text("why").contains("not for plug"),
+        "{}",
+        app.text("why")
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "refused before connecting");
+
+    let asked = std::time::Instant::now();
+    app.click("show");
+    assert!(
+        app.wait_until(|app| app.text("loaded") == "2"),
+        "{:?}",
+        app.error()
+    );
+    // A failure's first backoff is five seconds.
+    assert!(asked.elapsed().as_secs() < 4, "{:?}", asked.elapsed());
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
 /// A socket's URL and addresses are asked of, as a plugin's.
 #[test]
 fn a_plugins_socket_goes_through_the_policy() {
