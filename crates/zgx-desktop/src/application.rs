@@ -1715,6 +1715,7 @@ struct Host {
     /// on macOS, secure keyboard entry is on meanwhile.
     password: bool,
     gpu_stats: Option<crate::gpu_stats::GpuStatsLog>,
+    /// (`ZGX_DAMAGE_DUMP=dir` writes both frames of one that differs.)
     /// `ZGX_DAMAGE_CHECK=1`: compare every damaged frame with a full
     /// repaint and report stale pixels (slow; for debugging damage).
     damage_check: Option<u64>,
@@ -7901,23 +7902,63 @@ fn check_damage(
     let partial = renderer.readback()?;
     renderer.render_uncounted(scene, full)?;
     let fresh = renderer.readback()?;
-    let mut stale: Option<(usize, usize, usize, usize)> = None;
-    let mut count = 0;
-    for (index, (a, b)) in partial.chunks(4).zip(fresh.chunks(4)).enumerate() {
-        if a != b {
-            let (x, y) = (index % width, index / width);
-            count += 1;
-            stale = Some(stale.map_or((x, y, x, y), |(x0, y0, x1, y1)| {
-                (x0.min(x), y0.min(y), x1.max(x), y1.max(y))
-            }));
+    if let Some(stale) = stale_pixels(&partial, &fresh, width) {
+        let (x0, y0, x1, y1) = stale.bounds;
+        // `ZGX_DAMAGE_DUMP=dir`: both frames, as PPMs, to see what differs.
+        if let Some(dir) = zgx::env::var_os("ZGX_DAMAGE_DUMP") {
+            let dir = std::path::PathBuf::from(dir);
+            let height = partial.len() / 4 / width.max(1);
+            for (name, pixels) in [("partial", &partial), ("fresh", &fresh)] {
+                let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+                ppm.extend(
+                    pixels
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .flat_map(|pixel| &pixel[..3]),
+                );
+                let _ = std::fs::write(dir.join(format!("{frame}-{name}.ppm")), ppm);
+            }
         }
-    }
-    if let Some((x0, y0, x1, y1)) = stale {
         eprintln!(
-            "ZGX_DAMAGE_CHECK frame {frame}: {count} stale device pixels in ({x0},{y0})..({x1},{y1}); damage {damage:?}"
+            "ZGX_DAMAGE_CHECK frame {frame}: {} stale device pixels in ({x0},{y0})..({x1},{y1}), off by up to {}/255; damage {damage:?}",
+            stale.count, stale.most,
         );
     }
     Ok(())
+}
+
+/// Where two frames `width` pixels wide differ.
+struct StalePixels {
+    count: usize,
+    /// Left, top, right and bottom pixels, inclusive.
+    bounds: (usize, usize, usize, usize),
+    /// The most any channel of a pixel differs by.
+    most: u8,
+}
+fn stale_pixels(partial: &[u8], fresh: &[u8], width: usize) -> Option<StalePixels> {
+    let mut stale: Option<StalePixels> = None;
+    for (index, (a, b)) in partial.chunks(4).zip(fresh.chunks(4)).enumerate() {
+        if a != b {
+            let (x, y) = (index % width, index / width);
+            let off = a
+                .iter()
+                .zip(b)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap_or(0);
+            let seen = stale.get_or_insert(StalePixels {
+                count: 0,
+                bounds: (x, y, x, y),
+                most: 0,
+            });
+            seen.count += 1;
+            seen.most = seen.most.max(off);
+            let (x0, y0, x1, y1) = seen.bounds;
+            seen.bounds = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+    }
+    stale
 }
 
 /// Return freed heap pages to the system. glibc keeps what it frees mapped,
@@ -8189,6 +8230,19 @@ impl WindowCursor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stale_pixels_say_where_and_by_how_much() {
+        let fresh = vec![10_u8; 3 * 2 * 4];
+        assert!(super::stale_pixels(&fresh, &fresh, 3).is_none());
+        let mut partial = fresh.clone();
+        partial[4 * 4 + 1] = 13; // (1, 1)'s green, 3 off.
+        partial[2 * 4] = 9; // (2, 0)'s red, 1 off.
+        let stale = super::stale_pixels(&partial, &fresh, 3).expect("two differ");
+        assert_eq!(stale.count, 2);
+        assert_eq!(stale.bounds, (1, 0, 2, 1));
+        assert_eq!(stale.most, 3);
+    }
+
     #[test]
     fn the_same_smallest_and_largest_size_is_a_fixed_size() {
         let options = |min, max| super::WindowOptions {
