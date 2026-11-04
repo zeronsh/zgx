@@ -519,7 +519,11 @@ impl Popups {
         let wanted: Vec<(NodeId, Rect)> = scene
             .popups()
             .iter()
-            .filter_map(|root| scene.popup_bounds(*root).map(|bounds| (*root, bounds)))
+            .filter_map(|root| {
+                scene
+                    .popup_bounds(*root)
+                    .map(|bounds| (*root, whole_points(bounds, zoom)))
+            })
             .collect();
         let shown = std::mem::take(&mut self.shown);
         let limited = &mut self.limited;
@@ -887,9 +891,10 @@ fn surface_and_geometry(
     panel: Rect,
     size: (i32, i32),
 ) -> ((i32, i32), (i32, i32, i32, i32)) {
+    // (`whole_points`: whole, but for a zoom's float error.)
     let surface = (
-        rect.width.ceil().max(1.) as i32,
-        rect.height.ceil().max(1.) as i32,
+        rect.width.round().max(1.) as i32,
+        rect.height.round().max(1.) as i32,
     );
     let x = ((panel.x - rect.x).round() as i32).clamp(0, surface.0 - 1);
     let y = ((panel.y - rect.y).round() as i32).clamp(0, surface.1 - 1);
@@ -905,6 +910,24 @@ fn waits(presented: Option<Instant>, now: Instant) -> Option<Instant> {
     presented
         .map(|presented| presented + FRAME_WAIT)
         .filter(|until| *until > now)
+}
+
+/// `rect` (the scene's) grown to the whole surface points round it, at
+/// `zoom`: what a popup shows at. A surface has a whole size in points and a
+/// whole place on its parent. In a box of another size its renderer's buffer,
+/// on the whole pixels round the box, isn't the size its viewport shows: a
+/// menu opened at a pointer between pixels had a buffer a pixel wider than its
+/// surface, all of it resampled to fit, its text blurred.
+fn whole_points(rect: Rect, zoom: f32) -> Rect {
+    let (left, top) = ((rect.x * zoom).floor(), (rect.y * zoom).floor());
+    let right = ((rect.x + rect.width) * zoom).ceil().max(left + 1.);
+    let bottom = ((rect.y + rect.height) * zoom).ceil().max(top + 1.);
+    Rect::new(
+        left / zoom,
+        top / zoom,
+        (right - left) / zoom,
+        (bottom - top) / zoom,
+    )
 }
 
 fn rects_match(a: Rect, b: Rect) -> bool {
@@ -1034,11 +1057,8 @@ fn show(
     let popup = xdg.get_popup(Some(&parent_xdg), &positioner, &qh, ());
     positioner.destroy();
     xdg.set_window_geometry(geometry.0, geometry.1, geometry.2, geometry.3);
-    // The surface's size in the output's pixels.
-    let physical = (
-        (rect.width * display).round().max(1.) as u32,
-        (rect.height * display).round().max(1.) as u32,
-    );
+    // The surface's size in the output's pixels: what its renderer draws.
+    let physical = zgx_gpu::plane_size(scene_rect, scale);
     match &viewport {
         Some(viewport) => viewport.set_destination(width, height),
         None => surface.set_buffer_scale(display.round().max(1.) as i32),
@@ -1370,6 +1390,38 @@ delegate_noop!(State: ignore WpViewport);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// At every output scale whose pixels are whole points' multiples, the
+    /// buffer a popup's renderer draws is the surface's size in pixels, one
+    /// to one, wherever between pixels the scene put it.
+    #[test]
+    fn a_popups_buffer_is_its_surface_wherever_it_opens() {
+        for (x, y) in [(10., 20.), (10.5, 20.25), (1058.5, 633.75), (0.1, 0.9)] {
+            for (width, height) in [(376., 369.), (375.5, 368.25), (232.1, 225.9)] {
+                let shown = Rect::new(x, y, width, height);
+                for zoom in [1., 0.9, 1.25, 1.1] {
+                    for display in [1_f32, 2., 3.] {
+                        let bounds = whole_points(shown, zoom);
+                        assert!(bounds.x <= shown.x + 1e-3 && bounds.y <= shown.y + 1e-3);
+                        let zoomed = crate::popup_window::window_rect(bounds, zoom);
+                        let (surface, _) = surface_and_geometry(zoomed, zoomed, (1, 1));
+                        let buffer = zgx_gpu::plane_size(bounds, display * zoom);
+                        let wants = (
+                            surface.0 as u32 * display as u32,
+                            surface.1 as u32 * display as u32,
+                        );
+                        let off = |a: u32, b: u32| a.abs_diff(b) as f32;
+                        // (A zoom's float error may round a side out at most.)
+                        assert!(
+                            off(buffer.0, wants.0) <= if zoom == 1. { 0. } else { display }
+                                && off(buffer.1, wants.1) <= if zoom == 1. { 0. } else { display },
+                            "{shown:?} at zoom {zoom}, display {display}: buffer {buffer:?}, surface {surface:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     /// A chip with a tooltip card that paints a wide shadow, hovered so
     /// the card shows as a popup root: the card's box, where the popup

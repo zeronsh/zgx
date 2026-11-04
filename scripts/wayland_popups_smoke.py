@@ -31,7 +31,8 @@ Under a headless sway, driven with a virtual pointer (`wayland_pointer.py`):
 Under a headless Weston, whose windows winit decorates itself (the window
 geometry starts at its title bar, above the content), the menu opened by the
 app (`POPUP_PROBE_OPEN`) shows at the same place on the content: the title
-bar is accounted for."""
+bar is accounted for. Opened between pixels (`POPUP_PROBE_INSET`), its buffer
+is the size its viewport shows it."""
 import argparse
 import json
 import os
@@ -429,6 +430,24 @@ def main():
             checks["weston: configured at"] = configured.group(0)
             checks["weston: below winit's title bar, where the scene put it"] = placed(
                 "weston", Image.open(screenshot).convert("RGB"))
+            stop(app)
+
+            # A menu opened between pixels: its buffer is the size its
+            # viewport shows it, one to one, not a pixel more resampled to fit
+            # (its text blurred).
+            app, log = launch("weston-between", [str(args.probe)],
+                              dict(env, POPUP_PROBE_OPEN="1", POPUP_PROBE_INSET="16.5", WAYLAND_DEBUG="client"))
+            until("the menu between pixels", lambda: "popup configured" in log.read_text())
+            time.sleep(.5)
+            said = log.read_text()
+            shown = re.search(r"popup show .* buffer (\d+)x(\d+)", said)
+            destination = re.findall(r"set_destination\((\d+), (\d+)\)", said)
+            # After the window's own (its surface comes first).
+            sized = re.findall(r"create_buffer\(new id wl_buffer@\d+, 0, (\d+), (\d+), \d+, \d+\)", said)
+            between = {"shown": shown and shown.groups(), "viewport": destination[-1:], "buffer": sized[-1:]}
+            checks["weston: between pixels"] = between
+            checks["weston: a menu between pixels has a buffer the size of its surface"] = (
+                bool(shown) and destination[-1:] == sized[-1:] == [shown.groups()])
             stop(app)
 
             # A popover grown and shrunk a step a frame, as an animated one

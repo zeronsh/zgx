@@ -30,6 +30,23 @@ pub(crate) struct PlaneState {
     rect: Option<Rect>,
 }
 
+/// `rect`'s edges (left, top, right, bottom) on the whole device pixels round
+/// it, at `scale` pixels a point: what a plane in `rect` draws into.
+fn plane_pixels(rect: Rect, scale: f32) -> (f32, f32, f32, f32) {
+    let left = (rect.x * scale).floor();
+    let top = (rect.y * scale).floor();
+    let right = ((rect.x + rect.width) * scale).ceil().max(left + 1.);
+    let bottom = ((rect.y + rect.height) * scale).ceil().max(top + 1.);
+    (left, top, right, bottom)
+}
+
+/// The pixels a plane in `rect` draws into, at `scale` pixels a point
+/// (`GpuRenderer::set_plane_rect`, `set_popup`): the size to make its surface.
+pub fn plane_size(rect: Rect, scale: f32) -> (u32, u32) {
+    let (left, top, right, bottom) = plane_pixels(rect, scale);
+    ((right - left) as u32, (bottom - top) as u32)
+}
+
 impl GpuRenderer {
     /// A renderer presenting into `host`, a layer of the caller's above the
     /// window's native views (the overlay plane), sharing `context` (its
@@ -202,10 +219,7 @@ impl GpuRenderer {
     /// surfaces (the layer shows the last frame until the next).
     pub fn set_plane_rect(&mut self, rect: Rect) {
         let scale = self.scale;
-        let left = (rect.x * scale).floor();
-        let top = (rect.y * scale).floor();
-        let right = ((rect.x + rect.width) * scale).ceil().max(left + 1.);
-        let bottom = ((rect.y + rect.height) * scale).ceil().max(top + 1.);
+        let (left, top, right, bottom) = plane_pixels(rect, scale);
         let snapped = Rect::new(
             left / scale,
             top / scale,

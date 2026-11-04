@@ -116,7 +116,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .p(5.)
                         .children(items)
                 };
-            let view = cx.render(column().w_full().h_full().p(16.).justify_end().child(popup));
+            // `POPUP_PROBE_INSET`: its content inset this much, so the popup
+            // opens between pixels (`wayland_popups_smoke.py`).
+            let inset = std::env::var("POPUP_PROBE_INSET")
+                .ok()
+                .and_then(|inset| inset.parse().ok())
+                .unwrap_or(16.);
+            let view = cx.render(
+                column()
+                    .w_full()
+                    .h_full()
+                    .p(inset)
+                    .justify_end()
+                    .child(popup),
+            );
             #[cfg(target_os = "macos")]
             {
                 let window = cx.window.clone();
