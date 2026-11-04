@@ -6764,18 +6764,7 @@ impl WindowManager {
         match event {
             Event::Quit => event_loop.exit(),
             #[cfg(target_os = "macos")]
-            Event::FullScreen => {
-                for (number, phase, duration, seq) in crate::window_chrome::take_full_screen() {
-                    let Some(host) = self
-                        .hosts
-                        .values_mut()
-                        .find(|host| host.window_number == Some(number))
-                    else {
-                        continue;
-                    };
-                    host.full_screen(phase, duration, seq);
-                }
-            }
+            Event::FullScreen => self.apply_full_screen(),
             Event::Application(event, token) => {
                 // The window this brings up takes the launch's token...
                 #[cfg(target_os = "linux")]
@@ -7135,6 +7124,10 @@ impl WindowManager {
         id: WindowId,
         event: WindowEvent,
     ) {
+        // AppKit's full-screen notifications first: a will comes inside the
+        // call that starts the transition, before winit's resizes for it.
+        #[cfg(target_os = "macos")]
+        self.apply_full_screen();
         // A popup window's input goes to its parent's host (X11).
         #[cfg(target_os = "linux")]
         if crate::popup_window::route(id, &event) {
@@ -7197,7 +7190,26 @@ impl WindowManager {
             self.carry_drag(token);
         }
     }
+    /// AppKit's full-screen notifications queued since the last turn
+    /// (`window_chrome::watch_full_screen`), each to its window's host, in
+    /// the order they came. Applied as each turn begins, so a will goes
+    /// before the resizes it brings; nothing queued, nothing done.
+    #[cfg(target_os = "macos")]
+    fn apply_full_screen(&mut self) {
+        for (number, phase, duration, seq) in crate::window_chrome::take_full_screen() {
+            let Some(host) = self
+                .hosts
+                .values_mut()
+                .find(|host| host.window_number == Some(number))
+            else {
+                continue;
+            };
+            host.full_screen(phase, duration, seq);
+        }
+    }
     fn about_to_wait_turn(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        self.apply_full_screen();
         // A close request must terminate even while native surfaces are suspended.
         let closed: Vec<_> = self
             .hosts

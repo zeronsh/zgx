@@ -1526,8 +1526,9 @@ declare extern type WindowApi with
 	shown: State<boolean>
 	-- Whether the window is in full screen, read-only and followed, however
 	-- it went in or out (the green button, Ctrl+Cmd+F, the menu, Mission
-	-- Control, a script); and while it goes (macOS animates it), which way
-	-- and for how long, nil otherwise (always on Linux and Windows). In full
+	-- Control, a script), turning as it begins to go; and while it goes
+	-- (macOS animates it), which way and for how long, nil once it is there
+	-- (and always on Linux and Windows). In full
 	-- screen `controls` is nil: a title bar laid out around the traffic
 	-- lights moves over as they go.
 	full_screen: State<boolean>

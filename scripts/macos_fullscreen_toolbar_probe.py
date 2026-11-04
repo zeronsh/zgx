@@ -19,9 +19,9 @@ Each run also checks what the window says as it goes (`STATE` lines:
 `WindowInfo::fullscreen`, `WindowContext::full_screen_transition`, and the
 traffic lights, `controls`). By the green button: entering, then in full
 screen with no transition and no traffic lights, then leaving, then out with
-them back. Borderless: in and out with no transition (AppKit doesn't
-animate it). Failed: entering, then no transition once it has had time to
-end, still out of full screen.
+them back; borderless the same (AppKit animates winit's borderless full
+screen too). Failed: entering, then no transition once it has had time to
+end, still out of full screen, the traffic lights back.
 
 It is launched as a direct child, from /tmp, with a clean environment; it
 sends no input. If a system dialog appears, stop and report it; never click
@@ -63,26 +63,31 @@ def main():
             states = re.findall(r'^STATE \d+ full=(\S+) transition=(\S+) ([\d.]+) controls=(\S+)$', out, re.M)
             seen = [(full == 'true', moving, controls != 'none') for full, moving, _, controls in states]
             def went(*steps):
-                # `steps` in order, each a state seen (others between).
+                # `steps` in order, each a state seen (others between); None
+                # matches either.
                 at = 0
                 for state in seen:
-                    if at < len(steps) and state == steps[at]:
+                    if at < len(steps) and all(want is None or want == got for want, got in zip(steps[at], state)):
                         at += 1
                 return at == len(steps)
-            if via in ('green', 'button'):
-                checks[f'{via}: entering, then in full screen, no transition, no traffic lights'] = went(
-                    (False, 'none', True), (False, 'entering', True), (True, 'none', False))
-                checks[f'{via}: then leaving, then out, the traffic lights back'] = went(
-                    (True, 'none', False), (True, 'leaving', False), (False, 'none', True))
-                checks[f'{via}: a transition says how long it takes'] = all(
-                    0 < float(seconds) < 5 for _, moving, seconds, _ in states if moving != 'none')
-            elif via == 'borderless':
-                checks[f'{via}: in and out with no transition'] = went(
-                    (False, 'none', True), (True, 'none', False), (False, 'none', True)) and all(
-                    moving == 'none' for _, moving, _, _ in states)
-            else:
+            out_with_lights = (False, 'none', True)
+            if via == 'failed':
                 checks[f'{via}: entering, then no transition once it had time to end'] = went(
-                    (False, 'entering', True), (False, 'none', True)) and seen[-1] == (False, 'none', True)
+                    out_with_lights, (False, 'entering', None), out_with_lights) and seen[-1] == out_with_lights
+            else:
+                # The green button, a click on it, or winit's borderless full
+                # screen (AppKit animates each): out, entering (before the
+                # window says it is in), in with no traffic lights, leaving,
+                # out with them back.
+                checks[f'{via}: entering, then in full screen, no transition, no traffic lights'] = went(
+                    out_with_lights, (None, 'entering', None), (True, 'none', False))
+                checks[f'{via}: entering begins before full_screen turns true'] = next(
+                    (state[0] for state in seen if state[1] == 'entering'), True) is False
+                checks[f'{via}: then leaving, then out, the traffic lights back'] = went(
+                    (True, 'none', False), (None, 'leaving', None), out_with_lights) and seen[-1] == out_with_lights
+                checks[f'{via}: a transition says how long it takes'] = any(
+                    moving != 'none' for _, moving, _, _ in states) and all(
+                    0 < float(seconds) < 5 for _, moving, seconds, _ in states if moving != 'none')
             windows = {m[0]: m for m in re.findall(
                 r'^WINDOW (\S+) fullscreen=(\S+) frame_h=(\d+) layout_h=(\d+) buttons_hidden=(\S+) toolbar_visible=(\S+)$',
                 out, re.M)}
