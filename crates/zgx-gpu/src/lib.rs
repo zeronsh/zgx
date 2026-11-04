@@ -205,6 +205,10 @@ const VERTEX_BUDGET: usize = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 16_384;
 /// The bytes images' own textures may hold (`upload_image`).
 const IMAGE_TEXTURES: usize = 64 * 1024 * 1024;
+/// What textures of images no node shows may hold until the window goes idle:
+/// a few windows' worth of pictures to scroll back to.
+const IMAGES_GONE_BYTES: usize = 32 * 1024 * 1024;
+const IMAGES_GONE_COUNT: usize = 256;
 /// An image's texture: its bind group, bytes, texture and the size it
 /// holds (`fitted_size`; (0, 0): all of it).
 type ImageTexture = (wgpu::BindGroup, usize, Option<wgpu::Texture>, (u32, u32));
@@ -3932,6 +3936,8 @@ pub struct GpuRenderer {
     /// drawn in (`image_frame`): past the textures' budget, the least
     /// recently drawn go, not drawn this frame, and come back when drawn.
     image_drawn: FxHashMap<u64, u64>,
+    /// Textures kept of images no node shows (`bound_images_gone`).
+    images_gone: rustc_hash::FxHashSet<u64>,
     /// Frames drawn, for `image_drawn`.
     image_frame: u64,
     /// GPU views' textures, by view (`viewport`): none until one shows.
@@ -4577,6 +4583,7 @@ impl GpuRenderer {
             layer_incomplete: false,
             images_uploaded: false,
             image_drawn: FxHashMap::default(),
+            images_gone: Default::default(),
             image_frame: 0,
             views: None,
             #[cfg(target_os = "macos")]
@@ -5509,11 +5516,46 @@ impl GpuRenderer {
             if let Some(cache) = &mut self.native_surfaces {
                 cache.retain(&live_images);
             }
-            self.images.retain(|id, _| live_images.contains(id));
+            // A picture whose row went (a list scrolled past) may come back
+            // with its pixels long given up, to decode blank again: its
+            // texture stays, within a bound, until the window goes idle.
+            // Others' are gone with their nodes; they have no `image_drawn`.
+            let drawn = &self.image_drawn;
+            self.images
+                .retain(|id, _| live_images.contains(id) || drawn.contains_key(id));
+            self.images_gone.clear();
+            self.images_gone
+                .extend(self.images.keys().filter(|id| !live_images.contains(id)));
+            self.bound_images_gone();
             let images = &self.images;
             self.image_drawn.retain(|id, _| images.contains_key(id));
         }
         self.retain_views();
+    }
+    /// Textures of `images_gone` past their bound, least recently drawn first.
+    fn bound_images_gone(&mut self) {
+        let mut bytes: usize = (self.images_gone.iter())
+            .filter_map(|id| self.images.get(id))
+            .map(|entry| entry.1)
+            .sum();
+        let mut count = self.images_gone.len();
+        if bytes <= IMAGES_GONE_BYTES && count <= IMAGES_GONE_COUNT {
+            return;
+        }
+        let mut gone: Vec<(u64, u64)> = (self.images_gone.iter())
+            .map(|id| (self.image_drawn.get(id).copied().unwrap_or(0), *id))
+            .collect();
+        gone.sort_unstable();
+        for (_, id) in gone {
+            if bytes <= IMAGES_GONE_BYTES && count <= IMAGES_GONE_COUNT {
+                break;
+            }
+            if let Some(entry) = self.images.remove(&id) {
+                bytes -= entry.1;
+            }
+            self.images_gone.remove(&id);
+            count -= 1;
+        }
     }
     /// Forget GPU views whose frames' textures are gone.
     fn retain_views(&mut self) {
@@ -13172,6 +13214,10 @@ impl GpuRenderer {
         self.backdrops = FxHashMap::default();
         self.drop_unheld_shaders();
         self.images.remove(&effects::EFFECT_ATLAS);
+        for id in std::mem::take(&mut self.images_gone) {
+            self.images.remove(&id);
+            self.image_drawn.remove(&id);
+        }
         self.spare = None;
         self.layers.retain(|_, cache| !cache.parked);
         self.retain_views();

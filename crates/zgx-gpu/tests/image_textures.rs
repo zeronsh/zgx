@@ -154,6 +154,93 @@ fn a_kept_file_draws_once_decoded_at_the_size_it_shows() {
     assert!(gpu.readback().unwrap()[(30 * 200 + 30) * 4] > 200);
 }
 
+/// A picture's row scrolled out of a list and back: its node is new, its image
+/// the same, its decoded pixels given up long since. Its texture waited, so it
+/// draws in the frame it returns, not blank until it decodes again; once the
+/// window has gone idle it has gone, and memory with it.
+#[test]
+fn a_kept_file_returning_to_the_scene_draws_at_once() {
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(400, 300, image::Rgba([230, 20, 20, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let picture = zgx_gpu::assets::decode_image_kept(Arc::from(png)).unwrap();
+    let style = || Style {
+        width: Some(100.),
+        height: Some(75.),
+        ..Default::default()
+    };
+    let whole = [Rect::new(0., 0., 200., 200.)];
+    let mut scene = Scene::new(200., 200.);
+    let mut gpu = GpuRenderer::new(200, 200).unwrap();
+    let node = scene.append(scene.root(), NodeKind::Image(picture.clone()), style());
+    scene.flush();
+    gpu.render(&scene, &whole).unwrap();
+    for _ in 0..500 {
+        std::thread::sleep(std::time::Duration::from_millis(4));
+        if gpu.images_decoded() {
+            gpu.render(&scene, &whole).unwrap();
+        }
+        if gpu.debug_cache_stats().image_textures == 1 {
+            break;
+        }
+    }
+    assert_eq!(gpu.debug_cache_stats().image_textures, 1, "decoded");
+    assert!(gpu.take_images_uploaded());
+    // Its pixels given up, as the host does after uploads.
+    zgx::image::release_decoded();
+
+    let red = |gpu: &GpuRenderer| gpu.readback().unwrap()[(30 * 200 + 30) * 4];
+    scene.remove(node);
+    scene.flush();
+    gpu.render(&scene, &whole).unwrap();
+    assert!(red(&gpu) < 100, "gone with its row");
+    let node = scene.append(scene.root(), NodeKind::Image(picture.clone()), style());
+    scene.flush();
+    gpu.render(&scene, &whole).unwrap();
+    assert!(!gpu.images_decoded(), "nothing to wait for");
+    assert!(red(&gpu) > 200, "drawn in the frame it returns");
+
+    // Gone again, and the window idle: its texture goes too.
+    scene.remove(node);
+    scene.flush();
+    gpu.render(&scene, &whole).unwrap();
+    assert_eq!(gpu.debug_cache_stats().image_textures, 1, "kept");
+    gpu.trim();
+    assert_eq!(gpu.debug_cache_stats().image_textures, 0, "given back");
+}
+
+/// What textures of pictures no node shows may hold is bounded, the least
+/// recently drawn going first.
+#[test]
+fn textures_of_images_gone_are_bounded() {
+    let whole = [Rect::new(0., 0., 800., 600.)];
+    let mut scene = Scene::new(800., 600.);
+    let mut gpu = GpuRenderer::new(800, 600).unwrap();
+    // 40 photos of 1.2 MB, each in the scene a frame: 48 MB seen, 32 MB kept.
+    for i in 0..40 {
+        let node = scene.append(scene.root(), photo(i), photo_style());
+        scene.flush();
+        gpu.render(&scene, &whole).unwrap();
+        scene.remove(node);
+        scene.flush();
+        gpu.render(&scene, &whole).unwrap();
+    }
+    let stats = gpu.debug_cache_stats();
+    assert!(
+        stats.image_bytes <= 32 * 1024 * 1024,
+        "{}",
+        stats.image_bytes
+    );
+    assert!(
+        stats.image_bytes >= 24 * 1024 * 1024,
+        "{}",
+        stats.image_bytes
+    );
+    gpu.trim();
+    assert_eq!(gpu.debug_cache_stats().image_bytes, 0);
+}
+
 /// A 2 by 2 checker, black and white, drawn at 100 by 100: smooth, its
 /// middle blends them; pixelated (`Scene::set_image_rendering`), each point
 /// is the nearest of the four, black or white, as an image and as a

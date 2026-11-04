@@ -543,6 +543,9 @@ fn image_cache_reclaims_removed_nodes_and_leaves_out_oversized_allocations() {
     scene.remove(node);
     let d = scene.flush().damage;
     gpu.render(&scene, &d).unwrap();
+    // Kept to come back to (a list's row), until the window goes idle.
+    assert_eq!(gpu.debug_cache_stats().image_textures, 1);
+    gpu.trim();
     assert_eq!(gpu.debug_cache_stats().image_textures, 0);
     let huge = std::sync::Arc::new(
         zgx::image::ImageData::new(4096, 4097, vec![0; 4096 * 4097 * 4]).unwrap(),
@@ -2908,6 +2911,8 @@ fn object_fit_pixels_crop_center_and_reuse_uploaded_image_across_transitions() {
     gpu.render(&ui.scene.borrow(), &[Rect::new(0., 0., 112., 104.)])
         .unwrap();
     assert_eq!(partial, gpu.readback().unwrap());
+    // (Those no node shows are kept until the window goes idle.)
+    gpu.trim();
     assert_eq!(gpu.debug_cache_stats().image_textures, 1);
 }
 
