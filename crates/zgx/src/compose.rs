@@ -5944,25 +5944,37 @@ pub(crate) fn focus_movement(
 }
 /// Where a list that scrolls with the scroll view around it
 /// (`View::virtualize_in_ancestor`) shows: its viewport's place, and those
-/// of the scroll views around it and the window, which clip it, followed
-/// (each moves as a view scrolls or resizes).
+/// of the scroll views around it, the window and the boxes between it and
+/// the innermost view, followed (each moves as a view scrolls, or a box
+/// resizes).
 pub(crate) struct AncestorWindow {
     viewport: NodeId,
     list: Signal<crate::scene::Rect>,
-    /// The innermost scroll view around it (else the window) first.
+    /// The innermost scroll view around it (else the window) first, then
+    /// the others, the window and the boxes between it and that view.
     around: Vec<Signal<crate::scene::Rect>>,
 }
 impl AncestorWindow {
     pub(crate) fn new(ui: &Ui, root: NodeId, viewport: NodeId) -> Self {
-        let mut views: Vec<NodeId> = {
+        let (mut views, clips): (Vec<NodeId>, Vec<NodeId>) = {
             let scene = ui.scene.borrow();
-            scene
+            let views = scene
                 .ancestors(root)
                 .filter(|id| scene.is_scroll_content(*id))
                 .filter_map(|content| scene.parent(content))
-                .collect()
+                .collect();
+            // And every box between it and the innermost of them, any of
+            // which may clip it (its style, set as it mounts, perhaps not
+            // yet), showing more or less of it as it grows or shrinks (one
+            // easing open) without moving it.
+            let clips = scene
+                .ancestors(root)
+                .take_while(|id| !scene.is_scroll_content(*id))
+                .collect();
+            (views, clips)
         };
         views.push(ui.root());
+        views.extend(clips);
         Self {
             viewport,
             list: ui.observe_bounds(viewport),
