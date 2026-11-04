@@ -347,7 +347,11 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
             // in view where they are as they come in above: it alone tracks
             // its anchor row's key.
             let keeps_place = edges.as_ref().is_some_and(|edges| edges.watches_start());
-            if let Some(edges) = edges {
+            // Scrolled with the view around it (`virtualize_in_ancestor`):
+            // that view's wheel, scrollbar and edges are its own. Not for
+            // rows measured: their anchoring moves the list's own offset.
+            let ancestor = !measured && edges.as_ref().is_some_and(|edges| edges.ancestor);
+            if let Some(edges) = edges.filter(|edges| !edges.ancestor) {
                 crate::compose::watch_edges(
                     ui,
                     root,
@@ -360,7 +364,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
             // Clip rows to the allocated content box, keeping root padding clear.
             let viewport = ui.container(root, Layout::Overlay, Default::default());
             let content = ui.container(viewport, Layout::Overlay, Default::default());
-            ui.scene.borrow_mut().set_scroll_copy(content, true);
+            if !ancestor {
+                ui.scene.borrow_mut().set_scroll_copy(content, true);
+            }
+            let window = ancestor.then(|| crate::compose::AncestorWindow::new(ui, root, viewport));
             let stretch = crate::compose::ListStretch::new(
                 ui,
                 root,
@@ -383,7 +390,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
             let wheel_extent = extent.clone();
             let weak = ui.downgrade();
             ui.on_event(root, false, move |cx| {
-                if cx.phase == EventPhase::Capture || cx.default_prevented() {
+                if cx.phase == EventPhase::Capture || cx.default_prevented() || ancestor {
                     return;
                 }
                 // Focus moving to a row's control (Tab past the rows in
@@ -422,7 +429,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     }
                 }
             });
-            if scrollbar {
+            if scrollbar && !ancestor {
                 crate::compose_scrollbar::mount(
                     ui,
                     root,
@@ -462,8 +469,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
             ui.bind(root, move || {
                 heights.revision.get();
                 mounted_revision.get();
-                let (width, height) = size.get();
+                let (width, mut height) = size.get();
                 let requested = offset.get();
+                let around = window.as_ref().zip(weak.upgrade());
                 let mut pending_measurement = false;
                 let mut measurement_changed = false;
                 if measured {
@@ -567,6 +575,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                                 .min(last)
                                 .min(limit);
                     }
+                    // The part the view around it shows.
+                    if let Some((window, ui)) = &around {
+                        (position, height) = window.window(ui, total);
+                    }
                     // A row asked for, else the keyboard's, else one followed.
                     let target = asked
                         .or(request
@@ -583,10 +595,17 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     if let Some((index, align, _)) = target {
                         let top = model.row_offset(index);
                         let row_height = model.row_height(index).unwrap();
-                        position = align
-                            .position(top, row_height, height, position)
-                            .max(0.)
-                            .min(limit);
+                        match &around {
+                            // The view around it scrolls to it; built as it
+                            // shows.
+                            Some((window, ui)) => window.reveal(ui, top, row_height),
+                            None => {
+                                position = align
+                                    .position(top, row_height, height, position)
+                                    .max(0.)
+                                    .min(limit)
+                            }
+                        }
                     }
                     let (mut range, first) =
                         model.visible_range_and_row(position, height, overscan);
@@ -799,15 +818,20 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     }
                     {
                         let mut scene = ui.scene.borrow_mut();
+                        // Scrolled with the view around it: as tall as its
+                        // rows, unclipped, in place.
                         scene.set_style(
                             viewport,
-                            crate::scene::Style {
-                                clip: true,
-                                ..crate::widgets::fixed(width, height)
+                            match ancestor {
+                                true => crate::widgets::fixed(width, total),
+                                false => crate::scene::Style {
+                                    clip: true,
+                                    ..crate::widgets::fixed(width, height)
+                                },
                             },
                         );
                         scene.set_style(content, crate::widgets::fixed(width, total));
-                        stretch.place(&mut scene, position);
+                        stretch.place(&mut scene, if ancestor { 0. } else { position });
                         order.clear();
                         for (key, _, top, row_height) in &keys {
                             let entry = entries.get_mut(key).expect("a row");
@@ -837,7 +861,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     // position. Let the queued pass handle it instead of
                     // replacing that request with this pass's old geometry.
                     let request_unchanged = offset.get().to_bits() == requested.to_bits();
-                    if request_unchanged {
+                    if request_unchanged && !ancestor {
                         anchor = next_anchor;
                         offset.set(position);
                     } else {

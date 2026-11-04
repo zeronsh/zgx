@@ -582,6 +582,14 @@ impl Ui {
     /// Scroll the scroll views around `node` (innermost first) so `rect`
     /// (window points) shows, with a little room.
     fn scroll_rect_into_view(&mut self, node: NodeId, rect: Rect) {
+        self.scroll_rect_into_view_with(node, rect, true);
+    }
+    /// `scroll_rect_into_view` from within a frame's layout (an
+    /// `after_layout` step): the frame lays out what it scrolled.
+    pub(crate) fn scroll_rect_into_view_in_layout(&mut self, node: NodeId, rect: Rect) {
+        self.scroll_rect_into_view_with(node, rect, false);
+    }
+    fn scroll_rect_into_view_with(&mut self, node: NodeId, rect: Rect, settle: bool) {
         const ROOM: f32 = 24.;
         let viewports: Vec<NodeId> = {
             let scene = self.scene.borrow();
@@ -620,7 +628,9 @@ impl Ui {
                     delta_y: dy,
                 },
             );
-            self.prepare_frame();
+            if settle {
+                self.prepare_frame();
+            }
             rect = Rect::new(rect.x - dx, rect.y - dy, rect.width, rect.height);
         }
     }

@@ -841,6 +841,9 @@ pub(crate) struct ListRare {
     pub(crate) contain: bool,
     /// `scroll_padding`: kept clear as a row's control scrolls into view.
     pub(crate) scroll_padding: Option<ScrollPadding>,
+    /// `virtualize = "ancestor"`: it scrolls with the scroll view around it,
+    /// building the rows that view shows (`View::virtualize_in_ancestor`).
+    pub(crate) ancestor: bool,
 }
 
 /// `ui.list`'s `on_end`, called as its end comes within `distance` points.
@@ -3203,6 +3206,7 @@ const WIDGET_FIELDS: &[&str] = &[
     "format",
     "hour12",
     "minute_step",
+    "virtualize",
 ];
 /// The keys `late_field` takes: looked for only once a key is no style
 /// property. Every key is compared against `WIDGET_FIELDS`, so a field
@@ -5241,15 +5245,34 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let inset = table.get::<Option<f32>>("sticky_top")?;
             let sticky_top = inset.filter(|t| t.is_finite()).unwrap_or(0.).max(0.);
-            let rare = (sticky.is_some() || row_text.is_some() || end.is_some()).then(|| {
-                Box::new(ListRare {
-                    sticky,
-                    sticky_top,
-                    row_text,
-                    end,
-                    ..ListRare::default()
-                })
-            });
+            let ancestor = match table.get::<Option<String>>("virtualize")?.as_deref() {
+                None => false,
+                Some("ancestor") => {
+                    if measured {
+                        return Err(mlua::Error::runtime(
+                            "ui.list `virtualize = \"ancestor\"` takes `height` or `heights`, \
+                             not `measured`",
+                        ));
+                    }
+                    true
+                }
+                Some(_) => {
+                    return Err(mlua::Error::runtime(
+                        "ui.list `virtualize` is \"ancestor\" (built as the scroll view around it shows)",
+                    ));
+                }
+            };
+            let rare = (sticky.is_some() || row_text.is_some() || end.is_some() || ancestor)
+                .then(|| {
+                    Box::new(ListRare {
+                        sticky,
+                        sticky_top,
+                        row_text,
+                        end,
+                        ancestor,
+                        ..ListRare::default()
+                    })
+                });
             let mut node = fill(
                 lua,
                 Node::new(
