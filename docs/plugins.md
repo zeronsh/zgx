@@ -37,6 +37,16 @@ ui.button { id = "clear", hook = false, "Clear done", on_click = ui.action("clea
 
 **Keep the host's own controls on top.** A view a host composes around the app's (`render`) can hold `modal(label, open).top_layer()` (`View::top_layer`): a layer filling the window, above whatever a plugin opens (`ui.modal`, `ui.layer`, a popover, a fixed node at any `z`), and live under them, so its controls take the pointer while a plugin's modal is up. The pointer passes through it but for its controls, and it takes no focus. A script's `z` orders its element among its siblings and can't reach it.
 
+**Decision controls.** What only the person may answer (tool approval, sign-in, keeping a template) goes in `ui.decision { key, … }` ([overlays](reference/overlays.md#decision)): a plugin can't make one, reach into one, or draw over one.
+
+- Replacing, hiding or disabling an element whose declared tree holds one is refused, and reported in `ScriptHost::contributions` and to the plugin.
+- While one is mounted, a plugin's popups (popovers, menus, tooltips, context menus) stay in the window, under it, not in windows of their own. The app's own popups keep theirs.
+- What a refusal can't see: a builder's output (a component, a row) replaced from above, or a filter of a list's `items` dropping the row. A plugin's own window (`Capability::Windows`) is one too, as nothing in this window can be above another window.
+
+So a host holding a pending decision reads `host.decision_shown(key)`: true while at least half of it shows and no plugin has a window open, followed where read reactively. While it is false, the host shows its own fallback in its top layer. A scrolled-away decision reads false too.
+
+A module replaced with `ui.override` runs as the app's own code (`Capability::Override` is a trust grant), so none of this holds against it.
+
 Plugins may also target an element by role and name, as the app writes them (`role:button "Add"`, or `"Add"`). That is convenient and the most fragile form; prefer declared hooks.
 
 **Classes and chains.** `.session-row` targets every element with that class (`class = "session-row"`), and a contribution goes beside or in place of each. `#sidebar >> .session-row` targets those inside `#sidebar`, at any depth: each part before a `>>` is an element above the one before it. Parts combine as one element's (`#save .primary`, `role:button "Add"`). A chain is checked as the element mounts, so one in a row of a `ui.each` inside the sidebar matches, and the same class elsewhere doesn't. `ui.filter` takes the same targets.

@@ -7,6 +7,8 @@
 mod components;
 #[path = "../container_queries.rs"]
 mod container_queries;
+#[path = "../decision.rs"]
+mod decision;
 #[path = "../display_contents.rs"]
 mod display_contents;
 #[path = "../driver.rs"]

@@ -161,6 +161,9 @@ pub(crate) struct Windows {
     /// The published windows' content, by id.
     pub content: RefCell<HashMap<String, Content>>,
     pub list: Signal<Vec<Window>>,
+    /// What says a plugin's windows are open: each window's `open`, each
+    /// group's list. The load's.
+    plugin_opens: RefCell<Vec<Signal<Value>>>,
     /// Each window's own state (`win`), by id: the same across loads, as
     /// the host bound it when the window opened.
     states: RefCell<HashMap<String, WindowState>>,
@@ -175,6 +178,7 @@ impl Windows {
             first_errors: RefCell::default(),
             content: RefCell::default(),
             list: runtime.signal(Vec::new()),
+            plugin_opens: RefCell::default(),
             states: RefCell::default(),
         }
     }
@@ -192,8 +196,18 @@ impl Windows {
             .borrow_mut()
             .retain(|id, _| list.iter().any(|w| &w.id == id));
     }
+    /// Whether a plugin has a window open, followed where read reactively.
+    pub fn plugin_window_open(&self) -> bool {
+        self.plugin_opens.borrow().iter().any(|open| {
+            open.with(|value| match value {
+                Value::List(items) => !items.is_empty(),
+                other => other.truthy(),
+            })
+        })
+    }
     /// A load begins: what it declares replaces what is published.
     pub fn begin(&self) {
+        self.plugin_opens.borrow_mut().clear();
         self.pending.borrow_mut().clear();
         self.pending_groups.borrow_mut().clear();
     }
@@ -649,6 +663,9 @@ pub(crate) fn install(
             let what = |field: &str| format!("ui.window `{id}`'s `{field}`");
             let open = expect_state(&table.get::<mlua::Value>("open")?, &what("open"))?;
             let runtime = crate::node::env(lua)?.runtime.clone();
+            if matches!(&*crate::node::env(lua)?.grants, crate::Grants::Only(_)) {
+                windows.plugin_opens.borrow_mut().push(open.clone());
+            }
             let (window, node) =
                 window_of(&table, id, open, true, Some((lua, &windows)), &runtime)?;
             let mut pending = windows.pending.borrow_mut();
@@ -679,6 +696,9 @@ pub(crate) fn install(
                     Some(options) => (options.get("key")?, options.get("on_close")?),
                     None => (None, None),
                 };
+                if matches!(&*env.grants, crate::Grants::Only(_)) {
+                    groups.plugin_opens.borrow_mut().push(list.clone());
+                }
                 groups.pending_groups.borrow_mut().push(Group {
                     list,
                     build,

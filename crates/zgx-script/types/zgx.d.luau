@@ -19800,6 +19800,10 @@ declare ui: {
 	-- What `build` makes of the value, entering and exiting as it changes;
 	-- nil shows nothing. The value is `any`, as `each`'s item is.
 	presence: (value: string | Readable<unknown> | (() -> unknown), build: (value: any) -> Node, opts: PresenceOptions?) -> Node,
+	-- Controls no plugin reaches or covers (tool approval, sign-in): drawn and
+	-- hit over all a plugin opens, in the room this holds in flow. The app's
+	-- own script alone makes one.
+	decision: (props: Merge<ContainerProps, { key: string, label: string? }>) -> Node,
 	-- Where plugins' contributions to `name` go.
 	-- A plugin extension point. `context` reaches what is contributed to
 	-- it: a contributed component gets it as `props.slot` (one component,

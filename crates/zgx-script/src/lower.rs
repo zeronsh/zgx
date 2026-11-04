@@ -476,7 +476,52 @@ impl Hooks {
             .into_iter()
             .map(|at| &self.all[at])
             .filter(|hook| (by_name || hook.target.text.is_none()) && targets(&hook.target, node))
+            .filter(|hook| !removes_decision(hook, node))
             .collect()
+    }
+}
+/// Whether `hook` would take away a decision control `node` declares
+/// (`ui.decision`) by replacing, hiding or disabling it: it does nothing
+/// then, and the plugin is told. What only a builder knows of is for
+/// `ScriptHost::decision_shown`.
+fn removes_decision(hook: &crate::node::HookContribution, node: &Node) -> bool {
+    use crate::node::{Adds, Filtered, Place};
+    let removes = match &hook.adds {
+        Adds::Node(place, _) => *place == Place::Replace,
+        Adds::Filters(filters) => filters
+            .iter()
+            .any(|(what, _)| matches!(what, Filtered::Hidden | Filtered::Disabled)),
+    };
+    if !removes || !holds_decision(node) {
+        return false;
+    }
+    if hook.stats.error.borrow().is_none() {
+        let message = format!(
+            "ui.contribute {{ target = \"{}\" }}: refused, it holds a decision control \
+             (ui.decision), which no plugin removes",
+            hook.target_text()
+        );
+        *hook.stats.error.borrow_mut() = Some(message.clone());
+        if let Some(vm) = hook.vm.upgrade() {
+            vm.report(mlua::Error::runtime(message));
+        }
+    }
+    true
+}
+/// Whether `node`'s declared tree has a decision control in it.
+fn holds_decision(node: &Node) -> bool {
+    if matches!(node.kind, Kind::Decision(_)) || node.children.iter().any(|c| holds_decision(c)) {
+        return true;
+    }
+    match &node.kind {
+        Kind::Show {
+            then, otherwise, ..
+        } => holds_decision(then) || otherwise.as_deref().is_some_and(holds_decision),
+        Kind::Switch { cases, default, .. } => {
+            cases.iter().any(|(_, case)| holds_decision(case))
+                || default.as_deref().is_some_and(holds_decision)
+        }
+        _ => false,
     }
 }
 /// Whether `node` is what `target` names, by what is known of it before it
@@ -647,7 +692,140 @@ fn contributed_now(
         Some(own) => format!("{own}, {from}"),
         None => format!("From the plugin {owner}"),
     };
-    view.accessible_description(described)
+    plugin_view(view.accessible_description(described), low)
+}
+/// `view`, a plugin's among the app's: its popups stay in the window while a
+/// decision control shows (`Decisions::showing`).
+fn plugin_view(view: View, low: &Lowering) -> View {
+    zgx::compose::provide(
+        zgx::compose::PopupsInWindow(low.decisions.showing.clone()),
+        view,
+    )
+}
+/// Whether `node` is a plugin's, not the application's.
+fn plugin_owned(node: &Node) -> bool {
+    node.owner.upgrade().is_some_and(|vm| {
+        crate::node::env(&vm.lua).is_ok_and(|env| matches!(&*env.grants, crate::Grants::Only(_)))
+    })
+}
+/// Whether a decision key's control shows, and how many are mounted.
+type DecisionKey = (Signal<bool>, u32);
+/// The decision controls mounted (`ui.decision`), for
+/// `ScriptHost::decision_shown`, and across loads.
+pub(crate) struct Decisions {
+    runtime: zgx::reactive::Runtime,
+    keys: std::cell::RefCell<HashMap<Rc<str>, DecisionKey>>,
+    /// Whether one is mounted, a plugin's popups held in the window then.
+    showing: Signal<bool>,
+}
+impl Decisions {
+    pub(crate) fn new(runtime: &zgx::reactive::Runtime) -> Self {
+        Self {
+            runtime: runtime.clone(),
+            keys: Default::default(),
+            showing: runtime.signal(false),
+        }
+    }
+    /// Whether at least half of decision `key` shows (false until it does).
+    pub(crate) fn shown(&self, key: &str) -> Signal<bool> {
+        let mut keys = self.keys.borrow_mut();
+        if let Some((shown, _)) = keys.get(key) {
+            return shown.clone();
+        }
+        let shown = self.runtime.signal(false);
+        keys.insert(key.into(), (shown.clone(), 0));
+        shown
+    }
+    fn mounted(self: &Rc<Self>, key: &Rc<str>) -> impl Drop + 'static {
+        struct Mounted(Rc<Decisions>, Rc<str>);
+        impl Drop for Mounted {
+            fn drop(&mut self) {
+                let mut keys = self.0.keys.borrow_mut();
+                if let Some((shown, count)) = keys.get_mut(&self.1) {
+                    *count -= 1;
+                    if *count == 0 {
+                        shown.set(false);
+                    }
+                }
+                let any = keys.values().any(|(_, count)| *count > 0);
+                drop(keys);
+                if !any {
+                    self.0.showing.set(false);
+                }
+            }
+        }
+        self.shown(key);
+        self.keys.borrow_mut().get_mut(key).expect("just made").1 += 1;
+        if self.showing.with_untracked(|on| !*on) {
+            self.showing.set(true);
+        }
+        Mounted(self.clone(), key.clone())
+    }
+}
+/// What a slot shows for one contribution. Apart from `kind_view`, as few
+/// elements are a slot.
+#[cold]
+#[inline(never)]
+fn slot_item(n: &Rc<Node>, context: Option<&Value>, low: &Rc<Lowering>) -> View {
+    let view = match context {
+        // What is contributed here hears it (`props.slot`).
+        Some(context) => zgx::compose::provide(SlotContext(context.clone()), lower(n, low)),
+        None => lower(n, low),
+    };
+    match plugin_owned(n) {
+        true => plugin_view(view, low),
+        false => view,
+    }
+}
+/// `ui.decision`: what it holds lowered out of plugins' reach, hoisted over
+/// the box in flow its own props style.
+#[cold]
+#[inline(never)]
+fn decision(node: &Node, held: &crate::node::Decision, low: &Rc<Lowering>) -> View {
+    let crate::node::Decision {
+        key,
+        label,
+        content,
+    } = held;
+    let has = |props: &[Prop]| node.props.iter().any(|(prop, _)| props.contains(prop));
+    let fills = (
+        has(&[Prop::W, Prop::WFull, Prop::Size]),
+        has(&[Prop::H, Prop::HFull, Prop::Size]),
+    );
+    // Lowered without what plugins add, then and whenever a part of it builds
+    // later (a row, a branch, a component).
+    let alone = Rc::new(Lowering {
+        slots: Default::default(),
+        hooks: None,
+        sealed: Default::default(),
+        decisions: low.decisions.clone(),
+        actions: low.actions.clone(),
+        elements: low.elements.clone(),
+        runtime: low.runtime.clone(),
+        assets: low.assets.clone(),
+        inspector: low.inspector.clone(),
+        depth: std::cell::Cell::new(low.depth.get()),
+        #[cfg(feature = "components")]
+        commands: low.commands.clone(),
+    });
+    let mut held = column().children(content.iter().map(|child| lower(child, &alone)));
+    if fills.0 {
+        held = held.w_full();
+    }
+    if fills.1 {
+        held = held.h_full();
+    }
+    let decisions = low.decisions.clone();
+    let key = key.clone();
+    zgx::compose::hoist(
+        &low.runtime,
+        div(),
+        held,
+        label.as_str(),
+        fills,
+        Some(low.decisions.shown(&key)),
+    )
+    .on_mount(move |handle| handle.retain(decisions.mounted(&key)))
 }
 /// A component inside a `private` element: built later, as it mounts,
 /// and still sealed from plugins then.
@@ -1133,6 +1311,7 @@ pub(crate) struct Lowering {
     /// How many `private` elements the lowering running now is inside:
     /// nothing in them is a plugin's target.
     pub sealed: std::cell::Cell<u32>,
+    pub decisions: Rc<Decisions>,
     pub actions: Actions,
     pub elements: Rc<crate::element::Elements>,
     pub runtime: zgx::reactive::Runtime,
@@ -3378,14 +3557,9 @@ fn kind_view(
                 .into_iter()
                 .flatten()
                 .filter(|(owner, _)| from.as_deref().is_none_or(|from| **owner == *from))
-                .map(|(_, n)| match context {
-                    // What is contributed here hears it (`props.slot`).
-                    Some(context) => {
-                        zgx::compose::provide(SlotContext(context.clone()), lower(n, low))
-                    }
-                    None => lower(n, low),
-                }),
+                .map(|(_, n)| slot_item(n, context.as_ref(), low)),
         ),
+        Kind::Decision(held) => decision(node, held, low),
     }
 }
 
