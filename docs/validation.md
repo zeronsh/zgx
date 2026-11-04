@@ -154,7 +154,7 @@ CI runs on every push to main and every pull request (`.github/workflows/ci.yml`
 | KWin 5.27, X11 | Xvfb, `kwin_x11` | the menu is drawn |
 | Mutter 46, X11 | Xvfb, `mutter --x11` | the menu is drawn |
 
-Those results are from an Ubuntu 24.04 arm64 container with no `/dev/dri`. `mutter --headless` also starts, but has no capture of its own, so it isn't in the script. fluxbox and i3 were looked at by hand on X11 and aren't either.
+On each, `WindowCapabilities::blur_behind` is true on KWin alone, and on each but sway, which doesn't maximize a window that asks, `WindowContext::maximized` follows the system. Those results are from an Ubuntu 24.04 arm64 container with no `/dev/dri`. `mutter --headless` also starts, but has no capture of its own, so it isn't in the script. fluxbox and i3 were looked at by hand on X11 and aren't either.
 
 Not run: Wayfire stops without a DRM device, which a container doesn't have. Hyprland has no Ubuntu 24.04 package and wasn't built; it is expected to stop the same way. labwc failed creating its Xwayland socket in that container.
 

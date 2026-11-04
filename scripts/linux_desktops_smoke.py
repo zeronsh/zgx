@@ -7,6 +7,10 @@ On each, popup_probe's menu (`POPUP_PROBE_OPEN`, opened by the app: not every
 compositor can be sent a click) shows, drawn, past the window's edge or within
 it as the desktop places it.
 
+`WindowCapabilities::blur_behind` says what each does: only KWin blurs (true
+there, false on the rest). And on those that maximize a window it is asked to
+(all but sway), `WindowContext::maximized` follows the system's word.
+
 On KWin and sway, glass_counter's glass over a wallpaper of hard stripes: KWin,
 which has a blur protocol, blurs them; sway, which has none, shows them sharp,
 the difference `Glass` documents. Blur needs KWin's GL compositing, which
@@ -35,6 +39,9 @@ SCREEN = (1400, 900)
 # popup_probe's window and menu.
 CONTENT = (16, 20, 28)
 MENU = (35, 46, 64)
+# What has a blur protocol, and what doesn't maximize a window that asks.
+BLURS = {"kwin"}
+NO_MAXIMIZE = {"sway"}
 # Each pixel's difference from its neighbour, as a share of the wallpaper's: a
 # blur takes most of it away.
 BLURRED_BELOW, SHARP_ABOVE = .25, .5
@@ -290,6 +297,24 @@ def popup(desktop, probe, capture, output, checks):
         window, menu = box(image, CONTENT), box(image, MENU)
         checks[f"{name}: boxes"] = {"window": window, "menu": menu}
         checks[f"{name}: a window and its menu are drawn"] = bool(window and menu)
+        said = log.read_text()
+        checks[f"{name}: blur_behind is what the desktop does"] = (
+            f"BLUR behind={'true' if name in BLURS else 'false'}" in said)
+    finally:
+        stop(app)
+
+
+def maximize(desktop, probe, output, checks):
+    """popup_probe maximized at its own word: does the app hear it done?"""
+    name = desktop.name
+    log = output / f"{name}-maximize.log"
+    app = subprocess.Popen([str(probe)], env=dict(desktop.env, POPUP_PROBE_MAXIMIZE="1"), stdout=log.open("w"),
+                           stderr=subprocess.STDOUT)
+    try:
+        desktop.wait("the window maximized", lambda: "MAXIMIZED true" in log.read_text(), 15)
+        checks[f"{name}: maximized follows the system"] = True
+    except TimeoutError:
+        checks[f"{name}: maximized follows the system"] = False
     finally:
         stop(app)
 
@@ -352,6 +377,8 @@ def main():
             popup(desktop, probe, capture, args.output, checks)
             if name in ("kwin", "sway") and shutil.which("swaybg"):
                 glass(desktop, counter, capture, args.output, checks, "blurred" if name == "kwin" else "sharp")
+            if name not in NO_MAXIMIZE:
+                maximize(desktop, probe, args.output, checks)
             ran.append(name)
         except (TimeoutError, OSError, AssertionError, StopIteration) as error:
             checks[f"{name}: ran"] = False

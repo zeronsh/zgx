@@ -108,6 +108,8 @@ mod text_drop;
 mod thumbnail;
 mod url;
 #[cfg(target_os = "linux")]
+mod wayland_blur;
+#[cfg(target_os = "linux")]
 mod wayland_data;
 mod window_chrome;
 mod window_info;

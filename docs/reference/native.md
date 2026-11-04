@@ -195,7 +195,10 @@ return ui.row {
 ```luau
 ui.window.full_screen: State<boolean>
 ui.window.full_screen_transition: State<{ phase: "entering" | "leaving", duration: number }?>
+ui.window.maximized: State<boolean>
 ```
+
+`ui.window.maximized` is whether the window is maximized, read-only and followed, for what a window draws at its edges only while it floats.
 
 `ui.window.full_screen` is whether the window is in full screen, however it went in or out: the green button, Ctrl+Cmd+F, the View menu, Mission Control, or a script. On macOS it turns as the window begins going in or out. `ui.window.full_screen_transition` is the transition while one runs (macOS animates it, `set_fullscreen`'s too): `phase` is `"entering"` or `"leaving"`, and `duration` is about how many seconds it takes (AppKit doesn't say: as long as the last one that way took, about 0.55 at first). It begins just before `full_screen` turns, and is nil once the window is there. It is nil always on Linux and Windows, where `full_screen` changes at once. Both are read-only.
 

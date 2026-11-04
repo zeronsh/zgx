@@ -454,6 +454,8 @@ pub fn run_hosting(
         host.window_state(&cx.ui);
         // `ui.window.size`.
         host.window_size(cx.viewport.clone());
+        // `ui.window.maximized`.
+        host.window_maximized(cx.maximized.clone());
         // `ui.window.full_screen` and `ui.window.full_screen_transition`.
         {
             let transition = cx.full_screen_transition.clone();

@@ -290,10 +290,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // compositor no script can click in (Weston).
                 if std::env::var_os("POPUP_PROBE_OPEN").is_some() {
                     let open = open.clone();
+                    let capabilities = cx.window_info.capabilities.clone();
                     cx.tasks.spawn(async move {
                         zgx::timer::sleep(std::time::Duration::from_millis(500)).await;
+                        println!("BLUR behind={}", capabilities.get().blur_behind);
                         open.set(true);
                     });
+                }
+                // `POPUP_PROBE_MAXIMIZE`: the window maximizes itself, and
+                // says when the system has done it.
+                if std::env::var_os("POPUP_PROBE_MAXIMIZE").is_some() {
+                    let window = cx.window.clone();
+                    cx.tasks.spawn(async move {
+                        zgx::timer::sleep(std::time::Duration::from_millis(500)).await;
+                        window.set_maximized(true);
+                    });
+                    let maximized = cx.maximized.clone();
+                    let told = cx.ui.runtime.effect(move || {
+                        println!("MAXIMIZED {}", maximized.get());
+                    });
+                    cx.on_closed(move || drop(told));
                 }
                 let report = cx.ui.runtime.effect(move || {
                     println!("OPEN {} CHOSEN {:?}", open.get(), chosen.get());
