@@ -197,9 +197,9 @@ ui.window.full_screen: State<boolean>
 ui.window.full_screen_transition: State<{ phase: "entering" | "leaving", duration: number }?>
 ```
 
-`ui.window.full_screen` is whether the window is in full screen, however it went in or out: the green button, Ctrl+Cmd+F, the View menu, Mission Control, or a script. On macOS it turns as the window begins going in or out. `ui.window.full_screen_transition` is the transition while one runs (macOS animates it, `set_fullscreen`'s too): `phase` is `"entering"` or `"leaving"`, and `duration` is about how many seconds it takes (AppKit's estimate). It begins just before `full_screen` turns, and is nil once the window is there. It is nil always on Linux and Windows, where `full_screen` changes at once. Both are read-only.
+`ui.window.full_screen` is whether the window is in full screen, however it went in or out: the green button, Ctrl+Cmd+F, the View menu, Mission Control, or a script. On macOS it turns as the window begins going in or out. `ui.window.full_screen_transition` is the transition while one runs (macOS animates it, `set_fullscreen`'s too): `phase` is `"entering"` or `"leaving"`, and `duration` is about how many seconds it takes (AppKit doesn't say: as long as the last one that way took, about 0.55 at first). It begins just before `full_screen` turns, and is nil once the window is there. It is nil always on Linux and Windows, where `full_screen` changes at once. Both are read-only.
 
-In full screen macOS hides the traffic lights, and `ui.window.controls` is nil. A title bar laid out around them can slide over as they go:
+In full screen macOS hides the traffic lights, and `ui.window.controls` is nil. Through a transition `controls` and `titlebar_area` already say where they end up: nil from the moment the window begins going in, and their place out of full screen from the moment it begins coming out. A title bar laid out around them can slide over as they go:
 
 ```lua
 return ui.row {
@@ -214,6 +214,8 @@ return ui.row {
 ```
 
 Something timed by hand (an `anime` animation) can read the transition's own `duration` as it begins.
+
+AppKit animates a snapshot of the window through the transition, and shows the window itself again as it ends. What is drawn meanwhile keeps the content current, but is not on the screen: a tween runs behind the snapshot, and the window shows it finished. `ui.window.shown` stays true through the transition; a window still covered once it is over counts as covered then.
 
 `zgx run` keeps both; a Rust host passes its window's with `ScriptHost::window_full_screen` (`WindowInfo::fullscreen` and `WindowContext::full_screen_transition`).
 

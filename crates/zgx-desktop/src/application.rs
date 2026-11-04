@@ -1744,6 +1744,10 @@ struct Host {
     /// a `Settled` of an earlier one leaves a newer one be.
     #[cfg(target_os = "macos")]
     full_screen_seq: u64,
+    /// The title bar's area and buttons as they were when the window last
+    /// began going into full screen: where they are once it is out again.
+    #[cfg(target_os = "macos")]
+    chrome_out: Option<crate::window_info::Chrome>,
     /// Its content's top-left in global coordinates, and its number with
     /// the window server (macOS), for drags between windows: kept as the
     /// window moves, so a drag asks AppKit nothing as it moves.
@@ -2093,6 +2097,8 @@ impl Host {
             popups_fullscreen: false,
             #[cfg(target_os = "macos")]
             full_screen_seq: 0,
+            #[cfg(target_os = "macos")]
+            chrome_out: None,
             content_origin: None,
             window_number: None,
             window_grab: None,
@@ -2270,17 +2276,76 @@ impl Host {
         } else if phase == FullScreenPhase::Settled && seq != self.full_screen_seq {
             return;
         }
+        // The title bar's area and buttons, where they end up, before the
+        // transition says it begins (a slide timed to it reads its target):
+        // none going in; going out, where they were before going in (the
+        // window takes its frame back). Once it is there, as the window has
+        // them, before the transition says it is over.
+        let info = &self.context.window_info;
+        match phase {
+            FullScreenPhase::WillEnter => {
+                self.chrome_out = Some(info.chrome());
+                info.set_chrome((None, None));
+            }
+            FullScreenPhase::WillExit => {
+                if let Some(out) = self.chrome_out {
+                    info.set_chrome(out);
+                }
+            }
+            _ => {}
+        }
+        let mut covered = false;
+        if phase.settles()
+            && let Some(window) = &self.window
+        {
+            info.refresh(window, self.options.titlebar);
+            // Covered after all, once the transition is over: an occlusion
+            // it went on drawing through is counted now.
+            covered = !*RENDER_WHEN_COVERED
+                && !self.native_occluded
+                && crate::window_chrome::occluded(window) == Some(true);
+        }
         let transition = phase.transition(duration);
         let signal = &self.context.full_screen_transition;
         if signal.with_untracked(|now| *now != transition) {
             signal.set(transition);
         }
-        if phase.settles()
-            && let Some(window) = &self.window
+        if covered {
+            self.occlude();
+        }
+    }
+    /// Minimized, or on a Space no longer shown: its menus and popovers
+    /// close, as AppKit's do (they would show again with it, still open),
+    /// and it stops presenting until it shows again.
+    fn occlude(&mut self) {
+        self.context.ui.dismiss_popups();
+        self.context.ui.cancel_interactions();
+        self.native_occluded = true;
+        self.context.ui.set_presented(false);
+        self.presentation.occlude();
+    }
+    /// Whether the window is going into or out of full screen (macOS).
+    fn in_full_screen_transition(&self) -> bool {
+        self.context
+            .full_screen_transition
+            .with_untracked(Option::is_some)
+    }
+    /// The title bar's area and buttons to show while the window's geometry
+    /// changes, if not as AppKit has them: through a full-screen transition,
+    /// where they end up (`full_screen`).
+    fn chrome_held(&self) -> Option<crate::window_info::Chrome> {
+        #[cfg(target_os = "macos")]
         {
-            self.context
-                .window_info
-                .refresh(window, self.options.titlebar);
+            crate::window_info::held_chrome(
+                self.context
+                    .full_screen_transition
+                    .with_untracked(|now| *now),
+                self.chrome_out,
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
         }
     }
     fn sync_ime_cancellation(&mut self) {
@@ -4244,9 +4309,10 @@ impl Host {
                 | WindowEvent::ScaleFactorChanged { .. }
         ) && let Some(window) = &self.window
         {
+            let held = self.chrome_held();
             self.context
                 .window_info
-                .refresh(window, self.options.titlebar);
+                .refresh_holding(window, self.options.titlebar, held);
             self.context
                 .ui
                 .set_popup_screens(crate::popup_window::popup_screens(window));
@@ -4287,16 +4353,13 @@ impl Host {
         match event {
             WindowEvent::CloseRequested => {}
             WindowEvent::Occluded(_) if *RENDER_WHEN_COVERED => {}
-            WindowEvent::Occluded(true) => {
-                // Minimized, or on a Space no longer shown: its menus and
-                // popovers close, as AppKit's do (they would show again
-                // with it, still open).
-                self.context.ui.dismiss_popups();
-                self.context.ui.cancel_interactions();
-                self.native_occluded = true;
-                self.context.ui.set_presented(false);
-                self.presentation.occlude();
-            }
+            // Going into or out of full screen, AppKit counts the window
+            // covered while it animates: it goes on drawing (its content
+            // resizes through the transition, and shows current as it ends),
+            // and is counted covered only if it still is once the transition
+            // is over (`full_screen`).
+            WindowEvent::Occluded(true) if self.in_full_screen_transition() => {}
+            WindowEvent::Occluded(true) => self.occlude(),
             WindowEvent::Occluded(false) => {
                 self.native_occluded = false;
                 self.context

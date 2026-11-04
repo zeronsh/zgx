@@ -1548,7 +1548,7 @@ export type ItemWindow = {
 export type WindowRect = { x: number, y: number, width: number, height: number }
 
 -- A window going into full screen or out (macOS's animation): which way,
--- and about how many seconds it takes.
+-- and about how many seconds it takes (as long as the last one that way).
 export type FullScreenTransition = { phase: "entering" | "leaving", duration: number }
 
 -- `ui.window`: called, it declares a window (`WindowOptions`). Its fields

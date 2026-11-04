@@ -1792,8 +1792,8 @@ impl TitlebarAction {
 }
 
 /// A window's full-screen notification, queued (`watch_full_screen`): its
-/// window number, what AppKit said, AppKit's estimate of the animation it
-/// began, and the transition it belongs to (a will's number, which its
+/// window number, what AppKit said, about how long the animation it began
+/// takes, and the transition it belongs to (a will's number, which its
 /// `Settled` carries).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) type FullScreenNote = (
@@ -1825,6 +1825,26 @@ pub(crate) fn take_full_screen() -> Vec<FullScreenNote> {
     #[cfg(not(target_os = "macos"))]
     {
         Vec::new()
+    }
+}
+
+/// Whether AppKit counts `window` covered (its occlusion state not
+/// visible), as it is now; `None` where zgx can't ask (not macOS).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn occluded(window: &winit::window::Window) -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        let window = mac::ns_window(window)?;
+        Some(
+            !window
+                .occlusionState()
+                .contains(objc2_app_kit::NSWindowOcclusionState::Visible),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        None
     }
 }
 
@@ -1999,6 +2019,14 @@ mod mac {
         static FULL_SCREEN_WAKE: std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>> =
             const { std::cell::RefCell::new(None) };
         static FULL_SCREEN_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// How long the last transition each way took, will to did (going
+        /// in, then out): AppKit says nothing of its full-screen animation's
+        /// length.
+        static FULL_SCREEN_TOOK: std::cell::Cell<[Option<std::time::Duration>; 2]> =
+            const { std::cell::Cell::new([None; 2]) };
+        /// When each window's transition began, by window number.
+        static FULL_SCREEN_BEGAN: std::cell::RefCell<Vec<(isize, std::time::Instant)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
     }
 
     /// Every window's `NSWindowWill…`/`NSWindowDid…FullScreen`, queued with
@@ -2052,17 +2080,32 @@ mod mac {
                     phase,
                     FullScreenPhase::WillEnter | FullScreenPhase::WillExit
                 );
+                let way = usize::from(matches!(
+                    phase,
+                    FullScreenPhase::WillExit | FullScreenPhase::DidExit
+                ));
                 let (duration, seq) = if will {
-                    // To the screen's frame or back: AppKit's estimate of
-                    // the animation.
-                    let frame = window
-                        .screen()
-                        .map_or(window.frame(), |screen| screen.frame());
-                    let seconds = window.animationResizeTime(frame);
+                    // As long as the last one this way took; the first, as
+                    // long as AppKit's takes (`FULL_SCREEN_FIRST`).
+                    let duration = FULL_SCREEN_TOOK.get()[way].unwrap_or(FULL_SCREEN_FIRST);
+                    FULL_SCREEN_BEGAN.with_borrow_mut(|began| {
+                        began.retain(|(window, _)| *window != number);
+                        began.push((number, std::time::Instant::now()));
+                    });
                     let seq = FULL_SCREEN_SEQ.get() + 1;
                     FULL_SCREEN_SEQ.set(seq);
-                    (std::time::Duration::from_secs_f64(seconds.max(0.)), seq)
+                    (duration, seq)
                 } else {
+                    // Done: how long it took, for the next this way.
+                    let began = FULL_SCREEN_BEGAN.with_borrow_mut(|began| {
+                        let at = began.iter().position(|(window, _)| *window == number)?;
+                        Some(began.swap_remove(at).1)
+                    });
+                    if let Some(began) = began {
+                        let mut took = FULL_SCREEN_TOOK.get();
+                        took[way] = Some(began.elapsed());
+                        FULL_SCREEN_TOOK.set(took);
+                    }
                     (std::time::Duration::ZERO, FULL_SCREEN_SEQ.get())
                 };
                 note_full_screen((number, phase, duration, seq));
@@ -2084,6 +2127,10 @@ mod mac {
         }
     }
 
+    /// How long a window's first transition each way is said to take: about
+    /// what AppKit's took on macOS 26 (0.52 to 0.58 s, in and out).
+    /// `animationResizeTime`, a resize's, says 0.35 s in and 0.07 s out.
+    const FULL_SCREEN_FIRST: std::time::Duration = std::time::Duration::from_millis(550);
     /// How long past a transition's estimated end its `Settled` comes, and
     /// past an inset toolbar's restore at the soonest.
     const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_millis(1500);

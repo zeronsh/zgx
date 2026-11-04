@@ -115,8 +115,8 @@ pub struct WindowCapabilities {
 /// (macOS): `WindowContext::full_screen_transition`, `ui.window.full_screen_transition`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FullScreenTransition {
-    /// Going into full screen, over about this long (AppKit's estimate of
-    /// its animation).
+    /// Going into full screen, over about this long (AppKit doesn't say:
+    /// as long as the last one this way took).
     Entering(std::time::Duration),
     /// Coming out of it, over about this long.
     Leaving(std::time::Duration),
@@ -204,6 +204,18 @@ impl WindowInfo {
         }
     }
     pub(crate) fn refresh(&self, window: &Window, titlebar: crate::Titlebar) {
+        self.refresh_holding(window, titlebar, None);
+    }
+    /// `refresh`, but with the title bar's area and buttons `hold` where it
+    /// is given rather than read from the window: through a full-screen
+    /// transition, where they end up (none going in; where they were
+    /// before going out), not where AppKit has them partway.
+    pub(crate) fn refresh_holding(
+        &self,
+        window: &Window,
+        titlebar: crate::Titlebar,
+        hold: Option<Chrome>,
+    ) {
         let wayland = window
             .display_handle()
             .is_ok_and(|h| matches!(h.as_raw(), RawDisplayHandle::Wayland(_)));
@@ -248,12 +260,7 @@ impl WindowInfo {
         } else {
             (area.map(unzoom), controls.map(unzoom))
         };
-        if self.titlebar_area.with_untracked(|old| *old != area) {
-            self.titlebar_area.set(area);
-        }
-        if self.controls.with_untracked(|old| *old != controls) {
-            self.controls.set(controls);
-        }
+        self.set_chrome(hold.unwrap_or((area, controls)));
         self.capabilities.set(WindowCapabilities {
             global_position: !wayland,
             placement: !wayland,
@@ -263,6 +270,44 @@ impl WindowInfo {
         self.ready.set(true);
     }
 }
+/// A title bar's free area and its window's buttons, in points
+/// (`WindowInfo::titlebar_area`, `controls`).
+pub(crate) type Chrome = (Option<zgx::scene::Rect>, Option<zgx::scene::Rect>);
+/// The title bar's area and buttons to show through `transition`, if not as
+/// AppKit has them partway: where they end up, so a slide timed to it reads
+/// its target as it begins. None going in; going out, `out`, where they were
+/// before going in, if that is known.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn held_chrome(
+    transition: Option<FullScreenTransition>,
+    out: Option<Chrome>,
+) -> Option<Chrome> {
+    match transition {
+        Some(FullScreenTransition::Entering(_)) => Some((None, None)),
+        Some(FullScreenTransition::Leaving(_)) => out,
+        None => None,
+    }
+}
+impl WindowInfo {
+    /// The title bar's area and buttons as they are now.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn chrome(&self) -> Chrome {
+        (
+            self.titlebar_area.with_untracked(|area| *area),
+            self.controls.with_untracked(|controls| *controls),
+        )
+    }
+    /// Set the title bar's area and buttons, each only if it changed.
+    pub(crate) fn set_chrome(&self, (area, controls): Chrome) {
+        if self.titlebar_area.with_untracked(|old| *old != area) {
+            self.titlebar_area.set(area);
+        }
+        if self.controls.with_untracked(|old| *old != controls) {
+            self.controls.set(controls);
+        }
+    }
+}
+
 pub(crate) fn refresh_rate_hz(monitor: &MonitorHandle) -> Option<f64> {
     monitor
         .refresh_rate_millihertz()
@@ -402,6 +447,30 @@ pub(crate) fn attributes(
 mod full_screen_tests {
     use super::{FullScreenPhase, FullScreenTransition};
     use std::time::Duration;
+
+    /// Through a transition the title bar's rects say where they end up.
+    #[test]
+    fn a_transition_holds_the_title_bar_where_it_ends_up() {
+        use super::{Chrome, held_chrome};
+        let half = Duration::from_millis(500);
+        let rect = zgx::scene::Rect::new(12., 13., 52., 16.);
+        let out: Chrome = (None, Some(rect));
+        assert_eq!(
+            held_chrome(Some(FullScreenTransition::Entering(half)), Some(out)),
+            Some((None, None))
+        );
+        assert_eq!(
+            held_chrome(Some(FullScreenTransition::Leaving(half)), Some(out)),
+            Some(out)
+        );
+        // Out with nowhere known to go back to (it opened in full screen),
+        // and with no transition: as the window has them.
+        assert_eq!(
+            held_chrome(Some(FullScreenTransition::Leaving(half)), None),
+            None
+        );
+        assert_eq!(held_chrome(None, Some(out)), None);
+    }
 
     /// AppKit's will begins a transition as long as its animation; its did
     /// ends it, and the window is read again; a transition that failed
