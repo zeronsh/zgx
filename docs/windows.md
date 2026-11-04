@@ -449,6 +449,11 @@ bands. The glyphs follow the window's light or dark (`WindowHandle::set_theme`),
 not the system's. `scripts/windows_caption_smoke.py` checks all of it in a real
 window at 100% and 150% zoom, light and dark.
 
+Windows' Transparency effects switch (`EnableTransparency`) is reported as
+`SystemPreferences::reduced_transparency`, and read again as Windows announces
+the change (`WM_SETTINGCHANGE`): with it off, `glass.tint` is the raised surface
+and `glass.blur` zero, as on macOS.
+
 Windows take the executable's own icon (its first icon group, the one
 Explorer shows) for the title bar, the taskbar and Alt+Tab, sized for the
 window's DPI. Embed one as a resource from the app's build script, for
