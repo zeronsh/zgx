@@ -121,6 +121,11 @@ harness = false
 
 # On the main thread, as layer presentation runs (`fn main`).
 [[test]]
+name = "zoomed_layers"
+harness = false
+
+# On the main thread, as layer presentation runs (`fn main`).
+[[test]]
 name = "native_paths"
 harness = false
 

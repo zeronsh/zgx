@@ -148,7 +148,9 @@ impl LoopSheet {
         (width * self.columns) as u64 * (height * self.rows) as u64 * 4
             / Rc::strong_count(&self.buffer) as u64
     }
-    fn shown(&self, scale: f32) -> LoopShown {
+    /// `zoom`: the window's, which `scale` holds and the layer's points
+    /// don't (`GpuRenderer::set_zoom`).
+    fn shown(&self, scale: f32, zoom: f64) -> LoopShown {
         let (columns, rows) = (self.columns as f64, self.rows as f64);
         let rects = (0..self.starts.len() as u32)
             .map(|cell| {
@@ -169,14 +171,16 @@ impl LoopSheet {
             .collect();
         let duration = total / self.baked.fps as f64;
         let (width, height) = self.cell;
+        // From the sheet's whole pixels, so the layer lands on the screen's.
+        let point = f64::from(scale) / zoom;
         LoopShown {
             key: self.key(),
             surface: self.buffer.surface.clone(),
             rect: (
-                self.frame.0 as f64,
-                self.frame.1 as f64,
-                (width as f32 / scale) as f64,
-                (height as f32 / scale) as f64,
+                (self.frame.0 * scale).round() as f64 / point,
+                (self.frame.1 * scale).round() as f64 / point,
+                width as f64 / point,
+                height as f64 / point,
             ),
             opacity: self.opacity,
             rects,
@@ -218,7 +222,8 @@ impl GpuRenderer {
             .filter(|caret| caret.shown)
         {
             let (x, y, width, height) = caret.rect;
-            let scale = scale as f64;
+            // In the layer's points: the zoom isn't in them.
+            let scale = scale as f64 / self.zoom;
             let [r, g, b, a] = caret.color;
             let byte = |value: f64| (value * a * 255.).round() as u8;
             over.push(OverFrame::Caret {
@@ -352,7 +357,7 @@ impl GpuRenderer {
             .loop_sheets
             .iter()
             .filter(|sheet| changed.contains(&sheet.key()))
-            .map(|sheet| sheet.shown(scale))
+            .map(|sheet| sheet.shown(scale, self.zoom))
             .collect();
         if let Some(layer) = self
             .layer_present

@@ -1270,6 +1270,13 @@ that last check on a Mac without the hold. `crates/zgx-gpu/tests/baked_loops.rs`
 covers what stays in the frames and what draws a sheet again, and
 `crates/zgx-script/tests/anime.rs` (`baked`) what hands a loop back to the engine.
 
+`scripts/macos_zoomed_loops_probe.py` zooms that window (100%, 110%, 90%): a
+loop's layer lies in a row with a still box the frames draw, its top, height
+and edge theirs, read from captures. `crates/zgx-gpu/tests/zoomed_layers.rs`
+covers the frames of loops' and GPU views' layers, the caret as read back, and
+what the frames draw themselves (moved, faded, turned, shaders', layers')
+under partial repaints, at each of those zooms.
+
 ## macOS caret (Core Animation's)
 
 `scripts/macos_caret_probe.py` runs the caret_idle example, a focused field

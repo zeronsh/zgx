@@ -663,7 +663,7 @@ impl GpuRenderer {
                 .as_mut()
                 .and_then(|views| views.planes.get_mut(&key))
             && let Some(mut primed) = planed.primed.take()
-            && primed.rect() == planed_points(rect)
+            && primed.rect() == planed_points(rect, self.zoom)
         {
             primed.moved = true;
             planed.shown = true;
@@ -702,7 +702,7 @@ impl GpuRenderer {
             views.owed = true;
             return Ok(true);
         }
-        let points = planed_points(rect);
+        let points = planed_points(rect, self.zoom);
         // When the host began this frame, in host seconds (the drawables'
         // presented times' clock), for the present log.
         let started = self
@@ -958,14 +958,15 @@ pub(crate) fn schedule_planes(
     }
 }
 
-/// `rect` as a plane's box: the host's points from the top left.
+/// `rect` as a plane's box: the host's points from the top left, which the
+/// window's `zoom` isn't in (`GpuRenderer::set_zoom`).
 #[cfg(target_os = "macos")]
-fn planed_points(rect: zgx::scene::Rect) -> (f64, f64, f64, f64) {
+fn planed_points(rect: zgx::scene::Rect, zoom: f64) -> (f64, f64, f64, f64) {
     (
-        f64::from(rect.x),
-        f64::from(rect.y),
-        f64::from(rect.width),
-        f64::from(rect.height),
+        f64::from(rect.x) * zoom,
+        f64::from(rect.y) * zoom,
+        f64::from(rect.width) * zoom,
+        f64::from(rect.height) * zoom,
     )
 }
 
