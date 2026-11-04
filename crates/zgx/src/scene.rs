@@ -10920,6 +10920,11 @@ impl Scene {
     pub(crate) fn layout_revision(&self) -> u64 {
         self.layout_revision
     }
+    /// How many layout passes it has run: a test's count of them.
+    #[cfg(test)]
+    pub(crate) fn layout_passes(&self) -> u64 {
+        self.layout_pass
+    }
     /// Updates geometry for hit testing without consuming pending paint damage.
     /// The next `flush` reports this work and all damage accumulated by layout.
     #[inline(never)]
