@@ -68,6 +68,7 @@ SMOKES = [
     ("keyboard-layout", "python3 scripts/keyboard_layout_smoke.py {bin}/primary_selection --output {out}", False),
     ("popup-windows", "python3 scripts/popup_windows_smoke.py {bin}/popup_probe --output {out}", False),
     ("decision-controls", "python3 scripts/decision_probe_smoke.py {bin}/decision_probe --output {out}", False),
+    ("sealed-regions", "python3 scripts/decision_probe_smoke.py {bin}/decision_probe --sealed --output {out}", False),
     ("wayland-popups", "python3 scripts/wayland_popups_smoke.py {bin}/popup_probe --output {out}", False),
     ("drag-preview", "python3 scripts/drag_preview_smoke.py {bin}/drag_drop --output {out}", False),
     ("drag-windows", "python3 scripts/drag_windows_smoke.py {bin} --output {out}", False),

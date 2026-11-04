@@ -7,6 +7,10 @@
 //! is up, and in this one from then on; the app's own keep theirs. The plugin
 //! opens them from its own buttons, once the window has settled.
 //!
+//! `--sealed`: the same against a sealed page (`ui.sealed`): a plugin's modal
+//! over it, then one the plugin opens in its own page there, which stays in
+//! that page's box.
+//!
 //! Clicks go through the input routing, this process alone (the user's pointer
 //! is never moved), unless `DECISION_PROBE_EXTERNAL` is set: then it prints
 //! `CLICK x y` and waits for a click from outside. `DECISION_PROBE_DWELL` is
@@ -57,11 +61,47 @@ ui.contribute { target = "#after", after = ui.modal { open = modal, z = 21474836
             ui.div { id = "nested-panel", w = 300, h = 900 } } } } }
 "##;
 
-fn plugin_entry() -> PathBuf {
+/// `--sealed`: a Settings page, and in it a page of the plugin's.
+const SEALED_APP: &str = r##"
+local clicked = ui.shared("clicked", 0)
+return ui.column { w_full = true, h_full = true, p = 12,
+    ui.text { id = "after", "After" },
+    ui.sealed { key = "settings", w = 300, h = 200,
+        ui.column { w_full = true, h_full = true,
+            ui.button { id = "app-setting", w = 300, h = 40, "Setting",
+                on_click = function() clicked:set(clicked:peek() + 1) end },
+            ui.plugin_page { plugin = "plugin", w = 300, h = 100 },
+            ui.button { id = "app-below", w = 300, h = 40, "Below",
+                on_click = function() clicked:set(clicked:peek() + 1) end },
+        },
+    },
+}
+"##;
+
+const SEALED_PLUGIN: &str = r##"
+local over = ui.state("over", false)
+local in_page = ui.state("in_page", false)
+local nested = ui.state("nested", true)
+ui.contribute { target = "#after", after = ui.button { id = "open-over", w = 60, h = 24, "Over",
+    on_click = function() over:set(true) end } }
+ui.contribute { target = "#after", after = ui.modal { open = over, z = 2147483647,
+    ui.div { id = "plugin-modal", w = 2000, h = 2000, z = 2147483647, on_click = function() end,
+        ui.popover { open = nested, label = "Plugin's nested",
+            anchor = ui.button { id = "nested-trigger", w = 60, h = 24, "Nested" },
+            ui.div { id = "nested-panel", w = 300, h = 900 } } } } }
+ui.contribute("plugin_page", ui.column {
+    ui.button { id = "page-button", w = 100, h = 24, "Page",
+        on_click = function() in_page:set(true) end },
+    ui.modal { open = in_page, z = 2147483647,
+        ui.div { id = "page-modal", w = 3000, h = 3000, on_click = function() end } },
+})
+"##;
+
+fn plugin_entry(code: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("zgx-decision-probe-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a directory for the plugin");
     let entry = dir.join("init.luau");
-    std::fs::write(&entry, PLUGIN).expect("the plugin's script");
+    std::fs::write(&entry, code).expect("the plugin's script");
     entry
 }
 
@@ -191,10 +231,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         })
         .run(|cx| {
-            let host = ScriptHost::inline(&cx.ui.runtime, "app", APP);
+            let sealed = std::env::args().any(|arg| arg == "--sealed");
+            let (app, plugin) = match sealed {
+                true => (SEALED_APP, SEALED_PLUGIN),
+                false => (APP, PLUGIN),
+            };
+            let host = ScriptHost::inline(&cx.ui.runtime, "app", app);
             host.set_plugins(vec![Plugin {
                 name: "plugin".into(),
-                entry: plugin_entry(),
+                entry: plugin_entry(plugin),
                 grants: Vec::new(),
             }]);
             let clicked = host.shared("clicked", Value::Num(0.));
@@ -219,6 +264,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let wait = probe.dwell;
                 sleep(wait).await;
                 println!("READY");
+                if sealed {
+                    sleep(wait).await;
+                    let (scene, native) = probe.report("sealed", "app-setting");
+                    sleep(wait).await;
+                    probe.check("the pointer finds the setting", probe.finds("app-setting"));
+                    probe.check("no popup in a window", scene == 0);
+                    probe.check("none on the system's list", !macos || native == 0);
+                    probe.poke("open-over");
+                    sleep(wait).await;
+                    probe.check("the modal shows", probe.view.find("plugin-modal").is_some());
+                    probe.check(
+                        "its popover shows",
+                        probe.view.find("nested-panel").is_some(),
+                    );
+                    let (scene, native) = probe.report("plugin-modal", "app-setting");
+                    sleep(wait).await;
+                    probe.check("no popup in a window", scene == 0);
+                    probe.check("none on the system's list", !macos || native == 0);
+                    probe.check("the pointer finds the setting", probe.finds("app-setting"));
+                    probe.click("app-setting", 1.).await;
+                    probe.check("the plugin's page shows", probe.finds("page-button"));
+                    probe.poke("page-button");
+                    sleep(wait).await;
+                    probe.check("its modal shows", probe.view.find("page-modal").is_some());
+                    let (scene, native) = probe.report("page-modal", "app-setting");
+                    sleep(wait).await;
+                    probe.check("no popup in a window", scene == 0);
+                    probe.check("none on the system's list", !macos || native == 0);
+                    probe.check(
+                        "the page's modal stays in its box",
+                        probe.finds("app-below"),
+                    );
+                    probe.click("app-below", 2.).await;
+                    let failed = probe.failed.get();
+                    println!("RESULT {}", if failed { "fail" } else { "pass" });
+                    std::process::exit(i32::from(failed));
+                }
                 sleep(wait).await;
                 probe.poke("plugin-trigger");
                 sleep(wait).await;
