@@ -1,6 +1,6 @@
 //! Reactive variable-height virtualization, sharing retained component ownership.
 use super::*;
-use crate::virtual_list::{HeightError, HeightIndex};
+use crate::virtual_list::{HeightError, HeightIndex, THINNEST_ROW};
 use std::cell::Cell;
 
 /// Cloneable indexed heights with logarithmic point updates and no whole-index clones.
@@ -658,7 +658,13 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     } else {
                         discovery = None;
                     }
-                    let geometry: Vec<_> = model.rows(range).collect();
+                    // Measured, a row must be built to know its height. Given
+                    // it, one too thin to show isn't: rows folded away would
+                    // otherwise all fit in the view, and all be built.
+                    let mut geometry: Vec<_> = model.rows(range).collect();
+                    if !measured && model.may_have_thin_rows() {
+                        geometry.retain(|(_, _, row_height)| *row_height >= THINNEST_ROW);
+                    }
                     // An empty list keeps whether it is at its end (it is):
                     // its first rows then follow the end as later ones do.
                     let next_anchor = match first {
@@ -748,7 +754,12 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                         anchor_key = (|| {
                             let first = keys.first()?.1;
                             let (key, index, ..) = keys.get(next.index.checked_sub(first)?)?;
-                            (*index == next.index).then(|| key.clone())
+                            if *index == next.index {
+                                return Some(key.clone());
+                            }
+                            // Rows too thin to build are missing from among them.
+                            let at = keys.binary_search_by_key(&next.index, |row| row.1).ok()?;
+                            Some(keys[at].0.clone())
                         })();
                     }
                 }
