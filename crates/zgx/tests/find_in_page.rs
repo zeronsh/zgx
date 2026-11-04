@@ -179,6 +179,52 @@ fn a_lists_rows_are_counted_unmounted_in_slices_and_then_nothing_runs() {
     assert_eq!(scene.text_marks(row)[0].color, current);
 }
 
+/// A list that scrolls with the scroll view around it: its rows counted
+/// unmounted, and stepping to one scrolls that view to it, where it mounts.
+#[test]
+fn a_list_scrolled_with_the_view_around_it_finds_a_row_it_has_not_built() {
+    let mut ui = Ui::new(400., 300.);
+    let panel = ui.signal(0.);
+    let name = |n: usize| match n {
+        700 => "a needle here".to_string(),
+        n => format!("Row {n}"),
+    };
+    ui.mount(
+        scroll(panel.clone()).w(300.).h(200.).child(
+            column().w_full().child(text("Sections")).child(
+                virtual_list(
+                    ui.signal(0.),
+                    20.,
+                    1,
+                    || 1000,
+                    |n| n,
+                    move |_, n, _| text(name(n)),
+                )
+                .row_text(move |n| (n < 1000).then(|| name(n)))
+                .virtualize_in_ancestor()
+                .w_full(),
+            ),
+        ),
+    );
+    ui.prepare_frame();
+    ui.find_text("NEEDLE");
+    settle(&mut ui);
+    let status = ui.find_status();
+    assert_eq!(status.count, 1, "{status:?}");
+    ui.find_next();
+    ui.prepare_frame();
+    assert!(
+        (panel.get() - 700. * 20.).abs() < 200.,
+        "the view around it scrolled to the row: {}",
+        panel.get()
+    );
+    let scene = ui.scene.borrow();
+    let row = scene.marked_text().find(
+        |id| matches!(scene.kind(*id), NodeKind::Text { text, .. } if &**text == "a needle here"),
+    );
+    assert!(row.is_some(), "the row mounted and marked");
+}
+
 #[test]
 fn command_f_opens_the_bar_typing_finds_and_escape_selects_the_match() {
     let mut ui = Ui::new(500., 400.);

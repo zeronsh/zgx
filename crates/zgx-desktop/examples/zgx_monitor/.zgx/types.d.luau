@@ -15344,6 +15344,11 @@ export type ListProps = {
 	-- Its rows are one Tab stop, and the arrows, Page Up and Down, Home and
 	-- End move focus through every row (mounting it), as a list box's do.
 	keyboard: boolean?,
+	-- "ancestor": it doesn't scroll itself but with the scroll view around
+	-- it (a panel scrolling as a whole, its sections lists), as tall as its
+	-- rows, building only those that view shows. With `height` or
+	-- `heights`, not `measured`.
+	virtualize: "ancestor"?,
 	-- The list its rows show, as `ui.each`'s (not with `count` or
 	-- `heights`): `key` is given an item, and `row` an item and its index
 	-- as a state; built again when the item changes, or, taking a third
