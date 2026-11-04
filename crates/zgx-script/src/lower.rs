@@ -3814,8 +3814,27 @@ fn styled(
     {
         let vm = vm.clone();
         let element = element.clone();
+        let mut apart: Option<Box<StylesApart>> = None;
+        let mut apartness = Apartness::FirstRun;
         view = view.reactive_style(move || {
             let styles = match &element {
+                _ if apartness != Apartness::Never
+                    && functions_apart(&mut apartness, element.as_deref(), &dynamic) =>
+                {
+                    let apart = apart.get_or_insert_with(|| styles_apart(&dynamic, &vm));
+                    let mut lits = apart.lits.with(|lits| (**lits).clone());
+                    for (prop, source, scalar) in &dynamic {
+                        if !matches!(source, Owned::Computed(..))
+                            && let Some(lit) = resolve_style(source, *prop, scalar.as_ref(), &vm)
+                        {
+                            lits.push((*prop, lit));
+                        }
+                    }
+                    match &element {
+                        Some(element) => with_animated(element, lits),
+                        None => apply_all(Styles::new(), &lits),
+                    }
+                }
                 None if dynamic
                     .iter()
                     .all(|(prop, _, _)| !is_transform(*prop) && !is_corner(*prop)) =>
@@ -4439,6 +4458,104 @@ pub(crate) fn with_animated(element: &Element, mut lits: Vec<(Prop, Lit)>) -> St
         styles = crate::transform::style(styles, local);
     }
     styles
+}
+
+/// The functions among a node's styles, resolved by an effect of their own
+/// once what else moves it runs them for nothing: a frame of an animation or a
+/// tween applies what they said again, running none of them.
+struct StylesApart {
+    lits: Signal<Rc<Vec<(Prop, Lit)>>>,
+    _resolves: zgx::reactive::Effect,
+}
+/// Whether a node's functions resolve apart: looked at once, on its second run
+/// (a node not run again pays nothing), and from then on a byte's compare.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Apartness {
+    FirstRun,
+    SecondRun,
+    /// No functions, or none beside what moves it and no animation to come.
+    Never,
+    /// Functions on a node an animation may come to.
+    Animated,
+    Apart,
+}
+/// Whether the node, run now, should resolve its functions apart.
+#[inline]
+fn functions_apart(
+    apartness: &mut Apartness,
+    element: Option<&Element>,
+    dynamic: &[(Prop, Owned, Option<Signal<f32>>)],
+) -> bool {
+    match *apartness {
+        Apartness::Apart => true,
+        Apartness::Never => false,
+        Apartness::FirstRun => {
+            *apartness = Apartness::SecondRun;
+            false
+        }
+        Apartness::SecondRun => {
+            *apartness = look_at_functions(element, dynamic);
+            *apartness == Apartness::Apart
+        }
+        Apartness::Animated => {
+            let animated = animated(element);
+            if animated {
+                *apartness = Apartness::Apart;
+            }
+            animated
+        }
+    }
+}
+fn animated(element: Option<&Element>) -> bool {
+    element.is_some_and(|element| element.revision.with_untracked(|r| *r != 0))
+}
+/// A node run again: what its functions, if any, do from here.
+#[cold]
+#[inline(never)]
+fn look_at_functions(
+    element: Option<&Element>,
+    dynamic: &[(Prop, Owned, Option<Signal<f32>>)],
+) -> Apartness {
+    let function = |source: &Owned| matches!(source, Owned::Computed(..));
+    if !dynamic.iter().any(|(_, source, _)| function(source)) {
+        return Apartness::Never;
+    }
+    let moved_beside = dynamic
+        .iter()
+        .any(|(_, source, _)| !function(source) && !matches!(source, Owned::Lit(_)));
+    if moved_beside || animated(element) {
+        Apartness::Apart
+    } else if element.is_some() {
+        Apartness::Animated
+    } else {
+        Apartness::Never
+    }
+}
+#[cold]
+#[inline(never)]
+fn styles_apart(dynamic: &[(Prop, Owned, Option<Signal<f32>>)], vm: &Rc<Vm>) -> Box<StylesApart> {
+    let lits = vm.runtime.signal(Rc::new(Vec::new()));
+    let functions: Vec<_> = dynamic
+        .iter()
+        .filter(|(_, source, _)| matches!(source, Owned::Computed(..)))
+        .cloned()
+        .collect();
+    let (out, resolving) = (lits.clone(), vm.clone());
+    let _resolves = vm.runtime.untracked(|| {
+        vm.runtime.effect_now(move || {
+            let now: Vec<(Prop, Lit)> = functions
+                .iter()
+                .filter_map(|(prop, source, scalar)| {
+                    let lit = resolve_style(source, *prop, scalar.as_ref(), &resolving)?;
+                    Some((*prop, lit))
+                })
+                .collect();
+            if out.with_untracked(|was| **was != now) {
+                out.set(Rc::new(now));
+            }
+        })
+    });
+    Box::new(StylesApart { lits, _resolves })
 }
 
 /// A view carrying `element`'s animated values, registered once mounted.
