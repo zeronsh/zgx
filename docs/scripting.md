@@ -404,7 +404,7 @@ A plugin can also add next to any element of the app, or in its place, without a
 | its own `ui.state`, `ui.persist`, components and slots' contributions | yes | yes, its own only (a plugin named as an app script still has its own saved state) |
 | host actions (`ui.action`, `ui.invoke`, `ui.call`) | every one | those `expose_action(name, capability)` exposes, and only with the capability when it names one |
 | shared state (`ui.shared`, `{key}` in a template) | every key | those `expose_shared(key, capability)` exposes, likewise; those `expose_shared_read(key, capability)` exposes, to read and follow only (a write is an error naming the key) |
-| `ui.fetch`, remote images | yes | with `Capability::Fetch` |
+| `ui.fetch`, `ui.socket`, remote images | yes | with `Capability::Fetch`, and what the app's `fetch_policy` allows |
 | the clipboard, file dialogs | yes | with `Capability::Clipboard`, `Capability::Files` |
 | terminals (`ui.term`) | yes | with `Capability::Terminals` |
 | web pages (`ui.web`, `ui.webview`) | yes | with `Capability::Web`: its own pages, with their own cookies and storage, not the app's |
@@ -412,6 +412,34 @@ A plugin can also add next to any element of the app, or in its place, without a
 | files: modules, themes, images | from its directory | from its directory or below, links followed (one pointing outside is outside) |
 | commands (`ui.command`) | yes | yes, as `<plugin>/<id>`; a shortcut the app (or an earlier plugin) has stays theirs, and the plugin's is dropped (`ScriptHost::dropped_shortcuts`) |
 | the app's modules (`@app/…`) | requires them | replaces one with `ui.override` given `Capability::Override(module)` (or `"*"`), **a trust grant**: the replacement runs as the app's own code; never requires them |
+
+`Capability::Fetch` says a plugin may use the network; `ScriptHost::fetch_policy(impl FetchPolicy)` says where. It is the app's, and zgx-run asks it for every request a plugin or the app makes, naming the caller (the plugin's name, or `None` for the app): `url` for the URL and every redirect's, `address` for each address the host resolves to (or an IP literal) before connecting, so a name re-pointed at this device or the LAN is refused too, and `header` for each header set. Any `Err` fails the request with its message. Every method allows by default, and with no policy set everything is allowed, but a plugin never takes a proxy from the environment and never sets `Host`, `Connection`, `Transfer-Encoding`, `TE`, `Upgrade` or `Proxy-*`. Check `url.host()`: it is the host the transport connects to. A host with its own transport (`streaming_fetcher`, `socket_connector`) enforces this itself, with `Body::caller`, `Body::fetch_policy`, `Socket::caller` and `Socket::fetch_policy`.
+
+```rust
+struct Public;
+impl zgx_script::FetchPolicy for Public {
+    fn address(&self, caller: Option<&str>, host: &str, address: IpAddr) -> Result<(), String> {
+        // `to_canonical`: `::ffff:127.0.0.1` reaches this device as `127.0.0.1` does.
+        let address = address.to_canonical();
+        let private = match address {
+            IpAddr::V4(ip) => {
+                ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
+            }
+            IpAddr::V6(ip) => {
+                ip.is_loopback()
+                    || ip.is_unspecified()
+                    || ip.is_unique_local()
+                    || ip.is_unicast_link_local()
+            }
+        };
+        match caller {
+            Some(plugin) if private => Err(format!("{plugin} can't reach {host} at {address}")),
+            _ => Ok(()),
+        }
+    }
+}
+host.fetch_policy(Public);
+```
 
 A plugin's files are source, always: Luau checks no bytecode it loads, so a plugin's (or a module's) bytecode is read as source and fails to parse, rather than run. Only an app's bundle carries bytecode, its build's.
 

@@ -474,6 +474,66 @@ fn a_plugin_fetches_only_if_granted() {
 }
 
 #[test]
+fn a_transport_hears_who_asked_and_the_hosts_policy() {
+    struct Open;
+    impl zgx_script::FetchPolicy for Open {}
+
+    type Asked = (String, Option<String>, bool);
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Asked>::new()));
+    let log = asked.clone();
+    let h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"
+            ui.fetch("https://api.test/app")
+            return ui.column {
+                ui.image { src = "https://img.test/app.png", w = 20, h = 20 },
+                ui.slot("bar"),
+            }
+            "#,
+        )
+        .plugin(
+            "fetcher.luau",
+            r#"
+            ui.fetch("https://api.test/plugin")
+            ui.contribute("bar", ui.image { src = "https://img.test/plugin.png", w = 20, h = 20 })
+            "#,
+        )
+        .grant("fetcher.luau", zgx_script::Capability::Fetch);
+        host.fetch_policy(Open);
+        let log = log.clone();
+        host.streaming_fetcher(move |request, body| {
+            log.borrow_mut().push((
+                request.url,
+                body.caller().map(str::to_owned),
+                body.fetch_policy().is_some(),
+            ));
+            async { Err("nothing here".to_string()) }
+        });
+        host
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while asked.borrow().len() < 4 && Instant::now() < deadline {
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let mut asked = asked.borrow().clone();
+    asked.sort();
+    let plugin = Some("fetcher.luau".to_string());
+    assert_eq!(
+        asked,
+        [
+            ("https://api.test/app".to_string(), None, true),
+            ("https://api.test/plugin".to_string(), plugin.clone(), true),
+            ("https://img.test/app.png".to_string(), None, true),
+            ("https://img.test/plugin.png".to_string(), plugin, true),
+        ]
+    );
+}
+
+#[test]
 fn a_broken_plugin_is_left_out_and_the_rest_loads() {
     let mut h = Harness::new(|runtime| {
         ScriptHost::inline(runtime, "app", PLUGIN_APP)

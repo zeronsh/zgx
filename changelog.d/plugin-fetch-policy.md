@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **An app can police what its plugins reach over the network** (zgx-script, zgx-run): `ScriptHost::fetch_policy(impl FetchPolicy)` is asked of a request's URL, of every address its host resolves to, and of its headers, with the plugin's name as the caller (`None` for the app). zgx-run asks it on every redirect, before connecting to any address (so a name that later resolves to this device or the LAN is refused too), and for `ui.fetch`, remote images and `ui.socket` alike. A plugin never takes a proxy from the environment, and never sets Host, Connection, Transfer-Encoding, TE, Upgrade or `Proxy-*`, with or without a policy. A host with a transport of its own reads the same with `Body::caller`, `Body::fetch_policy`, `Socket::caller` and `Socket::fetch_policy`.

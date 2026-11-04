@@ -71,6 +71,9 @@ pub struct Socket(Rc<Link>);
 /// running its future.
 struct Link {
     conn: Weak<Conn>,
+    /// The plugin that opened it, and the app's policy as this attempt began.
+    caller: Option<Rc<str>>,
+    policy: Option<std::sync::Arc<dyn crate::fetch_policy::FetchPolicy>>,
     /// The script still wants this connection.
     live: Cell<bool>,
     /// The transport waiting for something to send.
@@ -93,6 +96,17 @@ impl Link {
 }
 
 impl Socket {
+    /// The plugin that opened this connection (its name), `None` for the
+    /// app's own scripts: what a transport tells `FetchPolicy` it is asking
+    /// for.
+    pub fn caller(&self) -> Option<&str> {
+        self.0.caller.as_deref()
+    }
+    /// The app's policy as this attempt began (`ScriptHost::fetch_policy`),
+    /// for a transport to ask.
+    pub fn fetch_policy(&self) -> Option<std::sync::Arc<dyn crate::fetch_policy::FetchPolicy>> {
+        self.0.policy.clone()
+    }
     /// The connection is open: the socket's `status` is `"open"`, its
     /// attempts start again from none, `on_open` runs and what was queued
     /// is sent.
@@ -214,6 +228,8 @@ struct Conn {
     runtime: Runtime,
     vm: Weak<crate::Vm>,
     connector: SharedConnector,
+    caller: Option<Rc<str>>,
+    policy: crate::fetch_policy::SharedPolicy,
     timers: Rc<crate::timers::Timers>,
     status: Signal<Value>,
     attempt: Signal<Value>,
@@ -257,6 +273,8 @@ impl Conn {
         };
         let link = Rc::new(Link {
             conn: Rc::downgrade(self),
+            caller: self.caller.clone(),
+            policy: self.policy.borrow().clone(),
             live: Cell::new(true),
             sender: RefCell::default(),
             task: RefCell::default(),
@@ -482,6 +500,7 @@ pub(crate) fn install(
     lua: &Lua,
     ui: &Table,
     connector: Option<SharedConnector>,
+    policy: crate::fetch_policy::SharedPolicy,
 ) -> mlua::Result<()> {
     ui.set(
         "socket",
@@ -492,7 +511,7 @@ pub(crate) fn install(
                      (`ScriptHost::grant(plugin, Capability::Fetch)`)",
                 ));
             };
-            socket(lua, url, opts, connector.clone())
+            socket(lua, url, opts, connector.clone(), policy.clone())
         })?,
     )?;
     ui.set(
@@ -514,6 +533,7 @@ fn socket(
     url: mlua::Value,
     opts: Option<Table>,
     connector: SharedConnector,
+    policy: crate::fetch_policy::SharedPolicy,
 ) -> mlua::Result<Table> {
     let url = match url {
         mlua::Value::String(s) => Err(s.to_str()?.to_string()),
@@ -564,6 +584,8 @@ fn socket(
         runtime: runtime.clone(),
         vm: env.vm.clone(),
         connector,
+        caller: crate::fetch_policy::caller_of(lua),
+        policy,
         timers: env.timers.clone(),
         status: runtime.signal(Value::Str("connecting".into())),
         attempt: runtime.signal(Value::Num(0.)),
