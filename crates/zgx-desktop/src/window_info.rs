@@ -111,6 +111,47 @@ pub struct WindowCapabilities {
     /// The window can enter native fullscreen.
     pub native_fullscreen: bool,
 }
+/// A window going into or out of full screen, as AppKit animates it
+/// (macOS): `WindowContext::full_screen_transition`, `ui.window.full_screen_transition`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FullScreenTransition {
+    /// Going into full screen, over about this long (AppKit's estimate of
+    /// its animation).
+    Entering(std::time::Duration),
+    /// Coming out of it, over about this long.
+    Leaving(std::time::Duration),
+}
+/// What AppKit says of a window's full screen (its `NSWindowWill…` and
+/// `NSWindowDid…FullScreen` notifications), or that a transition begun
+/// has had time to end (`Settled`: one that failed tells only winit's
+/// delegate).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) enum FullScreenPhase {
+    WillEnter,
+    DidEnter,
+    WillExit,
+    DidExit,
+    Settled,
+}
+impl FullScreenPhase {
+    /// The transition `self` leaves: a will begins one lasting `duration`;
+    /// a did, or `Settled`, ends it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn transition(self, duration: std::time::Duration) -> Option<FullScreenTransition> {
+        match self {
+            Self::WillEnter => Some(FullScreenTransition::Entering(duration)),
+            Self::WillExit => Some(FullScreenTransition::Leaving(duration)),
+            Self::DidEnter | Self::DidExit | Self::Settled => None,
+        }
+    }
+    /// Whether the window's state is settled after `self` (its full screen
+    /// and its title bar's buttons read again).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn settles(self) -> bool {
+        !matches!(self, Self::WillEnter | Self::WillExit)
+    }
+}
 /// A window's geometry and state, kept current as signals: reading one in
 /// a view updates it when the window moves, resizes or changes display.
 #[derive(Clone)]
@@ -355,4 +396,36 @@ pub(crate) fn attributes(
             .with_position(monitor.position());
     }
     Ok(attrs)
+}
+
+#[cfg(test)]
+mod full_screen_tests {
+    use super::{FullScreenPhase, FullScreenTransition};
+    use std::time::Duration;
+
+    /// AppKit's will begins a transition as long as its animation; its did
+    /// ends it, and the window is read again; a transition that failed
+    /// (no did) ends once it has had time to (`Settled`).
+    #[test]
+    fn a_full_screen_transition_runs_from_its_will_to_its_did() {
+        let half = Duration::from_millis(500);
+        assert_eq!(
+            FullScreenPhase::WillEnter.transition(half),
+            Some(FullScreenTransition::Entering(half))
+        );
+        assert_eq!(
+            FullScreenPhase::WillExit.transition(half),
+            Some(FullScreenTransition::Leaving(half))
+        );
+        for phase in [
+            FullScreenPhase::DidEnter,
+            FullScreenPhase::DidExit,
+            FullScreenPhase::Settled,
+        ] {
+            assert_eq!(phase.transition(half), None);
+            assert!(phase.settles());
+        }
+        assert!(!FullScreenPhase::WillEnter.settles());
+        assert!(!FullScreenPhase::WillExit.settles());
+    }
 }

@@ -188,6 +188,33 @@ return ui.row {
 }
 ```
 
+### Full screen
+
+```luau
+ui.window.full_screen: State<boolean>
+ui.window.full_screen_transition: State<{ phase: "entering" | "leaving", duration: number }?>
+```
+
+`ui.window.full_screen` is whether the window is in full screen, however it went in or out: the green button, Ctrl+Cmd+F, the View menu, Mission Control, or a script. `ui.window.full_screen_transition` is the transition while one runs (macOS animates it): `phase` is `"entering"` or `"leaving"`, and `duration` is about how many seconds it takes (AppKit's estimate). It is nil otherwise, and always on Linux and Windows, where `full_screen` changes at once. Both are read-only.
+
+In full screen macOS hides the traffic lights, and `ui.window.controls` is nil. A title bar laid out around them can slide over as they go:
+
+```lua
+return ui.row {
+	h = 44,
+	window_drag = true,
+	items = "center",
+	-- Clear of the traffic lights, flush once full screen hides them,
+	-- eased about as long as AppKit's animation.
+	pl = ui.tween(ui.window.full_screen, { duration = 500, from = 84, to = 12 }),
+	ui.text { "Title" },
+}
+```
+
+Something timed by hand (an `anime` animation) can read the transition's own `duration` as it begins.
+
+`zgx run` keeps both; a Rust host passes its window's with `ScriptHost::window_full_screen` (`WindowInfo::fullscreen` and `WindowContext::full_screen_transition`).
+
 ### Zoom
 
 ```luau

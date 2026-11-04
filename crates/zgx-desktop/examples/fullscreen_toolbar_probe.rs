@@ -5,7 +5,8 @@
 //! runs it and checks the lines.
 //!
 //! `--via green` goes in and out of full screen as the green button does
-//! (`toggleFullScreen:`); `--via borderless` with zgx's
+//! (`toggleFullScreen:`), `--via button` by clicking it (its
+//! `performClick:`); `--via borderless` with zgx's
 //! `WindowHandle::set_fullscreen` (winit's borderless full screen);
 //! `--via failed` posts AppKit's will-enter-full-screen notification for the
 //! window without entering, as a transition that fails after it began looks
@@ -17,6 +18,12 @@
 //!   buttons_hidden=<bool> toolbar_visible=<bool>`: the window, its content
 //!   layout rect's height (the window's whole height when nothing covers
 //!   its top) and its traffic lights.
+//!
+//! - `STATE <ms> full=<bool> transition=<entering|leaving|none> <seconds>
+//!   controls=<x or none>`: as each changes, what the window says of its
+//!   full screen (`WindowInfo::fullscreen`,
+//!   `WindowContext::full_screen_transition`) and its traffic lights
+//!   (`WindowInfo::controls`: none in full screen).
 //!
 //! Then `FULLSCREEN_TOOLBAR_DONE`.
 use std::time::Duration;
@@ -31,7 +38,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|i| args.get(i + 1))
         .cloned()
         .unwrap_or_else(|| "green".into());
-    let green = via == "green";
+    let button = via == "button";
+    let green = via == "green" || button;
     let failed = via == "failed";
     Application::new()
         .window(WindowOptions {
@@ -43,6 +51,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .run(move |cx| {
             cx.render(div().w_full().h_full().bg(rgba(0x3060a0ff)));
+            let (info, transition) = (cx.window_info.clone(), cx.full_screen_transition.clone());
+            let start = std::time::Instant::now();
+            let states = cx.ui.runtime.effect(move || {
+                let (moving, seconds) = match transition.get() {
+                    Some(zgx_desktop::FullScreenTransition::Entering(d)) => ("entering", d),
+                    Some(zgx_desktop::FullScreenTransition::Leaving(d)) => ("leaving", d),
+                    None => ("none", Duration::ZERO),
+                };
+                let controls = info
+                    .controls
+                    .get()
+                    .map_or("none".to_owned(), |rect| format!("{:.0}", rect.x));
+                println!(
+                    "STATE {} full={} transition={moving} {:.3} controls={controls}",
+                    start.elapsed().as_millis(),
+                    info.fullscreen.get(),
+                    seconds.as_secs_f64(),
+                );
+            });
+            cx.on_closed(move || drop(states));
             let window = cx.window.clone();
             cx.tasks.spawn(async move {
                 let pause = |ms| zgx::timer::sleep(Duration::from_millis(ms));
@@ -58,14 +86,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     window.close();
                     return;
                 }
-                if green {
+                if button {
+                    state::click();
+                } else if green {
                     state::toggle();
                 } else {
                     window.set_fullscreen(true);
                 }
                 pause(3000).await;
                 state::report("full");
-                if green {
+                if button {
+                    state::click();
+                } else if green {
                     state::toggle();
                 } else {
                     window.set_fullscreen(false);
@@ -104,6 +136,26 @@ mod state {
         unsafe {
             let name = objc2_app_kit::NSWindowWillEnterFullScreenNotification;
             NSNotificationCenter::defaultCenter().postNotificationName_object(name, Some(&window));
+        }
+    }
+
+    /// A click on the green button (its `performClick:`, the action a
+    /// press sends; no input posted).
+    pub fn click() {
+        let Some(window) = ours() else {
+            println!("NO_WINDOW");
+            return;
+        };
+        // SAFETY: `-standardWindowButton:` takes an NSUInteger (2: the zoom
+        // button) and returns a button or nil; `-performClick:` takes a
+        // sender, which may be nil.
+        unsafe {
+            let zoom: *mut AnyObject = msg_send![&*window, standardWindowButton: 2usize];
+            if zoom.is_null() {
+                println!("NO_BUTTON");
+                return;
+            }
+            let _: () = msg_send![zoom, performClick: std::ptr::null::<AnyObject>()];
         }
     }
 
@@ -166,6 +218,7 @@ mod state {
 #[cfg(not(target_os = "macos"))]
 mod state {
     pub fn will_enter() {}
+    pub fn click() {}
     pub fn toggle() {}
     pub fn report(_: &str) {
         println!("SKIP macOS only");
