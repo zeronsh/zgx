@@ -7473,7 +7473,14 @@ fn item_keys(vm: &Vm, key: &mlua::Function, items: &Value, kept: &mut KeptKeys) 
                 .collect::<Vec<_>>()
                 .into(),
         );
-        match all.and_then(|all| vm.call::<mlua::Table>(&all, (key, asked))) {
+        // Made into a table before the call: the host's work, which the
+        // script's budget isn't for, and a long list's is most of it.
+        let asked = mlua::IntoLua::into_lua(asked, lua);
+        let keyed = all.and_then(|all| {
+            let asked = asked?;
+            vm.call::<mlua::Table>(&all, (key, asked))
+        });
+        match keyed {
             Ok(table) => {
                 for (n, &i) in missing.iter().enumerate() {
                     let key = match table.raw_get::<mlua::Value>(n + 1) {
