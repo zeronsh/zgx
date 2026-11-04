@@ -262,6 +262,49 @@ return ui.column {}"#,
     );
 }
 
+/// A plugin that fails as it loads takes everything it declared with it: no
+/// command of its stays in the menu bar unable to run, no window of its
+/// stays declared. The app's own commands, and the error, remain.
+#[test]
+fn a_plugin_that_fails_to_load_leaves_no_commands_behind() {
+    let entry = plugin(
+        "failing",
+        r#"
+ui.command { id = "note", title = "New Note", menu = "Notes", key = "cmd+shift+n", run = function() end }
+ui.window { id = "notes", title = "Notes", open = ui.state("open", false), ui.text { "notes" } }
+error("plugin bug")
+"#,
+    );
+    let h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"ui.command { id = "copy", title = "Copy", menu = "Edit", key = "cmd+c", run = function() end }
+return ui.column {}"#,
+        );
+        host.set_plugins(vec![Plugin {
+            name: "failing".into(),
+            entry,
+            grants: vec![Capability::Windows],
+        }]);
+        host
+    });
+    let ids: Vec<String> = h.host.commands().get().into_iter().map(|c| c.id).collect();
+    assert_eq!(ids, ["copy"], "the failed plugin's command stayed");
+    assert!(!h.host.run_command("failing/note"));
+    assert!(h.host.run_command("copy"));
+    assert!(
+        h.host
+            .windows()
+            .get()
+            .iter()
+            .all(|window| !window.id.contains("notes")),
+        "the failed plugin's window stayed"
+    );
+    let error = h.host.error().get().unwrap_or_default();
+    assert!(error.contains("plugin bug"), "{error:?}");
+}
+
 #[test]
 fn a_plugins_pages_are_its_own_not_the_apps() {
     let entry = plugin(

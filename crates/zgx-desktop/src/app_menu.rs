@@ -302,6 +302,108 @@ pub(crate) fn validate(menus: &[AppMenu]) -> Result<(), AppMenuError> {
     }
     visit(menus, &mut HashSet::new(), &mut HashSet::new())
 }
+/// `menus` with what can't be shown left out, and why each thing was, so one
+/// bad item never costs the rest of the bar: a menu or item with no label
+/// (or a NUL in it), an item whose action is empty or another item's, a
+/// standard item twice or on another's shortcut. An accelerator no key
+/// names (⌘é, ⌘?) or another item has is dropped from its item alone: the
+/// item stays, chosen from the menu. What `validate` then accepts.
+pub(crate) fn sanitize(menus: Vec<AppMenu>) -> (Vec<AppMenu>, Vec<String>) {
+    fn usable(text: &str) -> bool {
+        !text.is_empty() && !text.contains('\0')
+    }
+    fn clean(
+        menu: AppMenu,
+        ids: &mut HashSet<String>,
+        shortcuts: &mut HashSet<String>,
+        problems: &mut Vec<String>,
+    ) -> Option<AppMenu> {
+        if !usable(&menu.label) {
+            problems.push(format!(
+                "a menu with no label (or a NUL in it) is left out, with its {} items",
+                menu.entries.len()
+            ));
+            return None;
+        }
+        let label = menu.label;
+        let mut entries = Vec::with_capacity(menu.entries.len());
+        for entry in menu.entries {
+            match entry {
+                AppMenuEntry::Item {
+                    label: title,
+                    action,
+                    enabled,
+                    checked,
+                    mut accelerator,
+                } => {
+                    if !usable(&title) || !usable(&action.0) {
+                        problems.push(format!(
+                            "an item in {label} with no label or action ({:?}, {:?}) is left out",
+                            title, action.0
+                        ));
+                        continue;
+                    }
+                    if !ids.insert(action.0.clone()) {
+                        problems.push(format!(
+                            "{label} › {title}: its action {:?} is another item's, so it is left out",
+                            action.0
+                        ));
+                        continue;
+                    }
+                    if let Some(shortcut) = &accelerator {
+                        match shortcut.name() {
+                            Err(_) => {
+                                problems.push(format!(
+                                    "{label} › {title}: no key names its shortcut, so it has none"
+                                ));
+                                accelerator = None;
+                            }
+                            Ok(name) if !shortcuts.insert(name.clone()) => {
+                                problems.push(format!(
+                                    "{label} › {title}: its shortcut {name} is another item's, so it has none"
+                                ));
+                                accelerator = None;
+                            }
+                            Ok(_) => {}
+                        }
+                    }
+                    entries.push(AppMenuEntry::Item {
+                        label: title,
+                        action,
+                        enabled,
+                        checked,
+                        accelerator,
+                    });
+                }
+                AppMenuEntry::Submenu(child) => {
+                    if let Some(child) = clean(child, ids, shortcuts, problems) {
+                        entries.push(AppMenuEntry::Submenu(child));
+                    }
+                }
+                AppMenuEntry::Standard(item) => {
+                    if shortcuts.contains(item.shortcut_name()) || ids.contains(&item.action().0) {
+                        problems.push(format!(
+                            "{label}: the standard {} item is there already, or its shortcut or action is another item's, so it is left out",
+                            item.label()
+                        ));
+                        continue;
+                    }
+                    shortcuts.insert(item.shortcut_name().to_owned());
+                    ids.insert(item.action().0);
+                    entries.push(AppMenuEntry::Standard(item));
+                }
+                AppMenuEntry::Separator => entries.push(AppMenuEntry::Separator),
+            }
+        }
+        Some(AppMenu { label, entries })
+    }
+    let (mut ids, mut shortcuts, mut problems) = (HashSet::new(), HashSet::new(), Vec::new());
+    let menus = menus
+        .into_iter()
+        .filter_map(|menu| clean(menu, &mut ids, &mut shortcuts, &mut problems))
+        .collect();
+    (menus, problems)
+}
 pub(crate) fn enabled_action(menus: &[AppMenu], action: &MenuAction) -> bool {
     menus
         .iter()
@@ -1033,6 +1135,28 @@ pub fn debug_key_before_menu_bar(menus: &[AppMenu], key: &str) -> Result<bool, A
     .ok_or_else(|| AppMenuError("no key event".into()))?;
     Ok(offer_key(&event))
 }
+/// Show `menus` as the menu bar in `current`'s place: in place where only
+/// its items' titles and states differ (`NativeMenu::update_states`), else
+/// a new bar; whether in place. A bar AppKit can't make leaves `current` as
+/// it was, the last good bar showing, and says why: the app goes on.
+#[cfg(target_os = "macos")]
+pub(crate) fn show_menus(
+    current: &mut Option<NativeMenu>,
+    menus: &[AppMenu],
+) -> Result<bool, AppMenuError> {
+    if current
+        .as_mut()
+        .is_some_and(|menu| menu.update_states(menus))
+    {
+        return Ok(true);
+    }
+    let replacement = NativeMenu::new(menus)?;
+    // The old menu removes itself from NSApp as it drops: install after.
+    *current = None;
+    replacement.install();
+    *current = Some(replacement);
+    Ok(false)
+}
 /// What `debug_menu_change` saw.
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
@@ -1042,36 +1166,36 @@ pub struct MenuChange {
     pub in_place: bool,
     /// The main menu AppKit shows is still the one it was: no new bar drawn.
     pub kept: bool,
+    /// Why the change couldn't be shown, the last good bar left showing.
+    pub failed: Option<String>,
     /// Each item of the bar's menus after, as (title, enabled, checked).
     pub items: Vec<(String, bool, bool)>,
 }
 /// Test hook: install `first` as the application's menu bar, then show
-/// `second` as a change of the app's menus does (`Event::MenusChanged`).
-/// Main thread only.
+/// `second` as a change of the app's menus does (`Event::MenusChanged`,
+/// through `show_menus`). Main thread only.
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub fn debug_menu_change(
     first: &[AppMenu],
     second: &[AppMenu],
 ) -> Result<MenuChange, AppMenuError> {
-    let mut menu = NativeMenu::new(first)?;
-    menu.install();
+    let mut current = None;
+    show_menus(&mut current, first)?;
     let Some(mtm) = objc2::MainThreadMarker::new() else {
         return Ok(MenuChange {
             in_place: false,
             kept: false,
+            failed: None,
             items: Vec::new(),
         });
     };
     let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
     let before = app.mainMenu();
-    let in_place = menu.update_states(second);
-    if !in_place {
-        // As the host does: the old menu leaves NSApp as it drops.
-        drop(menu);
-        menu = NativeMenu::new(second)?;
-        menu.install();
-    }
+    let (in_place, failed) = match show_menus(&mut current, second) {
+        Ok(in_place) => (in_place, None),
+        Err(error) => (false, Some(error.0)),
+    };
     let after = app.mainMenu();
     let kept = before
         .as_ref()
@@ -1095,10 +1219,11 @@ pub fn debug_menu_change(
             }
         }
     }
-    drop(menu);
+    drop(current);
     Ok(MenuChange {
         in_place,
         kept,
+        failed,
         items,
     })
 }
@@ -1361,6 +1486,88 @@ impl Drop for NativeMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// One bad item costs that item (or its shortcut), never the bar: what
+    /// `set_menus` shows is the rest, which `validate` then accepts.
+    #[test]
+    fn a_bar_with_bad_items_keeps_the_good_ones() {
+        use zgx::input::{Key, Modifiers};
+        let command = Modifiers {
+            meta: true,
+            ..Default::default()
+        };
+        let key = |key: &str| MenuAccelerator::new(Key::Character(key.into()), command);
+        let menus = vec![
+            AppMenu::new(
+                "File",
+                [
+                    AppMenuEntry::item("New Tab", "new-tab").accelerator(key("t")),
+                    // A second ⌘T: kept, without it.
+                    AppMenuEntry::item("New Terminal", "new-terminal").accelerator(key("t")),
+                    // No key names ⌘é or ⌘?: kept, without them.
+                    AppMenuEntry::item("Accent", "accent").accelerator(key("é")),
+                    AppMenuEntry::item("Help", "help").accelerator(key("?")),
+                    // No label, or the action of another: left out.
+                    AppMenuEntry::item("", "nameless"),
+                    AppMenuEntry::item("New Tab Again", "new-tab"),
+                    AppMenuEntry::Separator,
+                    AppMenuEntry::item("Close", "close").accelerator(key("w")),
+                ],
+            ),
+            // A menu with no label: left out, its items with it.
+            AppMenu::new("", [AppMenuEntry::item("Lost", "lost")]),
+            AppMenu::new(
+                "Edit",
+                [
+                    AppMenuEntry::Standard(StandardItem::Copy),
+                    AppMenuEntry::Standard(StandardItem::Copy),
+                    AppMenuEntry::item("Copy Path", "copy-path").accelerator(key("c")),
+                ],
+            ),
+        ];
+        assert!(validate(&menus).is_err(), "all or nothing before");
+        let (shown, left_out) = sanitize(menus);
+        assert_eq!(validate(&shown), Ok(()), "{left_out:?}");
+        let items: Vec<(String, String, bool)> = shown
+            .iter()
+            .flat_map(|menu| &menu.entries)
+            .filter_map(|entry| match entry {
+                AppMenuEntry::Item {
+                    label,
+                    action,
+                    accelerator,
+                    ..
+                } => Some((label.clone(), action.0.clone(), accelerator.is_some())),
+                _ => None,
+            })
+            .collect();
+        let item = |label: &str, action: &str, key| (label.to_owned(), action.to_owned(), key);
+        assert_eq!(
+            items,
+            [
+                item("New Tab", "new-tab", true),
+                item("New Terminal", "new-terminal", false),
+                item("Accent", "accent", false),
+                item("Help", "help", false),
+                item("Close", "close", true),
+                item("Copy Path", "copy-path", false),
+            ]
+        );
+        assert_eq!(
+            shown
+                .iter()
+                .map(|menu| menu.label.as_str())
+                .collect::<Vec<_>>(),
+            ["File", "Edit"]
+        );
+        let standards = shown[1]
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry, AppMenuEntry::Standard(_)))
+            .count();
+        assert_eq!(standards, 1, "the second Copy is left out");
+        // Each left out, or each shortcut dropped, is said.
+        assert_eq!(left_out.len(), 8, "{left_out:#?}");
+    }
     #[test]
     fn a_standard_items_shortcut_and_action_are_its_own() {
         use zgx::input::{Key, Modifiers};

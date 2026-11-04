@@ -3477,15 +3477,24 @@ impl ScriptHost {
         let managed = self.0.managed.borrow().clone();
         for script in self.0.plugins.iter().chain(&files).chain(&managed) {
             // A plugin that fails is left out, not the app: the error is
-            // reported, and the app and the other plugins load.
+            // reported, and the app and the other plugins load. What it
+            // declared before it failed goes with it: no command of its
+            // stays in the menu bar unable to run, no window of its opens.
+            let declared = (self.0.commands.mark(), self.0.windows.mark());
+            let discard = || {
+                self.0.commands.discard_since(declared.0);
+                self.0.windows.discard_since(declared.1);
+            };
             let (vm, root, contributions, added) = match self.run(script, true) {
                 Ok(ran) => ran,
                 Err(error) => {
+                    discard();
                     broken.push(error);
                     continue;
                 }
             };
             if root.is_some() {
+                discard();
                 broken.push(format!(
                     "{}: a plugin contributes with ui.contribute; it returns nothing",
                     script.name()

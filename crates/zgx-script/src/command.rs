@@ -130,6 +130,21 @@ impl Commands {
         self.pending_keys.borrow_mut().clear();
         self.pending_reserved.borrow_mut().clear();
     }
+    /// Where the load's declarations are, before a script runs.
+    pub fn mark(&self) -> (usize, usize, usize) {
+        (
+            self.pending.borrow().len(),
+            self.pending_keys.borrow().len(),
+            self.pending_reserved.borrow().len(),
+        )
+    }
+    /// A script failed as it loaded: what it declared since `mark` goes, so
+    /// no command of a failed plugin stays in the menu bar unable to run.
+    pub fn discard_since(&self, (commands, keys, reserved): (usize, usize, usize)) {
+        self.pending.borrow_mut().truncate(commands);
+        self.pending_keys.borrow_mut().truncate(keys);
+        self.pending_reserved.borrow_mut().truncate(reserved);
+    }
     /// The load succeeded: publish what it declared, and again whenever a
     /// shortcut that follows a state changes.
     pub fn publish(self: &Rc<Self>) {

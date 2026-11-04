@@ -531,6 +531,9 @@ pub struct WindowFactory {
     /// GPU contexts made later too.
     text_language: Rc<RefCell<Option<String>>>,
     menus: Rc<RefCell<Vec<crate::AppMenu>>>,
+    /// What the last `set_menus` left out, and why: said again only as it
+    /// changes, as an app sets its menus at every state change.
+    menus_left_out: Rc<RefCell<Vec<String>>>,
     /// The keystrokes the app keeps whatever has the keyboard
     /// (`set_reserved_shortcuts`).
     reserved: Rc<RefCell<Vec<zgx::actions::Keystroke>>>,
@@ -591,11 +594,29 @@ impl WindowFactory {
             .send_event(Event::FontsReplaced)
             .map_err(|_| "application event loop is closed")
     }
-    /// Replace the application menu model for existing and future windows.
+    /// Replace the application's menus, **for every window at once**: the
+    /// macOS menu bar, each window's bar elsewhere, and the shortcuts they
+    /// bind in every window, existing and future. One window's call (a
+    /// sheet's, a plugin's panel) replaces the main window's menus too, so
+    /// pass the whole app's each time, never one window's part.
+    ///
+    /// What can't be shown is left out and the rest shown, so one bad item
+    /// never costs the bar: a menu or item with no label, an item whose
+    /// action is another's, and an accelerator no key names (⌘é) or that
+    /// another item has, dropped from its item alone. Each is written on
+    /// stderr (`zgx: menus: …`) as it first appears. An error only when the
+    /// application is closed.
     pub fn set_menus(&self, menus: Vec<crate::AppMenu>) -> Result<(), crate::AppMenuError> {
-        crate::app_menu::validate(&menus)?;
         if !self.alive.get() {
             return Err(crate::AppMenuError("application is closed".into()));
+        }
+        let (menus, left_out) = crate::app_menu::sanitize(menus);
+        {
+            let mut said = self.menus_left_out.borrow_mut();
+            for problem in left_out.iter().filter(|problem| !said.contains(problem)) {
+                eprintln!("zgx: menus: {problem}");
+            }
+            *said = left_out;
         }
         *self.menus.borrow_mut() = menus;
         self.proxy
@@ -902,9 +923,13 @@ impl Application {
         self.options = options;
         self
     }
-    /// The application menu (validated now), for every window.
+    /// The application menu, for every window: what can't be shown is left
+    /// out and said on stderr, as `WindowFactory::set_menus` does.
     pub fn menus(mut self, menus: Vec<crate::AppMenu>) -> Result<Self, crate::AppMenuError> {
-        crate::app_menu::validate(&menus)?;
+        let (menus, left_out) = crate::app_menu::sanitize(menus);
+        for problem in &left_out {
+            eprintln!("zgx: menus: {problem}");
+        }
         self.menus = menus;
         Ok(self)
     }
@@ -1045,6 +1070,7 @@ impl Application {
             #[cfg(target_os = "linux")]
             activation: Rc::default(),
             menus: Rc::new(RefCell::new(self.menus)),
+            menus_left_out: Rc::default(),
             reserved: Rc::new(RefCell::new(self.reserved)),
             pending: Rc::new(RefCell::new(VecDeque::new())),
             next: Rc::new(Cell::new(1)),
@@ -6651,7 +6677,7 @@ impl WindowManager {
     /// frame shows rather than on the way to it, at once with no window
     /// about to show one, and after `MENU_BAR_LATEST` in any case.
     #[cfg(target_os = "macos")]
-    fn install_menu_bar(&mut self, event_loop: &ActiveEventLoop) {
+    fn install_menu_bar(&mut self) {
         let Some(latest) = self.menu_bar_due else {
             return;
         };
@@ -6665,12 +6691,15 @@ impl WindowManager {
             return;
         }
         self.menu_bar_due = None;
-        match crate::app_menu::NativeMenu::new(&self.factory.menus()) {
-            Ok(menu) => {
-                menu.install();
-                self.native_menu = Some(menu);
+        // A bar AppKit can't make is said, never the app's end: then the
+        // application and Window menus alone, every Mac app's.
+        if let Err(error) =
+            crate::app_menu::show_menus(&mut self.native_menu, &self.factory.menus())
+        {
+            eprintln!("zgx: the menu bar: {error}; showing the standard menus alone");
+            if let Err(error) = crate::app_menu::show_menus(&mut self.native_menu, &[]) {
+                eprintln!("zgx: the standard menus: {error}");
             }
-            Err(error) => self.fail(event_loop, error),
         }
     }
     fn resumed_turn(&mut self, event_loop: &ActiveEventLoop) {
@@ -6921,24 +6950,13 @@ impl WindowManager {
                 let menus = self.factory.menus();
                 let reserved = self.factory.reserved.borrow().clone();
                 // A menu bar still to be made is made from them then.
+                // One AppKit can't make is said and the last good bar kept,
+                // never the app's end; the shortcuts below still follow.
                 #[cfg(target_os = "macos")]
                 if self.menu_bar_due.is_none()
-                    && !self
-                        .native_menu
-                        .as_mut()
-                        .is_some_and(|menu| menu.update_states(&menus))
+                    && let Err(error) = crate::app_menu::show_menus(&mut self.native_menu, &menus)
                 {
-                    let replacement = match crate::app_menu::NativeMenu::new(&menus) {
-                        Ok(menu) => menu,
-                        Err(error) => {
-                            self.fail(event_loop, error);
-                            return;
-                        }
-                    };
-                    // Old menu removes itself from NSApp on drop; install replacement afterwards.
-                    self.native_menu = None;
-                    replacement.install();
-                    self.native_menu = Some(replacement);
+                    eprintln!("zgx: the menu bar: {error}; the last one stays");
                 }
                 for host in self.hosts.values_mut() {
                     host.context.menu_model.set(menus.clone());
@@ -7145,7 +7163,7 @@ impl WindowManager {
             && matches!(&event, WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed())
         {
             self.menu_bar_due = Some(std::time::Instant::now());
-            self.install_menu_bar(event_loop);
+            self.install_menu_bar();
             if crate::app_menu::offer_current_key() {
                 return;
             }
@@ -7248,7 +7266,7 @@ impl WindowManager {
             return;
         }
         #[cfg(target_os = "macos")]
-        self.install_menu_bar(event_loop);
+        self.install_menu_bar();
         // macOS's Reduce motion, Increase contrast or Reduce transparency
         // changed: every window's themes follow at once.
         if crate::system_colors::display_options_changed() {
@@ -8596,6 +8614,7 @@ mod tests {
             #[cfg(target_os = "linux")]
             activation: Rc::default(),
             menus: Rc::new(RefCell::new(Vec::new())),
+            menus_left_out: Rc::default(),
             reserved: Rc::default(),
             pending: Rc::new(RefCell::new(VecDeque::new())),
             next: Rc::new(Cell::new(1)),
@@ -8751,6 +8770,7 @@ mod tests {
             #[cfg(target_os = "linux")]
             activation: Rc::default(),
             menus: Rc::new(RefCell::new(Vec::new())),
+            menus_left_out: Rc::default(),
             reserved: Rc::default(),
             pending: Rc::new(RefCell::new(VecDeque::new())),
             next: Rc::new(Cell::new(1)),
@@ -8879,6 +8899,7 @@ mod tests {
             application_id: None,
             activation: Rc::default(),
             menus: Rc::new(RefCell::new(Vec::new())),
+            menus_left_out: Rc::default(),
             reserved: Rc::default(),
             pending: Rc::new(RefCell::new(VecDeque::new())),
             next: Rc::new(Cell::new(1)),
@@ -8954,6 +8975,7 @@ mod tests {
             application_id: None,
             activation: Rc::default(),
             menus: Rc::new(RefCell::new(Vec::new())),
+            menus_left_out: Rc::default(),
             reserved: Rc::default(),
             pending: Rc::new(RefCell::new(VecDeque::new())),
             next: Rc::new(Cell::new(1)),
@@ -9021,6 +9043,7 @@ mod tests {
             application_id: None,
             activation: Rc::default(),
             menus: Rc::new(RefCell::new(Vec::new())),
+            menus_left_out: Rc::default(),
             reserved: Rc::default(),
             pending: Rc::new(RefCell::new(VecDeque::new())),
             next: Rc::new(Cell::new(1)),

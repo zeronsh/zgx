@@ -78,6 +78,7 @@ fn main() {
             in_place,
             kept,
             items,
+            ..
         } = debug_menu_change(&view("Back", false, false), &view("Go Back", true, true)).unwrap();
         assert!(in_place && kept, "in place {in_place}, bar kept {kept}");
         assert!(
@@ -91,6 +92,7 @@ fn main() {
             in_place,
             kept,
             items,
+            ..
         } = debug_menu_change(&view("Back", true, true), &more).unwrap();
         assert!(!in_place && !kept, "in place {in_place}, bar kept {kept}");
         assert!(
@@ -98,5 +100,41 @@ fn main() {
             "{items:?}"
         );
         println!("menu_services: menus changing only their items' titles and states keep the bar");
+
+        // A bar AppKit can't make (here two items on one key, as
+        // `set_menus` never passes on) is said, and the last good bar
+        // stays: no exit, no empty bar.
+        let key = |key: &str| {
+            MenuAccelerator::new(
+                Key::Character(key.into()),
+                zgx::input::Modifiers {
+                    meta: true,
+                    ..Default::default()
+                },
+            )
+        };
+        let broken = [AppMenu::new(
+            "View",
+            [
+                AppMenuEntry::item("Back", "back").accelerator(key("j")),
+                AppMenuEntry::item("Forward", "forward").accelerator(key("j")),
+            ],
+        )];
+        let zgx_desktop::app_menu::MenuChange {
+            kept,
+            failed,
+            items,
+            ..
+        } = debug_menu_change(&view("Back", true, false), &broken).unwrap();
+        assert!(
+            failed.is_some() && kept,
+            "failed {failed:?}, bar kept {kept}"
+        );
+        assert!(
+            items.iter().any(|(title, ..)| title == "Sidebar")
+                && !items.iter().any(|(title, ..)| title == "Forward"),
+            "{items:?}"
+        );
+        println!("menu_services: a bar AppKit can't make keeps the last good one");
     }
 }
