@@ -308,3 +308,59 @@ fn a_task_sleeps() {
     wait_for(&mut h, "log", "first;slept;");
     assert!(began.elapsed() >= Duration::from_millis(20));
 }
+
+#[test]
+fn a_connector_hears_who_asked_and_the_hosts_policy() {
+    struct Open;
+    impl zgx_script::FetchPolicy for Open {}
+
+    type Asked = (String, Option<String>, bool);
+    let asked = Rc::new(RefCell::new(Vec::<Asked>::new()));
+    let log = asked.clone();
+    let h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"
+            local socket = ui.socket("wss://app.test/")
+            return ui.column { ui.slot("bar") }
+            "#,
+        )
+        .plugin(
+            "feed.luau",
+            r#"local socket = ui.socket("wss://plugin.test/")"#,
+        )
+        .grant("feed.luau", zgx_script::Capability::Fetch);
+        host.fetch_policy(Open);
+        let log = log.clone();
+        host.socket_connector(move |request, socket: Socket| {
+            log.borrow_mut().push((
+                request.url,
+                socket.caller().map(str::to_owned),
+                socket.fetch_policy().is_some(),
+            ));
+            async { Err("nothing here".to_string()) }
+        });
+        host
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while asked.borrow().len() < 2 && Instant::now() < deadline {
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let mut asked = asked.borrow().clone();
+    asked.dedup();
+    asked.sort();
+    assert_eq!(
+        asked[..2],
+        [
+            ("wss://app.test/".to_string(), None, true),
+            (
+                "wss://plugin.test/".to_string(),
+                Some("feed.luau".to_string()),
+                true
+            ),
+        ]
+    );
+}

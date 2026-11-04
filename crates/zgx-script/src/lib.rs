@@ -39,6 +39,7 @@ mod design;
 pub mod driver;
 mod element;
 mod elements_report;
+mod fetch_policy;
 pub use elements_report::{ElementGroup, ElementsReport, ListedElement};
 mod errors;
 #[cfg(target_os = "macos")]
@@ -97,6 +98,7 @@ pub use bundle::{Bundle, BundleFile, build};
 pub use calls::{Body, Request, Response};
 pub use command::{Command, DroppedShortcut};
 pub use design::DesignLint;
+pub use fetch_policy::{FetchPolicy, Url};
 pub use persist::app_data_dir;
 pub use socket::{Message, Socket, SocketRequest};
 pub use windows::WindowState;
@@ -1485,6 +1487,8 @@ struct Inner {
     fetcher: calls::SharedFetcher,
     /// The transport `ui.socket` connects through (`socket_connector`).
     connector: socket::SharedConnector,
+    /// What the app allows of scripts' requests (`fetch_policy`).
+    fetch_policy: fetch_policy::SharedPolicy,
     /// What each plugin may do beyond its sandbox (`grant`), by name.
     grants: RefCell<HashMap<String, Vec<Capability>>>,
     /// What every plugin may do (`grant_all_plugins`), those loaded later
@@ -1687,6 +1691,7 @@ impl ScriptHost {
             async_actions: Rc::default(),
             fetcher: Rc::default(),
             connector: Rc::default(),
+            fetch_policy: Rc::default(),
             grants: RefCell::default(),
             all_plugins: RefCell::default(),
             managed: RefCell::default(),
@@ -1773,9 +1778,11 @@ impl ScriptHost {
             theme_error: RefCell::default(),
             idle: RefCell::default(),
         }));
-        host.0
-            .assets
-            .connect(host.0.timers.clone(), host.0.fetcher.clone());
+        host.0.assets.connect(
+            host.0.timers.clone(),
+            host.0.fetcher.clone(),
+            host.0.fetch_policy.clone(),
+        );
         host.trim_when_idle();
         host
     }
@@ -2196,6 +2203,16 @@ impl ScriptHost {
         *self.0.connector.borrow_mut() = Some(Rc::new(move |request, socket| -> socket::Connect {
             Box::pin(connect(request, socket))
         }));
+    }
+    /// What the app allows of its scripts' requests, `ui.fetch`, remote
+    /// images and `ui.socket`, each attributed to the plugin that made it:
+    /// every URL including each redirect's, every address a host resolves
+    /// to, and every header a script sets. Without one, all are allowed.
+    /// `zgx-run`'s transports call it; a host's own transport reads it, and
+    /// the caller, from `Body` or `Socket`. It replaces the last, for the
+    /// requests made from now on.
+    pub fn fetch_policy(&self, policy: impl FetchPolicy) {
+        *self.0.fetch_policy.borrow_mut() = Some(std::sync::Arc::new(policy));
     }
     /// Refuse `ui.open_folder` to every script, the app's own too: an app
     /// that must not touch folders, whatever its scripts ask.
@@ -3927,16 +3944,18 @@ impl ScriptHost {
         });
         let may = |capability: Capability| grants.allows(&capability);
         let fetch = may(Capability::Fetch).then(|| self.0.fetcher.clone());
+        let policy = self.0.fetch_policy.clone();
         let actions = self.0.async_actions.clone();
         let upload_files = may(Capability::Files);
         lazy.ui(
             &["call", "fetch", "resource", "task", "try"],
-            move |lua, ui| calls::install(lua, ui, actions, fetch, upload_files),
+            move |lua, ui| calls::install(lua, ui, actions, fetch, policy, upload_files),
         );
         lazy.ui(&["paged", "debounced"], paged::install);
         let connector = may(Capability::Fetch).then(|| self.0.connector.clone());
+        let policy = self.0.fetch_policy.clone();
         lazy.ui(&["socket", "sleep"], move |lua, ui| {
-            socket::install(lua, ui, connector)
+            socket::install(lua, ui, connector, policy)
         });
         let (platform, picked) = (self.0.platform.clone(), self.0.picked.clone());
         let (clipboard, files_allowed) = (may(Capability::Clipboard), may(Capability::Files));

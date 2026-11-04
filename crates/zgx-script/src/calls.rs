@@ -74,6 +74,9 @@ struct BodyInner {
     /// whether the transport has told it.
     progress: RefCell<Option<Progress>>,
     told: Cell<bool>,
+    /// The plugin that asked (`caller`), and the app's policy then.
+    caller: std::cell::OnceCell<Rc<str>>,
+    policy: std::cell::OnceCell<std::sync::Arc<dyn crate::fetch_policy::FetchPolicy>>,
 }
 impl Body {
     fn new(sink: Option<Sink>) -> Self {
@@ -83,7 +86,28 @@ impl Body {
             open: Cell::new(true),
             progress: RefCell::default(),
             told: Cell::new(false),
+            caller: std::cell::OnceCell::new(),
+            policy: std::cell::OnceCell::new(),
         }))
+    }
+    /// The request is `lua`'s script's, under `policy`.
+    pub(crate) fn asked_by(&self, lua: &mlua::Lua, policy: &crate::fetch_policy::SharedPolicy) {
+        if let Some(caller) = crate::fetch_policy::caller_of(lua) {
+            let _ = self.0.caller.set(caller);
+        }
+        if let Some(policy) = policy.borrow().clone() {
+            let _ = self.0.policy.set(policy);
+        }
+    }
+    /// The plugin that made this request (its name), `None` for the app's
+    /// own scripts: what a transport tells `FetchPolicy` it is asking for.
+    pub fn caller(&self) -> Option<&str> {
+        self.0.caller.get().map(|caller| &**caller)
+    }
+    /// The app's policy as this request was made
+    /// (`ScriptHost::fetch_policy`), for a transport to ask.
+    pub fn fetch_policy(&self) -> Option<std::sync::Arc<dyn crate::fetch_policy::FetchPolicy>> {
+        self.0.policy.get().cloned()
     }
     /// A body kept whole, for the response's `body`.
     pub(crate) fn kept() -> Self {
@@ -1031,6 +1055,7 @@ pub(crate) fn install(
     ui: &Table,
     actions: AsyncActions,
     fetcher: Option<SharedFetcher>,
+    policy: crate::fetch_policy::SharedPolicy,
     // Whether it may read files for a body (`file`, `multipart`).
     files: bool,
 ) -> mlua::Result<()> {
@@ -1110,6 +1135,7 @@ pub(crate) fn install(
                 }
                 None => Body::kept(),
             };
+            body.asked_by(lua, &policy);
             let future = match (upload, on_progress) {
                 (None, None) => fetch(request, body.clone()),
                 (upload, on_progress) => {

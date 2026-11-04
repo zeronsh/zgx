@@ -57,7 +57,13 @@ pub(crate) struct Assets {
     /// retries a broken image when a new element shows it).
     failed: std::cell::RefCell<HashMap<String, Failure>>,
     /// The host's tasks and transport, which remote sources go through.
-    links: std::cell::RefCell<Option<(Rc<crate::timers::Timers>, crate::calls::SharedFetcher)>>,
+    links: std::cell::RefCell<
+        Option<(
+            Rc<crate::timers::Timers>,
+            crate::calls::SharedFetcher,
+            crate::fetch_policy::SharedPolicy,
+        )>,
+    >,
     /// Images the host made (`ScriptHost::image`), as `host:<name>`
     /// sources: what shows one follows its version.
     hosted: std::cell::RefCell<HashMap<String, zgx::reactive::Signal<u64>>>,
@@ -303,8 +309,9 @@ impl Assets {
         &self,
         timers: Rc<crate::timers::Timers>,
         fetcher: crate::calls::SharedFetcher,
+        policy: crate::fetch_policy::SharedPolicy,
     ) {
-        *self.links.borrow_mut() = Some((timers, fetcher));
+        *self.links.borrow_mut() = Some((timers, fetcher, policy));
     }
     pub(crate) fn set_files(&self, files: crate::Files) {
         self.source.set(Some(files));
@@ -4489,14 +4496,16 @@ fn remote_status_in(
     let links = assets.links.borrow().clone();
     let fetch = links
         .as_ref()
-        .and_then(|(_, fetcher)| fetcher.borrow().clone());
-    let (Some((timers, _)), Some(fetch)) = (links, fetch) else {
+        .and_then(|(_, fetcher, _)| fetcher.borrow().clone());
+    let (Some((timers, _, policy)), Some(fetch)) = (links, fetch) else {
         vm.report(mlua::Error::runtime(format!(
             "{src}: remote sources need the host's fetcher (`ScriptHost::fetcher`)"
         )));
         return ready.get();
     };
+    // Asked for by a plugin, the request is that plugin's, as its `ui.fetch`.
     let body = crate::calls::Body::kept();
+    body.asked_by(&vm.lua, &policy);
     let future = fetch(
         crate::calls::Request {
             url: src.to_owned(),
@@ -6439,7 +6448,7 @@ struct ToldInner {
 }
 impl Told {
     fn new(events: Option<Rc<crate::node::ImageEvents>>, low: &Lowering) -> Self {
-        let timers = (low.assets.links.borrow().as_ref()).map(|(timers, _)| timers.clone());
+        let timers = (low.assets.links.borrow().as_ref()).map(|(timers, ..)| timers.clone());
         Self(Rc::new(ToldInner {
             events,
             timers,
