@@ -1346,7 +1346,12 @@ pub struct Style {
     pub fade_overflow: bool,
     /// Lay its edges on whole points: a box placed by percentages or ratios
     /// (a split pane) keeps crisp borders at every size. Its size follows
-    /// its rounded edges, so boxes that share an edge still meet.
+    /// its rounded edges, so boxes that share an edge still meet. While its
+    /// size is changing, what it holds is laid out at that size rounded,
+    /// which only goes one way as the size does (the distance between rounded
+    /// edges doesn't: text would wrap and unwrap in a box only narrowing).
+    /// Held still for [`SNAP_SETTLE`], it's laid out at the size between its
+    /// edges.
     pub snap: bool,
     /// The smallest width it lays out at.
     pub min_width: Option<f32>,
@@ -2218,6 +2223,10 @@ impl Constraints {
     }
 }
 type ChildPlacement = (NodeId, Rect, Constraints);
+/// How long a `snap` box's size holds still before it's taken to have stopped:
+/// longer than a slow hand leaves between moves (an eighth of a second, and
+/// frames between them), or it would settle and move again by turns.
+pub const SNAP_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
 struct Measurement {
     constraints: Constraints,
     size: (f32, f32),
@@ -2979,6 +2988,11 @@ pub struct Scene {
     /// Nodes that ever had one, a content blur or a mask (`Node::promoted`).
     promoted_count: usize,
     text_measurer: Option<Box<dyn TextMeasurer>>,
+    /// Each `snap` box's size as given, and when it last changed while it's
+    /// taken to be moving.
+    snap_sizes: std::collections::HashMap<NodeId, ((f32, f32), Option<std::time::Instant>)>,
+    /// The `snap` box being placed, its edges found: one placing it again goes on.
+    snap_placing: Option<NodeId>,
     text_shaper: Option<std::rc::Rc<dyn crate::text_layout::TextShaper>>,
     font_shaper: Option<std::rc::Rc<dyn crate::text_layout::FontTextShaper>>,
     font_measurer: Option<Box<FontMeasurer>>,
@@ -3218,6 +3232,8 @@ impl Scene {
             promoted_count: 0,
             text_measurer: None,
             text_shaper: None,
+            snap_sizes: Default::default(),
+            snap_placing: None,
             font_shaper: None,
             font_measurer: None,
             font_reach: None,
@@ -8313,6 +8329,9 @@ impl Scene {
         matches!(node.kind, NodeKind::Container(_) | NodeKind::Panel { .. })
             && node.parent.is_some()
             && node.style.layout_options.is_none()
+            // (Placed again from its parent: its edges come from where it was
+            // given, not where they fell.)
+            && !node.style.snap
             // A row or column shrinks it along its axis alone: at its size
             // on both, it was not shrunk.
             && (node.style.flex_shrink == 0.
@@ -10551,10 +10570,12 @@ impl Scene {
         self.visit(id);
         // Checked by the caller: `arrange_from`, or the loop below for a
         // child.
-        let (x, y) = match self.tree_node(id).style.snap {
-            true => self.snap(id, x, y),
-            false => (x, y),
-        };
+        if self.tree_node(id).style.snap && self.snap_placing != Some(id) {
+            let (x, y, given) = self.snap(id, x, y);
+            self.arrange::<CELLS>(id, x, y, report, covered, level, context);
+            self.snap_placed(id, given);
+            return;
+        }
         // What it holds, read at once: laying it out leaves these as they are.
         // Checked just above.
         let node = self.tree_node(id);
@@ -10662,11 +10683,11 @@ impl Scene {
         covered: bool,
         context: &mut Option<DamageContext>,
     ) {
+        // (As `arrange` places one: not from here, which is inlined.)
+        if self.tree_node(id).style.snap {
+            return self.arrange::<true>(id, x, y, report, covered, 0, context);
+        }
         self.visit(id);
-        let (x, y) = match self.tree_node(id).style.snap {
-            true => self.snap(id, x, y),
-            false => (x, y),
-        };
         let node = self.tree_node(id);
         let cache = node.measurement.as_ref().unwrap();
         // A leaf's result places no children: measured as it is now.
@@ -10706,13 +10727,72 @@ impl Scene {
         node.dirty &= !LAYOUT;
         node.arrange_dirty = false;
     }
-    /// A `snap` node placed at `x`, `y`: its edges on whole points, laid
-    /// out again at the size between them if that differs.
-    fn snap(&mut self, id: NodeId, x: f32, y: f32) -> (f32, f32) {
+    /// A `snap` node placed at `x`, `y`: where its edges fall on whole
+    /// points, and its result's size for its caller to place it by, the size
+    /// between them, until `snap_placed` gives back the size returned. Its
+    /// result keeps that size otherwise, for the next time it's placed and
+    /// for what its parent reads. What it holds is laid out at the size
+    /// between its edges, as it rests; while that size is changing, at the
+    /// size rounded, which goes one way as the size does, where the distance
+    /// between two edges rounded apart comes and goes by a point.
+    #[cold]
+    #[inline(never)]
+    fn snap(&mut self, id: NodeId, x: f32, y: f32) -> (f32, f32, Option<(f32, f32)>) {
+        self.snap_placing = Some(id);
         if self.node(id).special.has(ZOOMED) {
-            return self.snap_zoomed(id, x, y);
+            let (x, y) = self.snap_zoomed(id, x, y);
+            return (x, y, None);
         }
-        self.snap_edges(id, x, y)
+        let measurement = self.node(id).measurement.as_ref().unwrap();
+        let (w, h) = measurement.size;
+        let asked = measurement.constraints;
+        let (x0, y0) = (x.round(), y.round());
+        let edges = (
+            ((x + w).round() - x0).max(0.),
+            ((y + h).round() - y0).max(0.),
+        );
+        let moving = match self.snap_sizes.get_mut(&id) {
+            Some(last) if last.0 != (w, h) => {
+                *last = ((w, h), Some(std::time::Instant::now()));
+                true
+            }
+            Some(last) => last.1.is_some(),
+            None => {
+                self.snap_sizes.insert(id, ((w, h), None));
+                false
+            }
+        };
+        let inner = match moving {
+            true => (w.round().max(0.), h.round().max(0.)),
+            false => edges,
+        };
+        if inner != (w, h) {
+            let constraints = Constraints {
+                force_width: Some(inner.0),
+                force_height: Some(inner.1),
+                ..asked
+            };
+            self.measure_full(id, constraints);
+            let node = self.node_mut(id);
+            let result = node.measurement.as_mut().unwrap();
+            (result.constraints, result.size) = (asked, (w, h));
+            // What it holds can change with its box as it was.
+            node.arrange_dirty = true;
+        }
+        let result = self.node_mut(id).measurement.as_mut().unwrap();
+        let given = std::mem::replace(&mut result.size, edges);
+        (x0, y0, Some(given))
+    }
+    /// `snap`'s caller has placed `id`: its result has the size it was given.
+    #[cold]
+    #[inline(never)]
+    fn snap_placed(&mut self, id: NodeId, given: Option<(f32, f32)>) {
+        self.snap_placing = None;
+        if let Some(given) = given
+            && let Some(result) = self.node_mut(id).measurement.as_mut()
+        {
+            result.size = given;
+        }
     }
     /// `snap` for a zoomed node, which lays out as `snap`
     /// (`restyle_special`): on whole points only if its style asks, and its
@@ -10757,8 +10837,8 @@ impl Scene {
         }
         (x, y)
     }
-    /// `snap`'s edges on whole points, laid out again at the size between
-    /// them if that differs.
+    /// A zoomed node's edges on whole points, laid out again at the size
+    /// between them if that differs.
     fn snap_edges(&mut self, id: NodeId, x: f32, y: f32) -> (f32, f32) {
         let measurement = self.node(id).measurement.as_ref().unwrap();
         let (w, h) = measurement.size;
@@ -11230,6 +11310,34 @@ impl Scene {
     /// Moves reported by the most recent flush.
     pub fn scroll_moves(&self) -> &[ScrollMove] {
         &self.moves
+    }
+    /// When a `snap` box moving now can be taken to have stopped
+    /// ([`Scene::settle_snaps`]). `None` with none moving.
+    pub fn snaps_settle_at(&self) -> Option<std::time::Instant> {
+        self.snap_sizes
+            .values()
+            .filter_map(|(_, moved)| *moved)
+            .min()
+            .map(|moved| moved + SNAP_SETTLE)
+    }
+    /// Lay out as they rest the `snap` boxes whose size hasn't changed for
+    /// [`SNAP_SETTLE`] by `now`: whether there were any.
+    pub fn settle_snaps(&mut self, now: std::time::Instant) -> bool {
+        if self.snap_sizes.is_empty() {
+            return false;
+        }
+        let mut sizes = std::mem::take(&mut self.snap_sizes);
+        sizes.retain(|id, _| self.contains(*id));
+        let mut settled = false;
+        for (id, (_, moved)) in &mut sizes {
+            if moved.is_some_and(|at| now.saturating_duration_since(at) >= SNAP_SETTLE) {
+                *moved = None;
+                settled = true;
+                self.invalidate_layout_to_root(*id);
+            }
+        }
+        self.snap_sizes = sizes;
+        settled
     }
     /// Counts flushes that reported damage or moves.
     pub fn flush_serial(&self) -> u64 {
