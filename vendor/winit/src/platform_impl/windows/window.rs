@@ -968,7 +968,13 @@ impl Window {
 
     #[inline]
     pub fn set_theme(&self, theme: Option<Theme>) {
-        try_theme(self.window, theme);
+        // zgx patch: `theme()` answers what was asked, and a system change
+        // leaves a window that asked for its own (WM_SETTINGCHANGE reads
+        // `preferred_theme`), as a window made with one is.
+        let current_theme = try_theme(self.window, theme);
+        let mut window_state = self.window_state_lock();
+        window_state.preferred_theme = theme;
+        window_state.current_theme = current_theme;
     }
 
     #[inline]

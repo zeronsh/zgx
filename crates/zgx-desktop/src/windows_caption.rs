@@ -1,0 +1,715 @@
+//! Windows' caption buttons, as `Titlebar::Inset` draws them: where they are,
+//! worked out once in the window's physical pixels, and what shows them.
+//!
+//! What is drawn, what Windows hit-tests (`WM_NCHITTEST`, so snap layouts) and
+//! what `WindowInfo::controls` reports all read one [`Geometry`], so they
+//! agree at any display scale and zoom. Like the buttons Windows would draw,
+//! they don't zoom with the content: 46 by 32 points of the display whatever
+//! the window's zoom, unless an app's `caption_height` has them span its own
+//! title bar, which does zoom.
+//!
+//! The glyphs are boxes and bars, whole pixels each, not text: no icon font
+//! to be missing (Windows 10 showed Segoe's as empty boxes).
+//!
+//! Apart from the window procedure (`window_chrome::win`), so what they work
+//! out is tested on every platform.
+use zgx::{
+    compose::prelude::*,
+    reactive::Signal,
+    scene::{Color, Rect},
+    style::Styled,
+    widgets::Ui,
+};
+
+/// Windows 11's caption buttons, in points of the display.
+const BUTTON_WIDTH: f64 = 46.;
+const BUTTON_HEIGHT: f64 = 32.;
+/// Resize bands inside a frameless window's edges, in points of the display:
+/// it has no frame outside them to take the pointer.
+const RESIZE_BAND: f64 = 5.;
+/// WinUI's caption glyphs, in points of the display: a 10-point square (the
+/// restored window's two 8-point ones in it), of 1-point strokes.
+const GLYPH: f64 = 10.;
+const RESTORE_BOX: f64 = 8.;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CaptionButton {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+/// What lies at a point of a frameless window, if not its content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Hit {
+    Button(CaptionButton),
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// A frameless window's caption, in its physical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Geometry {
+    /// The display's scale (its DPI's), without the zoom.
+    scale: f64,
+    /// The window's zoom: the content's points are `scale * zoom` pixels.
+    zoom: f64,
+    /// One button's width and the strip's height.
+    button: i32,
+    height: i32,
+    /// The person can resize it: it has resize bands and a Maximize button.
+    resizable: bool,
+    /// Windows run right to left: the buttons are at its top left.
+    rtl: bool,
+}
+impl Geometry {
+    /// For a window at display `scale` and `zoom`. `caption_height` is in the
+    /// content's points, so the strip spans a title bar of that height at
+    /// any zoom; without one it is Windows' 32 points of the display.
+    pub(crate) fn new(
+        scale: f64,
+        zoom: f64,
+        caption_height: Option<f64>,
+        resizable: bool,
+        rtl: bool,
+    ) -> Self {
+        let height = caption_height.map_or(BUTTON_HEIGHT * scale, |h| h * scale * zoom);
+        Self {
+            scale,
+            zoom,
+            button: ((BUTTON_WIDTH * scale).round() as i32).max(1),
+            height: (height.round() as i32).max(1),
+            resizable,
+            rtl,
+        }
+    }
+    /// How many buttons show: a fixed-size window has no Maximize.
+    fn count(&self) -> i32 {
+        if self.resizable { 3 } else { 2 }
+    }
+    /// `pixels` in the content's points.
+    fn points(&self, pixels: f64) -> f32 {
+        (pixels / (self.scale * self.zoom)) as f32
+    }
+    /// What client point (`x`, `y`) of a window `width` by `height` pixels
+    /// is, if not its content: a resize band, or one of its caption buttons
+    /// (`buttons`), at its top right, or top left where it runs right to
+    /// left, as Windows lays out a mirrored (`WS_EX_LAYOUTRTL`) window's.
+    pub(crate) fn hit(
+        &self,
+        (x, y): (i32, i32),
+        (width, height): (i32, i32),
+        maximized: bool,
+        buttons: bool,
+    ) -> Option<Hit> {
+        let band = if maximized || !self.resizable {
+            0
+        } else {
+            (RESIZE_BAND * self.scale).round() as i32
+        };
+        let (left, right) = (x < band, x >= width - band);
+        let (top, bottom) = (y < band, y >= height - band);
+        // The caption buttons keep all but the window's outermost pixels.
+        if buttons && y >= band.min(1) && y < self.height {
+            // Close nearest the edge they sit at.
+            let from_edge = if self.rtl { x } else { width - 1 - x };
+            if (band.min(1)..self.count() * self.button).contains(&from_edge) {
+                return Some(Hit::Button(match (from_edge / self.button, self.count()) {
+                    (0, _) => CaptionButton::Close,
+                    (1, 3) => CaptionButton::Maximize,
+                    _ => CaptionButton::Minimize,
+                }));
+            }
+        }
+        Some(match (top, bottom, left, right) {
+            (true, _, true, _) => Hit::TopLeft,
+            (true, _, _, true) => Hit::TopRight,
+            (_, true, true, _) => Hit::BottomLeft,
+            (_, true, _, true) => Hit::BottomRight,
+            (true, ..) => Hit::Top,
+            (_, true, ..) => Hit::Bottom,
+            (.., true, _) => Hit::Left,
+            (.., true) => Hit::Right,
+            _ => return None,
+        })
+    }
+    /// The caption strip of a window `width` pixels wide, less its buttons
+    /// (`buttons`), and those buttons, in points of the display
+    /// (`WindowInfo::refresh` puts them in the content's).
+    pub(crate) fn strip(&self, width: i32, buttons: bool) -> (Rect, Option<Rect>) {
+        let point = |pixels: i32| (f64::from(pixels) / self.scale) as f32;
+        let (height, all) = (point(self.height), point(width));
+        if !buttons {
+            return (Rect::new(0., 0., all, height), None);
+        }
+        let taken = (self.count() * self.button).min(width);
+        let (side, rest) = (point(taken), point(width - taken));
+        if self.rtl {
+            return (
+                Rect::new(side, 0., rest, height),
+                Some(Rect::new(0., 0., side, height)),
+            );
+        }
+        (
+            Rect::new(0., 0., rest, height),
+            Some(Rect::new(rest, 0., side, height)),
+        )
+    }
+    /// A stroke's pixels: whole, as the glyphs are drawn crisp, 1 up to 150%.
+    fn stroke(&self) -> f64 {
+        (self.scale + 0.25).floor().max(1.)
+    }
+    /// The glyph's square side, in pixels.
+    fn side(&self) -> f64 {
+        (GLYPH * self.scale).round().max(1.)
+    }
+    /// The glyph's square's top left in its button, on a whole pixel.
+    fn glyph_at(&self) -> (f64, f64) {
+        (
+            ((f64::from(self.button) - self.side()) / 2.).floor(),
+            ((f64::from(self.height) - self.side()) / 2.).floor(),
+        )
+    }
+    /// The restored window's front box's side, and how far its back box
+    /// stands up and to the right of it, in pixels.
+    fn restore(&self) -> (f64, f64) {
+        let front = (RESTORE_BOX * self.scale).round().min(self.side());
+        (front, self.side() - front)
+    }
+}
+
+/// WinUI's caption button brush for a button in `kind`'s state.
+fn fill(kind: CaptionButton, hover: bool, down: bool, dark: bool) -> Color {
+    match (kind, hover, down, dark) {
+        (_, false, ..) => Color(0, 0, 0, 0),
+        (CaptionButton::Close, _, false, _) => Color(196, 43, 28, 255),
+        (CaptionButton::Close, _, true, _) => Color(196, 43, 28, 230),
+        (_, _, false, true) => Color(255, 255, 255, 15),
+        (_, _, true, true) => Color(255, 255, 255, 10),
+        (_, _, false, false) => Color(0, 0, 0, 9),
+        (_, _, true, false) => Color(0, 0, 0, 6),
+    }
+}
+/// WinUI's caption glyph brush: `red`, a glyph over Close's red.
+fn ink(red: bool, dark: bool, active: bool) -> Color {
+    match (red, dark, active) {
+        (true, ..) => Color(255, 255, 255, 255),
+        (_, true, true) => Color(255, 255, 255, 255),
+        (_, true, false) => Color(255, 255, 255, 93),
+        (_, false, true) => Color(0, 0, 0, 228),
+        (_, false, false) => Color(0, 0, 0, 92),
+    }
+}
+
+/// What the buttons show, set by their host before a frame.
+#[derive(Clone)]
+pub(crate) struct CaptionLook {
+    pub(crate) hovered: Signal<Option<CaptionButton>>,
+    pub(crate) pressed: Signal<Option<CaptionButton>>,
+    pub(crate) maximized: Signal<bool>,
+    pub(crate) active: Signal<bool>,
+    pub(crate) dark: Signal<bool>,
+    pub(crate) fullscreen: Signal<bool>,
+    pub(crate) geometry: Signal<Geometry>,
+}
+impl CaptionLook {
+    pub(crate) fn new(ui: &Ui, geometry: Geometry) -> Self {
+        Self {
+            hovered: ui.signal(None),
+            pressed: ui.signal(None),
+            maximized: ui.signal(false),
+            active: ui.signal(true),
+            dark: ui.signal(true),
+            fullscreen: ui.signal(false),
+            geometry: ui.signal(geometry),
+        }
+    }
+    /// The glyph's colour on `kind`'s button now.
+    fn ink(&self, kind: CaptionButton) -> Color {
+        let red = kind == CaptionButton::Close && self.hovered.get() == Some(kind);
+        ink(red, self.dark.get(), self.active.get())
+    }
+    /// The buttons, over the content's top right, or top left right to left:
+    /// there the row runs from the right, Close outermost still.
+    pub(crate) fn view(&self, rtl: bool) -> View {
+        let fullscreen = self.fullscreen.clone();
+        let strip = row().absolute().top(0.);
+        let strip = if rtl { strip.left(0.) } else { strip.right(0.) };
+        strip
+            .pointer_events(false)
+            .reactive_style(move || Styles::new().opacity(if fullscreen.get() { 0. } else { 1. }))
+            .child(self.button(CaptionButton::Minimize, "zgx-caption-minimize"))
+            .child(self.button(CaptionButton::Maximize, "zgx-caption-maximize"))
+            .child(self.button(CaptionButton::Close, "zgx-caption-close"))
+    }
+    fn button(&self, kind: CaptionButton, id: &'static str) -> View {
+        let look = self.clone();
+        let glyph = match kind {
+            CaptionButton::Minimize => vec![self.minimize_glyph()],
+            CaptionButton::Maximize => self.maximize_glyph(),
+            CaptionButton::Close => self.close_glyph(),
+        };
+        let at = self.clone();
+        let inside = div()
+            .absolute()
+            .id(format!("{id}-glyph"))
+            .reactive_style(move || {
+                let geometry = at.geometry.get();
+                let (x, y) = geometry.glyph_at();
+                let side = geometry.points(geometry.side());
+                Styles::new()
+                    .left(geometry.points(x))
+                    .top(geometry.points(y))
+                    .size(side, side)
+            });
+        div()
+            .id(id)
+            .overflow_hidden()
+            .reactive_style(move || {
+                let geometry = look.geometry.get();
+                // A fixed-size window's Maximize takes no room and shows nothing.
+                let width = if kind == CaptionButton::Maximize && !geometry.resizable {
+                    0.
+                } else {
+                    geometry.points(f64::from(geometry.button))
+                };
+                let hover = look.hovered.get() == Some(kind);
+                let down = hover && look.pressed.get() == Some(kind);
+                Styles::new()
+                    .size(width, geometry.points(f64::from(geometry.height)))
+                    .bg(fill(kind, hover, down, look.dark.get()))
+            })
+            .child(inside.children(glyph))
+    }
+    /// A bar across the middle.
+    fn minimize_glyph(&self) -> View {
+        let look = self.clone();
+        div().absolute().reactive_style(move || {
+            let geometry = look.geometry.get();
+            let (side, stroke) = (geometry.side(), geometry.stroke());
+            Styles::new()
+                .left(0.)
+                .top(geometry.points(((side - stroke) / 2.).floor()))
+                .size(geometry.points(side), geometry.points(stroke))
+                .bg(look.ink(CaptionButton::Minimize))
+        })
+    }
+    /// A box; restored, a smaller one with the top and right of another
+    /// standing behind it.
+    fn maximize_glyph(&self) -> Vec<View> {
+        const KIND: CaptionButton = CaptionButton::Maximize;
+        let front = {
+            let look = self.clone();
+            div().absolute().reactive_style(move || {
+                let geometry = look.geometry.get();
+                let (x, y, box_side) = if look.maximized.get() {
+                    let (side, up) = geometry.restore();
+                    (0., up, side)
+                } else {
+                    (0., 0., geometry.side())
+                };
+                let stroke = geometry.points(geometry.stroke());
+                Styles::new()
+                    .left(geometry.points(x))
+                    .top(geometry.points(y))
+                    .size(geometry.points(box_side), geometry.points(box_side))
+                    .border(stroke)
+                    .border_color(look.ink(KIND))
+                    .rounded(stroke)
+            })
+        };
+        let back_top = {
+            let look = self.clone();
+            div().absolute().reactive_style(move || {
+                let geometry = look.geometry.get();
+                let (_, up) = geometry.restore();
+                Styles::new()
+                    .left(geometry.points(up))
+                    .top(0.)
+                    .size(
+                        geometry.points(geometry.side() - up),
+                        geometry.points(geometry.stroke()),
+                    )
+                    .bg(look.ink(KIND))
+                    .opacity(if look.maximized.get() { 1. } else { 0. })
+            })
+        };
+        let back_right = {
+            let look = self.clone();
+            div().absolute().reactive_style(move || {
+                let geometry = look.geometry.get();
+                let (front, _) = geometry.restore();
+                Styles::new()
+                    .left(geometry.points(geometry.side() - geometry.stroke()))
+                    .top(0.)
+                    .size(geometry.points(geometry.stroke()), geometry.points(front))
+                    .bg(look.ink(KIND))
+                    .opacity(if look.maximized.get() { 1. } else { 0. })
+            })
+        };
+        vec![front, back_top, back_right]
+    }
+    /// Two diagonals of the glyph's square.
+    fn close_glyph(&self) -> Vec<View> {
+        let line = |turn: f32| {
+            let look = self.clone();
+            div().absolute().rotate(turn).reactive_style(move || {
+                let geometry = look.geometry.get();
+                let (side, stroke) = (geometry.side(), geometry.stroke());
+                let length = side * std::f64::consts::SQRT_2;
+                Styles::new()
+                    .left(geometry.points((side - length) / 2.))
+                    .top(geometry.points((side - stroke) / 2.))
+                    .size(geometry.points(length), geometry.points(stroke))
+                    .bg(look.ink(CaptionButton::Close))
+            })
+        };
+        vec![
+            line(std::f32::consts::FRAC_PI_4),
+            line(-std::f32::consts::FRAC_PI_4),
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CaptionButton::*, *};
+
+    /// Display scales and zooms the buttons must agree at.
+    const SCALES: [f64; 4] = [1., 1.25, 1.5, 2.];
+    const ZOOMS: [f64; 5] = [1., 0.9, 1.1, 1.25, 1.5];
+
+    fn at(geometry: Geometry, x: i32, y: i32, width: i32) -> Option<Hit> {
+        geometry.hit((x, y), (width, 2000), false, true)
+    }
+    fn flat(scale: f64) -> Geometry {
+        Geometry::new(scale, 1., None, true, false)
+    }
+
+    /// Each drawn button's left, top, width and height in physical pixels,
+    /// as a window of `width` pixels lays them out.
+    fn drawn(geometry: Geometry, width: i32) -> Vec<(CaptionButton, (f32, f32, f32, f32))> {
+        let pixel = geometry.scale * geometry.zoom;
+        let mut ui = Ui::new(geometry.points(f64::from(width)), 600.);
+        // Right to left, the window runs so (`system_colors::sync`).
+        if geometry.rtl {
+            let mut scene = ui.scene.borrow_mut();
+            let root = scene.root();
+            scene.set_direction(root, Some(zgx::scene::Direction::Rtl));
+        }
+        let look = CaptionLook::new(&ui, geometry);
+        let view = ui.mount(look.view(geometry.rtl));
+        ui.prepare_frame();
+        let scene = ui.scene.borrow();
+        [
+            (Minimize, "zgx-caption-minimize"),
+            (Maximize, "zgx-caption-maximize"),
+            (Close, "zgx-caption-close"),
+        ]
+        .into_iter()
+        .filter_map(|(kind, id)| {
+            let rect = scene.bounds(view.find(id)?);
+            let px = |v: f32| f64::from(v) * pixel;
+            (rect.width > 0.).then_some((
+                kind,
+                (
+                    px(rect.x) as f32,
+                    px(rect.y) as f32,
+                    px(rect.width) as f32,
+                    px(rect.height) as f32,
+                ),
+            ))
+        })
+        .collect()
+    }
+
+    #[test]
+    fn drawn_hit_and_reported_agree_at_every_scale_and_zoom() {
+        let width = 1860;
+        for rtl in [false, true] {
+            for resizable in [true, false] {
+                for scale in SCALES {
+                    for zoom in ZOOMS {
+                        let g = Geometry::new(scale, zoom, None, resizable, rtl);
+                        let case = format!("{scale} × {zoom} rtl={rtl} resizable={resizable}");
+                        let buttons = drawn(g, width);
+                        assert_eq!(buttons.len(), if resizable { 3 } else { 2 }, "{case}");
+                        for (kind, (x, y, w, h)) in &buttons {
+                            let (x, w, h) = (*x, *w, *h);
+                            assert!(y.abs() < 0.01, "{case}: {kind:?} at y {y}");
+                            assert!((w - g.button as f32).abs() < 0.01, "{case}: {kind:?} {w}");
+                            assert!((h - g.height as f32).abs() < 0.01, "{case}: {kind:?} {h}");
+                            // Every pixel drawn as this button hit-tests as
+                            // it, and those beside it don't (the strip's
+                            // outermost pixel stays the resize band).
+                            let (first, last) = (x.round() as i32, (x + w).round() as i32 - 1);
+                            let row = g.height / 2;
+                            let inner = |p: i32| {
+                                if resizable {
+                                    (1..width - 1).contains(&p)
+                                } else {
+                                    (0..width).contains(&p)
+                                }
+                            };
+                            for p in [first, first + 1, last - 1, last] {
+                                if inner(p) {
+                                    assert_eq!(
+                                        at(g, p, row, width),
+                                        Some(Hit::Button(*kind)),
+                                        "{case}: pixel {p} of {kind:?} drawn {first}..={last}"
+                                    );
+                                }
+                            }
+                            for p in [first - 1, last + 1] {
+                                if inner(p) {
+                                    assert_ne!(
+                                        at(g, p, row, width),
+                                        Some(Hit::Button(*kind)),
+                                        "{case}: pixel {p} beside {kind:?}"
+                                    );
+                                }
+                            }
+                            assert_ne!(
+                                at(g, first + 2, g.height, width),
+                                Some(Hit::Button(*kind)),
+                                "{case}: below {kind:?}"
+                            );
+                        }
+                        // Reported, as WindowInfo has it, in the content's
+                        // points: the drawn buttons' extent.
+                        let (_, controls) = g.strip(width, true);
+                        let controls = controls.unwrap();
+                        let pixel = |v: f32| f64::from(v / zoom as f32) * scale * zoom;
+                        let (left, right) = buttons.iter().fold((f32::MAX, 0f32), |(l, r), b| {
+                            (l.min(b.1.0), r.max(b.1.0 + b.1.2))
+                        });
+                        let near = |a: f64, b: f32| (a - f64::from(b)).abs() < 0.05;
+                        assert!(near(pixel(controls.x), left), "{case}: {controls:?} {left}");
+                        assert!(
+                            near(pixel(controls.x + controls.width), right),
+                            "{case}: {controls:?} {right}"
+                        );
+                        assert!(near(pixel(controls.height), g.height as f32), "{case}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The ask's case: at 150% zoom the buttons were drawn 207 pixels wide,
+    /// hit-tested 138, and reported 92 points.
+    #[test]
+    fn zoomed_150_percent_they_are_138_pixels_drawn_hit_and_reported() {
+        let g = Geometry::new(1., 1.5, None, true, false);
+        let width = 1860;
+        let buttons = drawn(g, width);
+        let span = buttons.last().unwrap().1.0 + buttons.last().unwrap().1.2 - buttons[0].1.0;
+        assert!((span - 138.).abs() < 0.01, "{span}");
+        assert_eq!(at(g, width - 138, 16, width), Some(Hit::Button(Minimize)));
+        assert_eq!(at(g, width - 139, 16, width), None);
+        let (_, controls) = g.strip(width, true);
+        assert_eq!(
+            controls.unwrap().width / 1.5,
+            92.,
+            "in the content's points"
+        );
+    }
+
+    #[test]
+    fn a_frameless_windows_edges_resize_and_its_corner_buttons_answer() {
+        let size = (800, 600);
+        let g = flat(1.);
+        let at = |x, y| g.hit((x, y), size, false, true);
+        assert_eq!(at(400, 300), None, "content");
+        assert_eq!(at(0, 300), Some(Hit::Left));
+        assert_eq!(at(799, 300), Some(Hit::Right));
+        assert_eq!(at(400, 599), Some(Hit::Bottom));
+        assert_eq!(at(0, 0), Some(Hit::TopLeft));
+        assert_eq!(at(799, 599), Some(Hit::BottomRight));
+        // The buttons, 46 wide from the right, 32 tall; the outermost pixel
+        // stays the resize band.
+        assert_eq!(at(790, 10), Some(Hit::Button(Close)));
+        assert_eq!(at(799, 10), Some(Hit::Right));
+        assert_eq!(at(799, 2), Some(Hit::TopRight));
+        assert_eq!(at(740, 10), Some(Hit::Button(Maximize)));
+        assert_eq!(at(700, 10), Some(Hit::Button(Minimize)));
+        assert_eq!(at(640, 10), None, "left of the buttons");
+        assert_eq!(at(790, 40), None, "below the buttons");
+        // Without buttons (`Titlebar::Hidden`) the corner resizes.
+        assert_eq!(g.hit((790, 2), size, false, false), Some(Hit::Top));
+    }
+
+    #[test]
+    fn bands_and_buttons_scale_and_a_maximized_window_has_no_bands() {
+        let size = (1600, 1200);
+        // At 200% the band is 10 pixels and the buttons 92 by 64.
+        let g = flat(2.);
+        assert_eq!(g.hit((9, 600), size, false, false), Some(Hit::Left));
+        assert_eq!(g.hit((10, 600), size, false, false), None);
+        assert_eq!(
+            g.hit((1599 - 91, 60), size, false, true),
+            Some(Hit::Button(Close))
+        );
+        assert_eq!(
+            g.hit((1599 - 92, 60), size, false, true),
+            Some(Hit::Button(Maximize))
+        );
+        // Maximized, the edges are the screen's: nothing resizes, and the
+        // buttons reach the very corner.
+        let g = flat(1.);
+        assert_eq!(g.hit((0, 600), size, true, true), None);
+        assert_eq!(g.hit((1599, 0), size, true, true), Some(Hit::Button(Close)));
+    }
+
+    #[test]
+    fn a_fixed_size_window_has_no_maximize_and_no_resize_bands() {
+        let size = (800, 600);
+        let g = Geometry::new(1., 1., None, false, false);
+        let at = |x, y| g.hit((x, y), size, false, true);
+        assert_eq!(at(790, 10), Some(Hit::Button(Close)));
+        assert_eq!(at(799, 0), Some(Hit::Button(Close)), "to the very corner");
+        // Minimize next to Close, where Maximize would be.
+        assert_eq!(at(740, 10), Some(Hit::Button(Minimize)));
+        assert_eq!(at(700, 10), None, "the Minimize of three buttons");
+        for edge in [
+            (0, 300),
+            (799, 300),
+            (400, 0),
+            (400, 599),
+            (0, 0),
+            (799, 599),
+        ] {
+            assert_eq!(at(edge.0, edge.1), None, "{edge:?}");
+        }
+        let (area, controls) = g.strip(800, true);
+        assert_eq!(area, Rect::new(0., 0., 708., 32.));
+        assert_eq!(controls, Some(Rect::new(708., 0., 92., 32.)));
+    }
+
+    #[test]
+    fn the_titlebar_area_is_the_caption_strip_less_the_buttons() {
+        assert_eq!(
+            flat(1.).strip(800, true),
+            (
+                Rect::new(0., 0., 662., 32.),
+                Some(Rect::new(662., 0., 138., 32.))
+            )
+        );
+        // `Hidden` has no buttons: the whole strip is the app's.
+        assert_eq!(
+            flat(1.).strip(800, false),
+            (Rect::new(0., 0., 800., 32.), None)
+        );
+    }
+
+    #[test]
+    fn right_to_left_the_buttons_and_the_titlebar_area_mirror() {
+        // As Windows lays out a mirrored window's: the buttons at the top
+        // left, Close outermost.
+        let g = Geometry::new(1., 1., None, true, true);
+        let size = (800, 600);
+        let at = |x, y| g.hit((x, y), size, false, true);
+        assert_eq!(at(10, 10), Some(Hit::Button(Close)));
+        assert_eq!(at(60, 10), Some(Hit::Button(Maximize)));
+        assert_eq!(at(100, 10), Some(Hit::Button(Minimize)));
+        assert_eq!(at(160, 10), None, "right of the buttons");
+        assert_eq!(at(798, 10), Some(Hit::Right), "the right edge only resizes");
+        assert_eq!(
+            at(0, 10),
+            Some(Hit::Left),
+            "the outermost pixel still resizes"
+        );
+        assert_eq!(
+            g.strip(800, true),
+            (
+                Rect::new(138., 0., 662., 32.),
+                Some(Rect::new(0., 0., 138., 32.))
+            )
+        );
+    }
+
+    #[test]
+    fn a_caption_height_spans_a_title_bar_of_that_height_at_any_zoom() {
+        for (scale, zoom) in [(1., 1.), (1.25, 1.), (1., 1.5), (1.5, 0.9), (2., 1.25)] {
+            let g = Geometry::new(scale, zoom, Some(38.), true, false);
+            let tall = (38. * scale * zoom).round() as i32;
+            assert_eq!(g.height, tall);
+            let width = 2000;
+            let (area, controls) = g.strip(width, true);
+            for rect in [area, controls.unwrap()] {
+                // In the content's points, as reported: within a pixel of 38.
+                let reported = f64::from(rect.height) / zoom;
+                assert!((reported - 38.).abs() * scale * zoom <= 0.51, "{reported}");
+            }
+            for (_, (_, _, _, h)) in drawn(g, width) {
+                assert!((h - tall as f32).abs() < 0.01, "{h} of {tall}");
+            }
+            assert_eq!(at(g, width - 30, tall - 1, width), Some(Hit::Button(Close)));
+            assert_eq!(at(g, width - 30, tall, width), None);
+        }
+        // Without one: 32 points of the display, whatever the zoom.
+        assert_eq!(Geometry::new(1.5, 1.5, None, true, false).height, 48);
+    }
+
+    /// Whole pixels, centred, at the sizes WinUI's are at 100%.
+    #[test]
+    fn the_glyphs_are_whole_pixels_centred_in_their_button() {
+        let g = flat(1.);
+        assert_eq!((g.side(), g.stroke()), (10., 1.));
+        assert_eq!(g.glyph_at(), (18., 11.));
+        assert_eq!(g.restore(), (8., 2.));
+        let g = flat(1.5);
+        assert_eq!((g.side(), g.stroke()), (15., 1.));
+        assert_eq!(g.glyph_at(), (27., 16.));
+        let g = flat(2.);
+        assert_eq!((g.side(), g.stroke()), (20., 2.));
+        for scale in SCALES {
+            let g = flat(scale);
+            let (x, y) = g.glyph_at();
+            assert_eq!((x.fract(), y.fract()), (0., 0.));
+            // Not moved by the zoom: the same pixels at 150%.
+            assert_eq!(
+                Geometry::new(scale, 1.5, None, true, false).glyph_at(),
+                (x, y)
+            );
+        }
+    }
+
+    /// The glyphs are nodes the engine paints, no text: nothing to be missing.
+    #[test]
+    fn the_glyphs_draw_no_text() {
+        let mut ui = Ui::new(800., 600.);
+        let look = CaptionLook::new(&ui, flat(1.));
+        ui.mount(look.view(false));
+        ui.prepare_frame();
+        let scene = ui.scene.borrow();
+        assert!(
+            !scene
+                .paint_items()
+                .any(|item| matches!(item.kind, zgx::scene::NodeKind::Text { .. })),
+            "a glyph is text"
+        );
+    }
+
+    /// Light on a dark system: dark ink, seen on the light window.
+    #[test]
+    fn the_ink_follows_the_windows_theme() {
+        assert_eq!(ink(false, false, true), Color(0, 0, 0, 228));
+        assert_eq!(ink(false, true, true), Color(255, 255, 255, 255));
+        assert_eq!(ink(true, false, true), Color(255, 255, 255, 255), "on red");
+        let mut ui = Ui::new(800., 600.);
+        let look = CaptionLook::new(&ui, flat(1.));
+        ui.mount(look.view(false));
+        ui.prepare_frame();
+        assert_eq!(look.ink(Minimize), Color(255, 255, 255, 255));
+        look.dark.set(false);
+        ui.prepare_frame();
+        assert_eq!(look.ink(Minimize), Color(0, 0, 0, 228));
+    }
+}
