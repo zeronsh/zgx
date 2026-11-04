@@ -866,6 +866,11 @@ impl Session {
             })(),
             "key" => (|| {
                 let keys = text("keys").ok_or("key takes `keys` (\"Enter\", \"cmd+k\")")?;
+                // Modifiers alone (`alt`): held, then let go.
+                if let Some(modifiers) = driver::parse_modifiers(&keys) {
+                    driver::tap_modifiers(&mut ui, modifiers);
+                    return Ok((format!("pressed {keys} alone"), Value::Nil));
+                }
                 let (key, modifiers) = driver::parse_keys(&keys)?;
                 driver::press(&mut ui, key, modifiers);
                 Ok((format!("pressed {keys}"), Value::Nil))

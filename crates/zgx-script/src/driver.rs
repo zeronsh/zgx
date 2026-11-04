@@ -752,6 +752,30 @@ pub fn type_into(ui: &mut Ui, node: NodeId, text: &str) {
     click_at(ui, bounds);
     ui.dispatch(InputEvent::Text(text.into()));
 }
+/// Modifier keys alone, as text: `alt`, `ctrl+shift` (`cmd` as in
+/// [`parse_keys`]); None if `text` names any other key.
+pub fn parse_modifiers(text: &str) -> Option<Modifiers> {
+    let mut modifiers = Modifiers::default();
+    for part in text.split('+') {
+        match part.to_ascii_lowercase().as_str() {
+            "cmd" | "command" if cfg!(target_os = "macos") => modifiers.meta = true,
+            "cmd" | "command" | "ctrl" | "control" => modifiers.control = true,
+            "meta" | "super" => modifiers.meta = true,
+            "alt" | "opt" | "option" => modifiers.alt = true,
+            "shift" => modifiers.shift = true,
+            _ => return None,
+        }
+    }
+    Some(modifiers)
+}
+/// Press and release modifier keys alone, as a window reports them: held
+/// (`zgx::input::held_modifiers`), then none, with no key event between
+/// (a tap of Alt alone, which shows a menu bar).
+pub fn tap_modifiers(ui: &mut Ui, modifiers: Modifiers) {
+    zgx::input::set_held_modifiers(&ui.runtime, modifiers);
+    ui.runtime.flush();
+    zgx::input::set_held_modifiers(&ui.runtime, Modifiers::default());
+}
 /// Press and release `key` with `modifiers`, wherever focus is.
 pub fn press(ui: &mut Ui, key: Key, modifiers: Modifiers) {
     ui.dispatch(InputEvent::KeyDown {
@@ -1132,5 +1156,47 @@ fn short(v: f32) -> String {
         format!("{v}")
     } else {
         format!("{v:.1}")
+    }
+}
+
+#[cfg(test)]
+mod modifier_tap_tests {
+    use super::*;
+
+    #[test]
+    fn modifiers_alone_parse_and_others_do_not() {
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(parse_modifiers("alt"), Some(alt));
+        assert_eq!(
+            parse_modifiers("Alt+Shift"),
+            Some(Modifiers { shift: true, ..alt })
+        );
+        assert_eq!(parse_modifiers("alt+f"), None);
+        assert_eq!(parse_modifiers("Enter"), None);
+    }
+
+    /// What watches the modifiers sees them held, then let go.
+    #[test]
+    fn a_tap_is_seen_held_then_let_go() {
+        let mut ui = Ui::new(100., 100.);
+        let held = zgx::input::held_modifiers(&ui.runtime);
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let heard = seen.clone();
+        let _effect = ui
+            .runtime
+            .effect(move || heard.borrow_mut().push(held.get()));
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        tap_modifiers(&mut ui, alt);
+        ui.runtime.flush();
+        assert_eq!(
+            seen.borrow().as_slice(),
+            [Modifiers::default(), alt, Modifiers::default()]
+        );
     }
 }
