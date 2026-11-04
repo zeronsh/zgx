@@ -503,7 +503,8 @@ impl InputDispatcher {
         'hits: for hit in scene.hit_test_all(x, y) {
             if preview.is_some_and(|preview| {
                 hit == preview || scene.ancestors(hit).any(|id| id == preview)
-            }) {
+            }) || self.boxless(scene, hit)
+            {
                 continue;
             }
             let mut node = Some(hit);

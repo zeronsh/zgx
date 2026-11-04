@@ -63,6 +63,8 @@ mod list_tab_rows;
 mod markdown_lazy;
 #[path = "../mentions.rs"]
 mod mentions;
+#[path = "../pointer_through.rs"]
+mod pointer_through;
 #[path = "../regions.rs"]
 mod regions;
 #[path = "../reload_focus.rs"]

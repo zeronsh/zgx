@@ -2971,7 +2971,7 @@ impl Host {
             self.cursor_query = Some((
                 self.cursor,
                 revision,
-                scene.cursor_at(self.cursor.0, self.cursor.1),
+                ui.input.cursor_at(&scene, self.cursor.0, self.cursor.1),
             ));
         }
         let explicit = ui

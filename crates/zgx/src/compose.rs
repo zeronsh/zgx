@@ -7453,6 +7453,17 @@ impl NodeHandle {
     pub fn node(&self) -> NodeId {
         self.node
     }
+    /// Listen for input at the node as long as it is mounted, ahead of what
+    /// listens already: `View::on_event`, for a listener that comes later.
+    /// A node takes the pointer once it listens. `false` once the UI is gone.
+    pub fn on_event(&self, callback: impl FnMut(&mut EventContext) + 'static) -> bool {
+        let Some(ui) = self.ui.upgrade() else {
+            return false;
+        };
+        let binding = ui.input.listen_first(self.node, callback);
+        self.retain(binding);
+        true
+    }
     /// Where the node shows in the window, in points, through whatever
     /// transforms and zooms it lies under; `None` once it or its UI is gone.
     pub fn window_bounds(&self) -> Option<crate::scene::Rect> {

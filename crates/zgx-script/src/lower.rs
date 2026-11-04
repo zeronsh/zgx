@@ -4054,19 +4054,6 @@ fn styled(
             _ => view.context_menu(move |e| context_menu_items(&vm, &low, &build, e, None)),
         };
     }
-    // Listeners scripts add later (a draggable) receive the element's events.
-    if let Some(element) = &element {
-        let element = element.clone();
-        view = view.on_event(move |event| {
-            if element.listeners.borrow().is_empty() {
-                return;
-            }
-            let listeners = element.listeners.borrow().clone();
-            for listener in listeners {
-                listener(event);
-            }
-        });
-    }
     // Input and drag handlers read the node's handle (local coordinates).
     if element.is_some() || node.events().any_input() || node.events().any_drag() {
         let (element, elements, refs) = (element.clone(), low.elements.clone(), node.refs.clone());

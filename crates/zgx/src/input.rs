@@ -2389,9 +2389,50 @@ impl InputDispatcher {
             focus_changed: old != self.focused(),
         }
     }
+    /// Whether a hit on `hit` is on no box: a contents node (`switch`, a
+    /// script's `ui.show`) fills the box of what it holds but has none of its
+    /// own, as CSS's `display: contents`, so only what it holds can take the
+    /// pointer, unless it listens itself.
+    pub(crate) fn boxless(&self, scene: &Scene, hit: NodeId) -> bool {
+        scene.is_contents(hit) && !self.has_listeners(hit)
+    }
+    /// The cursor over `x, y`, from what a press there would reach: past what
+    /// the pointer passes through, unless that says a cursor of its own (a
+    /// drag's overlay), as CSS's `pointer-events: none` has it.
+    pub fn cursor_at(&self, scene: &Scene, x: f32, y: f32) -> Option<crate::cursor::Cursor> {
+        if !scene.has_cursors() {
+            return None;
+        }
+        'hits: for hit in scene.hit_test_all(x, y) {
+            if self.boxless(scene, hit) {
+                continue;
+            }
+            let mut node = Some(hit);
+            while let Some(id) = node {
+                if self
+                    .options(id)
+                    .is_some_and(|options| self.passes(scene, id, &options))
+                {
+                    match scene.own_cursor(id) {
+                        Some(cursor) => return Some(cursor),
+                        None => continue 'hits,
+                    }
+                }
+                if self.has_listeners(id) {
+                    break;
+                }
+                node = scene.parent(id);
+            }
+            return scene.cursor_over(hit);
+        }
+        None
+    }
     fn hit_target(&self, scene: &Scene, x: f32, y: f32) -> Option<NodeId> {
         let mut fallback = None;
         'hits: for hit in scene.hit_test_all(x, y) {
+            if self.boxless(scene, hit) {
+                continue;
+            }
             let mut node = Some(hit);
             while let Some(id) = node {
                 let (options, hollow) = self.options_hollow(id);
