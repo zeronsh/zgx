@@ -786,6 +786,7 @@ fn decision(node: &Node, held: &crate::node::Decision, low: &Rc<Lowering>) -> Vi
         key,
         label,
         content,
+        sealed,
     } = held;
     let has = |props: &[Prop]| node.props.iter().any(|(prop, _)| props.contains(prop));
     let fills = (
@@ -795,7 +796,13 @@ fn decision(node: &Node, held: &crate::node::Decision, low: &Rc<Lowering>) -> Vi
     // Lowered without what plugins add, then and whenever a part of it builds
     // later (a row, a branch, a component).
     let alone = Rc::new(Lowering {
-        slots: Default::default(),
+        slots: match *sealed {
+            // Under a name no script can write: no `ui.slot` shows them.
+            true => Some(low.slots.get(PLUGIN_PAGE).cloned().unwrap_or_default()),
+            false => low.slots.get(PAGES).cloned(),
+        }
+        .map(|pages| [(PAGES.to_owned(), pages)].into())
+        .unwrap_or_default(),
         hooks: None,
         sealed: Default::default(),
         decisions: low.decisions.clone(),
@@ -827,6 +834,32 @@ fn decision(node: &Node, held: &crate::node::Decision, low: &Rc<Lowering>) -> Vi
     )
     .on_mount(move |handle| handle.retain(decisions.mounted(&key)))
 }
+/// `ui.plugin_page`: what `plugin` alone gave its page, confined to this box:
+/// clipped, its portals with it, and its popups in the window. Lowered as the
+/// rest of its region, with no hook of another plugin's on it.
+#[cold]
+#[inline(never)]
+fn plugin_page(plugin: &Rc<str>, node: &Node, low: &Rc<Lowering>) -> View {
+    let Some(pages) = low.slots.get(PAGES) else {
+        if let Some(vm) = node.owner.upgrade() {
+            vm.report(mlua::Error::runtime(
+                "ui.plugin_page: it shows in a ui.sealed region alone",
+            ));
+        }
+        return div();
+    };
+    let page = column().w_full().h_full().children(
+        pages
+            .iter()
+            .filter(|(owner, _)| **owner == **plugin)
+            .map(|(_, n)| lower(n, low)),
+    );
+    div().child(zgx::compose::confined(plugin_view(page, low)))
+}
+/// The slot a plugin's page goes to: `ui.contribute("plugin_page", …)`.
+const PLUGIN_PAGE: &str = "plugin_page";
+/// Where a `ui.sealed` region holds them, for the `ui.plugin_page`s in it.
+const PAGES: &str = "\0plugin_pages";
 /// A component inside a `private` element: built later, as it mounts,
 /// and still sealed from plugins then.
 #[cold]
@@ -3560,6 +3593,7 @@ fn kind_view(
                 .map(|(_, n)| slot_item(n, context.as_ref(), low)),
         ),
         Kind::Decision(held) => decision(node, held, low),
+        Kind::PluginPage(plugin) => plugin_page(plugin, node, low),
     }
 }
 

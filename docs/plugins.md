@@ -45,6 +45,8 @@ ui.button { id = "clear", hook = false, "Clear done", on_click = ui.action("clea
 
 So a host holding a pending decision reads `host.decision_shown(key)`: true while at least half of it shows and no plugin has a window open, followed where read reactively. While it is false, the host shows its own fallback in its top layer. A scrolled-away decision reads false too.
 
+**Sealed regions.** `ui.sealed { … }` is the same for a region, a Settings page. A plugin's own settings page goes in it through `ui.plugin_page { plugin = name }`: the plugin gives it with `ui.contribute("plugin_page", node)`, no other plugin's shows there, and all it draws and opens is cut to that box. See [overlays](reference/overlays.md#sealed).
+
 A module replaced with `ui.override` runs as the app's own code (`Capability::Override` is a trust grant), so none of this holds against it.
 
 Plugins may also target an element by role and name, as the app writes them (`role:button "Add"`, or `"Add"`). That is convenient and the most fragile form; prefer declared hooks.

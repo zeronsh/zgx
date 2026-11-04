@@ -415,6 +415,8 @@ enum Kind {
         multiline: bool,
     },
     Component(Builder),
+    /// `confined`: a box holding what it mounts, portals included.
+    Confined(Box<View>),
     Provider(Box<dyn FnOnce(&mut Context)>, Box<View>),
     Slot(Slot),
     Region(RegionBuilder),
@@ -2377,6 +2379,12 @@ pub fn hoist(
     }));
     holder.child(room).child(layer.child(content))
 }
+/// `child` kept to this box, which fills its parent: drawn and hit inside it,
+/// and the portals it opens (a modal, a layer, a popover) mounted in it, so
+/// they are cut to it too, instead of reaching over the window.
+pub fn confined(child: View) -> View {
+    View::new(Kind::Confined(Box::new(child)))
+}
 /// Whether popups opened in a subtree stay in the window for now, under its
 /// top layer, rather than in windows of their own (`Ui::set_popup_screens`),
 /// which nothing in the window can be above. A service: `provide` it around
@@ -3398,6 +3406,29 @@ impl Drop for IdRegistration {
         }
     }
 }
+/// `compose::confined`: a box clipping what it holds, portals included.
+#[cold]
+#[inline(never)]
+fn mount_confined(
+    ui: &mut Ui,
+    parent: NodeId,
+    child: View,
+    mut environment: Environment,
+) -> NodeId {
+    let node = ui.container(
+        parent,
+        Layout::Overlay,
+        crate::scene::Style {
+            clip: true,
+            width_percent: Some(100.),
+            height_percent: Some(100.),
+            ..Default::default()
+        },
+    );
+    environment.portal = Some((node, ui.signal(true)));
+    mount(ui, node, child, environment);
+    node
+}
 pub(crate) fn mount(
     ui: &mut Ui,
     parent: NodeId,
@@ -3417,6 +3448,7 @@ pub(crate) fn mount(
     ui.set_mount_depth(depth + 1);
     let root = match kind {
         Kind::Component(build) => mount_component(ui, parent, build, view, environment),
+        Kind::Confined(child) => mount_confined(ui, parent, *child, environment),
         Kind::Provider(provide, child) => {
             mount_provider(ui, parent, provide, *child, view, environment)
         }

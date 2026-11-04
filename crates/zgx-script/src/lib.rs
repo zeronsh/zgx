@@ -4044,7 +4044,10 @@ impl ScriptHost {
             theme::install(lua, ui, dir, packages)
         });
         lazy.ui(&["form"], form::install);
-        lazy.ui(&["decision"], node::install_decisions);
+        lazy.ui(
+            &["decision", "sealed", "plugin_page"],
+            node::install_decisions,
+        );
         lazy.ui(&["modifiers"], modifiers::install);
         lazy.ui(&["editor"], element::install_editor);
         lazy.ui(&["router"], router::install);

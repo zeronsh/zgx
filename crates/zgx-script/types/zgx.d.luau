@@ -19804,6 +19804,12 @@ declare ui: {
 	-- hit over all a plugin opens, in the room this holds in flow. The app's
 	-- own script alone makes one.
 	decision: (props: Merge<ContainerProps, { key: string, label: string? }>) -> Node,
+	-- A region no plugin reaches, filters or draws over (a Settings page), but
+	-- for its `plugin_page`s. The app's own script alone makes one.
+	sealed: (props: Merge<ContainerProps, { key: string?, label: string? }>) -> Node,
+	-- In a `sealed` region: that plugin's own page, what it gives
+	-- `ui.contribute("plugin_page", …)`, kept to this box.
+	plugin_page: (props: Merge<Props, { plugin: string }>) -> Node,
 	-- Where plugins' contributions to `name` go.
 	-- A plugin extension point. `context` reaches what is contributed to
 	-- it: a contributed component gets it as `props.slot` (one component,

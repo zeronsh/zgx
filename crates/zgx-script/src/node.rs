@@ -647,7 +647,11 @@ impl Node {
             Kind::Component { .. } => "component",
             Kind::Presence { .. } => "presence",
             Kind::Slot { .. } => "slot",
-            Kind::Decision(_) => "decision",
+            Kind::Decision(ref decision) => match decision.sealed {
+                true => "sealed",
+                false => "decision",
+            },
+            Kind::PluginPage(_) => "plugin_page",
         }
     }
 }
@@ -659,6 +663,8 @@ pub struct Decision {
     pub key: Rc<str>,
     pub label: String,
     pub content: Vec<Rc<Node>>,
+    /// `ui.sealed`: a region, where `ui.plugin_page` shows a plugin's.
+    pub sealed: bool,
 }
 
 /// Script handlers for input and lifecycle events.
@@ -1112,6 +1118,9 @@ pub(crate) enum Kind {
     /// over all it opens (`zgx::compose::hoist`), with what holds them in
     /// flow. Its children are here: a plugin's hooks walk `Node::children`.
     Decision(Box<Decision>),
+    /// `ui.plugin_page`: what that plugin (its name) gave `ui.contribute(
+    /// "plugin_page", …)`, in a `ui.sealed` region, confined to this box.
+    PluginPage(Rc<str>),
     /// A plugin extension point; `context` reaches what is contributed to it
     /// (`props.slot` of a contributed component).
     Slot {
@@ -4512,41 +4521,71 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
 /// Installs the read-only `ui` global.
 /// `ui.override`, `ui.contribute` and `ui.filter`: what plugins (and an
 /// app's own extensions) hand the app, made once a script names one.
-/// `ui.decision`, set the first time it is read: a script that never asks
-/// makes no function for it.
+/// An error unless the script running is the application's: `what` no
+/// plugin makes.
+fn app_alone(lua: &Lua, what: &str) -> mlua::Result<()> {
+    if matches!(&*env(lua)?.grants, crate::Grants::Only(_)) {
+        return Err(mlua::Error::runtime(format!(
+            "{what}: only the app's own script makes this"
+        )));
+    }
+    Ok(())
+}
+/// `ui.decision`, or `ui.sealed` for a region (its key optional).
+fn decision_node(lua: &Lua, table: Table, sealed: bool) -> mlua::Result<mlua::AnyUserData> {
+    app_alone(lua, if sealed { "ui.sealed" } else { "ui.decision" })?;
+    let key: Option<String> = table.get("key")?;
+    if key.is_none() && !sealed {
+        return Err(mlua::Error::runtime("ui.decision needs a `key`"));
+    }
+    let label = table
+        .get::<Option<String>>("label")?
+        .unwrap_or_else(|| if sealed { "Sealed" } else { "Decision" }.to_owned());
+    let mut node = fill(
+        lua,
+        Node::new(
+            owner(lua)?,
+            Kind::Decision(Box::new(Decision {
+                key: key.unwrap_or_default().into(),
+                label,
+                content: Vec::new(),
+                sealed,
+            })),
+        ),
+        Some(&table),
+    )?;
+    node.private = true;
+    let content = std::mem::take(&mut node.children);
+    if let Kind::Decision(decision) = &mut node.kind {
+        decision.content = content;
+    }
+    node_ud(lua, node)
+}
+/// `ui.decision`, `ui.sealed` and `ui.plugin_page`, set the first time one is
+/// read: a script that never asks makes no function for them.
 pub(crate) fn install_decisions(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     ui.raw_set(
         "decision",
+        lua.create_function(|lua, table: Table| decision_node(lua, table, false))?,
+    )?;
+    ui.raw_set(
+        "sealed",
+        lua.create_function(|lua, table: Table| decision_node(lua, table, true))?,
+    )?;
+    ui.raw_set(
+        "plugin_page",
         lua.create_function(|lua, table: Table| {
-            if matches!(&*env(lua)?.grants, crate::Grants::Only(_)) {
-                return Err(mlua::Error::runtime(
-                    "ui.decision: only the app's own script makes a decision control",
-                ));
-            }
-            let key: Rc<str> = table
-                .get::<Option<String>>("key")?
-                .ok_or_else(|| mlua::Error::runtime("ui.decision needs a `key`"))?
+            app_alone(lua, "ui.plugin_page")?;
+            let plugin: Rc<str> = table
+                .get::<Option<String>>("plugin")?
+                .ok_or_else(|| mlua::Error::runtime("ui.plugin_page needs a `plugin`"))?
                 .into();
-            let label = table
-                .get::<Option<String>>("label")?
-                .unwrap_or_else(|| "Decision".to_owned());
-            let mut node = fill(
+            table.raw_set("plugin", mlua::Value::Nil)?;
+            let node = fill(
                 lua,
-                Node::new(
-                    owner(lua)?,
-                    Kind::Decision(Box::new(Decision {
-                        key,
-                        label,
-                        content: Vec::new(),
-                    })),
-                ),
+                Node::new(owner(lua)?, Kind::PluginPage(plugin)),
                 Some(&table),
             )?;
-            node.private = true;
-            let content = std::mem::take(&mut node.children);
-            if let Kind::Decision(decision) = &mut node.kind {
-                decision.content = content;
-            }
             node_ud(lua, node)
         })?,
     )
