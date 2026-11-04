@@ -2,7 +2,9 @@
 """A decision control on X11 (Xvfb/Openbox), driving the decision_probe example:
 at each step its own report of the popups in the scene against the windows the
 X server shows for it, and a real pointer click at the control's button while a
-plugin's modal and its overflowing popover are up. Passes if the probe does."""
+plugin's modal and its overflowing popover are up. `--sealed`: the same at a
+sealed page's button, with a plugin's modal over it and one in its own page.
+Passes if the probe does."""
 import argparse
 import json
 import os
@@ -21,6 +23,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=pathlib.Path, help="the decision_probe example")
     parser.add_argument("--output", type=pathlib.Path, required=True)
+    parser.add_argument("--sealed", action="store_true", help="against a sealed page (ui.sealed)")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     processes, checks = [], {}
@@ -44,7 +47,8 @@ def main():
         launch("openbox", ["openbox"], env)
         wait_for_wm(env)
         log = args.output / "application.log"
-        app = launch("application", [str(args.binary.resolve())], env, stdout=log.open("w"))
+        app = launch("application", [str(args.binary.resolve())] + (["--sealed"] if args.sealed else []), env,
+                     stdout=log.open("w"))
 
         def run(*argv):
             return subprocess.run(list(map(str, argv)), env=env, capture_output=True, text=True).stdout
@@ -86,10 +90,14 @@ def main():
         text = log.read_text()
         checks["output"] = text
         assert app.poll() == 0 and "RESULT pass" in text, text
-        assert checks["free"]["x_popup_windows"] >= 1, "no popup window to begin with"
-        assert checks["decision"]["x_popup_windows"] == 0
         assert checks["plugin-modal"]["x_popup_windows"] == 0
-        assert checks["app-popup"]["x_popup_windows"] == 1
+        if args.sealed:
+            assert checks["sealed"]["x_popup_windows"] == 0
+            assert checks["page-modal"]["x_popup_windows"] == 0
+        else:
+            assert checks["free"]["x_popup_windows"] >= 1, "no popup window to begin with"
+            assert checks["decision"]["x_popup_windows"] == 0
+            assert checks["app-popup"]["x_popup_windows"] == 1
     finally:
         (args.output / "result.json").write_text(json.dumps(checks, indent=2))
         for process in reversed(processes):
