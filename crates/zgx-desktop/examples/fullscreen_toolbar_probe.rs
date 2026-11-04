@@ -10,8 +10,9 @@
 //! does); `--via borderless` with zgx's
 //! `WindowHandle::set_fullscreen` (winit's borderless full screen);
 //! `--via failed` posts AppKit's will-enter-full-screen notification for the
-//! window without entering, as a transition that fails after it began looks
-//! to zgx (the toolbar hidden, then back once the window is plainly not in
+//! window without entering, then tells its delegate the transition failed
+//! (`windowDidFailToEnterFullScreen:`), as a transition that fails after it
+//! began looks to zgx (the toolbar hidden, then back once the window is plainly not in
 //! full screen). Before, in and after full screen it prints:
 //! - `STRIP <when> height=<pt> alpha=<a> visible=<bool>`: each toolbar
 //!   full-screen window;
@@ -79,7 +80,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state::report("before");
                 if failed {
                     state::will_enter();
-                    pause(500).await;
+                    pause(300).await;
+                    state::fail_to_enter();
+                    pause(200).await;
                     state::report("full");
                     pause(3000).await;
                     state::report("after");
@@ -160,6 +163,25 @@ mod state {
         }
     }
 
+    /// What AppKit tells the window's delegate (winit's) as a transition
+    /// fails: `windowDidFailToEnterFullScreen:`, which winit undoes its
+    /// full screen for. No notification says so.
+    pub fn fail_to_enter() {
+        let Some(window) = ours() else {
+            println!("NO_WINDOW");
+            return;
+        };
+        let Some(delegate) = window.delegate() else {
+            println!("NO_DELEGATE");
+            return;
+        };
+        // SAFETY: the window's delegate (winit's) answers
+        // `-windowDidFailToEnterFullScreen:`, which takes the window.
+        unsafe {
+            let _: () = msg_send![&*delegate, windowDidFailToEnterFullScreen: &*window];
+        }
+    }
+
     /// What the green button does.
     pub fn toggle() {
         if let Some(window) = ours() {
@@ -219,6 +241,7 @@ mod state {
 #[cfg(not(target_os = "macos"))]
 mod state {
     pub fn will_enter() {}
+    pub fn fail_to_enter() {}
     pub fn click() {}
     pub fn toggle() {}
     pub fn report(_: &str) {

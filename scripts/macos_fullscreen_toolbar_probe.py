@@ -8,7 +8,8 @@ and out of full screen as the green button does (`toggleFullScreen:`), by
 clicking it (`performClick:` on the zoom button), with
 zgx's `set_fullscreen` (winit's borderless full screen), and as a transition
 that fails after it began (AppKit's will-enter notification with no full
-screen after it: the toolbar must come back). In full screen,
+screen after it, and `windowDidFailToEnterFullScreen:` to the window's
+delegate, as AppKit tells winit: the toolbar must come back). In full screen,
 AppKit's toolbar window above it (NSToolbarFullScreenWindow) must show
 nothing (alpha 0, or not visible), the inset toolbar must be hidden and the
 content layout rect must be the window's whole height. After, the toolbar
