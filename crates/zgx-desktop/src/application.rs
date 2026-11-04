@@ -2925,9 +2925,9 @@ impl Host {
                                 None
                             }
                         },
-                        #[cfg(windows)]
+                        #[cfg(any(windows, target_os = "linux"))]
                         renderer,
-                        #[cfg(windows)]
+                        #[cfg(any(windows, target_os = "linux"))]
                         &report.damage,
                     )
                 },

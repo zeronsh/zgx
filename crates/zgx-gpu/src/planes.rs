@@ -113,9 +113,10 @@ impl GpuRenderer {
     /// that window last drew can be copied, its renderer on this one's
     /// context and at its scale. Taken now, before this renderer's next
     /// frame: call it again when the window repaints under the popup. Past
-    /// the window's edge there is nothing to blur, and what's behind shows
-    /// through the popup's fill. (macOS's popups have AppKit's material; its
-    /// frames encoded with Metal directly don't read this.)
+    /// the window's edge its edge's pixels go on, so the whole of the glass is
+    /// the window's, blurred, with nothing sharp through it. (macOS's popups
+    /// have AppKit's material; its frames encoded with Metal directly don't
+    /// read this.)
     pub fn set_backdrop(&mut self, window: Option<&GpuRenderer>) {
         let (Some(window), Some(rect)) = (window, self.plane_rect()) else {
             self.backdrop = None;
@@ -123,12 +124,8 @@ impl GpuRenderer {
         };
         window.flush_pending();
         let (width, height) = (self.width, self.height);
-        let fits = self
-            .backdrop
-            .as_ref()
-            .is_some_and(|(texture, _)| (texture.width(), texture.height()) == (width, height));
-        if !fits {
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = |device: &wgpu::Device| {
+            device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("popup backdrop"),
                 size: wgpu::Extent3d {
                     width,
@@ -140,63 +137,110 @@ impl GpuRenderer {
                 dimension: wgpu::TextureDimension::D2,
                 format: crate::FORMAT,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC
                     | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
-            });
-            let view = texture.create_view(&Default::default());
-            self.backdrop = Some((texture, view));
+            })
+        };
+        let fits = self
+            .backdrop
+            .as_ref()
+            .is_some_and(|(texture, _)| (texture.width(), texture.height()) == (width, height));
+        if !fits {
+            let made = texture(&self.device);
+            let view = made.create_view(&Default::default());
+            self.backdrop = Some((made, view));
         }
-        let (texture, view) = self.backdrop.as_ref().expect("made above");
         // Whole pixels of the window, as `set_plane_rect` snapped its box.
         let left = (rect.x * self.scale).round() as i64;
         let top = (rect.y * self.scale).round() as i64;
-        let right = (left + i64::from(width)).min(i64::from(window.width));
-        let bottom = (top + i64::from(height)).min(i64::from(window.height));
-        let (from_x, from_y) = (left.max(0), top.max(0));
+        let across = window_span(left, width, window.width);
+        let down = window_span(top, height, window.height);
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        // Nothing where the window doesn't reach, as it last was or not.
-        drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("popup backdrop clear"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            ..Default::default()
-        }));
-        if right > from_x && bottom > from_y {
+        let copy = |encoder: &mut wgpu::CommandEncoder,
+                    source: &wgpu::Texture,
+                    from: (u32, u32),
+                    target: &wgpu::Texture,
+                    to: (u32, u32),
+                    size: (u32, u32)| {
             encoder.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &window.target,
+                    texture: source,
                     mip_level: 0,
                     origin: wgpu::Origin3d {
-                        x: from_x as u32,
-                        y: from_y as u32,
+                        x: from.0,
+                        y: from.1,
                         z: 0,
                     },
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::TexelCopyTextureInfo {
-                    texture,
+                    texture: target,
                     mip_level: 0,
                     origin: wgpu::Origin3d {
-                        x: (from_x - left) as u32,
-                        y: (from_y - top) as u32,
+                        x: to.0,
+                        y: to.1,
                         z: 0,
                     },
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::Extent3d {
-                    width: (right - from_x) as u32,
-                    height: (bottom - from_y) as u32,
+                    width: size.0,
+                    height: size.1,
                     depth_or_array_layers: 1,
                 },
             );
+        };
+        let (backdrop, _) = self.backdrop.as_ref().expect("made above");
+        // What lies over the window, and the window's first and last rows
+        // again past them.
+        let inner = (across.1 - across.0, down.1 - down.0);
+        copy(
+            &mut encoder,
+            &window.target,
+            (across.2, down.2),
+            backdrop,
+            (across.0, down.0),
+            inner,
+        );
+        let last_row = down.2 + inner.1 - 1;
+        for y in (0..down.0).chain(down.1..height) {
+            let row = if y < down.0 { down.2 } else { last_row };
+            copy(
+                &mut encoder,
+                &window.target,
+                (across.2, row),
+                backdrop,
+                (across.0, y),
+                (inner.0, 1),
+            );
+        }
+        // The first and last columns of all that again past them: from a
+        // copy, a texture not being copied within itself.
+        if inner.0 < width {
+            let extended = texture(&self.device);
+            copy(
+                &mut encoder,
+                backdrop,
+                (0, 0),
+                &extended,
+                (0, 0),
+                (width, height),
+            );
+            let last_column = across.1 - 1;
+            for x in (0..across.0).chain(across.1..width) {
+                let column = if x < across.0 { across.0 } else { last_column };
+                copy(
+                    &mut encoder,
+                    backdrop,
+                    (column, 0),
+                    &extended,
+                    (x, 0),
+                    (1, height),
+                );
+            }
+            let view = extended.create_view(&Default::default());
+            self.backdrop = Some((extended, view));
         }
         self.queue.submit([encoder.finish()]);
     }
@@ -338,4 +382,17 @@ impl GpuRenderer {
         zgx::scene::translate_items(&mut items, -x, -y);
         items
     }
+}
+
+/// Along one axis, a popup from `start` (the window's pixels) and `size` long
+/// over a window `whole` long: the part of the popup that lies over it
+/// (`.0` to `.1`, the popup's pixels), and where that starts in the window. A
+/// popup wholly past the window takes the window's nearest pixel, so the part
+/// is never empty.
+fn window_span(start: i64, size: u32, whole: u32) -> (u32, u32, u32) {
+    let (size, whole) = (i64::from(size), i64::from(whole));
+    let from = (-start).clamp(0, size - 1);
+    let to = (whole - start).clamp(from + 1, size);
+    let at = (start + from).clamp(0, whole - 1);
+    (from as u32, (to.min(from + whole - at)) as u32, at as u32)
 }

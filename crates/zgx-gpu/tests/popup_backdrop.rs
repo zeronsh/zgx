@@ -32,14 +32,14 @@ struct Window {
 }
 impl Window {
     /// Red on its left half, blue on its right; over them, as a popup root,
-    /// a clear 100-point panel that blurs what's behind it at (`x`, 50).
-    fn new(x: f32, scale: f32) -> Self {
-        Self::shaped(x, scale, 0., false)
+    /// a clear 100-point panel that blurs what's behind it at (`x`, `y`).
+    fn new(x: f32, y: f32, scale: f32) -> Self {
+        Self::shaped(x, y, scale, 0., false)
     }
     /// As `new`, the panel rounded by `radius`, the popup's frames drawn into
     /// its target and its drawable at once (`single_pass`, as a window's on
     /// Windows are), where blending can't mix the blur over its target.
-    fn shaped(x: f32, scale: f32, radius: f32, single_pass: bool) -> Self {
+    fn shaped(x: f32, y: f32, scale: f32, radius: f32, single_pass: bool) -> Self {
         let pixels = (WIDTH * scale) as u32;
         let mut gpu = GpuRenderer::new(pixels, pixels).unwrap();
         gpu.set_scale_factor(scale);
@@ -70,7 +70,7 @@ impl Window {
             NodeKind::Container(Layout::Overlay),
             fixed(100., 100.),
         );
-        scene.set_transform(popup_root, Transform { x, y: 50. });
+        scene.set_transform(popup_root, Transform { x, y });
         let panel = scene.append(
             popup_root,
             NodeKind::Panel {
@@ -127,7 +127,7 @@ impl Window {
 fn a_popup_blurs_what_its_window_drew_under_it() {
     let _gpu_fixture = gpu_fixture();
     // Over the seam: red by its left, blue by its right, both at the seam.
-    let window = Window::new(150., 1.);
+    let window = Window::new(150., 50., 1.);
     let [r, _, b, a] = window.pixel(2., 50.);
     assert!(r > 200 && b < 60 && a == 255, "left {r} {b} {a}");
     let [r, _, b, a] = window.pixel(98., 50.);
@@ -139,7 +139,7 @@ fn a_popup_blurs_what_its_window_drew_under_it() {
     );
 
     // From where it lies: wholly over the red, only red.
-    let window = Window::new(20., 1.);
+    let window = Window::new(20., 50., 1.);
     let [r, _, b, a] = window.pixel(90., 50.);
     assert!(r > 240 && b < 10 && a == 255, "over red {r} {b} {a}");
 }
@@ -147,7 +147,7 @@ fn a_popup_blurs_what_its_window_drew_under_it() {
 #[test]
 fn without_a_backdrop_it_blurs_nothing() {
     let _gpu_fixture = gpu_fixture();
-    let mut window = Window::new(150., 1.);
+    let mut window = Window::new(150., 50., 1.);
     window.popup.set_backdrop(None);
     window.popup.repaint_all();
     window.popup.render(&window.scene, &[]).unwrap();
@@ -157,7 +157,7 @@ fn without_a_backdrop_it_blurs_nothing() {
 #[test]
 fn it_blurs_at_the_window_s_scale() {
     let _gpu_fixture = gpu_fixture();
-    let window = Window::new(150., 2.);
+    let window = Window::new(150., 50., 2.);
     let [r, _, b, a] = window.pixel(2., 50.);
     assert!(r > 200 && b < 60 && a == 255, "left {r} {b} {a}");
     let [r, _, b, a] = window.pixel(98., 50.);
@@ -165,19 +165,61 @@ fn it_blurs_at_the_window_s_scale() {
 }
 
 #[test]
-fn past_the_window_s_edge_nothing_is_blurred() {
+fn past_the_window_s_edge_the_glass_goes_on() {
     let _gpu_fixture = gpu_fixture();
-    // Half past the right edge (a popup's window may be).
-    let window = Window::new(350., 1.);
-    let [_, _, b, a] = window.pixel(10., 50.);
-    assert!(b > 150 && a > 150, "inside {b} {a}");
-    assert_eq!(window.pixel(95., 50.)[3], 0, "past it");
+    // Half past the right edge: all of it the window's blue, opaque, with
+    // no transparency mixed in by the edge.
+    let window = Window::new(350., 50., 1.);
+    for x in [10., 45., 55., 95.] {
+        let [r, _, b, a] = window.pixel(x, 50.);
+        assert!(r < 10 && b > 240 && a == 255, "at {x}: {r} {b} {a}");
+    }
+    // Past the bottom, the same.
+    let window = Window::new(20., 350., 1.);
+    for y in [10., 45., 55., 95.] {
+        let [r, _, b, a] = window.pixel(50., y);
+        assert!(r > 240 && b < 10 && a == 255, "at {y}: {r} {b} {a}");
+    }
+    // Past a corner, and from the left and the top.
+    let window = Window::new(350., 350., 2.);
+    let [_, _, b, a] = window.pixel(95., 95.);
+    assert!(b > 240 && a == 255, "the corner {b} {a}");
+    let window = Window::new(-50., -50., 1.);
+    let [r, _, _, a] = window.pixel(5., 5.);
+    assert!(r > 240 && a == 255, "the far corner {r} {a}");
+}
+
+/// Past the window's edge too, where the crop carries the edge on: on both
+/// ways of mixing the blur.
+#[test]
+fn outside_its_corners_it_shows_nothing_of_the_window() {
+    let _gpu_fixture = gpu_fixture();
+    for single_pass in [false, true] {
+        for (x, y) in [(20., 50.), (350., 350.)] {
+            let window = Window::shaped(x, y, 1., 12., single_pass);
+            for (cx, cy) in [(0., 0.), (99., 0.), (0., 99.), (99., 99.)] {
+                assert_eq!(
+                    window.pixel(cx, cy),
+                    [0, 0, 0, 0],
+                    "corner {cx},{cy} at {x},{y}, single pass {single_pass}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn wholly_past_the_window_it_takes_the_nearest_pixels() {
+    let _gpu_fixture = gpu_fixture();
+    let window = Window::new(500., 50., 1.);
+    let [r, _, b, a] = window.pixel(50., 50.);
+    assert!(r < 10 && b > 240 && a == 255, "{r} {b} {a}");
 }
 
 #[test]
 fn a_new_frame_under_it_shows_when_taken_again() {
     let _gpu_fixture = gpu_fixture();
-    let mut window = Window::new(20., 1.);
+    let mut window = Window::new(20., 50., 1.);
     assert!(window.pixel(90., 50.)[0] > 240);
     window.scene.set_kind(window.left, NodeKind::Rect(GREEN));
     window.draw();
@@ -194,7 +236,7 @@ fn a_rounded_popup_keeps_its_own_pixels_past_its_curve() {
     let _gpu_fixture = gpu_fixture();
     for single_pass in [false, true] {
         for scale in [1., 2.] {
-            let window = Window::shaped(50., scale, 24., single_pass);
+            let window = Window::shaped(50., 50., scale, 24., single_pass);
             let case = format!("single_pass {single_pass}, scale {scale}");
             for (x, y) in [(1., 1.), (98., 1.), (1., 98.), (98., 98.)] {
                 assert_eq!(window.pixel(x, y)[3], 0, "{case}: corner {x},{y}");
