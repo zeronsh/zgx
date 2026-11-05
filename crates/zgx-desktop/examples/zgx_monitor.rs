@@ -45,7 +45,7 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command},
     rc::Rc,
     time::{Duration, Instant},
@@ -86,8 +86,19 @@ struct Track {
     samples: VecDeque<Sample>,
 }
 
+/// The scripts: in the app bundle the monitor ships in, otherwise this checkout's.
+fn script() -> PathBuf {
+    let shipped = std::env::current_exe().ok().and_then(|exe| {
+        let path = exe.parent()?.parent()?.join("Resources/monitor/app.luau");
+        path.exists().then_some(path)
+    });
+    shipped.unwrap_or_else(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/zgx_monitor/app.luau")
+    })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/zgx_monitor/app.luau");
+    let script = script();
     let mut application = Application::new();
     // Geist, the interface's typeface (`font.sans` in zgx_monitor/glass.json).
     for bytes in [
