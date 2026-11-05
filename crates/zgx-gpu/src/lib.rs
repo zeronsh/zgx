@@ -13772,6 +13772,20 @@ impl GpuRenderer {
             self.narrow_drawables();
             self.release_drawables();
             self.idle = true;
+            self.renew_queue();
+        }
+    }
+    /// Metal's queue let go of, the driver's memory for it given back
+    /// (`Queue::renew`), with all this renderer gave it finished and let go of
+    /// (a command buffer holds its queue).
+    #[cfg(target_os = "macos")]
+    fn renew_queue(&mut self) {
+        self.finish_direct();
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        // SAFETY: Only the queue's handle goes; wgpu's work on it has been waited
+        // for, and nothing is being encoded (`renew` looks).
+        if let Some(queue) = unsafe { self.queue.as_hal::<wgpu::hal::api::Metal>() } {
+            queue.renew();
         }
     }
     /// Drop the fill and layer shaders no one holds but this renderer (a
