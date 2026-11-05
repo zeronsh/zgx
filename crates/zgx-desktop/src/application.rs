@@ -5838,6 +5838,9 @@ impl Host {
             self.rephased(waited);
             return;
         }
+        if zgap_log() {
+            eprintln!("ZTICK {:.2}", zgx::trace::now_ms());
+        }
         self.frame_arrived = true;
         self.frame_deadline = None;
         self.frame_heartbeat = Some(std::time::Instant::now());
@@ -7536,6 +7539,15 @@ impl WindowManager {
 }
 
 /// The event loop's turns, each contained (`WindowManager::contain`).
+// Diagnostic: ZGX_GAP_LOG=1, what the main thread did between frames, on
+// frames' clock: each refresh's arrival, and each turn of the loop over 2 ms.
+thread_local! {
+    static ZTURN: std::cell::Cell<f64> = const { std::cell::Cell::new(0.) };
+}
+fn zgap_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ZGX_GAP_LOG").is_some())
+}
 impl ApplicationHandler<Event> for WindowManager {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.contain(event_loop, None, |this| this.resumed_turn(event_loop));
@@ -7570,10 +7582,21 @@ impl ApplicationHandler<Event> for WindowManager {
         }
         self.window_event_now(event_loop, id, event);
     }
+    fn new_events(&mut self, _: &ActiveEventLoop, _: winit::event::StartCause) {
+        if zgap_log() {
+            ZTURN.set(zgx::trace::now_ms());
+        }
+    }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "linux")]
         self.flush_move(event_loop);
         self.contain(event_loop, None, |this| this.about_to_wait_turn(event_loop));
+        if zgap_log() {
+            let (at, now) = (ZTURN.get(), zgx::trace::now_ms());
+            if now - at > 2. {
+                eprintln!("ZTURN {at:.2} {:.2}", now - at);
+            }
+        }
     }
     /// The windows still open (`Application::quit`, a failure) close while
     /// the event loop is still there, not after `run_app` returns. On Linux
