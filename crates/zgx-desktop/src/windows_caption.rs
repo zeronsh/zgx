@@ -205,9 +205,9 @@ fn fill(kind: CaptionButton, hover: bool, down: bool, high_contrast: bool) -> Th
         (_, _, true) => tok::CAPTION_PRESSED.into(),
     }
 }
-/// The glyph's ink, from the theme's `caption.ink` tokens, by default its
+/// The glyph's ink, from the theme's `caption.text` tokens, by default its
 /// title bar's other controls': secondary at rest, primary under the pointer
-/// and pressed, tertiary in a window in the back; `caption.close.ink`, white,
+/// and pressed, tertiary in a window in the back; `caption.close.text`, white,
 /// over Close's red (`red`). In a contrast theme `hover` is the opaque
 /// highlight, which its window text doesn't read on (white on Night sky's
 /// cyan): under the pointer then, the highlight's own text, `accent.text`;
@@ -216,13 +216,13 @@ fn fill(kind: CaptionButton, hover: bool, down: bool, high_contrast: bool) -> Th
 /// needn't read on the system's. Close's red under the pointer stays.
 fn ink(red: bool, hover: bool, down: bool, active: bool, high_contrast: bool) -> Themed<Color> {
     match (red, hover, active) {
-        (true, ..) if down => tok::CAPTION_CLOSE_INK_PRESSED.into(),
-        (true, ..) => tok::CAPTION_CLOSE_INK.into(),
+        (true, ..) if down => tok::CAPTION_CLOSE_TEXT_PRESSED.into(),
+        (true, ..) => tok::CAPTION_CLOSE_TEXT.into(),
         (_, true, _) if high_contrast => tok::ACCENT_TEXT.into(),
         _ if high_contrast => tok::TEXT_PRIMARY.into(),
-        (_, true, _) => tok::CAPTION_INK_HOVER.into(),
-        (_, _, true) => tok::CAPTION_INK.into(),
-        (_, _, false) => tok::CAPTION_INK_INACTIVE.into(),
+        (_, true, _) => tok::CAPTION_TEXT_HOVER.into(),
+        (_, _, true) => tok::CAPTION_TEXT.into(),
+        (_, _, false) => tok::CAPTION_TEXT_INACTIVE.into(),
     }
 }
 
@@ -740,29 +740,29 @@ mod tests {
         let ink_of = |red, hover, down, active| ink(red, hover, down, active, false);
         assert_eq!(
             ink_of(false, false, false, true),
-            Themed::from(tok::CAPTION_INK)
+            Themed::from(tok::CAPTION_TEXT)
         );
         assert_eq!(
             ink_of(false, true, false, true),
-            Themed::from(tok::CAPTION_INK_HOVER)
+            Themed::from(tok::CAPTION_TEXT_HOVER)
         );
         assert_eq!(
             ink_of(false, true, true, true),
-            Themed::from(tok::CAPTION_INK_HOVER),
+            Themed::from(tok::CAPTION_TEXT_HOVER),
             "pressed"
         );
         assert_eq!(
             ink_of(false, false, false, false),
-            Themed::from(tok::CAPTION_INK_INACTIVE)
+            Themed::from(tok::CAPTION_TEXT_INACTIVE)
         );
         assert_eq!(
             ink_of(true, true, false, true),
-            Themed::from(tok::CAPTION_CLOSE_INK),
+            Themed::from(tok::CAPTION_CLOSE_TEXT),
             "on red"
         );
         assert_eq!(
             ink_of(true, true, true, false),
-            Themed::from(tok::CAPTION_CLOSE_INK_PRESSED),
+            Themed::from(tok::CAPTION_CLOSE_TEXT_PRESSED),
             "on red, pressed"
         );
         // A contrast theme's hover is its highlight: its own text on it, and
@@ -777,7 +777,7 @@ mod tests {
         );
         assert_eq!(
             ink(true, true, false, true, true),
-            Themed::from(tok::CAPTION_CLOSE_INK)
+            Themed::from(tok::CAPTION_CLOSE_TEXT)
         );
         assert_eq!(
             fill(Minimize, true, false, false),
@@ -787,20 +787,26 @@ mod tests {
             fill(Maximize, true, true, false),
             Themed::from(tok::CAPTION_PRESSED)
         );
-        assert_eq!(fill(Close, true, false, false), Themed::from(tok::CAPTION_CLOSE));
+        assert_eq!(
+            fill(Close, true, false, false),
+            Themed::from(tok::CAPTION_CLOSE)
+        );
         assert_eq!(
             fill(Close, true, true, false),
             Themed::from(tok::CAPTION_CLOSE_PRESSED)
         );
-        assert_eq!(fill(Close, false, false, false), Themed::from(Color(0, 0, 0, 0)));
+        assert_eq!(
+            fill(Close, false, false, false),
+            Themed::from(Color(0, 0, 0, 0))
+        );
         let mut ui = Ui::new(800., 600.);
         let look = CaptionLook::new(&ui, flat(1.));
         ui.mount(look.view(false));
         ui.prepare_frame();
-        assert_eq!(look.ink(Minimize), Themed::from(tok::CAPTION_INK));
+        assert_eq!(look.ink(Minimize), Themed::from(tok::CAPTION_TEXT));
         look.hovered.set(Some(Minimize));
         ui.prepare_frame();
-        assert_eq!(look.ink(Minimize), Themed::from(tok::CAPTION_INK_HOVER));
+        assert_eq!(look.ink(Minimize), Themed::from(tok::CAPTION_TEXT_HOVER));
         assert_eq!(look.fill(Minimize), Themed::from(tok::CAPTION_HOVER));
         look.high_contrast.set(true);
         ui.prepare_frame();
@@ -815,16 +821,16 @@ mod tests {
         for name in [zgx::theme::DARK, zgx::theme::LIGHT] {
             ui.theme().set(name).unwrap();
             let color = |token| ui.theme().root().color_untracked(token);
-            assert_eq!(color(tok::CAPTION_INK), color(tok::TEXT_SECONDARY));
-            assert_eq!(color(tok::CAPTION_INK_HOVER), color(tok::TEXT_PRIMARY));
-            assert_eq!(color(tok::CAPTION_INK_INACTIVE), color(tok::TEXT_TERTIARY));
+            assert_eq!(color(tok::CAPTION_TEXT), color(tok::TEXT_SECONDARY));
+            assert_eq!(color(tok::CAPTION_TEXT_HOVER), color(tok::TEXT_PRIMARY));
+            assert_eq!(color(tok::CAPTION_TEXT_INACTIVE), color(tok::TEXT_TERTIARY));
             assert_eq!(color(tok::CAPTION_HOVER), color(tok::HOVER));
             assert_eq!(color(tok::CAPTION_PRESSED), color(tok::PRESSED));
             assert_eq!(color(tok::CAPTION_CLOSE), Color(196, 43, 28, 255));
             assert_eq!(color(tok::CAPTION_CLOSE_PRESSED), Color(196, 43, 28, 230));
-            assert_eq!(color(tok::CAPTION_CLOSE_INK), Color(255, 255, 255, 255));
+            assert_eq!(color(tok::CAPTION_CLOSE_TEXT), Color(255, 255, 255, 255));
             assert_eq!(
-                color(tok::CAPTION_CLOSE_INK_PRESSED),
+                color(tok::CAPTION_CLOSE_TEXT_PRESSED),
                 Color(255, 255, 255, 255)
             );
         }
@@ -847,8 +853,8 @@ mod tests {
         ui.theme().register(
             zgx::theme::Theme::from_json(
                 r##"{ "name": "test-app", "type": "dark", "tokens": {
-                    "caption.ink": "#ededed", "caption.ink.hover": "#ffffff",
-                    "caption.ink.inactive": "#ededed", "caption.hover": "#ffffff1a",
+                    "caption.text": "#ededed", "caption.text.hover": "#ffffff",
+                    "caption.text.inactive": "#ededed", "caption.hover": "#ffffff1a",
                     "caption.pressed": "#ffffff26", "caption.close": "#010203" } }"##,
             )
             .unwrap(),
@@ -880,7 +886,11 @@ mod tests {
         look.active.set(true);
         look.hovered.set(Some(Minimize));
         ui.prepare_frame();
-        assert_eq!(color(look.ink(Minimize)), highlight_text, "under the pointer");
+        assert_eq!(
+            color(look.ink(Minimize)),
+            highlight_text,
+            "under the pointer"
+        );
         assert_eq!(color(look.fill(Minimize)), highlight);
         look.pressed.set(Some(Minimize));
         ui.prepare_frame();
