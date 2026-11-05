@@ -7415,32 +7415,95 @@ fn same_item(was: &Value, now: &Value) -> bool {
 /// kept so an address names it alone: a list written in one row (a token
 /// streaming in) asks `key` of that row's item alone.
 #[derive(Default)]
-struct KeptKeys(HashMap<usize, (Value, ListKey)>);
+struct KeptKeys {
+    keys: HashMap<usize, (Value, ListKey)>,
+    /// `key` read past an item's short fields (`KeyViews`): it's given the
+    /// items themselves from then on.
+    whole_items: bool,
+}
 impl KeptKeys {
     fn get(&self, item: &Value) -> Option<ListKey> {
         let at = crate::value::identity(item);
         (at != 0)
-            .then(|| self.0.get(&at).map(|(_, k)| k.clone()))
+            .then(|| self.keys.get(&at).map(|(_, k)| k.clone()))
             .flatten()
     }
     fn keep(&mut self, item: &Value, key: &ListKey) {
         let at = crate::value::identity(item);
         if at != 0 {
-            self.0.insert(at, (item.clone(), key.clone()));
+            self.keys.insert(at, (item.clone(), key.clone()));
         }
     }
 }
 
 /// `key(item)` as a list key: a number, string or boolean, else (or if it
 /// fails) the item's index.
-fn item_key(vm: &Vm, key: &mlua::Function, item: &Value, index: usize) -> ListKey {
-    match vm.call::<Value>(key, item.clone()) {
+fn item_key(
+    vm: &Vm,
+    key: &mlua::Function,
+    item: &Value,
+    index: usize,
+    whole_items: &mut bool,
+) -> ListKey {
+    let mut asked = None;
+    if !*whole_items
+        && crate::value::KeyViews::worth(item)
+        && let Ok(views) = crate::value::key_views(&vm.lua)
+        && let Ok(view) = views.view(&vm.lua, item)
+    {
+        let found = vm.call::<Value>(key, view);
+        if views.read_past() {
+            *whole_items = true;
+        } else {
+            asked = Some(found);
+        }
+    }
+    match asked.unwrap_or_else(|| vm.call::<Value>(key, item.clone())) {
         Ok(value) => ListKey::of(&value).unwrap_or(ListKey::Index(index)),
         Err(e) => {
             vm.report(e);
             ListKey::Index(index)
         }
     }
+}
+
+/// `all(key, items)` of the `missing` items: of views of the long ones
+/// (`KeyViews`), else of the items, when `key` read past a view.
+fn asked_keys(
+    vm: &Vm,
+    all: &mlua::Function,
+    key: &mlua::Function,
+    list: &[Value],
+    missing: &[usize],
+    kept: &mut KeptKeys,
+) -> mlua::Result<mlua::Table> {
+    if !kept.whole_items
+        && missing
+            .iter()
+            .any(|&i| crate::value::KeyViews::worth(&list[i]))
+    {
+        let views = crate::value::key_views(&vm.lua)?;
+        let items = vm.lua.create_table_with_capacity(missing.len(), 0)?;
+        for (n, &i) in missing.iter().enumerate() {
+            let item = &list[i];
+            let view = if crate::value::KeyViews::worth(item) {
+                views.view(&vm.lua, item)?
+            } else {
+                mlua::IntoLua::into_lua(item.clone(), &vm.lua)?
+            };
+            items.raw_set(n + 1, view)?;
+        }
+        let keys = vm.call::<mlua::Table>(all, (key, items));
+        if !views.read_past() {
+            return keys;
+        }
+        kept.whole_items = true;
+    }
+    let items: Vec<Value> = missing.iter().map(|&i| list[i].clone()).collect();
+    // Made into a table before the call: the host's work, which the script's
+    // budget isn't for, and a long list's is most of it.
+    let items = mlua::IntoLua::into_lua(Value::List(items.into()), &vm.lua)?;
+    vm.call::<mlua::Table>(all, (key, items))
 }
 
 /// The keys of `items`, `key(item)` asked only of the items not kept from
@@ -7454,7 +7517,7 @@ fn item_keys(vm: &Vm, key: &mlua::Function, items: &Value, kept: &mut KeptKeys) 
     let mut unknown = Vec::new();
     if missing.len() <= 8 {
         for &i in &missing {
-            keys[i] = Some(item_key(vm, key, &list[i], i));
+            keys[i] = Some(item_key(vm, key, &list[i], i, &mut kept.whole_items));
         }
     } else {
         let lua = &vm.lua;
@@ -7473,21 +7536,7 @@ fn item_keys(vm: &Vm, key: &mlua::Function, items: &Value, kept: &mut KeptKeys) 
                 lua.set_named_registry_value(LOOP, &all)?;
                 Ok::<_, mlua::Error>(all)
             });
-        let asked = Value::List(
-            missing
-                .iter()
-                .map(|&i| list[i].clone())
-                .collect::<Vec<_>>()
-                .into(),
-        );
-        // Made into a table before the call: the host's work, which the
-        // script's budget isn't for, and a long list's is most of it.
-        let asked = mlua::IntoLua::into_lua(asked, lua);
-        let keyed = all.and_then(|all| {
-            let asked = asked?;
-            vm.call::<mlua::Table>(&all, (key, asked))
-        });
-        match keyed {
+        match all.and_then(|all| asked_keys(vm, &all, key, list, &missing, kept)) {
             Ok(table) => {
                 for (n, &i) in missing.iter().enumerate() {
                     let key = match table.raw_get::<mlua::Value>(n + 1) {
@@ -7514,7 +7563,7 @@ fn item_keys(vm: &Vm, key: &mlua::Function, items: &Value, kept: &mut KeptKeys) 
         }
     }
     let keys: Vec<ListKey> = keys.into_iter().map(|k| k.unwrap()).collect();
-    kept.0.clear();
+    kept.keys.clear();
     for (i, (item, key)) in list.iter().zip(&keys).enumerate() {
         // (An index given only because `key` failed isn't the item's key.)
         if unknown.binary_search(&i).is_ok() {
@@ -7623,11 +7672,13 @@ fn lower_item_list(
             if let Some(known) = kept.borrow().get(&item) {
                 return known;
             }
-            let found = item_key(&vm, key, &item, index);
+            let mut whole_items = kept.borrow().whole_items;
+            let found = item_key(&vm, key, &item, index, &mut whole_items);
             let mut kept = kept.borrow_mut();
+            kept.whole_items = whole_items;
             // The items gone since stop being kept as the list's length.
-            if kept.0.len() > 4 * items.with_untracked(|l| l.list().len()) + 64 {
-                kept.0.clear();
+            if kept.keys.len() > 4 * items.with_untracked(|l| l.list().len()) + 64 {
+                kept.keys.clear();
             }
             kept.keep(&item, &found);
             found
