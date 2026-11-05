@@ -12482,8 +12482,9 @@ impl GpuRenderer {
             present.attach(self.surface.as_ref())?;
             present.retain_buffers(|_, buffer| buffer.drawable);
             // Presented feedback while the trial reads it, or a log does.
-            let wants_feedback =
-                present_log::enabled() || matches!(present.trial, Trial::Drawables { .. });
+            let wants_feedback = present_log::enabled()
+                || matches!(present.trial, Trial::Drawables { .. })
+                || std::env::var_os("ZGX_TILE_PROBE").is_some();
             // SAFETY: The raw device is only retained; the guard is dropped
             // before wgpu is called again.
             let device = unsafe { self.device.as_hal::<wgpu::hal::api::Metal>() }
@@ -13249,6 +13250,8 @@ impl GpuRenderer {
             {
                 layer.flush_loops();
             }
+            #[cfg(target_os = "macos")]
+            self.debug_probe_log();
             status
         };
         // The frame is done once shown (see `render`).
@@ -13256,6 +13259,59 @@ impl GpuRenderer {
             zgx::profile::frame();
         }
         status
+    }
+    /// Diagnostic, `ZGX_TILE_PROBE=1`: runs the tile probe (`Layer::probe`)
+    /// and, at most once a second, logs what the window server reports of
+    /// frames shown and skipped, with no capture attached. Counts are since
+    /// launch. Tiles' presented times batch with their transactions, so only
+    /// drawables' carry gaps (ms).
+    #[cfg(target_os = "macos")]
+    fn debug_probe_log(&mut self) {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var_os("ZGX_TILE_PROBE").is_some()) {
+            return;
+        }
+        thread_local! {
+            static LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+        }
+        // SAFETY: The raw device and queue are only retained; the guards are
+        // dropped at once.
+        let device = unsafe { self.device.as_hal::<wgpu::hal::api::Metal>() }
+            .map(|hal| hal.raw_device().clone());
+        let queue = unsafe { self.queue.as_hal::<wgpu::hal::api::Metal>() }.map(|hal| {
+            use objc2::Message;
+            hal.as_raw().retain()
+        });
+        let Some(layer) = self
+            .layer_present
+            .as_mut()
+            .and_then(|present| present.layer.as_mut())
+        else {
+            return;
+        };
+        if let (Some(device), Some(queue)) = (device, queue) {
+            layer.start_probe(&device, queue);
+        }
+        let now = std::time::Instant::now();
+        if LAST
+            .get()
+            .is_some_and(|at| now.duration_since(at).as_secs() < 1)
+        {
+            return;
+        }
+        LAST.set(Some(now));
+        let line = |feedback: Option<std::sync::Arc<layer_present::Feedback>>| {
+            feedback.map_or("none".to_string(), |feedback| {
+                let (shown, skipped, median, p99, late) = feedback.summary();
+                format!("shown={shown} skipped={skipped} gap_p50={median:.2} gap_p99={p99:.2} gaps_late={late}")
+            })
+        };
+        eprintln!(
+            "ZGX_PROBE {} tiles {} drawables {}",
+            present_log::now_ns(),
+            line(layer.probe_feedback()),
+            line(layer.drawable_feedback()),
+        );
     }
     fn present_frame(
         &mut self,
