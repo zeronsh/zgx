@@ -102,7 +102,8 @@ impl crate::Adapter for super::Adapter {
             },
             queue: super::Queue {
                 shared: Arc::new(QueueShared {
-                    raw: queue,
+                    device: self.shared.device.clone(),
+                    raw: parking_lot::Mutex::new(Some(queue)),
                     command_buffer_created_not_submitted: atomic::AtomicUsize::new(0),
                     last_committed: parking_lot::Mutex::new(None),
                 }),
