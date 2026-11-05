@@ -2,7 +2,8 @@
 """Glass windows on Windows 11 (`WindowOptions::glass`): each material asks
 the compositor for its system backdrop, read back from outside the app
 (`DwmGetWindowAttribute`, `DWMWA_SYSTEMBACKDROP_TYPE`): Acrylic for the
-heads-up glass, Mica for a window's background, Mica Alt for a title bar's.
+heads-up glass, Mica for a window's background, Mica Alt for a title bar's,
+none for plain glass (its blur is the window's accent instead).
 Acrylic must also show: Windows draws it while the window is active and a
 solid colour once another window is, so an empty patch of the window must
 change as a second test window (placed clear of it) takes the activation,
@@ -29,7 +30,8 @@ dwmapi = ctypes.WinDLL("dwmapi")
 dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
 DWMWA_SYSTEMBACKDROP_TYPE = 38
 # Material (ZGX_GLASS_MATERIAL), the backdrop it asks for, its name.
-MATERIALS = (("hud", 3, "Acrylic"), ("window", 2, "Mica"), ("titlebar", 4, "Mica Alt"))
+MATERIALS = (("hud", 3, "Acrylic"), ("window", 2, "Mica"), ("titlebar", 4, "Mica Alt"),
+             ("plain", 1, "none (the accent's blur)"))
 # An empty patch of glass_counter's window, in points: left of the count.
 PATCH = (16, 120, 56, 160)
 

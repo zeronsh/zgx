@@ -33,7 +33,8 @@ pub enum Titlebar {
 
 /// A blurred desktop behind a translucent window (macOS's behind-window
 /// `NSVisualEffectView`, cut to the window's rounded corners; on Windows 11
-/// the system backdrop nearest its material, Acrylic or Mica; on Linux the
+/// the system backdrop nearest its material, Acrylic or Mica, or for plain
+/// glass an untinted acrylic blur behind the window; on Linux the
 /// compositor's blur, asked for where it has a protocol for it, with no
 /// material, tint or saturation of zgx's). The window is transparent where
 /// zgx paints nothing (or translucent colour).
@@ -43,7 +44,9 @@ pub struct Glass {
     pub material: GlassMaterial,
     /// Only the blur: no tint from the desktop, no saturation boost, a
     /// 60-point gaussian, as gpui's `BlurredView` (for apps laying their own
-    /// tint over it).
+    /// tint over it). On Windows (10 1809 and later) whatever the material:
+    /// the blur of what is behind the window, untinted, with no system
+    /// backdrop, as gpui's `WindowBackgroundAppearance::Blurred` asks.
     pub plain: bool,
 }
 impl Glass {
@@ -392,39 +395,60 @@ mod win {
                 glass,
                 window.theme() != Some(winit::window::Theme::Light),
             ),
-            None => {
-                let margins = MARGINS::default();
-                let kind = DWMSBT_NONE;
-                // SAFETY: our own window; the attribute is given its size.
-                unsafe {
-                    let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
-                    let _ = DwmSetWindowAttribute(
-                        hwnd,
-                        DWMWA_SYSTEMBACKDROP_TYPE,
-                        &kind as *const _ as *const _,
-                        size_of_val(&kind) as u32,
-                    );
-                }
-            }
+            None => clear(hwnd),
+        }
+    }
+
+    /// The window's glass taken away: its backdrop, its accent's blur and
+    /// the frame extended under its client.
+    fn clear(hwnd: HWND) {
+        let margins = MARGINS::default();
+        let kind = DWMSBT_NONE;
+        blur_behind(hwnd, false);
+        // SAFETY: our own window; the attribute is given its size.
+        unsafe {
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                &kind as *const _ as *const _,
+                size_of_val(&kind) as u32,
+            );
         }
     }
 
     /// Put the system's backdrop behind the window: the frame, and its
     /// material, extended under the whole client, which shows it where zgx
     /// paints nothing. Windows 11 (22H2) only; elsewhere the window is
-    /// transparent alone. `Glass::plain` has no Windows equivalent.
+    /// transparent alone. `Glass::plain` has no backdrop but the acrylic
+    /// accent's blur, untinted (`blur_behind`), from Windows 10 1809, and no
+    /// frame under the client: DWM draws the extended frame over the
+    /// accent's blur, which then shows little of what is behind.
     fn frost(hwnd: HWND, glass: Glass, dark: bool) {
         // From the bottom, over the whole client: extended from the top, the
         // frame brings Windows' own caption buttons into the client, under
         // zgx's (or under nothing, where it paints none).
-        let margins = MARGINS {
-            cxLeftWidth: 0,
-            cxRightWidth: 0,
-            cyTopHeight: 0,
-            cyBottomHeight: i32::from(u16::MAX),
+        let margins = if glass.plain {
+            MARGINS::default()
+        } else {
+            MARGINS {
+                cxLeftWidth: 0,
+                cxRightWidth: 0,
+                cyTopHeight: 0,
+                cyBottomHeight: i32::from(u16::MAX),
+            }
         };
-        let kind = backdrop(glass.material);
+        let kind = if glass.plain {
+            DWMSBT_NONE
+        } else {
+            backdrop(glass.material)
+        };
         let dark = i32::from(dark);
+        // The accent's blur and a system backdrop never stand together: the
+        // one off before the other goes on.
+        if !glass.plain {
+            blur_behind(hwnd, false);
+        }
         // SAFETY: our own window; each attribute is given its own size.
         unsafe {
             let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
@@ -441,6 +465,104 @@ mod win {
                 size_of_val(&kind) as u32,
             );
         }
+        if glass.plain {
+            blur_behind(hwnd, true);
+        }
+    }
+
+    /// A window's accent (`SetWindowCompositionAttribute`'s
+    /// `WCA_ACCENT_POLICY`): its state, flags, tint (`0xAABBGGRR`) and
+    /// animation. Read by user32 (and the tests), not by Rust.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    #[allow(dead_code)]
+    struct AccentPolicy {
+        state: u32,
+        flags: u32,
+        tint: u32,
+        animation: u32,
+    }
+    /// A composition attribute and its data, as user32 takes them.
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct CompositionAttribute {
+        attribute: u32,
+        data: *mut std::ffi::c_void,
+        size: usize,
+    }
+    const WCA_ACCENT_POLICY: u32 = 19;
+    const ACCENT_DISABLED: u32 = 0;
+    const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
+    /// The acrylic accent's tint: black at an alpha of 1 of 255, as gpui's,
+    /// for an alpha of 0 is drawn as an opaque tint.
+    const UNTINTED: u32 = 0x0100_0000;
+    type Composition =
+        unsafe extern "system" fn(HWND, *mut CompositionAttribute) -> windows::core::BOOL;
+
+    /// user32's `SetWindowCompositionAttribute`: from Windows 10 1809
+    /// (17763), whose accent has the acrylic blur; `None` before.
+    fn composition() -> Option<Composition> {
+        use std::sync::OnceLock;
+        use windows::{
+            Wdk::System::SystemServices::RtlGetVersion,
+            Win32::System::{
+                LibraryLoader::{GetModuleHandleW, GetProcAddress},
+                SystemInformation::OSVERSIONINFOW,
+            },
+            core::{s, w},
+        };
+        type Proc = unsafe extern "system" fn() -> isize;
+        static SET: OnceLock<Option<Composition>> = OnceLock::new();
+        *SET.get_or_init(|| {
+            let mut version = OSVERSIONINFOW {
+                dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
+                ..Default::default()
+            };
+            // SAFETY: fills `version`, whose size it is given.
+            if unsafe { RtlGetVersion(&mut version) }.is_err()
+                || version.dwMajorVersion < 10
+                || version.dwBuildNumber < 17763
+            {
+                return None;
+            }
+            // SAFETY: user32 stays loaded in a process with windows.
+            // Undocumented, the function has kept this signature since
+            // Windows 7.
+            unsafe {
+                let user32 = GetModuleHandleW(w!("user32.dll")).ok()?;
+                let proc = GetProcAddress(user32, s!("SetWindowCompositionAttribute"))?;
+                Some(std::mem::transmute::<Proc, Composition>(proc))
+            }
+        })
+    }
+
+    /// The acrylic blur of what is behind the window, untinted, on or off:
+    /// `Glass::plain`, what gpui's `WindowBackgroundAppearance::Blurred`
+    /// asks of Windows. DWM draws it where a system backdrop would go, under
+    /// the client the frame is extended over. Before 1809, nothing. Whether
+    /// Windows took it: it has no getter for an accent to read it back by
+    /// (`GetWindowCompositionAttribute` refuses `WCA_ACCENT_POLICY`).
+    fn blur_behind(hwnd: HWND, on: bool) -> bool {
+        let Some(set) = composition() else {
+            return false;
+        };
+        let mut accent = AccentPolicy {
+            state: if on {
+                ACCENT_ENABLE_ACRYLICBLURBEHIND
+            } else {
+                ACCENT_DISABLED
+            },
+            tint: if on { UNTINTED } else { 0 },
+            ..Default::default()
+        };
+        let mut attribute = CompositionAttribute {
+            attribute: WCA_ACCENT_POLICY,
+            data: &mut accent as *mut _ as *mut _,
+            size: size_of_val(&accent),
+        };
+        // SAFETY: our own window; the accent outlives the call, and is given
+        // its size.
+        unsafe { set(hwnd, &mut attribute) }.as_bool()
     }
 
     /// The executable's own icon (its first icon group, the one Explorer
@@ -1171,6 +1293,65 @@ mod win {
                 let _ = DestroyWindow(hwnd);
             }
             assert_eq!(Rc::strong_count(&caption), 1, "given back with the window");
+        }
+
+        /// Plain glass is the acrylic accent's blur, with no system backdrop;
+        /// glass of a material has its backdrop again, and none has neither.
+        /// The backdrop is read back from DWM as another process would; the
+        /// accent, which Windows reads back to no one, is taken, on and off.
+        #[test]
+        fn plain_glass_blurs_behind_the_window_and_other_glass_takes_it_away() {
+            use windows::Win32::{
+                Graphics::Dwm::DwmGetWindowAttribute,
+                UI::WindowsAndMessaging::{
+                    CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP,
+                },
+            };
+            // SAFETY: a plain window of a system class, made and destroyed
+            // here; its backdrop read into a local of its size.
+            unsafe {
+                let hwnd = CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    windows::core::w!("STATIC"),
+                    None,
+                    WS_POPUP,
+                    0,
+                    0,
+                    10,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+                // Windows 11 (22H2) only: `None` before it.
+                let backdrop = || {
+                    let mut kind = DWM_SYSTEMBACKDROP_TYPE::default();
+                    DwmGetWindowAttribute(
+                        hwnd,
+                        DWMWA_SYSTEMBACKDROP_TYPE,
+                        &mut kind as *mut _ as *mut _,
+                        size_of_val(&kind) as u32,
+                    )
+                    .ok()
+                    .map(|()| kind)
+                };
+                let plain = Glass::new(GlassMaterial::UnderWindowBackground).plain();
+                // From Windows 10 1809, the accent is taken, on and off.
+                let accents = composition().is_some();
+                assert_eq!(blur_behind(hwnd, true), accents);
+                assert_eq!(blur_behind(hwnd, false), accents);
+                frost(hwnd, plain, true);
+                assert!(backdrop().is_none_or(|kind| kind == DWMSBT_NONE));
+                frost(hwnd, Glass::default(), true);
+                assert!(backdrop().is_none_or(|kind| kind == DWMSBT_TRANSIENTWINDOW));
+                frost(hwnd, plain, true);
+                assert!(backdrop().is_none_or(|kind| kind == DWMSBT_NONE));
+                clear(hwnd);
+                assert!(backdrop().is_none_or(|kind| kind == DWMSBT_NONE));
+                let _ = DestroyWindow(hwnd);
+            }
         }
 
         #[test]
