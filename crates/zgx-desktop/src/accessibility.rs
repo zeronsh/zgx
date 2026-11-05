@@ -457,6 +457,7 @@ impl AccessibilityTree {
             }
         }
         self.text_runs.retain(|owner, _| visible.contains(owner));
+        self.run_boxes.retain(|owner, _| visible.contains(owner));
         self.blocks.retain(|owner| visible.contains(owner));
         self.long_runs.retain(|owner, _| visible.contains(owner));
         // Fields saying what is wrong with them, and the text that shows it
@@ -3320,6 +3321,28 @@ mod vocabulary_tests {
             .filter_map(|n| n.label())
             .collect();
         assert_eq!(names, ["Archive", "Unread"]);
+    }
+
+    #[test]
+    fn a_label_gone_from_the_scene_takes_its_runs_place_with_it() {
+        let mut ui = Ui::new(400., 300.);
+        ui.set_assistive_technology(true);
+        let count = ui.signal(2_usize);
+        let read = count.clone();
+        ui.mount(column().child(keyed(
+            move || (0..read.get()).collect(),
+            |i: usize, _| text(format!("Row {i}")),
+        )));
+        let mut tree = AccessibilityTree::new();
+        let project = |ui: &mut Ui, tree: &mut AccessibilityTree| {
+            ui.prepare_frame();
+            tree.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Test", 1.);
+        };
+        project(&mut ui, &mut tree);
+        assert!(!tree.run_boxes.is_empty(), "their runs' place is kept");
+        count.set(0);
+        project(&mut ui, &mut tree);
+        assert!(tree.run_boxes.is_empty(), "and goes with it");
     }
 
     #[test]
