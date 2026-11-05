@@ -967,8 +967,14 @@ full APG conformance.
 ## Accessibility
 
 Controls report their role, name and state to assistive technology
-themselves (AccessKit: VoiceOver, Narrator, Orca). These say what a plain view
-means, as ARIA's attributes do in HTML; a view that sets none pays nothing:
+themselves (AccessKit: VoiceOver, Narrator, Orca). While no screen reader runs
+(on macOS, neither VoiceOver nor Switch Control; on Windows, none has set
+`SPI_GETSCREENREADER`), anything else reading the tree (a launcher, a window
+manager, Voice Control, Zoom, which follow focus and act on what is there) has
+it paced: focus at once, names, values and selection at most 100 ms late.
+
+These say what a plain view means, as ARIA's attributes do in HTML; a view that
+sets none pays nothing:
 
 - `.accessible_label(name)`: the name read for it (`aria-label`);
   `.accessible_label_when(|| …)` follows one, for a recycled row's name.

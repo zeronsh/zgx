@@ -5807,15 +5807,20 @@ impl Scene {
     /// password). Shapes the text: ask only when a reader does.
     pub fn text_lines(&self, id: NodeId) -> Option<Vec<TextLine>> {
         let mut lines = self.laid_out_lines(id)?;
-        if self.transformed > 0 {
+        // One walk of its ancestors for all of it: every caret of the node
+        // maps through the same matrix.
+        let placement = (self.transformed > 0 && self.contains(id))
+            .then(|| self.placed(id).2)
+            .flatten();
+        if let Some(placement) = placement {
             for line in &mut lines {
                 // Each caret where it shows across the line's middle; the
                 // line's box around its mapped corners.
                 let middle = line.rect.y + line.rect.height / 2.;
                 for caret in &mut line.carets {
-                    *caret = self.window_point(id, *caret, middle).0;
+                    *caret = placement.matrix.point(*caret, middle).0;
                 }
-                line.rect = self.window_rect(id, line.rect);
+                line.rect = placement.matrix.bounds(line.rect);
             }
         }
         Some(lines)
@@ -16291,6 +16296,50 @@ mod local_transform_tests {
 mod text_lines_tests {
     use super::*;
 
+    #[test]
+    fn text_lines_under_a_transform_map_as_window_point_does() {
+        let mut scene = Scene::new(400., 300.);
+        let moved = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(300.),
+                ..Default::default()
+            },
+        );
+        let node = scene.append(
+            moved,
+            NodeKind::Text {
+                text: "ab cd\nef".into(),
+                color: Color(0, 0, 0, 255),
+                font_size: 10.,
+            },
+            Style {
+                width: Some(200.),
+                ..Default::default()
+            },
+        );
+        scene.flush();
+        let plain = scene.text_lines(node).expect("lines");
+        scene.set_local_transform(
+            moved,
+            LocalTransform {
+                scale: (2., 2.),
+                ..LocalTransform::default()
+            },
+        );
+        scene.flush();
+        let lines = scene.text_lines(node).expect("lines");
+        assert_eq!(lines.len(), plain.len());
+        assert_ne!(lines[0].carets, plain[0].carets, "the transform shows");
+        for (line, was) in lines.iter().zip(&plain) {
+            let middle = was.rect.y + was.rect.height / 2.;
+            for (caret, x) in line.carets.iter().zip(&was.carets) {
+                assert_eq!(*caret, scene.window_point(node, *x, middle).0);
+            }
+            assert_eq!(line.rect, scene.window_rect(node, was.rect));
+        }
+    }
     #[test]
     fn text_lines_give_each_visual_lines_bytes_box_and_grapheme_edges() {
         let mut scene = Scene::new(400., 300.);
