@@ -2131,6 +2131,7 @@ fn quick(item: &Value) -> Quick {
         Value::Map(m) => Quick::At(Rc::as_ptr(m).cast::<()>() as usize),
         Value::Element(e) => Quick::At(e.address()),
         Value::Image(image) => Quick::At(std::sync::Arc::as_ptr(image).cast::<()>() as usize),
+        Value::Folded(folded) => Quick::At(Rc::as_ptr(folded).cast::<()>() as usize),
     }
 }
 /// Hashes items' contents to match rows (equal contents are compared
