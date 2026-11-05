@@ -198,15 +198,15 @@ export type ColorToken =
 	| "$selection.text.inactive"
 	| "$find.match"
 	| "$find.current"
-	| "$caption.ink"
-	| "$caption.ink.hover"
-	| "$caption.ink.inactive"
+	| "$caption.text"
+	| "$caption.text.hover"
+	| "$caption.text.inactive"
 	| "$caption.hover"
 	| "$caption.pressed"
 	| "$caption.close"
 	| "$caption.close.pressed"
-	| "$caption.close.ink"
-	| "$caption.close.ink.pressed"
+	| "$caption.close.text"
+	| "$caption.close.text.pressed"
 	| "$terminal.foreground"
 	| "$terminal.background"
 	| "$terminal.cursor"
@@ -361,15 +361,15 @@ export type TokenName =
 	| "find.match"
 	| "find.current"
 	| "mark.radius"
-	| "caption.ink"
-	| "caption.ink.hover"
-	| "caption.ink.inactive"
+	| "caption.text"
+	| "caption.text.hover"
+	| "caption.text.inactive"
 	| "caption.hover"
 	| "caption.pressed"
 	| "caption.close"
 	| "caption.close.pressed"
-	| "caption.close.ink"
-	| "caption.close.ink.pressed"
+	| "caption.close.text"
+	| "caption.close.text.pressed"
 	| "terminal.foreground"
 	| "terminal.background"
 	| "terminal.cursor"
@@ -424,20 +424,20 @@ export type Tokens = {
 	},
 	caption: {
 		close: {
-			ink: {
+			pressed: string,
+			text: {
 				pressed: string,
 				value: string,
 			},
-			pressed: string,
 			value: string,
 		},
 		hover: string,
-		ink: {
+		pressed: string,
+		text: {
 			hover: string,
 			inactive: string,
 			value: string,
 		},
-		pressed: string,
 	},
 	control: {
 		height: string,
