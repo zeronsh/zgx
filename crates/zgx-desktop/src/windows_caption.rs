@@ -192,12 +192,15 @@ impl Geometry {
 
 /// The wash under a button in `kind`'s state: the theme's `caption.hover` and
 /// `caption.pressed` (its `hover` and `pressed` unless it sets them), as under
-/// its own controls; Close's red, `caption.close` (WinUI's).
-fn fill(kind: CaptionButton, hover: bool, down: bool) -> Themed<Color> {
+/// its own controls; Close's red, `caption.close` (WinUI's). In a contrast
+/// theme, what `ink` reads on: the highlight, whatever an app's theme set.
+fn fill(kind: CaptionButton, hover: bool, down: bool, high_contrast: bool) -> Themed<Color> {
     match (kind, hover, down) {
         (_, false, _) => Color(0, 0, 0, 0).into(),
         (CaptionButton::Close, _, false) => tok::CAPTION_CLOSE.into(),
         (CaptionButton::Close, _, true) => tok::CAPTION_CLOSE_PRESSED.into(),
+        (_, _, false) if high_contrast => tok::HOVER.into(),
+        (_, _, true) if high_contrast => tok::PRESSED.into(),
         (_, _, false) => tok::CAPTION_HOVER.into(),
         (_, _, true) => tok::CAPTION_PRESSED.into(),
     }
@@ -207,12 +210,16 @@ fn fill(kind: CaptionButton, hover: bool, down: bool) -> Themed<Color> {
 /// and pressed, tertiary in a window in the back; `caption.close.ink`, white,
 /// over Close's red (`red`). In a contrast theme `hover` is the opaque
 /// highlight, which its window text doesn't read on (white on Night sky's
-/// cyan): under the pointer then, the highlight's own text, `accent.text`.
+/// cyan): under the pointer then, the highlight's own text, `accent.text`;
+/// elsewhere its window text. A theme's caption tokens step aside there: these
+/// buttons stand in for Windows' own, and an app's colours for its own look
+/// needn't read on the system's. Close's red under the pointer stays.
 fn ink(red: bool, hover: bool, down: bool, active: bool, high_contrast: bool) -> Themed<Color> {
     match (red, hover, active) {
         (true, ..) if down => tok::CAPTION_CLOSE_INK_PRESSED.into(),
         (true, ..) => tok::CAPTION_CLOSE_INK.into(),
         (_, true, _) if high_contrast => tok::ACCENT_TEXT.into(),
+        _ if high_contrast => tok::TEXT_PRIMARY.into(),
         (_, true, _) => tok::CAPTION_INK_HOVER.into(),
         (_, _, true) => tok::CAPTION_INK.into(),
         (_, _, false) => tok::CAPTION_INK_INACTIVE.into(),
@@ -257,7 +264,12 @@ impl CaptionLook {
     /// The wash under `kind`'s button now.
     fn fill(&self, kind: CaptionButton) -> Themed<Color> {
         let hover = self.hovered.get() == Some(kind);
-        fill(kind, hover, hover && self.pressed.get() == Some(kind))
+        fill(
+            kind,
+            hover,
+            hover && self.pressed.get() == Some(kind),
+            self.high_contrast.get(),
+        )
     }
     /// The buttons, over the content's top right, or top left right to left:
     /// there the row runs from the right, Close outermost still.
@@ -761,26 +773,26 @@ mod tests {
         );
         assert_eq!(
             ink(false, false, false, true, true),
-            Themed::from(tok::CAPTION_INK)
+            Themed::from(tok::TEXT_PRIMARY)
         );
         assert_eq!(
             ink(true, true, false, true, true),
             Themed::from(tok::CAPTION_CLOSE_INK)
         );
         assert_eq!(
-            fill(Minimize, true, false),
+            fill(Minimize, true, false, false),
             Themed::from(tok::CAPTION_HOVER)
         );
         assert_eq!(
-            fill(Maximize, true, true),
+            fill(Maximize, true, true, false),
             Themed::from(tok::CAPTION_PRESSED)
         );
-        assert_eq!(fill(Close, true, false), Themed::from(tok::CAPTION_CLOSE));
+        assert_eq!(fill(Close, true, false, false), Themed::from(tok::CAPTION_CLOSE));
         assert_eq!(
-            fill(Close, true, true),
+            fill(Close, true, true, false),
             Themed::from(tok::CAPTION_CLOSE_PRESSED)
         );
-        assert_eq!(fill(Close, false, false), Themed::from(Color(0, 0, 0, 0)));
+        assert_eq!(fill(Close, false, false, false), Themed::from(Color(0, 0, 0, 0)));
         let mut ui = Ui::new(800., 600.);
         let look = CaptionLook::new(&ui, flat(1.));
         ui.mount(look.view(false));
@@ -816,5 +828,67 @@ mod tests {
                 Color(255, 255, 255, 255)
             );
         }
+    }
+
+    /// An app's theme, dressing the buttons for its dark look, over a light
+    /// contrast theme: every state's glyph is on the system's colours, each
+    /// reading on what is behind it, where the app's would not (1.05:1 under
+    /// the pointer). Close's red under the pointer is the theme's still.
+    #[test]
+    fn in_a_contrast_theme_an_apps_caption_tokens_step_aside() {
+        let (window, text, highlight, highlight_text) = (
+            Color(255, 250, 239, 255),
+            Color(61, 61, 61, 255),
+            Color(144, 57, 18, 255),
+            Color(255, 245, 227, 255),
+        );
+        let close = Color(1, 2, 3, 255);
+        let mut ui = Ui::new(800., 600.);
+        ui.theme().register(
+            zgx::theme::Theme::from_json(
+                r##"{ "name": "test-app", "type": "dark", "tokens": {
+                    "caption.ink": "#ededed", "caption.ink.hover": "#ffffff",
+                    "caption.ink.inactive": "#ededed", "caption.hover": "#ffffff1a",
+                    "caption.pressed": "#ffffff26", "caption.close": "#010203" } }"##,
+            )
+            .unwrap(),
+        );
+        ui.theme().set("test-app").unwrap();
+        ui.theme().set_system_tokens([
+            (tok::BACKGROUND.0, window.into()),
+            (tok::TEXT_PRIMARY.0, text.into()),
+            (tok::TEXT_SECONDARY.0, text.into()),
+            (tok::TEXT_TERTIARY.0, text.into()),
+            (tok::ACCENT_TEXT.0, highlight_text.into()),
+            (tok::HOVER.0, highlight.into()),
+            (tok::PRESSED.0, highlight.into()),
+        ]);
+        let look = CaptionLook::new(&ui, flat(1.));
+        ui.mount(look.view(false));
+        look.high_contrast.set(true);
+        ui.prepare_frame();
+        let root = ui.theme().root();
+        let color = |themed| match themed {
+            Themed::Value(color) => color,
+            Themed::Token(id) => root.color_untracked(zgx::theme::ColorToken(id)),
+        };
+        assert_eq!(color(look.ink(Minimize)), text, "at rest");
+        assert_eq!(color(look.fill(Minimize)), Color(0, 0, 0, 0));
+        look.active.set(false);
+        ui.prepare_frame();
+        assert_eq!(color(look.ink(Minimize)), text, "in the back");
+        look.active.set(true);
+        look.hovered.set(Some(Minimize));
+        ui.prepare_frame();
+        assert_eq!(color(look.ink(Minimize)), highlight_text, "under the pointer");
+        assert_eq!(color(look.fill(Minimize)), highlight);
+        look.pressed.set(Some(Minimize));
+        ui.prepare_frame();
+        assert_eq!(color(look.ink(Minimize)), highlight_text, "pressed");
+        assert_eq!(color(look.fill(Minimize)), highlight);
+        look.pressed.set(None);
+        look.hovered.set(Some(Close));
+        ui.prepare_frame();
+        assert_eq!(color(look.fill(Close)), close);
     }
 }

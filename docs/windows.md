@@ -456,7 +456,8 @@ rest through their own tokens, which default to those: `caption.ink`,
 `caption.ink.hover` (under the pointer and pressed), `caption.ink.inactive`,
 `caption.hover` and `caption.pressed`, and for Close `caption.close`,
 `caption.close.pressed`, `caption.close.ink` and `caption.close.ink.pressed`
-(`#c42b1c`, `#c42b1ce6` and white by default). Their line is an outline icon's
+(`#c42b1c`, `#c42b1ce6` and white by default). In a contrast theme the system's
+colours stand in for all but Close's, whatever a theme sets. Their line is an outline icon's
 weight (1.75 at 24 points, drawn at 16), in whole pixels: 1 at 100% and 125%, 2
 at 150% to 200%. `scripts/windows_caption_smoke.py` checks all of it in a real
 window at 100% and 150% zoom, light and dark.
