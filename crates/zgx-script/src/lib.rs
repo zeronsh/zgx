@@ -407,6 +407,32 @@ pub(crate) struct Vm {
     /// The host's live lint mode, warnings and script call count.
     pub(crate) warnings: SharedWarnings,
 }
+/// PROBE, never to merge: a slow call, inclusive of what it runs.
+pub(crate) fn probe_time(f: &mlua::Function, took: std::time::Duration) {
+    if took.as_micros() >= 500 && std::env::var_os("ZGX_CALL_LOG").is_some() {
+        let info = f.info();
+        eprintln!(
+            "ZSLOW {:.2}ms {}:{} {}",
+            took.as_secs_f64() * 1000.,
+            info.short_src.as_deref().unwrap_or("?"),
+            info.line_defined.unwrap_or(0),
+            info.name.as_deref().unwrap_or("")
+        );
+    }
+}
+/// PROBE, never to merge: each script call's function, to stderr.
+pub(crate) fn probe_call(f: &mlua::Function) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("ZGX_CALL_EACH").is_some()) {
+        let info = f.info();
+        eprintln!(
+            "ZCALL {}:{} {}",
+            info.short_src.as_deref().unwrap_or("?"),
+            info.line_defined.unwrap_or(0),
+            info.name.as_deref().unwrap_or("")
+        );
+    }
+}
 impl Vm {
     /// Runs `f` with its own budget. A nested call (a component built
     /// while a handler runs) stops the outer call's clock meanwhile.
@@ -465,7 +491,11 @@ impl Vm {
         f: &mlua::Function,
         args: impl mlua::IntoLuaMulti,
     ) -> mlua::Result<R> {
-        self.guard(self.budget, || f.call(args))
+        probe_call(f);
+        let probe_at = std::time::Instant::now();
+        let probe_out = self.guard(self.budget, || f.call(args));
+        probe_time(f, probe_at.elapsed());
+        probe_out
     }
     pub(crate) fn report(&self, error: mlua::Error) {
         let message = describe(&self.name, &error);
