@@ -32,8 +32,10 @@ pub(crate) fn urgent(
 }
 
 /// Whether a screen reader runs (Narrator, NVDA, JAWS set the system's flag,
-/// `SPI_GETSCREENREADER`): what it speaks goes out at once. Elsewhere,
-/// where no such flag is read, as if one always ran.
+/// `SPI_GETSCREENREADER`; on macOS VoiceOver or Switch Control, which
+/// `NSWorkspace` says live): what it speaks goes out at once. A launcher or
+/// window manager reading the tree isn't one. Elsewhere, where no such flag
+/// is read, as if one always ran.
 pub(crate) fn screen_reader() -> bool {
     #[cfg(windows)]
     {
@@ -55,7 +57,12 @@ pub(crate) fn screen_reader() -> bool {
         };
         read.is_err() || on.as_bool()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace();
+        workspace.isVoiceOverEnabled() || workspace.isSwitchControlEnabled()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         true
     }
@@ -3313,6 +3320,44 @@ mod vocabulary_tests {
             .filter_map(|n| n.label())
             .collect();
         assert_eq!(names, ["Archive", "Unread"]);
+    }
+
+    #[test]
+    fn a_client_that_is_no_screen_reader_hears_a_name_late_but_right() {
+        use super::{GEOMETRY_EVERY, GeometryPacer, urgent};
+        let mut ui = Ui::new(400., 300.);
+        ui.set_assistive_technology(true);
+        let name = ui.signal("One".to_string());
+        let read = name.clone();
+        ui.mount(
+            column().child(
+                button()
+                    .accessible_label_when(move || read.get())
+                    .child(text("x")),
+            ),
+        );
+        let label = |nodes: &[Node]| {
+            find(nodes, accesskit::Role::Button)[0]
+                .label()
+                .map(str::to_owned)
+        };
+        let start = std::time::Instant::now();
+        let mut pacer = GeometryPacer::default();
+        assert!(pacer.update_now(start, true, true), "the first tree");
+        assert_eq!(label(&project(&mut ui)).as_deref(), Some("One"));
+        // With no screen reader, the new name waits its turn; with one, it
+        // would go at once.
+        name.set("Two".to_string());
+        let soon = start + GEOMETRY_EVERY / 2;
+        assert!(urgent(false, false, true, || true));
+        let now = urgent(false, false, true, || false);
+        assert!(!pacer.update_now(soon, now, true));
+        let due = pacer.deadline().expect("held for its deadline");
+        assert!(due <= start + GEOMETRY_EVERY);
+        // Nothing more comes but the wake at the deadline, and it's the
+        // tree as it is then.
+        assert!(pacer.update_now(due, false, false));
+        assert_eq!(label(&project(&mut ui)).as_deref(), Some("Two"));
     }
 
     #[test]
