@@ -451,7 +451,12 @@ are: `text.secondary` at rest, `text.primary` under the pointer and
 `pressed`, with Close's red and white glyph kept (in a contrast theme, the
 highlight's own text under the pointer). So they follow the app's light
 or dark, not the system's, from the window's root theme: a `theme` scoped over
-an app's title bar alone doesn't reach them. Their line is an outline icon's
+an app's title bar alone doesn't reach them. A theme inks them apart from the
+rest through their own tokens, which default to those: `caption.ink`,
+`caption.ink.hover` (under the pointer and pressed), `caption.ink.inactive`,
+`caption.hover` and `caption.pressed`, and for Close `caption.close`,
+`caption.close.pressed`, `caption.close.ink` and `caption.close.ink.pressed`
+(`#c42b1c`, `#c42b1ce6` and white by default). Their line is an outline icon's
 weight (1.75 at 24 points, drawn at 16), in whole pixels: 1 at 100% and 125%, 2
 at 150% to 200%. `scripts/windows_caption_smoke.py` checks all of it in a real
 window at 100% and 150% zoom, light and dark.
