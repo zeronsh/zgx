@@ -914,7 +914,7 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
     }
     let lua = t.weak_lua().try_upgrade()?;
     let cache = lua.app_data_ref::<Converted>();
-    let ids = cache.as_ref().map(|c| c.ids.clone());
+    let ids = cache.as_ref().map(|c| c.ids.borrow().clone());
     let mut cx = Cx {
         held: cache.as_ref().map(|c| c.held.borrow()),
         strings: HashMap::new(),
@@ -1432,7 +1432,14 @@ fn weak_keys(lua: &Lua) -> mlua::Result<Table> {
 }
 /// Give a new VM its cache of converted values.
 pub(crate) fn install_cache(lua: &Lua) {
-    let tables = lua.create_table();
+    let weak = |mode: &str| -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        let meta = lua.create_table()?;
+        meta.raw_set("__mode", mode)?;
+        t.set_metatable(Some(meta))?;
+        Ok(t)
+    };
+    let tables = weak("v");
     let clone = lua
         .globals()
         .get::<Table>("table")
@@ -1440,14 +1447,16 @@ pub(crate) fn install_cache(lua: &Lua) {
     if let (Ok(tables), Ok(ids), Ok(clone)) = (tables, weak_keys(lua), clone) {
         lua.set_app_data(Converted {
             held: Default::default(),
-            tables,
-            ids,
+            tables: RefCell::new(tables),
+            ids: RefCell::new(ids),
             clone,
             bases: Default::default(),
             weight: std::cell::Cell::new(0),
             swept: std::cell::Cell::new(0),
             recent: Default::default(),
             next_recent: std::cell::Cell::new(0),
+            recent_large: Default::default(),
+            next_recent_large: std::cell::Cell::new(0),
         });
     }
 }
@@ -1461,12 +1470,14 @@ pub(crate) fn install_cache(lua: &Lua) {
 struct Converted {
     /// id → the value and its `weight`.
     held: std::cell::RefCell<HashMap<usize, (Value, usize)>>,
-    /// id → table, while `held` holds its value. (Handles, not registry
-    /// keys: looked up for every row converted.)
-    tables: Table,
+    /// id → table, while `held` holds its value and a script holds the table
+    /// (weak values: a long list's rows are not a copy of it in the VM once
+    /// no script reads them). (Handles, not registry keys: looked up for
+    /// every row converted.)
+    tables: RefCell<Table>,
     /// table → id, weak keys: a read-only table given back (a computed
     /// returning a row it read) is its value again, without a walk.
-    ids: Table,
+    ids: RefCell<Table>,
     /// Luau's `table.clone`: a table copied in C (see `derive`).
     clone: mlua::Function,
     /// id → the value a list was written from (`derives_from`), whose
@@ -1481,6 +1492,10 @@ struct Converted {
     recent: std::cell::RefCell<Vec<(usize, Value, Table)>>,
     /// Where the next one goes once `recent` is full.
     next_recent: std::cell::Cell<usize>,
+    /// The last few large tables a script read, as `recent`: read again and
+    /// again and held by none between, each is converted once all the same.
+    recent_large: std::cell::RefCell<Vec<(usize, Value, Table)>>,
+    next_recent_large: std::cell::Cell<usize>,
 }
 /// Sweeps wait until the cache holds this much (`weight`) at least.
 const SWEPT_FROM: usize = 1 << 12;
@@ -1525,10 +1540,29 @@ pub(crate) fn shared_lua(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> 
     if !large(value) {
         return recent_lua(value, lua);
     }
-    shared_part(value, lua)
+    let converted = shared_part(value, lua)?;
+    if let (mlua::Value::Table(table), Some(cache)) = (&converted, lua.app_data_ref::<Converted>())
+    {
+        let id = identity(value);
+        let mut recent = cache.recent_large.borrow_mut();
+        if !recent.iter().any(|(at, ..)| *at == id) {
+            // Held with its value, so its address is not another's meanwhile.
+            let entry = (id, value.clone(), table.clone());
+            if recent.len() < RECENT_LARGE {
+                recent.push(entry);
+            } else {
+                let at = cache.next_recent_large.get();
+                recent[at] = entry;
+                cache.next_recent_large.set((at + 1) % RECENT_LARGE);
+            }
+        }
+    }
+    Ok(converted)
 }
 /// Small tables kept from their last conversions (`Converted::recent`).
 const RECENT: usize = 32;
+/// Large ones (`Converted::recent_large`).
+const RECENT_LARGE: usize = 8;
 /// `to_lua` for a small value, a table converted lately given again: a row's
 /// item read by its key and then by the row (`row:get()`), or by every
 /// function of the row, is converted once until it is written.
@@ -1572,7 +1606,7 @@ fn shared_part(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> {
         return to_lua(value, lua, true);
     };
     let id = identity(value);
-    let tables = cache.tables.clone();
+    let tables = cache.tables.borrow().clone();
     if let mlua::Value::Table(t) = tables.raw_get::<mlua::Value>(id_key(id))? {
         return Ok(mlua::Value::Table(t));
     }
@@ -1636,7 +1670,7 @@ fn raw_shared(lua: &Lua, value: &Value) -> mlua::Result<Table> {
     let Some(cache) = lua.app_data_ref::<Converted>() else {
         return Err(mlua::Error::runtime("no conversion cache"));
     };
-    let (tables, ids) = (cache.tables.clone(), cache.ids.clone());
+    let (tables, ids) = (cache.tables.borrow().clone(), cache.ids.borrow().clone());
     drop(cache);
     struct Made<'a> {
         filed: Vec<&'a Value>,
@@ -1734,8 +1768,11 @@ fn raw_shared(lua: &Lua, value: &Value) -> mlua::Result<Table> {
         let mut held = cache.held.borrow_mut();
         for part in &made.filed {
             let added = weight(part);
-            held.insert(identity(part), ((*part).clone(), added));
-            cache.weight.set(cache.weight.get() + added);
+            // (Filed again, its last table collected: it's weighed once.)
+            let was = held.insert(identity(part), ((*part).clone(), added));
+            cache
+                .weight
+                .set(cache.weight.get() + added - was.map_or(0, |(_, w)| w));
         }
     }
     CONVERTED.set(CONVERTED.get() + made.filed.len() as u64);
@@ -1758,9 +1795,12 @@ fn file_weighed(lua: &Lua, value: &Value, table: &Table, added: usize) -> mlua::
     // Held before it is filed, as in `raw_shared`: a filing that fails
     // part way (an allocation over the limit) must not leave `tables[id]`
     // without the value that keeps `id`'s address from being reused.
-    cache.held.borrow_mut().insert(id, (value.clone(), added));
-    cache.weight.set(cache.weight.get() + added);
-    let (tables, ids) = (cache.tables.clone(), cache.ids.clone());
+    // (Filed again, its last table collected: it's weighed once.)
+    let was = cache.held.borrow_mut().insert(id, (value.clone(), added));
+    cache
+        .weight
+        .set(cache.weight.get() + added - was.map_or(0, |(_, w)| w));
+    let (tables, ids) = (cache.tables.borrow().clone(), cache.ids.borrow().clone());
     drop(cache);
     tables.raw_set(id_key(id), table)?;
     ids.raw_set(table, id_key(id))?;
@@ -1770,22 +1810,15 @@ fn file_weighed(lua: &Lua, value: &Value, table: &Table, added: usize) -> mlua::
 /// little, and what nothing else holds costs at most as much again as what
 /// is held.
 fn sweep(lua: &Lua) -> mlua::Result<()> {
-    let due = lua
-        .app_data_ref::<Converted>()
-        .is_some_and(|cache| cache.weight.get() >= (cache.swept.get() * 2).max(SWEPT_FROM));
-    if due { sweep_now(lua) } else { Ok(()) }
+    sweep_when(lua, false)
 }
-/// Lets go of what nothing but the cache holds, whatever its weight: as a
-/// window goes idle, for what it was showing stays otherwise until the cache
-/// next doubles, and after a long list that may be never.
-#[cold]
-#[inline(never)]
-fn sweep_now(lua: &Lua) -> mlua::Result<()> {
+/// `sweep`, `now` whatever the cache weighs.
+fn sweep_when(lua: &Lua, now: bool) -> mlua::Result<()> {
     let Some(cache) = lua.app_data_ref::<Converted>() else {
         return Ok(());
     };
-    let (tables, ids) = (cache.tables.clone(), cache.ids.clone());
-    {
+    let (tables, ids) = (cache.tables.borrow().clone(), cache.ids.borrow().clone());
+    if now || cache.weight.get() >= (cache.swept.get() * 2).max(SWEPT_FROM) {
         let mut gone: Vec<usize> = Vec::new();
         {
             let mut held = cache.held.borrow_mut();
@@ -1793,9 +1826,16 @@ fn sweep_now(lua: &Lua) -> mlua::Result<()> {
             // parts.
             loop {
                 let before = gone.len();
+                // (Or its table has been collected: no script holds it.)
                 gone.extend(
                     held.iter()
-                        .filter(|(_, (v, _))| only_cached(v))
+                        .filter(|(id, (v, _))| {
+                            only_cached(v)
+                                || !matches!(
+                                    tables.raw_get::<mlua::Value>(id_key(**id)),
+                                    Ok(mlua::Value::Table(_))
+                                )
+                        })
                         .map(|(id, _)| *id),
                 );
                 if gone.len() == before {
@@ -1819,38 +1859,55 @@ fn sweep_now(lua: &Lua) -> mlua::Result<()> {
     }
     Ok(())
 }
-/// What a window going idle does to the cache: lets go of what only it holds,
-/// and, for a table keeps the room it grew to, files what is left in new ones.
-#[cold]
-#[inline(never)]
-pub(crate) fn trim_converted(lua: &Lua) -> mlua::Result<()> {
-    sweep_now(lua)?;
-    let Some(mut cache) = lua.remove_app_data::<Converted>() else {
+/// Everything no script holds let go of now, whatever the cache weighs: as a
+/// host goes idle, after a collection has cleared what scripts dropped. The
+/// large tables kept for reads to come go too.
+pub(crate) fn sweep_idle(lua: &Lua) {
+    let Some(cache) = lua.app_data_ref::<Converted>() else {
+        return;
+    };
+    cache.recent_large.borrow_mut().clear();
+    cache.next_recent_large.set(0);
+    cache.bases.borrow_mut().clear();
+    drop(cache);
+    let _ = sweep_when(lua, true);
+    let _ = rebuild_cache(lua);
+}
+/// The cache's tables and map made again at what they hold now: a Luau table
+/// and a `HashMap` keep the size they once had, a long chat's every row.
+fn rebuild_cache(lua: &Lua) -> mlua::Result<()> {
+    let Some(cache) = lua.app_data_ref::<Converted>() else {
         return Ok(());
     };
-    let refiled = (|| {
-        let (tables, ids) = (lua.create_table()?, weak_keys(lua)?);
-        for pair in cache.tables.pairs::<mlua::Value, Table>() {
-            let (id, table) = pair?;
-            ids.raw_set(&table, &id)?;
-            tables.raw_set(id, table)?;
+    let weak = |mode: &str| -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        let meta = lua.create_table()?;
+        meta.raw_set("__mode", mode)?;
+        t.set_metatable(Some(meta))?;
+        Ok(t)
+    };
+    let (new_tables, new_ids) = (weak("v")?, weak("k")?);
+    let old = cache.tables.borrow().clone();
+    {
+        let mut held = cache.held.borrow_mut();
+        for id in held.keys() {
+            if let mlua::Value::Table(t) = old.raw_get::<mlua::Value>(id_key(*id))? {
+                new_tables.raw_set(id_key(*id), &t)?;
+                new_ids.raw_set(t, id_key(*id))?;
+            }
         }
-        Ok::<_, mlua::Error>((tables, ids))
-    })();
-    // (Whatever happened, the cache goes back: it is as it was on an error.)
-    if let Ok((tables, ids)) = &refiled {
-        cache.tables = tables.clone();
-        cache.ids = ids.clone();
+        held.shrink_to_fit();
     }
-    lua.set_app_data(cache);
-    refiled.map(|_| ())
+    *cache.tables.borrow_mut() = new_tables;
+    *cache.ids.borrow_mut() = new_ids;
+    Ok(())
 }
 /// The cached table of `value`, if it has one.
 fn cached(lua: &Lua, value: &Value) -> mlua::Result<Option<Table>> {
     let Some(cache) = lua.app_data_ref::<Converted>() else {
         return Ok(None);
     };
-    let tables = cache.tables.clone();
+    let tables = cache.tables.borrow().clone();
     Ok(
         match tables.raw_get::<mlua::Value>(id_key(identity(value)))? {
             mlua::Value::Table(t) => Some(t),
@@ -1998,7 +2055,7 @@ fn converted_from(t: &Table, lua: &Lua) -> Option<Value> {
         return None;
     }
     let cache = lua.app_data_ref::<Converted>()?;
-    let ids = &cache.ids;
+    let ids = cache.ids.borrow().clone();
     let mlua::Value::LightUserData(id) = ids.raw_get::<mlua::Value>(t).ok()? else {
         return None;
     };

@@ -4305,7 +4305,10 @@ async fn wake(
 fn collect_garbage(inner: &Inner) {
     let loaded = inner.current.borrow().clone();
     for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
-        let _ = value::trim_converted(&vm.lua);
+        collect_fully(&vm.lua);
+        // What that freed of the conversion cache's tables, its values too,
+        // and what only those held.
+        value::sweep_idle(&vm.lua);
         collect_fully(&vm.lua);
     }
 }
