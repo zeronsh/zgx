@@ -2874,6 +2874,16 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 {
                     self.presented_at = Some(std::time::Instant::now());
+                    if std::env::var_os("ZGX_SCROLL_LOG").is_some() {
+                        let ns = {
+                            unsafe extern "C" {
+                                fn clock_gettime_nsec_np(clock: u32) -> u64;
+                            }
+                            // SAFETY: a libSystem call with no pointers; 8 is CLOCK_UPTIME_RAW.
+                            unsafe { clock_gettime_nsec_np(8) }
+                        };
+                        eprintln!("ZSL P {ns}");
+                    }
                     // What it shows now, for `Ui::snapshot` (the last frame's
                     // surface is the renderer's to reuse again).
                     *self.shown.borrow_mut() = renderer
@@ -5636,7 +5646,33 @@ impl Host {
                 });
                 self.scroll.flush()
             } else if self.frame_arrived {
-                self.scroll.sample(std::time::Instant::now())
+                // Diagnostic: when this sample is taken, against the frame grid;
+                // `ZGX_SCROLL_SAMPLE=grid` takes it at the grid's last point.
+                let now = std::time::Instant::now();
+                let grid = self
+                    .frame_timer
+                    .frame(now, self.frame_interval)
+                    .time
+                    .checked_sub(self.frame_interval)
+                    .unwrap_or(now);
+                let at = if std::env::var_os("ZGX_SCROLL_SAMPLE").is_some_and(|v| v == "grid") {
+                    grid.min(now)
+                } else {
+                    now
+                };
+                let sampled = self.scroll.sample(at);
+                if std::env::var_os("ZGX_SCROLL_LOG").is_some() {
+                    let ns = {
+                            unsafe extern "C" {
+                                fn clock_gettime_nsec_np(clock: u32) -> u64;
+                            }
+                            // SAFETY: a libSystem call with no pointers; 8 is CLOCK_UPTIME_RAW.
+                            unsafe { clock_gettime_nsec_np(8) }
+                        };
+                    let late = now.saturating_duration_since(grid).as_micros();
+                    eprintln!("ZSL S {ns} late_us {late} dy {}", sampled.map_or(0., |d| d.1));
+                }
+                sampled
             } else {
                 None
             };
