@@ -7325,6 +7325,14 @@ impl KeptKeys {
     }
 }
 
+/// An item's `field` as a list key: a number, string or boolean, else its
+/// index.
+fn field_key(item: &Value, field: &str, index: usize) -> ListKey {
+    item.field(field)
+        .and_then(ListKey::of)
+        .unwrap_or(ListKey::Index(index))
+}
+
 /// `key(item)` as a list key: a number, string or boolean, else (or if it
 /// fails) the item's index.
 fn item_key(vm: &Vm, key: &mlua::Function, item: &Value, index: usize) -> ListKey {
@@ -7449,6 +7457,7 @@ fn lower_item_list(
     else {
         unreachable!("lower_item_list takes lists")
     };
+    let key_field = rare.as_ref().and_then(|rare| rare.key_field.clone());
     let live = builder.info().num_params >= 3;
     let wrapped = row_builder(builder, vm, low);
     let builder = &wrapped;
@@ -7508,8 +7517,16 @@ fn lower_item_list(
     };
     let list_key = {
         let (items, key, vm) = (items.clone(), key.clone(), vm.clone());
+        let field = key_field.clone();
         let kept = Rc::new(std::cell::RefCell::new(KeptKeys::default()));
         move |index: usize| -> ListKey {
+            if let Some(field) = &field {
+                return items.with(|l| {
+                    l.list()
+                        .get(index)
+                        .map_or(ListKey::Index(index), |item| field_key(item, field, index))
+                });
+            }
             let Some(key) = &key else {
                 return ListKey::Index(index);
             };
@@ -7566,6 +7583,19 @@ fn lower_item_list(
             rows = rows.anchor_end();
         }
         let list = match key {
+            // Heights by key, kept as rows move, each read here: no item is
+            // made a table to give its key.
+            None if key_field.is_some() => {
+                let (items, field) = (items.clone(), key_field.clone().unwrap());
+                let keys = move || {
+                    items.with(|l| {
+                        let items = l.list().iter().enumerate();
+                        items.map(|(i, item)| field_key(item, &field, i)).collect()
+                    })
+                };
+                let estimate = |_: &[ListKey], _: usize| f32::NAN;
+                measured_rows(offset, rows, *overscan, keys, estimate, row)
+            }
             None => {
                 let r = rows.clone();
                 cx.retain(cx.runtime().effect(move || {
