@@ -46,7 +46,8 @@ pub struct Glass {
     /// 60-point gaussian, as gpui's `BlurredView` (for apps laying their own
     /// tint over it). On Windows (10 1809 and later) whatever the material:
     /// the blur of what is behind the window, untinted, with no system
-    /// backdrop, as gpui's `WindowBackgroundAppearance::Blurred` asks.
+    /// backdrop, as gpui's `WindowBackgroundAppearance::Blurred` asks; with
+    /// Transparency effects off, the material's backdrop, which goes solid.
     pub plain: bool,
 }
 impl Glass {
@@ -325,6 +326,10 @@ mod win {
         /// The system's settings or colours changed (high contrast, the
         /// accent, animations) since the host last read them.
         settings_changed: Cell<bool>,
+        /// The window's glass, for plain glass to follow Transparency effects.
+        glass: Cell<Option<Glass>>,
+        /// Whether the window's accent is on (`blur_behind`).
+        accent: Cell<bool>,
         hovered: Cell<Option<CaptionButton>>,
         pressed: Cell<Option<CaptionButton>>,
         tracking: Cell<bool>,
@@ -332,6 +337,18 @@ mod win {
         wake: RefCell<Option<Box<dyn Fn()>>>,
     }
     impl Caption {
+        /// Plain glass again as Transparency effects now ask, if they changed;
+        /// other glass has nothing of ours to change (Windows solidifies its
+        /// backdrop itself), so nothing to read.
+        fn follow_transparency(&self, hwnd: HWND) {
+            let Some(glass) = self.glass.get().filter(|glass| glass.plain) else {
+                return;
+            };
+            let accent = self.accent.get();
+            if crate::system_colors::windows_transparency_off() == accent {
+                self.accent.set(frost(hwnd, Some(glass), accent));
+            }
+        }
         /// Where its buttons are, at display `scale`: the same for what
         /// draws them, hit-tests them and reports them.
         fn geometry(&self, scale: f64) -> Geometry {
@@ -384,90 +401,123 @@ mod win {
     }
 
     /// The window's backdrop replaced (`super::set_glass`): `None` takes the
-    /// system's backdrop and the frame extended under the client away.
+    /// system's backdrop and the frame extended under the client away. Only
+    /// a window with the accent on asks Windows to take it off; one `apply`
+    /// could not subclass, which keeps no record, counts as having it.
     pub(super) fn set_glass(window: &Window, glass: Option<Glass>) {
         let Some(hwnd) = hwnd(window) else {
             return;
         };
-        match glass {
-            Some(glass) => frost(
-                hwnd,
-                glass,
-                window.theme() != Some(winit::window::Theme::Light),
-            ),
-            None => clear(hwnd),
+        if glass.is_some() {
+            darken(hwnd, window.theme() != Some(winit::window::Theme::Light));
+        }
+        let caption = caption_of(hwnd.0 as usize);
+        let accent = frost(hwnd, glass, caption.as_ref().is_none_or(|c| c.accent.get()));
+        if let Some(caption) = caption {
+            caption.glass.set(glass);
+            caption.accent.set(accent);
         }
     }
 
-    /// The window's glass taken away: its backdrop, its accent's blur and
-    /// the frame extended under its client.
-    fn clear(hwnd: HWND) {
-        let margins = MARGINS::default();
-        let kind = DWMSBT_NONE;
-        blur_behind(hwnd, false);
+    /// The frame under the glass dark or light.
+    fn darken(hwnd: HWND, dark: bool) {
+        let dark = i32::from(dark);
         // SAFETY: our own window; the attribute is given its size.
         unsafe {
-            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_SYSTEMBACKDROP_TYPE,
-                &kind as *const _ as *const _,
-                size_of_val(&kind) as u32,
-            );
-        }
-    }
-
-    /// Put the system's backdrop behind the window: the frame, and its
-    /// material, extended under the whole client, which shows it where zgx
-    /// paints nothing. Windows 11 (22H2) only; elsewhere the window is
-    /// transparent alone. `Glass::plain` has no backdrop but the acrylic
-    /// accent's blur, untinted (`blur_behind`), from Windows 10 1809, and no
-    /// frame under the client: DWM draws the extended frame over the
-    /// accent's blur, which then shows little of what is behind.
-    fn frost(hwnd: HWND, glass: Glass, dark: bool) {
-        // From the bottom, over the whole client: extended from the top, the
-        // frame brings Windows' own caption buttons into the client, under
-        // zgx's (or under nothing, where it paints none).
-        let margins = if glass.plain {
-            MARGINS::default()
-        } else {
-            MARGINS {
-                cxLeftWidth: 0,
-                cxRightWidth: 0,
-                cyTopHeight: 0,
-                cyBottomHeight: i32::from(u16::MAX),
-            }
-        };
-        let kind = if glass.plain {
-            DWMSBT_NONE
-        } else {
-            backdrop(glass.material)
-        };
-        let dark = i32::from(dark);
-        // The accent's blur and a system backdrop never stand together: the
-        // one off before the other goes on.
-        if !glass.plain {
-            blur_behind(hwnd, false);
-        }
-        // SAFETY: our own window; each attribute is given its own size.
-        unsafe {
-            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
             let _ = DwmSetWindowAttribute(
                 hwnd,
                 DWMWA_USE_IMMERSIVE_DARK_MODE,
                 &dark as *const _ as *const _,
                 size_of_val(&dark) as u32,
             );
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_SYSTEMBACKDROP_TYPE,
-                &kind as *const _ as *const _,
-                size_of_val(&kind) as u32,
-            );
         }
-        if glass.plain {
-            blur_behind(hwnd, true);
+    }
+
+    /// One thing a window's glass asks of Windows (`glass_steps`).
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum GlassStep {
+        /// The acrylic accent's blur, on or off (`blur_behind`).
+        Accent(bool),
+        /// The frame extended under the whole client, or not.
+        Frame(bool),
+        /// The system's backdrop.
+        Backdrop(DWM_SYSTEMBACKDROP_TYPE),
+    }
+
+    /// What `glass` asks of Windows, in order, of a window with its accent on
+    /// or off (`accent`), Transparency effects off or on (`reduced`).
+    ///
+    /// The system's backdrop shows through the frame, and its material,
+    /// extended under the whole client, where zgx paints nothing. Windows 11
+    /// (22H2) only; elsewhere the window is transparent alone. `Glass::plain`
+    /// has no backdrop but the acrylic accent's blur, untinted, from Windows
+    /// 10 1809, and no frame under the client: DWM draws the extended frame
+    /// over the accent's blur, which then shows little of what is behind.
+    /// With Transparency effects off Windows stops that blur and shows the
+    /// accent's tint, black: the material's backdrop then, which goes solid in
+    /// the window's light or dark. The accent's blur and a system backdrop
+    /// never stand together: the one off before the other goes on.
+    fn glass_steps(glass: Option<Glass>, reduced: bool, accent: bool) -> Vec<GlassStep> {
+        let blur = glass.is_some_and(|glass| glass.plain) && !reduced;
+        let mut steps = Vec::with_capacity(3);
+        if accent && !blur {
+            steps.push(GlassStep::Accent(false));
         }
+        steps.push(GlassStep::Frame(glass.is_some() && !blur));
+        steps.push(GlassStep::Backdrop(match glass {
+            Some(glass) if !blur => backdrop(glass.material),
+            _ => DWMSBT_NONE,
+        }));
+        if blur && !accent {
+            steps.push(GlassStep::Accent(true));
+        }
+        steps
+    }
+
+    /// Give the window `glass` (`glass_steps`). Whether its accent is on now.
+    fn frost(hwnd: HWND, glass: Option<Glass>, accent: bool) -> bool {
+        let reduced = glass.is_some_and(|glass| glass.plain)
+            && crate::system_colors::windows_transparency_off();
+        run_glass_steps(hwnd, &glass_steps(glass, reduced, accent), accent)
+    }
+
+    /// `steps` asked of Windows. Whether the window's accent is on after them,
+    /// from `accent`, before them.
+    fn run_glass_steps(hwnd: HWND, steps: &[GlassStep], mut accent: bool) -> bool {
+        for step in steps {
+            match *step {
+                GlassStep::Accent(on) => {
+                    blur_behind(hwnd, on);
+                    accent = on;
+                }
+                GlassStep::Frame(extended) => {
+                    // From the bottom, over the whole client: extended from
+                    // the top, the frame brings Windows' own caption buttons
+                    // into the client, under zgx's (or under nothing, where
+                    // it paints none).
+                    let margins = MARGINS {
+                        cyBottomHeight: if extended { i32::from(u16::MAX) } else { 0 },
+                        ..Default::default()
+                    };
+                    // SAFETY: our own window.
+                    unsafe {
+                        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+                    }
+                }
+                GlassStep::Backdrop(kind) => {
+                    // SAFETY: our own window; the attribute is given its size.
+                    unsafe {
+                        let _ = DwmSetWindowAttribute(
+                            hwnd,
+                            DWMWA_SYSTEMBACKDROP_TYPE,
+                            &kind as *const _ as *const _,
+                            size_of_val(&kind) as u32,
+                        );
+                    }
+                }
+            }
+        }
+        accent
     }
 
     /// A window's accent (`SetWindowCompositionAttribute`'s
@@ -871,13 +921,10 @@ mod win {
         };
         menu_theme(window);
         icon(hwnd);
-        if let Some(glass) = glass {
-            frost(
-                hwnd,
-                glass,
-                window.theme() != Some(winit::window::Theme::Light),
-            );
-        }
+        let accent = glass.is_some() && {
+            darken(hwnd, window.theme() != Some(winit::window::Theme::Light));
+            frost(hwnd, glass, false)
+        };
         // A frameless window is square unless asked; Windows 10 has no
         // rounded windows and refuses.
         let frameless = titlebar != Titlebar::Standard;
@@ -904,6 +951,8 @@ mod win {
             resizable: Cell::new(window.is_resizable()),
             fixed_size: Cell::new(false),
             settings_changed: Cell::new(false),
+            glass: Cell::new(glass),
+            accent: Cell::new(accent),
             hovered: Cell::new(None),
             pressed: Cell::new(None),
             tracking: Cell::new(false),
@@ -1005,6 +1054,7 @@ mod win {
         match message {
             // High contrast on or off, the accent, animations, the colours.
             WM_SETTINGCHANGE | WM_SYSCOLORCHANGE => {
+                caption.follow_transparency(hwnd);
                 caption.settings_changed.set(true);
                 if let Some(wake) = &*caption.wake.borrow() {
                     wake();
@@ -1251,6 +1301,11 @@ mod win {
             };
             let woken = Rc::new(Cell::new(0));
             let wake = woken.clone();
+            // Plain glass whose accent disagrees with the setting, as it does
+            // the moment the setting changes, whichever way that is.
+            let off = crate::system_colors::windows_transparency_off();
+            let glass = Some(Glass::new(GlassMaterial::UnderWindowBackground).plain());
+            let accent = off;
             let caption = Rc::new(Caption {
                 frameless: false,
                 buttons: false,
@@ -1261,6 +1316,8 @@ mod win {
                 resizable: Cell::new(true),
                 fixed_size: Cell::new(false),
                 settings_changed: Cell::new(false),
+                glass: Cell::new(glass),
+                accent: Cell::new(accent),
                 hovered: Cell::new(None),
                 pressed: Cell::new(None),
                 tracking: Cell::new(false),
@@ -1290,17 +1347,70 @@ mod win {
                 SendMessageW(hwnd, WM_SETTINGCHANGE, None, None);
                 assert!(caption.settings_changed.get());
                 assert_eq!(woken.get(), 1);
+                assert_eq!(
+                    caption.accent.get(),
+                    !off,
+                    "plain glass follows the setting"
+                );
                 let _ = DestroyWindow(hwnd);
             }
             assert_eq!(Rc::strong_count(&caption), 1, "given back with the window");
         }
 
-        /// Plain glass is the acrylic accent's blur, with no system backdrop;
-        /// glass of a material has its backdrop again, and none has neither.
-        /// The backdrop is read back from DWM as another process would; the
-        /// accent, which Windows reads back to no one, is taken, on and off.
+        /// What each glass asks of Windows, which reads no accent back. Plain
+        /// glass is the accent's blur, with no system backdrop and no frame
+        /// under the client; with Transparency effects off, the material's
+        /// backdrop. Glass that never had the accent never asks Windows to
+        /// take it away.
         #[test]
-        fn plain_glass_blurs_behind_the_window_and_other_glass_takes_it_away() {
+        fn plain_glass_is_the_accents_blur_until_transparency_effects_go_off() {
+            use GlassStep::{Accent, Backdrop, Frame};
+            let plain = Some(Glass::new(GlassMaterial::UnderWindowBackground).plain());
+            let hud = Some(Glass::default());
+            let (mica, acrylic) = (
+                Backdrop(DWMSBT_MAINWINDOW),
+                Backdrop(DWMSBT_TRANSIENTWINDOW),
+            );
+            let none = Backdrop(DWMSBT_NONE);
+            assert_eq!(
+                glass_steps(plain, false, false),
+                [Frame(false), none, Accent(true)],
+                "made"
+            );
+            assert_eq!(
+                glass_steps(plain, false, true),
+                [Frame(false), none],
+                "kept"
+            );
+            assert_eq!(
+                glass_steps(plain, true, true),
+                [Accent(false), Frame(true), mica],
+                "transparency turned off"
+            );
+            assert_eq!(
+                glass_steps(plain, true, false),
+                [Frame(true), mica],
+                "made so"
+            );
+            assert_eq!(glass_steps(hud, false, false), [Frame(true), acrylic]);
+            assert_eq!(glass_steps(hud, true, false), [Frame(true), acrylic]);
+            assert_eq!(
+                glass_steps(hud, false, true),
+                [Accent(false), Frame(true), acrylic],
+                "replacing plain glass"
+            );
+            assert_eq!(glass_steps(None, false, false), [Frame(false), none]);
+            assert_eq!(
+                glass_steps(None, false, true),
+                [Accent(false), Frame(false), none],
+                "taking plain glass away"
+            );
+        }
+
+        /// Those steps on a real window: the backdrop read back from DWM as
+        /// another process would, the accent taken, on and off.
+        #[test]
+        fn windows_takes_the_steps_of_each_glass() {
             use windows::Win32::{
                 Graphics::Dwm::DwmGetWindowAttribute,
                 UI::WindowsAndMessaging::{
@@ -1337,18 +1447,23 @@ mod win {
                     .ok()
                     .map(|()| kind)
                 };
-                let plain = Glass::new(GlassMaterial::UnderWindowBackground).plain();
+                let plain = Some(Glass::new(GlassMaterial::UnderWindowBackground).plain());
+                let run = |glass, reduced, accent| {
+                    run_glass_steps(hwnd, &glass_steps(glass, reduced, accent), accent)
+                };
                 // From Windows 10 1809, the accent is taken, on and off.
                 let accents = composition().is_some();
                 assert_eq!(blur_behind(hwnd, true), accents);
                 assert_eq!(blur_behind(hwnd, false), accents);
-                frost(hwnd, plain, true);
+                assert!(run(plain, false, false));
                 assert!(backdrop().is_none_or(|kind| kind == DWMSBT_NONE));
-                frost(hwnd, Glass::default(), true);
+                assert!(!run(plain, true, true));
+                assert!(backdrop().is_none_or(|kind| kind == DWMSBT_MAINWINDOW));
+                assert!(run(plain, false, false));
+                assert!(backdrop().is_none_or(|kind| kind == DWMSBT_NONE));
+                assert!(!run(Some(Glass::default()), false, true));
                 assert!(backdrop().is_none_or(|kind| kind == DWMSBT_TRANSIENTWINDOW));
-                frost(hwnd, plain, true);
-                assert!(backdrop().is_none_or(|kind| kind == DWMSBT_NONE));
-                clear(hwnd);
+                assert!(!run(None, false, false));
                 assert!(backdrop().is_none_or(|kind| kind == DWMSBT_NONE));
                 let _ = DestroyWindow(hwnd);
             }

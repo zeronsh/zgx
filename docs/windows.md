@@ -432,7 +432,10 @@ window's accent, `SetWindowCompositionAttribute`'s
 `WindowBackgroundAppearance::Blurred` is, for apps laying their own tint over
 it; Windows 10 1809 and later. Its frame is not extended under the client
 (as gpui's is not): DWM would draw the frame over the blur. Mica tints with
-the wallpaper alone and blurs nothing behind the window. Presentation through the visual
+the wallpaper alone and blurs nothing behind the window. With Transparency effects off
+Windows stops that blur and shows the accent's black tint, so plain glass then
+takes its material's backdrop, which goes solid, and follows the setting as it
+changes. Presentation through the visual
 measured the same as a window's own swap chain: every frame shown, the same
 keystroke latency and idle cost. Only transparent and glass windows present
 with alpha: an opaque window's swap chain is opaque from the start
