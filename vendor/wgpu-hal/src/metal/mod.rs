@@ -475,7 +475,8 @@ impl Queue {
     ) -> Self {
         Self {
             shared: Arc::new(QueueShared {
-                raw,
+                device: raw.device(),
+                raw: Mutex::new(Some(raw)),
                 command_buffer_created_not_submitted: atomic::AtomicUsize::new(0),
                 last_committed: Mutex::new(None),
             }),
@@ -483,14 +484,53 @@ impl Queue {
         }
     }
 
-    pub fn as_raw(&self) -> &ProtocolObject<dyn MTLCommandQueue> {
-        &self.shared.raw
+    /// zgx patch: the Metal queue now (`renew` replaces it).
+    pub fn as_raw(&self) -> Retained<ProtocolObject<dyn MTLCommandQueue>> {
+        self.shared.raw()
+    }
+
+    /// zgx patch: this Metal queue let go of, once all it was given has finished;
+    /// the next command buffer makes another. Metal's driver keeps a queue's memory
+    /// for as long as it lives: a pool of command buffers' resources, as many as
+    /// were ever in flight at once, and its render scratch, 174 MB on an M5 Max. A
+    /// window at rest gives them back so, at once and wholly, and its next frame
+    /// takes no longer on a new queue than on one that has sat a few seconds. (The
+    /// new one comes later, not here: a queue that exists as the old one goes
+    /// inherits all of it, and what's autoreleased on this thread holds the old one
+    /// until the run loop turns.) False, doing nothing, while a command buffer is
+    /// being encoded.
+    pub fn renew(&self) -> bool {
+        if self
+            .shared
+            .command_buffer_created_not_submitted
+            .load(atomic::Ordering::Acquire)
+            != 0
+        {
+            return false;
+        }
+        let mut raw = self.shared.raw.lock();
+        let Some(old) = raw.take() else {
+            return false;
+        };
+        autoreleasepool(|_| {
+            // A queue runs its command buffers in order: this last is all of them.
+            if let Some(last) = old.commandBufferWithUnretainedReferences() {
+                last.commit();
+                last.waitUntilCompleted();
+            }
+            drop(old);
+        });
+        true
     }
 }
 
 #[derive(Debug)]
 pub struct QueueShared {
-    raw: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    /// zgx patch: behind a lock, as `Queue::renew` lets it go. None since then,
+    /// until a command buffer is next wanted (`raw`).
+    raw: Mutex<Option<Retained<ProtocolObject<dyn MTLCommandQueue>>>>,
+    /// zgx patch: what makes the next one.
+    device: Retained<ProtocolObject<dyn MTLDevice>>,
     // Tracks command buffers created via `CommandEncoder::begin_encoding` that
     // have not yet been submitted or discarded. Used to proactively fail
     // before hitting Metal's `maxCommandBufferCount`.
@@ -502,6 +542,20 @@ pub struct QueueShared {
     /// zgx patch: presentation handoff for the most recent submission, so
     /// `present` needs neither an extra command buffer nor a blocking wait.
     last_committed: Mutex<Option<Arc<PresentHandoff>>>,
+}
+
+impl QueueShared {
+    /// zgx patch: the Metal queue now.
+    fn raw(&self) -> Retained<ProtocolObject<dyn MTLCommandQueue>> {
+        self.raw
+            .lock()
+            .get_or_insert_with(|| {
+                self.device
+                    .newCommandQueueWithMaxCommandBufferCount(adapter::MAX_COMMAND_BUFFERS)
+                    .expect("a Metal queue")
+            })
+            .clone()
+    }
 }
 
 /// zgx patch: whichever happens second, the submission being scheduled or
@@ -604,8 +658,16 @@ impl crate::Queue for Queue {
         autoreleasepool(|_| {
             let extra_command_buffer = {
                 let completed_value = Arc::clone(&signal_fence.completed_value);
+                let pending = Arc::clone(&signal_fence.pending_command_buffers);
                 let block = block2::RcBlock::new(move |_cmd_buf| {
                     completed_value.store(signal_value, atomic::Ordering::Release);
+                    // (Dropped outside the lock: releasing one may run its handlers' drops.)
+                    let done: Vec<_> = {
+                        let mut pending = pending.lock();
+                        let split = pending.partition_point(|&(value, _)| value <= signal_value);
+                        pending.drain(..split).collect()
+                    };
+                    drop(done);
                 });
 
                 // zgx patch: empty command buffers are never committed.
@@ -617,7 +679,7 @@ impl crate::Queue for Queue {
                         // We do not bother adjusting `command_buffer_created_not_submitted`
                         // because we immediately commit this buffer.
                         self.shared
-                            .raw
+                            .raw()
                             .commandBufferWithUnretainedReferences()
                             .unwrap()
                     }
@@ -628,6 +690,7 @@ impl crate::Queue for Queue {
                 signal_fence.maintain();
                 signal_fence
                     .pending_command_buffers
+                    .lock()
                     .push((signal_value, raw.clone()));
 
                 if let Some(shared_event) = &signal_fence.shared_event {
@@ -703,7 +766,7 @@ impl crate::Queue for Queue {
             }
             // We do not bother adjusting `command_buffer_created_not_submitted`
             // because we immediately commit this buffer.
-            let command_buffer = self.shared.raw.commandBuffer().unwrap();
+            let command_buffer = self.shared.raw().commandBuffer().unwrap();
             command_buffer.setLabel(Some(ns_string!("(wgpu internal) Present")));
 
             // https://developer.apple.com/documentation/quartzcore/cametallayer/1478157-presentswithtransaction?language=objc
@@ -1120,11 +1183,17 @@ unsafe impl Sync for QuerySet {}
 #[derive(Debug)]
 pub struct Fence {
     completed_value: Arc<atomic::AtomicU64>,
-    /// The pending fence values have to be ascending.
-    pending_command_buffers: Vec<(
-        crate::FenceValue,
-        Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-    )>,
+    /// The pending fence values have to be ascending. zgx patch: each goes as it
+    /// completes (`submit`'s handler), rather than at the next submission: a command
+    /// buffer holds its queue, and `Queue::renew`'s queue must go.
+    pending_command_buffers: Arc<
+        Mutex<
+            Vec<(
+                crate::FenceValue,
+                Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+            )>,
+        >,
+    >,
     shared_event: Option<Retained<ProtocolObject<dyn MTLSharedEvent>>>,
 }
 
@@ -1136,7 +1205,7 @@ unsafe impl Sync for Fence {}
 impl Fence {
     fn get_latest(&self) -> crate::FenceValue {
         let mut max_value = self.completed_value.load(atomic::Ordering::Acquire);
-        for &(value, ref cmd_buf) in self.pending_command_buffers.iter() {
+        for &(value, ref cmd_buf) in self.pending_command_buffers.lock().iter() {
             if cmd_buf.status() == MTLCommandBufferStatus::Completed {
                 max_value = value;
             }
@@ -1147,6 +1216,7 @@ impl Fence {
     fn maintain(&mut self) {
         let latest = self.get_latest();
         self.pending_command_buffers
+            .lock()
             .retain(|&(value, _)| value > latest);
     }
 

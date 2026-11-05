@@ -49,7 +49,8 @@ const POINTS: usize = 4;
 
 pub(crate) struct MetalFrame {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
-    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    /// (wgpu's, whose Metal queue is replaced as a window rests: `renew_queue`.)
+    queue: wgpu::Queue,
     full: Pipeline,
     full_clear: Pipeline,
     basic: Pipeline,
@@ -127,6 +128,15 @@ pub(crate) struct BlurRecords<'a> {
 }
 
 impl MetalFrame {
+    /// A command buffer on wgpu's queue as it is now. Command buffers committed
+    /// to it (`Frame::commit`) retain what they reference (`commandBuffer`, not
+    /// the unretained kind), so a wgpu resource dropped meanwhile stays alive
+    /// for them.
+    fn command_buffer(&self) -> Option<CommandBuffer> {
+        // SAFETY: The raw queue is only retained; the guard is dropped at once.
+        let hal = unsafe { self.queue.as_hal::<wgpu::hal::api::Metal>() }?;
+        hal.as_raw().commandBuffer()
+    }
     pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Self, GpuError> {
         // SAFETY: The raw device is retained, never destroyed; the guard is
         // dropped at once.
@@ -134,17 +144,7 @@ impl MetalFrame {
             .ok_or_else(|| GpuError("not a Metal device".into()))?;
         let raw = hal.raw_device().clone();
         drop(hal);
-        // SAFETY: The raw queue is retained, never destroyed. Command buffers
-        // committed to it (`Frame::commit`) retain what they reference
-        // (`commandBuffer`, not the unretained kind), so a wgpu resource
-        // dropped meanwhile stays alive for them.
-        let hal_queue = unsafe { queue.as_hal::<wgpu::hal::api::Metal>() }
-            .ok_or_else(|| GpuError("not a Metal queue".into()))?;
-        let queue = {
-            use objc2::Message;
-            hal_queue.as_raw().retain()
-        };
-        drop(hal_queue);
+        let queue = queue.clone();
         let draw = Library::translated(&raw, DRAW_MSL, Kind::Quads)?;
         let copy = Library::translated(&raw, COPY_MSL, Kind::Copies)?;
         let pipeline = |library: &Library, vertex: &str, fragment: &str, blend: Blend| {
@@ -187,7 +187,7 @@ impl MetalFrame {
             descriptor.setStorageMode(MTLStorageMode::Private);
             self.device.newTextureWithDescriptor(&descriptor)
         });
-        let (Some(target), Some(buffer)) = (target, self.queue.commandBuffer()) else {
+        let (Some(target), Some(buffer)) = (target, self.command_buffer()) else {
             return;
         };
         let pass = MTLRenderPassDescriptor::new();
@@ -368,7 +368,7 @@ impl MetalFrame {
         effects: &[EffectPass],
         first: Option<(&ProtocolObject<dyn MTLTexture>, [f32; 4])>,
     ) -> Frame {
-        let buffer = self.queue.commandBuffer().expect("a command buffer");
+        let buffer = self.command_buffer().expect("a command buffer");
         for effect in effects {
             let pipelines = self.effect_pipelines().expect("checked by `effects`");
             let load = match effect.down {
