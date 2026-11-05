@@ -7616,13 +7616,27 @@ fn lower_item_list(
     let live = builder.info().num_params >= 3;
     let wrapped = row_builder(builder, vm, low);
     let builder = &wrapped;
+    // `predict`: told of each row built, once the list has made it.
+    let predicting: Rc<std::cell::RefCell<Option<Rc<crate::predict::Predictor>>>> = Rc::default();
     let row = {
         let (items, builder, vm, low) = (items.clone(), builder.clone(), vm.clone(), low.clone());
+        let predicting = predicting.clone();
         move |index: Signal<usize>, _: ListKey, cx: &mut Context| -> View {
             let at = |list: &Value, i: usize| list.list().get(i).cloned().unwrap_or(Value::Nil);
             let runtime = cx.runtime();
             let first = index.with_untracked(|i| *i);
             let item = runtime.signal(items.with_untracked(|l| at(l, first)));
+            if let Some(predictor) = predicting.borrow().as_ref() {
+                item.with_untracked(|value| predictor.building(first, value));
+                struct Gone(Rc<crate::predict::Predictor>, usize, usize);
+                impl Drop for Gone {
+                    fn drop(&mut self) {
+                        self.0.unmounted(self.1, self.2);
+                    }
+                }
+                let at = item.with_untracked(crate::value::identity);
+                cx.retain(Gone(predictor.clone(), first, at));
+            }
             let shown = runtime.signal(Value::Num((first + 1) as f64));
             // Bumped as the item changes: a two-parameter row is built again.
             let changes = runtime.signal(0_u64);
@@ -7739,6 +7753,13 @@ fn lower_item_list(
         if *follow {
             rows = rows.anchor_end();
         }
+        // Predicting, keys are asked of the script once, by both.
+        let shared_keys = rare.as_ref().is_some_and(|rare| rare.predict).then(|| {
+            let kept = Rc::new(std::cell::RefCell::new(KeptKeys::default()));
+            let predictor = predictor_for(&items, key.as_ref(), key_field.as_ref(), vm, &rows, &kept, cx);
+            *predicting.borrow_mut() = Some(predictor);
+            kept
+        });
         let list = match key {
             // Heights by key, kept as rows move, each read here: no item is
             // made a table to give its key.
@@ -7763,10 +7784,18 @@ fn lower_item_list(
             // Heights by key, kept as rows move.
             Some(key) => {
                 let (key, vm, items) = (key.clone(), vm.clone(), items.clone());
-                let mut kept = KeptKeys::default();
-                let keys = move || items.with(|l| item_keys(&vm, &key, l, &mut kept));
                 let estimate = |_: &[ListKey], _: usize| f32::NAN;
-                measured_rows(offset, rows, *overscan, keys, estimate, row)
+                match shared_keys {
+                    Some(kept) => {
+                        let keys = move || items.with(|l| item_keys(&vm, &key, l, &mut kept.borrow_mut()));
+                        measured_rows(offset, rows, *overscan, keys, estimate, row)
+                    }
+                    None => {
+                        let mut kept = KeptKeys::default();
+                        let keys = move || items.with(|l| item_keys(&vm, &key, l, &mut kept));
+                        measured_rows(offset, rows, *overscan, keys, estimate, row)
+                    }
+                }
             }
         };
         return list.keyboard_navigation(keyboard).row_text(copy);
@@ -9293,4 +9322,82 @@ fn a_rows_identity_and_key_read_as_formatted() {
         assert!(!displays_as(&value, &text[..text.len() - 1]));
         assert!(!displays_as(&value, "x"));
     }
+}
+
+/// A list's predictor, told of its data and woken to work between frames.
+fn predictor_for(
+    items: &Signal<Value>,
+    key: Option<&mlua::Function>,
+    key_field: Option<&Rc<str>>,
+    vm: &Rc<Vm>,
+    rows: &zgx::compose::VariableHeights,
+    kept: &Rc<std::cell::RefCell<KeptKeys>>,
+    cx: &mut Context,
+) -> Rc<crate::predict::Predictor> {
+    let now = {
+        let items = items.clone();
+        Rc::new(move || items.with_untracked(Clone::clone)) as Rc<dyn Fn() -> Value>
+    };
+    let key_of = {
+        let (items, key, field, vm, kept) = (items.clone(), key.cloned(), key_field.cloned(), vm.clone(), kept.clone());
+        Rc::new(move |index: usize| -> Option<Rc<str>> {
+            let item = items.with_untracked(|l| l.list().get(index).cloned())?;
+            let found = if let Some(field) = &field {
+                field_key(&item, field, index)
+            } else {
+                let key = key.as_ref()?;
+                let known = kept.borrow().get(&item);
+                match known {
+                    Some(known) => known,
+                    None => {
+                        let mut whole = kept.borrow().whole_items;
+                        let found = item_key(&vm, key, &item, index, &mut whole);
+                        let mut kept = kept.borrow_mut();
+                        kept.whole_items = whole;
+                        kept.keep(&item, &found);
+                        found
+                    }
+                }
+            };
+            match found {
+                ListKey::Str(s) => Some(s),
+                ListKey::Num(n) => Some(Rc::from(n.to_string())),
+                _ => None,
+            }
+        }) as Rc<dyn Fn(usize) -> Option<Rc<str>>>
+    };
+    let predictor = crate::predict::Predictor::new(now, key_of, rows.clone());
+    let observer: Rc<dyn zgx::virtual_list::RowObserver> = predictor.clone();
+    rows.observe(&observer);
+    cx.retain(observer);
+    {
+        let (items, predictor) = (items.clone(), predictor.clone());
+        cx.retain(cx.runtime().effect(move || {
+            items.with(|_| ());
+            predictor.data_changed();
+        }));
+    }
+    if cx.try_service::<zgx::compose::TaskRunner>().is_some() {
+        let tasks = cx.tasks();
+        let working = Rc::new(std::cell::Cell::new(false));
+        let weak = Rc::downgrade(&predictor);
+        predictor.on_wake(Rc::new(move || {
+            if working.replace(true) {
+                return;
+            }
+            let (weak, working) = (weak.clone(), working.clone());
+            tasks.spawn(async move {
+                loop {
+                    zgx::timer::sleep(std::time::Duration::from_millis(1)).await;
+                    let Some(predictor) = weak.upgrade() else { break };
+                    let more = predictor.tick(Some(std::time::Duration::from_millis(2)));
+                    if !more && !predictor.holding() {
+                        break;
+                    }
+                }
+                working.set(false);
+            });
+        }));
+    }
+    predictor
 }

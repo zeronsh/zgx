@@ -407,6 +407,12 @@ pub(crate) fn script(
         paths: flag("paths")?,
         code: None,
     };
+    if crate::predict::recording() {
+        let breaks = options.breaks;
+        let blocks = Value::List(parse(&text, &options).into());
+        crate::predict::parsed(&text, breaks, &blocks);
+        return Ok(blocks);
+    }
     let key: Option<String> = match &opts {
         Some(t) => t.get("key")?,
         None => None,

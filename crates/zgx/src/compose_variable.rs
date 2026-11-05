@@ -39,6 +39,28 @@ impl VariableHeights {
         self.end.set(true);
         self
     }
+    /// Update many heights, passing once.
+    pub fn set_heights(&self, rows: &[(usize, f32)]) {
+        let mut changed = false;
+        {
+            let mut index = self.index.borrow_mut();
+            for (row, height) in rows {
+                changed |= index.set_height(*row, *height).unwrap_or(false);
+            }
+        }
+        if changed {
+            self.changed();
+        }
+    }
+    /// Tells `observer` of this list's rows from now on, while it's kept
+    /// elsewhere: it holds these heights, so they can't hold it.
+    pub fn observe(&self, observer: &Rc<dyn crate::virtual_list::RowObserver>) {
+        self.index.borrow_mut().observer.0 = Some(Rc::downgrade(observer));
+    }
+    /// Has the list pass again (an observer's rows to build changed).
+    pub fn pass_again(&self) {
+        self.changed();
+    }
     fn changed(&self) {
         self.revision
             .update(|revision| *revision = revision.wrapping_add(1));
@@ -473,6 +495,14 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 let requested = offset.get();
                 let mut pending_measurement = false;
                 let mut measurement_changed = false;
+                let observer = heights
+                    .index
+                    .borrow()
+                    .observer
+                    .0
+                    .as_ref()
+                    .and_then(|o| o.upgrade());
+                let mut observed = Vec::new();
                 if measured {
                     // Read every mounted observation in this effect so one
                     // batched layout publication produces one measurement pass.
@@ -486,6 +516,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             continue;
                         }
                         let observed_height = observed_height.max(1.);
+                        if observer.is_some() {
+                            observed.push((index, entry.node, observed_height));
+                        }
                         let previous = heights.index.borrow().row_height(index);
                         if previous.is_some_and(|old| old != observed_height)
                             // Do not assign an old keyed row's observation to a
@@ -504,6 +537,19 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     if measurement_changed {
                         heights.changed();
                     }
+                }
+                let mut extras = Vec::new();
+                if let Some(observer) = &observer {
+                    runtime.untracked(|| {
+                        observer.width(width);
+                        if let Some(ui) = weak.upgrade() {
+                            let scene = ui.scene.borrow();
+                            for (index, node, row_height) in &observed {
+                                observer.measured(&scene, *node, *index, width, *row_height);
+                            }
+                        }
+                        observer.extra_rows(&mut extras);
+                    });
                 }
                 let revision = heights.revision.get();
                 // Rows added or removed above the anchor row: it is as many
@@ -665,6 +711,17 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     if !measured && model.may_have_thin_rows() {
                         geometry.retain(|(_, _, row_height)| *row_height >= THINNEST_ROW);
                     }
+                    // Out of view, to learn from: just past the view's foot,
+                    // where a row's lazy parts build, in order among the others.
+                    if !extras.is_empty() {
+                        for row in extras.iter().copied() {
+                            if row < length && !geometry.iter().any(|(index, ..)| *index == row) {
+                                let known = model.row_height(row).unwrap_or(1.);
+                                geometry.push((row, position + height + 1., known));
+                            }
+                        }
+                        geometry.sort_by_key(|(index, ..)| *index);
+                    }
                     // An empty list keeps whether it is at its end (it is):
                     // its first rows then follow the end as later ones do.
                     let next_anchor = match first {
@@ -731,8 +788,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     };
                     if measured
                         && let Some((_, index, top, _)) =
-                            keys.iter().find(|(key, _, top, row_height)| {
-                                top + row_height > anchor.position && measured_row(key)
+                            keys.iter().find(|(key, index, top, row_height)| {
+                                top + row_height > anchor.position
+                                    && measured_row(key)
+                                    && !extras.contains(index)
                             })
                     {
                         anchor.index = *index;

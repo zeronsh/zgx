@@ -1274,6 +1274,15 @@ pub enum Justify {
 /// are not part of the contract. Reactive reads participate in the calling
 /// effect's dependency tracking.
 /// Writing signals from a measurement or shaping callback is unsupported.
+/// Measures rich text off the main thread, keeping nothing drawn.
+pub trait TextWorker {
+    /// Its width and height at `width`.
+    fn measure(&mut self, rich: &crate::rich_text::RichText, width: Option<f32>) -> (f32, f32);
+    /// Lets go of what measuring kept.
+    fn forget(&mut self);
+}
+/// Run on the worker's thread, makes the worker.
+pub type TextWorkerStart = Box<dyn FnOnce() -> Box<dyn TextWorker> + Send>;
 pub trait TextMeasurer {
     /// The size of `text` at `font_size`, wrapped at `max_width` if given.
     fn measure(&self, text: &str, font_size: f32, max_width: Option<f32>) -> (f32, f32);
@@ -2988,6 +2997,8 @@ pub struct Scene {
     /// Plain text's min-content size as `font_measurer` measures
     /// `min_content_lines`' copy, without shaping it (`leaf_size`).
     font_min_content: Option<Box<FontMinContent>>,
+    /// Makes a text worker: fonts of its own, on the thread that runs it.
+    text_worker: Option<std::rc::Rc<dyn Fn() -> TextWorkerStart>>,
     /// Rich text's, as `rich_measurer` measures `min_content_lines`' copy.
     rich_min_content: Option<Box<RichMinContent>>,
     rich_measurer: crate::rich_text::TextMeasure,
@@ -3226,6 +3237,7 @@ impl Scene {
             font_min_content: None,
             rich_min_content: None,
             rich_measurer: Default::default(),
+            text_worker: None,
             rich_shaper: None,
             text_shaper_revision: 0,
             pending_layout_nodes: 0,
@@ -5771,6 +5783,15 @@ impl Scene {
         self.rich_measurer.install_detached(Box::new(measure));
     }
     /// The rich text measurer layout uses, including one installed later.
+    /// What makes text workers (`text_worker`).
+    pub fn set_text_worker(&mut self, make: std::rc::Rc<dyn Fn() -> TextWorkerStart>) {
+        self.text_worker = Some(make);
+    }
+    /// Text measuring for another thread, as this scene's fonts measure it.
+    /// Called there to get the worker. None without a renderer's text.
+    pub fn text_worker(&self) -> Option<TextWorkerStart> {
+        self.text_worker.as_ref().map(|make| make())
+    }
     pub fn text_measure(&self) -> crate::rich_text::TextMeasure {
         self.rich_measurer.clone()
     }

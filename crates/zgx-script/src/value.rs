@@ -675,6 +675,9 @@ fn convert_in(value: mlua::Value, old: Option<&Value>, depth: u32) -> mlua::Resu
             _ if s.as_bytes().len() > zgx::text::LONG => long_string(&s.as_bytes()),
             _ => Value::Str(str_of(&s.as_bytes())),
         },
+        mlua::Value::Table(t) if crate::predict::proxies_alive() && crate::predict::given_back(&t).is_some() => {
+            crate::predict::given_back(&t).unwrap_or(Value::Nil)
+        }
         mlua::Value::Table(t) => match t
             .weak_lua()
             .try_upgrade()
@@ -1033,6 +1036,11 @@ impl FromLua for Value {
 /// As script data: tables are read-only (`frozen`) when they are state's
 /// own, or a mutable copy for `state:update`.
 pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlua::Value> {
+    if crate::predict::recording()
+        && let Some(proxy) = crate::predict::proxy(value, lua, frozen)?
+    {
+        return Ok(proxy);
+    }
     if matches!(value, Value::List(_) | Value::Map(_)) {
         CONVERTED.set(CONVERTED.get() + 1);
     }
@@ -1522,6 +1530,9 @@ fn id_key(id: usize) -> mlua::Value {
 /// As script data, read-only, its large parts shared with every other
 /// conversion of them.
 pub(crate) fn shared_lua(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> {
+    if crate::predict::recording() && crate::predict::marked(value) {
+        return to_lua(value, lua, true);
+    }
     if !large(value) {
         return recent_lua(value, lua);
     }
@@ -2547,7 +2558,11 @@ fn add_reads<T: 'static, M: UserDataMethods<T>>(
     state: impl Fn(&T) -> &State + Copy + 'static,
 ) {
     methods.add_method("get", move |lua, s: &T, ()| {
-        read(state(s).fresh().get(), lua)
+        let value = state(s).fresh().get();
+        if crate::predict::recording() {
+            crate::predict::state_read(&state(s).0, &value);
+        }
+        read(value, lua)
     });
     methods.add_method("peek", move |lua, s: &T, ()| {
         read(state(s).fresh().with_untracked(Clone::clone), lua)

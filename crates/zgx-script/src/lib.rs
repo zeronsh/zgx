@@ -65,6 +65,7 @@ mod lazy;
 mod library;
 pub mod lint;
 mod lower;
+pub mod predict;
 pub mod markdown;
 mod meter;
 mod modifiers;

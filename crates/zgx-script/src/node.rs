@@ -868,6 +868,9 @@ pub(crate) struct ListRare {
     /// start coming in reach calls. Taken as `fill` walks the table.
     pub(crate) start: Option<Function>,
     pub(crate) start_distance: Option<f32>,
+    /// `predict = true`, with `measured` and `data`: rows' heights known
+    /// before they're built, learned from those that are.
+    pub(crate) predict: bool,
     /// `at_end = state`: kept saying whether it rests at its end.
     pub(crate) at_end: Option<Signal<Value>>,
     /// `overscroll = "contain"`: a wheel over it stays with it.
@@ -3402,6 +3405,12 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 }
             }
         }
+        "predict" => {
+            if let Kind::List { rare, .. } = &mut node.kind {
+                let on: bool = lua.unpack(value)?;
+                rare.get_or_insert_default().predict = on;
+            }
+        }
         "on_start" | "start_distance" | "at_end" => {
             if let Kind::List { rare, .. } = &mut node.kind {
                 let rare = rare.get_or_insert_default();
@@ -4909,7 +4918,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let image = crate::lower::try_load_image_in(&vm, &env.assets, &env.runtime, &src);
             Ok(match image {
-                Ok(Some(image)) => (Some(image.width()), Some(image.height())),
+                Ok(Some(image)) => {
+                    if crate::predict::recording() {
+                        crate::predict::picture(&src, image.width(), image.height());
+                    }
+                    (Some(image.width()), Some(image.height()))
+                }
                 _ => (None, None),
             })
         })?,
