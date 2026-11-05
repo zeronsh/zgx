@@ -15446,8 +15446,9 @@ export type ListProps = {
 	-- Each row's item's key (a number, string or boolean), as a function of
 	-- its index (with `data`, of its item): a row follows its item as the
 	-- list changes, moved rather than written again (rows a removal or an
-	-- insertion shifts keep their nodes, text and layout).
-	key: (((index: number) -> any) | ((item: any) -> any))?,
+	-- insertion shifts keep their nodes, text and layout). With `data`, a
+	-- field's name (`key = "id"`) is read without making any item a table.
+	key: (((index: number) -> any) | ((item: any) -> any) | string)?,
 	-- Every row's height in points (28 by default); with `measured`, the
 	-- estimate for rows not yet measured.
 	height: number?,
