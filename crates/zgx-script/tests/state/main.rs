@@ -9,6 +9,8 @@ mod app_api;
 mod async_handlers;
 #[path = "../calls.rs"]
 mod calls;
+#[path = "../converted_at_idle.rs"]
+mod converted_at_idle;
 #[path = "../form_values.rs"]
 mod form_values;
 #[path = "../guard_doors.rs"]

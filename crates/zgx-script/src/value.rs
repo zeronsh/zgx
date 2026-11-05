@@ -1328,21 +1328,22 @@ fn large(value: &Value) -> bool {
     }
     matches!(value, Value::List(_) | Value::Map(_)) && count(value, &mut CACHED_FROM.clone())
 }
+/// A table whose keys don't keep what they name.
+fn weak_keys(lua: &Lua) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    let meta = lua.create_table()?;
+    meta.raw_set("__mode", "k")?;
+    t.set_metatable(Some(meta))?;
+    Ok(t)
+}
 /// Give a new VM its cache of converted values.
 pub(crate) fn install_cache(lua: &Lua) {
-    let weak = |mode: &str| -> mlua::Result<Table> {
-        let t = lua.create_table()?;
-        let meta = lua.create_table()?;
-        meta.raw_set("__mode", mode)?;
-        t.set_metatable(Some(meta))?;
-        Ok(t)
-    };
     let tables = lua.create_table();
     let clone = lua
         .globals()
         .get::<Table>("table")
         .and_then(|t| t.get::<mlua::Function>("clone"));
-    if let (Ok(tables), Ok(ids), Ok(clone)) = (tables, weak("k"), clone) {
+    if let (Ok(tables), Ok(ids), Ok(clone)) = (tables, weak_keys(lua), clone) {
         lua.set_app_data(Converted {
             held: Default::default(),
             tables,
@@ -1675,11 +1676,22 @@ fn file_weighed(lua: &Lua, value: &Value, table: &Table, added: usize) -> mlua::
 /// little, and what nothing else holds costs at most as much again as what
 /// is held.
 fn sweep(lua: &Lua) -> mlua::Result<()> {
+    let due = lua
+        .app_data_ref::<Converted>()
+        .is_some_and(|cache| cache.weight.get() >= (cache.swept.get() * 2).max(SWEPT_FROM));
+    if due { sweep_now(lua) } else { Ok(()) }
+}
+/// Lets go of what nothing but the cache holds, whatever its weight: as a
+/// window goes idle, for what it was showing stays otherwise until the cache
+/// next doubles, and after a long list that may be never.
+#[cold]
+#[inline(never)]
+fn sweep_now(lua: &Lua) -> mlua::Result<()> {
     let Some(cache) = lua.app_data_ref::<Converted>() else {
         return Ok(());
     };
     let (tables, ids) = (cache.tables.clone(), cache.ids.clone());
-    if cache.weight.get() >= (cache.swept.get() * 2).max(SWEPT_FROM) {
+    {
         let mut gone: Vec<usize> = Vec::new();
         {
             let mut held = cache.held.borrow_mut();
@@ -1712,6 +1724,32 @@ fn sweep(lua: &Lua) -> mlua::Result<()> {
         }
     }
     Ok(())
+}
+/// What a window going idle does to the cache: lets go of what only it holds,
+/// and, for a table keeps the room it grew to, files what is left in new ones.
+#[cold]
+#[inline(never)]
+pub(crate) fn trim_converted(lua: &Lua) -> mlua::Result<()> {
+    sweep_now(lua)?;
+    let Some(mut cache) = lua.remove_app_data::<Converted>() else {
+        return Ok(());
+    };
+    let refiled = (|| {
+        let (tables, ids) = (lua.create_table()?, weak_keys(lua)?);
+        for pair in cache.tables.pairs::<mlua::Value, Table>() {
+            let (id, table) = pair?;
+            ids.raw_set(&table, &id)?;
+            tables.raw_set(id, table)?;
+        }
+        Ok::<_, mlua::Error>((tables, ids))
+    })();
+    // (Whatever happened, the cache goes back: it is as it was on an error.)
+    if let Ok((tables, ids)) = &refiled {
+        cache.tables = tables.clone();
+        cache.ids = ids.clone();
+    }
+    lua.set_app_data(cache);
+    refiled.map(|_| ())
 }
 /// The cached table of `value`, if it has one.
 fn cached(lua: &Lua, value: &Value) -> mlua::Result<Option<Table>> {
