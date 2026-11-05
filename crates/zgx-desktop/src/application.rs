@@ -2214,6 +2214,30 @@ impl Host {
         }
     }
     fn sync_accessibility(&mut self) {
+        // Diagnostic: ZGX_AX_SELF=1 asks this window's content view for its
+        // accessibility children, once, 3 s in: what any client's first read
+        // does, so the tree goes live with no client and no permission.
+        #[cfg(target_os = "macos")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            let start = *START.get_or_init(std::time::Instant::now);
+            if start.elapsed().as_secs() >= 3
+                && std::env::var_os("ZGX_AX_SELF").is_some()
+                && !ASKED.swap(true, std::sync::atomic::Ordering::Relaxed)
+                && let Some(window) = &self.window
+                && let Ok(handle) = window.window_handle()
+                && let RawWindowHandle::AppKit(appkit) = handle.as_raw()
+            {
+                // SAFETY: the window's content view, alive with the window, on the main thread.
+                let view: &objc2::runtime::AnyObject =
+                    unsafe { appkit.ns_view.cast::<objc2::runtime::AnyObject>().as_ref() };
+                let _children: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+                    unsafe { objc2::msg_send![view, accessibilityChildren] };
+                eprintln!("ZAXSELF asked");
+            }
+        }
         let state = (
             self.context.ui.semantics.borrow().revision(),
             self.context.ui.input.focused(),
@@ -2256,14 +2280,24 @@ impl Host {
         self.accessibility_geometry_dirty = false;
         if let (Some(adapter), Some(_)) = (&mut self.adapter, &self.window) {
             let ui = &self.context.ui;
+            let zlog = std::env::var_os("ZGX_AX_LOG").is_some();
             adapter.update_if_active(|| {
-                self.tree.update(
+                let zat = std::time::Instant::now();
+                let update = self.tree.update(
                     &ui.scene.borrow(),
                     &ui.semantics.borrow(),
                     ui.input.focused(),
                     &self.options.title,
                     self.scale_factor,
-                )
+                );
+                if zlog {
+                    eprintln!(
+                        "ZAXUPDATE {:.3}ms nodes={}",
+                        zat.elapsed().as_secs_f64() * 1e3,
+                        update.nodes.len()
+                    );
+                }
+                update
             });
         }
     }

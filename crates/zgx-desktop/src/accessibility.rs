@@ -55,9 +55,10 @@ pub(crate) fn screen_reader() -> bool {
         };
         read.is_err() || on.as_bool()
     }
+    // Diagnostic: ZGX_AX_PACED=1, as if no screen reader runs.
     #[cfg(not(windows))]
     {
-        true
+        std::env::var_os("ZGX_AX_PACED").is_none()
     }
 }
 

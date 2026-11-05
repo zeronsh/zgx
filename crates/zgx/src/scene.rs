@@ -5794,6 +5794,23 @@ impl Scene {
     /// password). Shapes the text: ask only when a reader does.
     pub fn text_lines(&self, id: NodeId) -> Option<Vec<TextLine>> {
         let mut lines = self.laid_out_lines(id)?;
+        // Diagnostic: ZGX_AX_LINES=1, one walk of the ancestors per node.
+        static ONE_WALK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ONE_WALK.get_or_init(|| std::env::var_os("ZGX_AX_LINES").is_some()) {
+            let placement = (self.transformed > 0 && self.contains(id))
+                .then(|| self.placed(id).2)
+                .flatten();
+            if let Some(placement) = placement {
+                for line in &mut lines {
+                    let middle = line.rect.y + line.rect.height / 2.;
+                    for caret in &mut line.carets {
+                        *caret = placement.matrix.point(*caret, middle).0;
+                    }
+                    line.rect = placement.matrix.bounds(line.rect);
+                }
+            }
+            return Some(lines);
+        }
         if self.transformed > 0 {
             for line in &mut lines {
                 // Each caret where it shows across the line's middle; the
