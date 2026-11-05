@@ -2281,6 +2281,7 @@ impl Host {
         if let (Some(adapter), Some(_)) = (&mut self.adapter, &self.window) {
             let ui = &self.context.ui;
             let zlog = std::env::var_os("ZGX_AX_LOG").is_some();
+            let zwhole = std::time::Instant::now();
             adapter.update_if_active(|| {
                 let zat = std::time::Instant::now();
                 let update = self.tree.update(
@@ -2299,6 +2300,13 @@ impl Host {
                 }
                 update
             });
+            if zlog {
+                let (ids, cached, positions, boxes) = self.tree.sizes();
+                eprintln!(
+                    "ZAXSYNC {:.3}ms ids={ids} cached={cached} positions={positions} boxes={boxes}",
+                    zwhole.elapsed().as_secs_f64() * 1e3
+                );
+            }
         }
     }
     /// What AppKit said of this window's full screen (`phase`, of the

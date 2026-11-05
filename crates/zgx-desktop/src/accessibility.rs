@@ -130,6 +130,10 @@ struct LineRuns {
     offsets: Vec<Vec<usize>>,
 }
 impl AccessibilityTree {
+    /// Diagnostic: how much this tree holds.
+    pub fn sizes(&self) -> (usize, usize, usize, usize) {
+        (self.ids.len(), self.cache.len(), self.text_positions.len(), self.run_boxes.len())
+    }
     /// An empty tree: the first update is a complete snapshot.
     pub fn new() -> Self {
         Self::default()
