@@ -814,3 +814,48 @@ fn an_after_0_from_on_resize_settles_before_the_frame_is_drawn() {
     h.frame();
     assert_eq!(h.text("lines"), "30", "the first frame after a reload");
 }
+
+// PROBE, never to merge: what a computed that runs past its budget leaves.
+#[test]
+fn probe_computed_past_its_budget() {
+    let mut h = Harness::inline(
+        r#"local slow = ui.state("slow", false)
+        local n = ui.state("n", 1)
+        local runs = ui.state("runs", 0)
+        local reader_runs = 0
+        local said = ui.state("said", "")
+        local c = ui.computed(function()
+            local v = n:get()
+            runs:set(runs:peek() + 1)
+            if slow:get() then
+                local x = 0
+                while true do x = x + 1 end
+            end
+            return { value = v }
+        end)
+        ui.effect(function() c:get(); reader_runs = reader_runs + 1 end)
+        ui.command { id = "slow", run = function() n:set(2); slow:set(true) end }
+        ui.command { id = "n3", run = function() n:set(3) end }
+        ui.command { id = "fast", run = function() slow:set(false) end }
+        ui.command { id = "read", run = function()
+            local ok, v = pcall(function() return c:get() end)
+            said:set(`{ok} {if ok then v.value else v} runs={runs:peek()} readers={reader_runs}`)
+        end }
+        return ui.column { ui.text { id = "said", "{said}" }, ui.text { id = "v", function() return tostring(c:get().value) end } }"#,
+    );
+    let read = |h: &mut Harness, what: &str| {
+        run(h, "read");
+        eprintln!("PROBE {what}: said={:?} shown={:?} error={:?}", h.text("said"), h.text("v"), h.error().map(|e| e.chars().take(90).collect::<String>()));
+    };
+    read(&mut h, "before");
+    run(&mut h, "slow");
+    read(&mut h, "after it fired");
+    h.settle();
+    read(&mut h, "after more frames");
+    run(&mut h, "n3");
+    read(&mut h, "n changed, still slow");
+    run(&mut h, "fast");
+    read(&mut h, "fast again");
+    run(&mut h, "n3");
+    read(&mut h, "n3 again");
+}

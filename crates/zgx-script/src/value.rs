@@ -1279,6 +1279,14 @@ fn plain_map(lua: &Lua, fields: &[(Rc<str>, Value)]) -> mlua::Result<Table> {
 }
 impl IntoLua for Value {
     fn into_lua(self, lua: &Lua) -> mlua::Result<mlua::Value> {
+        // PROBE, never to merge.
+        let items = match &self { Value::List(l) => l.len(), _ => 0 };
+        if items >= 100 && std::env::var_os("ZGX_CALL_LOG").is_some() {
+            let (at, before) = (std::time::Instant::now(), ITEMS.get());
+            let out = shared_lua(&self, lua);
+            eprintln!("ZTOLUA {:.2}ms items={items} fields={}", at.elapsed().as_secs_f64() * 1e3, ITEMS.get() - before);
+            return out;
+        }
         shared_lua(&self, lua)
     }
 }
@@ -2029,8 +2037,19 @@ impl Shared {
     /// Sets the value, keeping the current one's parts where they are
     /// equal; whether anything changed.
     pub fn set(&self, value: Value) -> bool {
+        // PROBE, never to merge.
+        let at = std::time::Instant::now();
         let next = self.0.with_untracked(|old| value.reconcile(old));
-        self.0.set(next)
+        let spent = at.elapsed();
+        if spent.as_micros() >= 200 && std::env::var_os("ZGX_CALL_LOG").is_some() {
+            eprintln!("ZRECON {:.2}ms", spent.as_secs_f64() * 1e3);
+        }
+        let at = std::time::Instant::now();
+        let changed = self.0.set(next);
+        if at.elapsed().as_micros() >= 500 && std::env::var_os("ZGX_CALL_LOG").is_some() {
+            eprintln!("ZSET {:.2}ms (what the write ran, inclusive)", at.elapsed().as_secs_f64() * 1e3);
+        }
+        changed
     }
     /// The signal itself (its `set` replaces without reconciling).
     pub fn signal(&self) -> Signal<Value> {

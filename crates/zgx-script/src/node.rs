@@ -6394,7 +6394,11 @@ pub(crate) fn computed_state(_: &Lua, env: &Env, f: Function) -> crate::value::S
             let old = out.with_untracked(Clone::clone);
             let result = vm.call::<mlua::Value>(&f, ()).and_then(|returned| {
                 let table = returned.as_table().cloned();
+                let probe_at = std::time::Instant::now();
                 let value = crate::value::convert(returned, Some(&old))?;
+                if probe_at.elapsed().as_micros() >= 500 && std::env::var_os("ZGX_CALL_LOG").is_some() {
+                    eprintln!("ZCONV {:.2}ms (a computed's result back to Rust)", probe_at.elapsed().as_secs_f64() * 1e3);
+                }
                 if let Some(meter) = &meter {
                     meter.hold(&out, value.weight())?;
                 }
