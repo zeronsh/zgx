@@ -283,7 +283,7 @@ const PERSONALIZE: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Per
 /// switch), they are on. It is read again as Windows announces the change
 /// (`WM_SETTINGCHANGE`, "ImmersiveColorSet"; `window_chrome`'s subclass).
 #[cfg(windows)]
-fn windows_transparency_off() -> bool {
+pub(crate) fn windows_transparency_off() -> bool {
     dword_is_zero(PERSONALIZE, "EnableTransparency")
 }
 
