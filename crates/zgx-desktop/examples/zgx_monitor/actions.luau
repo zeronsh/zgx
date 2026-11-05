@@ -54,11 +54,13 @@ function M.open(pid: number?)
 	M.focus(id)
 end
 
--- The first panel shows the process the monitor launched, once per launch.
+-- The first panel shows the process the monitor launched or attached to,
+-- once per launch.
 function M.start()
 	if not state.started:peek() then
 		state.started:set(true)
-		M.open(state.launched)
+		state.attached:set(state.attach_name)
+		M.open(state.launched or state.attach_pid)
 	end
 end
 
@@ -157,6 +159,23 @@ function M.set_sidebar(open: boolean)
 end
 function M.toggle_sidebar()
 	M.set_sidebar(not state.sidebar_open:peek())
+end
+
+-- List the tree of the processes named `name`, or every process for "", and
+-- show the largest of them.
+function M.attach(name: string)
+	state.attached:set(name)
+	state.query:set("")
+	state.list_offset:set(0)
+	local largest: data.Proc? = nil
+	for _, p in data.by_pid do
+		if p.name == name and (not largest or p.mem > largest.mem) then
+			largest = p
+		end
+	end
+	if largest then
+		M.show(largest.pid)
+	end
 end
 
 -- Scroll the process list just enough to show row `index`.

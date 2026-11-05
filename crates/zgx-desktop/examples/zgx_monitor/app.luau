@@ -1,4 +1,5 @@
--- A resource monitor: every process in the sidebar, and panels charting a
+-- A resource monitor: every process in the sidebar, or one app's tree once
+-- attached to it, and panels charting a
 -- process's CPU, GPU and memory over the last minute. Panels lay out as the
 -- terminal example's panes do: split beside or below, resized by their
 -- dividers, moved by their headers onto another panel's edge (or its
@@ -22,7 +23,7 @@ local sidebar = require("@components/sidebar")
 local Titlebar = require("@components/titlebar")
 local Workspace = require("@components/workspace")
 
--- The first panel shows the process the monitor launched.
+-- The first panel shows the process the monitor launched or attached to.
 actions.start()
 commands.declare()
 

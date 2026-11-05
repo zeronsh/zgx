@@ -36,6 +36,15 @@ fn procs(tick: f64) -> Value {
                 let cpu = i as f64 * 10. + tick % 3.;
                 map(&[
                     ("pid", num(100. + i as f64)),
+                    // proc3 is proc1's child, and proc4 proc3's.
+                    (
+                        "ppid",
+                        num(match i {
+                            3 => 101.,
+                            4 => 103.,
+                            _ => 1.,
+                        }),
+                    ),
                     ("name", Value::Str(format!("proc{i}").into())),
                     ("cpu", num(cpu)),
                     ("gpu", num(i as f64)),
@@ -257,6 +266,115 @@ fn splitting_closing_and_browsing_with_keys() {
         app.panels()[0].0.width > 800.,
         "one panel fills the area again"
     );
+}
+
+impl App {
+    /// The sidebar's topmost text reading `name`: in an open menu, over the
+    /// list.
+    fn topmost(&mut self, name: &str) -> (f32, f32) {
+        self.h.ui.prepare_frame();
+        let scene = self.h.ui.scene.borrow();
+        let mut stack = vec![scene.root()];
+        let mut found: Option<Rect> = None;
+        while let Some(n) = stack.pop() {
+            if let NodeKind::Text { text, .. } = scene.kind(n)
+                && &**text == name
+            {
+                let b = scene.bounds(n);
+                if b.x < 300. && found.is_none_or(|f| b.y < f.y) {
+                    found = Some(b);
+                }
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        Self::center(found.unwrap_or_else(|| panic!("no text {name}")))
+    }
+    fn click(&mut self, at: (f32, f32)) {
+        self.drag(at, at, true);
+    }
+}
+
+#[test]
+fn an_apps_labels_name_its_rows_and_its_counts_follow_the_attached_tree() {
+    let mut app = App::new();
+    let counted = |owner: f64, count: f64| {
+        map(&[
+            ("owner", num(owner)),
+            ("label", Value::Str("Tabs".into())),
+            ("count", num(count)),
+        ])
+    };
+    app.h.host.shared("counts", Value::Nil).set(Value::List(
+        vec![counted(101., 1.), counted(102., 2.)].into(),
+    ));
+    let proc = |pid: f64, name: &str, label: Option<&str>| {
+        map(&[
+            ("pid", num(pid)),
+            ("ppid", num(1.)),
+            ("name", Value::Str(name.into())),
+            (
+                "label",
+                label.map_or(Value::Nil, |label| Value::Str(label.into())),
+            ),
+            ("cpu", num(1.)),
+            ("gpu", num(0.)),
+            ("mem", num(50.)),
+            ("smooth", num(1.)),
+        ])
+    };
+    app.h.host.shared("procs", Value::Nil).set(Value::List(
+        vec![
+            proc(101., "proc1", None),
+            proc(102., "helper", Some("Some tab")),
+        ]
+        .into(),
+    ));
+    app.settle();
+    let texts = app.texts();
+    assert!(texts.iter().any(|t| t == "Some tab"), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == "helper"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "Tabs 3"), "{texts:?}");
+
+    // Attached to proc1, only what it counts.
+    app.sample();
+    let trigger = app.topmost("All processes");
+    app.click(trigger);
+    let item = app.topmost("proc1");
+    app.click(item);
+    app.sample();
+    let texts = app.texts();
+    assert!(texts.iter().any(|t| t == "Tabs 1"), "{texts:?}");
+}
+
+#[test]
+fn attaching_lists_a_process_and_what_it_started_until_all_are_chosen() {
+    let mut app = App::new();
+    let trigger = app.topmost("All processes");
+    app.click(trigger);
+    let item = app.topmost("proc1");
+    app.click(item);
+    app.sample();
+    let texts = app.texts();
+    for name in ["proc1", "proc3", "proc4"] {
+        assert!(texts.iter().any(|t| t == name), "{name} in {texts:?}");
+    }
+    assert!(!texts.iter().any(|t| t.starts_with("102 ·")), "{texts:?}");
+    assert!(
+        texts.iter().any(|t| t.starts_with("3 processes")),
+        "{texts:?}"
+    );
+    assert!(
+        app.panel_names().iter().any(|name| name == "proc1"),
+        "the panel follows"
+    );
+
+    let trigger = app.topmost("proc1");
+    app.click(trigger);
+    let item = app.topmost("All processes");
+    app.click(item);
+    let texts = app.texts();
+    assert!(texts.iter().any(|t| t.starts_with("102 ·")), "{texts:?}");
+    assert!(texts.iter().any(|t| t.contains("5 processes")), "{texts:?}");
 }
 
 #[test]
