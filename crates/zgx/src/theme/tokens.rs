@@ -300,6 +300,26 @@ schema! {
     /// The corner radius of marks behind text (find's matches, an editor's
     /// decorations), drawn as a selection is: its radius by default.
     MARK_RADIUS: Number = "mark.radius" => "{selection.radius}",
+    // Windows' caption buttons (`Titlebar::Inset`): by default inked as an
+    // app's own title bar controls, Close in WinUI's red.
+    /// A caption button's glyph at rest.
+    CAPTION_INK: Color = "caption.ink" => "{text.secondary}",
+    /// A caption button's glyph under the pointer and pressed.
+    CAPTION_INK_HOVER: Color = "caption.ink.hover" => "{text.primary}",
+    /// A caption button's glyph while its window is in the back.
+    CAPTION_INK_INACTIVE: Color = "caption.ink.inactive" => "{text.tertiary}",
+    /// Behind a caption button under the pointer.
+    CAPTION_HOVER: Color = "caption.hover" => "{hover}",
+    /// Behind a caption button pressed.
+    CAPTION_PRESSED: Color = "caption.pressed" => "{pressed}",
+    /// Behind Close under the pointer.
+    CAPTION_CLOSE: Color = "caption.close" => "#c42b1cff",
+    /// Behind Close pressed.
+    CAPTION_CLOSE_PRESSED: Color = "caption.close.pressed" => "#c42b1ce6",
+    /// Close's glyph over its red.
+    CAPTION_CLOSE_INK: Color = "caption.close.ink" => "#ffffffff",
+    /// Close's glyph pressed.
+    CAPTION_CLOSE_INK_PRESSED: Color = "caption.close.ink.pressed" => "{caption.close.ink}",
     // Terminals' colours. Unset, as the built-in themes leave them, each
     // keeps the terminal's own: the user's Ghostty configuration, or the
     // engine-drawn terminal's palette. A theme sets them to match it.

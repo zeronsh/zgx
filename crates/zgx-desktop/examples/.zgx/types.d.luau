@@ -198,6 +198,15 @@ export type ColorToken =
 	| "$selection.text.inactive"
 	| "$find.match"
 	| "$find.current"
+	| "$caption.ink"
+	| "$caption.ink.hover"
+	| "$caption.ink.inactive"
+	| "$caption.hover"
+	| "$caption.pressed"
+	| "$caption.close"
+	| "$caption.close.pressed"
+	| "$caption.close.ink"
+	| "$caption.close.ink.pressed"
 	| "$terminal.foreground"
 	| "$terminal.background"
 	| "$terminal.cursor"
@@ -352,6 +361,15 @@ export type TokenName =
 	| "find.match"
 	| "find.current"
 	| "mark.radius"
+	| "caption.ink"
+	| "caption.ink.hover"
+	| "caption.ink.inactive"
+	| "caption.hover"
+	| "caption.pressed"
+	| "caption.close"
+	| "caption.close.pressed"
+	| "caption.close.ink"
+	| "caption.close.ink.pressed"
 	| "terminal.foreground"
 	| "terminal.background"
 	| "terminal.cursor"
@@ -402,6 +420,23 @@ export type Tokens = {
 	button: {
 		bg: string,
 		hover: string,
+		pressed: string,
+	},
+	caption: {
+		close: {
+			ink: {
+				pressed: string,
+				value: string,
+			},
+			pressed: string,
+			value: string,
+		},
+		hover: string,
+		ink: {
+			hover: string,
+			inactive: string,
+			value: string,
+		},
 		pressed: string,
 	},
 	control: {
