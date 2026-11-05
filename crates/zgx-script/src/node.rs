@@ -877,6 +877,9 @@ pub(crate) struct ListRare {
     /// `virtualize = "ancestor"`: it scrolls with the scroll view around it,
     /// building the rows that view shows (`View::virtualize_in_ancestor`).
     pub(crate) ancestor: bool,
+    /// `key = "id"` (with `data`): the field of an item that is its key, read
+    /// in Rust, so keying a list makes none of its items a table.
+    pub(crate) key_field: Option<Rc<str>>,
 }
 
 /// `ui.list`'s `on_end`, called as its end comes within `distance` points.
@@ -5388,16 +5391,39 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     ));
                 }
             };
-            let rare = (sticky.is_some() || row_text.is_some() || end.is_some() || ancestor)
-                .then(|| {
-                    Box::new(ListRare {
-                        sticky,
-                        sticky_top,
-                        row_text,
-                        end,
-                        ancestor,
-                        ..ListRare::default()
-                    })
+            let (key, key_field) = match table.get::<mlua::Value>("key")? {
+                mlua::Value::Nil => (None, None),
+                mlua::Value::Function(key) => (Some(key), None),
+                mlua::Value::String(field) => {
+                    if items.is_none() {
+                        return Err(mlua::Error::runtime(
+                            "ui.list `key = \"field\"` names a field of an item: it takes \
+                             `data`, not `count` (with `count`, give a function of the index)",
+                        ));
+                    }
+                    (None, Some(Rc::from(&*field.to_string_lossy())))
+                }
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "ui.list `key` is a function, or with `data` the name of a field",
+                    ));
+                }
+            };
+            let rare = (sticky.is_some()
+                || row_text.is_some()
+                || end.is_some()
+                || ancestor
+                || key_field.is_some())
+            .then(|| {
+                Box::new(ListRare {
+                    sticky,
+                    sticky_top,
+                    row_text,
+                    end,
+                    ancestor,
+                    key_field,
+                    ..ListRare::default()
+                })
                 });
             let mut node = fill(
                 lua,
@@ -5411,7 +5437,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         rare,
                         overscan,
                         build,
-                        key: table.get::<Option<Function>>("key")?,
+                        key,
                         measured,
                         follow: table.get::<Option<bool>>("follow")?.unwrap_or(false),
                         offset,
