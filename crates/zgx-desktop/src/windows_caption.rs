@@ -190,33 +190,32 @@ impl Geometry {
     }
 }
 
-/// Close's red under the pointer (WinUI's), and pressed.
-const CLOSE_RED: Color = Color(196, 43, 28, 255);
-const CLOSE_RED_PRESSED: Color = Color(196, 43, 28, 230);
-
-/// The wash under a button in `kind`'s state: the app's theme's `hover` and
-/// `pressed`, as under its own controls; Close's red.
+/// The wash under a button in `kind`'s state: the theme's `caption.hover` and
+/// `caption.pressed` (its `hover` and `pressed` unless it sets them), as under
+/// its own controls; Close's red, `caption.close` (WinUI's).
 fn fill(kind: CaptionButton, hover: bool, down: bool) -> Themed<Color> {
     match (kind, hover, down) {
         (_, false, _) => Color(0, 0, 0, 0).into(),
-        (CaptionButton::Close, _, false) => CLOSE_RED.into(),
-        (CaptionButton::Close, _, true) => CLOSE_RED_PRESSED.into(),
-        (_, _, false) => tok::HOVER.into(),
-        (_, _, true) => tok::PRESSED.into(),
+        (CaptionButton::Close, _, false) => tok::CAPTION_CLOSE.into(),
+        (CaptionButton::Close, _, true) => tok::CAPTION_CLOSE_PRESSED.into(),
+        (_, _, false) => tok::CAPTION_HOVER.into(),
+        (_, _, true) => tok::CAPTION_PRESSED.into(),
     }
 }
-/// The glyph's ink, from the app's theme as its title bar's other controls:
-/// secondary at rest, primary under the pointer, tertiary in a window in the
-/// back; white over Close's red (`red`). In a contrast theme `hover` is the
-/// opaque highlight, which its window text doesn't read on (white on Night
-/// sky's cyan): under the pointer then, the highlight's own text, `accent.text`.
-fn ink(red: bool, hover: bool, active: bool, high_contrast: bool) -> Themed<Color> {
+/// The glyph's ink, from the theme's `caption.ink` tokens, by default its
+/// title bar's other controls': secondary at rest, primary under the pointer
+/// and pressed, tertiary in a window in the back; `caption.close.ink`, white,
+/// over Close's red (`red`). In a contrast theme `hover` is the opaque
+/// highlight, which its window text doesn't read on (white on Night sky's
+/// cyan): under the pointer then, the highlight's own text, `accent.text`.
+fn ink(red: bool, hover: bool, down: bool, active: bool, high_contrast: bool) -> Themed<Color> {
     match (red, hover, active) {
-        (true, ..) => Color(255, 255, 255, 255).into(),
+        (true, ..) if down => tok::CAPTION_CLOSE_INK_PRESSED.into(),
+        (true, ..) => tok::CAPTION_CLOSE_INK.into(),
         (_, true, _) if high_contrast => tok::ACCENT_TEXT.into(),
-        (_, true, _) => tok::TEXT_PRIMARY.into(),
-        (_, _, true) => tok::TEXT_SECONDARY.into(),
-        (_, _, false) => tok::TEXT_TERTIARY.into(),
+        (_, true, _) => tok::CAPTION_INK_HOVER.into(),
+        (_, _, true) => tok::CAPTION_INK.into(),
+        (_, _, false) => tok::CAPTION_INK_INACTIVE.into(),
     }
 }
 
@@ -250,6 +249,7 @@ impl CaptionLook {
         ink(
             kind == CaptionButton::Close && hover,
             hover,
+            hover && self.pressed.get() == Some(kind),
             self.active.get(),
             self.high_contrast.get(),
         )
@@ -721,53 +721,100 @@ mod tests {
         );
     }
 
-    /// The glyphs take the app's text colours and washes, as its own title
-    /// bar controls do, so a light app on a dark system has dark glyphs:
-    /// secondary at rest, primary under the pointer, tertiary in the back;
-    /// Close's red and white glyph kept.
+    /// The glyphs take the theme's caption tokens: secondary at rest, primary
+    /// under the pointer, tertiary in the back; Close's red and white glyph.
     #[test]
-    fn the_ink_is_the_apps_text_and_washes() {
-        let ink_of = |red, hover, active| ink(red, hover, active, false);
+    fn the_ink_is_the_themes_caption_tokens() {
+        let ink_of = |red, hover, down, active| ink(red, hover, down, active, false);
         assert_eq!(
-            ink_of(false, false, true),
-            Themed::from(tok::TEXT_SECONDARY)
-        );
-        assert_eq!(ink_of(false, true, true), Themed::from(tok::TEXT_PRIMARY));
-        assert_eq!(
-            ink_of(false, false, false),
-            Themed::from(tok::TEXT_TERTIARY)
+            ink_of(false, false, false, true),
+            Themed::from(tok::CAPTION_INK)
         );
         assert_eq!(
-            ink_of(true, true, true),
-            Themed::from(Color(255, 255, 255, 255)),
+            ink_of(false, true, false, true),
+            Themed::from(tok::CAPTION_INK_HOVER)
+        );
+        assert_eq!(
+            ink_of(false, true, true, true),
+            Themed::from(tok::CAPTION_INK_HOVER),
+            "pressed"
+        );
+        assert_eq!(
+            ink_of(false, false, false, false),
+            Themed::from(tok::CAPTION_INK_INACTIVE)
+        );
+        assert_eq!(
+            ink_of(true, true, false, true),
+            Themed::from(tok::CAPTION_CLOSE_INK),
             "on red"
+        );
+        assert_eq!(
+            ink_of(true, true, true, false),
+            Themed::from(tok::CAPTION_CLOSE_INK_PRESSED),
+            "on red, pressed"
         );
         // A contrast theme's hover is its highlight: its own text on it, and
         // Close keeps its red and white.
-        assert_eq!(ink(false, true, true, true), Themed::from(tok::ACCENT_TEXT));
         assert_eq!(
-            ink(false, false, true, true),
-            Themed::from(tok::TEXT_SECONDARY)
+            ink(false, true, false, true, true),
+            Themed::from(tok::ACCENT_TEXT)
         );
         assert_eq!(
-            ink(true, true, true, true),
-            Themed::from(Color(255, 255, 255, 255))
+            ink(false, false, false, true, true),
+            Themed::from(tok::CAPTION_INK)
         );
-        assert_eq!(fill(Minimize, true, false), Themed::from(tok::HOVER));
-        assert_eq!(fill(Maximize, true, true), Themed::from(tok::PRESSED));
-        assert_eq!(fill(Close, true, false), Themed::from(CLOSE_RED));
+        assert_eq!(
+            ink(true, true, false, true, true),
+            Themed::from(tok::CAPTION_CLOSE_INK)
+        );
+        assert_eq!(
+            fill(Minimize, true, false),
+            Themed::from(tok::CAPTION_HOVER)
+        );
+        assert_eq!(
+            fill(Maximize, true, true),
+            Themed::from(tok::CAPTION_PRESSED)
+        );
+        assert_eq!(fill(Close, true, false), Themed::from(tok::CAPTION_CLOSE));
+        assert_eq!(
+            fill(Close, true, true),
+            Themed::from(tok::CAPTION_CLOSE_PRESSED)
+        );
         assert_eq!(fill(Close, false, false), Themed::from(Color(0, 0, 0, 0)));
         let mut ui = Ui::new(800., 600.);
         let look = CaptionLook::new(&ui, flat(1.));
         ui.mount(look.view(false));
         ui.prepare_frame();
-        assert_eq!(look.ink(Minimize), Themed::from(tok::TEXT_SECONDARY));
+        assert_eq!(look.ink(Minimize), Themed::from(tok::CAPTION_INK));
         look.hovered.set(Some(Minimize));
         ui.prepare_frame();
-        assert_eq!(look.ink(Minimize), Themed::from(tok::TEXT_PRIMARY));
-        assert_eq!(look.fill(Minimize), Themed::from(tok::HOVER));
+        assert_eq!(look.ink(Minimize), Themed::from(tok::CAPTION_INK_HOVER));
+        assert_eq!(look.fill(Minimize), Themed::from(tok::CAPTION_HOVER));
         look.high_contrast.set(true);
         ui.prepare_frame();
         assert_eq!(look.ink(Minimize), Themed::from(tok::ACCENT_TEXT));
+    }
+
+    /// Unset, the caption tokens are what the buttons were inked with before
+    /// them: the title bar controls' text and washes, and WinUI's red.
+    #[test]
+    fn the_caption_tokens_default_to_the_title_bar_controls_and_winui_red() {
+        let ui = Ui::new(800., 600.);
+        for name in [zgx::theme::DARK, zgx::theme::LIGHT] {
+            ui.theme().set(name).unwrap();
+            let color = |token| ui.theme().root().color_untracked(token);
+            assert_eq!(color(tok::CAPTION_INK), color(tok::TEXT_SECONDARY));
+            assert_eq!(color(tok::CAPTION_INK_HOVER), color(tok::TEXT_PRIMARY));
+            assert_eq!(color(tok::CAPTION_INK_INACTIVE), color(tok::TEXT_TERTIARY));
+            assert_eq!(color(tok::CAPTION_HOVER), color(tok::HOVER));
+            assert_eq!(color(tok::CAPTION_PRESSED), color(tok::PRESSED));
+            assert_eq!(color(tok::CAPTION_CLOSE), Color(196, 43, 28, 255));
+            assert_eq!(color(tok::CAPTION_CLOSE_PRESSED), Color(196, 43, 28, 230));
+            assert_eq!(color(tok::CAPTION_CLOSE_INK), Color(255, 255, 255, 255));
+            assert_eq!(
+                color(tok::CAPTION_CLOSE_INK_PRESSED),
+                Color(255, 255, 255, 255)
+            );
+        }
     }
 }
