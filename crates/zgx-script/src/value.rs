@@ -57,6 +57,9 @@ pub trait Unfold {
     fn unfold(&self) -> Value;
 }
 
+/// A table's fields, as `Value::Map` holds them.
+type Fields = [(Rc<str>, Value)];
+
 /// A value kept small until it's read (`Value::Folded`).
 pub struct Folded {
     /// Its `id` field, which a list reads for each of its rows.
@@ -65,7 +68,7 @@ pub struct Folded {
     /// What it last opened to, while something holds that: a script's table
     /// of it, through the conversion cache, so reads while that stands find
     /// one table.
-    open: RefCell<Option<std::rc::Weak<[(Rc<str>, Value)]>>>,
+    open: RefCell<Option<std::rc::Weak<Fields>>>,
     /// What it opened to for the host's `field`, which hands out a reference.
     kept: std::cell::OnceCell<Value>,
 }
@@ -1523,7 +1526,6 @@ pub(crate) fn install_cache(lua: &Lua) {
             recent: Default::default(),
             next_recent: std::cell::Cell::new(0),
             recent_large: Default::default(),
-            next_recent_large: std::cell::Cell::new(0),
         });
     }
 }
@@ -1561,9 +1563,19 @@ struct Converted {
     next_recent: std::cell::Cell<usize>,
     /// The last few large tables a script read, as `recent`: read again and
     /// again and held by none between, each is converted once all the same.
-    recent_large: std::cell::RefCell<Vec<(usize, Value, Table)>>,
-    next_recent_large: std::cell::Cell<usize>,
+    /// Long lists apart from the rest, which a list's rows would crowd out, and
+    /// each a whole conversion to read again.
+    recent_large: [Recent; 2],
 }
+/// Tables kept from their last conversions, and where the next one goes once
+/// they're full.
+#[derive(Default)]
+struct Recent {
+    tables: std::cell::RefCell<Vec<(usize, Value, Table)>>,
+    next: std::cell::Cell<usize>,
+}
+/// What counts as a long list, in `Converted::recent_large`.
+const LONG_LIST: usize = 64;
 /// Sweeps wait until the cache holds this much (`weight`) at least.
 const SWEPT_FROM: usize = 1 << 12;
 /// The values a cached value's table holds, its small parts counted all the
@@ -1611,23 +1623,32 @@ pub(crate) fn shared_lua(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> 
         return recent_lua(value, lua);
     }
     let converted = shared_part(value, lua)?;
-    if let (mlua::Value::Table(table), Some(cache)) = (&converted, lua.app_data_ref::<Converted>())
-    {
-        let id = identity(value);
-        let mut recent = cache.recent_large.borrow_mut();
-        if !recent.iter().any(|(at, ..)| *at == id) {
-            // Held with its value, so its address is not another's meanwhile.
-            let entry = (id, value.clone(), table.clone());
-            if recent.len() < RECENT_LARGE {
-                recent.push(entry);
-            } else {
-                let at = cache.next_recent_large.get();
-                recent[at] = entry;
-                cache.next_recent_large.set((at + 1) % RECENT_LARGE);
-            }
-        }
+    if let mlua::Value::Table(table) = &converted {
+        keep_large(lua, value, table);
     }
     Ok(converted)
+}
+/// `table`, `value`'s, among the large tables kept for the reads to come
+/// (`Converted::recent_large`).
+fn keep_large(lua: &Lua, value: &Value, table: &Table) {
+    let Some(cache) = lua.app_data_ref::<Converted>() else {
+        return;
+    };
+    let id = identity(value);
+    let kept = &cache.recent_large[usize::from(value.list().len() >= LONG_LIST)];
+    let mut recent = kept.tables.borrow_mut();
+    if recent.iter().any(|(at, ..)| *at == id) {
+        return;
+    }
+    // Held with its value, so its address is not another's meanwhile.
+    let entry = (id, value.clone(), table.clone());
+    if recent.len() < RECENT_LARGE {
+        recent.push(entry);
+    } else {
+        let at = kept.next.get();
+        recent[at] = entry;
+        kept.next.set((at + 1) % RECENT_LARGE);
+    }
 }
 /// Small tables kept from their last conversions (`Converted::recent`).
 const RECENT: usize = 32;
@@ -1943,8 +1964,16 @@ pub(crate) fn sweep_idle(lua: &Lua) {
     let Some(cache) = lua.app_data_ref::<Converted>() else {
         return;
     };
-    cache.recent_large.borrow_mut().clear();
-    cache.next_recent_large.set(0);
+    let [others, lists] = &cache.recent_large;
+    others.tables.borrow_mut().clear();
+    others.next.set(0);
+    // (A list a state still has stays, its table read at each wake: those let go
+    // are held here and by `held` alone.)
+    lists
+        .tables
+        .borrow_mut()
+        .retain(|(_, value, _)| matches!(value, Value::List(items) if Rc::strong_count(items) > 2));
+    lists.next.set(0);
     cache.bases.borrow_mut().clear();
     drop(cache);
     let _ = sweep_when(lua, true);
@@ -2119,7 +2148,9 @@ pub(crate) fn remember(lua: &Lua, table: &Table, value: &Value) -> mlua::Result<
     };
     let copy: Table = clone.call(table)?;
     copy.set_readonly(true);
-    file(lua, value, &copy)
+    file(lua, value, &copy)?;
+    keep_large(lua, value, &copy);
+    Ok(())
 }
 /// How many values a VM's conversion cache holds.
 pub(crate) fn converted_len(lua: &Lua) -> usize {
