@@ -1277,6 +1277,100 @@ fn plain_map(lua: &Lua, fields: &[(Rc<str>, Value)]) -> mlua::Result<Table> {
         })
     }
 }
+/// A string long enough that a key is not read from it (a row's text): what
+/// a view leaves out.
+const KEY_FIELD_LEN: usize = 256;
+/// A row smaller than this is given to `key` whole: its table costs less
+/// than a view and a table both, and shown, its row uses that table.
+const KEY_VIEW_FROM: usize = 2048;
+
+/// What a list gives `key` of its items (`view`): a measured list asks a key
+/// of every row before it shows any, and a key reads an id, so long rows off
+/// the screen stay out of the script's heap. A view has an item's short fields;
+/// reading any other field, or looping over it, marks the views read past
+/// (`read_past`), and the list asks again of the items themselves.
+#[derive(Clone)]
+pub(crate) struct KeyViews {
+    /// A view's metatable, when its item has fields it left out.
+    partial: Table,
+    read_past: Rc<std::cell::Cell<bool>>,
+}
+pub(crate) fn key_views(lua: &Lua) -> mlua::Result<KeyViews> {
+    if let Some(views) = lua.app_data_ref::<KeyViews>() {
+        return Ok(views.clone());
+    }
+    let read_past = Rc::new(std::cell::Cell::new(false));
+    let partial = lua.create_table()?;
+    let mark = read_past.clone();
+    let read = lua.create_function(move |_, ()| {
+        mark.set(true);
+        Ok(mlua::Value::Nil)
+    })?;
+    partial.raw_set("__index", &read)?;
+    partial.raw_set("__iter", &read)?;
+    partial.raw_set("__len", &read)?;
+    let views = KeyViews { partial, read_past };
+    lua.set_app_data(views.clone());
+    Ok(views)
+}
+impl KeyViews {
+    /// Whether `item` is worth a view: `key` is given the item, if not.
+    pub(crate) fn worth(item: &Value) -> bool {
+        matches!(item, Value::Map(_)) && item.weight() >= KEY_VIEW_FROM
+    }
+    /// What `key` is given of `item`, made through Luau's C API in one
+    /// protected call, as `plain_map` makes a row.
+    pub(crate) fn view(&self, lua: &Lua, item: &Value) -> mlua::Result<mlua::Value> {
+        use mlua::ffi;
+        let Value::Map(fields) = item else {
+            return item.clone().into_lua(lua);
+        };
+        let n = std::ffi::c_int::try_from(fields.len())
+            .map_err(|_| mlua::Error::runtime("a table with too many fields"))?;
+        // SAFETY: as `plain_map`'s. `partial`, the one argument, is at 1; the
+        // table made above it replaces it, left as `exec_raw`'s one result.
+        unsafe {
+            lua.exec_raw::<mlua::Value>(&self.partial, |state| {
+                ffi::lua_createtable(state, 0, n);
+                let mut whole = true;
+                for (name, field) in fields.iter() {
+                    let (key, len) = (name.as_ptr().cast(), name.len());
+                    match field {
+                        Value::Bool(b) => {
+                            ffi::lua_pushlstring(state, key, len);
+                            ffi::lua_pushboolean(state, std::ffi::c_int::from(*b));
+                        }
+                        Value::Num(n) => {
+                            ffi::lua_pushlstring(state, key, len);
+                            ffi::lua_pushnumber(state, *n);
+                        }
+                        Value::Str(s) if s.len() <= KEY_FIELD_LEN => {
+                            ffi::lua_pushlstring(state, key, len);
+                            ffi::lua_pushlstring(state, s.as_ptr().cast(), s.len());
+                        }
+                        Value::Nil => continue,
+                        _ => {
+                            whole = false;
+                            continue;
+                        }
+                    }
+                    ffi::lua_rawset(state, -3);
+                }
+                if !whole {
+                    ffi::lua_pushvalue(state, 1);
+                    ffi::lua_setmetatable(state, -2);
+                }
+                ffi::lua_setreadonly(state, -1, 1);
+                ffi::lua_replace(state, 1);
+            })
+        }
+    }
+    /// Whether `key` read past a view since this was last asked.
+    pub(crate) fn read_past(&self) -> bool {
+        self.read_past.replace(false)
+    }
+}
+
 impl IntoLua for Value {
     fn into_lua(self, lua: &Lua) -> mlua::Result<mlua::Value> {
         shared_lua(&self, lua)
