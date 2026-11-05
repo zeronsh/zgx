@@ -1663,6 +1663,9 @@ struct Host {
     /// When the pointer or the wheel last moved in this window (`refresh_grid`).
     #[cfg(target_os = "macos")]
     input_at: Option<std::time::Instant>,
+    /// Diagnostic: when a capped hand's next frame is due (`hand_capped`).
+    #[cfg(target_os = "macos")]
+    hand_next: Option<std::time::Instant>,
     /// The window's size as AppKit last reported it (`Resized`, sent for
     /// every change of the content view's frame): asking every frame
     /// costs a walk of the window's frame views. None until reported.
@@ -2088,6 +2091,8 @@ impl Host {
             resized_at: None,
             #[cfg(target_os = "macos")]
             input_at: None,
+            #[cfg(target_os = "macos")]
+            hand_next: None,
             #[cfg(target_os = "macos")]
             reported_size: None,
             #[cfg(target_os = "macos")]
@@ -5757,6 +5762,15 @@ impl Host {
                 .is_some_and(|link| link.running());
         #[cfg(not(any(target_os = "macos", windows)))]
         let paced = false;
+        // Diagnostic: a hand's frames no oftener than ZGX_HAND_CAP_HZ, drawn on
+        // the ticks that keep to it and handed over as drawn; what's skipped
+        // stays damage for the next.
+        #[cfg(target_os = "macos")]
+        if self.hand_capped() {
+            self.frame_arrived = false;
+            self.sync_frames();
+            return Ok(self.tasks.has_ready() || !self.pending.borrow().is_empty());
+        }
         // Scene damage accumulates until the refresh paints it in one frame.
         if !paced || due || self.frame_arrived || self.force || self.redraw_whole {
             #[cfg(target_os = "macos")]
@@ -5772,6 +5786,43 @@ impl Host {
         }
         self.sync_frames();
         Ok(self.tasks.has_ready() || !self.pending.borrow().is_empty())
+    }
+    /// Diagnostic: whether this tick is one a capped hand skips. `hand_next`
+    /// advances by the cap's interval, so 80 on a 120 Hz link draws two ticks
+    /// of three; a tick is taken if within 1.5 ms of its time.
+    #[cfg(target_os = "macos")]
+    fn hand_capped(&mut self) -> bool {
+        static CAP: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+        let Some(interval) = *CAP.get_or_init(|| {
+            std::env::var("ZGX_HAND_CAP_HZ")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .map(|hz| std::time::Duration::from_secs_f64(1.0 / hz))
+        }) else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        let hand = self.scroll.active(now)
+            || self
+                .input_at
+                .is_some_and(|at| now.duration_since(at) < INPUT_FRAMES);
+        if !hand || self.force || self.redraw_whole {
+            self.hand_next = None;
+            return false;
+        }
+        const EARLY: std::time::Duration = std::time::Duration::from_micros(1500);
+        match self.hand_next {
+            Some(next) if now + EARLY < next => true,
+            // Behind by more than a frame: count from here, not to catch up.
+            Some(next) if now < next + interval => {
+                self.hand_next = Some(next + interval);
+                false
+            }
+            _ => {
+                self.hand_next = Some(now + interval);
+                false
+            }
+        }
     }
     fn frames_presented(&self) -> bool {
         self.window.is_some()
