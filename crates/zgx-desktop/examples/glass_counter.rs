@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             glass: Some(match std::env::var("ZGX_GLASS_MATERIAL").as_deref() {
                 Ok("window") => Glass::new(GlassMaterial::WindowBackground),
                 Ok("titlebar") => Glass::new(GlassMaterial::Titlebar),
+                Ok("plain") => Glass::new(GlassMaterial::UnderWindowBackground).plain(),
                 _ => Glass::default(),
             }),
             ..Default::default()

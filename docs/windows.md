@@ -425,7 +425,14 @@ Windows present through a DirectComposition visual, so `WindowOptions::transpare
 windows are transparent where zgx paints nothing, and `WindowOptions::glass`
 puts the Windows 11 system backdrop behind them: Acrylic for the heads-up and
 transient materials, Mica for window and page backgrounds, Mica Alt for title
-bars (see [window controls](window-controls.md)). Presentation through the visual
+bars (see [window controls](window-controls.md)). `Glass::plain` has no system
+backdrop: it is the acrylic blur of what is behind the window, untinted (the
+window's accent, `SetWindowCompositionAttribute`'s
+`ACCENT_ENABLE_ACRYLICBLURBEHIND` with a tint of alpha 1), as gpui's
+`WindowBackgroundAppearance::Blurred` is, for apps laying their own tint over
+it; Windows 10 1809 and later. Its frame is not extended under the client
+(as gpui's is not): DWM would draw the frame over the blur. Mica tints with
+the wallpaper alone and blurs nothing behind the window. Presentation through the visual
 measured the same as a window's own swap chain: every frame shown, the same
 keystroke latency and idle cost. Only transparent and glass windows present
 with alpha: an opaque window's swap chain is opaque from the start
@@ -493,7 +500,7 @@ Known gap: menus and popovers keep the theme's flat background, where Windows
 (`DWMSBT_TRANSIENTWINDOW`) only behind an activated window, and a flat colour
 behind one never activated; a popup must not take activation from its window,
 which keeps the keyboard. The undocumented `SetWindowCompositionAttribute`
-acrylic is not used.
+acrylic is not used for popups (only for a window's plain glass).
 
 A popup's `backdrop_blur` blurs the app's own pixels: what its window last drew
 under the popup, copied into a texture of the popup's size while it shows
@@ -975,7 +982,12 @@ The probes for the rest of Windows:
 - `windows_glass_smoke.py` (`glass_counter`): each glass material asks the
   compositor for its system backdrop, read back from outside the app
   (`DWMWA_SYSTEMBACKDROP_TYPE`): Acrylic for the heads-up glass, Mica for a
-  window's background, Mica Alt for a title bar's. Acrylic must also show: an
+  window's background, Mica Alt for a title bar's, none for plain glass
+  (whose blur is the window's accent, which Windows reads back to no one:
+  `GetWindowCompositionAttribute` refuses it; a unit test,
+  `plain_glass_blurs_behind_the_window_and_other_glass_takes_it_away`, sees
+  it taken).
+  Acrylic must also show: an
   empty patch of the window changes as another test window takes the
   activation (Windows draws a solid colour for an inactive window's acrylic),
   where an opaque fill would not.
