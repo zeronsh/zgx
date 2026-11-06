@@ -274,6 +274,68 @@ fn a_small_control_keeps_its_press_from_a_drag_around_it() {
     assert_eq!(click_src(&code), "click;");
 }
 
+/// Pressed at `press`'s middle, moved by each of `moves` in turn, and let go
+/// at the last.
+fn gesture(code: &str, moves: &[(f32, f32)]) -> String {
+    let mut h = Harness::inline(code);
+    h.ui.scene.borrow_mut().resize(400., 300.);
+    h.frames(3);
+    let b = {
+        let node = h.find("press").unwrap();
+        h.ui.scene.borrow().bounds(node)
+    };
+    let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
+    let button = zgx::input::PointerButton::Primary;
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    h.frames(1);
+    let mut at = (x, y);
+    for (dx, dy) in moves {
+        at = (x + dx, y + dy);
+        h.ui.dispatch(InputEvent::PointerMove { x: at.0, y: at.1 });
+        h.frames(1);
+    }
+    h.ui.dispatch(InputEvent::PointerUp {
+        x: at.0,
+        y: at.1,
+        button,
+    });
+    h.frames(1);
+    h.text("log")
+}
+const JIGGLE: [(f32, f32); 2] = [(2., 1.), (-1., 1.)];
+const MOVED: [(f32, f32); 2] = [(16., 8.), (40., 20.)];
+const AND_BACK: [(f32, f32); 3] = [(16., 8.), (40., 20.), (0., 0.)];
+
+/// A hand shakes: a button most of a draggable still clicks under a shake too
+/// small to start a drag. Moved, it drags and doesn't click, even let go where
+/// it began.
+#[test]
+fn a_clickable_filling_a_source_clicks_under_a_shake_and_drags_when_moved() {
+    for button in ["button(200, 40)", "button(180, 40)"] {
+        let code = app(&format!("source({button}, 200)"));
+        assert_eq!(gesture(&code, &[]), "click;", "{button}, no movement");
+        assert_eq!(gesture(&code, &JIGGLE), "click;", "{button}, a shake");
+        assert_eq!(gesture(&code, &MOVED), "drag;", "{button}, moved");
+        assert_eq!(gesture(&code, &AND_BACK), "drag;", "{button}, and back");
+    }
+}
+
+/// Under three quarters of it, a clickable keeps its press however it moves:
+/// a click where it's let go on it.
+#[test]
+fn a_clickable_under_most_of_a_source_never_drags_it() {
+    let code = app("source(button(100, 40), 200)");
+    assert_eq!(gesture(&code, &JIGGLE), "click;");
+    assert_eq!(
+        gesture(&code, &[(16., 8.), (20., 10.)]),
+        "click;",
+        "let go on it"
+    );
+    assert_eq!(gesture(&code, &AND_BACK), "click;");
+    assert_eq!(gesture(&code, &[(200., 8.)]), "", "let go off it");
+}
+
 /// Nothing clickable: the drag's own, as ever.
 #[test]
 fn a_drag_starts_from_what_only_shows_inside_it() {
