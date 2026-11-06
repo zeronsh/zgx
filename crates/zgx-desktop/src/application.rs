@@ -5818,8 +5818,12 @@ impl Host {
         // Diagnostic: a hand's frames no oftener than ZGX_HAND_CAP_HZ, drawn on
         // the ticks that keep to it and handed over as drawn; what's skipped
         // stays damage for the next.
+        // Only a tick that would draw counts: a wake for anything else mustn't
+        // spend the cap's turn.
         #[cfg(target_os = "macos")]
-        if self.hand_capped() {
+        if (!paced || due || self.frame_arrived || self.force || self.redraw_whole)
+            && self.hand_capped()
+        {
             self.frame_arrived = false;
             self.sync_frames();
             return Ok(self.tasks.has_ready() || !self.pending.borrow().is_empty());
