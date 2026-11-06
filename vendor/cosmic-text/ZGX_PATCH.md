@@ -435,3 +435,9 @@ grid; zgx-gpu's `a_run_on_a_grid_takes_its_cells_whichever_font_draws_it`
 checks braille, a letterlike symbol, Thai, a combining accent and plain
 letters with the platform's fonts. The padding pass skips a grid, and a NaN
 compares and hashes by its bits, so grids of other cells are other keys. The crate depends on `unicode-width`.
+
+## Shaping's scratch at rest (zgx-cosmic-text 0.19.13)
+
+`FontSystem::rest` gives back `ShapeBuffer`'s buffers. They hold what the longest
+text shaped since left there, kept for reuse: a visual line's lists, one per line
+of that text, for as long as the app runs. zgx-gpu calls it as a window goes idle.
