@@ -519,7 +519,7 @@ ios.stack = ui.component(function(props)
 					w = 9,
 					pointer_events = false,
 					aria_hidden = true,
-					bg = "linear-gradient(to left, #00000018, #00000000)",
+					gradient = { angle = 270, stops = { "#00000018", "#00000000" } },
 					hidden = function()
 						return index ~= #pages:get() or index == 1
 					end,
