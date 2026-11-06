@@ -264,9 +264,9 @@ pub fn keyboard_rise(travel: f64, contact: f64, total: f64) -> f64 {
         (past + ease) * (past + ease) / (4. * ease)
     }
 }
+type ShownScrolls = std::collections::HashMap<crate::scene::NodeId, Rc<dyn Fn(f32)>>;
 thread_local! {
-    static SHOWN_SCROLLS: std::cell::RefCell<std::collections::HashMap<crate::scene::NodeId, Rc<dyn Fn(f32)>>> =
-        std::cell::RefCell::default();
+    static SHOWN_SCROLLS: std::cell::RefCell<ShownScrolls> = std::cell::RefCell::default();
 }
 /// Tell `told` where scroll view `node` shows while the host moves it without
 /// drawing it (the page riding a keyboard), its offset not changing: a bar over
