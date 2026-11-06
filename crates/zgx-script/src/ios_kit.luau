@@ -492,6 +492,46 @@ ios.stack = ui.component(function(props)
 				end,
 				pointer_events = on_top,
 				Page { build = builders[id], nav = nav },
+				-- What a navigation controller lays over the page behind, and the
+				-- soft edge of the page coming over it (measured beside one:
+				-- black at 10%, gone as the top page goes; a 9 point edge).
+				ui.div {
+					absolute = true,
+					left = 0,
+					top = 0,
+					right = 0,
+					bottom = 0,
+					bg = "#000000",
+					pointer_events = false,
+					aria_hidden = true,
+					hidden = function()
+						return index ~= #pages:get() - 1
+					end,
+					opacity = function()
+						return 0.1 * (1 - clamp((drag:get() + entering:get()) / width, 0, 1))
+					end,
+				},
+				ui.div {
+					absolute = true,
+					left = -9,
+					top = 0,
+					bottom = 0,
+					w = 9,
+					pointer_events = false,
+					aria_hidden = true,
+					bg = "linear-gradient(to left, #00000018, #00000000)",
+					hidden = function()
+						return index ~= #pages:get() or index == 1
+					end,
+					opacity = function()
+						local entered = entering:get()
+						if entered ~= 0 then
+							return clamp(entered / width, 0, 1)
+						end
+						local moved = drag:get()
+						return if moved > 0 then 1 - clamp(moved / width, 0, 1) else 0
+					end,
+				},
 			}
 		end, { display = "contents" }),
 	}
