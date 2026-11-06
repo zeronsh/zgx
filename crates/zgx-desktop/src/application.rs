@@ -1261,6 +1261,20 @@ fn align_wait(
 ) -> Option<std::time::Duration> {
     (period < ALIGN_PERIOD && left > ALIGN_EARLY && left < ALIGN_LATEST).then(|| left - ALIGN_AT)
 }
+/// Diagnostic: `ZGX_SCROLL_LINK=1` paces a scroll's frames as an animation's,
+/// on the display link and off the refresh grid.
+#[cfg(target_os = "macos")]
+fn scroll_on_link() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| zgx::env::var_os("ZGX_SCROLL_LINK").is_some_and(|v| v != "0"))
+}
+/// Diagnostic: `ZGX_SCROLL_STEPS=1` writes, capture-free, each wheel event
+/// read, each offset step applied and each frame handed over, to stderr: real
+/// events' spacing, and distinct offsets drawn per second.
+fn scroll_steps() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| zgx::env::var_os("ZGX_SCROLL_STEPS").is_some_and(|v| v != "0"))
+}
 /// How long after a resize frames skip the refresh-point wait (the renderer
 /// presents on the plain layer for as long: `zgx_gpu`'s `RESIZE_SETTLE`).
 #[cfg(target_os = "macos")]
@@ -2821,6 +2835,9 @@ impl Host {
                         std::thread::sleep(wait);
                     }
                 })?;
+                if scroll_steps() {
+                    eprintln!("zgx-scroll shown {}", zgx_gpu::present_log::now_ns());
+                }
                 // In the frame's transaction: the editor's caret and Core
                 // Animation's never show together, nor neither.
                 #[cfg(target_os = "macos")]
@@ -4756,6 +4773,9 @@ impl Host {
                 })?;
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
+                if scroll_steps() {
+                    eprintln!("zgx-scroll event {} {delta:?} {phase:?}", zgx_gpu::present_log::now_ns());
+                }
                 // When it happened, not when this thread got to it.
                 let now = std::time::Instant::now();
                 let happened = self
@@ -5620,6 +5640,9 @@ impl Host {
                 None
             };
             if let Some((delta_x, delta_y)) = delta {
+                if scroll_steps() {
+                    eprintln!("zgx-scroll step {} {delta_x} {delta_y}", zgx_gpu::present_log::now_ns());
+                }
                 let (x, y) = self.scroll.position;
                 self.dispatch(InputEvent::Scroll {
                     x,
@@ -5952,7 +5975,7 @@ impl Host {
             // updates, scrolling) a timer paces them on the grid the link last
             // reported, and the link (a thread spinning to each refresh) runs
             // again only to resync.
-            let animating = wanted && rate.is_none() && !scrolling;
+            let animating = wanted && rate.is_none() && (!scrolling || scroll_on_link());
             self.link_paced = animating;
             if let Some(renderer) = &mut self.renderer {
                 renderer.set_full_rate(wanted && rate.is_none());
