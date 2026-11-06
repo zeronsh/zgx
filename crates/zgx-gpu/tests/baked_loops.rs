@@ -556,6 +556,116 @@ fn a_layer_is_where_its_node_is_after_any_frame() {
     }
 }
 
+/// Over a backdrop blur a frame walks everything, and a node can stop
+/// painting all the same: hidden, or under something gone transparent.
+#[cfg(target_os = "macos")]
+fn a_layer_goes_with_its_node_under_a_blur_too() {
+    let blurred = |clip: bool| {
+        let mut window = Placed::new(clip);
+        let root = window.scene.root();
+        let blur = window
+            .scene
+            .append(root, NodeKind::Rect(Color(0, 0, 0, 40)), fixed(50., 20.));
+        window
+            .scene
+            .set_transform(blur, Transform { x: 140., y: 170. });
+        let effects = Effects {
+            blur_radius: 16.,
+            ..window.scene.effects(blur)
+        };
+        window.scene.set_effects(blur, effects);
+        window.show();
+        assert!(window.scene.has_backdrop_blur());
+        assert_eq!(window.layer(), Some((30., 30.)), "over the blur's frames");
+        window
+    };
+    // Past its clip.
+    let mut window = blurred(true);
+    let node = window.node;
+    window
+        .scene
+        .set_transform(node, Transform { x: 10., y: 150. });
+    window.show();
+    assert_eq!(window.layer(), None, "past its clip");
+    // What holds it hidden, and shown again where it has gone.
+    let mut window = blurred(false);
+    let holder = window.holder;
+    let options = zgx::layout::LayoutOptions {
+        visible: Some(false),
+        ..Default::default()
+    };
+    window.scene.set_style(
+        holder,
+        Style {
+            layout_options: Some(std::sync::Arc::new(options)),
+            ..fixed(100., 100.)
+        },
+    );
+    window.show();
+    assert_eq!(window.layer(), None, "hidden");
+    window.scene.set_style(holder, fixed(100., 100.));
+    window
+        .scene
+        .set_transform(holder, Transform { x: 60., y: 70. });
+    window.show();
+    assert_eq!(window.layer(), Some((70., 80.)), "shown again");
+    // Transparent.
+    let mut window = blurred(false);
+    let holder = window.holder;
+    let effects = Effects {
+        opacity: 0.,
+        ..window.scene.effects(holder)
+    };
+    window.scene.set_effects(holder, effects);
+    window.show();
+    assert_eq!(window.layer(), None, "transparent");
+}
+
+/// What a frame not yet presented asked for doesn't stand against the next;
+/// the layer moves with a frame that presents, not with one that doesn't.
+#[cfg(target_os = "macos")]
+fn a_layer_moves_with_the_frame_that_presents() {
+    let mut window = Placed::new(false);
+    let holder = window.holder;
+    // Drawn, not presented (a window covered between its frame and its turn).
+    window
+        .scene
+        .set_transform(holder, Transform { x: 50., y: 60. });
+    let damage = window.scene.flush().damage;
+    window.gpu.render(&window.scene, &damage).unwrap();
+    assert_eq!(window.layer(), Some((30., 30.)), "not before its frame");
+    // Drawn again, elsewhere, then presented.
+    window
+        .scene
+        .set_transform(holder, Transform { x: 70., y: 80. });
+    window.show();
+    assert_eq!(window.layer(), Some((80., 90.)), "the frame that shows");
+}
+
+/// A new scale (another display) changes no place, in points.
+#[cfg(target_os = "macos")]
+fn a_layer_stays_with_its_node_across_a_scale() {
+    let mut window = Placed::new(false);
+    let holder = window.holder;
+    window.gpu.set_scale_factor(1.);
+    window.gpu.resize(200, 200);
+    window.show();
+    assert_eq!(window.layer(), Some((30., 30.)), "at 1x");
+    window
+        .scene
+        .set_transform(holder, Transform { x: 50., y: 60. });
+    window.show();
+    assert_eq!(window.layer(), Some((60., 70.)), "moved at 1x");
+    window.gpu.set_scale_factor(3.);
+    window.gpu.resize(600, 600);
+    window.show();
+    let at = window.layer().expect("shown at 3x");
+    assert!(
+        (at.0 - 60.).abs() < 1e-6 && (at.1 - 70.).abs() < 1e-6,
+        "at 3x: {at:?}"
+    );
+}
+
 fn main() {
     #[cfg(target_os = "macos")]
     {
@@ -571,5 +681,8 @@ fn main() {
         loops_that_look_alike_share_a_sheet();
         a_layer_never_shows_a_loop_its_node_does_not();
         a_layer_is_where_its_node_is_after_any_frame();
+        a_layer_goes_with_its_node_under_a_blur_too();
+        a_layer_moves_with_the_frame_that_presents();
+        a_layer_stays_with_its_node_across_a_scale();
     }
 }
