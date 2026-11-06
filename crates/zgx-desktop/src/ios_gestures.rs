@@ -143,6 +143,9 @@ define_class!(
                     vy: speed.y as f32,
                 });
             }
+            // What the app does next (a spring's timer) runs as the host's loop
+            // turns: told now, not left to whatever comes next.
+            zgx::native_view::wake();
             state.window.request_redraw();
         }
     }

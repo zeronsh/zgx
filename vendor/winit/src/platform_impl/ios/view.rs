@@ -9,7 +9,7 @@ use objc2_ui_kit::{
     UICoordinateSpace, UIEvent, UIForceTouchCapability, UIGestureRecognizer,
     UIGestureRecognizerDelegate, UIGestureRecognizerState, UIPanGestureRecognizer,
     UIPinchGestureRecognizer, UIResponder, UIRotationGestureRecognizer, UITapGestureRecognizer,
-    UITextInputTraits, UITouch, UITouchPhase, UITouchType, UITraitEnvironment, UIView,
+    UITouch, UITouchPhase, UITouchType, UITraitEnvironment, UIView,
 };
 
 use super::app_state::{self, EventWrapper};
@@ -356,10 +356,8 @@ declare_class!(
         }
     }
 
-    unsafe impl UITextInputTraits for WinitView {
-    }
-
-    // zgx: no UIKeyInput. Its own view is the keyboard's (`zgx_desktop`'s
+    // zgx: no UIKeyInput or UITextInputTraits (claimed with none of its methods:
+    // UIKit asking one of this view as first responder ended the app). Its own view is the keyboard's (`zgx_desktop`'s
     // `ios_text`), and with this one claiming input too UIKit gave it the keyboard
     // when that view let go: the keyboard never went away.
 );

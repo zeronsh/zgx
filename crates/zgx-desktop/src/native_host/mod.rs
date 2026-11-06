@@ -114,6 +114,9 @@ pub(crate) struct NativeHost {
     /// The overlays above it, from level 2, each made when first needed.
     #[cfg(target_os = "ios")]
     above: Vec<AbovePlane>,
+    /// The system's edge effects asked for (`native_control`), kept registered.
+    #[cfg(target_os = "ios")]
+    edge_effects: Vec<(zgx::scene::NodeId, zgx::native_view::NativeRegistration)>,
     /// The overlay renderer drew this frame (present it).
     #[cfg(any(
         target_os = "macos",
@@ -203,6 +206,8 @@ impl NativeHost {
             surfaces: None,
             #[cfg(target_os = "ios")]
             above: Vec::new(),
+            #[cfg(target_os = "ios")]
+            edge_effects: Vec::new(),
             #[cfg(any(
                 target_os = "macos",
                 target_os = "ios",
@@ -378,6 +383,17 @@ impl NativeHost {
         scale: f32,
         zoom: f32,
     ) -> Result<Vec<Rect>, zgx_gpu::GpuError> {
+        // Asked for by nodes mounted since: they make the host active.
+        #[cfg(target_os = "ios")]
+        {
+            self.edge_effects.retain(|(node, _)| scene.contains(*node));
+            for (node, effect) in zgx::native_control::take_edge_effects() {
+                let registration = self
+                    .natives
+                    .register(node, zgx::native_view::NativeContent::EdgeEffect(effect));
+                self.edge_effects.push((node, registration));
+            }
+        }
         // Frames go with native geometry, in one transaction, while there is any.
         renderer.present_with_native_views(self.active());
         // Unsupported (no runtime, no surfaces): native nodes paint placeholders.
@@ -429,8 +445,16 @@ impl NativeHost {
             }
         }
         #[cfg(target_os = "ios")]
-        let (split, damage) =
-            PlaneSplit::compute_levels(scene, &self.natives.nodes(), &self.split, ios::LEVELS);
+        let (split, damage) = {
+            let barriers: Vec<_> = self.edge_effects.iter().map(|(node, _)| *node).collect();
+            PlaneSplit::compute_levels(
+                scene,
+                &self.natives.nodes(),
+                &self.split,
+                ios::LEVELS,
+                &barriers,
+            )
+        };
         #[cfg(not(target_os = "ios"))]
         let (split, damage) = PlaneSplit::compute(scene, &self.natives.nodes(), &self.split);
         let split = Rc::new(split);

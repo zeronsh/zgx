@@ -174,6 +174,9 @@ enum Content {
     Platform,
     /// A `WKWebView` (`NativeContent::Web`), kept while it stands here.
     Web(#[allow(dead_code)] Rc<dyn zgx::web_view::WebViewBackend>),
+    /// What says where the scroll edge effect reaches
+    /// (`NativeContent::EdgeEffect`): a view above the content, as a bar is.
+    Edge(zgx::native_control::EdgeEffect),
     /// A `UISwitch` (`NativeContent::Toggle`).
     Toggle(Rc<ToggleState>, #[allow(dead_code)] Retained<ToggleTarget>),
     /// A `UITabBar` (`NativeContent::Tabs`), and what it tells through.
@@ -240,6 +243,137 @@ struct Mounted {
     hidden: bool,
 }
 
+/// `scroll`'s effect on `edge`.
+///
+/// # Safety
+/// `scroll` is a `UIScrollView`, on the main thread.
+unsafe fn scroll_edge_effect(
+    scroll: &AnyObject,
+    edge: zgx::native_control::Edge,
+) -> Retained<AnyObject> {
+    use zgx::native_control::Edge;
+    // SAFETY: UIScrollView's getters, as the caller promises.
+    unsafe {
+        match edge {
+            Edge::Top => msg_send![scroll, topEdgeEffect],
+            Edge::Bottom => msg_send![scroll, bottomEdgeEffect],
+            Edge::Left => msg_send![scroll, leftEdgeEffect],
+            Edge::Right => msg_send![scroll, rightEdgeEffect],
+        }
+    }
+}
+
+/// The app, held still inside a scroll view that doesn't scroll: the system's
+/// edge effect works on a scroll view's own contents (its blur on any behind it,
+/// its veil only on those), so this is how it gets over zgx's Metal. Made only
+/// when an app asks for the effect: public API all, and nothing for those that
+/// don't.
+struct EdgeHost {
+    scroll: Retained<AnyObject>,
+    above: Retained<AnyObject>,
+    /// Which slots lie under the effect.
+    under: u8,
+}
+/// How far the held scroll view is scrolled: past either end, so every edge's
+/// effect shows.
+const EDGE_OFFSET: f64 = 400.;
+impl EdgeHost {
+    fn new(root: &Retained<AnyObject>) -> Self {
+        // SAFETY: UIKit's constructors and setters, on the main thread. The view
+        // controller's view gives way to a plain one holding the scroll view and
+        // the view above it.
+        unsafe {
+            let window: Retained<AnyObject> = msg_send![&**root, window];
+            let controller: Retained<AnyObject> = msg_send![&*window, rootViewController];
+            let bounds: CGRect = msg_send![&**root, bounds];
+            let holder = plain_view(bounds);
+            let _: () = msg_send![&*holder, setAutoresizingMask: FILL];
+            // What the effect's backdrop lies over, as a view controller's view has.
+            let background: Retained<AnyObject> = msg_send![class!(UIColor), systemBackgroundColor];
+            let _: () = msg_send![&*holder, setBackgroundColor: &*background];
+            let _: () = msg_send![&*controller, setView: &*holder];
+            let scroll: Retained<AnyObject> =
+                msg_send![msg_send![class!(UIScrollView), alloc], initWithFrame: bounds];
+            let _: () = msg_send![&*scroll, setAutoresizingMask: FILL];
+            let _: () = msg_send![&*scroll, setScrollEnabled: false];
+            let _: () = msg_send![&*scroll, setScrollsToTop: false];
+            let _: () = msg_send![&*scroll, setShowsVerticalScrollIndicator: false];
+            let _: () = msg_send![&*scroll, setShowsHorizontalScrollIndicator: false];
+            // UIScrollViewContentInsetAdjustmentNever.
+            let _: () = msg_send![&*scroll, setContentInsetAdjustmentBehavior: 2isize];
+            let size = CGSize {
+                width: 20000.,
+                height: 20000.,
+            };
+            let _: () = msg_send![&*scroll, setContentSize: size];
+            let at = CGPoint {
+                x: EDGE_OFFSET,
+                y: EDGE_OFFSET,
+            };
+            let _: () = msg_send![&*scroll, setContentOffset: at];
+            use zgx::native_control::Edge;
+            for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+                let _: () = msg_send![&*scroll_edge_effect(&scroll, edge), setHidden: true];
+            }
+            let _: () = msg_send![&*holder, addSubview: &*scroll];
+            // A view between: winit sets the app's view's frame itself.
+            let held = plain_view(CGRect {
+                origin: at,
+                size: bounds.size,
+            });
+            let _: () = msg_send![&*held, setAutoresizingMask: FILL];
+            let _: () = msg_send![&*scroll, addSubview: &*held];
+            let _: () = msg_send![&*held, addSubview: &**root];
+            let above = passive_view(bounds);
+            let _: () = msg_send![&*above, setAutoresizingMask: FILL];
+            let _: () = msg_send![&*above, setUserInteractionEnabled: true];
+            let _: () = msg_send![&*holder, addSubview: &*above];
+            Self {
+                scroll,
+                above,
+                under: LEVELS,
+            }
+        }
+    }
+    /// A view that says where `effect` reaches: it must hold a view to count.
+    fn element(&self, effect: zgx::native_control::EdgeEffect) -> Retained<AnyObject> {
+        use zgx::native_control::Edge;
+        let rect_edge = match effect.edge {
+            Edge::Top => 1usize,
+            Edge::Left => 2,
+            Edge::Bottom => 4,
+            Edge::Right => 8,
+        };
+        // SAFETY: UIKit's constructors and setters, on the main thread.
+        unsafe {
+            let scroll_effect = scroll_edge_effect(&self.scroll, effect.edge);
+            let _: () = msg_send![&*scroll_effect, setHidden: false];
+            let style: Retained<AnyObject> = if effect.hard {
+                msg_send![class!(UIScrollEdgeEffectStyle), hardStyle]
+            } else {
+                msg_send![class!(UIScrollEdgeEffectStyle), softStyle]
+            };
+            let _: () = msg_send![&*scroll_effect, setStyle: &*style];
+            let view = plain_view(rect(Rect::new(0., 0., 1., 1.)));
+            let _: () = msg_send![&*view, setUserInteractionEnabled: false];
+            let _: () = msg_send![&*view, setAccessibilityElementsHidden: true];
+            let interaction: Retained<AnyObject> =
+                msg_send![class!(UIScrollEdgeElementContainerInteraction), new];
+            let _: () = msg_send![&*interaction, setScrollView: &*self.scroll];
+            let _: () = msg_send![&*interaction, setEdge: rect_edge];
+            let _: () = msg_send![&*view, addInteraction: &*interaction];
+            let label: Retained<AnyObject> = msg_send![class!(UILabel), new];
+            let text = crate::ios_system::ns_string(" ");
+            let _: () = msg_send![&*label, setText: &*text];
+            let clear: Retained<AnyObject> = msg_send![class!(UIColor), clearColor];
+            let _: () = msg_send![&*label, setTextColor: &*clear];
+            let _: () = msg_send![&*label, setAutoresizingMask: FILL];
+            let _: () = msg_send![&*view, addSubview: &*label];
+            view
+        }
+    }
+}
+
 /// How many overlays stack between native views: a page, what is pushed over
 /// it, a sheet or a tab bar over those. Paint above them all joins the last.
 pub(crate) const LEVELS: u8 = 4;
@@ -252,6 +386,10 @@ pub(crate) struct Surfaces {
     hosts: Vec<Retained<AnyObject>>,
     /// The overlays' views, by level from 1, and where each shows.
     planes: Vec<(Retained<AnyObject>, Option<Option<Rect>>)>,
+    /// The window's view.
+    root: Retained<AnyObject>,
+    /// What holds the app in a scroll view of the system's, once one is asked for.
+    edge_host: Option<EdgeHost>,
     mounted: HashMap<NodeId, Mounted>,
     order: Vec<NodeId>,
     zoom: f32,
@@ -297,6 +435,8 @@ impl Surfaces {
             groups: HashMap::new(),
             hosts,
             planes,
+            root,
+            edge_host: None,
             mounted: HashMap::new(),
             order: Vec::new(),
             zoom: 1.,
@@ -336,6 +476,46 @@ impl Surfaces {
                 scale,
                 context,
             )
+        }
+    }
+    /// The view saying where the effect reaches, and the effect on, in the
+    /// scroll view the app now lies in (made for the first one).
+    fn make_edge(&mut self, effect: zgx::native_control::EdgeEffect) -> Retained<AnyObject> {
+        let edge_host = self
+            .edge_host
+            .get_or_insert_with(|| EdgeHost::new(&self.root));
+        edge_host.element(effect)
+    }
+    /// Hosts and planes in the app's view lie under the effect; those above
+    /// its slot in the view above the scroll view.
+    fn place_planes(&mut self, edge_slot: Option<u8>) {
+        let Some(edge_host) = &mut self.edge_host else {
+            return;
+        };
+        let under = edge_slot.unwrap_or(LEVELS);
+        if edge_host.under == under {
+            return;
+        }
+        edge_host.under = under;
+        // SAFETY: UIView's method, on the main thread. A view keeps its layer's
+        // contents as it moves.
+        unsafe {
+            for slot in 0..LEVELS {
+                let (host, plane) = (
+                    &self.hosts[usize::from(slot)],
+                    &self.planes[usize::from(slot)].0,
+                );
+                let inside = slot <= under;
+                let parent = if inside { &self.root } else { &edge_host.above };
+                let _: () = msg_send![&**parent, addSubview: &**host];
+                // The plane over this slot's views: inside only below the effect.
+                let parent = if slot < under {
+                    &self.root
+                } else {
+                    &edge_host.above
+                };
+                let _: () = msg_send![&**parent, addSubview: &**plane];
+            }
         }
     }
     /// Whether native geometry or a pane's look changes this frame.
@@ -414,6 +594,9 @@ impl Surfaces {
                     };
                     (view, Content::Web(backend))
                 }
+                NativeContent::EdgeEffect(effect) if !self.mounted.contains_key(node) => {
+                    (self.make_edge(*effect), Content::Edge(*effect))
+                }
                 NativeContent::Toggle(state) if !self.mounted.contains_key(node) => {
                     if let Some((view, clip, target)) = self.reusable.pop() {
                         *target.ivars().borrow_mut() = state.clone();
@@ -471,6 +654,18 @@ impl Surfaces {
                 hidden: false,
             });
         }
+        // What must lie under the effect and what above it, by its slot.
+        let edge_slot = split
+            .natives()
+            .iter()
+            .filter(|placement| {
+                self.mounted
+                    .get(&placement.node)
+                    .is_some_and(|mounted| matches!(mounted.content, Content::Edge(_)))
+            })
+            .map(|placement| placement.slot)
+            .max();
+        self.place_planes(edge_slot);
         let mut order = Vec::with_capacity(split.natives().len());
         for placement in split.natives() {
             order.push(placement.node);
@@ -561,8 +756,17 @@ impl Surfaces {
             Some(group) => self.mounted.get(&group).map(|g| content_view(&g.view)),
             None => Some(self.hosts[usize::from(placement.slot)].clone()),
         };
+        let edge_host = self
+            .edge_host
+            .as_ref()
+            .map(|edge_host| edge_host.above.clone());
         let Some(mounted) = self.mounted.get_mut(&placement.node) else {
             return;
+        };
+        let host = if matches!(mounted.content, Content::Edge(_)) {
+            edge_host
+        } else {
+            host
         };
         if mounted.parent != parent || mounted.slot != placement.slot || mounted.frame.is_none() {
             mounted.parent = parent;

@@ -47,6 +47,9 @@ pub enum NativeContent {
     /// The system's tab bar (see [`crate::native_control`]).
     #[cfg(target_os = "ios")]
     Tabs(Rc<crate::native_control::TabsState>),
+    /// The system's scroll edge effect (see [`crate::native_control`]).
+    #[cfg(target_os = "ios")]
+    EdgeEffect(crate::native_control::EdgeEffect),
 }
 impl NativeContent {
     /// A short description for placeholders and diagnostics.
@@ -75,6 +78,8 @@ impl NativeContent {
             Self::Toggle(_) => "Switch".into(),
             #[cfg(target_os = "ios")]
             Self::Tabs(_) => "Tabs".into(),
+            #[cfg(target_os = "ios")]
+            Self::EdgeEffect(_) => "Edge effect".into(),
         }
     }
 }
@@ -538,6 +543,8 @@ struct Walk<'a> {
     native_rects: Vec<(Rect, u8)>,
     /// Where overlay paint lands so far: `region[0]` on level 1.
     region: Vec<Vec<Rect>>,
+    /// Native views all that overlaps them after must go above.
+    barriers: &'a [NodeId],
     split: PlaneSplit,
     damage: Vec<Rect>,
     changed: HashSet<NodeId>,
@@ -818,6 +825,9 @@ impl Walk<'_> {
                 if let Some(visible) = placement.visible() {
                     placement.slot = self.slot_of(visible);
                     self.native_rects.push((visible, placement.slot));
+                    if self.barriers.contains(&item.id) && self.levels > placement.slot + 1 {
+                        self.add_region(placement.slot + 1, visible);
+                    }
                 }
                 self.split.native_nodes.insert(item.id);
                 self.split.natives.push(placement);
@@ -913,7 +923,7 @@ impl PlaneSplit {
     /// and the damage its changes add: where paint moved between planes, both
     /// planes repaint. Call after the scene's layout is up to date.
     pub fn compute(scene: &Scene, natives: &[NodeId], previous: &PlaneSplit) -> (Self, Vec<Rect>) {
-        Self::compute_levels(scene, natives, previous, 1)
+        Self::compute_levels(scene, natives, previous, 1, &[])
     }
     /// `compute`, for a platform that can stack `levels` overlays between its
     /// native views: one native view over another's overlay paint then shows
@@ -925,6 +935,7 @@ impl PlaneSplit {
         natives: &[NodeId],
         previous: &PlaneSplit,
         levels: u8,
+        barriers: &[NodeId],
     ) -> (Self, Vec<Rect>) {
         let natives: HashSet<NodeId> = natives
             .iter()
@@ -965,6 +976,7 @@ impl PlaneSplit {
                 natives: &natives,
                 previous,
                 levels,
+                barriers,
                 native_rects: Vec::new(),
                 region: Vec::new(),
                 split: Self::default(),

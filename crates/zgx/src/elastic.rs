@@ -566,15 +566,26 @@ pub(crate) fn driver_in(
     y: f32,
 ) -> Option<ScrollDriver> {
     let hit = scene.hit_test(x, y)?;
-    std::iter::once(hit)
-        .chain(scene.ancestors(hit))
-        .find_map(|node| {
-            state
-                .views
-                .iter()
-                .find(|(root, _)| *root == node)
-                .and_then(|(_, view)| view.upgrade())
-                .filter(|view| !view.fits())
+    let around = || {
+        std::iter::once(hit)
+            .chain(scene.ancestors(hit))
+            .filter_map(|node| {
+                state
+                    .views
+                    .iter()
+                    .find(|(root, _)| *root == node)
+                    .and_then(|(_, view)| view.upgrade())
+            })
+    };
+    around()
+        .find(|view| !view.fits())
+        // A list shorter than its box still gives under a finger, on iOS.
+        .or_else(|| {
+            if cfg!(target_os = "ios") {
+                around().find(|view| !view.horizontal)
+            } else {
+                None
+            }
         })
         .map(|view| ScrollDriver(Rc::downgrade(&view)))
 }

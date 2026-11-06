@@ -214,6 +214,73 @@ pub fn escape() -> bool {
     handlers.iter().rev().any(|handler| handler())
 }
 
+/// An edge of a scroll view or the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    /// The top.
+    Top,
+    /// The bottom.
+    Bottom,
+    /// The left.
+    Left,
+    /// The right.
+    Right,
+}
+/// The system's scroll edge effect on a node's box (iOS): what passes under the
+/// box softens and fades, as under a navigation bar. Paint after the node shows
+/// above it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EdgeEffect {
+    /// The window's edge it lies on.
+    pub edge: Edge,
+    /// A veil cut sharply at the box's end, rather than the soft ramp past it.
+    pub hard: bool,
+}
+thread_local! {
+    static PENDING_EDGES: std::cell::RefCell<Vec<(crate::scene::NodeId, EdgeEffect)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+/// Give `node` the system's edge effect: the host takes it up at its next frame.
+pub fn request_edge_effect(node: crate::scene::NodeId, effect: EdgeEffect) {
+    PENDING_EDGES.with(|pending| pending.borrow_mut().push((node, effect)));
+}
+/// What was asked for since the host last took them.
+pub fn take_edge_effects() -> Vec<(crate::scene::NodeId, EdgeEffect)> {
+    PENDING_EDGES.with(|pending| std::mem::take(&mut *pending.borrow_mut()))
+}
+
+/// What a platform's pull to refresh on a scroll view does: `top` is where its
+/// spinner hangs from, and `refresh` is given what ends it.
+#[derive(Clone)]
+pub struct PullRefresh {
+    /// Points from the window's top.
+    pub top: Rc<dyn Fn() -> f32>,
+    /// Told when a pull lets go past where it refreshes.
+    pub refresh: Rc<dyn Fn(Rc<dyn Fn()>)>,
+}
+thread_local! {
+    static PULLS: std::cell::RefCell<std::collections::HashMap<crate::scene::NodeId, PullRefresh>> =
+        std::cell::RefCell::default();
+}
+/// Give `node`, a scroll view, the platform's pull to refresh.
+pub fn set_pull_refresh(node: crate::scene::NodeId, pull: PullRefresh) {
+    PULLS.with(|pulls| pulls.borrow_mut().insert(node, pull));
+}
+/// The pull to refresh of the scroll view around the window's point `(x, y)`.
+pub fn pull_refresh_at(scene: &crate::scene::Scene, x: f32, y: f32) -> Option<PullRefresh> {
+    PULLS.with(|pulls| {
+        let mut pulls = pulls.borrow_mut();
+        pulls.retain(|node, _| scene.contains(*node));
+        if pulls.is_empty() {
+            return None;
+        }
+        let hit = scene.hit_test(x, y)?;
+        std::iter::once(hit)
+            .chain(scene.ancestors(hit))
+            .find_map(|node| pulls.get(&node).cloned())
+    })
+}
+
 /// Where a pan the platform recognizes is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanPhase {

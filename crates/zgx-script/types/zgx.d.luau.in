@@ -3330,6 +3330,18 @@ export type NativeSwitchProps = Merge<Props, {
 	-- What assistive technology calls it.
 	label: string?,
 }>
+export type ScrollEdgeOptions = {
+	edge: ("top" | "bottom" | "left" | "right")?,
+	-- "soft" fades past its box; "hard" is a veil cut at its end.
+	style: ("soft" | "hard")?,
+	-- The box's size across the edge, in points.
+	size: Reactive<number>?,
+	-- Whether it shows: a function of a scroll offset, say.
+	shown: Reactive<boolean>?,
+	-- Draw it rather than use the system's: for an edge inside the window.
+	drawn: boolean?,
+	[any]: any,
+}
 export type NativePanEvent = {
 	phase: "began" | "changed" | "ended" | "cancelled",
 	x: number,
@@ -3601,6 +3613,13 @@ declare ui: {
 	-- A tap felt in the hand (iOS): "light", "medium", "heavy", "soft", "rigid",
 	-- "success", "warning", "error" or "selection".
 	haptic: (kind: string) -> (),
+	-- A soft fade where content passes under an edge: on a window's edge on iOS,
+	-- the system's own; elsewhere drawn. Paint after it stays sharp above it.
+	scroll_edge: (opts: ScrollEdgeOptions) -> Node,
+	native_edge: (element: Element, edge: string, hard: boolean) -> (),
+	-- The system's pull to refresh on a scroll view's element (iOS). `top` says
+	-- where its spinner hangs; `on_refresh` is given what ends it.
+	pull_refresh: (opts: { element: Element, top: () -> number, on_refresh: (done: () -> ()) -> () }) -> (),
 	-- A pan the system recognizes (iOS), which the script only draws: from the
 	-- leading edge, or on an element. `on_pan` always hears an ending.
 	native_pan: (opts: NativePanOptions) -> (),

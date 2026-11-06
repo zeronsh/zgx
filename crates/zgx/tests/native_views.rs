@@ -965,7 +965,7 @@ fn stacked_planes_exist_only_where_views_and_paint_overlap() {
     let id = |name: &str| view.find(name).unwrap();
     let scene = ui.scene.borrow();
     let (split, _) =
-        PlaneSplit::compute_levels(&scene, &natives.nodes(), &PlaneSplit::default(), 4);
+        PlaneSplit::compute_levels(&scene, &natives.nodes(), &PlaneSplit::default(), 4, &[]);
     let slot = |name: &str| split.native(id(name)).unwrap().slot;
     assert_eq!((slot("a"), slot("b"), slot("c")), (0, 1, 0));
     assert_eq!(split.level(id("cover")), 1);

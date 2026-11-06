@@ -21,7 +21,9 @@ fn tab_items(table: &Table) -> mlua::Result<Vec<(String, String)>> {
 /// `ui.ios`, the kit of `ios_kit.luau`, made the first time a script names it.
 pub(crate) fn install_kit(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     const SOURCE: &str = include_str!("ios_kit.luau");
-    let kit: Table = crate::lazy::builtin(lua, "=ui.ios", SOURCE)?.call(ui.clone())?;
+    let kit: Table = crate::lazy::builtin(lua, "=ui.ios", SOURCE)?
+        .call((ui.clone(), cfg!(target_os = "ios")))?;
+    ui.set("scroll_edge", kit.get::<Function>("scroll_edge")?)?;
     ui.set("ios", kit)
 }
 
@@ -55,6 +57,39 @@ fn present_alert(table: Table, style: AlertStyle) -> mlua::Result<()> {
                 let _ = on_choose.call::<()>(index + 1);
             }
         }),
+    );
+    Ok(())
+}
+
+/// `ui.pull_refresh { element, top, on_refresh }`: the system's pull to refresh
+/// on a scroll view. `top()` is where its spinner hangs; `on_refresh(done)`.
+fn pull_refresh(lua: &Lua, table: Table) -> mlua::Result<()> {
+    use zgx::native_control::{PullRefresh, set_pull_refresh};
+    let element: mlua::UserDataRef<crate::element::ElementUd> = table.get("element")?;
+    let Some(node) = element.0.read(|_, id| id) else {
+        return Ok(());
+    };
+    let top: Function = table.get("top")?;
+    let on_refresh: Function = table.get("on_refresh")?;
+    // What ends a pull, made once: it calls what the latest pull left.
+    let current: std::rc::Rc<std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>>> =
+        Default::default();
+    let ender = current.clone();
+    let done_fn = lua.create_function(move |_, ()| {
+        if let Some(done) = ender.borrow_mut().take() {
+            done();
+        }
+        Ok(())
+    })?;
+    set_pull_refresh(
+        node,
+        PullRefresh {
+            top: std::rc::Rc::new(move || top.call::<f32>(()).unwrap_or(0.)),
+            refresh: std::rc::Rc::new(move |done| {
+                *current.borrow_mut() = Some(done);
+                let _ = on_refresh.call::<()>(done_fn.clone());
+            }),
+        },
     );
     Ok(())
 }
@@ -157,6 +192,8 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
             "native_pan",
             "gesture_log",
             "share",
+            "native_edge",
+            "pull_refresh",
             "action_sheet",
         ],
         |lua, ui| {
@@ -181,6 +218,34 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
             )?;
             ui.set("system_menu", lua.create_function(system_menu)?)?;
             ui.set("native_pan", lua.create_function(native_pan)?)?;
+            ui.set("pull_refresh", lua.create_function(pull_refresh)?)?;
+            ui.set(
+                "native_edge",
+                lua.create_function(
+                    |_,
+                     (element, edge, hard): (
+                        mlua::UserDataRef<crate::element::ElementUd>,
+                        String,
+                        bool,
+                    )| {
+                        use zgx::native_control::{Edge, EdgeEffect, request_edge_effect};
+                        let edge = match edge.as_str() {
+                            "bottom" => Edge::Bottom,
+                            "left" => Edge::Left,
+                            "right" => Edge::Right,
+                            _ => Edge::Top,
+                        };
+                        if let Some(node) = element.0.read(|_, id| id) {
+                            // It paints nothing of zgx's: a walk must still find it.
+                            if let Some(scene) = element.0.scene() {
+                                scene.borrow_mut().set_platform_painted(node, true);
+                            }
+                            request_edge_effect(node, EdgeEffect { edge, hard });
+                        }
+                        Ok(())
+                    },
+                )?,
+            )?;
             ui.set(
                 "gesture_log",
                 lua.create_function(|_, line: String| {

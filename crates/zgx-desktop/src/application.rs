@@ -1739,9 +1739,10 @@ struct Host {
     /// What the keyboard last covered, and the editor it was for.
     #[cfg(target_os = "ios")]
     keyboard_seen: (f32, Option<zgx::scene::NodeId>),
-    /// Passes left to try to show the caret above the keyboard.
+    /// Until when to keep showing the caret above the keyboard: its height and
+    /// the page's room for it arrive over several frames.
     #[cfg(target_os = "ios")]
-    keyboard_reveal: u32,
+    keyboard_reveal: Option<std::time::Instant>,
     /// What had focus before a finger pressed, for a pan to give it back.
     touch_focus: Option<zgx::scene::NodeId>,
     /// The last press was a finger's or a pen's, not a mouse's: an editor
@@ -2025,7 +2026,7 @@ impl Host {
             #[cfg(target_os = "ios")]
             keyboard_seen: (0., None),
             #[cfg(target_os = "ios")]
-            keyboard_reveal: 0,
+            keyboard_reveal: None,
             touch_focus: None,
             #[cfg(windows)]
             touch_last: false,
@@ -3864,6 +3865,14 @@ impl Host {
                         overscroll.set(stretch);
                     }
                 },
+                {
+                    let scene = std::rc::Rc::downgrade(&self.context.ui.scene);
+                    move |x, y| {
+                        let scene = scene.upgrade()?;
+                        let scene = scene.try_borrow().ok()?;
+                        zgx::native_control::pull_refresh_at(&scene, x, y)
+                    }
+                },
             );
             self.text_input = crate::ios_text::TextInput::new(window.clone());
             crate::ios_menu::install(&window, self.context.ui.scene.clone());
@@ -4827,7 +4836,7 @@ impl Host {
                     && self.touch.idle()
                     && let Some(scroller) = &self.native_scroll
                 {
-                    scroller.finger_down(self.context.ui.scroll_driver_at(p.x, p.y));
+                    scroller.finger_down(self.context.ui.scroll_driver_at(p.x, p.y), (p.x, p.y));
                     self.touch.set_press_delay(scroller.tracks());
                 }
                 if touch.phase == winit::event::TouchPhase::Started && self.touch.idle() {
@@ -5759,12 +5768,17 @@ impl Host {
                 // Tried over a few passes: the room a page makes for the
                 // keyboard is laid out after it is told of it.
                 if covered > self.keyboard_seen.0 || focused != self.keyboard_seen.1 {
-                    self.keyboard_reveal = KEYBOARD_REVEAL_PASSES;
+                    self.keyboard_reveal = Some(std::time::Instant::now() + KEYBOARD_REVEAL_FOR);
                 }
                 self.keyboard_seen = (covered, focused);
             }
-            if self.keyboard_reveal > 0 {
-                self.keyboard_reveal -= 1;
+            if self
+                .keyboard_reveal
+                .is_some_and(|until| std::time::Instant::now() >= until)
+            {
+                self.keyboard_reveal = None;
+            }
+            if self.keyboard_reveal.is_some() {
                 if let Some(editor) = self.context.ui.focused_editor()
                     && covered > 0.
                 {
@@ -5778,6 +5792,10 @@ impl Host {
                     };
                     const ROOM: f32 = 16.;
                     if caret.y + caret.height + ROOM > bottom {
+                        crate::ios_gestures::log(&format!(
+                            "keyboard reveal caret bottom={:.0} keyboard top={bottom:.0}",
+                            caret.y + caret.height
+                        ));
                         let shown = zgx::scene::Rect::new(
                             caret.x,
                             caret.y,
@@ -5785,8 +5803,6 @@ impl Host {
                             caret.height + ROOM + covered,
                         );
                         self.context.ui.scroll_rect_into_view(editor.node, shown);
-                    } else {
-                        self.keyboard_reveal = 0;
                     }
                 }
             }
@@ -8336,7 +8352,7 @@ fn is_key_window(window: &winit::window::Window) -> bool {
 }
 
 #[cfg(target_os = "ios")]
-const KEYBOARD_REVEAL_PASSES: u32 = 12;
+const KEYBOARD_REVEAL_FOR: std::time::Duration = std::time::Duration::from_millis(700);
 static FIRST_RENDER: std::sync::Once = std::sync::Once::new();
 static FIRST_PRESENT: std::sync::Once = std::sync::Once::new();
 /// How long after the event loop starts the menu bar is made whether or not

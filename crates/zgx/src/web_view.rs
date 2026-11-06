@@ -1077,7 +1077,10 @@ impl Focusable {
             NativeContent::Terminal(term) => Some(Self::Terminal(term.clone())),
             NativeContent::Platform(_) => None,
             #[cfg(target_os = "ios")]
-            NativeContent::Glass(_) | NativeContent::Toggle(_) | NativeContent::Tabs(_) => None,
+            NativeContent::Glass(_)
+            | NativeContent::Toggle(_)
+            | NativeContent::Tabs(_)
+            | NativeContent::EdgeEffect(_) => None,
         }
     }
     fn focused(&self) -> bool {
@@ -1193,9 +1196,10 @@ fn placeholder(content: NativeContent) -> View {
         }
         NativeContent::Platform(_) => text(content.label()),
         #[cfg(target_os = "ios")]
-        NativeContent::Glass(_) | NativeContent::Toggle(_) | NativeContent::Tabs(_) => {
-            text(content.label())
-        }
+        NativeContent::Glass(_)
+        | NativeContent::Toggle(_)
+        | NativeContent::Tabs(_)
+        | NativeContent::EdgeEffect(_) => text(content.label()),
     };
     div()
         .absolute()

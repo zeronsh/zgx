@@ -2,7 +2,7 @@
 -- colours, text sizes, glass and symbols, to UIKit's measurements. What must be
 -- exact is the system's own (`ui.native_tabs`, `ui.native_switch`, `ui.alert`).
 -- An app can take any of these apart: they use nothing a script can't.
-local ui = ...
+local ui, IS_IOS = ...
 local ios = {}
 
 local function clamp(value, low, high)
@@ -17,6 +17,8 @@ local PARALLAX = 0.3
 local SETTLE_MOST = 1200
 -- A release this fast decides, wherever the finger is (points a second).
 local FLING = 300
+-- A refresh that never says it's done ends after this long (milliseconds).
+local REFRESH_MOST = 15000
 
 -- Runs `state` to `target` as a critically damped spring from where it is, a
 -- frame at a time, then `done`. Only while something moves.
@@ -62,6 +64,55 @@ local function settle(state, target, done, speed)
 	return stop
 end
 ios.settle = settle
+
+-- A soft fade where content passes under an edge. On a window's edge on iOS,
+-- the system's own; elsewhere drawn. `edge`, `style`, `size`, `shown`, `drawn`.
+function ios.scroll_edge(props)
+	local edge = props.edge or "top"
+	local hard = props.style == "hard"
+	local across = edge == "top" or edge == "bottom"
+	local size = props.size or 50
+	local hidden = props.shown
+			and function()
+				local shown = props.shown
+				if type(shown) == "function" then
+					shown = shown()
+				elseif type(shown) ~= "boolean" then
+					shown = shown:get()
+				end
+				return not shown
+			end
+		or nil
+	local box = {
+		absolute = true,
+		left = if edge ~= "right" then 0 else nil,
+		right = if edge ~= "left" then 0 else nil,
+		top = if edge ~= "bottom" then 0 else nil,
+		bottom = if edge ~= "top" then 0 else nil,
+		w = if across then nil else size,
+		h = if across then size else nil,
+		hidden = hidden,
+		pointer_events = false,
+		aria_hidden = true,
+	}
+	if IS_IOS and not props.drawn then
+		box.on_mount = function(element)
+			ui.native_edge(element, edge, hard)
+		end
+		return ui.div(box)
+	end
+	-- Drawn: the blur fades out across the box, under a veil.
+	local to_end = { top = 180, bottom = 0, left = 90, right = 270 }
+	if not hard then
+		box.backdrop_blur = 4
+		box.mask_gradient = { angle = to_end[edge], stops = { "#000000", "#000000", "#00000000" } }
+	end
+	box.gradient = {
+		angle = to_end[edge],
+		stops = if hard then { "$surface.base", "$surface.base" } else { "#00000030", "#00000000" },
+	}
+	return ui.div(box)
+end
 
 -- A list's section: an inset card, with a header and footer in the system's
 -- small text. `ui.ios.section { header = "…", footer = "…", ui.ios.row { … } }`.
@@ -218,9 +269,6 @@ end
 function ios.page(props)
 	local safe = ui.window.safe_area
 	local offset = ui.use_state(0)
-	local stretch = ui.window.overscroll
-	local pulled = false
-	local refreshing = ui.use_state(false)
 	local children = {}
 	for index, child in ipairs(props) do
 		children[index] = child
@@ -237,6 +285,28 @@ function ios.page(props)
 			w = "100%",
 			h = "100%",
 			offset = offset,
+			-- The system's own: its spinner, its threshold, and it holds the page
+			-- down until `done`, which a page that forgets still gets in time.
+			on_mount = props.on_refresh and function(element)
+				ui.pull_refresh {
+					element = element,
+					top = function()
+						return safe:get().top + 44
+					end,
+					on_refresh = function(done)
+						ui.haptic("medium")
+						local finished = false
+						local function finish()
+							if not finished then
+								finished = true
+								done()
+							end
+						end
+						ui.after(REFRESH_MOST, finish)
+						props.on_refresh(finish)
+					end,
+				}
+			end or nil,
 			ui.column {
 				pt = function()
 					return safe:get().top + 44
@@ -263,40 +333,16 @@ function ios.page(props)
 				children,
 			},
 		},
-		-- The spinner a pull shows, under the bar.
-		props.on_refresh and ui.div {
-			absolute = true,
-			left = 0,
-			right = 0,
-			top = function()
-				return safe:get().top + 8
+		-- The system's edge under the bar as content passes under it, then its
+		-- small title and its buttons on glass, above it.
+		ios.scroll_edge {
+			size = function()
+				return safe:get().top + 44
 			end,
-			h = 30,
-			items = "center",
-			justify = "center",
-			opacity = function()
-				if refreshing:get() then
-					return 1
-				end
-				local amount = -stretch:get()
-				-- As UIRefreshControl: a pull far enough refreshes, at once.
-				if amount >= 70 and not pulled and not refreshing:get() then
-					pulled = true
-					refreshing:set(true)
-					ui.haptic("medium")
-					props.on_refresh(function()
-						refreshing:set(false)
-					end)
-				elseif amount <= 0 then
-					pulled = false
-				end
-				return clamp(amount / 70, 0, 1)
+			shown = function()
+				return offset:get() > 0
 			end,
-			pointer_events = false,
-			ui.symbol { name = "arrow.triangle.2.circlepath", size = 18, weight = 600, color = "$text.secondary" },
-		} or nil,
-		-- The bar: a soft edge as content passes under it, its small title, and
-		-- its buttons on glass.
+		},
 		ui.div {
 			absolute = true,
 			left = 0,
@@ -306,7 +352,6 @@ function ios.page(props)
 				return safe:get().top + 50
 			end,
 			pointer_events = false,
-			bg = props.bg or "$ios.grouped",
 			opacity = collapsed,
 			ui.row {
 				absolute = true,
@@ -383,13 +428,50 @@ ios.stack = ui.component(function(props)
 	function nav.depth()
 		return #pages:get()
 	end
-	-- The spring running: a new gesture or page takes over from it.
-	local running
-	local function run(state, target, done, speed)
-		if running then
-			running()
+	-- A spring each: one taking over from the other would leave that one's page
+	-- stopped where it was, with nothing to move it on.
+	local running_drag, running_enter
+	local function run_drag(target, done, speed)
+		if running_drag then
+			running_drag()
 		end
-		running = settle(state, target, done, speed)
+		running_drag = settle(drag, target, function()
+			running_drag = nil
+			if done then
+				done()
+			end
+		end, speed)
+	end
+	local function run_enter()
+		if running_enter then
+			running_enter()
+		end
+		running_enter = settle(entering, 0, function()
+			running_enter = nil
+		end)
+	end
+	-- Nothing may rest part way: whatever got here, a page out of place with no
+	-- spring on it goes home, and says so in the record.
+	local function recover()
+		local at = drag:get()
+		if not running_drag and at ~= 0 then
+			ui.gesture_log("recovered: drag " .. at .. " with nothing moving it")
+			run_drag(0)
+		end
+		local coming = entering:get()
+		if not running_enter and coming ~= 0 then
+			ui.gesture_log("recovered: entering " .. coming .. " with nothing moving it")
+			run_enter()
+		end
+	end
+	local holding = false
+	-- Looked at after each gesture and page change, never while idle.
+	local function check_soon()
+		ui.after(SETTLE_MOST + 300, function()
+			if not holding then
+				recover()
+			end
+		end)
 	end
 	function nav.push(build)
 		next_id += 1
@@ -398,10 +480,11 @@ ios.stack = ui.component(function(props)
 		table.insert(list, next_id)
 		entering:set(width)
 		pages:set(list)
-		run(entering, 0)
+		run_enter()
+		check_soon()
 	end
 	local function finish_pop(speed)
-		run(drag, width, function()
+		run_drag(width, function()
 			local kept = table.clone(pages:get())
 			builders[table.remove(kept)] = nil
 			pages:set(kept)
@@ -413,6 +496,7 @@ ios.stack = ui.component(function(props)
 			return
 		end
 		finish_pop(0)
+		check_soon()
 	end
 	local start = 0
 	-- iOS recognizes the swipe, and tells every ending; the page only follows.
@@ -426,9 +510,14 @@ ios.stack = ui.component(function(props)
 		end,
 		on_pan = function(e)
 			if e.phase == "began" then
-				if running then
-					running()
-					running = nil
+				holding = true
+				if running_drag then
+					running_drag()
+					running_drag = nil
+				end
+				if running_enter then
+					running_enter()
+					running_enter = nil
 				end
 				if entering:get() ~= 0 then
 					entering:set(0)
@@ -437,14 +526,18 @@ ios.stack = ui.component(function(props)
 			elseif e.phase == "changed" then
 				drag:set(clamp(start + e.x, 0, width))
 			elseif e.phase == "ended" then
+				holding = false
+				check_soon()
 				local at = drag:get()
 				if e.vx > FLING or (at > width / 2 and e.vx > -FLING) then
 					finish_pop(e.vx)
 				else
-					run(drag, 0, nil, e.vx)
+					run_drag(0, nil, e.vx)
 				end
 			else
-				run(drag, 0, nil, 0)
+				holding = false
+				check_soon()
+				run_drag(0, nil, 0)
 			end
 		end,
 	}
