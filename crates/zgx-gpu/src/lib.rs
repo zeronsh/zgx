@@ -13842,7 +13842,11 @@ impl GpuRenderer {
         }
         // Word shapes kept for the next frame, and the table they peaked in
         // (streaming fills it): the next frame shapes what it needs again.
-        self.fonts.borrow_mut().shape_run_cache = Default::default();
+        {
+            let mut fonts = self.fonts.borrow_mut();
+            fonts.shape_run_cache = Default::default();
+            fonts.rest();
+        }
         self.text_cache
             .borrow_mut()
             .rest(self.shapes.values().filter_map(|shaped| shaped.prepared));

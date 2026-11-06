@@ -145,6 +145,17 @@ impl AccessibilityTree {
         self.cache.clear();
         self.projection_revisions.clear();
     }
+    /// A window at rest: the room its tables took for what has gone.
+    pub fn rest(&mut self) {
+        self.ids.shrink_to_fit();
+        self.cache.shrink_to_fit();
+        self.projection_revisions.shrink_to_fit();
+        self.text_runs.shrink_to_fit();
+        self.text_positions.shrink_to_fit();
+        self.blocks.shrink_to_fit();
+        self.long_runs.shrink_to_fit();
+        self.run_boxes.shrink_to_fit();
+    }
     fn id(&mut self, node: NodeId) -> AccessibleId {
         *self.ids.entry(node).or_insert_with(|| {
             self.next += 1;
@@ -3343,6 +3354,33 @@ mod vocabulary_tests {
         count.set(0);
         project(&mut ui, &mut tree);
         assert!(tree.run_boxes.is_empty(), "and goes with it");
+    }
+
+    #[test]
+    fn at_rest_the_tables_give_back_what_a_big_page_took_and_nothing_else() {
+        let mut ui = Ui::new(400., 300.);
+        ui.set_assistive_technology(true);
+        let count = ui.signal(4_000_usize);
+        let read = count.clone();
+        ui.mount(column().child(keyed(
+            move || (0..read.get()).collect(),
+            |i: usize, _| text(format!("Row {i}")),
+        )));
+        let mut tree = AccessibilityTree::new();
+        let project = |ui: &mut Ui, tree: &mut AccessibilityTree| {
+            ui.prepare_frame();
+            tree.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Test", 1.)
+        };
+        project(&mut ui, &mut tree);
+        let big = tree.cache.capacity();
+        count.set(2);
+        project(&mut ui, &mut tree);
+        assert!(tree.cache.capacity() >= big, "a table only grows by itself");
+        tree.rest();
+        assert!(tree.cache.capacity() < big / 8);
+        // What it knows stays: nothing has changed, so nothing goes out again.
+        let same = project(&mut ui, &mut tree);
+        assert!(same.nodes.is_empty(), "{:?}", same.nodes.len());
     }
 
     #[test]
