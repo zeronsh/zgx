@@ -3,7 +3,7 @@
 //! GPU glyph atlas; stable text never reshapes on paint or compositor updates.
 #![warn(missing_docs)]
 use cosmic_text::{Buffer, CacheKey, FontSystem, Metrics, SwashCache, SwashContent};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
 use zgx::scene::{Color, NodeId, NodeKind, Rect, Scene};
 
@@ -182,6 +182,8 @@ pub struct DebugCacheStats {
     pub image_textures: usize,
     /// Their bytes.
     pub image_bytes: usize,
+    /// Image textures held softer than drawn, for the budget.
+    pub images_softer: usize,
     /// Bytes of rasterized canvases and decorations.
     pub canvas_raster_bytes: usize,
     /// Bytes of rasterized SVGs.
@@ -193,6 +195,8 @@ pub struct DebugCacheStats {
     pub vertex_buffers: usize,
     /// Cached layer textures.
     pub layer_textures: usize,
+    /// Layers that went coarser for their budget, and are still layers.
+    pub layers_coarser: usize,
     /// Their bytes.
     pub layer_bytes: usize,
 }
@@ -214,8 +218,9 @@ const IMAGES_GONE_COUNT: usize = 256;
 type ImageTexture = (wgpu::BindGroup, usize, Option<wgpu::Texture>, (u32, u32));
 /// A kept file's pixels aren't decoded yet (`ImageData::pixels_at`).
 const IMAGE_PENDING: &str = "an image's pixels are decoding";
-const IMAGE_COARSER: &str =
-    "images past the budget of image textures are drawn at a lower resolution";
+/// The longest side a texture is cut to past the budget (`upload_image_at`):
+/// however full it is, a picture shows, and this little goes over it.
+const IMAGE_LEAST_SIDE: u32 = 64;
 /// The size a texture of a `width` by `height` image holds when drawn at
 /// `drawn` device pixels (`None`: all of it): scaled down, its shape kept,
 /// to the least that is at least that large on both axes; never up.
@@ -232,8 +237,7 @@ fn fitted_size(width: u32, height: u32, drawn: Option<(f32, f32)>) -> (u32, u32)
 }
 use zgx::image::resample::{halve, shrink};
 /// Why an image can have no texture: a frame goes on without it.
-const IMAGE_MISSES: [&str; 3] = [
-    "the images one frame draws exceed the 64 MiB budget of image textures",
+const IMAGE_MISSES: [&str; 2] = [
     "visible images exceed the budget of 16,384",
     "image exceeds GPU texture dimensions",
 ];
@@ -3940,6 +3944,14 @@ pub struct GpuRenderer {
     images_gone: rustc_hash::FxHashSet<u64>,
     /// Frames drawn, for `image_drawn`.
     image_frame: u64,
+    /// The bytes of textures this frame asked for, their pixels decoding:
+    /// each decodes to its share of the budget, not all of it.
+    images_decoding: usize,
+    /// Images and layers that went softer for their budgets: no issue, the
+    /// budget doing its job, but `zgx inspect memory` shows them. Written only
+    /// as that happens, and read only as asked (`debug_cache_stats`).
+    images_softer: FxHashSet<u64>,
+    layers_coarser: FxHashSet<NodeId>,
     /// GPU views' textures, by view (`viewport`): none until one shows.
     views: Option<Box<viewport::Views>>,
     /// Wakes the host when a GPU view's plane has a drawable for a frame it
@@ -4589,6 +4601,9 @@ impl GpuRenderer {
             image_drawn: FxHashMap::default(),
             images_gone: Default::default(),
             image_frame: 0,
+            images_decoding: 0,
+            images_softer: FxHashSet::default(),
+            layers_coarser: FxHashSet::default(),
             views: None,
             #[cfg(target_os = "macos")]
             plane_wake: None,
@@ -4678,6 +4693,12 @@ impl GpuRenderer {
         );
         report.add(
             "gpu",
+            "images softer for the budget",
+            Some(stats.images_softer),
+            None,
+        );
+        report.add(
+            "gpu",
             "layers",
             Some(stats.layer_textures),
             Some(stats.layer_bytes),
@@ -4695,10 +4716,14 @@ impl GpuRenderer {
                 (false, true) => ", transformed",
                 (false, false) => "",
             };
+            let coarser = match self.layers_coarser.contains(id) {
+                true => ", coarser for its budget",
+                false => "",
+            };
             report.add(
                 "gpu layer",
                 format!(
-                    "@{} {}x{} px at {:.2}x, {:.1} MiB live{state}",
+                    "@{} {}x{} px at {:.2}x, {:.1} MiB live{state}{coarser}",
                     id.number(),
                     (w * layer.uv[0]).round(),
                     (h * layer.uv[1]).round(),
@@ -4759,11 +4784,17 @@ impl GpuRenderer {
             swash_outlines: self.swash.outline_command_cache.len(),
             image_textures: self.images.len(),
             image_bytes: self.images.values().map(|i| i.1).sum(),
+            images_softer: (self.images_softer.iter())
+                .filter(|id| self.images.contains_key(id))
+                .count(),
             canvas_raster_bytes: self.canvases.bytes(),
             svg_raster_bytes: self.svgs.bytes(),
             vertex_buffer_bytes: self.vertex_capacity,
             vertex_buffers,
             layer_textures: self.layers.len(),
+            layers_coarser: (self.layers_coarser.iter())
+                .filter(|id| self.layers.contains_key(id))
+                .count(),
             layer_bytes: self.layers.values().map(|l| l.bytes).sum(),
         }
     }
@@ -5055,6 +5086,7 @@ impl GpuRenderer {
             self.start_declared_fills();
         }
         self.image_frame += 1;
+        self.images_decoding = 0;
         if self.image_frame == LAUNCH_FRAMES {
             // An app that never goes idle checks its font cache here, once.
             font_cache_check();
@@ -5125,15 +5157,13 @@ impl GpuRenderer {
     pub fn take_issues(&mut self) -> Vec<String> {
         std::mem::take(&mut self.issues)
     }
-    /// `warn` for what is said once per `key` (a layer's number), whatever
-    /// numbers its message gives as they change.
+    /// A layer went coarser for its budget: `zgx inspect memory` shows it.
     #[cold]
-    fn warn_keyed(&mut self, key: (&str, u32), issue: String) {
-        let key = format!("{}@{}", key.0, key.1);
-        if !self.warned.contains(&key) {
-            self.warned.push(key);
-            self.issues.push(issue);
-        }
+    fn note_layer_coarser(&mut self, id: NodeId) {
+        let layers = &self.layers;
+        self.layers_coarser
+            .retain(|other| *other == id || layers.contains_key(other));
+        self.layers_coarser.insert(id);
     }
     /// The bytes isolated layers' textures may take together: four of the
     /// window's frames, and at least `LAYER_BUDGET`. A layer as large as the
@@ -5665,23 +5695,7 @@ impl GpuRenderer {
             }
         }
         if coarser {
-            let pixels = pixels(1.) * 4.;
-            self.warn_keyed(
-                ("layer coarser", id.number()),
-                format!(
-                    "isolated layer @{} ({:.1} MiB at the device's scale) is past {}: it \
-                     rasterizes coarser",
-                    id.number(),
-                    pixels / MB,
-                    match pixels as usize > budget {
-                        true => format!(
-                            "the budget of isolated layers ({:.0} MiB)",
-                            budget as f32 / MB
-                        ),
-                        false => "the GPU's texture size".to_string(),
-                    },
-                ),
-            );
+            self.note_layer_coarser(id);
         }
         let device_scale = self.scale;
         let scale = device_scale * factor;
@@ -5825,33 +5839,10 @@ impl GpuRenderer {
             existing = self.layers.get(&id).map_or(0, |l| l.bytes);
             used = self.layers.values().map(|l| l.bytes).sum();
         }
-        if !self.layers.contains_key(&id) && self.layers.len() >= 1024 {
-            self.warn("past 1024 isolated layers: they go on, each as coarse as the budget needs");
-        }
         // Past the budget or the texture limits: again, in the room left,
         // coarser. Once: a texture of one texel still takes its 64 by 64.
         if (used - existing + bytes > budget || width > limit || height > limit) && room == budget {
-            let others = self.layers.len() - usize::from(existing > 0);
-            let live: usize = (self.layers.iter())
-                .filter(|(other, _)| **other != id)
-                .map(|(_, layer)| layer.live_bytes())
-                .sum();
-            self.warn_keyed(
-                ("layer past the budget", id.number()),
-                format!(
-                    "isolated layer @{} ({}x{} px, {:.1} MiB) is past the budget of isolated \
-                     layers ({:.0} MiB): {} others hold {:.1} MiB allocated, {:.1} MiB of it \
-                     live; it rasterizes coarser",
-                    id.number(),
-                    width,
-                    height,
-                    bytes as f32 / MB,
-                    budget as f32 / MB,
-                    others,
-                    (used - existing) as f32 / MB,
-                    live as f32 / MB,
-                ),
-            );
+            self.note_layer_coarser(id);
             let room = budget.saturating_sub(used - existing).min(budget - 1);
             return self.prepare_layer(scene, id, magnified, exact_around, shown, stats, room);
         }
@@ -7479,10 +7470,15 @@ impl GpuRenderer {
                     .filter(|mode| *mode != zgx::scene::BlendMode::Normal)
                     .filter(|_| self.prepare_blend(filter.as_ref().map(|(shader, _)| &**shader)));
                 // Blurred or masked: composited from its effect slot.
-                let effect = (item.isolated
-                    && (item.effects.filter_blur > 0. || scene.mask(item.id).is_some()))
-                .then(|| self.effect_slot(item.id, effects::Purpose::Content))
-                .flatten();
+                let effected = item.isolated
+                    && (item.effects.filter_blur > 0. || scene.mask(item.id).is_some());
+                let effect = effected
+                    .then(|| self.effect_slot(item.id, effects::Purpose::Content))
+                    .flatten();
+                // Its mask decoding: nothing yet, rather than all of it.
+                if effected && effect.is_none() && scene.mask(item.id).is_some() {
+                    continue;
+                }
                 // And its drop shadow, from its own slot.
                 let shadow = match item.isolated && scene.has_drop_shadows() {
                     true => scene
@@ -11372,6 +11368,27 @@ impl GpuRenderer {
             }
             return Ok(true);
         }
+        // Held smaller than drawn, the budget's doing: uploaded again only
+        // if there's now room for more, not on every frame.
+        if let Some(entry) = self.images.get(&image.id()) {
+            let held = entry.3;
+            let others = (self.images.iter())
+                .filter(|(id, _)| **id != image.id())
+                .filter(|(id, _)| {
+                    self.image_drawn
+                        .get(id)
+                        .is_none_or(|drawn| *drawn >= self.image_frame)
+                })
+                .map(|(_, entry)| entry.1)
+                .sum::<usize>();
+            let fits = self.image_size_within(image, size, others);
+            if fits.0 <= held.0 && fits.1 <= held.1 {
+                if let Some(drawn) = self.image_drawn.get_mut(&image.id()) {
+                    *drawn = self.image_frame;
+                }
+                return Ok(true);
+            }
+        }
         match self.upload_image_at(image, size) {
             Ok(()) => {}
             // Its pixels decoding: drawn once they are.
@@ -11394,6 +11411,37 @@ impl GpuRenderer {
     fn image_budget(&self) -> usize {
         (self.width as usize * self.height as usize * 4 * 4).max(IMAGE_TEXTURES)
     }
+    /// The size `image`'s texture takes, wanted at `wanted`, with `held` bytes
+    /// of others staying: smaller, its shape kept, while past the texture
+    /// limit or the budget; never left out (`IMAGE_LEAST_SIDE`).
+    fn image_size_within(
+        &self,
+        image: &zgx::image::ImageData,
+        wanted: (u32, u32),
+        held: usize,
+    ) -> (u32, u32) {
+        let limit = self.device.limits().max_texture_dimension_2d;
+        let budget = self.image_budget();
+        let (full_w, full_h) = (image.width().max(1), image.height().max(1));
+        let at = |scale: f32| {
+            let side = |v: u32, full: u32| ((v as f32 * scale).ceil() as u32).clamp(1, full);
+            (side(wanted.0, full_w), side(wanted.1, full_h))
+        };
+        let mut scale = 1f32;
+        while {
+            let (w, h) = at(scale);
+            (w > limit || h > limit) && (w, h) != (1, 1)
+        } {
+            scale *= 0.75;
+        }
+        while {
+            let (w, h) = at(scale);
+            w as usize * h as usize * 4 + held > budget && w.max(h) > IMAGE_LEAST_SIDE
+        } {
+            scale *= 0.75;
+        }
+        at(scale)
+    }
     /// `upload_image` at `size` (`fitted_size`), or smaller where the budget
     /// or the texture limit says: drawn softer rather than left out.
     fn upload_image_at(
@@ -11404,39 +11452,16 @@ impl GpuRenderer {
         if let Some(frame) = image.gpu_frame() {
             return self.render_view(image, frame);
         }
-        // A kept file's pixels at the size it is drawn, decoded off this
-        // thread: until they are, it isn't drawn, and the host draws again
-        // once they are (`take_images_awaited`).
-        let source = match image.keeps_file() {
-            true => match image.pixels_at(wanted) {
-                Some(source) => Some(source),
-                None => {
-                    self.images_awaited = true;
-                    return Err(GpuError(IMAGE_PENDING.into()));
-                }
-            },
-            false => None,
-        };
         let budget = self.image_budget();
         let limit = self.device.limits().max_texture_dimension_2d;
         let (full_w, full_h) = (image.width().max(1), image.height().max(1));
-        // Smaller by `scale` from `wanted`, its shape kept.
-        let at = |scale: f32| {
-            let side = |v: u32, full: u32| ((v as f32 * scale).ceil() as u32).clamp(1, full);
-            (side(wanted.0, full_w), side(wanted.1, full_h))
-        };
         let bytes = |(w, h): (u32, u32)| w as usize * h as usize * 4;
-        let mut scale = 1f32;
-        while {
-            let (w, h) = at(scale);
-            (w > limit || h > limit) && (w, h) != (1, 1)
-        } {
-            scale *= 0.75;
-        }
         // An image it replaces at another size gives its bytes back.
         let replaced = self.images.get(&image.id()).map_or(0, |entry| entry.1);
-        let mut held = self.images.values().map(|entry| entry.1).sum::<usize>() - replaced;
-        if bytes(at(scale)) + held > budget {
+        let mut held = self.images.values().map(|entry| entry.1).sum::<usize>() - replaced
+            + self.images_decoding;
+        let whole = self.image_size_within(image, wanted, 0);
+        if bytes(whole) + held > budget {
             // Images not drawn this frame give their textures back, least
             // recently drawn first (a long page scrolled through): drawn
             // again, they upload again.
@@ -11448,7 +11473,7 @@ impl GpuRenderer {
                 .collect();
             idle.sort_unstable();
             for (_, id) in idle {
-                if bytes(at(scale)) + held <= budget {
+                if bytes(whole) + held <= budget {
                     break;
                 }
                 if id == image.id() {
@@ -11461,24 +11486,35 @@ impl GpuRenderer {
             }
         }
         // Still past it: drawn smaller rather than left out.
-        let unshrunk = at(scale);
-        while bytes(at(scale)) + held > budget && at(scale) != (1, 1) {
-            scale *= 0.75;
-        }
-        let (width, height) = at(scale);
-        if bytes((width, height)) + held > budget {
-            return Err(GpuError(IMAGE_MISSES[0].into()));
-        }
-        if (width, height) != unshrunk {
-            self.warn(IMAGE_COARSER);
+        let (width, height) = self.image_size_within(image, wanted, held);
+        if (width, height) != whole {
+            let images = &self.images;
+            self.images_softer.retain(|id| images.contains_key(id));
+            self.images_softer.insert(image.id());
+        } else if !self.images_softer.is_empty() {
+            self.images_softer.remove(&image.id());
         }
         let bytes = bytes((width, height));
         if self.images.len() >= MAX_IMAGES && !self.images.contains_key(&image.id()) {
-            return Err(GpuError(IMAGE_MISSES[1].into()));
+            return Err(GpuError(IMAGE_MISSES[0].into()));
         }
         if width > limit || height > limit {
-            return Err(GpuError(IMAGE_MISSES[2].into()));
+            return Err(GpuError(IMAGE_MISSES[1].into()));
         }
+        // A kept file's pixels at the size it takes, decoded off this thread:
+        // until they are, it isn't drawn, and the host draws again once they
+        // are (`take_images_awaited`). No larger than its texture will be.
+        let source = match image.keeps_file() {
+            true => match image.pixels_at((width, height)) {
+                Some(source) => Some(source),
+                None => {
+                    self.images_awaited = true;
+                    self.images_decoding += bytes;
+                    return Err(GpuError(IMAGE_PENDING.into()));
+                }
+            },
+            false => None,
+        };
         let texture = sampled_texture(&self.device, self.unified, width, height, "image");
         let (mut pixels, (mut w, mut h)) = match &source {
             // Premultiplied already, at least its size.

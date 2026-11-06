@@ -1853,8 +1853,8 @@ impl ScriptHost {
         }
     }
     /// Calls `hook` with each issue the framework reports (`zgx::issues`),
-    /// with its kind: an error, or the renderer going on with less (a layer
-    /// coarser, an image softer), which `on_error` hears too, untagged.
+    /// with its kind: an error, or the renderer going on with less (a glyph
+    /// left out), which `on_error` hears too, untagged.
     pub fn on_issue(&self, hook: impl Fn(zgx::issues::IssueKind, &str) + 'static) {
         self.0.issues.borrow_mut().hooks.push(Rc::new(hook));
     }

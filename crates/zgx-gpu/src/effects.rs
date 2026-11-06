@@ -103,6 +103,10 @@ struct Shelf {
     end: u32,
 }
 /// What a slot was drawn from: equal, it composites as it is.
+/// A mask in a slot's key: its image, the texel at the slot's corner, the
+/// step, and the size of the texture they're in (at the size drawn, the step
+/// alone can't tell).
+type MaskKey = (u64, [i32; 2], [u32; 2], [u32; 2]);
 #[derive(Clone, Copy, PartialEq)]
 struct Key {
     revision: u64,
@@ -113,7 +117,7 @@ struct Key {
     tint: Option<[u8; 3]>,
     /// The image, and where its texels fall (a 64th of a texel, and the
     /// step per slot texel's bits).
-    mask: Option<(u64, [i32; 2], [u32; 2])>,
+    mask: Option<MaskKey>,
 }
 /// A layer's slot of the effect atlas.
 #[derive(Clone, Copy)]
@@ -166,7 +170,9 @@ pub(crate) struct EffectAtlas {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) blank: wgpu::Texture,
     blank_bind: wgpu::BindGroup,
-    masks: FxHashMap<u64, wgpu::BindGroup>,
+    /// Bound masks, each with the texture it was made for: drawn larger, an
+    /// image's texture is another.
+    masks: FxHashMap<u64, (wgpu::BindGroup, wgpu::Texture)>,
     shelves: Vec<Shelf>,
     bottom: u32,
     pub(crate) slots: FxHashMap<(NodeId, Purpose), Slot>,
@@ -218,7 +224,7 @@ struct Want {
     pad: u32,
     sigma: f32,
     /// The image, the mask texel at the slot's corner and its step.
-    mask: Option<(std::sync::Arc<zgx::image::ImageData>, [f32; 4])>,
+    mask: Option<(std::sync::Arc<zgx::image::ImageData>, [f32; 4], [u32; 2])>,
 }
 impl Want {
     fn room(&self) -> (u32, u32) {
@@ -287,15 +293,16 @@ impl GpuRenderer {
                 let Some(layer) = self.layers.get(&item.id) else {
                     continue;
                 };
+                let (bounds, revision, step) = (layer.bounds, layer.revision, layer.step);
                 let content = (
                     (layer.uv[0] * layer.texture.width() as f32).round() as u32,
                     (layer.uv[1] * layer.texture.height() as f32).round() as u32,
                 );
-                if content.0 == 0 || content.1 == 0 || layer.bounds.width <= 0. {
+                if content.0 == 0 || content.1 == 0 || bounds.width <= 0. {
                     continue;
                 }
                 // Layer texels per logical pixel.
-                let scale = content.0 as f32 / layer.bounds.width;
+                let scale = content.0 as f32 / bounds.width;
                 let sigma = (blur * scale).min(MAX_SIGMA);
                 let (factor, pad, slot_sigma) = if sigma > 0. {
                     // Averaged down where sigma spans 2 to 4 texels; the boxes
@@ -321,42 +328,58 @@ impl GpuRenderer {
                 let texel = factor / scale;
                 let origin = (-(pad as f32) / scale, -(pad as f32) / scale);
                 // The quad's first texel is the gutter's: one before the slot's.
-                let mask = mask.map(|mask| {
-                    let image = &mask.image;
-                    let along = |size: f32, pixels: u32, start: f32, node: f32, offset: f32| {
-                        if size <= 0. {
-                            return (-1., 0.);
+                let mask = match mask {
+                    Some(mask) => {
+                        // A mask is a picture drawn at its size: a texture of
+                        // that size, whatever the file's. Decoding, the slot
+                        // waits, and the host draws again once it's done.
+                        let image = mask.image.clone();
+                        let drawn = (mask.size.0 * scale, mask.size.1 * scale);
+                        let mut uploads = GpuStats::default();
+                        if !self.ensure_image(&image, Some(drawn), &mut uploads)? {
+                            continue;
                         }
-                        let per = pixels as f32 / size;
-                        ((start - texel - node - offset) * per, texel * per)
-                    };
-                    let (x, step_x) = along(
-                        mask.size.0,
-                        image.width(),
-                        layer.bounds.x + origin.0,
-                        item.bounds.x,
-                        mask.offset.0,
-                    );
-                    let (y, step_y) = along(
-                        mask.size.1,
-                        image.height(),
-                        layer.bounds.y + origin.1,
-                        item.bounds.y,
-                        mask.offset.1,
-                    );
-                    (image.clone(), [x, y, step_x, step_y])
-                });
+                        let (width, height) = match self.images[&image.id()].3 {
+                            (0, 0) => (image.width(), image.height()),
+                            held => held,
+                        };
+                        let along = |size: f32, pixels: u32, start: f32, node: f32, offset: f32| {
+                            if size <= 0. {
+                                return (-1., 0.);
+                            }
+                            let per = pixels as f32 / size;
+                            ((start - texel - node - offset) * per, texel * per)
+                        };
+                        let (x, step_x) = along(
+                            mask.size.0,
+                            width,
+                            bounds.x + origin.0,
+                            item.bounds.x,
+                            mask.offset.0,
+                        );
+                        let (y, step_y) = along(
+                            mask.size.1,
+                            height,
+                            bounds.y + origin.1,
+                            item.bounds.y,
+                            mask.offset.1,
+                        );
+                        Some((image, [x, y, step_x, step_y], [width, height]))
+                    }
+                    None => None,
+                };
                 let key = Key {
-                    revision: layer.revision,
-                    step: layer.step,
+                    revision,
+                    step,
                     content,
                     sigma: sigma.to_bits(),
                     tint,
-                    mask: mask.as_ref().map(|(image, [x, y, step_x, step_y])| {
+                    mask: mask.as_ref().map(|(image, [x, y, step_x, step_y], held)| {
                         (
                             image.id(),
                             [(x * 64.).round() as i32, (y * 64.).round() as i32],
                             [step_x.to_bits(), step_y.to_bits()],
+                            *held,
                         )
                     }),
                 };
@@ -378,13 +401,6 @@ impl GpuRenderer {
         }
         if wanted.is_empty() {
             return Ok(());
-        }
-        for want in &wanted {
-            if let Some((image, _)) = &want.mask
-                && !self.images.contains_key(&image.id())
-            {
-                self.upload_image(image)?;
-            }
         }
         let frame = self.layer_frame;
         // Unchanged slots composite as they are; the rest go where they fit.
@@ -499,7 +515,10 @@ impl GpuRenderer {
                 color,
                 fade: inside,
                 options,
-                shape: want.mask.as_ref().map_or([0.; 4], |(_, mapping)| *mapping),
+                shape: want
+                    .mask
+                    .as_ref()
+                    .map_or([0.; 4], |(_, mapping, _)| *mapping),
                 // A shadow's tint (effects.wgsl), or none (-1).
                 border: match want.key.tint {
                     Some([r, g, b]) => [
@@ -519,7 +538,7 @@ impl GpuRenderer {
                 Job {
                     node: want.node,
                     purpose: want.purpose,
-                    mask: want.mask.as_ref().map(|(image, _)| image.id()),
+                    mask: want.mask.as_ref().map(|(image, ..)| image.id()),
                     across: blurred.then(|| quad([start, start, want.factor, want.sigma], [0.; 4])),
                     down: match blurred {
                         true => quad([x, y, 0., want.sigma], inside),
@@ -632,18 +651,19 @@ impl GpuRenderer {
             .clone();
         for job in jobs {
             if let Some(image) = job.mask
+                && let Some(texture) = self.images.get(&image).and_then(|entry| entry.2.clone())
                 && !self
                     .effects
                     .as_ref()
-                    .is_some_and(|atlas| atlas.masks.contains_key(&image))
-                && let Some(texture) = self.images.get(&image).and_then(|entry| entry.2.clone())
+                    .and_then(|atlas| atlas.masks.get(&image))
+                    .is_some_and(|(_, made_for)| *made_for == texture)
             {
                 let bind = self.mask_bind(&mask_layout, &texture.create_view(&Default::default()));
                 self.effects
                     .as_mut()
                     .expect("planned")
                     .masks
-                    .insert(image, bind);
+                    .insert(image, (bind, texture));
             }
         }
         let pipelines = self.effect_pipelines.as_ref().expect("made above");
@@ -696,7 +716,10 @@ impl GpuRenderer {
                     layer
                 };
                 let mask = match (down, job.mask) {
-                    (true, Some(image)) => atlas.masks.get(&image).unwrap_or(&atlas.blank_bind),
+                    (true, Some(image)) => atlas
+                        .masks
+                        .get(&image)
+                        .map_or(&atlas.blank_bind, |(bind, _)| bind),
                     _ => &atlas.blank_bind,
                 };
                 encoded.set_bind_group(0, source, &[]);

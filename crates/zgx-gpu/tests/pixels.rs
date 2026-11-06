@@ -750,11 +750,8 @@ fn layer_texture_budget_rasterizes_coarser_and_recovers_after_removal() {
     scene.set_isolated(huge, true);
     let d = scene.flush().damage;
     gpu.render(&scene, &d).unwrap();
-    let issues = gpu.take_issues();
-    assert!(
-        issues[0].contains("budget of isolated layers (64 MiB)"),
-        "{issues:?}"
-    );
+    assert_eq!(gpu.take_issues(), Vec::<String>::new());
+    assert_eq!(gpu.debug_cache_stats().layers_coarser, 1);
     let bytes = gpu.debug_cache_stats().layer_bytes;
     assert!(bytes > 0 && bytes <= 64 * 1024 * 1024, "{bytes}");
     scene.remove(huge);
@@ -6171,10 +6168,10 @@ fn a_tilt_past_the_eye_inside_a_zoomed_layer_draws() {
     gpu.render(&scene, &report.damage).unwrap();
 }
 
-/// Past the budget or the texture size, a layer rasterizes coarser, is said
-/// once, and shows.
+/// Past the budget or the texture size, a layer rasterizes coarser and shows:
+/// no issue, the budget doing its job, and devtools can find it.
 #[test]
-fn a_layer_past_its_budget_draws_coarser_and_says_so_once() {
+fn a_layer_past_its_budget_draws_coarser_and_raises_no_issue() {
     let _gpu_fixture = gpu_fixture();
     for (width, height) in [(12_000., 12_000.), (60_000., 40.)] {
         let mut gpu = GpuRenderer::new(100, 100).unwrap();
@@ -6195,15 +6192,10 @@ fn a_layer_past_its_budget_draws_coarser_and_says_so_once() {
         );
         let report = scene.flush();
         gpu.render(&scene, &report.damage).unwrap();
-        let issues = gpu.take_issues();
-        assert_eq!(issues.len(), 1, "{issues:?}");
-        assert!(issues[0].contains("coarser"), "{issues:?}");
+        assert_eq!(gpu.take_issues(), Vec::<String>::new());
+        assert_eq!(gpu.debug_cache_stats().layers_coarser, 1);
         let pixels = gpu.readback().unwrap();
         assert!(pixels[(10 * 100 + 10) * 4] > 200, "it shows");
-        scene.set_transform(layer, Transform { x: -1., y: 0. });
-        let report = scene.flush();
-        gpu.render(&scene, &report.damage).unwrap();
-        assert!(gpu.take_issues().is_empty(), "said once");
     }
 }
 
@@ -6232,15 +6224,8 @@ fn layers_past_their_count_and_budget_all_draw() {
     }
     let report = scene.flush();
     gpu.render(&scene, &report.damage).unwrap();
-    let issues = gpu.take_issues();
-    assert!(issues.iter().any(|i| i.contains("1024")), "{issues:?}");
-    assert!(
-        issues.iter().any(
-            |i| i.contains("past the budget of isolated layers (64 MiB)")
-                && i.contains("MiB allocated")
-        ),
-        "{issues:?}"
-    );
+    assert_eq!(gpu.take_issues(), Vec::<String>::new());
+    assert!(gpu.debug_cache_stats().layers_coarser > 0);
     assert!(gpu.readback().unwrap()[(300 * 600 + 300) * 4 + 1] > 150);
 }
 
