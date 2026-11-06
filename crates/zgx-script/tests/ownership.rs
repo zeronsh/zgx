@@ -74,3 +74,34 @@ fn a_timer_made_in_a_computed_lasts_until_its_next_run() {
     h.frames(2);
     assert_eq!(h.text("fired"), "2 ", "the first run's never fired");
 }
+
+/// A timer made in a handler, at no scope, fires as ever however many have
+/// ended before it, and stopping one still stops it.
+#[test]
+fn timers_made_in_handlers_fire_and_stop_as_those_before_them_go() {
+    let mut h = Harness::inline(
+        r##"local fired = ui.state("fired", 0)
+        local stopped = ui.state("stopped", 0)
+        local function burst()
+            for _ = 1, 40 do
+                ui.after(0, function() fired:set(fired:peek() + 1) end)
+            end
+            local stop = ui.after(20, function() stopped:set(stopped:peek() + 1) end)
+            stop()
+        end
+        return ui.column {
+            ui.button { id = "burst", w = 10, h = 10, on_click = burst },
+            ui.text { id = "fired", "{fired}" },
+            ui.text { id = "stopped", "{stopped}" },
+        }"##,
+    );
+    for round in 1..=5 {
+        h.click("burst");
+        let want = (round * 40).to_string();
+        assert!(h.wait_until(|app| app.text("fired") == want), "round {round}: {}", h.text("fired"));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    h.frames(2);
+    assert_eq!(h.text("stopped"), "0");
+}
+
