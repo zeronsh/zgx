@@ -3289,6 +3289,119 @@ fn assert_blur_matches_fresh(
     );
 }
 
+/// A blurred frame walks only where its damage reaches through the filters
+/// (`Scene::backdrop_filters`), not the window: what it draws must still be
+/// what the whole frame draws, even where the damage reaches a filter only
+/// through another (a change under one filter whose output meets a second,
+/// the second's backdrop reaching past both), with boxes under a moved
+/// ancestor and far from every filter changing too.
+#[test]
+fn a_blurred_frame_walked_within_its_reach_is_the_frame_drawn_afresh() {
+    let _fixture = gpu_fixture();
+    let mut gpu = GpuRenderer::new(320, 200).unwrap();
+    let mut scene = Scene::new(320., 200.);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    scene.append(
+        scene.root(),
+        NodeKind::Rect(Color(20, 30, 50, 255)),
+        fixed(320., 200.),
+    );
+    let rect = |scene: &mut Scene, parent, color, w, h, x, y| {
+        let node = scene.append(parent, NodeKind::Rect(color), fixed(w, h));
+        scene.set_transform(node, Transform { x, y });
+        node
+    };
+    let root = scene.root();
+    // Under the first filter alone, and under the second alone, past the
+    // first's output and the damage.
+    let under_first = rect(
+        &mut scene,
+        root,
+        Color(240, 200, 60, 255),
+        10.,
+        10.,
+        30.,
+        40.,
+    );
+    let under_second = rect(
+        &mut scene,
+        root,
+        Color(60, 220, 120, 255),
+        10.,
+        10.,
+        150.,
+        40.,
+    );
+    // A group of boxes moved as one, far from both filters.
+    let group = scene.append(root, NodeKind::Container(Layout::Overlay), fixed(60., 60.));
+    scene.set_transform(group, Transform { x: 240., y: 120. });
+    let mut far = Vec::new();
+    for i in 0..12 {
+        let box_ = rect(
+            &mut scene,
+            group,
+            Color(30 + i * 15, 90, 200 - i * 10, 255),
+            8.,
+            8.,
+            (i % 4) as f32 * 14.,
+            (i / 4) as f32 * 14.,
+        );
+        far.push(box_);
+    }
+    // The first filter's output meets the second's: damage under the
+    // first re-blurs the second too, so its backdrop is drawn again.
+    for (x, w) in [(24., 90.), (100., 80.)] {
+        let blur = rect(&mut scene, root, Color(230, 40, 70, 40), w, 60., x, 24.);
+        scene.set_effects(
+            blur,
+            Effects {
+                blur_radius: 5.,
+                ..Effects::default()
+            },
+        );
+    }
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    assert_blur_matches_fresh(&gpu, &scene, 320, 200, 1.);
+    // Under the first filter alone: the second's backdrop (`under_second`)
+    // is drawn again within its blur, though nothing near it changed. The
+    // renderer is given the box alone (the scene's flush grows its damage
+    // through the filters too, but the renderer reconstructs blur from what
+    // it's given), so the reach it walks must be its own.
+    scene.set_kind(under_first, NodeKind::Rect(Color(20, 160, 240, 255)));
+    scene.flush();
+    gpu.render(&scene, &[Rect::new(30., 40., 10., 10.)])
+        .unwrap();
+    assert_blur_matches_fresh(&gpu, &scene, 320, 200, 1.);
+    // Under the second alone.
+    scene.set_kind(under_second, NodeKind::Rect(Color(220, 60, 200, 255)));
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    assert_blur_matches_fresh(&gpu, &scene, 320, 200, 1.);
+    // Far from both: the group slides a step at a time, as rows do, and
+    // one of its boxes changes on the way.
+    for step in 1..=6 {
+        scene.set_transform(
+            group,
+            Transform {
+                x: 240. - step as f32 * 3.5,
+                y: 120. + step as f32 * 1.5,
+            },
+        );
+        if step == 3 {
+            scene.set_kind(far[5], NodeKind::Rect(Color(250, 250, 250, 255)));
+        }
+        let damage = scene.flush().damage;
+        gpu.render(&scene, &damage).unwrap();
+        assert_blur_matches_fresh(&gpu, &scene, 320, 200, 1.);
+    }
+    // And slid under the second filter: it is backdrop now.
+    scene.set_transform(group, Transform { x: 120., y: 30. });
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    assert_blur_matches_fresh(&gpu, &scene, 320, 200, 1.);
+}
+
 #[test]
 fn bounded_blur_damage_distant_and_backdrop_halo_updates() {
     let _fixture = gpu_fixture();

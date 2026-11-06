@@ -5341,6 +5341,19 @@ impl GpuRenderer {
                 scene.layer_items_within(start, Some(&self.plane_world(regions))),
                 merged,
             ),
+            // Backdrop blur: the frame draws where its damage reaches
+            // through every filter it touches (`render_flat`'s
+            // `blur_damage`), from those the walk finds. Grown first through
+            // every filter there could be, each as far as it could reach
+            // (`Scene::backdrop_filters`), the damage covers all of that, so
+            // a walk within it finds the same items there, in the same order,
+            // and the same pixels are drawn: what lies outside it draws
+            // nothing this frame. (The window's own walk alone: a plane's,
+            // a popup's and a layer's place their items otherwise.)
+            None if !self.fresh && start.is_none() && self.plane.is_none() && !self.in_layer => {
+                let reach = blur_damage(damage, &scene.backdrop_filters(), viewport, self.scale);
+                (scene.layer_items_within(None, Some(&reach)), merged)
+            }
             None => (scene.layer_items(start), merged),
         };
         // Fades its walk passed draw their bands as one; a frame kept to

@@ -11733,6 +11733,26 @@ impl Scene {
     pub fn has_backdrop_blur(&self) -> bool {
         !self.blur_nodes.is_empty()
     }
+    /// Each backdrop filter that shows, as far as it can reach: its box in
+    /// the window (around its transformed corners under a transform), left
+    /// unclipped, and its blur radius. Whatever the paint walk finds of a
+    /// filter (its item's box within its clip) lies inside its box here, so
+    /// a renderer can grow a frame's damage through every filter it might
+    /// touch before it walks, and walk no further than that.
+    pub fn backdrop_filters(&self) -> Vec<(Rect, f32)> {
+        self.blur_nodes
+            .iter()
+            .filter_map(|id| {
+                let (bounds, effects, _) = self.world(*id);
+                let bounds = match self.transformed {
+                    0 => bounds,
+                    _ => self.transformed_world_bounds(*id),
+                };
+                (effects.opacity > 0.0 && effects.blur_radius > 0.0)
+                    .then_some((bounds, effects.blur_radius))
+            })
+            .collect()
+    }
     /// The paint items in paint order: the window's with `None` (popups left
     /// out), or popup `root`'s alone.
     pub fn layer_items(&self, root: Option<NodeId>) -> Vec<PaintItem<'_>> {
