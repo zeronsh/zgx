@@ -1,0 +1,36 @@
+# iOS
+
+zgx runs on iOS through the desktop host (`zgx-desktop`), under winit's iOS backend: `Application`, Rust views and Luau apps work as they do elsewhere. Luau is interpreted, as it is on every platform. It is a spike: nothing has run on a real iPhone yet.
+
+```sh
+python3 scripts/ios/sim.py run --example gallery --shot out.png
+python3 scripts/ios/sim.py run -p zgx-run --example ios_app --name settings_app --resource crates/zgx-script/examples/ios_settings --shot out.png
+```
+
+The script boots a simulator of its own (`zgx-ios-lab`, or `ZGX_IOS_DEVICE`) without opening Simulator.app. Simulator results say nothing about performance, memory or feel: it draws on the Mac's GPU.
+
+## What is the system's, and what is zgx's
+
+| Piece | Whose | Why |
+| --- | --- | --- |
+| Text, lists, rows, cards, layout | zgx | Colours (`$text.primary`, `$ios.*`), Dynamic Type sizes and tracking are read from UIKit; laid out to UIKit's numbers |
+| Glass (`ui.glass`, `ui.glass_group`) | the system's | The compositor draws it from what lies under it, zgx's Metal layer included: a native view between the base and overlay planes |
+| Scrolling | UIKit's physics, zgx's drawing | A `UIScrollView` nobody sees, its pan on the window's view, drives zgx's scroll views (`ios_scroll.rs`) |
+| Keyboard, marked text, suggestions | the system's | A `UITextInput` responder over the document Windows' input methods use (`ios_text.rs`, `text_store.rs`) |
+| SF Symbols (`ui.symbol`) | the system's | Drawn by `UIImage` |
+| Switch | either | `ui.native_switch` is `UISwitch`: exact, and in a list about 6 points of a core more while scrolling, measured on a simulator. A drawn one is free |
+| Tab bar (`ui.native_tabs`) | the system's | Its selection is a lens that morphs between tabs, which nothing drawn matches |
+
+A window with no native view does none of the plane work, as on the desktop.
+
+## Accessibility
+
+There is one tree of elements, zgx's, through AccessKit's iOS adapter (`vendor/accesskit_ios`, its changes in `ZGX_PATCH.md`). System views are hidden from assistive technology and exposed as their zgx node. `ZGX_IOS_AX_DUMP=1` prints what is offered. The adapter builds nothing until a tree is read, shuts down when VoiceOver stops, and lets go 30 seconds after the last read when nothing says assistive technology runs (`vendor/accesskit_ios/tests/shutdown.rs`, on a simulator).
+
+## Not there yet
+
+- A real iPhone: GPU cost and memory of the planes and glass, feel, VoiceOver, Switch Control, Voice Control, Full Keyboard Access, and reading `/System/Library/Fonts` there.
+- Selection handles and the loupe (`UITextInteraction`); images on the clipboard; custom accessibility actions.
+- A control or pane cut by a rounded parent (a rectangle clips it); fading glass in and out.
+- Navigation bar collapse, sheets and detents, edge swipe back, context menus, haptics, pull to refresh.
+- File dialogs and prompts report the backend missing. Web views and terminals aren't hosted.

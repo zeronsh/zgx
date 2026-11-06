@@ -1562,10 +1562,15 @@ export type FullScreenTransition = { phase: "entering" | "leaving", duration: nu
 -- resizes, scale and fullscreen. `zoom` is the window's zoom, as a
 -- browser's page zoom (1 at 100%; Cmd/Ctrl +, - and 0 change it, and
 -- setting it zooms the window, within 0.25 to 5); `zoomable` false turns
--- the keys off.
+-- the keys off. `safe_area` is what the screen's edges and the system's bars
+-- leave of the window, `{ top, right, bottom, left }` in points: iOS's safe
+-- area, all 0 elsewhere. `keyboard` is how much of the bottom the on-screen
+-- keyboard covers, in points.
 -- An extern type: a function and a table can't intersect, so that would be
 -- `never`, and `ui`, holding one, would stop reporting its unknown members.
 declare extern type WindowApi with
+	safe_area: State<{ top: number, right: number, bottom: number, left: number }>
+	keyboard: State<number>
 	titlebar_area: State<WindowRect?>
 	controls: State<WindowRect?>
 	zoom: State<number>
@@ -3289,6 +3294,46 @@ export type WebViewProps = Merge<Props, Merge<WebOptions, {
 	on_download: ((d: Download) -> ...unknown)?,
 }>>
 export type TerminalProps = Merge<Props, { term: Term }>
+export type GlassProps = Merge<Props, {
+	[number]: Child,
+	-- `"regular"` (the default) or `"clear"`.
+	variant: (string | ReadOnlyState<string>)?,
+	-- A colour the glass takes on.
+	tint: Props_bg,
+	-- Answers presses as the system's controls do.
+	interactive: (boolean | ReadOnlyState<boolean>)?,
+	-- Its corners' radius in points (default 24).
+	radius: (number | ReadOnlyState<number>)?,
+}>
+export type GlassGroupProps = Merge<Props, {
+	[number]: Child,
+	-- How near panes come before they merge, in points (default 20).
+	spacing: number?,
+}>
+export type SymbolProps = Merge<Props, {
+	-- The SF Symbol's name.
+	name: string,
+	-- Its point size, as a font's (default 17).
+	size: (number | ReadOnlyState<number>)?,
+	-- A font weight, 100 to 900 (default 400).
+	weight: (number | ReadOnlyState<number>)?,
+	-- Its colour (default `$text.primary`).
+	color: Props_bg,
+}>
+export type NativeSwitchProps = Merge<Props, {
+	-- Whether it is on: a state it writes, or a function with `on_change`.
+	value: State<boolean> | (() -> boolean),
+	on_change: ((on: boolean) -> ())?,
+	-- What assistive technology calls it.
+	label: string?,
+}>
+export type NativeTabsProps = Merge<Props, {
+	-- The chosen tab, from 1.
+	value: State<number> | (() -> number),
+	on_change: ((tab: number) -> ())?,
+	-- Each tab's title and SF Symbol.
+	items: { { title: string, symbol: string } },
+}>
 -- `from`: only what that plugin (by name) contributes.
 export type SlotProps = Merge<Props, { context: unknown?, from: string? }>
 -- What a plugin targets: an element by its `id` (`"#save"`), declared hook
@@ -3485,6 +3530,16 @@ declare ui: {
 	-- page for `id`, made with `opts` the first time, kept across reloads.
 	web: ((opts: WebOptions?) -> Web) & ((id: string, opts: WebOptions?) -> Web),
 	terminal: (props: TerminalProps) -> Node,
+	-- The system's glass where it has one (iOS), a blur under a tint elsewhere.
+	glass: (props: GlassProps) -> Node,
+	-- Glass inside merges within `spacing` points, as the system's does.
+	glass_group: (props: GlassGroupProps) -> Node,
+	-- A system symbol (`name = "wifi"`), drawn by iOS; an empty box of its size elsewhere.
+	symbol: (props: SymbolProps) -> Node,
+	-- The system's on and off control (iOS's UISwitch), drawn elsewhere.
+	native_switch: (props: NativeSwitchProps) -> Node,
+	-- The system's tab bar (iOS's UITabBar), a row of tabs elsewhere.
+	native_tabs: (props: NativeTabsProps) -> Node,
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,

@@ -6890,6 +6890,7 @@ impl Drop for WindowManager {
         // Cloned public factories become inert at shutdown and must not keep
         // the clipboard worker or its owned display connection alive.
         let clipboard = self.factory.clipboard.borrow_mut().take();
+        #[cfg_attr(target_os = "ios", allow(clippy::drop_non_drop))]
         drop(clipboard);
         let mut pending = self.factory.pending.borrow_mut();
         for request in pending.iter() {

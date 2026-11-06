@@ -122,30 +122,18 @@ pub(crate) struct NativeHost {
     overlay_live: bool,
     /// Native geometry changed and has not been applied yet.
     #[cfg_attr(
-        not(any(
-            target_os = "macos",
-            target_os = "ios",
-            all(windows, feature = "webview2")
-        )),
+        not(any(target_os = "macos", all(windows, feature = "webview2"))),
         allow(dead_code)
     )]
     pending: bool,
     /// What clip views' hit tests consult (macOS's clip views).
     #[cfg_attr(
-        not(any(
-            target_os = "macos",
-            target_os = "ios",
-            all(windows, feature = "webview2")
-        )),
+        not(any(target_os = "macos", all(windows, feature = "webview2"))),
         allow(dead_code)
     )]
     scene: std::rc::Weak<std::cell::RefCell<Scene>>,
     #[cfg_attr(
-        not(any(
-            target_os = "macos",
-            target_os = "ios",
-            all(windows, feature = "webview2")
-        )),
+        not(any(target_os = "macos", all(windows, feature = "webview2"))),
         allow(dead_code)
     )]
     input: zgx::input::InputDispatcher,
@@ -662,11 +650,7 @@ fn contains(outer: Rect, inner: Rect) -> bool {
 }
 
 /// One shape a native view's cut masks it to, in window coordinates.
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    all(windows, feature = "webview2")
-))]
+#[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Shape {
     Rect(Rect),
@@ -674,11 +658,7 @@ enum Shape {
 }
 /// The shapes cutting a box: `clip`, unless every rounded shape lies inside
 /// it, then each rounded rectangle; `None` where a level cuts nothing.
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    all(windows, feature = "webview2")
-))]
+#[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
 fn shapes(clip: Rect, rounded: &[zgx::scene::RoundRect], levels: usize) -> Vec<Option<Shape>> {
     let rounded: Vec<zgx::scene::RoundRect> = rounded
         .iter()

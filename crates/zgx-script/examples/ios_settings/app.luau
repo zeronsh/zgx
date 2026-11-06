@@ -55,7 +55,7 @@ local function row(item, last)
 		justify = "start",
 		hover = {},
 		active = { bg = "$pressed" },
-		role = item.toggle and "switch" or nil,
+		role = if item.toggle then "switch" else "button",
 		checked = item.toggle,
 		on_click = item.toggle and function()
 			item.toggle:set(not item.toggle:get())

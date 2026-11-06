@@ -83,6 +83,7 @@ impl TextStore {
     }
     /// The focused editor's input scope (`input_scope`), the default with
     /// none.
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     pub(crate) fn input_scope(&self) -> i32 {
         input_scope(
             self.editor
@@ -371,6 +372,7 @@ impl TextStore {
     /// The input method marked its composition's clauses (its display
     /// attributes, read after each of its edits): document ranges and how
     /// each is marked. Ranges outside the composition are left out.
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     pub(crate) fn mark_clauses(&mut self, clauses: &[(Range<usize>, ClauseStyle)]) {
         let (Some(editor), Some(composition)) = (self.editor.clone(), self.composition.clone())
         else {
@@ -461,6 +463,7 @@ impl TextStore {
 /// editor's `InputMode`: which touch keyboard Windows shows, what its input
 /// methods offer. `None`'s keyboard isn't shown at all (the host's part);
 /// its scope is the default.
+#[cfg_attr(target_os = "ios", allow(dead_code))]
 pub(crate) fn input_scope(mode: InputMode) -> i32 {
     match mode {
         InputMode::Text | InputMode::None => 0, // IS_DEFAULT

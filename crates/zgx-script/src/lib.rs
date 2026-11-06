@@ -69,6 +69,7 @@ pub mod markdown;
 mod meter;
 mod modifiers;
 mod motion;
+mod native;
 mod node;
 mod opens;
 mod paged;
@@ -4109,7 +4110,7 @@ impl ScriptHost {
         let ui: mlua::Table = lua.globals().get("ui").map_err(fail)?;
         // Each module made the first time a script names it (`lazy`).
         let lazy = lazy::Lazy::default();
-        node::install_glass(&lazy);
+        native::install_glass(&lazy);
         lazy.ui(&["path", "linear"], canvas::install);
         #[cfg(feature = "scene3d")]
         lazy.ui(
