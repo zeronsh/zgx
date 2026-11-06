@@ -61,8 +61,7 @@ pub(crate) enum Press {
 /// A tape's event due, as the platform would report it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Due {
-    /// With when the tape has it happen, whenever the window reads it.
-    Wheel(MouseScrollDelta, TouchPhase, Instant),
+    Wheel(MouseScrollDelta, TouchPhase),
     /// The pointer at a place in the window, in points.
     Pointer((f32, f32), Press),
 }
@@ -236,7 +235,7 @@ impl Tape {
         if self.playing.front().is_none_or(|(at, _)| *at > now) {
             return None;
         }
-        let (at, mut e) = self.playing.pop_front()?;
+        let (_, mut e) = self.playing.pop_front()?;
         // The pointer's moves due by now come as one, the last: a platform
         // hands an app one move a turn, and each move handled lays out a
         // window it resizes. A window slower than the tape would otherwise
@@ -260,7 +259,7 @@ impl Tape {
         } else {
             MouseScrollDelta::LineDelta(e.delta.0, e.delta.1)
         };
-        Some(Due::Wheel(delta, e.phase, at))
+        Some(Due::Wheel(delta, e.phase))
     }
 }
 
@@ -306,8 +305,7 @@ mod tests {
             tape.due(start, 1.),
             Some(Due::Wheel(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(0., -2.5)),
-                TouchPhase::Started,
-                start
+                TouchPhase::Started
             ))
         );
         assert_eq!(tape.due(ms(7), 1.), None, "not due yet");
@@ -315,17 +313,14 @@ mod tests {
             tape.due(ms(8), 1.),
             Some(Due::Wheel(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.5, -6.75)),
-                TouchPhase::Moved,
-                ms(8)
+                TouchPhase::Moved
             ))
         );
         assert_eq!(
             tape.due(ms(40), 1.),
             Some(Due::Wheel(
                 MouseScrollDelta::LineDelta(0., -1.),
-                TouchPhase::Moved,
-                // When the tape has it, though the window reads it later.
-                ms(25)
+                TouchPhase::Moved
             ))
         );
         assert_eq!(tape.deadline(), None, "played");
