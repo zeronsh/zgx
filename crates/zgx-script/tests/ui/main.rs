@@ -37,6 +37,8 @@ mod host_top_layer;
 mod i18n_script;
 #[path = "../idle_gc.rs"]
 mod idle_gc;
+#[path = "../list_keys_read.rs"]
+mod list_keys_read;
 #[path = "../image_cache.rs"]
 mod image_cache;
 #[path = "../intrinsic_sizes.rs"]
