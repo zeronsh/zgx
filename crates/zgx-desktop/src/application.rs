@@ -1267,6 +1267,29 @@ fn align_wait(
 /// presents on the plain layer for as long: `zgx_gpu`'s `RESIZE_SETTLE`).
 #[cfg(target_os = "macos")]
 const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+/// The rate below the display's that frames keep, if any: what animations ask
+/// for, unless a hand is on the window (then frames run at the display's rate,
+/// on the link).
+#[cfg(target_os = "macos")]
+fn reduced_rate(demanded: Option<f64>, hand: bool, refresh: f64) -> Option<f64> {
+    demanded.filter(|rate| !hand && *rate < refresh - 0.5)
+}
+/// How long after a move of the pointer or the wheel a window's frames are a
+/// hand's, handed over as they are drawn (`refresh_grid`). Past two refreshes
+/// of the slowest pointer, and short enough that what follows, a stream or
+/// an animation, has its grid back at once.
+#[cfg(target_os = "macos")]
+const HAND_FRAMES: std::time::Duration = std::time::Duration::from_millis(100);
+/// Whether a frame drawn at `now` is a hand's: the pointer or the wheel moved
+/// a moment ago, or a scroll it started still runs.
+#[cfg(target_os = "macos")]
+fn under_hand(
+    input_at: Option<std::time::Instant>,
+    scrolling: bool,
+    now: std::time::Instant,
+) -> bool {
+    scrolling || input_at.is_some_and(|at| now.duration_since(at) < HAND_FRAMES)
+}
 /// How long after input frames stay at the display's full rate: a press's
 /// release spring or a hover fade that follows input keeps its frames too.
 #[cfg(any(target_os = "macos", windows))]
@@ -1641,6 +1664,9 @@ struct Host {
     /// would hold the next resize step back.
     #[cfg(target_os = "macos")]
     resized_at: Option<std::time::Instant>,
+    /// When the pointer or the wheel last moved in this window (`refresh_grid`).
+    #[cfg(target_os = "macos")]
+    input_at: Option<std::time::Instant>,
     /// The window's size as AppKit last reported it (`Resized`, sent for
     /// every change of the content view's frame): asking every frame
     /// costs a walk of the window's frame views. None until reported.
@@ -2067,6 +2093,8 @@ impl Host {
             caret_applied: None,
             #[cfg(target_os = "macos")]
             resized_at: None,
+            #[cfg(target_os = "macos")]
+            input_at: None,
             #[cfg(target_os = "macos")]
             reported_size: None,
             #[cfg(target_os = "macos")]
@@ -4337,6 +4365,13 @@ impl Host {
         Ok(())
     }
     fn window_event(&mut self, event: WindowEvent) -> Result<(), Box<dyn Error>> {
+        #[cfg(target_os = "macos")]
+        if matches!(
+            event,
+            WindowEvent::CursorMoved { .. } | WindowEvent::MouseWheel { .. }
+        ) {
+            self.input_at = Some(std::time::Instant::now());
+        }
         // On Wayland the compositor holds the pointer while it has the drag,
         // and gives it back at the drop, before the drop's target finishes
         // with it: a press then is a new gesture, which that drag's end must
@@ -5888,6 +5923,12 @@ impl Host {
             self.latch = Latch::default();
             return None;
         }
+        // A hand's frames: the grid's fixed point would cost a frame near a
+        // refresh's length a whole refresh, and what the hand moves lags it.
+        if under_hand(self.input_at, self.scroll.active(now), now) {
+            self.latch = Latch::default();
+            return None;
+        }
         let steady = self
             .presented_at
             .is_some_and(|at| now.duration_since(at) < STEADY_GAP);
@@ -5937,18 +5978,21 @@ impl Host {
             // otherwise hold what input changed until their next tick, a drag
             // shown at 12 fps up to 80 ms late.
             let inputting = self.input_until.is_some_and(|until| now < until);
-            let rate = self
-                .frames
-                .demanded_rate(refresh)
-                .filter(|rate| !scrolling && !inputting && *rate < refresh - 0.5);
+            let rate = reduced_rate(
+                self.frames.demanded_rate(refresh),
+                scrolling || inputting,
+                refresh,
+            );
             // Animating at the display's rate, the link paces every frame:
             // locked to the display, frames reach the window server one a
             // refresh, where a timer's wake-ups wander by milliseconds and
-            // leave some refreshes without a new frame. Otherwise (slower
-            // updates, scrolling) a timer paces them on the grid the link last
+            // leave some refreshes without a new frame. So is a scroll: a timer
+            // and the grid's wait held the main thread through most of each
+            // refresh, and a real hand's events came half as often. Otherwise
+            // (slower updates) a timer paces them on the grid the link last
             // reported, and the link (a thread spinning to each refresh) runs
             // again only to resync.
-            let animating = wanted && rate.is_none() && !scrolling;
+            let animating = wanted && rate.is_none();
             self.link_paced = animating;
             if let Some(renderer) = &mut self.renderer {
                 renderer.set_full_rate(wanted && rate.is_none());
@@ -5967,11 +6011,8 @@ impl Host {
             // 8.0%, near a composited view's 9.1%.
             link.set_view_clock(drawables);
             // Once the link has reported the grid, the timer continues it:
-            // a scroll starting after a pause, or the grid going stale, keeps
-            // its frames on the timer while the link reports again (see
-            // `link_reported`). Handing frames to the link meanwhile lost a
-            // refresh each time it started: a gesture's second frame came
-            // ~22 ms after its first, and a scroll lost one a second.
+            // the grid going stale keeps slower frames on the timer while the
+            // link reports again (see `link_reported`).
             let synced = !animating && self.vsync_synced.is_some();
             let timed = wanted && synced;
             if timed && !self.vsync_paced {
@@ -8430,6 +8471,39 @@ mod tests {
         for left in [1.9, 2.5, 3.2, 8.0, 15.0] {
             assert_eq!(align_wait(ms(left), slow), None, "{left} ms at 60 Hz");
         }
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_hand_runs_at_the_displays_rate_whatever_animations_ask() {
+        assert_eq!(
+            reduced_rate(Some(12.), true, 120.),
+            None,
+            "a hand: the link"
+        );
+        assert_eq!(
+            reduced_rate(None, true, 120.),
+            None,
+            "a hand alone: the link"
+        );
+        assert_eq!(reduced_rate(Some(12.), false, 120.), Some(12.));
+        assert_eq!(
+            reduced_rate(Some(120.), false, 120.),
+            None,
+            "the display's own"
+        );
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_hands_frames_are_off_the_grid_and_a_streams_are_on_it() {
+        let now = std::time::Instant::now();
+        let ago = |ms: u64| Some(now - std::time::Duration::from_millis(ms));
+        assert!(under_hand(ago(8), false, now), "a pointer moving");
+        assert!(under_hand(None, true, now), "a scroll still running");
+        assert!(
+            !under_hand(ago(100), false, now),
+            "a hand gone a moment ago"
+        );
+        assert!(!under_hand(None, false, now), "no hand at all: a stream");
     }
     #[cfg(target_os = "macos")]
     #[test]
