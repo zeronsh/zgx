@@ -868,10 +868,27 @@ impl Frame {
     pub(crate) fn commit_presenting(
         self,
         drawable: Option<&ProtocolObject<dyn objc2_metal::MTLDrawable>>,
+        flip: Option<&crate::layer_present::FlipSlot>,
     ) -> CommandBuffer {
         self.encoder.endEncoding();
         if let Some(drawable) = drawable {
             self.buffer.presentDrawable(drawable);
+        }
+        if let Some(flip) = flip {
+            let flip = flip.clone();
+            let handler = block2::RcBlock::new(
+                move |done: std::ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+                    // SAFETY: Metal passes the buffer that completed, alive for the call.
+                    let done = unsafe { done.as_ref() };
+                    flip.gpu_done(done.GPUEndTime() - done.GPUStartTime());
+                },
+            );
+            // SAFETY: A live block taking the buffer, as the handler's type declares; Metal
+            // copies it. Added before the commit, as Metal requires.
+            unsafe {
+                self.buffer
+                    .addCompletedHandler(block2::RcBlock::as_ptr(&handler))
+            };
         }
         self.buffer.commit();
         self.buffer

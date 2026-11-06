@@ -261,6 +261,7 @@ impl GpuRenderer {
     /// Test hook: the frame shown, without what layers show over it.
     #[doc(hidden)]
     pub fn debug_bare_pixels(&self) -> Option<(u32, u32, Vec<u8>)> {
+        self.finish_direct();
         let mut frame = self.shown_frame()?;
         frame.over.clear();
         frame.read(0, 0, u32::MAX, u32::MAX)

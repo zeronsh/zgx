@@ -550,23 +550,74 @@ fn loop_animation(shown: &LoopShown) -> Option<Retained<AnyObject>> {
         Some(animation)
     }
 }
-/// PROTOTYPE: a tile flip to run on another thread once the GPU is done.
+/// PROTOTYPE: a tile flip, run once the frame's GPU work is done: by Metal's
+/// completion handler, or by the main thread if that came first.
 pub(crate) struct FlipPlan {
     plain: Retained<CALayer>,
     tile: Retained<CALayer>,
     probe: Option<Probe>,
 }
-// SAFETY: prototype; the layers are only touched in an explicit transaction there, and the main
-// thread joins before it touches them again.
+// SAFETY: prototype; only used in an explicit transaction, and the main thread
+// joins (`FlipSlot::join`) before it touches these layers again.
 unsafe impl Send for FlipPlan {}
 impl FlipPlan {
-    pub(crate) fn run(self) {
+    fn run(self) {
         transaction(|| {
             hide_tiles(&self.plain, Some(&self.tile));
             if let Some(probe) = &self.probe {
                 probe.present();
             }
         });
+    }
+}
+#[derive(Default)]
+struct FlipState {
+    ran: Option<f64>,
+    plan: Option<FlipPlan>,
+}
+/// PROTOTYPE: a frame's GPU work and its tile flip, whichever is ready last
+/// running the flip.
+#[derive(Clone, Default)]
+pub(crate) struct FlipSlot(std::sync::Arc<(std::sync::Mutex<FlipState>, std::sync::Condvar)>);
+impl FlipSlot {
+    /// The handler: the GPU is done; flip, if the plan came first.
+    pub(crate) fn gpu_done(&self, ran: f64) {
+        let mut state = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(plan) = state.plan.take() {
+            // Nothing that waits on Metal may run on its completion queue: the
+            // probe's drawable schedules and waits, so its flip goes elsewhere.
+            if plan.probe.is_some() {
+                let slot = self.clone();
+                std::thread::spawn(move || {
+                    objc2::rc::autoreleasepool(|_| plan.run());
+                    let mut state = slot.0.0.lock().unwrap_or_else(|e| e.into_inner());
+                    state.ran = Some(ran);
+                    slot.0.1.notify_all();
+                });
+                return;
+            }
+            objc2::rc::autoreleasepool(|_| plan.run());
+        }
+        state.ran = Some(ran);
+        self.0.1.notify_all();
+    }
+    /// The main thread: flip now if the GPU is done, or leave it to the handler.
+    pub(crate) fn hand_over(&self, plan: FlipPlan) {
+        let mut state = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.ran.is_some() {
+            drop(state);
+            plan.run();
+        } else {
+            state.plan = Some(plan);
+        }
+    }
+    /// Wait until the GPU is done and the flip made: how long the GPU ran.
+    pub(crate) fn join(&self) -> f64 {
+        let mut state = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        while state.ran.is_none() {
+            state = self.0.1.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        state.ran.unwrap_or(0.)
     }
 }
 /// See `Layer::probe`.
@@ -1678,7 +1729,10 @@ impl Layer {
     pub(crate) fn plan_flip(&mut self, buffer: &Buffer, opaque: bool) -> Option<FlipPlan> {
         if self.video.is_some()
             || self.drawables.as_ref().is_some_and(|d| d.shown)
-            || self.loops_due.as_ref().is_some_and(|(_, shown)| !shown.is_empty())
+            || self
+                .loops_due
+                .as_ref()
+                .is_some_and(|(_, shown)| !shown.is_empty())
         {
             return None;
         }
@@ -1766,6 +1820,13 @@ impl Layer {
     }
     /// Drops the tiles of surfaces other than `surfaces` (the renderer's, as
     /// it keeps fewer or makes new ones): a tile holds its surface.
+    /// PROTOTYPE: whether `keep` would drop a tile.
+    pub(crate) fn keep_changes(&self, surfaces: impl Iterator<Item = u32> + Clone) -> bool {
+        !self
+            .tiles
+            .iter()
+            .all(|(id, _)| surfaces.clone().any(|kept| kept == *id))
+    }
     pub fn keep(&mut self, surfaces: impl Iterator<Item = u32> + Clone) {
         if self
             .tiles
