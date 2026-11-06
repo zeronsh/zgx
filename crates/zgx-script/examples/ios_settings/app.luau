@@ -95,6 +95,17 @@ end
 
 local airplane = ui.state("airplane", false)
 
+-- More of the same below the fold, to flick against a native list.
+local more: { any } = {}
+for index = 1, 30 do
+	more[index] = section {
+		{ icon = "bell.badge.fill", tint = "$ios.red", title = "Notifications" },
+		{ icon = "speaker.wave.3.fill", tint = "$ios.pink", title = "Sounds & Haptics" },
+		{ icon = "moon.fill", tint = "$ios.indigo", title = "Focus" },
+		{ icon = "gear", tint = "$ios.gray", title = "General" },
+	}
+end
+
 return ui.div {
 	w = "100%",
 	h = "100%",
@@ -104,10 +115,10 @@ return ui.div {
 		h = "100%",
 		ui.column {
 			pt = function()
-				return safe:get().top + 50
+				return safe:get().top + 54
 			end,
 			pb = 120,
-			ui.text { "Settings", ml = 16, mb = 8, text_size = "$font.size.xxl", weight = 700, color = "$text.primary" },
+			ui.text { "Settings", ml = 16, mb = 4, text_size = "$font.size.xxl", weight = 700, color = "$text.primary" },
 			section {
 				{ icon = "airplane", tint = "$ios.orange", title = "Airplane Mode", toggle = airplane },
 				{ icon = "wifi", tint = "$ios.blue", title = "Wi-Fi", detail = "Home" },
@@ -124,6 +135,7 @@ return ui.div {
 				{ icon = "gear", tint = "$ios.gray", title = "General" },
 				{ icon = "accessibility", tint = "$ios.blue", title = "Accessibility" },
 			},
+			more,
 		},
 	},
 	ui.glass {

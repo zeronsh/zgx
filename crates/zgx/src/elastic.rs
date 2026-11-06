@@ -496,3 +496,88 @@ fn step(ui: &Ui, view: &Rc<Elastic>, now: Instant) -> bool {
     }
     true
 }
+
+/// A scroll view driven from outside: a platform's own scroller tracks the
+/// finger, coasts and rubber-bands, and each of its positions lands here.
+#[derive(Clone)]
+pub struct ScrollDriver(Weak<Elastic>);
+
+/// A driven scroll view's measures, in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollMetrics {
+    /// It scrolls across, not down.
+    pub horizontal: bool,
+    /// Its own size.
+    pub size: (f32, f32),
+    /// Its content's size.
+    pub extent: (f32, f32),
+    /// How far along it has scrolled.
+    pub offset: f32,
+    /// How far past either end it shows (`ScrollDriver::drive`).
+    pub stretch: f32,
+}
+
+impl ScrollDriver {
+    /// Its measures, while it is mounted.
+    pub fn metrics(&self) -> Option<ScrollMetrics> {
+        let view = self.0.upgrade()?;
+        Some(ScrollMetrics {
+            horizontal: view.horizontal,
+            size: view.size.with_untracked(|s| *s),
+            extent: view.extent.with_untracked(|s| *s),
+            offset: view.offset.with_untracked(|o| *o),
+            stretch: view.shown.with_untracked(|s| *s),
+        })
+    }
+    /// Show position `value`, which may be past either end: the offset an app
+    /// reads stays in range, and what lies beyond is stretch, as the platform
+    /// curved it.
+    pub fn drive(&self, value: f32) {
+        let Some(view) = self.0.upgrade() else {
+            return;
+        };
+        view.snap();
+        let offset = value.clamp(0., view.limit());
+        if view.offset.with_untracked(|o| *o) != offset {
+            view.offset.set(offset);
+        }
+        let stretch = value - offset;
+        if view.shown.with_untracked(|s| *s) != stretch {
+            view.shown.set(stretch);
+        }
+    }
+    /// Whether this is the same scroll view as `other`.
+    pub fn same(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+}
+
+/// The innermost scroll view at (`x`, `y`) that has room to scroll.
+pub(crate) fn driver_at(ui: &Ui, x: f32, y: f32) -> Option<ScrollDriver> {
+    let scene = ui.scene.borrow();
+    let state = ui.elastic_state().borrow();
+    let hit = scene.hit_test(x, y)?;
+    std::iter::once(hit)
+        .chain(scene.ancestors(hit))
+        .find_map(|node| {
+            state
+                .views
+                .iter()
+                .find(|(root, _)| *root == node)
+                .and_then(|(_, view)| view.upgrade())
+                .filter(|view| !view.fits())
+        })
+        .map(|view| ScrollDriver(Rc::downgrade(&view)))
+}
+
+/// The tallest mounted scroll view with room to scroll: what a tap on the
+/// status bar scrolls to its top.
+pub(crate) fn main_driver(state: &State) -> Option<ScrollDriver> {
+    state
+        .views
+        .iter()
+        .filter_map(|(_, view)| view.upgrade())
+        .filter(|view| !view.horizontal && !view.fits())
+        .max_by(|a, b| a.length().total_cmp(&b.length()))
+        .map(|view| ScrollDriver(Rc::downgrade(&view)))
+}

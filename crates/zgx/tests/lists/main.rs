@@ -22,6 +22,8 @@ mod keyboard_scrolling;
 mod navigation_swipes;
 #[path = "../overlay_scrollbars.rs"]
 mod overlay_scrollbars;
+#[path = "../scroll_driver.rs"]
+mod scroll_driver;
 #[path = "../scroll_latching.rs"]
 mod scroll_latching;
 #[path = "../variable_virtual_list.rs"]

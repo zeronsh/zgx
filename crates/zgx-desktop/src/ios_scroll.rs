@@ -1,0 +1,205 @@
+//! Scrolling with UIKit's own physics: a `UIScrollView` nobody sees, its pan
+//! gesture on the window's view, says where zgx's scroll views should be.
+//! Tracking, deceleration, rubber-banding and a tap on the status bar are
+//! UIKit's, not an imitation; zgx draws. When the pan begins, UIKit cancels the
+//! finger's touches, so a press under it ends as it does in a native list.
+//!
+//! When a finger lands the scroller takes on the zgx scroll view under it.
+use objc2::{
+    DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
+    rc::Retained,
+    runtime::{AnyObject, Bool, NSObject, NSObjectProtocol},
+};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use zgx::elastic::ScrollDriver;
+
+struct State {
+    /// The zgx scroll view the scroller stands for.
+    driver: RefCell<Option<ScrollDriver>>,
+    /// Finds what a tap on the status bar scrolls.
+    top: RefCell<Box<dyn Fn() -> Option<ScrollDriver>>>,
+    /// Its positions are ours being set, not UIKit's motion.
+    configuring: std::cell::Cell<bool>,
+    window: Arc<winit::window::Window>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = Rc<State>]
+    struct Delegate;
+    unsafe impl NSObjectProtocol for Delegate {}
+    impl Delegate {
+        #[unsafe(method(scrollViewDidScroll:))]
+        fn did_scroll(&self, view: &AnyObject) {
+            let state = self.ivars();
+            if state.configuring.get() {
+                return;
+            }
+            let Some(driver) = state.driver.borrow().clone() else {
+                return;
+            };
+            // SAFETY: UIScrollView's getter.
+            let at: CGPoint = unsafe { msg_send![view, contentOffset] };
+            let horizontal = driver.metrics().is_some_and(|m| m.horizontal);
+            driver.drive(if horizontal { at.x } else { at.y } as f32);
+            state.window.request_redraw();
+        }
+        #[unsafe(method(scrollViewShouldScrollToTop:))]
+        fn should_scroll_to_top(&self, view: &AnyObject) -> Bool {
+            let state = self.ivars();
+            let driver = (state.top.borrow())();
+            let Some(driver) = driver else {
+                return Bool::NO;
+            };
+            configure(state, view, driver);
+            Bool::YES
+        }
+    }
+);
+
+fn configure(state: &State, view: &AnyObject, driver: ScrollDriver) {
+    let Some(metrics) = driver.metrics() else {
+        return;
+    };
+    state.configuring.set(true);
+    let (offset_x, offset_y) = if metrics.horizontal {
+        (metrics.offset as f64, 0.)
+    } else {
+        (0., metrics.offset as f64)
+    };
+    let size = CGSize {
+        width: metrics.size.0 as f64,
+        height: metrics.size.1 as f64,
+    };
+    let content = CGSize {
+        width: if metrics.horizontal {
+            metrics.extent.0 as f64
+        } else {
+            size.width
+        },
+        height: if metrics.horizontal {
+            size.height
+        } else {
+            metrics.extent.1 as f64
+        },
+    };
+    let frame = CGRect {
+        origin: CGPoint { x: 0., y: 0. },
+        size,
+    };
+    // SAFETY: UIScrollView's setters, on the main thread.
+    unsafe {
+        let _: () = msg_send![view, setFrame: frame];
+        let _: () = msg_send![view, setContentSize: content];
+        let _: () = msg_send![view, setContentOffset: CGPoint { x: offset_x, y: offset_y }];
+        let _: () = msg_send![view, setScrollEnabled: true];
+    }
+    *state.driver.borrow_mut() = Some(driver);
+    state.configuring.set(false);
+}
+
+pub(crate) struct NativeScroller {
+    view: Retained<AnyObject>,
+    _delegate: Retained<Delegate>,
+    state: Rc<State>,
+}
+
+impl NativeScroller {
+    pub(crate) fn new(
+        window: Arc<winit::window::Window>,
+        top: impl Fn() -> Option<ScrollDriver> + 'static,
+    ) -> Option<Self> {
+        let mtm = MainThreadMarker::new()?;
+        let handle = window.window_handle().ok()?;
+        let RawWindowHandle::UiKit(handle) = handle.as_raw() else {
+            return None;
+        };
+        let state = Rc::new(State {
+            driver: RefCell::default(),
+            top: RefCell::new(Box::new(top)),
+            configuring: Default::default(),
+            window: window.clone(),
+        });
+        let delegate = Delegate::alloc(mtm).set_ivars(state.clone());
+        // SAFETY: NSObject's `init`, on a fresh allocation with its ivars set.
+        let delegate: Retained<Delegate> = unsafe { msg_send![super(delegate), init] };
+        // SAFETY: winit's view, alive with its window; UIKit's constructor and
+        // setters, on the main thread checked above. The view keeps the pan.
+        let view = unsafe {
+            let root: *const AnyObject = handle.ui_view.as_ptr().cast();
+            let view: Retained<AnyObject> = msg_send![class!(UIScrollView), new];
+            let _: () = msg_send![&*view, setDelegate: &*delegate];
+            let _: () = msg_send![&*view, setAlpha: 0f64];
+            let _: () = msg_send![&*view, setUserInteractionEnabled: false];
+            let _: () = msg_send![&*view, setAccessibilityElementsHidden: true];
+            let _: () = msg_send![&*view, setShowsVerticalScrollIndicator: false];
+            let _: () = msg_send![&*view, setShowsHorizontalScrollIndicator: false];
+            // UIScrollViewContentInsetAdjustmentNever: zgx lays out by the
+            // safe area itself.
+            let _: () = msg_send![&*view, setContentInsetAdjustmentBehavior: 2isize];
+            let _: () = msg_send![&*view, setScrollEnabled: false];
+            let _: () = msg_send![&*view, setScrollsToTop: true];
+            let _: () = msg_send![&*root, insertSubview: &*view, atIndex: 0isize];
+            let pan: Retained<AnyObject> = msg_send![&*view, panGestureRecognizer];
+            let _: () = msg_send![&*root, addGestureRecognizer: &*pan];
+            view
+        };
+        // `ZGX_IOS_SCROLL_PROBE=y`: three seconds in, UIKit animates the main
+        // scroll view to `y`, for a check of this path with no finger on it.
+        if let Some(y) = zgx::env::var("ZGX_IOS_SCROLL_PROBE")
+            .ok()
+            .and_then(|y| y.parse::<f64>().ok())
+        {
+            let (view, state) = (view.clone(), state.clone());
+            let fire = block2::RcBlock::new(move |_: *mut AnyObject| {
+                let driver = (state.top.borrow())();
+                if let Some(driver) = driver {
+                    configure(&state, &view, driver);
+                    // SAFETY: UIScrollView's method, on the main thread.
+                    let _: () = unsafe {
+                        msg_send![&*view, setContentOffset: CGPoint { x: 0., y }, animated: true]
+                    };
+                }
+            });
+            // SAFETY: NSTimer's constructor; the run loop keeps it.
+            let _: Retained<AnyObject> = unsafe {
+                msg_send![class!(NSTimer),
+                    scheduledTimerWithTimeInterval: 3f64,
+                    repeats: false,
+                    block: &*fire]
+            };
+        }
+        Some(Self {
+            view,
+            _delegate: delegate,
+            state,
+        })
+    }
+    /// A finger landed over `driver` (none: nothing there scrolls, and the
+    /// finger is zgx's alone). A scroller in motion keeps its scroll view:
+    /// the finger catches it, as it does in a native list.
+    pub(crate) fn finger_down(&self, driver: Option<ScrollDriver>) {
+        // SAFETY: UIScrollView's getters and setters, on the main thread.
+        unsafe {
+            let moving: bool = msg_send![&*self.view, isDecelerating];
+            let tracking: bool = msg_send![&*self.view, isTracking];
+            if moving || tracking {
+                return;
+            }
+            match driver {
+                Some(driver) => configure(&self.state, &self.view, driver),
+                None => {
+                    *self.state.driver.borrow_mut() = None;
+                    let _: () = msg_send![&*self.view, setScrollEnabled: false];
+                }
+            }
+        }
+    }
+    /// Whether UIKit tracks scrolling for this finger: zgx offers it no pan.
+    pub(crate) fn tracks(&self) -> bool {
+        self.state.driver.borrow().is_some()
+    }
+}

@@ -42,7 +42,7 @@ pub(crate) mod editor_autocorrect;
 pub(crate) mod editor_lines;
 pub(crate) mod editor_menu;
 pub(crate) mod editor_spell;
-pub(crate) mod elastic;
+pub mod elastic;
 pub mod find;
 mod find_text;
 pub mod rich_text;

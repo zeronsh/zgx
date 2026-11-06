@@ -1727,6 +1727,9 @@ struct Host {
     scroll: crate::scroll_resample::ScrollResampler,
     /// Fingers and pens on the screen, as the pointer.
     touch: crate::touch::Touches,
+    /// UIKit's scrolling (`ios_scroll`), made with the window.
+    #[cfg(target_os = "ios")]
+    native_scroll: Option<crate::ios_scroll::NativeScroller>,
     /// What had focus before a finger pressed, for a pan to give it back.
     touch_focus: Option<zgx::scene::NodeId>,
     /// The last press was a finger's or a pen's, not a mouse's: an editor
@@ -2003,6 +2006,8 @@ impl Host {
             window_cursor: WindowCursor::default(),
             scroll: Default::default(),
             touch: Default::default(),
+            #[cfg(target_os = "ios")]
+            native_scroll: None,
             touch_focus: None,
             #[cfg(windows)]
             touch_last: false,
@@ -2146,6 +2151,14 @@ impl Host {
                     }
                 }
                 crate::touch::Step::TryPan { x, y, dx, dy } => {
+                    // UIKit tracks this finger; if it decides on a pan, it
+                    // cancels the touch. Until then it drags what it pressed.
+                    #[cfg(target_os = "ios")]
+                    if self.native_scroll.as_ref().is_some_and(|s| s.tracks()) {
+                        let next = self.touch.decided(false);
+                        self.touch_steps(next)?;
+                        continue;
+                    }
                     let panned = self.dispatch_prevented(InputEvent::Scroll {
                         x,
                         y,
@@ -3809,6 +3822,18 @@ impl Host {
                 .and_then(|selector| crate::window_info::select_monitor(event_loop, selector));
             window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(display)));
         }
+        #[cfg(target_os = "ios")]
+        {
+            self.native_scroll = crate::ios_scroll::NativeScroller::new(
+                window.clone(),
+                self.context.ui.main_scroll_driver(),
+            );
+            // What the bars leave of it, before its first frame.
+            self.context
+                .window_info
+                .safe_area
+                .set(crate::ios_system::safe_area(&window));
+        }
         window.set_visible(self.state.visible);
         if self.state.minimized {
             window.set_minimized(true);
@@ -4748,6 +4773,13 @@ impl Host {
                 #[cfg(windows)]
                 {
                     self.touch_last = true;
+                }
+                #[cfg(target_os = "ios")]
+                if touch.phase == winit::event::TouchPhase::Started
+                    && self.touch.idle()
+                    && let Some(scroller) = &self.native_scroll
+                {
+                    scroller.finger_down(self.context.ui.scroll_driver_at(p.x, p.y));
                 }
                 if touch.phase == winit::event::TouchPhase::Started && self.touch.idle() {
                     self.touch_focus = self.context.ui.input.focused();

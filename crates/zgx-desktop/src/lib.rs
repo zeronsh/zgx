@@ -72,6 +72,8 @@ mod composition;
 mod contain;
 pub mod file_dialog;
 #[cfg(target_os = "ios")]
+mod ios_scroll;
+#[cfg(target_os = "ios")]
 mod ios_system;
 #[cfg(target_os = "linux")]
 mod linux_dbus;
