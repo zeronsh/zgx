@@ -276,6 +276,9 @@ struct EditorHint {
     /// The caret's colour and width, if not the text's and the app's
     /// (`EditorHandle::set_caret_style`).
     caret: Cell<(Option<Color>, Option<f32>)>,
+    /// The platform shows the selection and caret over it, with its handles
+    /// (`EditorHandle::set_platform_selection`).
+    platform_selection: Cell<bool>,
     select_on_focus: Cell<bool>,
     /// A text area: once its text holds a line break, it is laid out a line
     /// at a time at any length (`editor_lines`), so an edit shapes the line
@@ -500,6 +503,7 @@ impl EditorHint {
         Self {
             value,
             placeholder: RefCell::default(),
+            platform_selection: Cell::new(false),
             caret: Cell::default(),
             select_on_focus: Cell::default(),
             lines,
@@ -922,6 +926,13 @@ impl EditorHandle {
     pub fn set_caret_style(&self, color: Option<Color>, width: Option<f32>) {
         let width = width.filter(|w| w.is_finite() && *w >= 0.);
         if self.hint.caret.replace((color, width)) != (color, width) {
+            self.refresh();
+        }
+    }
+    /// Whether the platform draws the selection and caret, with its own
+    /// handles and loupe (iOS's `UITextInteraction`), and the editor none.
+    pub fn set_platform_selection(&self, platform: bool) {
+        if self.hint.platform_selection.replace(platform) != platform {
             self.refresh();
         }
     }
@@ -5227,7 +5238,10 @@ impl Ui {
             );
             let font = editor_font(&s, root, &font).into_owned();
             s.set_font(text, font.clone());
-            let caret_color = draw_hint.caret.get().0.unwrap_or(color);
+            let caret_color = match draw_hint.platform_selection.get() {
+                true => Color(0, 0, 0, 0),
+                false => draw_hint.caret.get().0.unwrap_or(color),
+            };
             s.set_kind(caret, NodeKind::Rect(caret_color));
             let wrap_width = draw_wrap.get().then_some(inner_width.max(1.));
             // The committed text's revision tells its layout it is the same
@@ -5729,6 +5743,7 @@ impl Ui {
                     }),
                     rects: rects
                         .into_iter()
+                        .filter(|_| !draw_hint.platform_selection.get())
                         .map(|(x, y, w, h)| Rect::new(x, y, w, h))
                         .collect(),
                     text_color: None,

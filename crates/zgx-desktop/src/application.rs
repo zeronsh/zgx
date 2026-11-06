@@ -5719,6 +5719,17 @@ impl Host {
             {
                 self.context.window_info.keyboard.set(covered);
             }
+            // UIKit's text gestures lie over the focused editor.
+            if let (Some(text), Some(editor)) = (&self.text_input, self.context.ui.focused_editor())
+            {
+                let bounds = self
+                    .context
+                    .ui
+                    .scene
+                    .borrow()
+                    .transformed_bounds(editor.node);
+                text.place(bounds);
+            }
             // The keyboard's Return, as the key it is.
             if self
                 .text_input

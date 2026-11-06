@@ -36,6 +36,11 @@ struct State {
     enter: Cell<bool>,
     /// A tap, as the host saw it, for the keyboard's own cursor.
     told_len: Cell<usize>,
+    /// Where the view is, on the focused editor: what UIKit asks and tells of
+    /// text is relative to it, and its gestures are over it.
+    origin: Cell<(f32, f32)>,
+    /// An editor has the keyboard: touches on it are `UITextInteraction`'s.
+    editing: Cell<bool>,
 }
 
 thread_local! {
@@ -437,17 +442,99 @@ fn area(start: usize, end: usize) -> CGRect {
                 height: 0.,
             },
         },
-        |r| CGRect {
+        in_view,
+    )
+}
+/// A rectangle in the window's points, in the view's.
+fn in_view(r: zgx::scene::Rect) -> CGRect {
+    let (x, y) = state().map_or((0., 0.), |state| state.origin.get());
+    CGRect {
+        origin: CGPoint {
+            x: (r.x - x) as f64,
+            y: (r.y - y) as f64,
+        },
+        size: CGSize {
+            width: r.width as f64,
+            height: r.height as f64,
+        },
+    }
+}
+/// The document's offset nearest a point in the view.
+fn offset_at_point(point: CGPoint) -> Option<usize> {
+    let state = state()?;
+    let (x, y) = state.origin.get();
+    let found = state
+        .store
+        .borrow()
+        .offset_at(point.x as f32 + x, point.y as f32 + y);
+    found
+}
+/// `UITextSelectionRect`: one line's box of a selection.
+fn selection_rect_class() -> &'static AnyClass {
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    fn ivar(this: &AnyObject, name: &std::ffi::CStr) -> f64 {
+        let class = selection_rect_class();
+        // SAFETY: an instance of this class, which declares it.
+        unsafe {
+            *class
+                .instance_variable(name)
+                .expect("declared")
+                .load::<f64>(this)
+        }
+    }
+    extern "C-unwind" fn get_rect(this: &AnyObject, _: Sel) -> CGRect {
+        CGRect {
             origin: CGPoint {
-                x: r.x as f64,
-                y: r.y as f64,
+                x: ivar(this, c"x"),
+                y: ivar(this, c"y"),
             },
             size: CGSize {
-                width: r.width as f64,
-                height: r.height as f64,
+                width: ivar(this, c"w"),
+                height: ivar(this, c"h"),
             },
-        },
-    )
+        }
+    }
+    extern "C-unwind" fn writing_direction(_: &AnyObject, _: Sel) -> isize {
+        // NSWritingDirectionNatural.
+        -1
+    }
+    extern "C-unwind" fn contains_start(this: &AnyObject, _: Sel) -> Bool {
+        Bool::new(ivar(this, c"first") != 0.)
+    }
+    extern "C-unwind" fn contains_end(this: &AnyObject, _: Sel) -> Bool {
+        Bool::new(ivar(this, c"last") != 0.)
+    }
+    extern "C-unwind" fn is_vertical(_: &AnyObject, _: Sel) -> Bool {
+        Bool::NO
+    }
+    CLASS.get_or_init(|| {
+        let mut builder =
+            ClassBuilder::new(c"ZgxSelectionRect", class!(UITextSelectionRect)).expect("one class");
+        for name in [c"x", c"y", c"w", c"h", c"first", c"last"] {
+            builder.add_ivar::<f64>(name);
+        }
+        // SAFETY: each has the signature of the selector it answers.
+        unsafe {
+            builder.add_method(sel!(rect), get_rect as extern "C-unwind" fn(_, _) -> _);
+            builder.add_method(
+                sel!(writingDirection),
+                writing_direction as extern "C-unwind" fn(_, _) -> _,
+            );
+            builder.add_method(
+                sel!(containsStart),
+                contains_start as extern "C-unwind" fn(_, _) -> _,
+            );
+            builder.add_method(
+                sel!(containsEnd),
+                contains_end as extern "C-unwind" fn(_, _) -> _,
+            );
+            builder.add_method(
+                sel!(isVertical),
+                is_vertical as extern "C-unwind" fn(_, _) -> _,
+            );
+        }
+        builder.register()
+    })
 }
 extern "C-unwind" fn first_rect(_: &AnyObject, _: Sel, range: *mut AnyObject) -> CGRect {
     let (start, end) = range_ends(range);
@@ -459,26 +546,66 @@ extern "C-unwind" fn caret_rect(_: &AnyObject, _: Sel, at: *mut AnyObject) -> CG
     rect.size.width = rect.size.width.max(2.);
     rect
 }
-extern "C-unwind" fn selection_rects(_: &AnyObject, _: Sel, _: *mut AnyObject) -> *mut AnyObject {
-    // SAFETY: an empty array: zgx draws its selection itself.
+extern "C-unwind" fn selection_rects(
+    _: &AnyObject,
+    _: Sel,
+    range: *mut AnyObject,
+) -> *mut AnyObject {
+    let (start, end) = range_ends(range);
+    let lines = state().map_or(Vec::new(), |state| {
+        state.store.borrow().line_areas(start, end)
+    });
+    let class = selection_rect_class();
+    let count = lines.len();
+    // SAFETY: new instances of the class above, their ivars set, in an array
+    // handed to UIKit autoreleased.
     unsafe {
-        let empty: Retained<AnyObject> = msg_send![class!(NSArray), array];
-        Retained::autorelease_return(empty)
+        let array: Retained<AnyObject> = msg_send![class!(NSMutableArray), array];
+        for (index, line) in lines.into_iter().enumerate() {
+            let rect = in_view(line);
+            let made: Retained<AnyObject> = msg_send![class, new];
+            let set = |name: &std::ffi::CStr, value: f64| {
+                *class
+                    .instance_variable(name)
+                    .expect("declared")
+                    .load_ptr::<f64>(&made) = value;
+            };
+            set(c"x", rect.origin.x);
+            set(c"y", rect.origin.y);
+            set(c"w", rect.size.width);
+            set(c"h", rect.size.height);
+            set(c"first", f64::from(u8::from(index == 0)));
+            set(c"last", f64::from(u8::from(index + 1 == count)));
+            let _: () = msg_send![&*array, addObject: &*made];
+        }
+        Retained::autorelease_return(array)
     }
 }
-extern "C-unwind" fn closest_position(_: &AnyObject, _: Sel, _: CGPoint) -> *mut AnyObject {
-    position(state().map_or(0, |state| state.store.borrow().selection().1))
+extern "C-unwind" fn closest_position(_: &AnyObject, _: Sel, at: CGPoint) -> *mut AnyObject {
+    let found = offset_at_point(at);
+    position(found.unwrap_or_else(|| state().map_or(0, |state| state.store.borrow().selection().1)))
 }
 extern "C-unwind" fn closest_within(
     _: &AnyObject,
     _: Sel,
-    _: CGPoint,
+    at: CGPoint,
     within: *mut AnyObject,
 ) -> *mut AnyObject {
-    position(range_ends(within).1)
+    let (start, end) = range_ends(within);
+    position(offset_at_point(at).unwrap_or(end).clamp(start, end))
 }
-extern "C-unwind" fn character_range(_: &AnyObject, _: Sel, _: CGPoint) -> *mut AnyObject {
-    std::ptr::null_mut()
+extern "C-unwind" fn character_range(_: &AnyObject, _: Sel, at: CGPoint) -> *mut AnyObject {
+    let Some(state) = state() else {
+        return std::ptr::null_mut();
+    };
+    let Some(offset) = offset_at_point(at) else {
+        return std::ptr::null_mut();
+    };
+    let len = state.store.borrow().len();
+    range(offset.min(len), (offset + 1).min(len))
+}
+extern "C-unwind" fn text_input_view(this: &AnyObject, _: Sel) -> *const AnyObject {
+    this
 }
 
 // UIResponderStandardEditActions: the edit menu's, and a hardware keyboard's.
@@ -579,13 +706,24 @@ extern "C-unwind" fn is_secure(_: &AnyObject, _: Sel) -> Bool {
             .is_some_and(EditorHandle::is_secure)
     }))
 }
-extern "C-unwind" fn no_hit(
-    _: &AnyObject,
+/// Touches on the editor with the keyboard are `UITextInteraction`'s: its
+/// cursor, handles, loupe and edit menu. Anywhere else, or with none, zgx's.
+extern "C-unwind" fn hit_test(
+    this: &AnyObject,
     _: Sel,
-    _: CGPoint,
-    _: *mut AnyObject,
+    at: CGPoint,
+    event: *mut AnyObject,
 ) -> *mut AnyObject {
-    std::ptr::null_mut()
+    if !state().is_some_and(|state| state.editing.get()) {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: UIView's method, UIKit asking on the main thread.
+    let inside: Bool = unsafe { msg_send![this, pointInside: at, withEvent: event] };
+    if inside.as_bool() {
+        (this as *const AnyObject).cast_mut()
+    } else {
+        std::ptr::null_mut()
+    }
 }
 
 fn input_class() -> &'static AnyClass {
@@ -753,7 +891,11 @@ fn input_class() -> &'static AnyClass {
             );
             b.add_method(
                 sel!(hitTest:withEvent:),
-                no_hit as extern "C-unwind" fn(_, _, _, _) -> _,
+                hit_test as extern "C-unwind" fn(_, _, _, _) -> _,
+            );
+            b.add_method(
+                sel!(textInputView),
+                text_input_view as extern "C-unwind" fn(_, _) -> _,
             );
         }
         b.register()
@@ -765,6 +907,7 @@ pub(crate) struct TextInput {
     view: Retained<AnyObject>,
     state: Rc<State>,
     focused: Cell<bool>,
+    size: Cell<(f32, f32)>,
 }
 
 impl TextInput {
@@ -780,6 +923,8 @@ impl TextInput {
             tokenizer: RefCell::default(),
             enter: Cell::new(false),
             told_len: Cell::new(0),
+            origin: Cell::new((0., 0.)),
+            editing: Cell::new(false),
         });
         CURRENT.with(|current| *current.borrow_mut() = Some(state.clone()));
         // SAFETY: winit's view, alive with its window; UIKit's calls on the
@@ -789,6 +934,12 @@ impl TextInput {
             let view: Retained<AnyObject> = msg_send![input_class(), new];
             let _: () = msg_send![&*view, setAccessibilityElementsHidden: true];
             let _: () = msg_send![&*root, addSubview: &*view];
+            // UITextInteractionModeEditable: UIKit's own cursor, handles, loupe
+            // and edit menu over zgx's text.
+            let interaction: Retained<AnyObject> =
+                msg_send![class!(UITextInteraction), textInteractionForMode: 0isize];
+            let _: () = msg_send![&*interaction, setTextInput: &*view];
+            let _: () = msg_send![&*view, addInteraction: &*interaction];
             view
         };
         let _ = NSObject::class();
@@ -796,22 +947,56 @@ impl TextInput {
             view,
             state,
             focused: Cell::new(false),
+            size: Cell::new((0., 0.)),
         })
     }
     /// The focused editor changed: the keyboard comes or goes with it.
     pub(crate) fn focus(&self, editor: Option<EditorHandle>) {
         let wanted = editor.is_some();
+        if let Some(editor) = &editor {
+            editor.set_platform_selection(true);
+        }
+        self.state.editing.set(wanted);
         self.state.store.borrow_mut().focus(editor);
         self.state.told_len.set(self.state.store.borrow().len());
         if wanted != self.focused.replace(wanted) {
             // SAFETY: UIResponder's methods, on the main thread.
             unsafe {
                 if wanted {
+                    // Above what came since: native views' planes and hosts.
+                    let parent: Option<Retained<AnyObject>> = msg_send![&*self.view, superview];
+                    if let Some(parent) = parent {
+                        let _: () = msg_send![&*parent, bringSubviewToFront: &*self.view];
+                    }
                     let _: Bool = msg_send![&*self.view, becomeFirstResponder];
                 } else {
                     let _: Bool = msg_send![&*self.view, resignFirstResponder];
                 }
             }
+        }
+    }
+    /// Keep the view over the focused editor (`bounds`, in the window's points).
+    pub(crate) fn place(&self, bounds: zgx::scene::Rect) {
+        if self.state.origin.get() == (bounds.x, bounds.y)
+            && self.size.get() == (bounds.width, bounds.height)
+        {
+            return;
+        }
+        self.state.origin.set((bounds.x, bounds.y));
+        self.size.set((bounds.width, bounds.height));
+        let frame = CGRect {
+            origin: CGPoint {
+                x: bounds.x as f64,
+                y: bounds.y as f64,
+            },
+            size: CGSize {
+                width: bounds.width as f64,
+                height: bounds.height as f64,
+            },
+        };
+        // SAFETY: UIView's setter, on the main thread.
+        unsafe {
+            let _: () = msg_send![&*self.view, setFrame: frame];
         }
     }
     /// Return was pressed since the last call.

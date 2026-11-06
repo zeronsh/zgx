@@ -2,7 +2,7 @@
 //! link asking for 120 Hz, running only while frames are drawn, so an idle app
 //! still has nothing awake.
 use objc2::{
-    DefinedClass, Encode, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
+    MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, NSObject, NSObjectProtocol},
     sel,

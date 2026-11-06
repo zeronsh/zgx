@@ -195,6 +195,32 @@ impl TextStore {
         let (a, b) = (shown_byte(editor, start), shown_byte(editor, end));
         editor.text_area(a..b)
     }
+    /// The document's offset nearest the window's point `(x, y)`.
+    pub(crate) fn offset_at(&self, x: f32, y: f32) -> Option<usize> {
+        let editor = self.editor.as_ref()?;
+        let byte = editor.offset_at(x, y)?;
+        Some(editor.editor.borrow_mut().byte_to_utf16(byte))
+    }
+    /// Where `start..end` shows, a box for each line it runs on.
+    pub(crate) fn line_areas(&self, start: usize, end: usize) -> Vec<zgx::scene::Rect> {
+        /// Past this it is one box: a phone's selection of a long document.
+        const CHARACTERS: usize = 4096;
+        let mut lines: Vec<zgx::scene::Rect> = Vec::new();
+        if end.saturating_sub(start) > CHARACTERS {
+            lines.extend(self.area(start, end));
+            return lines;
+        }
+        for at in start..end {
+            let Some(area) = self.area(at, at + 1) else {
+                continue;
+            };
+            match lines.last_mut() {
+                Some(line) if (line.y - area.y).abs() < 1. => *line = line.union(area),
+                _ => lines.push(area),
+            }
+        }
+        lines
+    }
     /// The selection (`GetSelection`): the caret or selection in the
     /// composition while there is one, else the editor's; its start, its end,
     /// and whether the caret is at the start.
