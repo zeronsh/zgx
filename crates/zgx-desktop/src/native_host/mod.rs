@@ -209,6 +209,12 @@ impl NativeHost {
     pub fn active(&self) -> bool {
         !self.natives.is_empty() || !self.split.is_empty()
     }
+    /// Whether a native view now on show splits the window into planes. One
+    /// hidden with its tab, or its panel, keeps its place in `active` and splits
+    /// nothing.
+    pub fn splits_planes(&self) -> bool {
+        !self.split.is_empty()
+    }
     /// Whether `node` is a native view's node (pointer over the page: the
     /// platform view owns the cursor).
     pub fn is_native(&self, node: zgx::scene::NodeId) -> bool {

@@ -2721,7 +2721,7 @@ impl Host {
         #[cfg(target_os = "macos")]
         self.context.ui.set_native_caret(
             *NATIVE_CARET
-                && !self.native.active()
+                && !self.native.splits_planes()
                 && self
                     .renderer
                     .as_ref()
