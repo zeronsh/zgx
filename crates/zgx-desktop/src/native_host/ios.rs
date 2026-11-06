@@ -263,6 +263,15 @@ unsafe fn scroll_edge_effect(
     }
 }
 
+thread_local! {
+    static HELD: std::cell::RefCell<Option<Retained<AnyObject>>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// The view holding all of the app that lies under the edge effect, once there
+/// is one: moved, it leaves what is above the effect where it is.
+pub(crate) fn held_view() -> Option<Retained<AnyObject>> {
+    HELD.with(|slot| slot.borrow().clone())
+}
 /// The app, held still inside a scroll view that doesn't scroll: the system's
 /// edge effect works on a scroll view's own contents (its blur on any behind it,
 /// its veil only on those), so this is how it gets over zgx's Metal. Made only
@@ -324,6 +333,7 @@ impl EdgeHost {
             let _: () = msg_send![&*held, setAutoresizingMask: FILL];
             let _: () = msg_send![&*scroll, addSubview: &*held];
             let _: () = msg_send![&*held, addSubview: &**root];
+            HELD.with(|slot| *slot.borrow_mut() = Some(held.clone()));
             let above = passive_view(bounds);
             let _: () = msg_send![&*above, setAutoresizingMask: FILL];
             let _: () = msg_send![&*above, setUserInteractionEnabled: true];

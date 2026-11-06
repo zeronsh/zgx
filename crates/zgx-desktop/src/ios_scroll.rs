@@ -47,6 +47,10 @@ struct State {
     keyboard_link: RefCell<Option<Retained<AnyObject>>>,
     /// The page's relation to the keyboard's edge, while there is one.
     lock: RefCell<Option<KeyboardLock>>,
+    /// The page moving with the keyboard in the render server, no redraws.
+    glue: RefCell<Option<Glue>>,
+    /// What waits for the frame being drawn, to change in its transaction.
+    after_frame: RefCell<Option<AfterFrame>>,
     /// What must show above the keyboard: the app's latest word.
     field: RefCell<Option<(ScrollDriver, f32)>>,
     /// The edge last frame: where, when, and for how many frames it hasn't moved.
@@ -135,8 +139,303 @@ pub(crate) fn keyboard_changing(covered: f32) {
             });
         }
     }
+    glue_to_keyboard(&state);
     start_keyboard_link(&state);
     crate::ios_gestures::log(&format!("keyboard will cover {covered:.0}"));
+}
+
+/// The page's way to the keyboard's new place, done by the render server: an
+/// animation of the view holding the content, from the keyboard's own spring and
+/// on its clock, so the two move as one with nothing drawn. What the app paints
+/// above the edge effect is not in that view and stays. Without an edge effect
+/// all the app is one layer, its bars too: the page follows by frames instead.
+struct Glue {
+    driver: ScrollDriver,
+    /// The offset drawn while this runs.
+    drawn: f32,
+    /// The offset to draw once it has.
+    target: f32,
+}
+enum AfterFrame {
+    /// The animation goes: the frame shows what it showed.
+    Remove,
+    /// The animation starts: the frame was drawn for it.
+    Start(Vec<f64>),
+}
+const GLUE_KEY: &str = "zgxKeyboard";
+/// Steps of the sampled spring, per second: the display's fastest.
+const GLUE_RATE: f64 = 120.;
+
+/// `layer`'s one animation, if it is a spring on a position: the keyboard's.
+///
+/// # Safety
+/// On the main thread.
+unsafe fn keyboard_spring(layer: &AnyObject) -> Option<KeyboardSpring> {
+    // SAFETY: CALayer's and CASpringAnimation's getters, as the caller promises.
+    unsafe {
+        let keys: Option<Retained<AnyObject>> = msg_send![layer, animationKeys];
+        let keys = keys?;
+        let count: usize = msg_send![&*keys, count];
+        if count != 1 {
+            return None;
+        }
+        let key: Retained<AnyObject> = msg_send![&*keys, objectAtIndex: 0usize];
+        let animation: Option<Retained<AnyObject>> = msg_send![layer, animationForKey: &*key];
+        let animation = animation?;
+        let spring: bool = msg_send![&*animation, isKindOfClass: class!(CASpringAnimation)];
+        if !spring {
+            return None;
+        }
+        let from: Option<Retained<AnyObject>> = msg_send![&*animation, fromValue];
+        let from: CGPoint = msg_send![&*from?, CGPointValue];
+        Some(KeyboardSpring {
+            from: from.y,
+            mass: msg_send![&*animation, mass],
+            stiffness: msg_send![&*animation, stiffness],
+            damping: msg_send![&*animation, damping],
+            velocity: msg_send![&*animation, initialVelocity],
+            duration: msg_send![&*animation, duration],
+        })
+    }
+}
+#[derive(Clone, Copy)]
+struct KeyboardSpring {
+    /// How far from its end it starts: it is added to where the layer rests.
+    from: f64,
+    mass: f64,
+    stiffness: f64,
+    damping: f64,
+    velocity: f64,
+    duration: f64,
+}
+impl KeyboardSpring {
+    /// The share of `from` left, every `1 / GLUE_RATE` of a second to its end.
+    fn remaining(&self) -> Vec<f64> {
+        const SUBSTEPS: usize = 16;
+        let steps = (self.duration * GLUE_RATE).ceil().max(1.) as usize;
+        let dt = self.duration / steps as f64 / SUBSTEPS as f64;
+        let (mut x, mut v) = (1f64, -self.velocity);
+        let mut out = Vec::with_capacity(steps + 1);
+        out.push(x);
+        for _ in 0..steps {
+            for _ in 0..SUBSTEPS {
+                v += (-self.damping * v - self.stiffness * x) / self.mass * dt;
+                x += v * dt;
+            }
+            out.push(x);
+        }
+        out
+    }
+}
+
+/// The begin time the keyboard's animation has, once its transaction committed.
+///
+/// # Safety
+/// On the main thread.
+unsafe fn keyboard_began(state: &State) -> f64 {
+    let tracker = state.tracker.borrow();
+    let Some(tracker) = &*tracker else {
+        return 0.;
+    };
+    // SAFETY: CALayer's getters, as the caller promises.
+    unsafe {
+        let layer: Retained<AnyObject> = msg_send![&**tracker, layer];
+        let keys: Option<Retained<AnyObject>> = msg_send![&*layer, animationKeys];
+        let Some(keys) = keys else { return 0. };
+        let first: Option<Retained<AnyObject>> = msg_send![&*keys, firstObject];
+        let Some(first) = first else { return 0. };
+        let animation: Option<Retained<AnyObject>> = msg_send![&*layer, animationForKey: &*first];
+        animation.map_or(0., |animation| msg_send![&*animation, beginTime])
+    }
+}
+
+/// Run `values` on the held view's layer, over the keyboard's duration.
+fn start_glue(values: &[f64], duration: f64, begin: f64) {
+    let Some(held) = crate::native_host::ios::held_view() else {
+        return;
+    };
+    // SAFETY: Core Animation's constructors and setters, on the main thread.
+    unsafe {
+        let path = crate::ios_system::objc2_foundation_string("transform.translation.y");
+        let animation: Retained<AnyObject> =
+            msg_send![class!(CAKeyframeAnimation), animationWithKeyPath: &*path];
+        let numbers: Retained<AnyObject> = msg_send![class!(NSMutableArray), array];
+        for value in values {
+            let number: Retained<AnyObject> = msg_send![class!(NSNumber), numberWithDouble: *value];
+            let _: () = msg_send![&*numbers, addObject: &*number];
+        }
+        let _: () = msg_send![&*animation, setValues: &*numbers];
+        let _: () = msg_send![&*animation, setDuration: duration];
+        // Held after its end, and before its start if it starts late: it is on
+        // the keyboard's clock.
+        let both = crate::ios_system::objc2_foundation_string("both");
+        let _: () = msg_send![&*animation, setFillMode: &*both];
+        let _: () = msg_send![&*animation, setRemovedOnCompletion: false];
+        let _: () = msg_send![&*animation, setBeginTime: begin];
+        let layer: Retained<AnyObject> = msg_send![&*held, layer];
+        let key = crate::ios_system::objc2_foundation_string(GLUE_KEY);
+        let _: () = msg_send![&*layer, addAnimation: &*animation, forKey: &*key];
+    }
+}
+
+fn remove_glue() {
+    let Some(held) = crate::native_host::ios::held_view() else {
+        return;
+    };
+    // SAFETY: CALayer's method, on the main thread.
+    unsafe {
+        let layer: Retained<AnyObject> = msg_send![&*held, layer];
+        let key = crate::ios_system::objc2_foundation_string(GLUE_KEY);
+        let _: () = msg_send![&*layer, removeAnimationForKey: &*key];
+    }
+}
+
+/// The page where it shows now, the animation stopped: a finger took it, or the
+/// keyboard changed its mind.
+fn unglue(state: &State) {
+    let Some(glue) = state.glue.borrow_mut().take() else {
+        return;
+    };
+    let shown = crate::native_host::ios::held_view().map_or(0., |held| {
+        // SAFETY: CALayer's getters and key-value coding, on the main thread.
+        unsafe {
+            let layer: Retained<AnyObject> = msg_send![&*held, layer];
+            let shown: Option<Retained<AnyObject>> = msg_send![&*layer, presentationLayer];
+            let Some(shown) = shown else { return 0. };
+            let path = crate::ios_system::objc2_foundation_string("transform.translation.y");
+            let value: Option<Retained<AnyObject>> = msg_send![&*shown, valueForKeyPath: &*path];
+            value.map_or(0., |value| {
+                let value: f64 = msg_send![&*value, doubleValue];
+                value
+            })
+        }
+    });
+    glue.driver.drive(glue.drawn - shown as f32);
+    *state.after_frame.borrow_mut() = Some(AfterFrame::Remove);
+    state.window.request_redraw();
+}
+
+/// Called as the keyboard's animation is made, in its transaction.
+fn glue_to_keyboard(state: &State) {
+    unglue(state);
+    if crate::native_host::ios::held_view().is_none() {
+        return;
+    }
+    let (spring, end) = {
+        let tracker = state.tracker.borrow();
+        let Some(tracker) = &*tracker else {
+            return;
+        };
+        // SAFETY: UIView's and CALayer's methods, on the main thread: the layout
+        // guide's change, with the keyboard's animation, comes out of this.
+        let spring = unsafe {
+            let parent: Option<Retained<AnyObject>> = msg_send![&**tracker, superview];
+            if let Some(parent) = parent {
+                let _: () = msg_send![&*parent, layoutIfNeeded];
+            }
+            let layer: Retained<AnyObject> = msg_send![&**tracker, layer];
+            keyboard_spring(&layer)
+        };
+        (spring, keyboard_edge(state, true))
+    };
+    let (Some(spring), Some(end)) = (spring, end) else {
+        crate::ios_gestures::log("keyboard: no spring to follow, by frames");
+        return;
+    };
+    let start = end + spring.from;
+    let lock = state.lock.borrow();
+    // Where the page belongs for each place of the keyboard's edge.
+    let (driver, page): (ScrollDriver, Box<dyn Fn(f64) -> f32>) = match &*lock {
+        Some(KeyboardLock::Show {
+            driver,
+            offset,
+            bottom,
+        }) => {
+            let (offset, bottom) = (*offset, *bottom);
+            (
+                driver.clone(),
+                Box::new(move |edge| {
+                    offset + (f64::from(bottom + KEYBOARD_ROOM) - edge).max(0.) as f32
+                }),
+            )
+        }
+        Some(KeyboardLock::Hide {
+            driver, from, to, ..
+        }) => {
+            let (from, to) = (*from, *to);
+            (
+                driver.clone(),
+                Box::new(move |edge| (from - (edge - start) as f32).max(to)),
+            )
+        }
+        None => return,
+    };
+    let (first, last) = (page(start), page(end));
+    if (first - last).abs() < 0.5 {
+        return;
+    }
+    // Drawn with the page the lower of the two: what the move uncovers is then
+    // below the content drawn, behind the keyboard.
+    let drawn = first.min(last);
+    let values: Vec<f64> = spring
+        .remaining()
+        .into_iter()
+        .map(|left| f64::from(drawn - page(end + spring.from * left)))
+        .chain(std::iter::once(f64::from(drawn - last)))
+        .collect();
+    let duration = spring.duration * (values.len() as f64 - 1.) / (values.len() as f64 - 2.);
+    crate::ios_gestures::log(&format!(
+        "keyboard glue {first:.0} to {last:.0}, drawn {drawn:.0}, spring {:.0} over {:.3}s",
+        spring.from, spring.duration
+    ));
+    *state.glue.borrow_mut() = Some(Glue {
+        driver: driver.clone(),
+        drawn,
+        target: last,
+    });
+    if (drawn - first).abs() < 0.5 {
+        // In this transaction, so on the keyboard's clock with no begin time.
+        start_glue(&values, duration, 0.);
+    } else {
+        driver.drive(drawn);
+        *state.after_frame.borrow_mut() = Some(AfterFrame::Start(values));
+        state.window.request_redraw();
+    }
+}
+
+/// The frame just presented shows in this transaction: what waited for it, too.
+pub(crate) fn frame_done() {
+    let Some(state) = CURRENT.with(|current| current.borrow().clone()) else {
+        return;
+    };
+    let waiting = state.after_frame.borrow_mut().take();
+    match waiting {
+        Some(AfterFrame::Remove) => remove_glue(),
+        Some(AfterFrame::Start(values)) => {
+            // Its begin time once committed; not yet, then this joins its commit
+            // and takes the same one.
+            // SAFETY: Core Animation's getters, on the main thread.
+            let begin = unsafe { keyboard_began(&state) };
+            let duration = state
+                .tracker
+                .borrow()
+                .as_ref()
+                .and_then(|tracker| {
+                    // SAFETY: as above.
+                    unsafe {
+                        let layer: Retained<AnyObject> = msg_send![&**tracker, layer];
+                        keyboard_spring(&layer)
+                    }
+                })
+                .map_or(0.4, |spring| spring.duration);
+            start_glue(
+                &values,
+                duration * (values.len() as f64 - 1.) / (values.len() as f64 - 2.),
+                begin,
+            );
+        }
+        None => {}
+    }
 }
 
 fn root_height(state: &State) -> f64 {
@@ -209,8 +508,14 @@ fn keyboard_frame(state: &State, link: &AnyObject) {
     state
         .edge_seen
         .set((edge, 0., if moving { 0 } else { rested + 1 }));
+    let glued = state.glue.borrow().is_some();
+    if glued {
+        crate::ios_gestures::log_follow_edge(edge, edge, 0.);
+    }
     let lock = state.lock.borrow();
     match &*lock {
+        // The render server has it, until it lands.
+        _ if glued => {}
         Some(KeyboardLock::Show {
             driver,
             offset,
@@ -247,6 +552,16 @@ fn keyboard_frame(state: &State, link: &AnyObject) {
 
 /// The edge came to rest: the scroller takes the page from where it was left.
 fn finish_keyboard_move(state: &State, edge: f64) {
+    if let Some(glue) = state.glue.borrow_mut().take() {
+        // The new offset's frame and the animation's end, in one transaction.
+        if (glue.target - glue.drawn).abs() < 0.5 {
+            remove_glue();
+        } else {
+            glue.driver.drive(glue.target);
+            *state.after_frame.borrow_mut() = Some(AfterFrame::Remove);
+            state.window.request_redraw();
+        }
+    }
     if let Some(link) = state.keyboard_link.borrow_mut().take() {
         // SAFETY: CADisplayLink's method, on the main thread.
         let _: () = unsafe { msg_send![&*link, invalidate] };
@@ -516,6 +831,7 @@ define_class!(
             crate::ios_gestures::log("scroll dragging");
             let state = self.ivars();
             stop_following(state, view);
+            unglue(state);
             state.lock.borrow_mut().take();
             state.following.borrow_mut().take();
             start_keyboard_link(state);
@@ -760,6 +1076,8 @@ impl NativeScroller {
             lock: RefCell::default(),
             field: RefCell::default(),
             edge_seen: std::cell::Cell::new((0., 0., 0)),
+            glue: RefCell::new(None),
+            after_frame: RefCell::new(None),
             bottom_inset: std::cell::Cell::new(0.),
             refresh_ending: Rc::default(),
             dragging: std::cell::Cell::new(false),

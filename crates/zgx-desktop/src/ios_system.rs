@@ -450,7 +450,7 @@ pub(crate) fn ns_string(text: &str) -> Retained<AnyObject> {
 
 /// # Safety
 /// On any thread: NSString's constructor, over a NUL-terminated copy.
-unsafe fn objc2_foundation_string(text: &str) -> Retained<AnyObject> {
+pub(crate) unsafe fn objc2_foundation_string(text: &str) -> Retained<AnyObject> {
     let text = std::ffi::CString::new(text).unwrap_or_default();
     // SAFETY: as above.
     unsafe { msg_send![class!(NSString), stringWithUTF8String: text.as_ptr()] }

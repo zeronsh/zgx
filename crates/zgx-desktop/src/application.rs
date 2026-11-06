@@ -2568,7 +2568,10 @@ impl Host {
         {
             self.recover_renderer();
         }
-        match self.draw_frame() {
+        let drawn = self.draw_frame();
+        #[cfg(target_os = "ios")]
+        crate::ios_scroll::frame_done();
+        match drawn {
             Err(error)
                 if error
                     .downcast_ref::<zgx_gpu::GpuError>()
