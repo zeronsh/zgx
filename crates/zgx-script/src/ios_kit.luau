@@ -14,10 +14,11 @@ end
 local function settle(state, target, done)
 	local velocity = 0
 	local stop
-	local spring = 200
+	local spring = 320
 	local damping = 2 * math.sqrt(spring)
 	local last = ui.now()
-	stop = ui.every(16, function()
+	-- As often as an iPhone draws.
+	stop = ui.every(8, function()
 		local at = state:get()
 		-- By the time that passed: a tick can come late.
 		local now = ui.now()
