@@ -1081,3 +1081,18 @@ return ui.glass_group {
     assert!(h.natives.nodes().is_empty());
     assert!(h.find("label").is_some());
 }
+
+/// `ui.symbol` is a box of its size where nothing draws symbols, so layouts
+/// hold; `$ios.…` tokens lint clean, as iOS sets them.
+#[test]
+fn a_symbol_without_a_renderer_keeps_its_size() {
+    let mut h = Harness::inline(
+        r##"return ui.row {
+    ui.symbol { name = "wifi", size = 20, color = "$text.primary" },
+    ui.text { id = "after", "x" },
+}"##,
+    );
+    h.ui.prepare_frame();
+    let after = h.find("after").expect("the text mounted");
+    assert_eq!(h.ui.scene.borrow().bounds(after).x, 20.);
+}

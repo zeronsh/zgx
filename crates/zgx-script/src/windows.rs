@@ -525,6 +525,8 @@ fn window_of(
 /// (`ScriptHost::window_chrome`), which `ui.window.titlebar_area` and
 /// `ui.window.controls` read.
 pub(crate) const TITLEBAR_AREA: &str = "zgx.window.titlebar_area";
+/// `ui.window.safe_area`'s state (`ScriptHost::window_safe_area`).
+pub(crate) const SAFE_AREA: &str = "zgx.window.safe_area";
 pub(crate) const CONTROLS: &str = "zgx.window.controls";
 /// The shared keys holding the app's window's zoom (1 at 100%) and whether
 /// its keys zoom it (`ScriptHost::window_zoom`): `ui.window.zoom` and
@@ -617,6 +619,10 @@ pub(crate) fn install(
             State::new(shared.state(TITLEBAR_AREA, Value::Nil)),
         )?;
         window.set("controls", State::new(shared.state(CONTROLS, Value::Nil)))?;
+        window.set(
+            "safe_area",
+            State::new(shared.state(SAFE_AREA, crate::safe_area_value([0.; 4]))),
+        )?;
     }
     let meta = lua.create_table()?;
     // `zoom` and `zoomable` made as a script first reads them: a script that

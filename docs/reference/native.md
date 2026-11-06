@@ -10,6 +10,7 @@ ui.terminal(props: TerminalProps) -> Node
 ui.term(id: string, opts: TermOptions?) -> Term
 ui.glass(props: GlassProps) -> Node
 ui.glass_group(props: GlassGroupProps) -> Node
+ui.symbol(props: SymbolProps) -> Node
 ui.command(opts: CommandOptions) -> ()
 ```
 
@@ -21,6 +22,7 @@ ui.command(opts: CommandOptions) -> ()
 | `term` | the session for `id`, started the first time with `opts`; later calls return the same session, their handlers replacing the previous run's |
 | `glass` | a box of the system's Liquid Glass on iOS, drawn by the compositor from what lies under it; children draw over it. A blur under a tint elsewhere. `variant` (`"regular"`, `"clear"`), `tint`, `interactive`, `radius` |
 | `glass_group` | panes of glass inside merge within `spacing` points of each other (iOS); an ordinary box elsewhere |
+| `symbol` | an SF Symbol, drawn by iOS at the screen's pixels: `name`, `size`, `weight`, `color`. An empty box of its size elsewhere |
 | `command` | an app command: the host shows it as a menu item (`ScriptHost::commands`) and runs it when chosen, its key working wherever focus is |
 
 ## Web view options

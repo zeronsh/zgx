@@ -1013,6 +1013,8 @@ impl Application {
     /// return once the application quits.
     pub fn run(self, build: impl FnOnce(&mut WindowContext)) -> Result<(), Box<dyn Error>> {
         zgx::profile::mark("run");
+        #[cfg(target_os = "ios")]
+        zgx::symbol::set_renderer(crate::ios_system::symbol);
         // Who the app is to the system's notifications and badge.
         crate::notify::set_identity(crate::notify::Identity {
             application_id: self.application_id.clone(),
@@ -4459,6 +4461,18 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 {
                     self.reported_size = Some(size);
+                }
+                #[cfg(target_os = "ios")]
+                if let Some(window) = &self.window {
+                    let insets = crate::ios_system::safe_area(window);
+                    if self
+                        .context
+                        .window_info
+                        .safe_area
+                        .with_untracked(|now| *now != insets)
+                    {
+                        self.context.window_info.safe_area.set(insets);
+                    }
                 }
                 // AppKit lays the window's buttons out again: zoomed, they go
                 // back where the title bar has them, now and once its layout

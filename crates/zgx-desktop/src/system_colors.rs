@@ -81,7 +81,11 @@ fn tokens() -> Vec<(TokenId, TokenInput)> {
         }
         tokens
     }
-    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    #[cfg(target_os = "ios")]
+    {
+        crate::ios_system::tokens()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", windows, target_os = "linux")))]
     {
         Vec::new()
     }
@@ -345,7 +349,11 @@ fn preferences() -> SystemPreferences {
             reduced_transparency: !crate::x11_settings::composited(),
         }
     }
-    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    #[cfg(target_os = "ios")]
+    {
+        crate::ios_system::preferences()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", windows, target_os = "linux")))]
     {
         SystemPreferences::default()
     }
@@ -834,7 +842,11 @@ pub(crate) fn display_options_changed() -> bool {
         });
         CHANGED.swap(false, Ordering::Relaxed)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "ios")]
+    {
+        crate::ios_system::options_changed()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     {
         false
     }

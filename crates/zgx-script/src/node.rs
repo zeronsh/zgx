@@ -647,6 +647,7 @@ impl Node {
             Kind::Terminal(_) => "terminal",
             Kind::Glass(_) => "glass",
             Kind::GlassGroup(_) => "glass_group",
+            Kind::Symbol(_) => "symbol",
             Kind::Checkbox { .. } => "checkbox",
             Kind::Input { .. } => "input",
             Kind::Progress { .. } => "progress",
@@ -976,6 +977,8 @@ pub(crate) enum Kind {
     Glass(Box<GlassSpec>),
     /// `ui.glass_group { spacing = n, ... }`: glass that merges.
     GlassGroup(f32),
+    /// `ui.symbol { name = "wifi", ... }`: a system symbol.
+    Symbol(Box<SymbolSpec>),
     Checkbox {
         label: String,
         value: Signal<Value>,
@@ -1522,9 +1525,45 @@ pub(crate) struct GlassSpec {
     pub interactive: Option<Source>,
     pub radius: Option<Source>,
 }
-/// `ui.glass` and `ui.glass_group`, made the first time a script names one.
+/// How a `ui.symbol` looks: its props, each a value or state.
+#[derive(Clone)]
+pub(crate) struct SymbolSpec {
+    pub name: String,
+    pub size: Option<Source>,
+    pub weight: Option<Source>,
+    pub color: Option<Source>,
+}
+/// `ui.glass`, `ui.glass_group` and `ui.symbol`, made the first time a script
+/// names one.
 pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
-    lazy.ui(&["glass", "glass_group"], |lua, ui| {
+    lazy.ui(&["glass", "glass_group", "symbol"], |lua, ui| {
+        ui.set(
+            "symbol",
+            lua.create_function(|lua, table: Table| {
+                let name: String = table.get("name")?;
+                table.raw_set("name", mlua::Value::Nil)?;
+                let take = |name: &str, ty: Ty| -> mlua::Result<Option<Source>> {
+                    let value = table.get::<mlua::Value>(name)?;
+                    table.raw_set(name, mlua::Value::Nil)?;
+                    match value {
+                        mlua::Value::Nil => Ok(None),
+                        value => source(lua, ty, name, value).map(Some),
+                    }
+                };
+                let spec = SymbolSpec {
+                    name,
+                    size: take("size", Ty::Num)?,
+                    weight: take("weight", Ty::Num)?,
+                    color: take("color", Ty::Color)?,
+                };
+                let node = fill(
+                    lua,
+                    Node::new(owner(lua)?, Kind::Symbol(Box::new(spec))),
+                    Some(&table),
+                )?;
+                node_ud(lua, node)
+            })?,
+        )?;
         ui.set(
             "glass",
             lua.create_function(|lua, table: Table| {

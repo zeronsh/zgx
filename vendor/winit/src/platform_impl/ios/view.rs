@@ -96,6 +96,30 @@ declare_class!(
             );
         }
 
+        // zgx patch: a new safe area lays the view out again, and so reports
+        // its size for the host to read the insets by.
+        #[method(safeAreaInsetsDidChange)]
+        fn safe_area_insets_did_change(&self) {
+            let _: () = unsafe { msg_send![super(self), safeAreaInsetsDidChange] };
+            unsafe { self.setNeedsLayout() };
+        }
+
+        // zgx patch: light or dark changed.
+        #[method(traitCollectionDidChange:)]
+        fn trait_collection_did_change(&self, previous: Option<&objc2::runtime::AnyObject>) {
+            let _: () = unsafe { msg_send![super(self), traitCollectionDidChange: previous] };
+            let Some(window) = self.window() else { return };
+            let mtm = MainThreadMarker::new().unwrap();
+            let theme = super::window::theme_of(self);
+            app_state::handle_nonuser_event(
+                mtm,
+                EventWrapper::StaticEvent(Event::WindowEvent {
+                    window_id: RootWindowId(window.id()),
+                    event: WindowEvent::ThemeChanged(theme),
+                }),
+            );
+        }
+
         #[method(setContentScaleFactor:)]
         fn set_content_scale_factor(&self, untrusted_scale_factor: CGFloat) {
             let mtm = MainThreadMarker::new().unwrap();

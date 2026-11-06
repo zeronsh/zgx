@@ -115,6 +115,43 @@ fn font_features(settings: &[([u8; 4], u32)]) -> cosmic_text::FontFeatures {
     }
     features
 }
+/// iOS's system font's tracking at `size` points, in ems: the normal row of
+/// its `trak` table (SFUI.ttf, iOS 26), units of 1/2048 em, between its sizes.
+#[cfg(target_os = "ios")]
+fn system_tracking(size: f32) -> f32 {
+    const TABLE: [(f32, f32); 21] = [
+        (6., 82.),
+        (9., 38.),
+        (10., 24.),
+        (11., 12.),
+        (12., 0.),
+        (13., -12.),
+        (14., -22.),
+        (15., -32.),
+        (16., -40.),
+        (17., -52.),
+        (20., -46.),
+        (22., -24.),
+        (24., 6.),
+        (28., 28.),
+        (32., 26.),
+        (36., 21.),
+        (50., 14.),
+        (64., 7.),
+        (80., 0.),
+        (100., 0.),
+        (138., 0.),
+    ];
+    let units = match TABLE.iter().position(|(at, _)| *at >= size) {
+        Some(0) => TABLE[0].1,
+        Some(next) => {
+            let ((a, ua), (b, ub)) = (TABLE[next - 1], TABLE[next]);
+            ua + (ub - ua) * (size - a) / (b - a)
+        }
+        None => 0.,
+    };
+    units / 2048.
+}
 pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> {
     use zgx::text_layout::FontFamily;
     let family = match &font.family {
@@ -143,6 +180,12 @@ pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> 
         });
     let spacing = font.letter_spacing.pixels();
     if spacing == 0. {
+        // What UIKit does for its system font, unasked: a face's tracking at
+        // this size. Text with a spacing of its own keeps it.
+        #[cfg(target_os = "ios")]
+        if matches!(font.family, FontFamily::SansSerif) {
+            return attrs.letter_spacing(system_tracking(size));
+        }
         attrs
     } else {
         // cosmic-text 0.14 accepts tracking in EM, while our public styles use

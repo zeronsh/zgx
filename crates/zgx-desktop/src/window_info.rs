@@ -189,6 +189,9 @@ pub struct WindowInfo {
     /// buttons at the top right, macOS's traffic lights at the top left),
     /// or `None` where there are none.
     pub controls: Signal<Option<zgx::scene::Rect>>,
+    /// What the screen's edges and the system's bars leave of the window, in
+    /// points: top, right, bottom, left. iOS's safe area; all 0 elsewhere.
+    pub safe_area: Signal<[f32; 4]>,
 }
 impl WindowInfo {
     pub(crate) fn new(ui: &Ui, width: f64, height: f64) -> Self {
@@ -206,6 +209,7 @@ impl WindowInfo {
             corner_radius: ui.signal(0.),
             titlebar_area: ui.signal(None),
             controls: ui.signal(None),
+            safe_area: ui.signal([0.; 4]),
         }
     }
     pub(crate) fn refresh(&self, window: &Window, titlebar: crate::Titlebar) {

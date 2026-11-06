@@ -1569,10 +1569,13 @@ export type FullScreenTransition = { phase: "entering" | "leaving", duration: nu
 -- resizes, scale and fullscreen. `zoom` is the window's zoom, as a
 -- browser's page zoom (1 at 100%; Cmd/Ctrl +, - and 0 change it, and
 -- setting it zooms the window, within 0.25 to 5); `zoomable` false turns
--- the keys off.
+-- the keys off. `safe_area` is what the screen's edges and the system's bars
+-- leave of the window, `{ top, right, bottom, left }` in points: iOS's safe
+-- area, all 0 elsewhere.
 -- An extern type: a function and a table can't intersect, so that would be
 -- `never`, and `ui`, holding one, would stop reporting its unknown members.
 declare extern type WindowApi with
+	safe_area: State<{ top: number, right: number, bottom: number, left: number }>
 	titlebar_area: State<WindowRect?>
 	controls: State<WindowRect?>
 	zoom: State<number>
@@ -18804,9 +18807,23 @@ export type GlassProps = {
 	-- Open the context menu under the node, from its left edge (a tab's),
 	-- rather than at the pointer.
 	context_menu_below: Props_context_menu_below,
-	[number]: never,
+	[number]: Child,
 }
 
+export type SymbolProps = {
+	-- The SF Symbol's name.
+	name: string,
+	-- Its point size, as a font's (default 17).
+	size: (number | ReadOnlyState<number>)?,
+	-- A font weight, 100 to 900 (default 400).
+	weight: (number | ReadOnlyState<number>)?,
+	-- Its colour (default `$text.primary`).
+	color: Props_bg,
+	-- Its margins, as any node's.
+	m: Props_m,
+	mx: Props_mx,
+	my: Props_my,
+}
 export type GlassGroupProps = {
 	-- How near panes come before they merge, in points (default 20).
 	spacing: number?,
@@ -19195,7 +19212,7 @@ export type GlassGroupProps = {
 	-- Open the context menu under the node, from its left edge (a tab's),
 	-- rather than at the pointer.
 	context_menu_below: Props_context_menu_below,
-	[number]: never,
+	[number]: Child,
 }
 
 -- `from`: only what that plugin (by name) contributes.
@@ -20559,6 +20576,8 @@ declare ui: {
 	glass: (props: GlassProps) -> Node,
 	-- Glass inside merges within `spacing` points, as the system's does.
 	glass_group: (props: GlassGroupProps) -> Node,
+	-- A system symbol (`name = "wifi"`), drawn by iOS; an empty box of its size elsewhere.
+	symbol: (props: SymbolProps) -> Node,
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,
