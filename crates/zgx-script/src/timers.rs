@@ -99,6 +99,8 @@ impl Timers {
                     None => zgx::timer::sleep(period.max(Duration::from_millis(1))).await,
                 }
                 if !running.get() || !fire() || !repeat {
+                    // (What keeps its `Stop` may let it go: `Stop::done`.)
+                    running.set(false);
                     return;
                 }
             }
@@ -111,6 +113,10 @@ pub(crate) struct Stop(Rc<Cell<bool>>);
 impl Stop {
     pub fn handle(&self) -> Rc<Cell<bool>> {
         self.0.clone()
+    }
+    /// Its timer has ended, or been stopped: nothing here to keep.
+    pub fn done(&self) -> bool {
+        !self.0.get()
     }
 }
 impl Drop for Stop {
@@ -176,3 +182,38 @@ impl TestClock {
         })
     }
 }
+
+#[cfg(test)]
+mod ended {
+    use super::*;
+    use crate::node::keep_in;
+    use std::any::Any;
+
+    fn stop(alive: bool) -> Box<dyn Any> {
+        Box::new(Stop(Rc::new(Cell::new(alive))))
+    }
+
+    #[test]
+    fn timers_that_ended_dont_pile_up_where_theyre_kept() {
+        let mut kept = Vec::new();
+        for _ in 0..10_000 {
+            keep_in(&mut kept, stop(false));
+        }
+        assert!(kept.len() <= 4, "{}", kept.len());
+    }
+
+    #[test]
+    fn a_timer_still_to_fire_and_anything_else_kept_stay() {
+        let mut kept: Vec<Box<dyn Any>> = Vec::new();
+        keep_in(&mut kept, stop(true));
+        keep_in(&mut kept, Box::new("an effect"));
+        let waiting = kept[0].downcast_ref::<Stop>().unwrap().handle();
+        for _ in 0..10_000 {
+            keep_in(&mut kept, stop(false));
+        }
+        assert!(waiting.get(), "not stopped by those around it going");
+        assert!(kept.iter().any(|k| k.downcast_ref::<&str>().is_some()));
+        assert!(kept.iter().any(|k| k.downcast_ref::<Stop>().is_some_and(|s| !s.done())));
+    }
+}
+
