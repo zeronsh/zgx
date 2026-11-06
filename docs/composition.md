@@ -711,10 +711,10 @@ Trackpads' pixel deltas pass as they are.
 
 `Ui::set_elastic_scrolling(true)`, which the macOS host turns on, gives scroll views
 macOS's and Safari's rubber band. A trackpad gesture pushed past an edge stretches
-the view: its content moves on, ever less for each further pixel (AppKit's curve),
+the view: its content moves on a twentieth of the push, in a straight line (AppKit's),
 while the offset an app reads stays in range. Pulling back unwinds the stretch
-before the content scrolls, and lifting the fingers springs it back, critically
-damped, in about 0.4 s. A flick's momentum that reaches an edge bounces. It
+before the content scrolls, as far as the hand moves, and lifting the fingers springs
+it back in about 0.4 s. A flick's momentum that reaches an edge bounces. It
 stretches the view the gesture is latched to; otherwise, as a page bounces rather
 than a box in it, the outermost view under the pointer that scrolls along that
 axis. The host reports the gesture's phases as `InputEvent::ScrollGesture`. A mouse

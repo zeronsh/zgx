@@ -59,21 +59,19 @@ fn a_trackpad_pulled_past_an_edge_stretches_it_and_letting_go_springs_back() {
     phase(&mut ui, ScrollGesture::Began);
     scroll_by(&mut ui, -40.);
     let first = shift(&ui, content, &offset);
-    assert!(
-        0. < first && first < 40.,
-        "stretched, with resistance: {first}"
-    );
+    assert_eq!(first, 2., "a twentieth of the push");
     assert_eq!(offset.get(), 0., "the offset stays in range");
     scroll_by(&mut ui, -40.);
     let second = shift(&ui, content, &offset);
-    assert!(second - first < first, "each pixel further stretches less");
-    // Back toward the content: the stretch goes first, then it scrolls.
-    scroll_by(&mut ui, 60.);
-    assert!(shift(&ui, content, &offset) < second);
+    assert_eq!(second, 4., "in a straight line");
+    // Back toward the content: what shows comes back as far as the hand moves,
+    // then it scrolls.
+    scroll_by(&mut ui, 1.);
+    assert_eq!(shift(&ui, content, &offset), 3.);
     assert_eq!(offset.get(), 0.);
     scroll_by(&mut ui, 40.);
     assert_eq!(shift(&ui, content, &offset), 0.);
-    assert!(offset.get() > 0., "and the rest scrolls");
+    assert_eq!(offset.get(), 37., "and the rest scrolls");
 
     // Down at the end and let go: it springs back.
     offset.set(300.);
@@ -122,11 +120,13 @@ fn a_mouse_wheel_never_stretches_and_momentum_bounces_off_an_edge() {
     scroll_by(&mut ui, -30.);
     scroll_by(&mut ui, -20.);
     assert_eq!(offset.get(), 0.);
+    let deadline = ui.next_interaction_deadline().expect("it bounces");
+    ui.advance_interactions(deadline + Duration::from_millis(80))
+        .unwrap();
     assert!(
         shift(&ui, content, &offset) > 0.,
-        "it bounces past the edge"
+        "past the edge, at the speed it got there"
     );
-    let deadline = ui.next_interaction_deadline().expect("and comes back");
     ui.advance_interactions(deadline + Duration::from_millis(800))
         .unwrap();
     ui.advance_interactions(Instant::now() + Duration::from_secs(2))
@@ -143,7 +143,46 @@ fn a_mouse_wheel_never_stretches_and_momentum_bounces_off_an_edge() {
     phase(&mut ui, ScrollGesture::Ended);
     phase(&mut ui, ScrollGesture::MomentumBegan);
     scroll_by(&mut ui, -20.);
+    let deadline = ui.next_interaction_deadline().expect("a new fling bounces");
+    ui.advance_interactions(deadline + Duration::from_millis(80))
+        .unwrap();
     assert!(shift(&ui, content, &offset) > 0., "a new fling bounces");
+}
+
+/// What a stretch does let go, and a bounce's height, against what an
+/// `NSScrollView` was measured to do: `(x + 0.31 v t) e^(-12.5 t)`.
+#[test]
+fn a_stretch_and_a_bounce_come_back_on_the_systems_curve() {
+    let mut ui = Ui::new(300., 200.);
+    ui.set_elastic_scrolling(true);
+    ui.set_refresh_interval(Duration::from_millis(10));
+    let (offset, content) = mount(&mut ui);
+    phase(&mut ui, ScrollGesture::Began);
+    scroll_by(&mut ui, -400.);
+    assert_eq!(shift(&ui, content, &offset), 20.);
+    phase(&mut ui, ScrollGesture::Ended);
+    let start = ui.next_interaction_deadline().expect("it springs back");
+    ui.advance_interactions(start + Duration::from_millis(100))
+        .unwrap();
+    let shown = shift(&ui, content, &offset);
+    assert!((shown - 5.73).abs() < 0.3, "after 100 ms: {shown}");
+    ui.advance_interactions(start + Duration::from_millis(500))
+        .unwrap();
+    assert_eq!(shift(&ui, content, &offset), 0., "gone by 500 ms");
+    assert_eq!(ui.next_interaction_deadline(), None);
+
+    // 30 points a refresh of 10 ms reaches the edge at 3000 points a second.
+    phase(&mut ui, ScrollGesture::MomentumBegan);
+    scroll_by(&mut ui, -30.);
+    let start = ui.next_interaction_deadline().expect("it bounces");
+    ui.advance_interactions(start + Duration::from_millis(80))
+        .unwrap();
+    let peak = shift(&ui, content, &offset);
+    assert!((peak - 27.4).abs() < 1.5, "its height at 80 ms: {peak}");
+    ui.advance_interactions(start + Duration::from_millis(800))
+        .unwrap();
+    assert_eq!(shift(&ui, content, &offset), 0., "and back");
+    assert_eq!(ui.next_interaction_deadline(), None);
 }
 
 #[test]
