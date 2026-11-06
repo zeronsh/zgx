@@ -165,6 +165,16 @@ thread_local! {
     static NAVIGATION_SWIPES: RefCell<Option<std::rc::Rc<dyn crate::platform::macos::NavigationSwipes>>> =
         const { RefCell::new(None) };
 }
+thread_local! {
+    /// zgx patch: when each scroll event not yet taken happened.
+    static SCROLL_EVENT_TIMES: std::cell::RefCell<std::collections::VecDeque<f64>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+pub(crate) fn take_scroll_event_time() -> Option<f64> {
+    SCROLL_EVENT_TIMES.with_borrow_mut(|times| times.pop_front())
+}
+
 pub(crate) fn set_navigation_swipes(
     swipes: Option<std::rc::Rc<dyn crate::platform::macos::NavigationSwipes>>,
 ) {
@@ -827,6 +837,14 @@ declare_class!(
             };
 
             self.update_modifiers(event, false);
+
+            // zgx patch: when it happened, for `take_scroll_event_time`.
+            SCROLL_EVENT_TIMES.with_borrow_mut(|times| {
+                if times.len() == 64 {
+                    times.pop_front();
+                }
+                times.push_back(unsafe { event.timestamp() });
+            });
 
             self.ivars().app_delegate.maybe_queue_device_event(DeviceEvent::MouseWheel { delta });
             self.queue_event(WindowEvent::MouseWheel {

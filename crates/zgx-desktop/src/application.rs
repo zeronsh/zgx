@@ -1743,6 +1743,8 @@ struct Host {
     trackpad: Trackpad,
     /// Devtools' wheel recordings, and what they play back (`Ui::wheel_tape`).
     wheel_tape: std::rc::Rc<std::cell::RefCell<crate::wheel_tape::Tape>>,
+    /// When the next wheel event a tape delivers happens.
+    wheel_happened: Option<std::time::Instant>,
     /// Native views (web pages) over and under this window's zgx content.
     native: crate::native_host::NativeHost,
     /// Popups shown past the window, in windows of their own.
@@ -2007,6 +2009,7 @@ impl Host {
             tsf_tried: false,
             trackpad: Trackpad::Idle,
             wheel_tape,
+            wheel_happened: None,
             pending_file_drops: Default::default(),
             hovered_files: Vec::new(),
             modifiers: Modifiers::default(),
@@ -3339,6 +3342,16 @@ impl Host {
         self.sync_ime_cancellation();
     }
 }
+/// When the wheel event being read happened, where the platform says (macOS);
+/// `now`, when it's read, where it doesn't.
+fn wheel_event_time(now: std::time::Instant) -> std::time::Instant {
+    #[cfg(all(target_os = "macos", zgx_winit_patched))]
+    if let Some(time) = winit::platform::macos::take_scroll_event_time() {
+        return crate::scroll_resample::happened_at(now, zgx_gpu::present_log::now_ns(), time);
+    }
+    now
+}
+
 impl Host {
     /// A renderer for `window`: on a context another window made, when its
     /// adapter suits the window, else on one of its own, which the app's
@@ -4743,12 +4756,15 @@ impl Host {
                 })?;
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
-                self.wheel_tape.borrow_mut().received(
-                    std::time::Instant::now(),
-                    delta,
-                    self.scale_factor,
-                    phase,
-                );
+                // When it happened, not when this thread got to it.
+                let now = std::time::Instant::now();
+                let happened = self
+                    .wheel_happened
+                    .take()
+                    .unwrap_or_else(|| wheel_event_time(now));
+                self.wheel_tape
+                    .borrow_mut()
+                    .received(happened, delta, self.scale_factor, phase);
                 // A trackpad gesture's phase: its start goes before its
                 // motion, its end after all of it.
                 let gesture = if cfg!(target_os = "macos")
@@ -4812,7 +4828,7 @@ impl Host {
                     }
                 } else if crate::scroll_resample::enabled() {
                     // Applied on display refreshes; see `update`.
-                    let now = std::time::Instant::now();
+                    let now = happened;
                     self.scroll.position = self.cursor;
                     match delta {
                         MouseScrollDelta::PixelDelta(_) => self.scroll.push_precise(now, (dx, dy)),
@@ -5556,8 +5572,9 @@ impl Host {
                 break;
             };
             match due {
-                crate::wheel_tape::Due::Wheel(delta, phase) => {
+                crate::wheel_tape::Due::Wheel(delta, phase, happened) => {
                     self.cursor = at;
+                    self.wheel_happened = Some(happened);
                     self.window_event(WindowEvent::MouseWheel {
                         device_id: winit::event::DeviceId::dummy(),
                         delta,

@@ -61,7 +61,8 @@ pub(crate) enum Press {
 /// A tape's event due, as the platform would report it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Due {
-    Wheel(MouseScrollDelta, TouchPhase),
+    /// With when the tape has it happen, whenever the window reads it.
+    Wheel(MouseScrollDelta, TouchPhase, Instant),
     /// The pointer at a place in the window, in points.
     Pointer((f32, f32), Press),
 }
@@ -235,7 +236,7 @@ impl Tape {
         if self.playing.front().is_none_or(|(at, _)| *at > now) {
             return None;
         }
-        let (_, e) = self.playing.pop_front()?;
+        let (at, e) = self.playing.pop_front()?;
         if let Some(press) = e.pointer {
             let at = (self.at.0 + e.delta.0, self.at.1 + e.delta.1);
             return Some(Due::Pointer(at, press));
@@ -248,7 +249,7 @@ impl Tape {
         } else {
             MouseScrollDelta::LineDelta(e.delta.0, e.delta.1)
         };
-        Some(Due::Wheel(delta, e.phase))
+        Some(Due::Wheel(delta, e.phase, at))
     }
 }
 
@@ -294,7 +295,8 @@ mod tests {
             tape.due(start, 1.),
             Some(Due::Wheel(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(0., -2.5)),
-                TouchPhase::Started
+                TouchPhase::Started,
+                start
             ))
         );
         assert_eq!(tape.due(ms(7), 1.), None, "not due yet");
@@ -302,14 +304,17 @@ mod tests {
             tape.due(ms(8), 1.),
             Some(Due::Wheel(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.5, -6.75)),
-                TouchPhase::Moved
+                TouchPhase::Moved,
+                ms(8)
             ))
         );
         assert_eq!(
             tape.due(ms(40), 1.),
             Some(Due::Wheel(
                 MouseScrollDelta::LineDelta(0., -1.),
-                TouchPhase::Moved
+                TouchPhase::Moved,
+                // When the tape has it, though the window reads it later.
+                ms(25)
             ))
         );
         assert_eq!(tape.deadline(), None, "played");
