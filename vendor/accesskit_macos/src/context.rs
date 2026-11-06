@@ -80,7 +80,13 @@ impl Context {
 
     pub(crate) fn remove_platform_node(&self, id: NodeId) -> Option<Id<PlatformNode>> {
         let mut platform_nodes = self.platform_nodes.borrow_mut();
-        platform_nodes.remove(&id)
+        let removed = platform_nodes.remove(&id);
+        // zgx patch: the room a big page's nodes took goes with them.
+        if platform_nodes.capacity() > 1024 && platform_nodes.capacity() > platform_nodes.len() * 4
+        {
+            platform_nodes.shrink_to_fit();
+        }
+        removed
     }
 
     pub(crate) fn do_action(&self, request: ActionRequest) {
