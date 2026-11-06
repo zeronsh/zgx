@@ -159,10 +159,14 @@ fn runaway_scripts_hit_their_time_budget() {
     };
     // A bare loop, one in a coroutine, and one calling the host: each is
     // stopped once its budget runs out, not long after. Bounded by the CPU
-    // time the call took, as the budget counts it: a shared CI machine can
-    // stall the thread for longer than the bound in wall time (it then
-    // spends nothing, and the script runs on as it resumes), while a
-    // watchdog waking late leaves the script spinning, which this sees.
+    // time as the budget counts it: a shared CI machine can stall the thread
+    // for longer than the bound in wall time (it then spends nothing, and
+    // the script runs on as it resumes), while a watchdog waking late leaves
+    // the script spinning, which this sees. Not by all the CPU the call took:
+    // the budget stops runaway scripts, not the updates they cause, and a
+    // loop of state writes spends much of its time off the clock (47 ms in
+    // all on Linux; on Windows 47 to 172 ms, by where its 15.6 ms ticks fall,
+    // for the same three ticks counted).
     for code in [
         "while true do end",
         "coroutine.wrap(function() while true do end end)()",
@@ -174,12 +178,14 @@ fn runaway_scripts_hit_their_time_budget() {
         let error = host.reload().unwrap_err();
         assert!(error.contains("time budget"), "{code}: {error}");
         let (wall, spent) = (started.elapsed(), zgx_script::thread_cpu_time() - cpu);
+        let stop = zgx_script::last_budget_stop().expect("a call stopped for its time");
         // 30 ms, and what loading the script takes in a debug build: about
         // 33 ms on a quiet machine.
         assert!(
-            spent < Duration::from_millis(150),
-            "{code}: stopped after {spent:?} of CPU ({wall:?} wall); {:?}",
-            zgx_script::last_budget_stop()
+            stop.cpu < Duration::from_millis(150),
+            "{code}: stopped after {:?} of its budget's CPU ({spent:?} of CPU in all, \
+             {wall:?} wall); {stop:?}",
+            stop.cpu
         );
     }
 
