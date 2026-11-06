@@ -19989,6 +19989,14 @@ export type NativeSwitchProps = {
 	-- What assistive technology calls it.
 	label: string?,
 }
+export type SystemMenuItem = {
+	title: string,
+	-- An SF Symbol's name.
+	symbol: string?,
+	style: ("destructive" | "default")?,
+	on_choose: (() -> ())?,
+	[number]: never,
+}
 export type AlertOptions = {
 	title: string?,
 	message: string?,
@@ -21784,6 +21792,8 @@ declare ui: {
 	-- A tap felt in the hand (iOS): "light", "medium", "heavy", "soft", "rigid",
 	-- "success", "warning", "error" or "selection".
 	haptic: (kind: string) -> (),
+	-- A long press on the element shows these, the system's way (iOS).
+	system_menu: (element: Element, build: () -> { SystemMenuItem }) -> (),
 	-- The system's alert, or action sheet (iOS). `on_choose` hears which button, from 1.
 	alert: (opts: AlertOptions) -> (),
 	action_sheet: (opts: AlertOptions) -> (),

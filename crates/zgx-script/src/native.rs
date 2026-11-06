@@ -59,6 +59,47 @@ fn present_alert(table: Table, style: AlertStyle) -> mlua::Result<()> {
     Ok(())
 }
 
+/// `ui.system_menu(element, build)`: `build` gives `{ title, symbol, style, on_choose }`s.
+fn system_menu(
+    _: &Lua,
+    (element, build): (mlua::UserDataRef<crate::element::ElementUd>, Function),
+) -> mlua::Result<()> {
+    let Some(node) = element.0.read(|_, id| id) else {
+        return Ok(());
+    };
+    zgx::native_control::set_system_menu(
+        node,
+        std::rc::Rc::new(move || {
+            let mut actions = Vec::new();
+            let Ok(listed) = build.call::<Table>(()) else {
+                return actions;
+            };
+            for item in listed.sequence_values::<Table>().flatten() {
+                let Ok(title) = item.get::<String>("title") else {
+                    continue;
+                };
+                let on_choose = item.get::<Option<Function>>("on_choose").ok().flatten();
+                actions.push(zgx::native_control::MenuAction {
+                    title,
+                    symbol: item.get("symbol").ok().flatten(),
+                    destructive: item
+                        .get::<Option<String>>("style")
+                        .ok()
+                        .flatten()
+                        .is_some_and(|style| style == "destructive"),
+                    run: std::rc::Rc::new(move || {
+                        if let Some(on_choose) = &on_choose {
+                            let _ = on_choose.call::<()>(());
+                        }
+                    }),
+                });
+            }
+            actions
+        }),
+    );
+    Ok(())
+}
+
 /// `ui.glass`, `ui.glass_group` and `ui.symbol`, made the first time a script
 /// names one.
 pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
@@ -71,6 +112,7 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
             "native_tabs",
             "haptic",
             "alert",
+            "system_menu",
             "action_sheet",
         ],
         |lua, ui| {
@@ -93,6 +135,7 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
                     present_alert(table, AlertStyle::ActionSheet)
                 })?,
             )?;
+            ui.set("system_menu", lua.create_function(system_menu)?)?;
             ui.set(
                 "native_tabs",
                 lua.create_function(|lua, table: Table| {

@@ -112,6 +112,13 @@ local function SettingsPage(nav: any)
 		ios.section {
 			ios.row {
 				icon = "bell.badge.fill",
+				menu = function()
+					return {
+						{ title = "Share", symbol = "square.and.arrow.up" },
+						{ title = "Mute", symbol = "bell.slash" },
+						{ title = "Remove", symbol = "trash", style = "destructive" },
+					}
+				end,
 				tint = "$ios.red",
 				title = "Notifications",
 				hidden = unmatched("Notifications"),
@@ -315,7 +322,11 @@ return ui.div {
 				p = 20,
 				gap = 12,
 				ui.text { "A sheet", heading = 2, text_size = "$font.size.lg", weight = 600, color = "$text.primary" },
-				ui.text { "Drag the handle between its detents, or down to close.", wrap = true, color = "$text.secondary" },
+				ui.text {
+					"Drag the handle between its detents, or down to close.",
+					wrap = true,
+					color = "$text.secondary",
+				},
 			}
 		end,
 	},

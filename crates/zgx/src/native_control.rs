@@ -200,6 +200,56 @@ pub enum AlertButtonStyle {
     /// What destroys something: the system marks it.
     Destructive,
 }
+/// An entry of a node's system menu (`set_system_menu`).
+pub struct MenuAction {
+    /// What it says.
+    pub title: String,
+    /// An SF Symbol's name.
+    pub symbol: Option<String>,
+    /// Shown as what can't be undone.
+    pub destructive: bool,
+    /// What choosing it does.
+    pub run: Rc<dyn Fn()>,
+}
+/// What gives a node's system menu when it is asked for.
+pub type MenuBuilder = Rc<dyn Fn() -> Vec<MenuAction>>;
+thread_local! {
+    static MENUS: std::cell::RefCell<std::collections::HashMap<crate::scene::NodeId, MenuBuilder>> =
+        std::cell::RefCell::default();
+}
+/// Give `node` a system menu: a long press on it, or what is inside it, shows
+/// what `build` gives, the system's way (a host that has one: iOS).
+pub fn set_system_menu(node: crate::scene::NodeId, build: MenuBuilder) {
+    MENUS.with(|menus| menus.borrow_mut().insert(node, build));
+}
+/// The system menu for the window's point `(x, y)`, with the box of the node
+/// that has it: its innermost around what is there.
+pub fn system_menu_at(
+    scene: &crate::scene::Scene,
+    x: f32,
+    y: f32,
+) -> Option<(crate::scene::Rect, Vec<MenuAction>)> {
+    MENUS.with(|menus| {
+        let mut menus = menus.borrow_mut();
+        // Those whose nodes went with their rows.
+        menus.retain(|node, _| scene.contains(*node));
+        if menus.is_empty() {
+            return None;
+        }
+        for hit in scene.hit_test_all(x, y) {
+            let mut at = Some(hit);
+            while let Some(node) = at {
+                if let Some(build) = menus.get(&node) {
+                    let build = build.clone();
+                    return Some((scene.transformed_bounds(node), build()));
+                }
+                at = scene.parent(node);
+            }
+        }
+        None
+    })
+}
+
 /// What only the platform does: a host that has these provides them
 /// ([`set_system_ui`]), and elsewhere they do nothing.
 pub trait SystemUi {
