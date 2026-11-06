@@ -171,11 +171,11 @@ fn tell(state: &State, this: &AnyObject, will: Sel, did: Sel, edit: impl FnOnce(
     // SAFETY: UITextInputDelegate's methods on UIKit's object, set by UIKit.
     unsafe {
         if !delegate.is_null() {
-            let _: () = objc2::msg_send![&*delegate, performSelector: will, withObject: this];
+            let _: *mut AnyObject = msg_send![&*delegate, performSelector: will, withObject: this];
         }
         edit();
         if !delegate.is_null() {
-            let _: () = objc2::msg_send![&*delegate, performSelector: did, withObject: this];
+            let _: *mut AnyObject = msg_send![&*delegate, performSelector: did, withObject: this];
         }
     }
 }
@@ -481,6 +481,63 @@ extern "C-unwind" fn character_range(_: &AnyObject, _: Sel, _: CGPoint) -> *mut 
     std::ptr::null_mut()
 }
 
+// UIResponderStandardEditActions: the edit menu's, and a hardware keyboard's.
+extern "C-unwind" fn edit_copy(_: &AnyObject, _: Sel, _: *mut AnyObject) {
+    let Some(state) = state() else { return };
+    let editor = state.store.borrow().editor().cloned();
+    if let Some(editor) = editor.filter(|editor| !editor.is_secure()) {
+        let _ = crate::ios_pasteboard::Clipboard.set_text(editor.copy());
+    }
+}
+extern "C-unwind" fn edit_cut(_: &AnyObject, _: Sel, _: *mut AnyObject) {
+    let Some(state) = state() else { return };
+    let editor = state.store.borrow().editor().cloned();
+    if let Some(editor) = editor.filter(|editor| !editor.is_secure()) {
+        let _ = crate::ios_pasteboard::Clipboard.set_text(editor.cut());
+        state.window.request_redraw();
+    }
+}
+extern "C-unwind" fn edit_paste(_: &AnyObject, _: Sel, _: *mut AnyObject) {
+    let Some(state) = state() else { return };
+    let editor = state.store.borrow().editor().cloned();
+    if let (Some(editor), Ok(text)) = (editor, crate::ios_pasteboard::Clipboard.get_text()) {
+        editor.paste(&text);
+        state.window.request_redraw();
+    }
+}
+extern "C-unwind" fn edit_select_all(_: &AnyObject, _: Sel, _: *mut AnyObject) {
+    let Some(state) = state() else { return };
+    if let Some(editor) = state.store.borrow().editor() {
+        editor.select_all();
+    }
+    state.window.request_redraw();
+}
+extern "C-unwind" fn can_perform(this: &AnyObject, _: Sel, action: Sel, _: *mut AnyObject) -> Bool {
+    let Some(state) = state() else {
+        return Bool::NO;
+    };
+    let store = state.store.borrow();
+    let (start, end, _) = store.selection();
+    let selected = start != end;
+    let secure = store.editor().is_some_and(EditorHandle::is_secure);
+    let can = if action == sel!(copy:) || action == sel!(cut:) {
+        selected && !secure
+    } else if action == sel!(paste:) {
+        // SAFETY: UIPasteboard's getter, which reads no contents and so shows
+        // no prompt.
+        unsafe {
+            let board: Retained<AnyObject> = msg_send![class!(UIPasteboard), generalPasteboard];
+            msg_send![&*board, hasStrings]
+        }
+    } else if action == sel!(selectAll:) {
+        store.len() > 0
+    } else {
+        let _ = this;
+        false
+    };
+    Bool::new(can)
+}
+
 fn input_mode() -> InputMode {
     state()
         .and_then(|state| state.store.borrow().editor().map(EditorHandle::input_mode))
@@ -682,6 +739,17 @@ fn input_class() -> &'static AnyClass {
             b.add_method(
                 sel!(isSecureTextEntry),
                 is_secure as extern "C-unwind" fn(_, _) -> _,
+            );
+            b.add_method(sel!(copy:), edit_copy as extern "C-unwind" fn(_, _, _));
+            b.add_method(sel!(cut:), edit_cut as extern "C-unwind" fn(_, _, _));
+            b.add_method(sel!(paste:), edit_paste as extern "C-unwind" fn(_, _, _));
+            b.add_method(
+                sel!(selectAll:),
+                edit_select_all as extern "C-unwind" fn(_, _, _),
+            );
+            b.add_method(
+                sel!(canPerformAction:withSender:),
+                can_perform as extern "C-unwind" fn(_, _, _, _) -> _,
             );
             b.add_method(
                 sel!(hitTest:withEvent:),

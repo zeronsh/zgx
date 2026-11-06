@@ -28,4 +28,10 @@ return ui.column {
 	ui.input { value = search, label = "Search", placeholder = "Search", inputmode = "search" },
 	ui.text { "Name: {name}", color = "$text.secondary" },
 	ui.text { "Submitted {submitted} times", color = "$text.secondary" },
+	ui.text {
+		function()
+			return "Keyboard covers " .. ui.window.keyboard:get() .. " points"
+		end,
+		color = "$text.secondary",
+	},
 }

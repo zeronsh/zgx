@@ -3845,6 +3845,8 @@ impl Host {
                 self.context.ui.scroll_driver_finder(),
             );
             self.text_input = crate::ios_text::TextInput::new(window.clone());
+            // Listening before the first keyboard comes.
+            let _ = crate::ios_system::keyboard_height();
             crate::ios_system::dump_accessibility_later(&window);
             // What the bars leave of it, before its first frame.
             self.context
@@ -5695,6 +5697,15 @@ impl Host {
             let due = self.touch.due_press(std::time::Instant::now());
             if !due.is_empty() {
                 self.touch_steps(due)?;
+            }
+            let covered = crate::ios_system::keyboard_height();
+            if self
+                .context
+                .window_info
+                .keyboard
+                .with_untracked(|now| *now != covered)
+            {
+                self.context.window_info.keyboard.set(covered);
             }
             // The keyboard's Return, as the key it is.
             if self

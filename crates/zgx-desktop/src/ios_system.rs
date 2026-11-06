@@ -196,6 +196,49 @@ pub(crate) fn tokens() -> Vec<(TokenId, TokenInput)> {
 }
 
 static CHANGED: AtomicBool = AtomicBool::new(false);
+/// How much of the screen the keyboard is about to cover, in points, as bits.
+static KEYBOARD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// How much of the screen's height the keyboard covers, in points. The first
+/// call starts listening.
+pub(crate) fn keyboard_height() -> f32 {
+    static LISTENING: std::sync::Once = std::sync::Once::new();
+    LISTENING.call_once(|| {
+        unsafe extern "C" {
+            static UIKeyboardWillChangeFrameNotification: *const AnyObject;
+            static UIKeyboardFrameEndUserInfoKey: *const AnyObject;
+        }
+        let block = block2::RcBlock::new(|note: *mut AnyObject| {
+            // SAFETY: UIKit's notification, its user info holding the frame in
+            // an NSValue, read on the main thread it posts on.
+            unsafe {
+                let info: Option<Retained<AnyObject>> = msg_send![note, userInfo];
+                let Some(info) = info else { return };
+                let value: Option<Retained<AnyObject>> =
+                    msg_send![&*info, objectForKey: UIKeyboardFrameEndUserInfoKey];
+                let Some(value) = value else { return };
+                let frame: objc2_core_foundation::CGRect = msg_send![&*value, CGRectValue];
+                let screen: Retained<AnyObject> = msg_send![class!(UIScreen), mainScreen];
+                let bounds: objc2_core_foundation::CGRect = msg_send![&*screen, bounds];
+                let covered = (bounds.size.height - frame.origin.y).max(0.) as f32;
+                KEYBOARD.store(covered.to_bits(), Ordering::Relaxed);
+            }
+        });
+        // SAFETY: NSNotificationCenter's method, with UIKit's own name; the
+        // block lives as long as the app, with its observer.
+        unsafe {
+            let center: Retained<AnyObject> =
+                msg_send![class!(NSNotificationCenter), defaultCenter];
+            let observer: Retained<AnyObject> = msg_send![&*center,
+                addObserverForName: UIKeyboardWillChangeFrameNotification,
+                object: std::ptr::null::<AnyObject>(),
+                queue: std::ptr::null::<AnyObject>(),
+                usingBlock: &*block];
+            std::mem::forget(observer);
+        }
+    });
+    f32::from_bits(KEYBOARD.load(Ordering::Relaxed))
+}
 
 /// A display setting or the text size changed since the last call. The
 /// first call starts listening.

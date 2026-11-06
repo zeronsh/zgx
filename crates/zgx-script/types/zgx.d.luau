@@ -1571,11 +1571,13 @@ export type FullScreenTransition = { phase: "entering" | "leaving", duration: nu
 -- setting it zooms the window, within 0.25 to 5); `zoomable` false turns
 -- the keys off. `safe_area` is what the screen's edges and the system's bars
 -- leave of the window, `{ top, right, bottom, left }` in points: iOS's safe
--- area, all 0 elsewhere.
+-- area, all 0 elsewhere. `keyboard` is how much of the bottom the on-screen
+-- keyboard covers, in points.
 -- An extern type: a function and a table can't intersect, so that would be
 -- `never`, and `ui`, holding one, would stop reporting its unknown members.
 declare extern type WindowApi with
 	safe_area: State<{ top: number, right: number, bottom: number, left: number }>
+	keyboard: State<number>
 	titlebar_area: State<WindowRect?>
 	controls: State<WindowRect?>
 	zoom: State<number>

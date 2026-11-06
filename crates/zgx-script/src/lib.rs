@@ -2483,13 +2483,15 @@ impl ScriptHost {
     /// Keep `ui.window.safe_area` as the window has it: pass its
     /// `WindowInfo::safe_area` (top, right, bottom, left in points), shown as
     /// `{ top, right, bottom, left }`.
-    pub fn window_safe_area(&self, safe_area: Signal<[f32; 4]>) {
+    pub fn window_safe_area(&self, safe_area: Signal<[f32; 4]>, keyboard: Signal<f32>) {
+        let covered = self.0.shared.state(windows::KEYBOARD, Value::Num(0.));
         let state = self
             .0
             .shared
             .state(windows::SAFE_AREA, safe_area_value([0.; 4]));
         let effect = self.0.runtime.effect_now(move || {
             state.set(safe_area_value(safe_area.get()));
+            covered.set(Value::Num(f64::from(keyboard.get())));
         });
         self.0.safe_area.replace(Some(effect));
     }

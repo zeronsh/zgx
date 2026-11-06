@@ -36,6 +36,9 @@ fn crlf(text: &str) -> String {
     out
 }
 
+#[cfg(target_os = "ios")]
+use crate::ios_pasteboard as arboard;
+
 enum Backend {
     Native(arboard::Clipboard),
     #[cfg(target_os = "linux")]

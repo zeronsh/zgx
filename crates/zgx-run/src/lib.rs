@@ -449,7 +449,10 @@ pub fn run_hosting(
             cx.window_info.controls.clone(),
         );
         // `ui.window.safe_area`: what the system's bars leave of the window.
-        host.window_safe_area(cx.window_info.safe_area.clone());
+        host.window_safe_area(
+            cx.window_info.safe_area.clone(),
+            cx.window_info.keyboard.clone(),
+        );
         // `ui.window.zoom`: the window's zoom, as its keys or the script set it.
         host.window_zoom(&cx.ui);
         // `ui.window.active` and `ui.window.shown`.

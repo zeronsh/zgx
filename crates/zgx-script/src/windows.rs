@@ -527,6 +527,8 @@ fn window_of(
 pub(crate) const TITLEBAR_AREA: &str = "zgx.window.titlebar_area";
 /// `ui.window.safe_area`'s state (`ScriptHost::window_safe_area`).
 pub(crate) const SAFE_AREA: &str = "zgx.window.safe_area";
+/// `ui.window.keyboard`'s state (`ScriptHost::window_safe_area`).
+pub(crate) const KEYBOARD: &str = "zgx.window.keyboard";
 pub(crate) const CONTROLS: &str = "zgx.window.controls";
 /// The shared keys holding the app's window's zoom (1 at 100%) and whether
 /// its keys zoom it (`ScriptHost::window_zoom`): `ui.window.zoom` and
@@ -622,6 +624,10 @@ pub(crate) fn install(
         window.set(
             "safe_area",
             State::new(shared.state(SAFE_AREA, crate::safe_area_value([0.; 4]))),
+        )?;
+        window.set(
+            "keyboard",
+            State::new(shared.state(KEYBOARD, Value::Num(0.))),
         )?;
     }
     let meta = lua.create_table()?;
