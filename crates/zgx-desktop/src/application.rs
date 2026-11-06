@@ -3041,6 +3041,9 @@ impl Host {
             crate::native_host::set_cursor(window, cursor);
             #[cfg(not(target_os = "macos"))]
             window.set_cursor(cursor);
+            // (And over its popups, which Windows asks apart.)
+            #[cfg(windows)]
+            crate::popup_window::set_cursor(cursor);
             self.native_cursor = Some(cursor);
         }
     }
