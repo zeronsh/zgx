@@ -59,7 +59,7 @@ def bundle(binary: Path, name: str, resources: list[Path]) -> Path:
             shutil.copytree(resource, app / resource.name, symlinks=True)
         else:
             shutil.copy2(resource, app / resource.name)
-    identifier = "sh.zeron.zgx.ios." + name.replace("_", "-")
+    identifier = "dev.zgx.ios." + name.replace("_", "-")
     with open(app / "Info.plist", "wb") as f:
         plistlib.dump(
             {
@@ -122,7 +122,7 @@ def main() -> int:
     app = bundle(binary, name, args.resource)
 
     udid = device()
-    identifier = "sh.zeron.zgx.ios." + name.replace("_", "-")
+    identifier = "dev.zgx.ios." + name.replace("_", "-")
     if not args.install_only:
         simctl("terminate", udid, identifier, check=False)
     simctl("install", udid, str(app))

@@ -54,7 +54,7 @@ def main() -> int:
     binary = ROOT / "target" / sim.TARGET / profile / "examples" / example
     app = sim.bundle(binary, "ios_cost", [args.luau] if args.luau else [])
     udid = sim.device()
-    identifier = "sh.zeron.zgx.ios.ios-cost"
+    identifier = "dev.zgx.ios.ios-cost"
     sim.simctl("install", udid, str(app))
     print(f"{'case':34}{'CPU % core':>12}{'memory MB':>12}{'first frame ms':>16}")
     for case in args.cases:
