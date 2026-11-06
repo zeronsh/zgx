@@ -226,7 +226,7 @@ local function TextPage(nav: any)
 				},
 			},
 		},
-		ui.text { "Refreshed {refreshed} times", mx = 36, mb = 240, color = "$text.secondary" },
+		ui.text { "Refreshed {refreshed} times", wrap = true, mx = 36, mb = 240, color = "$text.secondary" },
 		ios.section {
 			header = "LOW ON THE PAGE",
 			footer = "The page scrolls this field above the keyboard.",

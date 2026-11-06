@@ -5104,6 +5104,12 @@ fn open_element(
         } => {
             dim_when_disabled(&mut view);
             let mut defaults = widget_style(|w| &w.editor);
+            // Its height follows Dynamic Type's token as it changes; built
+            // once, a larger text size would clip the text.
+            #[cfg(target_os = "ios")]
+            if !multiline {
+                defaults = defaults.h(tok::CONTROL_HEIGHT);
+            }
             // The default outline is drawn over; a border the app gives
             // takes room, as CSS's does, unless it says otherwise.
             let own_border =

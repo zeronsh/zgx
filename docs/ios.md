@@ -39,6 +39,8 @@ There is one tree of elements, zgx's, through AccessKit's iOS adapter (`vendor/a
 
 `ui.scroll_edge { edge, style, size, shown, drawn }` is iOS 26's scroll edge effect on a window's edge: Apple's own, through public API. The first one puts the app in a `UIScrollView` held still, because the effect works on a scroll view's own contents, and adds a view with `UIScrollEdgeElementContainerInteraction` over the box; an app without one pays nothing. What the script paints after the node shows above the effect. Against a real navigation bar over the same content, pixels match within 1/255 where both pick the same veil; the effect picks a darkening or a lightening one from what is under it, and at some offsets the two pick differently. `drawn = true` is a blur and gradient for an edge inside the window, and what other platforms get: not Apple's, and not matched to it.
 
+Which veil the effect shows over the same content depends on how the scroll got there: Apple's own bar, ending at one offset from three different starts, shows three different veils, and repeats exactly from a fresh launch. Don't compare zgx with a native bar at one offset and call a different veil a bug; compare one that chose the same (soft in light matches to 1/255).
+
 ## In Luau
 
 `ui.ios` (a Settings-style app's sections, rows, pages with large titles, stacks with edge swipes, sheets, search, pull to refresh), `ui.alert`, `ui.action_sheet`, `ui.haptic`, `ui.share`, `ui.system_menu`, `ui.on_escape`, `ui.native_pan`, `ui.pull_refresh`, `ui.scroll_edge`, `ui.webview`. `crates/zgx-script/examples/ios_showcase` holds them in one app.
