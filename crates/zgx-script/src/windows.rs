@@ -529,6 +529,8 @@ pub(crate) const TITLEBAR_AREA: &str = "zgx.window.titlebar_area";
 pub(crate) const SAFE_AREA: &str = "zgx.window.safe_area";
 /// `ui.window.keyboard`'s state (`ScriptHost::window_safe_area`).
 pub(crate) const KEYBOARD: &str = "zgx.window.keyboard";
+/// `ui.window.overscroll`'s state (`ScriptHost::window_safe_area`).
+pub(crate) const OVERSCROLL: &str = "zgx.window.overscroll";
 pub(crate) const CONTROLS: &str = "zgx.window.controls";
 /// The shared keys holding the app's window's zoom (1 at 100%) and whether
 /// its keys zoom it (`ScriptHost::window_zoom`): `ui.window.zoom` and
@@ -624,6 +626,10 @@ pub(crate) fn install(
         window.set(
             "safe_area",
             State::new(shared.state(SAFE_AREA, crate::safe_area_value([0.; 4]))),
+        )?;
+        window.set(
+            "overscroll",
+            State::new(shared.state(OVERSCROLL, Value::Num(0.))),
         )?;
         window.set(
             "keyboard",

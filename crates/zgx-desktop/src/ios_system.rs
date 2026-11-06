@@ -416,7 +416,11 @@ pub(crate) fn symbol(
 }
 
 /// An `NSString` of `text`.
-///
+pub(crate) fn ns_string(text: &str) -> Retained<AnyObject> {
+    // SAFETY: as `objc2_foundation_string` promises.
+    unsafe { objc2_foundation_string(text) }
+}
+
 /// # Safety
 /// On any thread: NSString's constructor, over a NUL-terminated copy.
 unsafe fn objc2_foundation_string(text: &str) -> Retained<AnyObject> {
@@ -500,5 +504,126 @@ fn dump_element(element: &AnyObject, depth: usize) {
             let child: Retained<AnyObject> = msg_send![&*children, objectAtIndex: index];
             dump_element(&child, depth + 1);
         }
+    }
+}
+
+/// Haptics and alerts, as UIKit does them.
+pub(crate) struct IosSystemUi;
+impl zgx::native_control::SystemUi for IosSystemUi {
+    fn haptic(&self, kind: &str) {
+        // SAFETY: UIKit's constructors and methods, on the main thread.
+        unsafe {
+            match kind {
+                "success" | "warning" | "error" => {
+                    let kind: isize = match kind {
+                        "success" => 0,
+                        "warning" => 1,
+                        _ => 2,
+                    };
+                    let made: Retained<AnyObject> =
+                        msg_send![class!(UINotificationFeedbackGenerator), new];
+                    let _: () = msg_send![&*made, notificationOccurred: kind];
+                }
+                "selection" => {
+                    let made: Retained<AnyObject> =
+                        msg_send![class!(UISelectionFeedbackGenerator), new];
+                    let _: () = msg_send![&*made, selectionChanged];
+                }
+                _ => {
+                    let style: isize = match kind {
+                        "medium" => 1,
+                        "heavy" => 2,
+                        "soft" => 3,
+                        "rigid" => 4,
+                        _ => 0,
+                    };
+                    let made: Retained<AnyObject> = msg_send![msg_send![class!(UIImpactFeedbackGenerator), alloc], initWithStyle: style];
+                    let _: () = msg_send![&*made, impactOccurred];
+                }
+            }
+        }
+    }
+    fn alert(
+        &self,
+        style: zgx::native_control::AlertStyle,
+        title: &str,
+        message: &str,
+        buttons: &[(String, zgx::native_control::AlertButtonStyle)],
+        done: Box<dyn FnOnce(usize)>,
+    ) {
+        use zgx::native_control::{AlertButtonStyle, AlertStyle};
+        let done = std::rc::Rc::new(std::cell::RefCell::new(Some(done)));
+        // SAFETY: UIKit's constructors and methods, on the main thread. The
+        // window's root view controller presents; a sheet on an iPad needs a
+        // place to point from, the middle of the window.
+        unsafe {
+            let preferred: isize = match style {
+                AlertStyle::Alert => 1,
+                AlertStyle::ActionSheet => 0,
+            };
+            let title = (!title.is_empty()).then(|| ns_string(title));
+            let message = (!message.is_empty()).then(|| ns_string(message));
+            let controller: Retained<AnyObject> = msg_send![class!(UIAlertController),
+                alertControllerWithTitle: title.as_deref().map_or(std::ptr::null(), |t| t as *const AnyObject),
+                message: message.as_deref().map_or(std::ptr::null(), |m| m as *const AnyObject),
+                preferredStyle: preferred];
+            for (index, (label, kind)) in buttons.iter().enumerate() {
+                let kind: isize = match kind {
+                    AlertButtonStyle::Default => 0,
+                    AlertButtonStyle::Cancel => 1,
+                    AlertButtonStyle::Destructive => 2,
+                };
+                let done = done.clone();
+                let handler = block2::RcBlock::new(move |_: *mut AnyObject| {
+                    if let Some(done) = done.borrow_mut().take() {
+                        done(index);
+                    }
+                    zgx::native_view::wake();
+                });
+                let action: Retained<AnyObject> = msg_send![class!(UIAlertAction),
+                    actionWithTitle: &*ns_string(label),
+                    style: kind,
+                    handler: &*handler];
+                let _: () = msg_send![&*controller, addAction: &*action];
+            }
+            let Some(root) = root_controller() else {
+                return;
+            };
+            let popover: Option<Retained<AnyObject>> =
+                msg_send![&*controller, popoverPresentationController];
+            if let Some(popover) = popover {
+                let view: Retained<AnyObject> = msg_send![&*root, view];
+                let bounds: objc2_core_foundation::CGRect = msg_send![&*view, bounds];
+                let middle = objc2_core_foundation::CGRect {
+                    origin: objc2_core_foundation::CGPoint {
+                        x: bounds.size.width / 2.,
+                        y: bounds.size.height / 2.,
+                    },
+                    size: objc2_core_foundation::CGSize {
+                        width: 1.,
+                        height: 1.,
+                    },
+                };
+                let _: () = msg_send![&*popover, setSourceView: &*view];
+                let _: () = msg_send![&*popover, setSourceRect: middle];
+            }
+            let _: () = msg_send![&*root,
+                presentViewController: &*controller,
+                animated: true,
+                completion: std::ptr::null::<AnyObject>()];
+        }
+    }
+}
+
+/// The key window's root view controller: what presents the system's sheets.
+pub(crate) fn root_controller() -> Option<Retained<AnyObject>> {
+    // SAFETY: UIApplication's getters, on the main thread. `keyWindow` is
+    // deprecated for scenes; winit's app has the one window.
+    unsafe {
+        let app: Retained<AnyObject> = msg_send![class!(UIApplication), sharedApplication];
+        let windows: Retained<AnyObject> = msg_send![&*app, windows];
+        let first: Option<Retained<AnyObject>> = msg_send![&*windows, firstObject];
+        let window = first?;
+        msg_send![&*window, rootViewController]
     }
 }

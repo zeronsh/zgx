@@ -24,6 +24,8 @@ thread_local! {
 struct State {
     /// What finds the zgx scroll view at a window point.
     at: Box<dyn Fn(f32, f32) -> Option<ScrollDriver>>,
+    /// Told how far past an end it shows (`ui.window.overscroll`).
+    stretched: Box<dyn Fn(f32)>,
     /// The zgx scroll view the scroller stands for.
     driver: RefCell<Option<ScrollDriver>>,
     /// Finds what a tap on the status bar scrolls.
@@ -53,6 +55,9 @@ define_class!(
             let at: CGPoint = unsafe { msg_send![view, contentOffset] };
             let horizontal = driver.metrics().is_some_and(|m| m.horizontal);
             driver.drive(if horizontal { at.x } else { at.y } as f32);
+            if let Some(metrics) = driver.metrics() {
+                (state.stretched)(metrics.stretch);
+            }
             state.window.request_redraw();
         }
         #[unsafe(method(scrollViewShouldScrollToTop:))]
@@ -178,6 +183,7 @@ impl NativeScroller {
         window: Arc<winit::window::Window>,
         top: impl Fn() -> Option<ScrollDriver> + 'static,
         at: impl Fn(f32, f32) -> Option<ScrollDriver> + 'static,
+        stretched: impl Fn(f32) + 'static,
     ) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
         let handle = window.window_handle().ok()?;
@@ -186,6 +192,7 @@ impl NativeScroller {
         };
         let state = Rc::new(State {
             at: Box::new(at),
+            stretched: Box::new(stretched),
             driver: RefCell::default(),
             top: RefCell::new(Box::new(top)),
             configuring: Default::default(),

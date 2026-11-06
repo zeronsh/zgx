@@ -195,6 +195,9 @@ pub struct WindowInfo {
     /// How much of the window's bottom the on-screen keyboard covers, in
     /// points (iOS; 0 elsewhere).
     pub keyboard: Signal<f32>,
+    /// How far past an end the scroll view being moved shows, in points:
+    /// negative past its start (iOS, for a pull to refresh; 0 elsewhere).
+    pub overscroll: Signal<f32>,
 }
 impl WindowInfo {
     pub(crate) fn new(ui: &Ui, width: f64, height: f64) -> Self {
@@ -214,6 +217,7 @@ impl WindowInfo {
             controls: ui.signal(None),
             safe_area: ui.signal([0.; 4]),
             keyboard: ui.signal(0.),
+            overscroll: ui.signal(0.),
         }
     }
     pub(crate) fn refresh(&self, window: &Window, titlebar: crate::Titlebar) {

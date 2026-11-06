@@ -1014,7 +1014,10 @@ impl Application {
     pub fn run(self, build: impl FnOnce(&mut WindowContext)) -> Result<(), Box<dyn Error>> {
         zgx::profile::mark("run");
         #[cfg(target_os = "ios")]
-        zgx::symbol::set_renderer(crate::ios_system::symbol);
+        {
+            zgx::symbol::set_renderer(crate::ios_system::symbol);
+            zgx::native_control::set_system_ui(std::rc::Rc::new(crate::ios_system::IosSystemUi));
+        }
         // Who the app is to the system's notifications and badge.
         crate::notify::set_identity(crate::notify::Identity {
             application_id: self.application_id.clone(),
@@ -3843,6 +3846,12 @@ impl Host {
                 window.clone(),
                 self.context.ui.main_scroll_driver(),
                 self.context.ui.scroll_driver_finder(),
+                {
+                    let overscroll = self.context.window_info.overscroll.clone();
+                    move |stretch| {
+                        overscroll.set(stretch);
+                    }
+                },
             );
             self.text_input = crate::ios_text::TextInput::new(window.clone());
             // Listening before the first keyboard comes.

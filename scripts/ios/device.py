@@ -240,8 +240,9 @@ def launch(device, environment, console=False):
     command = [
         "xcrun", "devicectl", "device", "process", "launch", "--terminate-existing",
         "--device", device["id"],
-        "--environment-variables", json.dumps(environment),
     ]
+    if environment:
+        command += ["--environment-variables", json.dumps(environment)]
     if console:
         command.append("--console")
     command.append(BUNDLE)

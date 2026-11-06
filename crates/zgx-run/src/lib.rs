@@ -452,6 +452,7 @@ pub fn run_hosting(
         host.window_safe_area(
             cx.window_info.safe_area.clone(),
             cx.window_info.keyboard.clone(),
+            cx.window_info.overscroll.clone(),
         );
         // `ui.window.zoom`: the window's zoom, as its keys or the script set it.
         host.window_zoom(&cx.ui);

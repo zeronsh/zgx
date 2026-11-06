@@ -181,3 +181,50 @@ pub fn native_toggle(
         }
     })
 }
+
+/// How a [`SystemUi::alert`] shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlertStyle {
+    /// In the middle of the screen.
+    Alert,
+    /// Rising from the bottom, for a choice among actions.
+    ActionSheet,
+}
+/// What a button of a [`SystemUi::alert`] says about itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlertButtonStyle {
+    /// An ordinary choice.
+    Default,
+    /// What backs out: the system places it apart.
+    Cancel,
+    /// What destroys something: the system marks it.
+    Destructive,
+}
+/// What only the platform does: a host that has these provides them
+/// ([`set_system_ui`]), and elsewhere they do nothing.
+pub trait SystemUi {
+    /// A tap felt in the hand: `"light"`, `"medium"`, `"heavy"`, `"soft"`,
+    /// `"rigid"`, `"success"`, `"warning"`, `"error"` or `"selection"`.
+    fn haptic(&self, kind: &str);
+    /// The system's alert or action sheet. `done` hears which button, from 0.
+    fn alert(
+        &self,
+        style: AlertStyle,
+        title: &str,
+        message: &str,
+        buttons: &[(String, AlertButtonStyle)],
+        done: Box<dyn FnOnce(usize)>,
+    );
+}
+thread_local! {
+    static SYSTEM_UI: std::cell::RefCell<Option<Rc<dyn SystemUi>>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// The host's own (the host calls this).
+pub fn set_system_ui(system: Rc<dyn SystemUi>) {
+    SYSTEM_UI.with(|slot| *slot.borrow_mut() = Some(system));
+}
+/// The host's, if it has one.
+pub fn system_ui() -> Option<Rc<dyn SystemUi>> {
+    SYSTEM_UI.with(|slot| slot.borrow().clone())
+}

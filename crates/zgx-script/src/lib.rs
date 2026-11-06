@@ -2484,8 +2484,14 @@ impl ScriptHost {
     /// Keep `ui.window.safe_area` as the window has it: pass its
     /// `WindowInfo::safe_area` (top, right, bottom, left in points), shown as
     /// `{ top, right, bottom, left }`.
-    pub fn window_safe_area(&self, safe_area: Signal<[f32; 4]>, keyboard: Signal<f32>) {
+    pub fn window_safe_area(
+        &self,
+        safe_area: Signal<[f32; 4]>,
+        keyboard: Signal<f32>,
+        overscroll: Signal<f32>,
+    ) {
         let covered = self.0.shared.state(windows::KEYBOARD, Value::Num(0.));
+        let stretched = self.0.shared.state(windows::OVERSCROLL, Value::Num(0.));
         let state = self
             .0
             .shared
@@ -2493,6 +2499,7 @@ impl ScriptHost {
         let effect = self.0.runtime.effect_now(move || {
             state.set(safe_area_value(safe_area.get()));
             covered.set(Value::Num(f64::from(keyboard.get())));
+            stretched.set(Value::Num(f64::from(overscroll.get())));
         });
         self.0.safe_area.replace(Some(effect));
     }
@@ -4111,6 +4118,7 @@ impl ScriptHost {
         // Each module made the first time a script names it (`lazy`).
         let lazy = lazy::Lazy::default();
         native::install_glass(&lazy);
+        lazy.ui(&["ios"], native::install_kit);
         lazy.ui(&["path", "linear"], canvas::install);
         #[cfg(feature = "scene3d")]
         lazy.ui(

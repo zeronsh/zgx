@@ -4,7 +4,8 @@
 use crate::node::{
     GlassSpec, Kind, Node, Source, SymbolSpec, Ty, control_value, fill, node_ud, owner, source,
 };
-use mlua::Table;
+use mlua::{Function, Lua, Table};
+use zgx::native_control::{AlertButtonStyle, AlertStyle};
 
 /// A `ui.native_tabs`'s `items`: each tab's title and system symbol.
 fn tab_items(table: &Table) -> mlua::Result<Vec<(String, String)>> {
@@ -17,6 +18,47 @@ fn tab_items(table: &Table) -> mlua::Result<Vec<(String, String)>> {
         })
         .collect()
 }
+/// `ui.ios`, the kit of `ios_kit.luau`, made the first time a script names it.
+pub(crate) fn install_kit(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+    const SOURCE: &str = include_str!("ios_kit.luau");
+    let kit: Table = crate::lazy::builtin(lua, "=ui.ios", SOURCE)?.call(ui.clone())?;
+    ui.set("ios", kit)
+}
+
+/// What `ui.alert` and `ui.action_sheet` take: `title`, `message`, `buttons`
+/// (`{ title, style }`), `on_choose`.
+fn present_alert(table: Table, style: AlertStyle) -> mlua::Result<()> {
+    let title: String = table.get::<Option<String>>("title")?.unwrap_or_default();
+    let message: String = table.get::<Option<String>>("message")?.unwrap_or_default();
+    let on_choose: Option<Function> = table.get("on_choose")?;
+    let mut buttons = Vec::new();
+    let listed: Table = table.get("buttons")?;
+    for button in listed.sequence_values::<Table>() {
+        let button = button?;
+        let kind = match button.get::<Option<String>>("style")?.as_deref() {
+            Some("cancel") => AlertButtonStyle::Cancel,
+            Some("destructive") => AlertButtonStyle::Destructive,
+            _ => AlertButtonStyle::Default,
+        };
+        buttons.push((button.get::<String>("title")?, kind));
+    }
+    let Some(system) = zgx::native_control::system_ui() else {
+        return Ok(());
+    };
+    system.alert(
+        style,
+        &title,
+        &message,
+        &buttons,
+        Box::new(move |index| {
+            if let Some(on_choose) = on_choose {
+                let _ = on_choose.call::<()>(index + 1);
+            }
+        }),
+    );
+    Ok(())
+}
+
 /// `ui.glass`, `ui.glass_group` and `ui.symbol`, made the first time a script
 /// names one.
 pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
@@ -27,8 +69,30 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
             "symbol",
             "native_switch",
             "native_tabs",
+            "haptic",
+            "alert",
+            "action_sheet",
         ],
         |lua, ui| {
+            ui.set(
+                "haptic",
+                lua.create_function(|_, kind: String| {
+                    if let Some(system) = zgx::native_control::system_ui() {
+                        system.haptic(&kind);
+                    }
+                    Ok(())
+                })?,
+            )?;
+            ui.set(
+                "alert",
+                lua.create_function(|_, table: Table| present_alert(table, AlertStyle::Alert))?,
+            )?;
+            ui.set(
+                "action_sheet",
+                lua.create_function(|_, table: Table| {
+                    present_alert(table, AlertStyle::ActionSheet)
+                })?,
+            )?;
             ui.set(
                 "native_tabs",
                 lua.create_function(|lua, table: Table| {

@@ -1,0 +1,274 @@
+-- A native-feeling iOS app in zgx alone: tab bar, navigation stack with a large
+-- title and a swipe back, grouped lists, a sheet, an alert and an action sheet,
+-- a search field with the system's keyboard, pull to refresh, and glass.
+local ios = ui.ios
+local tab = ui.state("tab", 1)
+local airplane = ui.state("airplane", false)
+local query = ui.state("query", "")
+local sheet_open = ui.state("sheet_open", false)
+local refreshed = ui.state("refreshed", 0)
+local note = ui.state("note", "")
+
+local function Detail(nav: any, title: string)
+	local enabled = ui.use_state(true)
+	return ios.page {
+		title = title,
+		nav = nav,
+		ios.section {
+			footer = "A page pushed on the stack. Drag from the left edge to go back.",
+			ios.row { title = "Enabled", toggle = enabled },
+			ios.row { title = "Version", detail = "26.0", chevron = false, last = true },
+		},
+		ios.section {
+			ios.row {
+				title = "Reset…",
+				color = "$danger",
+				chevron = false,
+				last = true,
+				on_click = function()
+					ui.action_sheet {
+						title = "Reset " .. title .. "?",
+						message = "This can't be undone.",
+						buttons = {
+							{ title = "Reset", style = "destructive" },
+							{ title = "Cancel", style = "cancel" },
+						},
+						on_choose = function(button)
+							if button == 1 then
+								ui.haptic("success")
+							end
+						end,
+					}
+				end,
+			},
+		},
+	}
+end
+local DetailPage = ui.component(function(props: { nav: any, title: string })
+	return Detail(props.nav, props.title)
+end)
+
+local function SettingsPage(nav: any)
+	local function open(title: string)
+		return function()
+			nav.push(function(inner: any)
+				return DetailPage { nav = inner, title = title }
+			end)
+		end
+	end
+	return ios.page {
+		title = "Settings",
+		nav = nav,
+		on_refresh = function(done)
+			ui.after(900, function()
+				refreshed:set(refreshed:get() + 1)
+				done()
+			end)
+		end,
+		ios.search { value = query, mx = 20 },
+		ui.div { h = 16 },
+		ios.section {
+			ios.row { icon = "airplane", tint = "$ios.orange", title = "Airplane Mode", toggle = airplane },
+			ios.row {
+				icon = "wifi",
+				tint = "$ios.blue",
+				title = "Wi-Fi",
+				detail = "Home",
+				on_click = open("Wi-Fi"),
+			},
+			ios.row {
+				icon = "wave.3.right",
+				tint = "$ios.blue",
+				title = "Bluetooth",
+				detail = "On",
+				on_click = open("Bluetooth"),
+			},
+			ios.row {
+				icon = "antenna.radiowaves.left.and.right",
+				tint = "$ios.green",
+				title = "Cellular",
+				last = true,
+				on_click = open("Cellular"),
+			},
+		},
+		ios.section {
+			ios.row {
+				icon = "bell.badge.fill",
+				tint = "$ios.red",
+				title = "Notifications",
+				on_click = open("Notifications"),
+			},
+			ios.row {
+				icon = "speaker.wave.3.fill",
+				tint = "$ios.pink",
+				title = "Sounds & Haptics",
+				on_click = function()
+					ui.haptic("success")
+					ui.alert {
+						title = "Sounds & Haptics",
+						message = "You felt that one on a phone.",
+						buttons = { { title = "OK" } },
+					}
+				end,
+			},
+			ios.row { icon = "moon.fill", tint = "$ios.indigo", title = "Focus", on_click = open("Focus") },
+			ios.row {
+				icon = "hourglass",
+				tint = "$ios.indigo",
+				title = "Screen Time",
+				last = true,
+				on_click = open("Screen Time"),
+			},
+		},
+		ios.section {
+			ios.row {
+				icon = "gear",
+				tint = "$ios.gray",
+				title = "A sheet",
+				on_click = function()
+					sheet_open:set(true)
+				end,
+			},
+			ios.row {
+				icon = "accessibility",
+				tint = "$ios.blue",
+				title = "Accessibility",
+				last = true,
+				on_click = open("Accessibility"),
+			},
+		},
+	}
+end
+
+local function TextPage(nav: any)
+	return ios.page {
+		title = "Notes",
+		nav = nav,
+		ios.section {
+			header = "A NOTE",
+			ui.div {
+				px = 16,
+				py = 12,
+				ui.textarea {
+					value = note,
+					label = "Note",
+					placeholder = "Write something",
+					h = 160,
+					bg = "#00000000",
+					border = 0,
+					focus = {},
+				},
+			},
+		},
+		ui.text { "Refreshed {refreshed} times", mx = 36, color = "$text.secondary" },
+	}
+end
+
+local function GlassPage(_nav: any)
+	local apart = ui.use_state(8)
+	local rows: { any } = {}
+	for index = 1, 30 do
+		rows[index] = ui.row {
+			h = 88,
+			bg = index % 2 == 0 and "$ios.blue" or "$ios.orange",
+			px = 20,
+			items = "center",
+			ui.text { "Row " .. index, color = "#ffffff", weight = 600, text_size = "$font.size.lg" },
+		}
+	end
+	return ui.div {
+		w = "100%",
+		h = "100%",
+		ui.scroll { w = "100%", h = "100%", ui.column { rows } },
+		ui.glass_group {
+			absolute = true,
+			left = 76,
+			bottom = 260,
+			w = 260,
+			h = 96,
+			spacing = 40,
+			ui.glass { absolute = true, left = 0, top = 0, w = 96, h = 96, radius = 48, interactive = true },
+			ui.glass {
+				absolute = true,
+				left = 96,
+				top = 0,
+				w = 96,
+				h = 96,
+				radius = 48,
+				interactive = true,
+				x = ui.spring(apart),
+			},
+		},
+		ui.glass {
+			absolute = true,
+			left = 76,
+			right = 76,
+			bottom = 180,
+			h = 56,
+			radius = 28,
+			interactive = true,
+			ui.button {
+				w = "100%",
+				h = "100%",
+				rounded = 28,
+				bg = "#00000000",
+				hover = {},
+				active = {},
+				on_click = function()
+					apart:set(if apart:get() < 40 then 90 else 8)
+				end,
+				ui.text { "Merge", weight = 600, color = "$text.primary" },
+			},
+		},
+	}
+end
+
+local function page(index: number)
+	return ui.div {
+		absolute = true,
+		left = 0,
+		right = 0,
+		top = 0,
+		bottom = 0,
+		hidden = function()
+			return tab:get() ~= index
+		end,
+		ios.stack {
+			root = if index == 1 then SettingsPage elseif index == 2 then TextPage else GlassPage,
+		},
+	}
+end
+
+return ui.div {
+	w = "100%",
+	h = "100%",
+	bg = "$ios.grouped",
+	page(1),
+	page(2),
+	page(3),
+	ui.native_tabs {
+		absolute = true,
+		left = 0,
+		right = 0,
+		bottom = 0,
+		h = 83,
+		value = tab,
+		items = {
+			{ title = "Settings", symbol = "gear" },
+			{ title = "Notes", symbol = "note.text" },
+			{ title = "Glass", symbol = "circle.hexagongrid.fill" },
+		},
+	},
+	ios.sheet {
+		open = sheet_open,
+		detents = { 0.45, 1 },
+		build = function()
+			return ui.column {
+				p = 20,
+				gap = 12,
+				ui.text { "A sheet", heading = 2, text_size = "$font.size.lg", weight = 600, color = "$text.primary" },
+				ui.text { "Drag the handle between its detents, or down to close.", color = "$text.secondary" },
+			}
+		end,
+	},
+}
