@@ -18810,6 +18810,13 @@ export type GlassProps = {
 	[number]: Child,
 }
 
+export type NativeSwitchProps = {
+	-- Whether it is on: a state it writes, or a function with `on_change`.
+	value: State<boolean> | (() -> boolean),
+	on_change: ((on: boolean) -> ())?,
+	-- What assistive technology calls it.
+	label: string?,
+}
 export type SymbolProps = {
 	-- The SF Symbol's name.
 	name: string,
@@ -20578,6 +20585,8 @@ declare ui: {
 	glass_group: (props: GlassGroupProps) -> Node,
 	-- A system symbol (`name = "wifi"`), drawn by iOS; an empty box of its size elsewhere.
 	symbol: (props: SymbolProps) -> Node,
+	-- The system's on and off control (iOS's UISwitch), drawn elsewhere.
+	native_switch: (props: NativeSwitchProps) -> Node,
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,

@@ -2965,6 +2965,16 @@ fn kind_view(
         Kind::Terminal(term) => zgx::terminal::terminal(term),
         Kind::Glass(spec) => glass_of(spec, vm),
         Kind::Symbol(spec) => symbol_of(spec, vm),
+        Kind::Toggle(label, value) => {
+            let (read, write) = (value.clone(), value.clone());
+            zgx::native_control::native_toggle(
+                label.clone(),
+                move || read.with(Value::truthy),
+                move |on| {
+                    write.set(Value::Bool(on));
+                },
+            )
+        }
         Kind::GlassGroup(spacing) => zgx::glass::glass_group(*spacing),
         #[cfg(feature = "scene3d")]
         Kind::Scene3d(spec) => crate::scene3d::lower(spec, vm, &low.assets, need(&mut cx)),

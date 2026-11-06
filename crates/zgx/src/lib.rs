@@ -111,6 +111,7 @@ mod compose_drag;
 pub mod native_surface;
 
 pub mod glass;
+pub mod native_control;
 pub mod native_view;
 /// The clipboard and file dialogs, as a service a host provides.
 pub mod platform;

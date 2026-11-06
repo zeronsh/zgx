@@ -13,5 +13,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|entry| entry.path())
         .find(|path| path.join("app.luau").is_file())
         .ok_or("no folder in the bundle holds an app.luau")?;
-    zgx_run::run(&app)
+    // `ZGX_APP_ARGS`: the script's `ui.args`, space separated.
+    let args = zgx::env::var("ZGX_APP_ARGS")
+        .map(|args| args.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default();
+    zgx_run::run_with(&app, args)
 }

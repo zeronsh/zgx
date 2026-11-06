@@ -3827,6 +3827,7 @@ impl Host {
             self.native_scroll = crate::ios_scroll::NativeScroller::new(
                 window.clone(),
                 self.context.ui.main_scroll_driver(),
+                self.context.ui.scroll_driver_finder(),
             );
             crate::ios_system::dump_accessibility_later(&window);
             // What the bars leave of it, before its first frame.

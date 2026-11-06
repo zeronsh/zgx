@@ -556,6 +556,15 @@ impl ScrollDriver {
 pub(crate) fn driver_at(ui: &Ui, x: f32, y: f32) -> Option<ScrollDriver> {
     let scene = ui.scene.borrow();
     let state = ui.elastic_state().borrow();
+    driver_in(&scene, &state, x, y)
+}
+
+pub(crate) fn driver_in(
+    scene: &crate::scene::Scene,
+    state: &State,
+    x: f32,
+    y: f32,
+) -> Option<ScrollDriver> {
     let hit = scene.hit_test(x, y)?;
     std::iter::once(hit)
         .chain(scene.ancestors(hit))

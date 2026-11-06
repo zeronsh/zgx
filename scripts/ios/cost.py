@@ -41,16 +41,18 @@ def main() -> int:
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--rows", type=int, default=200)
     parser.add_argument("--release", action="store_true")
+    parser.add_argument("--luau", type=Path, help="a Luau app: each case's mode is its `ui.args`")
     parser.add_argument("cases", nargs="*", default=["plain", "drawn", "hosted", "plain:1", "plain:4"])
     args = parser.parse_args()
     environment = {k: v for k, v in sim.os.environ.items() if k != "SDKROOT"}
-    build = ["cargo", "build", "-p", "zgx-desktop", "--example", "ios_cost", "--target", sim.TARGET, "--locked"]
+    package, example = ("zgx-run", "ios_app") if args.luau else ("zgx-desktop", "ios_cost")
+    build = ["cargo", "build", "-p", package, "--example", example, "--target", sim.TARGET, "--locked"]
     if args.release:
         build.append("--release")
     subprocess.run(build, check=True, cwd=ROOT, env=dict(environment, CARGO_PROFILE_DEV_DEBUG="0"))
     profile = "release" if args.release else "debug"
-    binary = ROOT / "target" / sim.TARGET / profile / "examples" / "ios_cost"
-    app = sim.bundle(binary, "ios_cost", [])
+    binary = ROOT / "target" / sim.TARGET / profile / "examples" / example
+    app = sim.bundle(binary, "ios_cost", [args.luau] if args.luau else [])
     udid = sim.device()
     identifier = "sh.zeron.zgx.ios.ios-cost"
     sim.simctl("install", udid, str(app))
@@ -66,6 +68,7 @@ def main() -> int:
             launch = dict(
                 environment,
                 SIMCTL_CHILD_COST_MODE=mode,
+                SIMCTL_CHILD_ZGX_APP_ARGS=mode.replace("/", " "),
                 SIMCTL_CHILD_COST_GLASS=panes or "0",
                 SIMCTL_CHILD_COST_ROWS=str(args.rows),
                 SIMCTL_CHILD_ZGX_PROFILE="1",

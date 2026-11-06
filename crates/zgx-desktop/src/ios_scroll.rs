@@ -16,7 +16,14 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use zgx::elastic::ScrollDriver;
 
+thread_local! {
+    /// The window's scroller (iOS's one window), for its class's methods.
+    static CURRENT: std::cell::RefCell<Option<Rc<State>>> = const { std::cell::RefCell::new(None) };
+}
+
 struct State {
+    /// What finds the zgx scroll view at a window point.
+    at: Box<dyn Fn(f32, f32) -> Option<ScrollDriver>>,
     /// The zgx scroll view the scroller stands for.
     driver: RefCell<Option<ScrollDriver>>,
     /// Finds what a tap on the status bar scrolls.
@@ -73,9 +80,42 @@ fn scroller_class() -> &'static AnyClass {
     ) -> *mut AnyObject {
         std::ptr::null_mut()
     }
+    /// A pan may start from a finger zgx never heard of, one on a hosted
+    /// control: what lies under it is decided as UIKit asks.
+    extern "C-unwind" fn should_begin(this: &AnyObject, _: Sel, pan: &AnyObject) -> Bool {
+        // SAFETY: UIScrollView's and UIGestureRecognizer's own methods.
+        unsafe {
+            let moving: bool = msg_send![this, isDecelerating];
+            if !moving {
+                let at: CGPoint = msg_send![pan, locationInView: std::ptr::null::<AnyObject>()];
+                let state = CURRENT.with(|current| current.borrow().clone());
+                if let Some(state) = state {
+                    match (state.at)(at.x as f32, at.y as f32) {
+                        Some(driver) => configure(&state, this, driver),
+                        None => {
+                            *state.driver.borrow_mut() = None;
+                            let empty = CGSize {
+                                width: 0.,
+                                height: 0.,
+                            };
+                            let _: () = msg_send![this, setContentSize: empty];
+                        }
+                    }
+                }
+            }
+            msg_send![super(this, class!(UIScrollView)), gestureRecognizerShouldBegin: pan]
+        }
+    }
     CLASS.get_or_init(|| {
         let mut builder = ClassBuilder::new(c"ZgxScroller", class!(UIScrollView))
             .expect("one class of this name");
+        // SAFETY: `should_begin` has `gestureRecognizerShouldBegin:`'s signature.
+        unsafe {
+            builder.add_method(
+                sel!(gestureRecognizerShouldBegin:),
+                should_begin as extern "C-unwind" fn(_, _, _) -> _,
+            );
+        }
         // SAFETY: `hit_test` has `hitTest:withEvent:`'s signature.
         unsafe {
             builder.add_method(
@@ -137,6 +177,7 @@ impl NativeScroller {
     pub(crate) fn new(
         window: Arc<winit::window::Window>,
         top: impl Fn() -> Option<ScrollDriver> + 'static,
+        at: impl Fn(f32, f32) -> Option<ScrollDriver> + 'static,
     ) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
         let handle = window.window_handle().ok()?;
@@ -144,11 +185,13 @@ impl NativeScroller {
             return None;
         };
         let state = Rc::new(State {
+            at: Box::new(at),
             driver: RefCell::default(),
             top: RefCell::new(Box::new(top)),
             configuring: Default::default(),
             window: window.clone(),
         });
+        CURRENT.with(|current| *current.borrow_mut() = Some(state.clone()));
         let delegate = Delegate::alloc(mtm).set_ivars(state.clone());
         // SAFETY: NSObject's `init`, on a fresh allocation with its ivars set.
         let delegate: Retained<Delegate> = unsafe { msg_send![super(delegate), init] };
@@ -221,7 +264,11 @@ impl NativeScroller {
                 // good. With nothing to scroll it never begins.
                 None => {
                     *self.state.driver.borrow_mut() = None;
-                    let _: () = msg_send![&*self.view, setContentSize: CGSize::new(0., 0.)];
+                    let empty = CGSize {
+                        width: 0.,
+                        height: 0.,
+                    };
+                    let _: () = msg_send![&*self.view, setContentSize: empty];
                 }
             }
         }

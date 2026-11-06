@@ -7,14 +7,20 @@
 //! answer them), up the responder chain. Neither is seen by assistive
 //! technology: the one tree of elements is zgx's. All of it changes in one
 //! Core Animation transaction, the planes' drawables presented inside it.
-use objc2::{MainThreadMarker, class, msg_send, rc::Retained, runtime::AnyObject};
+use objc2::{
+    DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
+    rc::Retained,
+    runtime::{AnyObject, NSObject, NSObjectProtocol},
+    sel,
+};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use std::{collections::HashMap, ptr::NonNull};
+use std::{collections::HashMap, ptr::NonNull, rc::Rc};
 use winit::raw_window_handle::{
     HasWindowHandle, RawDisplayHandle, RawWindowHandle, UiKitDisplayHandle, UiKitWindowHandle,
 };
 use zgx::{
     glass::{GlassContent, GlassStyle, GlassVariant},
+    native_control::ToggleState,
     native_view::{NativeContent, NativePlacement, NativeViews, PlaneSplit},
     scene::{NodeId, Rect, Scene},
     widgets::Ui,
@@ -38,6 +44,11 @@ fn rect(r: Rect) -> CGRect {
 
 /// A view of ours: over the window's, untouchable and unseen by assistive
 /// technology.
+fn plain_view(frame: CGRect) -> Retained<AnyObject> {
+    // SAFETY: UIView's initializer, on the main thread.
+    unsafe { msg_send![msg_send![class!(UIView), alloc], initWithFrame: frame] }
+}
+
 fn passive_view(frame: CGRect) -> Retained<AnyObject> {
     // SAFETY: UIView's initializer and setters, on the main thread (every
     // caller holds `Surfaces`, which is made there).
@@ -88,10 +99,39 @@ enum Content {
     Glass(GlassContent),
     /// An app's own view (`NativeContent::Platform`): it takes its touches.
     Platform,
+    /// A `UISwitch` (`NativeContent::Toggle`).
+    Toggle(Rc<ToggleState>, #[allow(dead_code)] Retained<ToggleTarget>),
 }
+
+impl Content {
+    /// A control a person touches, cut by what clips its node.
+    fn is_control(&self) -> bool {
+        matches!(self, Self::Platform | Self::Toggle(..))
+    }
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = std::cell::RefCell<Rc<ToggleState>>]
+    struct ToggleTarget;
+    unsafe impl NSObjectProtocol for ToggleTarget {}
+    impl ToggleTarget {
+        #[unsafe(method(toggled:))]
+        fn toggled(&self, control: &AnyObject) {
+            // SAFETY: UISwitch's getter.
+            let on: bool = unsafe { msg_send![control, isOn] };
+            (self.ivars().borrow().changed)(on);
+        }
+    }
+);
 
 struct Mounted {
     view: Retained<AnyObject>,
+    /// What clips a control, holding it (`Content::is_control`).
+    clip: Option<Retained<AnyObject>>,
+    /// The `UISwitch` shows this.
+    shown_on: bool,
     content: Content,
     style: Option<GlassStyle>,
     parent: Option<NodeId>,
@@ -110,7 +150,16 @@ pub(crate) struct Surfaces {
     order: Vec<NodeId>,
     zoom: f32,
     interactive: bool,
+    /// `UISwitch`es no row shows now, to show the next row that needs one.
+    reusable: Vec<(
+        Retained<AnyObject>,
+        Retained<AnyObject>,
+        Retained<ToggleTarget>,
+    )>,
 }
+
+/// More than a phone's screen of rows.
+const REUSABLE_TOGGLES: usize = 32;
 
 impl Surfaces {
     pub fn new(window: &winit::window::Window) -> Result<Self, String> {
@@ -142,6 +191,7 @@ impl Surfaces {
             order: Vec::new(),
             zoom: 1.,
             interactive: false,
+            reusable: Vec::new(),
         })
     }
     /// A renderer presenting into the overlay's view.
@@ -196,12 +246,21 @@ impl Surfaces {
     pub fn apply(&mut self, natives: &NativeViews, split: &PlaneSplit) {
         let views = natives.views();
         // Gone: their views too.
+        let reusable = &mut self.reusable;
         self.mounted.retain(|node, mounted| {
             let kept = views.iter().any(|(other, _)| other == node);
             if !kept {
                 // SAFETY: UIView's method, on the main thread.
                 unsafe {
-                    let _: () = msg_send![&*mounted.view, removeFromSuperview];
+                    let top = mounted.clip.as_ref().unwrap_or(&mounted.view);
+                    let _: () = msg_send![&**top, removeFromSuperview];
+                }
+                // Scrolling away and back makes and drops a row's control each
+                // time: kept, as a table view keeps its cells.
+                if let (Content::Toggle(_, target), Some(clip)) = (&mounted.content, &mounted.clip)
+                    && reusable.len() < REUSABLE_TOGGLES
+                {
+                    reusable.push((mounted.view.clone(), clip.clone(), target.clone()));
                 }
             }
             kept
@@ -217,10 +276,48 @@ impl Surfaces {
                     };
                     (view.clone(), Content::Platform)
                 }
+                NativeContent::Toggle(state) if !self.mounted.contains_key(node) => {
+                    if let Some((view, clip, target)) = self.reusable.pop() {
+                        *target.ivars().borrow_mut() = state.clone();
+                        // SAFETY: UISwitch's and UIView's setters, on the main thread.
+                        unsafe {
+                            let _: () = msg_send![&*view, setOn: state.on.get(), animated: false];
+                            let _: () = msg_send![&*clip, setHidden: false];
+                        }
+                        self.mounted.insert(
+                            *node,
+                            Mounted {
+                                view,
+                                clip: Some(clip),
+                                shown_on: state.on.get(),
+                                content: Content::Toggle(state.clone(), target),
+                                style: None,
+                                parent: None,
+                                frame: None,
+                                alpha: 1.,
+                                hidden: false,
+                            },
+                        );
+                        continue;
+                    }
+                    let (view, target) = make_toggle(state);
+                    (view, Content::Toggle(state.clone(), target))
+                }
                 _ => continue,
             };
+            let clip = content.is_control().then(|| {
+                let clip = plain_view(rect(Rect::new(0., 0., 1., 1.)));
+                // SAFETY: UIView's setter and method, on the main thread.
+                unsafe {
+                    let _: () = msg_send![&*clip, setClipsToBounds: true];
+                    let _: () = msg_send![&*clip, addSubview: &*view];
+                }
+                clip
+            });
             self.mounted.entry(*node).or_insert_with(|| Mounted {
                 view,
+                clip,
+                shown_on: matches!(&content, Content::Toggle(state, _) if state.on.get()),
                 content,
                 style: None,
                 parent: None,
@@ -238,10 +335,8 @@ impl Surfaces {
         // The host passes touches to its panes only while one answers them.
         let interactive = self.mounted.values().any(|mounted| {
             mounted.style.is_some_and(|style| style.interactive)
-                || matches!(
-                    mounted.content,
-                    Content::Glass(GlassContent::Group(_)) | Content::Platform
-                )
+                || matches!(mounted.content, Content::Glass(GlassContent::Group(_)))
+                || mounted.content.is_control()
         });
         if interactive != self.interactive {
             self.interactive = interactive;
@@ -261,7 +356,8 @@ impl Surfaces {
                     if let Some(host) = host {
                         // SAFETY: UIView's method, on the main thread.
                         unsafe {
-                            let _: () = msg_send![&*host, bringSubviewToFront: &*mounted.view];
+                            let top = mounted.clip.as_ref().unwrap_or(&mounted.view);
+                            let _: () = msg_send![&*host, bringSubviewToFront: &**top];
                         }
                     }
                 }
@@ -312,21 +408,40 @@ impl Surfaces {
         if mounted.parent != parent || mounted.frame.is_none() {
             mounted.parent = parent;
             if let Some(host) = host {
+                let top = mounted.clip.as_ref().unwrap_or(&mounted.view);
                 // SAFETY: UIView's method, on the main thread.
                 unsafe {
-                    let _: () = msg_send![&*host, addSubview: &*mounted.view];
+                    let _: () = msg_send![&*host, addSubview: &**top];
                 }
             }
         }
-        let hidden = placement.visible().is_none();
+        let visible = placement.visible();
+        let hidden = visible.is_none();
         if hidden != mounted.hidden {
             mounted.hidden = hidden;
+            let top = mounted.clip.as_ref().unwrap_or(&mounted.view);
             // SAFETY: UIView's setter, on the main thread.
             unsafe {
-                let _: () = msg_send![&*mounted.view, setHidden: hidden];
+                let _: () = msg_send![&**top, setHidden: hidden];
             }
         }
-        if mounted.frame != Some(placement.frame) {
+        if let (Some(clip), Some(visible)) = (&mounted.clip, visible) {
+            // A control shows what clips leave of it, as an image would.
+            if mounted.frame != Some(placement.frame) {
+                mounted.frame = Some(placement.frame);
+                let inside = Rect::new(
+                    placement.frame.x - visible.x,
+                    placement.frame.y - visible.y,
+                    placement.frame.width,
+                    placement.frame.height,
+                );
+                // SAFETY: UIView's setters, on the main thread.
+                unsafe {
+                    let _: () = msg_send![&**clip, setFrame: rect(visible)];
+                    let _: () = msg_send![&*mounted.view, setFrame: rect(inside)];
+                }
+            }
+        } else if mounted.clip.is_none() && mounted.frame != Some(placement.frame) {
             mounted.frame = Some(placement.frame);
             let frame = Rect::new(
                 placement.frame.x - origin.0,
@@ -337,6 +452,15 @@ impl Surfaces {
             // SAFETY: UIView's setter, on the main thread.
             unsafe {
                 let _: () = msg_send![&*mounted.view, setFrame: rect(frame)];
+            }
+        }
+        if let Content::Toggle(state, _) = &mounted.content
+            && mounted.shown_on != state.on.get()
+        {
+            mounted.shown_on = state.on.get();
+            // SAFETY: UISwitch's method, on the main thread.
+            unsafe {
+                let _: () = msg_send![&*mounted.view, setOn: mounted.shown_on, animated: true];
             }
         }
         if mounted.alpha != placement.opacity {
@@ -362,6 +486,24 @@ impl Surfaces {
     }
     /// Keyboard focus never goes to glass.
     pub fn sync_focus(&mut self, _: &Ui, _: &NativeViews) {}
+}
+
+/// A `UISwitch` that tells `state`, and what it tells through.
+fn make_toggle(state: &Rc<ToggleState>) -> (Retained<AnyObject>, Retained<ToggleTarget>) {
+    let mtm = MainThreadMarker::new().expect("views are made on the main thread");
+    let target = ToggleTarget::alloc(mtm).set_ivars(std::cell::RefCell::new(state.clone()));
+    // SAFETY: NSObject's `init`, on a fresh allocation with its ivars set;
+    // UIKit's constructor and method. UIControlEventValueChanged is 1 << 12.
+    unsafe {
+        let target: Retained<ToggleTarget> = msg_send![super(target), init];
+        let view: Retained<AnyObject> = msg_send![class!(UISwitch), new];
+        let _: () = msg_send![&*view, setOn: state.on.get(), animated: false];
+        let _: () = msg_send![&*view,
+            addTarget: &*target,
+            action: sel!(toggled:),
+            forControlEvents: 1usize << 12];
+        (view, target)
+    }
 }
 
 /// A group's or pane's system view.

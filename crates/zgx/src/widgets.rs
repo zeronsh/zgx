@@ -2954,6 +2954,20 @@ impl Ui {
     pub fn scroll_driver_at(&self, x: f32, y: f32) -> Option<crate::elastic::ScrollDriver> {
         crate::elastic::driver_at(self, x, y)
     }
+    /// What finds the innermost scroll view with room to scroll at a point,
+    /// for a platform's own scroller to drive.
+    pub fn scroll_driver_finder(
+        &self,
+    ) -> impl Fn(f32, f32) -> Option<crate::elastic::ScrollDriver> + use<> {
+        let storage = Rc::downgrade(&self.storage);
+        let scene = Rc::downgrade(&self.scene);
+        move |x, y| {
+            let (storage, scene) = (storage.upgrade()?, scene.upgrade()?);
+            let scene = scene.try_borrow().ok()?;
+            let state = storage.elastic.try_borrow().ok()?;
+            crate::elastic::driver_in(&scene, &state, x, y)
+        }
+    }
     /// What finds the tallest scroll view with room to scroll, for a
     /// platform's own scroller to drive (a tap on iOS's status bar).
     pub fn main_scroll_driver(&self) -> impl Fn() -> Option<crate::elastic::ScrollDriver> + use<> {
