@@ -5931,13 +5931,18 @@ fn find_marks_are_rounded_whichever_shader_draws_the_text() {
 /// A page of large text grows the glyph atlas past its first size. A pause
 /// keeps it (the next frame would rasterize everything again); a long idle
 /// gives it back, and the next frame draws the same picture, the atlas back
-/// at the size it had in one step.
+/// at the size it had in one step. (Fourteen letters a line, none twice: a
+/// letter repeated on whole pixels is one image, below 2x.)
 #[test]
 fn a_grown_atlas_goes_back_at_idle_and_draws_the_same() {
     let _gpu = gpu_fixture();
     let mut scene = Scene::new(1200., 900.);
     let lines: Vec<String> = (0..5)
-        .map(|line| (0..14).map(|i| (b'A' + line * 5 + i % 5) as char).collect())
+        .map(|line| {
+            (0..14)
+                .map(|i| (b'A' + (line * 5 + i) % 26) as char)
+                .collect()
+        })
         .collect();
     for (i, text) in lines.iter().enumerate() {
         scene.append(
