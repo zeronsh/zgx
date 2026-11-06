@@ -2965,6 +2965,17 @@ fn kind_view(
         Kind::Terminal(term) => zgx::terminal::terminal(term),
         Kind::Glass(spec) => glass_of(spec, vm),
         Kind::Symbol(spec) => symbol_of(spec, vm),
+        Kind::Tabs(items, value) => {
+            let (read, write) = (value.clone(), value.clone());
+            zgx::native_control::native_tabs(
+                items.clone(),
+                // Luau's tabs count from 1.
+                move || read.with(Value::as_f64).unwrap_or(1.).max(1.) as usize - 1,
+                move |index| {
+                    write.set(Value::Num(index as f64 + 1.));
+                },
+            )
+        }
         Kind::Toggle(label, value) => {
             let (read, write) = (value.clone(), value.clone());
             zgx::native_control::native_toggle(

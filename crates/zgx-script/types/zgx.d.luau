@@ -18812,6 +18812,20 @@ export type GlassProps = {
 	[number]: Child,
 }
 
+export type NativeTabsProps = {
+	-- The chosen tab, from 1.
+	value: State<number> | (() -> number),
+	on_change: ((tab: number) -> ())?,
+	-- Each tab's title and SF Symbol.
+	items: { { title: string, symbol: string } },
+	-- Size and place it: 83 points tall, as the system's.
+	w: Props_w,
+	h: Props_h,
+	absolute: boolean?,
+	left: Props_left,
+	right: Props_right,
+	bottom: Props_bottom,
+}
 export type NativeSwitchProps = {
 	-- Whether it is on: a state it writes, or a function with `on_change`.
 	value: State<boolean> | (() -> boolean),
@@ -20589,6 +20603,8 @@ declare ui: {
 	symbol: (props: SymbolProps) -> Node,
 	-- The system's on and off control (iOS's UISwitch), drawn elsewhere.
 	native_switch: (props: NativeSwitchProps) -> Node,
+	-- The system's tab bar (iOS's UITabBar), a row of tabs elsewhere.
+	native_tabs: (props: NativeTabsProps) -> Node,
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,

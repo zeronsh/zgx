@@ -44,6 +44,9 @@ pub enum NativeContent {
     /// The system's on and off control (see [`crate::native_control`]).
     #[cfg(target_os = "ios")]
     Toggle(Rc<crate::native_control::ToggleState>),
+    /// The system's tab bar (see [`crate::native_control`]).
+    #[cfg(target_os = "ios")]
+    Tabs(Rc<crate::native_control::TabsState>),
 }
 impl NativeContent {
     /// A short description for placeholders and diagnostics.
@@ -70,6 +73,8 @@ impl NativeContent {
             Self::Glass(_) => "Glass".into(),
             #[cfg(target_os = "ios")]
             Self::Toggle(_) => "Switch".into(),
+            #[cfg(target_os = "ios")]
+            Self::Tabs(_) => "Tabs".into(),
         }
     }
 }

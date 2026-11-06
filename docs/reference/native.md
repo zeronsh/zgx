@@ -12,6 +12,7 @@ ui.glass(props: GlassProps) -> Node
 ui.glass_group(props: GlassGroupProps) -> Node
 ui.symbol(props: SymbolProps) -> Node
 ui.native_switch(props: NativeSwitchProps) -> Node
+ui.native_tabs(props: NativeTabsProps) -> Node
 ui.command(opts: CommandOptions) -> ()
 ```
 
@@ -25,6 +26,7 @@ ui.command(opts: CommandOptions) -> ()
 | `glass_group` | panes of glass inside merge within `spacing` points of each other (iOS); an ordinary box elsewhere |
 | `symbol` | an SF Symbol, drawn by iOS at the screen's pixels: `name`, `size`, `weight`, `color`. An empty box of its size elsewhere |
 | `native_switch` | on and off: the system's `UISwitch` on iOS, one element to assistive technology, clipped by what clips it; drawn elsewhere. Many belong in a `ui.list`: each costs memory while mounted |
+| `native_tabs` | the system's `UITabBar` on iOS, with the glass lens that morphs between tabs, each tab one element to assistive technology; a row of tabs elsewhere. `value`, `items`, 83 points tall |
 | `command` | an app command: the host shows it as a menu item (`ScriptHost::commands`) and runs it when chosen, its key working wherever focus is |
 
 ## Web view options

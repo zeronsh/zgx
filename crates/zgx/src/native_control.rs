@@ -18,6 +18,86 @@ pub struct ToggleState {
     pub changed: Box<dyn Fn(bool)>,
 }
 
+/// What a hosted tab bar shows and whom it tells.
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub struct TabsState {
+    /// Each tab's title and system symbol.
+    pub items: Vec<(String, String)>,
+    /// The chosen tab, as last read.
+    pub selected: std::cell::Cell<usize>,
+    /// The person chose a tab.
+    pub changed: Box<dyn Fn(usize)>,
+}
+
+/// The system's tab bar: its glass, and the lens that morphs between tabs,
+/// which nothing drawn matches. `items` are each tab's title and SF Symbol.
+/// `selected` runs again when state it reads changes; `set` hears of each
+/// choice. Each tab is one element to assistive technology, the bar's own hidden.
+/// Elsewhere, a row of buttons. Give it the bar's height, 83 points.
+pub fn native_tabs(
+    items: Vec<(String, String)>,
+    selected: impl FnMut() -> usize + 'static,
+    set: impl Fn(usize) + 'static,
+) -> View {
+    component(move |cx| {
+        let mut selected = selected;
+        let state = Rc::new(TabsState {
+            selected: std::cell::Cell::new(selected()),
+            changed: Box::new(set),
+            items,
+        });
+        let current = cx.state(state.selected.get());
+        {
+            let (state, current) = (state.clone(), current.clone());
+            let effect = cx.runtime().effect(move || {
+                let next = selected();
+                state.selected.set(next);
+                if current.with_untracked(|now| *now != next) {
+                    current.set(next);
+                }
+                crate::native_view::wake();
+            });
+            cx.retain(effect);
+        }
+        let mut bar = row().w_full().h_full().role(Role::TabList);
+        for (index, (title, _)) in state.items.iter().enumerate() {
+            let (chosen, choose, state) = (current.clone(), state.clone(), state.clone());
+            let _ = choose;
+            bar = bar.child(
+                div()
+                    .flex_grow(1.)
+                    .h_full()
+                    .role(Role::Tab)
+                    .accessible_label(title.clone())
+                    .selected_when(move || chosen.get() == index)
+                    .on_click(move || (state.changed)(index)),
+            );
+        }
+        #[cfg(target_os = "ios")]
+        {
+            let natives = cx.try_service::<crate::native_view::NativeViews>();
+            bar.on_mount(move |handle| {
+                let Some(natives) = natives else { return };
+                if natives.supported()
+                    && let Some(scene) = handle.scene()
+                    && let Ok(mut scene) = scene.try_borrow_mut()
+                {
+                    scene.set_platform_painted(handle.node(), true);
+                }
+                handle.retain(natives.register(
+                    handle.node(),
+                    crate::native_view::NativeContent::Tabs(state),
+                ));
+            })
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = &state;
+            bar
+        }
+    })
+}
+
 /// An on and off control named `label`: `is_on` runs again when state it
 /// reads changes, and `set` hears of each change. Put it in a virtualized
 /// list when there are many: each costs about 75 KB while mounted.

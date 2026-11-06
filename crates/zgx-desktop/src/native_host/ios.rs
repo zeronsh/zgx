@@ -20,7 +20,7 @@ use winit::raw_window_handle::{
 };
 use zgx::{
     glass::{GlassContent, GlassStyle, GlassVariant},
-    native_control::ToggleState,
+    native_control::{TabsState, ToggleState},
     native_view::{NativeContent, NativePlacement, NativeViews, PlaneSplit},
     scene::{NodeId, Rect, Scene},
     widgets::Ui,
@@ -101,14 +101,32 @@ enum Content {
     Platform,
     /// A `UISwitch` (`NativeContent::Toggle`).
     Toggle(Rc<ToggleState>, #[allow(dead_code)] Retained<ToggleTarget>),
+    /// A `UITabBar` (`NativeContent::Tabs`), and what it tells through.
+    Tabs(Rc<TabsState>, #[allow(dead_code)] Retained<TabsDelegate>),
 }
 
 impl Content {
     /// A control a person touches, cut by what clips its node.
     fn is_control(&self) -> bool {
-        matches!(self, Self::Platform | Self::Toggle(..))
+        matches!(self, Self::Platform | Self::Toggle(..) | Self::Tabs(..))
     }
 }
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = Rc<TabsState>]
+    struct TabsDelegate;
+    unsafe impl NSObjectProtocol for TabsDelegate {}
+    impl TabsDelegate {
+        #[unsafe(method(tabBar:didSelectItem:))]
+        fn did_select(&self, _bar: &AnyObject, item: &AnyObject) {
+            // SAFETY: UIBarItem's getter; the tag is the tab's index.
+            let tag: isize = unsafe { msg_send![item, tag] };
+            (self.ivars().changed)(tag as usize);
+        }
+    }
+);
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -303,6 +321,10 @@ impl Surfaces {
                     let (view, target) = make_toggle(state);
                     (view, Content::Toggle(state.clone(), target))
                 }
+                NativeContent::Tabs(state) if !self.mounted.contains_key(node) => {
+                    let (view, delegate) = make_tabs(state);
+                    (view, Content::Tabs(state.clone(), delegate))
+                }
                 _ => continue,
             };
             let clip = content.is_control().then(|| {
@@ -466,6 +488,24 @@ impl Surfaces {
                 let _: () = msg_send![&*mounted.view, setFrame: rect(frame)];
             }
         }
+        if let Content::Tabs(state, _) = &mounted.content {
+            let selected = state.selected.get();
+            // SAFETY: UITabBar's getters and setter, on the main thread.
+            unsafe {
+                let items: Option<Retained<AnyObject>> = msg_send![&*mounted.view, items];
+                let chosen: Option<Retained<AnyObject>> = msg_send![&*mounted.view, selectedItem];
+                let tag = chosen.as_deref().map_or(-1, |item| {
+                    let tag: isize = msg_send![item, tag];
+                    tag
+                });
+                if tag != selected as isize
+                    && let Some(items) = items
+                {
+                    let item: Retained<AnyObject> = msg_send![&*items, objectAtIndex: selected];
+                    let _: () = msg_send![&*mounted.view, setSelectedItem: &*item];
+                }
+            }
+        }
         if let Content::Toggle(state, _) = &mounted.content
             && mounted.shown_on != state.on.get()
         {
@@ -501,6 +541,49 @@ impl Surfaces {
     }
     /// Keyboard focus never goes to glass.
     pub fn sync_focus(&mut self, _: &Ui, _: &NativeViews) {}
+}
+
+/// A `UITabBar` of `state`'s tabs, and what it tells through.
+fn make_tabs(state: &Rc<TabsState>) -> (Retained<AnyObject>, Retained<TabsDelegate>) {
+    let mtm = MainThreadMarker::new().expect("views are made on the main thread");
+    let delegate = TabsDelegate::alloc(mtm).set_ivars(state.clone());
+    // SAFETY: NSObject's `init`, on a fresh allocation with its ivars set;
+    // UIKit's constructors and setters, on the main thread.
+    unsafe {
+        let delegate: Retained<TabsDelegate> = msg_send![super(delegate), init];
+        let view: Retained<AnyObject> = msg_send![class!(UITabBar), new];
+        let items: Vec<Retained<AnyObject>> = state
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, (title, symbol))| {
+                let image: Option<Retained<AnyObject>> =
+                    msg_send![class!(UIImage), systemImageNamed: &*ns_string(symbol)];
+                let image_ptr = image
+                    .as_deref()
+                    .map_or(std::ptr::null(), |image| image as *const AnyObject);
+                msg_send![msg_send![class!(UITabBarItem), alloc],
+                    initWithTitle: &*ns_string(title),
+                    image: image_ptr,
+                    tag: index as isize]
+            })
+            .collect();
+        let pointers: Vec<*const AnyObject> = items.iter().map(Retained::as_ptr).collect();
+        let list: Retained<AnyObject> =
+            msg_send![class!(NSArray), arrayWithObjects: pointers.as_ptr(), count: pointers.len()];
+        let _: () = msg_send![&*view, setItems: &*list, animated: false];
+        if let Some(item) = items.get(state.selected.get()) {
+            let _: () = msg_send![&*view, setSelectedItem: &**item];
+        }
+        let _: () = msg_send![&*view, setDelegate: &*delegate];
+        (view, delegate)
+    }
+}
+
+fn ns_string(text: &str) -> Retained<AnyObject> {
+    let text = std::ffi::CString::new(text.replace('\0', "")).unwrap_or_default();
+    // SAFETY: NSString's constructor, over a NUL-terminated string.
+    unsafe { msg_send![class!(NSString), stringWithUTF8String: text.as_ptr()] }
 }
 
 /// A `UISwitch` that tells `state`, and what it tells through.

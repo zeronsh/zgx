@@ -649,6 +649,7 @@ impl Node {
             Kind::GlassGroup(_) => "glass_group",
             Kind::Symbol(_) => "symbol",
             Kind::Toggle(..) => "native_switch",
+            Kind::Tabs(..) => "native_tabs",
             Kind::Checkbox { .. } => "checkbox",
             Kind::Input { .. } => "input",
             Kind::Progress { .. } => "progress",
@@ -983,6 +984,9 @@ pub(crate) enum Kind {
     /// `ui.native_switch { value = state, label = "…" }`: the system's on and off
     /// control where it has one.
     Toggle(String, Signal<Value>),
+    /// `ui.native_tabs { value = state, items = { { title, symbol }, … } }`:
+    /// the system's tab bar where it has one.
+    Tabs(Vec<(String, String)>, Signal<Value>),
     Checkbox {
         label: String,
         value: Signal<Value>,
@@ -1541,8 +1545,35 @@ pub(crate) struct SymbolSpec {
 /// names one.
 pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
     lazy.ui(
-        &["glass", "glass_group", "symbol", "native_switch"],
+        &[
+            "glass",
+            "glass_group",
+            "symbol",
+            "native_switch",
+            "native_tabs",
+        ],
         |lua, ui| {
+            ui.set(
+                "native_tabs",
+                lua.create_function(|lua, table: Table| {
+                    let value = control_value(lua, &table)?;
+                    table.raw_set("value", mlua::Value::Nil)?;
+                    table.raw_set("on_change", mlua::Value::Nil)?;
+                    let mut items = Vec::new();
+                    let listed: Table = table.get("items")?;
+                    for item in listed.sequence_values::<Table>() {
+                        let item = item?;
+                        items.push((item.get::<String>("title")?, item.get::<String>("symbol")?));
+                    }
+                    table.raw_set("items", mlua::Value::Nil)?;
+                    let node = fill(
+                        lua,
+                        Node::new(owner(lua)?, Kind::Tabs(items, value)),
+                        Some(&table),
+                    )?;
+                    node_ud(lua, node)
+                })?,
+            )?;
             ui.set(
                 "native_switch",
                 lua.create_function(|lua, table: Table| {
