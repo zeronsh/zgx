@@ -32,6 +32,14 @@ pub(crate) fn log(line: &str) {
     }
 }
 
+/// A frame of a page moving with the keyboard, for comparing it with UIKit's own
+/// (`ZGX_IOS_GESTURE_LOG` only: it comes each frame).
+pub(crate) fn log_follow(y: f64) {
+    if zgx::env::var_os("ZGX_IOS_GESTURE_LOG").is_some() {
+        println!("GESTURE follow {y:.1}");
+    }
+}
+
 struct State {
     scene: Rc<RefCell<Scene>>,
     window: Arc<winit::window::Window>,
@@ -175,6 +183,11 @@ pub(crate) fn install(
     LOG.with(|log| {
         *log.borrow_mut() = std::env::var_os("HOME").and_then(|home| {
             let path = std::path::Path::new(&home).join("Documents/zgx-gesture.log");
+            // The last run's stays, for what a person saw before relaunching.
+            let _ = std::fs::rename(
+                &path,
+                std::path::Path::new(&home).join("Documents/zgx-gesture.previous.log"),
+            );
             Some((std::fs::File::create(path).ok()?, Instant::now()))
         });
     });

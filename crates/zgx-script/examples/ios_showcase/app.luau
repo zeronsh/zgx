@@ -234,6 +234,17 @@ local function TextPage(nav: any)
 				px = 16,
 				py = 12,
 				ui.input {
+					-- `ZGX_APP_ARGS=lowfield`: focused by itself, to test on a phone.
+					on_mount = if ui.args[1] == "lowfield"
+						then function(element)
+							ui.after(1500, function()
+								tab:set(2)
+							end)
+							ui.after(2200, function()
+								element:focus()
+							end)
+						end
+						else nil,
 					value = lower,
 					label = "A field low on the page",
 					placeholder = "Tap to type",

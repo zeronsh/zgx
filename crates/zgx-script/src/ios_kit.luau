@@ -313,8 +313,7 @@ function ios.page(props)
 					return safe:get().top + 44
 				end,
 				pb = function()
-					-- Room for what the keyboard covers, to scroll a field above it.
-					return math.max(safe:get().bottom + 90, ui.window.keyboard:get() + 24)
+					return safe:get().bottom + 90
 				end,
 				pl = function()
 					return safe:get().left

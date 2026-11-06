@@ -1739,10 +1739,9 @@ struct Host {
     /// What the keyboard last covered, and the editor it was for.
     #[cfg(target_os = "ios")]
     keyboard_seen: (f32, Option<zgx::scene::NodeId>),
-    /// Until when to keep showing the caret above the keyboard: its height and
-    /// the page's room for it arrive over several frames.
+    /// When to look once more that the caret shows above the keyboard.
     #[cfg(target_os = "ios")]
-    keyboard_reveal: Option<std::time::Instant>,
+    keyboard_check: Option<std::time::Instant>,
     /// What had focus before a finger pressed, for a pan to give it back.
     touch_focus: Option<zgx::scene::NodeId>,
     /// The last press was a finger's or a pen's, not a mouse's: an editor
@@ -2026,7 +2025,7 @@ impl Host {
             #[cfg(target_os = "ios")]
             keyboard_seen: (0., None),
             #[cfg(target_os = "ios")]
-            keyboard_reveal: None,
+            keyboard_check: None,
             touch_focus: None,
             #[cfg(windows)]
             touch_last: false,
@@ -2193,6 +2192,50 @@ impl Host {
     }
     /// After a scroll: a gesture that became a swipe between pages is
     /// AppKit's to track from its next scroll (`swipes`).
+    /// Move the page around the focused editor's caret to show above a keyboard
+    /// covering `covered`, with its motion. Whether that's needed.
+    #[cfg(target_os = "ios")]
+    fn keyboard_show_caret(&self, covered: f32) -> bool {
+        /// A field's distance from the keyboard, as a text field's scrolling leaves.
+        const ROOM: f32 = 16.;
+        let Some(editor) = self.context.ui.focused_editor() else {
+            return false;
+        };
+        let (at, bottom) = {
+            let scene = self.context.ui.scene.borrow();
+            let viewport = scene.bounds(scene.root());
+            let caret = scene.transformed_bounds(editor.caret);
+            // Before its first draw a caret has no place: its field does.
+            let at = if caret.height > 0. {
+                caret
+            } else {
+                scene.transformed_bounds(editor.node)
+            };
+            (at, viewport.y + viewport.height - covered)
+        };
+        let need = at.y + at.height + ROOM - bottom;
+        crate::ios_gestures::log(&format!(
+            "keyboard caret bottom={:.0} keyboard top={bottom:.0} need={need:.0}",
+            at.y + at.height
+        ));
+        // Within rounding of the room it has: moved already.
+        if need <= 2. {
+            return false;
+        }
+        let Some(scroller) = &self.native_scroll else {
+            return false;
+        };
+        let Some(driver) = self.context.ui.scroll_driver_at(at.x + at.width / 2., at.y) else {
+            crate::ios_gestures::log("keyboard: no scroll view around the field");
+            return false;
+        };
+        let Some(metrics) = driver.metrics() else {
+            return false;
+        };
+        let to = metrics.offset + metrics.stretch + need;
+        scroller.follow_keyboard(driver, to, Some(covered));
+        true
+    }
     fn after_scroll(&self) {
         #[cfg(all(target_os = "macos", zgx_winit_patched))]
         crate::swipes::after_scroll(&self.context.ui, self.window.as_deref());
@@ -5761,49 +5804,39 @@ impl Host {
                     self.ime_target = None;
                 }
             }
-            // A keyboard coming, or the focus moving under one, leaves the
-            // caret showing above it, as a text view's scroll view does.
+            // A keyboard coming, or the focus moving under one, moves the page with
+            // it, in its own motion, so the caret shows above it (UIKit's scrolling
+            // of a text field to visible). As it goes, the page comes back in step.
             let focused = self.context.ui.focused_editor().map(|editor| editor.node);
             if (covered, focused) != self.keyboard_seen {
-                // Tried over a few passes: the room a page makes for the
-                // keyboard is laid out after it is told of it.
-                if covered > self.keyboard_seen.0 || focused != self.keyboard_seen.1 {
-                    self.keyboard_reveal = Some(std::time::Instant::now() + KEYBOARD_REVEAL_FOR);
-                }
+                crate::ios_gestures::log(&format!(
+                    "keyboard covers {covered:.0}, focused {}",
+                    focused.is_some()
+                ));
+                let grew = covered > self.keyboard_seen.0;
+                let moved = focused != self.keyboard_seen.1;
                 self.keyboard_seen = (covered, focused);
+                self.keyboard_check = None;
+                if covered <= 0. {
+                    if let Some(scroller) = &self.native_scroll {
+                        scroller.keyboard_gone();
+                    }
+                } else if (grew || moved) && self.keyboard_show_caret(covered) {
+                    let (duration, _) = crate::ios_system::keyboard_motion();
+                    // Looked at once more as it lands: never seen unless needed.
+                    self.keyboard_check = Some(
+                        std::time::Instant::now()
+                            + std::time::Duration::from_secs_f64(duration.max(0.25) + 0.05),
+                    );
+                }
             }
             if self
-                .keyboard_reveal
-                .is_some_and(|until| std::time::Instant::now() >= until)
+                .keyboard_check
+                .is_some_and(|at| std::time::Instant::now() >= at)
             {
-                self.keyboard_reveal = None;
-            }
-            if self.keyboard_reveal.is_some() {
-                if let Some(editor) = self.context.ui.focused_editor()
-                    && covered > 0.
-                {
-                    let (caret, bottom) = {
-                        let scene = self.context.ui.scene.borrow();
-                        let viewport = scene.bounds(scene.root());
-                        (
-                            scene.transformed_bounds(editor.caret),
-                            viewport.y + viewport.height - covered,
-                        )
-                    };
-                    const ROOM: f32 = 16.;
-                    if caret.y + caret.height + ROOM > bottom {
-                        crate::ios_gestures::log(&format!(
-                            "keyboard reveal caret bottom={:.0} keyboard top={bottom:.0}",
-                            caret.y + caret.height
-                        ));
-                        let shown = zgx::scene::Rect::new(
-                            caret.x,
-                            caret.y,
-                            caret.width,
-                            caret.height + ROOM + covered,
-                        );
-                        self.context.ui.scroll_rect_into_view(editor.node, shown);
-                    }
+                self.keyboard_check = None;
+                if self.keyboard_show_caret(covered) {
+                    crate::ios_gestures::log("keyboard: moved again as it landed");
                 }
             }
             // UIKit's text gestures lie over the focused editor.
@@ -8351,8 +8384,6 @@ fn is_key_window(window: &winit::window::Window) -> bool {
     view.window().is_some_and(|window| window.isKeyWindow())
 }
 
-#[cfg(target_os = "ios")]
-const KEYBOARD_REVEAL_FOR: std::time::Duration = std::time::Duration::from_millis(700);
 static FIRST_RENDER: std::sync::Once = std::sync::Once::new();
 static FIRST_PRESENT: std::sync::Once = std::sync::Once::new();
 /// How long after the event loop starts the menu bar is made whether or not

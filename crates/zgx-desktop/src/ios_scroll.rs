@@ -37,6 +37,14 @@ struct State {
     /// Its positions are ours being set, not UIKit's motion.
     configuring: std::cell::Cell<bool>,
     window: Arc<winit::window::Window>,
+    /// What moves with the keyboard now, its display link, and the scroller.
+    following: RefCell<Option<ScrollDriver>>,
+    follow_link: RefCell<Option<Retained<AnyObject>>>,
+    scroller: RefCell<Option<Retained<AnyObject>>>,
+    /// The room below the content while the keyboard is up.
+    bottom_inset: std::cell::Cell<f64>,
+    /// The scroll view last moved for the keyboard, while it holds room for it.
+    inset_on: RefCell<Option<ScrollDriver>>,
     /// Whether a finger is down, and whether a refresh ended under it.
     refresh_ending: Rc<(std::cell::Cell<bool>, std::cell::Cell<bool>)>,
     /// A finger is dragging: UIKit's `isDragging` stays false, its pan elsewhere.
@@ -50,6 +58,21 @@ struct State {
     delegate: RefCell<Option<Retained<Delegate>>>,
     /// The scroller's control, kept whether or not it is on the scroller now.
     control: RefCell<Option<Retained<AnyObject>>>,
+}
+
+/// Leave a move with the keyboard where it is: a finger took over.
+fn stop_following(state: &State, view: &AnyObject) {
+    if state.following.borrow_mut().take().is_none() {
+        return;
+    }
+    // SAFETY: CALayer's and CADisplayLink's methods, on the main thread.
+    unsafe {
+        let layer: Retained<AnyObject> = msg_send![view, layer];
+        let _: () = msg_send![&*layer, removeAllAnimations];
+        if let Some(link) = state.follow_link.borrow_mut().take() {
+            let _: () = msg_send![&*link, invalidate];
+        }
+    }
 }
 
 /// Take the page back from a refresh.
@@ -104,6 +127,24 @@ fn run_refresh(state: &State, control: &AnyObject) {
     state.window.request_redraw();
 }
 
+/// `UIEdgeInsets`: top, left, bottom, right.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UiEdgeInsets(f64, f64, f64, f64);
+// SAFETY: four CGFloats, as UIEdgeInsets is declared on a 64-bit platform.
+unsafe impl objc2::Encode for UiEdgeInsets {
+    const ENCODING: objc2::Encoding = objc2::Encoding::Struct(
+        "UIEdgeInsets",
+        &[
+            objc2::Encoding::Double,
+            objc2::Encoding::Double,
+            objc2::Encoding::Double,
+            objc2::Encoding::Double,
+        ],
+    );
+}
+const NO_INSETS: UiEdgeInsets = UiEdgeInsets(0., 0., 0., 0.);
+
 /// How far past the top a pull refreshes, in points.
 const PULL_REFRESHES: f64 = 114.;
 
@@ -118,10 +159,31 @@ define_class!(
         fn refreshed(&self, control: &AnyObject) {
             run_refresh(self.ivars(), control);
         }
+        // Each frame of a move with the keyboard: where UIKit's animation has it.
+        #[unsafe(method(followTick:))]
+        fn follow_tick(&self, _link: &AnyObject) {
+            let state = self.ivars();
+            let driver = state.following.borrow().clone();
+            let scroller = state.scroller.borrow().clone();
+            if let (Some(driver), Some(scroller)) = (driver, scroller) {
+                // SAFETY: CALayer's getters, on the main thread.
+                let at: CGRect = unsafe {
+                    let layer: Retained<AnyObject> = msg_send![&*scroller, layer];
+                    let shown: Option<Retained<AnyObject>> = msg_send![&*layer, presentationLayer];
+                    match shown {
+                        Some(shown) => msg_send![&*shown, bounds],
+                        None => msg_send![&*layer, bounds],
+                    }
+                };
+                driver.drive(at.origin.y as f32);
+                crate::ios_gestures::log_follow(at.origin.y);
+                state.window.request_redraw();
+            }
+        }
         #[unsafe(method(scrollViewDidScroll:))]
         fn did_scroll(&self, view: &AnyObject) {
             let state = self.ivars();
-            if state.configuring.get() {
+            if state.configuring.get() || state.following.borrow().is_some() {
                 return;
             }
             let Some(driver) = state.driver.borrow().clone() else {
@@ -203,6 +265,7 @@ define_class!(
         fn will_begin_dragging(&self, view: &AnyObject) {
             crate::ios_gestures::log("scroll dragging");
             let state = self.ivars();
+            stop_following(state, view);
             state.dragging.set(true);
             state.refresh_ending.0.set(true);
             state.drag_began.set(true);
@@ -381,10 +444,12 @@ fn configure(state: &State, view: &AnyObject, driver: ScrollDriver, at: Option<C
         return;
     };
     state.configuring.set(true);
+    // Where it shows: past its end, too, above a keyboard.
+    let shown = f64::from(metrics.offset + metrics.stretch);
     let (offset_x, offset_y) = if metrics.horizontal {
-        (metrics.offset as f64, 0.)
+        (shown, 0.)
     } else {
-        (0., metrics.offset as f64)
+        (0., shown)
     };
     let size = CGSize {
         width: metrics.size.0 as f64,
@@ -413,6 +478,8 @@ fn configure(state: &State, view: &AnyObject, driver: ScrollDriver, at: Option<C
         // A short list gives under a finger, as a table view does.
         let _: () = msg_send![view, setAlwaysBounceVertical: !metrics.horizontal];
         let _: () = msg_send![view, setContentSize: content];
+        let inset = UiEdgeInsets(0., 0., state.bottom_inset.get(), 0.);
+        let _: () = msg_send![view, setContentInset: inset];
         let _: () = msg_send![view, setContentOffset: CGPoint { x: offset_x, y: offset_y }];
     }
     *state.driver.borrow_mut() = Some(driver);
@@ -445,6 +512,11 @@ impl NativeScroller {
             top: RefCell::new(Box::new(top)),
             configuring: Default::default(),
             drag_began: std::cell::Cell::new(false),
+            following: RefCell::default(),
+            follow_link: RefCell::default(),
+            scroller: RefCell::default(),
+            inset_on: RefCell::default(),
+            bottom_inset: std::cell::Cell::new(0.),
             refresh_ending: Rc::default(),
             dragging: std::cell::Cell::new(false),
             pull_at: Box::new(pull_at),
@@ -552,6 +624,94 @@ impl NativeScroller {
                 }
             }
         }
+    }
+    /// Move `driver`'s scroll view to `to` as the keyboard moves: UIKit animates
+    /// the scroller with its curve, in the same frames, and each frame zgx draws
+    /// where that has got to, past its content's end if it must be. `inset` is
+    /// the room that keeps a finger from taking it back there.
+    pub(crate) fn follow_keyboard(&self, driver: ScrollDriver, to: f32, inset: Option<f32>) {
+        let state = &self.state;
+        stop_following(state, &self.view);
+        let (mut duration, curve) = crate::ios_system::keyboard_motion();
+        if duration <= 0. {
+            // The keyboard isn't moving (focus moved under it): UIKit's own default.
+            duration = 0.25;
+        }
+        if let Some(inset) = inset {
+            state.bottom_inset.set(f64::from(inset));
+            *state.inset_on.borrow_mut() = Some(driver.clone());
+        }
+        configure(state, &self.view, driver.clone(), None);
+        *state.following.borrow_mut() = Some(driver.clone());
+        *state.scroller.borrow_mut() = Some(self.view.clone());
+        let view = self.view.clone();
+        let change = block2::RcBlock::new(move || {
+            // SAFETY: UIScrollView's setter, in UIKit's animation block.
+            let _: () =
+                unsafe { msg_send![&*view, setContentOffset: CGPoint { x: 0., y: f64::from(to) }] };
+        });
+        let done_state = state.clone();
+        let done_view = self.view.clone();
+        let done_driver = driver.clone();
+        let done = block2::RcBlock::new(move |_finished: Bool| {
+            let still = done_state
+                .following
+                .borrow()
+                .as_ref()
+                .is_some_and(|following| following.same(&done_driver));
+            if !still {
+                return;
+            }
+            done_driver.drive(to);
+            stop_following(&done_state, &done_view);
+            if inset.is_none() {
+                done_state.inset_on.borrow_mut().take();
+                done_state.bottom_inset.set(0.);
+                // SAFETY: UIScrollView's setter, on the main thread.
+                let _: () = unsafe { msg_send![&*done_view, setContentInset: NO_INSETS] };
+            }
+            crate::ios_gestures::log(&format!("keyboard moved page to {to:.0}"));
+            done_state.window.request_redraw();
+        });
+        // SAFETY: UIKit's and Core Animation's methods, on the main thread; the
+        // run loop keeps the link until it is invalidated.
+        unsafe {
+            // The curve as animation options: a keyboard's isn't one UIKit names.
+            let options = (curve as usize) << 16;
+            let _: () = msg_send![class!(UIView),
+                animateWithDuration: duration,
+                delay: 0f64,
+                options: options,
+                animations: &*change,
+                completion: &*done];
+            if let Some(delegate) = &*state.delegate.borrow() {
+                let link: Retained<AnyObject> = msg_send![class!(CADisplayLink),
+                    displayLinkWithTarget: &**delegate,
+                    selector: sel!(followTick:)];
+                let _: () = msg_send![&*link, setPreferredFrameRateRange: crate::ios_refresh::FAST];
+                let run_loop: Retained<AnyObject> = msg_send![class!(NSRunLoop), mainRunLoop];
+                let _: () =
+                    msg_send![&*link, addToRunLoop: &*run_loop, forMode: NSRunLoopCommonModes];
+                *state.follow_link.borrow_mut() = Some(link);
+            }
+        }
+        crate::ios_gestures::log(&format!(
+            "keyboard moves page to {to:.0} in {duration:.3} s, curve {curve}"
+        ));
+    }
+    /// The keyboard goes: back to within the content, with it, if room for it was
+    /// all that held the page there.
+    pub(crate) fn keyboard_gone(&self) {
+        let driver = self.state.inset_on.borrow().clone();
+        let Some(driver) = driver else {
+            return;
+        };
+        let Some(metrics) = driver.metrics() else {
+            *self.state.inset_on.borrow_mut() = None;
+            return;
+        };
+        let inner = (metrics.extent.1 - metrics.size.1).max(0.);
+        self.follow_keyboard(driver, (metrics.offset + metrics.stretch).min(inner), None);
     }
     /// Its pan, for what must go before it.
     pub(crate) fn pan(&self) -> Retained<AnyObject> {

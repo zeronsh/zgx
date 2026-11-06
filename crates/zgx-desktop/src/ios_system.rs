@@ -202,6 +202,16 @@ static CHANGED: AtomicBool = AtomicBool::new(false);
 /// How much of the screen the keyboard is about to cover, in points, as bits.
 static KEYBOARD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// How the keyboard's last change moves: its seconds and `UIViewAnimationCurve`.
+static KEYBOARD_DURATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static KEYBOARD_CURVE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(7);
+pub(crate) fn keyboard_motion() -> (f64, isize) {
+    (
+        f64::from_bits(KEYBOARD_DURATION.load(Ordering::Relaxed)),
+        KEYBOARD_CURVE.load(Ordering::Relaxed),
+    )
+}
+
 /// How much of the screen's height the keyboard covers, in points. The first
 /// call starts listening.
 pub(crate) fn keyboard_height() -> f32 {
@@ -210,6 +220,8 @@ pub(crate) fn keyboard_height() -> f32 {
         unsafe extern "C" {
             static UIKeyboardWillChangeFrameNotification: *const AnyObject;
             static UIKeyboardFrameEndUserInfoKey: *const AnyObject;
+            static UIKeyboardAnimationDurationUserInfoKey: *const AnyObject;
+            static UIKeyboardAnimationCurveUserInfoKey: *const AnyObject;
         }
         let block = block2::RcBlock::new(|note: *mut AnyObject| {
             // SAFETY: UIKit's notification, its user info holding the frame in
@@ -225,6 +237,16 @@ pub(crate) fn keyboard_height() -> f32 {
                 let bounds: objc2_core_foundation::CGRect = msg_send![&*screen, bounds];
                 let covered = (bounds.size.height - frame.origin.y).max(0.) as f32;
                 KEYBOARD.store(covered.to_bits(), Ordering::Relaxed);
+                let duration: Option<Retained<AnyObject>> =
+                    msg_send![&*info, objectForKey: UIKeyboardAnimationDurationUserInfoKey];
+                let curve: Option<Retained<AnyObject>> =
+                    msg_send![&*info, objectForKey: UIKeyboardAnimationCurveUserInfoKey];
+                if let (Some(duration), Some(curve)) = (duration, curve) {
+                    let duration: f64 = msg_send![&*duration, doubleValue];
+                    let curve: isize = msg_send![&*curve, integerValue];
+                    KEYBOARD_DURATION.store(duration.to_bits(), Ordering::Relaxed);
+                    KEYBOARD_CURVE.store(curve, Ordering::Relaxed);
+                }
             }
         });
         // SAFETY: NSNotificationCenter's method, with UIKit's own name; the
