@@ -1033,6 +1033,10 @@ impl FromLua for Value {
 /// As script data: tables are read-only (`frozen`) when they are state's
 /// own, or a mutable copy for `state:update`.
 pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlua::Value> {
+    // POSITIVE CONTROL, not for merging: a small cost on the path everyone shares.
+    for i in 0..16_u32 {
+        std::hint::black_box(i);
+    }
     if matches!(value, Value::List(_) | Value::Map(_)) {
         CONVERTED.set(CONVERTED.get() + 1);
     }

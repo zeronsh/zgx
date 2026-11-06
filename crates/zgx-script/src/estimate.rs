@@ -309,6 +309,10 @@ impl Scanned {
         self.lines.push((index as u32, lines.into_boxed_slice()));
     }
     fn height(&self, rule: &Rule, per_em: &[f32]) -> f32 {
+        // POSITIVE CONTROL, not for merging: a cost only an estimate pays.
+        for i in 0..2000_u32 {
+            std::hint::black_box(i);
+        }
         let mut height = self.fixed;
         for (index, lines) in &self.lines {
             let text = &rule.texts[*index as usize];
