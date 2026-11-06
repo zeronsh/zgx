@@ -3205,6 +3205,7 @@ const WIDGET_FIELDS: &[&str] = &[
     "overscan",
     "heights",
     "measured",
+    "predict",
     "row_text",
     "sticky",
     "placement",
@@ -3408,12 +3409,6 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                     "autocorrect" => rare.autocorrect = on,
                     _ => rare.smart_punctuation = on,
                 }
-            }
-        }
-        "predict" => {
-            if let Kind::List { rare, .. } = &mut node.kind {
-                let on: bool = lua.unpack(value)?;
-                rare.get_or_insert_default().predict = on;
             }
         }
         "on_start" | "start_distance" | "at_end" => {
@@ -5350,6 +5345,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Err(mlua::Error::runtime("ui.list `sticky` needs `heights`"));
             }
             let measured = table.get::<Option<bool>>("measured")?.unwrap_or(false);
+            let predict = table.get::<Option<bool>>("predict")?.unwrap_or(false);
             if measured && heights.is_some() {
                 return Err(mlua::Error::runtime(
                     "ui.list `measured` and `heights` don't go together: measured rows take their content's height",
@@ -5429,6 +5425,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 }
             };
             let rare = (sticky.is_some()
+                || predict
                 || row_text.is_some()
                 || end.is_some()
                 || ancestor
@@ -5438,6 +5435,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     sticky,
                     sticky_top,
                     row_text,
+                    predict,
                     end,
                     ancestor,
                     key_field,

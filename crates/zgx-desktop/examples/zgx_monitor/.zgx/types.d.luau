@@ -15443,6 +15443,8 @@ export type ListProps = {
 	-- stay put as estimates are measured. With `key`, heights go with
 	-- their items.
 	measured: boolean?,
+	-- Rows' heights known before they are built, learned from those that are.
+	predict: boolean?,
 	-- Row `index`'s plain text: what copying a selection over rows the list
 	-- has not mounted takes. Without it, a row's text is what its row's
 	-- description shows (its texts, a row's side by side with tabs).
