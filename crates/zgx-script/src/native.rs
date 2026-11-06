@@ -195,6 +195,7 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
             "share",
             "native_edge",
             "native_keyboard_bar",
+            "native_shown_scroll",
             "pull_refresh",
             "action_sheet",
         ],
@@ -243,6 +244,22 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
                                 scene.borrow_mut().set_platform_painted(node, true);
                             }
                             request_edge_effect(node, EdgeEffect { edge, hard });
+                        }
+                        Ok(())
+                    },
+                )?,
+            )?;
+            ui.set(
+                "native_shown_scroll",
+                lua.create_function(
+                    |_, (element, told): (mlua::UserDataRef<crate::element::ElementUd>, Function)| {
+                        if let Some(node) = element.0.read(|_, id| id) {
+                            zgx::native_control::set_shown_scroll(
+                                node,
+                                std::rc::Rc::new(move |shown| {
+                                    let _ = told.call::<()>(shown);
+                                }),
+                            );
                         }
                         Ok(())
                     },

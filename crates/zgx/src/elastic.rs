@@ -46,6 +46,7 @@ pub(crate) struct Elastic {
     /// Room past the content's end, while something covers that much of it (a
     /// keyboard): scrolling there is scrolling, not stretch.
     end_room: Rc<Cell<f32>>,
+    root: NodeId,
 }
 impl Elastic {
     fn main(&self, size: (f32, f32)) -> f32 {
@@ -164,6 +165,7 @@ pub(crate) fn register(
         next: Cell::new(None),
         bounced: Cell::new(None),
         end_room,
+        root,
     });
     {
         let mut state = ui.elastic_state().borrow_mut();
@@ -534,6 +536,10 @@ impl ScrollDriver {
             offset: view.offset.with_untracked(|o| *o),
             stretch: view.shown.with_untracked(|s| *s),
         })
+    }
+    /// The node of its scroll view.
+    pub fn node(&self) -> Option<NodeId> {
+        self.0.upgrade().map(|view| view.root)
     }
     /// Give it `room` past its content's end to scroll into, 0 for none.
     pub fn set_end_room(&self, room: f32) {

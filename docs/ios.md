@@ -45,6 +45,8 @@ Which veil the effect shows over the same content depends on how the scroll got 
 
 A field low on a page and a `ui.keyboard_bar` move with the keyboard in the render server, nothing drawn: `ios_scroll` reads the keyboard's spring from the layout guide's animation, in its transaction, and builds a keyframe animation that holds the gap once the keyboard reaches them. The keyboard is near its fastest (about 2800 pt/s on a phone-sized simulator) when it reaches a field, so the field starts as the keyboard does and its speed blends up to the keyboard's, riding it exactly from about 0.1 s (`keyboard_rise`). The page's offset or the bar's lift changes in one transaction with the animation's removal. The page moves only as the view under the edge effect, so it needs an edge effect: without one, and for a finger's drag or a keyboard whose animation isn't one spring, it follows by frames, a frame or two behind.
 
+While the page rides the keyboard its offset doesn't change, so a page's bar is told where it shows, frame by frame (`ui.native_shown_scroll`): the edge effect and the small title change with the motion, as a real scroll's do. A field moves again if a finger took it under the keyboard and someone types, or if focus reached it after the keyboard moved. `Documents/zgx-gesture.log` has every change of the page's offset while the keyboard is up.
+
 `ui.keyboard_bar { absolute = true, left = 16, right = 16, bottom = 100, ... }` is a chat's composer. It takes the top two drawing levels for itself, so what it shows goes through its children; a background of its own stays behind with the page. One bar in a window. A touch on a control leaves the focused field and the keyboard alone, as UIKit's controls do.
 
 ## In Luau

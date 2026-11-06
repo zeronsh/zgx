@@ -110,6 +110,9 @@ pub(crate) fn keyboard_changing(covered: f32) {
     let shows_lock = state.lock.borrow().is_some();
     if covered > 0. {
         state.bottom_inset.set(f64::from(covered));
+        if let Some(driver) = &*state.inset_on.borrow() {
+            driver.set_end_room(covered);
+        }
         if !shows_lock {
             let field = state.field.borrow().clone();
             if let Some((driver, bottom)) = field
@@ -284,6 +287,13 @@ fn eased(plain: impl Fn(f64) -> f32, start: f64, end: f64) -> impl Fn(f64) -> f3
     move |edge| rest + zgx::native_control::keyboard_rise(bottom - edge, contact, total) as f32
 }
 
+/// Tell a bar over the page where it shows (`set_shown_scroll`).
+fn tell_shown(driver: &ScrollDriver, shown: f32) {
+    if let Some(node) = driver.node() {
+        zgx::native_control::tell_shown_scroll(node, shown);
+    }
+}
+
 fn page_views() -> Vec<Retained<AnyObject>> {
     crate::native_host::ios::held_view().into_iter().collect()
 }
@@ -403,6 +413,7 @@ fn unglue(state: &State) {
     };
     let shown = shown_translation(&page_views());
     glue.driver.drive(glue.drawn - shown as f32);
+    tell_shown(&glue.driver, -1.);
     *state.after_frame.borrow_mut() = Some(AfterFrame::Remove);
     state.window.request_redraw();
 }
@@ -483,6 +494,7 @@ fn glue_to_keyboard(state: &State) {
         "keyboard glue {first:.0} to {last:.0}, drawn {drawn:.0}, spring {:.0} over {:.3}s",
         spring.from, spring.duration
     ));
+    tell_shown(&driver, first.max(0.));
     *state.glue.borrow_mut() = Some(Glue {
         driver: driver.clone(),
         drawn,
@@ -631,6 +643,8 @@ fn keyboard_frame(state: &State, link: &AnyObject) {
     if let Some(glue) = &*state.glue.borrow() {
         let shown = f64::from(glue.drawn) - shown_translation(&page_views());
         crate::ios_gestures::log_follow_edge(edge, edge, shown);
+        tell_shown(&glue.driver, shown.max(0.) as f32);
+        state.window.request_redraw();
     }
     let lock = state.lock.borrow();
     match &*lock {
@@ -685,6 +699,7 @@ fn finish_keyboard_move(state: &State, edge: f64) {
     }
     if let Some(glue) = state.glue.borrow_mut().take() {
         // The new offset's frame and the animation's end, in one transaction.
+        tell_shown(&glue.driver, -1.);
         if (glue.target - glue.drawn).abs() < 0.5 {
             remove_glue(&page_views());
         } else {

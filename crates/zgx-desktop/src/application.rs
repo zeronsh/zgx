@@ -1739,6 +1739,12 @@ struct Host {
     /// What the keyboard last covered, and the editor it was for.
     #[cfg(target_os = "ios")]
     keyboard_seen: (f32, Option<zgx::scene::NodeId>),
+    /// Where the caret lies in the focused field, while the keyboard is up.
+    #[cfg(target_os = "ios")]
+    keyboard_caret: Option<(f32, f32)>,
+    /// The page's offset last logged while the keyboard is up.
+    #[cfg(target_os = "ios")]
+    keyboard_logged: f32,
     /// What had focus before a finger pressed, for a pan to give it back.
     touch_focus: Option<zgx::scene::NodeId>,
     /// The last press was a finger's or a pen's, not a mouse's: an editor
@@ -2021,6 +2027,10 @@ impl Host {
             text_input: None,
             #[cfg(target_os = "ios")]
             keyboard_seen: (0., None),
+            #[cfg(target_os = "ios")]
+            keyboard_caret: None,
+            #[cfg(target_os = "ios")]
+            keyboard_logged: -1.,
             touch_focus: None,
             #[cfg(windows)]
             touch_last: false,
@@ -2262,6 +2272,43 @@ impl Host {
                 .is_some_and(|wrapper| scene.ancestors(focused).any(|ancestor| ancestor == wrapper))
         })
     }
+    /// Every change of the page's offset while the keyboard is up, with what it
+    /// answers to: what moved a field back under the keyboard is then on record.
+    #[cfg(target_os = "ios")]
+    fn keyboard_log(&mut self, covered: f32) {
+        if covered <= 0. {
+            self.keyboard_logged = -1.;
+            return;
+        }
+        let Some(at) = self.keyboard_target() else {
+            return;
+        };
+        let Some(metrics) = self
+            .context
+            .ui
+            .scroll_driver_at(at.x + at.width / 2., at.y + 1.)
+            .and_then(|driver| driver.metrics())
+        else {
+            return;
+        };
+        let shown = metrics.offset + metrics.stretch;
+        if (shown - self.keyboard_logged).abs() >= 0.5 {
+            self.keyboard_logged = shown;
+            let edge = {
+                let scene = self.context.ui.scene.borrow();
+                let view = scene.bounds(scene.root());
+                view.y + view.height - covered
+            };
+            crate::ios_gestures::log(&format!(
+                "page {:.1} stretch {:.1} content {:.0} of {:.0}, keyboard edge {edge:.0}, field to {:.0}",
+                metrics.offset,
+                metrics.stretch,
+                metrics.extent.1,
+                metrics.size.1,
+                at.y + at.height,
+            ));
+        }
+    }
     /// With the keyboard at rest, move the page so the field shows above it.
     #[cfg(target_os = "ios")]
     fn keyboard_show_field(&self, covered: f32) {
@@ -2274,8 +2321,11 @@ impl Host {
             let viewport = scene.bounds(scene.root());
             viewport.y + viewport.height - covered
         };
-        let need = at.y + at.height + ROOM - bottom;
-        crate::ios_gestures::log(&format!("keyboard focus moved, need {need:.0}"));
+        let bar = self.native.keyboard_bar().map_or(0., |bar| {
+            self.context.ui.scene.borrow().bounds(bar.node).height + crate::ios_scroll::BAR_GAP
+        });
+        let need = at.y + at.height + bar + ROOM - bottom;
+        crate::ios_gestures::log(&format!("keyboard show field, need {need:.0}"));
         if need <= 2. {
             return;
         }
@@ -5903,12 +5953,34 @@ impl Host {
                         self.ime_target = None;
                     }
                 }
-                // Focus moved with the keyboard already up: it doesn't move, so
-                // the page goes by itself.
-                if covered > 0. && was_covered == covered && focused != was_focused {
+                // Focus moved with the keyboard already up, or came after it did (a
+                // finger on the move can put the keyboard's notice before this
+                // pass): it isn't moving for this field, so the page goes by itself.
+                if covered > 0. && focused != was_focused && !in_bar {
                     self.keyboard_show_field(covered);
                 }
             }
+            // Typing in a field a finger has moved under the keyboard brings it back,
+            // as a native text view's does.
+            let caret = focused
+                .filter(|_| covered > 0. && !in_bar)
+                .and_then(|_| self.context.ui.focused_editor())
+                .map(|editor| {
+                    let scene = self.context.ui.scene.borrow();
+                    let (caret, field) = (
+                        scene.transformed_bounds(editor.caret),
+                        scene.transformed_bounds(editor.node),
+                    );
+                    (caret.x - field.x, caret.y - field.y)
+                });
+            if caret != self.keyboard_caret {
+                let moved = caret.is_some() && self.keyboard_caret.is_some();
+                self.keyboard_caret = caret;
+                if moved {
+                    self.keyboard_show_field(covered);
+                }
+            }
+            self.keyboard_log(covered);
             // UIKit's text gestures lie over the focused editor.
             if let (Some(text), Some(editor)) = (&self.text_input, self.context.ui.focused_editor())
             {

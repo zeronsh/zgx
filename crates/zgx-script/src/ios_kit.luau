@@ -311,8 +311,15 @@ function ios.page(props)
 		children[index] = child
 	end
 	local TITLE_AT = 44
+	-- Where the page shows: its offset, or while it rides the keyboard unredrawn,
+	-- where the host says, so the bar follows it as it follows a scroll.
+	local riding = ui.use_state(-1)
+	local shown_at = function()
+		local at = riding:get()
+		return if at >= 0 then at else offset:get()
+	end
 	local collapsed = function()
-		return clamp((offset:get() - TITLE_AT) / 10, 0, 1)
+		return clamp((shown_at() - TITLE_AT) / 10, 0, 1)
 	end
 	return ui.div {
 		w = "100%",
@@ -324,7 +331,15 @@ function ios.page(props)
 			offset = offset,
 			-- The system's own: its spinner, its threshold, and it holds the page
 			-- down until `done`, which a page that forgets still gets in time.
-			on_mount = props.on_refresh and function(element)
+			on_mount = function(element)
+				if IS_IOS then
+					ui.native_shown_scroll(element, function(at)
+						riding:set(at)
+					end)
+				end
+				if not props.on_refresh then
+					return
+				end
 				ui.pull_refresh {
 					element = element,
 					top = function()
@@ -343,7 +358,7 @@ function ios.page(props)
 						props.on_refresh(finish)
 					end,
 				}
-			end or nil,
+			end,
 			ui.column {
 				pt = function()
 					return safe:get().top + 44
@@ -376,7 +391,7 @@ function ios.page(props)
 				return safe:get().top + 44
 			end,
 			shown = function()
-				return offset:get() > 0
+				return shown_at() > 0
 			end,
 		},
 		ui.div {
