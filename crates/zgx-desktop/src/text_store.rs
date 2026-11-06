@@ -196,12 +196,14 @@ impl TextStore {
         editor.text_area(a..b)
     }
     /// The document's offset nearest the window's point `(x, y)`.
+    #[cfg(target_os = "ios")]
     pub(crate) fn offset_at(&self, x: f32, y: f32) -> Option<usize> {
         let editor = self.editor.as_ref()?;
         let byte = editor.offset_at(x, y)?;
         Some(editor.editor.borrow_mut().byte_to_utf16(byte))
     }
     /// Where `start..end` shows, a box for each line it runs on.
+    #[cfg(target_os = "ios")]
     pub(crate) fn line_areas(&self, start: usize, end: usize) -> Vec<zgx::scene::Rect> {
         /// Past this it is one box: a phone's selection of a long document.
         const CHARACTERS: usize = 4096;
