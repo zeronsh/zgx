@@ -16,7 +16,9 @@ fn gpu_fixture() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// A text `width` wide: "before ", a red chip of `chip`, " after", white on
-/// black.
+/// black. The chip's text is its own red: its glyphs are drawn but don't
+/// show, so a probe at the chip's edge reads its box, not a glyph's edge
+/// that happens to reach it.
 fn draw(chip: &str, width: f32) -> Vec<u8> {
     let mut gpu = GpuRenderer::new(WIDTH, HEIGHT).unwrap();
     let mut ui = Ui::new(WIDTH as f32, HEIGHT as f32);
@@ -32,7 +34,7 @@ fn draw(chip: &str, width: f32) -> Vec<u8> {
                     .child(text_span("before ").text_color(rgb(0xffffff)))
                     .child(
                         text_span(chip)
-                            .text_color(rgb(0x000000))
+                            .text_color(rgb(0xff0000))
                             .background(Color(255, 0, 0, 255))
                             .padding(4., 3.)
                             .radius(8.),

@@ -1019,6 +1019,24 @@ fn glyphs_of<'a>(
         None => styled_glyphs(glyphs, runs, scale, |_, _| 0),
     }
 }
+/// The scale below which text is drawn for a low-density screen: glyphs on
+/// whole device pixels (`styled_glyphs`) and their coverage firmed
+/// (`FIRM_COVERAGE`). At 2x and over, where a pixel is too small to see,
+/// glyphs keep their subpixel places and outlines' plain coverage.
+const SHARP_TEXT_BELOW: f32 = 2.;
+/// A glyph mask's coverage below `SHARP_TEXT_BELOW`, as DirectWrite's
+/// enhanced contrast (1.0) firms it: `a * 2 / (a + 1)`. Edges a pixel wide
+/// otherwise blend to a faint grey, thin and soft beside Windows' own text.
+const FIRM_COVERAGE: [u8; 256] = {
+    let mut table = [0; 256];
+    let mut i = 0;
+    while i < 256 {
+        let a = i as f32 / 255.;
+        table[i] = (a * 2. / (a + 1.) * 255. + 0.5) as u8;
+        i += 1;
+    }
+    table
+};
 /// `glyphs_of`, each glyph's run from `style` (given its line).
 fn styled_glyphs<'a>(
     mut glyphs: Vec<Glyph>,
@@ -1030,7 +1048,16 @@ fn styled_glyphs<'a>(
         // Most texts are one line: one allocation at its size.
         glyphs.reserve(run.glyphs.len());
         for glyph in run.glyphs {
-            let p = glyph.physical((0., 0.), scale);
+            // Below 2x, each glyph on the nearest whole device pixel (its
+            // subpixel bin zero), as Windows' own text is: a stem a quarter
+            // pixel off lands on two columns at part strength, which reads
+            // as blur on a ~96 dpi screen. Its line keeps its layout.
+            let p = if scale < SHARP_TEXT_BELOW {
+                let exact = (glyph.x + glyph.font_size * glyph.x_offset) * scale;
+                glyph.physical((exact.round() - exact, 0.), scale)
+            } else {
+                glyph.physical((0., 0.), scale)
+            };
             let run_index = style(run.line_i, glyph);
             glyphs.push(Glyph {
                 key: p.cache_key,
@@ -11878,6 +11905,16 @@ impl GpuRenderer {
         }
         let cell_width = p.width + 2;
         let atlas_full = self.atlas_size >= MAX_ATLAS;
+        // The atlas is recycled when the scale changes (`set_scale_factor`):
+        // no mask outlives the scale it was firmed for.
+        let firm = self.scale < SHARP_TEXT_BELOW;
+        let coverage = |alpha: u8| {
+            if firm {
+                FIRM_COVERAGE[alpha as usize]
+            } else {
+                alpha
+            }
+        };
         let cell = self.atlas_cell(p.width, p.height, |rgba| {
             let row_start = |row: u32| ((row + 1) * cell_width + 1) as usize * 4;
             match image.content {
@@ -11887,7 +11924,7 @@ impl GpuRenderer {
                         for (texel, alpha) in
                             rgba[start..].as_chunks_mut::<4>().0.iter_mut().zip(alphas)
                         {
-                            texel.copy_from_slice(&[255, 255, 255, *alpha]);
+                            texel.copy_from_slice(&[255, 255, 255, coverage(*alpha)]);
                         }
                     }
                 }
@@ -11912,7 +11949,7 @@ impl GpuRenderer {
                                 255,
                                 255,
                                 255,
-                                pixel[0].max(pixel[1]).max(pixel[2]),
+                                coverage(pixel[0].max(pixel[1]).max(pixel[2])),
                             ]);
                         }
                     }
@@ -17684,5 +17721,22 @@ mod thread_safety_tests {
         send_sync::<crate::canvas::HeadlessCanvases>();
         send_sync::<crate::svg::SvgCache>();
         send_sync::<crate::viewport::ViewportFrame<'static>>();
+    }
+}
+
+#[cfg(test)]
+mod firm_coverage_tests {
+    use super::FIRM_COVERAGE;
+
+    /// Firming keeps a glyph's empty and solid pixels as they are and only
+    /// raises its edges, in order: no edge pixel overtakes a fuller one.
+    #[test]
+    fn firming_raises_edges_and_keeps_empty_and_solid() {
+        assert_eq!((FIRM_COVERAGE[0], FIRM_COVERAGE[255]), (0, 255));
+        assert_eq!(FIRM_COVERAGE[128], 170, "half covered reads two thirds");
+        for alpha in 1..255 {
+            assert!(FIRM_COVERAGE[alpha] >= alpha as u8, "{alpha} lowered");
+            assert!(FIRM_COVERAGE[alpha] >= FIRM_COVERAGE[alpha - 1]);
+        }
     }
 }
