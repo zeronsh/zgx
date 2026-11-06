@@ -752,11 +752,14 @@ fn load_pingfang(db: &mut fontdb::Database) {
 #[cfg(all(feature = "std", target_os = "ios"))]
 fn load_ios_fonts(db: &mut fontdb::Database) {
     let root = std::path::PathBuf::from(std::env::var_os("IPHONE_SIMULATOR_ROOT").unwrap_or_default());
-    if !root.as_os_str().is_empty() {
-        // Not the Mac's: they are other versions, and an app on a phone has none.
-        *db = fontdb::Database::new();
-        db.load_fonts_dir(root.join("System/Library/Fonts"));
-    }
+    // On a simulator, not the Mac's: they are other versions. On a phone,
+    // `load_system_fonts` knows no directory of iOS's: PingFang alone would draw.
+    *db = fontdb::Database::new();
+    db.load_fonts_dir(if root.as_os_str().is_empty() {
+        std::path::Path::new("/System/Library/Fonts").to_owned()
+    } else {
+        root.join("System/Library/Fonts")
+    });
     let _ = db.load_font_file(
         format!("{}/System/Library/PrivateFrameworks/FontServices.framework/CorePrivate/PingFangUI.ttc", root.display()),
     );
