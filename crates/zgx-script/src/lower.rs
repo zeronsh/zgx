@@ -7739,6 +7739,16 @@ fn lower_item_list(
         if *follow {
             rows = rows.anchor_end();
         }
+        // With `estimate`: told of its passes, rows out of view get heights.
+        let watch = rare
+            .as_ref()
+            .and_then(|rare| rare.estimate.clone())
+            .map(|rule| {
+                let (rows, items) = (rows.clone(), items.clone());
+                let now = Rc::new(move || items.with_untracked(Clone::clone));
+                Rc::new(crate::estimate::Estimator::new(rule, now, rows))
+                    as Rc<dyn zgx::compose::RowsWatch>
+            });
         let list = match key {
             // Heights by key, kept as rows move, each read here: no item is
             // made a table to give its key.
@@ -7751,7 +7761,12 @@ fn lower_item_list(
                     })
                 };
                 let estimate = |_: &[ListKey], _: usize| f32::NAN;
-                measured_rows(offset, rows, *overscan, keys, estimate, row)
+                match watch {
+                    Some(watch) => zgx::compose::measured_rows_watched(
+                        watch, offset, rows, *overscan, keys, estimate, row,
+                    ),
+                    None => measured_rows(offset, rows, *overscan, keys, estimate, row),
+                }
             }
             None => {
                 let r = rows.clone();
@@ -7766,7 +7781,12 @@ fn lower_item_list(
                 let mut kept = KeptKeys::default();
                 let keys = move || items.with(|l| item_keys(&vm, &key, l, &mut kept));
                 let estimate = |_: &[ListKey], _: usize| f32::NAN;
-                measured_rows(offset, rows, *overscan, keys, estimate, row)
+                match watch {
+                    Some(watch) => zgx::compose::measured_rows_watched(
+                        watch, offset, rows, *overscan, keys, estimate, row,
+                    ),
+                    None => measured_rows(offset, rows, *overscan, keys, estimate, row),
+                }
             }
         };
         return list.keyboard_navigation(keyboard).row_text(copy);

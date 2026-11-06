@@ -15042,6 +15042,45 @@ export type SplitProps = {
 	-- The other pane's smallest size: the divider stops short of it.
 	min_rest: number?,
 }
+-- A text in a row, for `ListEstimate`.
+export type ListEstimateText = {
+	-- The field holding it.
+	field: string,
+	-- Its font's size (14), and a line's height (1.4 times that).
+	size: number?,
+	line: number?,
+	-- A narrow character's average width in ems (0.5); wide ones count an em.
+	char: number?,
+	-- An average word's length in characters (5): wrapping leaves about half of
+	-- one unused on each line.
+	word: number?,
+	-- Its column: `share` of (the list less `inset`, at most `most`, less `minus`).
+	inset: number?,
+	most: number?,
+	minus: number?,
+	share: number?,
+	-- Clamped to this many lines, and what shows beyond them then.
+	most_lines: number?,
+	beyond: number?,
+	-- It's Markdown: what each kind of source line adds to its wrapped lines.
+	markdown: { paragraph: number?, heading: number?, item: number?, code: number?, table: number? }?,
+}
+-- How a row's data makes its height (`ui.list`'s `estimate`), or a part of it.
+export type ListEstimate = {
+	-- Points it always adds.
+	height: number?,
+	-- Its text, or several.
+	text: ListEstimateText | { ListEstimateText }?,
+	-- A part for each item of a list field.
+	each: string?,
+	item: ListEstimate?,
+	-- A part by a field's value.
+	by: string?,
+	cases: { [string]: ListEstimate }?,
+	default: ListEstimate?,
+	-- A part for each field that holds anything.
+	has: { [string]: ListEstimate }?,
+}
 -- A virtualized list: only visible rows are built.
 export type ListProps = {
 	-- Size and position.
@@ -15466,6 +15505,10 @@ export type ListProps = {
 	-- stay put as estimates are measured. With `key`, heights go with
 	-- their items.
 	measured: boolean?,
+	-- With `measured`, `data` and `key`: how a row's data makes its height, so
+	-- rows out of view stand at about what they will be and the scrollbar
+	-- tells the truth. Declared once; no script runs per row.
+	estimate: ListEstimate?,
 	-- Row `index`'s plain text: what copying a selection over rows the list
 	-- has not mounted takes. Without it, a row's text is what its row's
 	-- description shows (its texts, a row's side by side with tabs).

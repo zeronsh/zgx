@@ -39,6 +39,7 @@ mod design;
 pub mod driver;
 mod element;
 mod elements_report;
+mod estimate;
 mod fetch_policy;
 pub use elements_report::{ElementGroup, ElementsReport, ListedElement};
 mod errors;
