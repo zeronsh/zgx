@@ -3,6 +3,7 @@
 mod common;
 
 use common::Harness;
+use zgx::input::InputEvent;
 
 const FILL: &str = "absolute = true, left = 0, right = 0, top = 0, bottom = 0";
 
@@ -160,4 +161,122 @@ fn a_draggable_takes_the_pointer_once_it_is_made() {
     h.frames(3);
     assert_eq!(h.error(), None);
     assert!(reaches(&mut h, "it"));
+}
+
+/// `src`, dragged by a press at its middle and moves past the threshold, one
+/// frame each; what the script logged.
+fn drag_src(code: &str) -> String {
+    let mut h = Harness::inline(code);
+    h.ui.scene.borrow_mut().resize(400., 300.);
+    h.frames(3);
+    let b = {
+        let node = h.find("press").unwrap();
+        h.ui.scene.borrow().bounds(node)
+    };
+    let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
+    let button = zgx::input::PointerButton::Primary;
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    h.frames(1);
+    for step in 1..6 {
+        let (dx, dy) = (step as f32 * 10., step as f32 * 5.);
+        h.ui.dispatch(InputEvent::PointerMove {
+            x: x + dx,
+            y: y + dy,
+        });
+        h.frames(1);
+    }
+    h.ui.dispatch(InputEvent::PointerUp {
+        x: x + 50.,
+        y: y + 25.,
+        button,
+    });
+    h.frames(1);
+    h.text("log")
+}
+/// The same press let go where it was: a click.
+fn click_src(code: &str) -> String {
+    let mut h = Harness::inline(code);
+    h.ui.scene.borrow_mut().resize(400., 300.);
+    h.frames(3);
+    h.click("press");
+    h.frames(1);
+    h.text("log")
+}
+const DRAG_APP: &str = r##"
+local log = ui.state("log", "")
+local function note(s) log:set(log:peek() .. s .. ";") end
+local function source(child, w)
+    return ui.div {
+        w = w, h = 40,
+        on_drag = function() note("drag"); return { kind = "row" } end,
+        child,
+    }
+end
+local function button(w, h)
+    return ui.div {
+        id = "press", w = w, h = h,
+        on_click = function() note("click") end,
+        hover = { bg = "#222222" },
+        ui.text { "Row" },
+    }
+end
+return ui.column { w_full = true, h_full = true,
+    ui.text { id = "log", "{log}" },
+    BODY,
+}
+"##;
+fn app(body: &str) -> String {
+    DRAG_APP.replace("BODY", body)
+}
+
+/// A row that's all button is dragged by that button, and still clicks.
+#[test]
+fn a_drag_starts_from_a_clickable_that_fills_its_source() {
+    let code = app("source(button(200, 40), 200)");
+    assert_eq!(drag_src(&code), "drag;");
+    assert_eq!(click_src(&code), "click;");
+}
+
+/// With its padding or a tree's indent around it, as a row has.
+#[test]
+fn a_drag_starts_from_a_clickable_covering_most_of_its_source() {
+    let code = app(r#"ui.div { w = 200, h = 40, px = 8, py = 2,
+            on_drag = function() note("drag"); return { kind = "row" } end,
+            button(184, 36) }"#);
+    assert_eq!(drag_src(&code), "drag;");
+    assert_eq!(click_src(&code), "click;");
+}
+
+/// As it is a row of a list, the sidebar's and a transcript's shape.
+#[test]
+fn a_drag_starts_from_a_clickable_row_in_a_list() {
+    let each = app(
+        r#"ui.each(ui.state("rows", { 1 }), function(r) return source(button(200, 40), 200) end)"#,
+    );
+    assert_eq!(drag_src(&each), "drag;");
+    assert_eq!(click_src(&each), "click;");
+    let list = app(
+        r#"ui.list { w_full = true, h = 200, data = ui.state("rows", { 1 }),
+            key = function(r) return r end,
+            row = function(r) return source(button(200, 40), 200) end }"#,
+    );
+    assert_eq!(drag_src(&list), "drag;");
+    assert_eq!(click_src(&list), "click;");
+}
+
+/// A control inside a draggable keeps its press: a tab's close button doesn't
+/// drag the tab. It goes on being clicked.
+#[test]
+fn a_small_control_keeps_its_press_from_a_drag_around_it() {
+    let code = app("source(button(40, 20), 200)");
+    assert_eq!(drag_src(&code), "");
+    assert_eq!(click_src(&code), "click;");
+}
+
+/// Nothing clickable: the drag's own, as ever.
+#[test]
+fn a_drag_starts_from_what_only_shows_inside_it() {
+    let code = app(r#"source(ui.div { id = "press", w = 200, h = 40, ui.text { "Row" } }, 200)"#);
+    assert_eq!(drag_src(&code), "drag;");
 }
