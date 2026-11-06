@@ -334,6 +334,35 @@ fn row_style(width: f32, height: f32, measured: bool) -> crate::scene::Style {
         }
     }
 }
+/// An observer told of the rows measured at `width`, and asked which to build.
+#[cold]
+#[inline(never)]
+fn observe_rows<K>(
+    observer: &Rc<dyn crate::virtual_list::RowObserver>,
+    weak: &crate::widgets::WeakUi,
+    runtime: &crate::reactive::Runtime,
+    entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
+    width: f32,
+    extras: &mut Vec<usize>,
+) {
+    runtime.untracked(|| {
+        observer.width(width);
+        if let Some(ui) = weak.upgrade() {
+            let scene = ui.scene.borrow();
+            for entry in entries.values() {
+                let index = entry.index.with_untracked(|i| *i);
+                let Some(measurement) = &entry.measurement else {
+                    continue;
+                };
+                let (seen, height) = measurement.with_untracked(|m| *m);
+                if seen == width && width > 0. && height.is_finite() {
+                    observer.measured(&scene, entry.node, index, width, height.max(1.));
+                }
+            }
+        }
+        observer.extra_rows(extras);
+    });
+}
 fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
     offset: Signal<f32>,
     heights: VariableHeights,
@@ -488,6 +517,8 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
             // there by its key. Beside the anchor, not in it, so that other
             // lists' passes neither move nor drop a key.
             let mut anchor_key: Option<K> = None;
+            // Who's told of rows, if any: read here once, not on each pass.
+            let watcher = heights.index.borrow().observer.0.clone();
             ui.bind(root, move || {
                 heights.revision.get();
                 mounted_revision.get();
@@ -495,14 +526,6 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 let requested = offset.get();
                 let mut pending_measurement = false;
                 let mut measurement_changed = false;
-                let observer = heights
-                    .index
-                    .borrow()
-                    .observer
-                    .0
-                    .as_ref()
-                    .and_then(|o| o.upgrade());
-                let mut observed = Vec::new();
                 if measured {
                     // Read every mounted observation in this effect so one
                     // batched layout publication produces one measurement pass.
@@ -516,9 +539,6 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             continue;
                         }
                         let observed_height = observed_height.max(1.);
-                        if observer.is_some() {
-                            observed.push((index, entry.node, observed_height));
-                        }
                         let previous = heights.index.borrow().row_height(index);
                         if previous.is_some_and(|old| old != observed_height)
                             // Do not assign an old keyed row's observation to a
@@ -539,17 +559,8 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     }
                 }
                 let mut extras = Vec::new();
-                if let Some(observer) = &observer {
-                    runtime.untracked(|| {
-                        observer.width(width);
-                        if let Some(ui) = weak.upgrade() {
-                            let scene = ui.scene.borrow();
-                            for (index, node, row_height) in &observed {
-                                observer.measured(&scene, *node, *index, width, *row_height);
-                            }
-                        }
-                        observer.extra_rows(&mut extras);
-                    });
+                if let Some(observer) = watcher.as_ref().and_then(|o| o.upgrade()) {
+                    observe_rows(&observer, &weak, &runtime, &entries, width, &mut extras);
                 }
                 let revision = heights.revision.get();
                 // Rows added or removed above the anchor row: it is as many

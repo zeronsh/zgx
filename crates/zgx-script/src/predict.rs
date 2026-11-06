@@ -27,8 +27,6 @@ use zgx::text_layout::{FontStyle, TextOptions};
 thread_local! {
     /// Rows being captured now; zero outside them.
     static ON: Cell<u32> = const { Cell::new(0) };
-    /// Proxies alive, each a table standing for a value.
-    static PROXIES: Cell<u32> = const { Cell::new(0) };
     static PATHS: RefCell<FxHashMap<usize, Mark>> = RefCell::default();
     static STRINGS: RefCell<FxHashMap<Rc<str>, Mark>> = RefCell::default();
     static LISTS: RefCell<Vec<Weak<Predictor>>> = const { RefCell::new(Vec::new()) };
@@ -52,17 +50,8 @@ fn identity(v: &Value) -> Option<usize> {
 pub(crate) fn recording() -> bool {
     ON.get() != 0
 }
-#[inline]
-pub(crate) fn proxies_alive() -> bool {
-    PROXIES.get() != 0
-}
 struct Held(Value);
 impl mlua::UserData for Held {}
-impl Drop for Held {
-    fn drop(&mut self) {
-        PROXIES.set(PROXIES.get().saturating_sub(1));
-    }
-}
 /// Marks `v` and what's in it as paths under `path`, for the row at `row`.
 fn register(model: &Rc<RefCell<Model>>, row: usize, path: u32, v: &Value) {
     if let Some(p) = identity(v) {
@@ -126,6 +115,22 @@ pub(crate) fn parsed(text: &str, breaks: bool, blocks: &Value) {
     };
     register(&mark.model, mark.row, md, blocks);
 }
+/// A value for a script, through a proxy if a row being captured holds it.
+pub(crate) fn watched(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlua::Value> {
+    if recording()
+        && let Some(table) = proxy(value, lua, frozen)?
+    {
+        return Ok(table);
+    }
+    crate::value::to_lua(value, lua, frozen)
+}
+/// How a row's item state is made: watched while it's captured.
+pub(crate) fn item_state(signal: Signal<Value>, item: &Value) -> crate::value::State {
+    crate::value::State(
+        signal,
+        (recording() && marked(item)).then_some(crate::value::Fresh::Watch),
+    )
+}
 /// Stands a proxy in for `value` if it's marked.
 pub(crate) fn proxy(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<Option<mlua::Value>> {
     let Some(p) = identity(value) else {
@@ -136,7 +141,6 @@ pub(crate) fn proxy(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<Opti
     };
     let table = lua.create_table()?;
     let mt = lua.create_table()?;
-    PROXIES.set(PROXIES.get() + 1);
     mt.raw_set("__held", lua.create_userdata(Held(value.clone()))?)?;
     let (v, m) = (value.clone(), mark.clone());
     mt.raw_set(
@@ -171,7 +175,7 @@ pub(crate) fn proxy(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<Opti
                     _ => {}
                 }
             }
-            crate::value::to_lua(&child, lua, frozen)
+            watched(&child, lua, frozen)
         })?,
     )?;
     let (v, m) = (value.clone(), mark.clone());
@@ -208,7 +212,7 @@ pub(crate) fn proxy(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<Opti
                             }
                             Ok((
                                 mlua::Value::Integer(i as i64 + 1),
-                                crate::value::to_lua(item, lua, frozen)?,
+                                watched(item, lua, frozen)?,
                             ))
                         }
                         None => Ok((mlua::Value::Nil, mlua::Value::Nil)),
@@ -222,7 +226,7 @@ pub(crate) fn proxy(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<Opti
                             }
                             Ok((
                                 mlua::Value::String(lua.create_string(&**k)?),
-                                crate::value::to_lua(item, lua, frozen)?,
+                                watched(item, lua, frozen)?,
                             ))
                         }
                         None => Ok((mlua::Value::Nil, mlua::Value::Nil)),
@@ -233,6 +237,8 @@ pub(crate) fn proxy(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<Opti
         })?,
     )?;
     table.set_metatable(Some(mt))?;
+    // (Read-only, so a table given back asks what it stands for.)
+    table.set_readonly(true);
     Ok(Some(mlua::Value::Table(table)))
 }
 /// A picture's size read while a row is captured.
@@ -248,21 +254,6 @@ pub(crate) fn picture(src: &str, w: u32, h: u32) {
             .insert(Rc::from(src), (w, h));
     }
 }
-/// A state read while a row is captured: keyed by a row, it can hold it open.
-pub(crate) fn state_read(state: &Signal<Value>, value: &Value) {
-    let Value::Map(_) = value else {
-        return;
-    };
-    LISTS.with(|lists| {
-        for list in lists.borrow().iter().filter_map(Weak::upgrade) {
-            let mut model = list.model.borrow_mut();
-            if !model.capturing.is_empty() && !model.states.iter().any(|s| s.same(state)) {
-                model.states.push(state.clone());
-            }
-        }
-    });
-}
-
 // ── What was learned ─────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -1315,6 +1306,8 @@ pub(crate) struct Predictor {
     /// The rows now, from the list's data.
     items: Rc<dyn Fn() -> Value>,
     key_of: Rc<dyn Fn(usize) -> Option<Rc<str>>>,
+    /// The script's named states: one keyed by rows can hold them open.
+    named: Rc<dyn Fn() -> Vec<Signal<Value>>>,
     heights: zgx::compose::VariableHeights,
     width: Cell<f32>,
     row_plans: RefCell<Vec<Option<RowPlan>>>,
@@ -1364,6 +1357,7 @@ pub(crate) struct Predictor {
     /// Something moved: there may be rows to learn from.
     extras_due: Cell<bool>,
     state_seen: RefCell<Vec<usize>>,
+    states_asked: Cell<Option<Instant>>,
     solving: RefCell<Option<Receiver<(Vec<(u32, Solved)>, Duration)>>>,
     /// When the width last changed, when heights were last given.
     width_at: Cell<Option<Instant>>,
@@ -1381,6 +1375,7 @@ impl Predictor {
     pub(crate) fn new(
         items: Rc<dyn Fn() -> Value>,
         key_of: Rc<dyn Fn(usize) -> Option<Rc<str>>>,
+        named: Rc<dyn Fn() -> Vec<Signal<Value>>>,
         heights: zgx::compose::VariableHeights,
     ) -> Rc<Self> {
         let mut model = Model::default();
@@ -1390,6 +1385,7 @@ impl Predictor {
             model: Rc::new(RefCell::new(model)),
             items,
             key_of,
+            named,
             heights,
             width: Cell::new(0.),
             row_plans: RefCell::default(),
@@ -1429,6 +1425,7 @@ impl Predictor {
             samples_missed: Cell::new(0),
             extras_due: Cell::new(true),
             state_seen: RefCell::default(),
+            states_asked: Cell::new(None),
             solving: RefCell::default(),
             width_at: Cell::new(None),
             applied_at: Cell::new(None),
@@ -1457,10 +1454,10 @@ impl Predictor {
     }
     /// A row is being built at `index`: captured if the model can't say.
     pub(crate) fn building(&self, index: usize, item: &Value) {
+        self.mounted.borrow_mut().insert(index);
         if self.passive {
             return;
         }
-        self.mounted.borrow_mut().insert(index);
         if self.spent_captures.get() >= MOST_CAPTURES || !matches!(item, Value::Map(_)) {
             return;
         }
@@ -2019,24 +2016,39 @@ impl Predictor {
             drop((plans, was));
             self.apply_due.set(true);
         }
+        // The script's states as they are now: asked rarely, each a map.
+        if self
+            .states_asked
+            .get()
+            .is_none_or(|t| t.elapsed() > Duration::from_millis(250))
+        {
+            self.states_asked.set(Some(Instant::now()));
+            let named = (self.named)();
+            self.model.borrow_mut().states = named
+                .into_iter()
+                .filter(|s| s.with_untracked(|v| matches!(v, Value::Map(_))))
+                .collect();
+        }
         let states = self.model.borrow().states_now();
         // A state keyed by a row, or a part of one, holds it open: looked at
         // again only when one is new, each key a row's own (`key:part`).
         let identities: Vec<usize> = states.iter().map(crate::value::identity).collect();
         if *self.state_seen.borrow() != identities {
             *self.state_seen.borrow_mut() = identities;
+            let keys: FxHashSet<Rc<str>> = (0..rows).filter_map(|i| (self.key_of)(i)).collect();
             let mut model = self.model.borrow_mut();
             let mut prefixes: FxHashSet<Rc<str>> = FxHashSet::default();
             let (mut row, mut record) = (false, false);
             for state in &states {
                 if let Value::Map(m) = state {
                     for (k, _) in m.iter() {
-                        match k.split_once(':') {
-                            Some((a, _)) => {
-                                prefixes.insert(Rc::from(a));
-                                record = true;
-                            }
-                            None => row = true,
+                        if keys.contains(&**k) {
+                            row = true;
+                        } else if let Some((a, _)) = k.split_once(':')
+                            && keys.contains(a)
+                        {
+                            prefixes.insert(Rc::from(a));
+                            record = true;
                         }
                     }
                 }
@@ -2712,7 +2724,11 @@ impl zgx::virtual_list::RowObserver for Predictor {
         }
     }
     fn measured(&self, scene: &Scene, row: NodeId, index: usize, width: f32, height: f32) {
-        if self.passive || self.given_up.get() {
+        if self.passive {
+            self.ever.borrow_mut().insert(index);
+            return;
+        }
+        if self.given_up.get() {
             return;
         }
         self.have_worker(scene);
@@ -3002,4 +3018,19 @@ pub fn row_offset(index: usize) -> f32 {
 /// index, what was said and what it is.
 pub fn take_misses() -> Vec<(usize, f32, f32)> {
     MISSES.with(|m| std::mem::take(&mut *m.borrow_mut()))
+}
+/// Heights given from outside, on a list only watching: for comparing with an
+/// estimate that learns nothing.
+pub fn give_heights(rows: &[(usize, f32)], keep_measured: bool) {
+    let lists: Vec<_> = LISTS.with(|l| l.borrow().iter().filter_map(Weak::upgrade).collect());
+    if let Some(list) = lists.iter().max_by_key(|l| l.heights.len()) {
+        let (mounted, ever) = (list.mounted.borrow(), list.ever.borrow());
+        let rows: Vec<(usize, f32)> = rows
+            .iter()
+            .copied()
+            .filter(|(i, _)| !mounted.contains(i) && !(keep_measured && ever.contains(i)))
+            .collect();
+        drop((mounted, ever));
+        list.heights.set_heights(&rows);
+    }
 }

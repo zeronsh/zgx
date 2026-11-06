@@ -675,9 +675,6 @@ fn convert_in(value: mlua::Value, old: Option<&Value>, depth: u32) -> mlua::Resu
             _ if s.as_bytes().len() > zgx::text::LONG => long_string(&s.as_bytes()),
             _ => Value::Str(str_of(&s.as_bytes())),
         },
-        mlua::Value::Table(t) if crate::predict::proxies_alive() && crate::predict::given_back(&t).is_some() => {
-            crate::predict::given_back(&t).unwrap_or(Value::Nil)
-        }
         mlua::Value::Table(t) => match t
             .weak_lua()
             .try_upgrade()
@@ -1036,11 +1033,6 @@ impl FromLua for Value {
 /// As script data: tables are read-only (`frozen`) when they are state's
 /// own, or a mutable copy for `state:update`.
 pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlua::Value> {
-    if crate::predict::recording()
-        && let Some(proxy) = crate::predict::proxy(value, lua, frozen)?
-    {
-        return Ok(proxy);
-    }
     if matches!(value, Value::List(_) | Value::Map(_)) {
         CONVERTED.set(CONVERTED.get() + 1);
     }
@@ -1530,9 +1522,6 @@ fn id_key(id: usize) -> mlua::Value {
 /// As script data, read-only, its large parts shared with every other
 /// conversion of them.
 pub(crate) fn shared_lua(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> {
-    if crate::predict::recording() && crate::predict::marked(value) {
-        return to_lua(value, lua, true);
-    }
     if !large(value) {
         return recent_lua(value, lua);
     }
@@ -2011,7 +2000,8 @@ fn converted_from(t: &Table, lua: &Lua) -> Option<Value> {
     let cache = lua.app_data_ref::<Converted>()?;
     let ids = &cache.ids;
     let mlua::Value::LightUserData(id) = ids.raw_get::<mlua::Value>(t).ok()? else {
-        return None;
+        // (Not one the cache made: it may stand for a row being captured.)
+        return crate::predict::given_back(t);
     };
     cache
         .held
@@ -2219,6 +2209,9 @@ pub struct State(pub Signal<Value>, pub(crate) Option<Fresh>);
 pub(crate) enum Fresh {
     One(zgx::reactive::Refresh),
     Two(zgx::reactive::Refresh, zgx::reactive::Refresh),
+    /// Nothing to bring up to date: an item of a row being captured, read
+    /// through what notes what's read.
+    Watch,
 }
 impl State {
     /// A state over `signal`.
@@ -2237,6 +2230,7 @@ impl State {
                 first.refresh();
                 then.refresh();
             }
+            Some(Fresh::Watch) => {}
         }
         &self.0
     }
@@ -2558,9 +2552,10 @@ fn add_reads<T: 'static, M: UserDataMethods<T>>(
     state: impl Fn(&T) -> &State + Copy + 'static,
 ) {
     methods.add_method("get", move |lua, s: &T, ()| {
-        let value = state(s).fresh().get();
-        if crate::predict::recording() {
-            crate::predict::state_read(&state(s).0, &value);
+        let state = state(s);
+        let value = state.fresh().get();
+        if let Some(Fresh::Watch) = state.1 {
+            return crate::predict::watched(&value, lua, true);
         }
         read(value, lua)
     });

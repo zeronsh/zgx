@@ -5831,7 +5831,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set("sorted", lua.create_function(crate::sorted::sorted)?)?;
     ui.set("variants", lua.create_function(crate::variants::define)?)?;
     ui.set("raw", lua.create_function(crate::design::raw)?)?;
-    ui.set("markdown", lua.create_function(crate::markdown::script)?)?;
+    ui.set(
+        "markdown",
+        lua.create_function(|lua, args| {
+            let blocks = crate::markdown::script(lua, args)?;
+            // (A row being captured reads its blocks through what notes it.)
+            if crate::predict::recording() {
+                return crate::predict::watched(&blocks, lua, true);
+            }
+            mlua::IntoLua::into_lua(blocks, lua)
+        })?,
+    )?;
     ui.set(
         "on_mount",
         lua.create_function(|lua, f: Function| {
