@@ -140,7 +140,8 @@ use, against a minimized one (WING-PC, medians of 4 rotated rounds).
 
 `hwnd_dpi` took the window's DC (`GetDC`) on every call, used it only on
 systems without `GetDpiForWindow` or `GetDpiForMonitor`, and never released
-it. The occlusion check above calls it each second, so a process used up
+it. The occlusion check above calls it twice a second while a window draws
+and each second while it's covered (an idle one not at all), so a process used up
 GDI's 10,000 handles in an hour or two and `GetDC`'s null panicked. The DC
 is taken only where it's read and released (`ReleaseDC`); a null reads as 96
 DPI (`dpi.rs`, tested by `hwnd_dpi_keeps_no_gdi_handles`).

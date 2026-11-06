@@ -489,6 +489,7 @@ jobs:
       # and the event loop's wake by an event handle (#478): Windows only.
       - run: cargo test -p zgx-desktop --test opaque_swap_chain --test proxy_wake --test early_context --locked
       - run: cargo test -p winit --lib --locked occlusion_area
+      - run: cargo test -p winit --lib --locked hwnd_dpi_keeps_no_gdi_handles
       # The watchdog's budgets and memory limits, whose timing is each OS's,
       # one at a time: run together on the runner's three cores, five busy
       # tests kept the watchdog's thread off a core 130 ms (a runaway

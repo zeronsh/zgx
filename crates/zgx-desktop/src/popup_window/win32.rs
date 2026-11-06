@@ -59,18 +59,18 @@ use windows::{
                 GetClientRect, GetCursorPos, GetWindow, GetWindowLongPtrW, GetWindowRect, HTCLIENT,
                 HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_APPSTARTING, IDC_ARROW, IDC_CROSS,
                 IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
-                IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT, IsWindowVisible, KillTimer,
-                LoadCursorW, MA_NOACTIVATE, RegisterClassExW, SPI_SETWORKAREA, SW_HIDE,
-                SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-                SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos,
-                ShowWindow, WINDOWPOS, WM_ACTIVATEAPP, WM_DISPLAYCHANGE, WM_LBUTTONDBLCLK,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
-                WM_MOUSEACTIVATE, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
-                WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCRBUTTONDOWN,
-                WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE,
-                WM_TIMER, WM_WINDOWPOSCHANGED, WM_XBUTTONDBLCLK, WM_XBUTTONDOWN, WM_XBUTTONUP,
-                WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-                WS_POPUP, WindowFromPoint,
+                IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT, IsWindowVisible, KillTimer, LoadCursorW,
+                MA_NOACTIVATE, RegisterClassExW, SPI_SETWORKAREA, SW_HIDE, SW_SHOWNOACTIVATE,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+                SWP_SHOWWINDOW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                WINDOWPOS, WM_ACTIVATEAPP, WM_DISPLAYCHANGE, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+                WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE,
+                WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_NCHITTEST,
+                WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCRBUTTONDOWN, WM_RBUTTONDBLCLK,
+                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_TIMER,
+                WM_WINDOWPOSCHANGED, WM_XBUTTONDBLCLK, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW,
+                WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
+                WindowFromPoint,
             },
         },
     },
@@ -91,31 +91,28 @@ const SUBCLASS_ID: usize = 0x7a67_7570; // "zgup"
 /// MK_MBUTTON | MK_XBUTTON1 | MK_XBUTTON2`).
 const BUTTONS: usize = 0x01 | 0x02 | 0x10 | 0x20 | 0x40;
 
-thread_local! {
-    /// The cursor zgx last chose (`Application::sync_cursor`), which a popup
-    /// shows when Windows asks it for one.
-    static CURSOR: Cell<CursorIcon> = const { Cell::new(CursorIcon::Default) };
-}
-
-/// Show `cursor` over the popups too: Windows asks each window under the
-/// pointer for its own, and a popup otherwise answers the arrow.
-pub(crate) fn set_cursor(cursor: CursorIcon) {
-    CURSOR.set(cursor);
-}
-
-/// The system cursor for `cursor`, as winit's own windows pick it.
+/// The system cursor for `cursor`, as winit's own windows pick it
+/// (`to_windows_cursor`, which it doesn't export).
 fn system_cursor(cursor: CursorIcon) -> PCWSTR {
     match cursor {
         CursorIcon::Pointer => IDC_HAND,
         CursorIcon::Text | CursorIcon::VerticalText => IDC_IBEAM,
-        CursorIcon::Crosshair | CursorIcon::Cell => IDC_CROSS,
-        CursorIcon::Move | CursorIcon::AllScroll | CursorIcon::Grab | CursorIcon::Grabbing => IDC_SIZEALL,
+        CursorIcon::Crosshair => IDC_CROSS,
+        CursorIcon::Move | CursorIcon::AllScroll | CursorIcon::Grab | CursorIcon::Grabbing => {
+            IDC_SIZEALL
+        }
         CursorIcon::NotAllowed | CursorIcon::NoDrop => IDC_NO,
         CursorIcon::Wait => IDC_WAIT,
         CursorIcon::Progress => IDC_APPSTARTING,
         CursorIcon::Help => IDC_HELP,
-        CursorIcon::EResize | CursorIcon::WResize | CursorIcon::EwResize | CursorIcon::ColResize => IDC_SIZEWE,
-        CursorIcon::NResize | CursorIcon::SResize | CursorIcon::NsResize | CursorIcon::RowResize => IDC_SIZENS,
+        CursorIcon::EResize
+        | CursorIcon::WResize
+        | CursorIcon::EwResize
+        | CursorIcon::ColResize => IDC_SIZEWE,
+        CursorIcon::NResize
+        | CursorIcon::SResize
+        | CursorIcon::NsResize
+        | CursorIcon::RowResize => IDC_SIZENS,
         CursorIcon::NeResize | CursorIcon::SwResize | CursorIcon::NeswResize => IDC_SIZENESW,
         CursorIcon::NwResize | CursorIcon::SeResize | CursorIcon::NwseResize => IDC_SIZENWSE,
         _ => IDC_ARROW,
@@ -147,6 +144,9 @@ struct Target {
     send: RefCell<Option<Sink>>,
     parent: Cell<usize>,
     tracking: Cell<bool>,
+    /// What to show when Windows asks: each window under the pointer answers
+    /// for itself, and winit answers only for the parent.
+    cursor: Cell<CursorIcon>,
 }
 impl Target {
     fn send(&self, input: PopupInput) {
@@ -189,11 +189,17 @@ unsafe extern "system" fn popup_proc(
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST => return LRESULT(HTCLIENT as isize),
         WM_SETCURSOR => {
-            // The one zgx chose for what is under the pointer (`set_cursor`),
-            // as over the window itself: a menu row's hand, a field's I-beam.
-            // SAFETY: a system cursor, set while over our window.
+            // The one its window's zgx chose for what is under the pointer
+            // (`PopupHost::set_cursor`), as over the window itself: a menu
+            // row's hand, a field's I-beam.
+            // SAFETY: our window's slot, as below; a system cursor, set while
+            // over our window.
             unsafe {
-                if let Ok(cursor) = LoadCursorW(None, system_cursor(CURSOR.get())) {
+                let target = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Target;
+                let chosen = target
+                    .as_ref()
+                    .map_or(CursorIcon::Default, |t| t.cursor.get());
+                if let Ok(cursor) = LoadCursorW(None, system_cursor(chosen)) {
                     SetCursor(Some(cursor));
                 }
             }
@@ -1015,6 +1021,8 @@ fn follow(parent: HWND) {
 pub(crate) struct PopupHost {
     shown: Vec<(NodeId, Panel)>,
     send: Sink,
+    /// The cursor its window's zgx last chose (`set_cursor`).
+    cursor: CursorIcon,
     /// The window they show over, once any has.
     parent: Option<usize>,
 }
@@ -1024,7 +1032,16 @@ impl PopupHost {
         Self {
             shown: Vec::new(),
             send: Rc::new(send),
+            cursor: CursorIcon::Default,
             parent: None,
+        }
+    }
+    /// Show `cursor` over these popups too: Windows asks each window under
+    /// the pointer for its own.
+    pub fn set_cursor(&mut self, cursor: CursorIcon) {
+        self.cursor = cursor;
+        for (_, panel) in &self.shown {
+            panel.target.cursor.set(cursor);
         }
     }
     /// Whether any popup shows.
@@ -1196,6 +1213,7 @@ impl PopupHost {
                 // Its first frame is in its visual before it shows.
                 // SAFETY: our device, on its thread.
                 let _ = unsafe { panel.device.Commit() };
+                panel.target.cursor.set(self.cursor);
                 panel.show(parent, &self.send);
             }
         }
@@ -1351,18 +1369,69 @@ mod tests {
     use super::*;
     use zgx::scene::{Layout, QuadStyle, Style};
 
-    /// A popup shows the cursor zgx chose, not always the arrow: a menu
-    /// row's hand, a field's I-beam, a splitter's arrows.
+    /// A popup answers Windows with the cursor its own window's zgx chose, not
+    /// always the arrow, and two windows' popups each keep their own. A window
+    /// of the class that shows nothing, asked as Windows would ask.
     #[test]
-    fn a_popup_shows_the_cursor_zgx_chose() {
-        assert_eq!(system_cursor(CursorIcon::Default), IDC_ARROW);
-        assert_eq!(system_cursor(CursorIcon::Pointer), IDC_HAND);
-        assert_eq!(system_cursor(CursorIcon::Text), IDC_IBEAM);
-        assert_eq!(system_cursor(CursorIcon::ColResize), IDC_SIZEWE);
-        assert_eq!(system_cursor(CursorIcon::RowResize), IDC_SIZENS);
-        set_cursor(CursorIcon::Pointer);
-        assert_eq!(system_cursor(CURSOR.get()), IDC_HAND);
-        set_cursor(CursorIcon::Default);
+    fn a_popup_shows_the_cursor_its_window_chose() {
+        use windows::Win32::UI::WindowsAndMessaging::{GetCursor, SendMessageW};
+        // SAFETY: windows of our class, never shown, made and destroyed here,
+        // their targets outliving them; system cursors, compared by handle.
+        unsafe {
+            let window = || {
+                CreateWindowExW(
+                    WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                    class(),
+                    w!(""),
+                    WS_POPUP,
+                    0,
+                    0,
+                    1,
+                    1,
+                    None,
+                    None,
+                    Some(GetModuleHandleW(None).unwrap_or_default().into()),
+                    None,
+                )
+                .unwrap()
+            };
+            let shows = |hwnd: HWND, cursor| {
+                SetCursor(None);
+                assert_eq!(SendMessageW(hwnd, WM_SETCURSOR, None, None), LRESULT(1));
+                assert_eq!(GetCursor(), LoadCursorW(None, cursor).unwrap());
+            };
+            let (first, second) = (window(), window());
+            shows(first, IDC_ARROW);
+            let (a, b) = (Target::default(), Target::default());
+            SetWindowLongPtrW(first, GWLP_USERDATA, &a as *const Target as isize);
+            SetWindowLongPtrW(second, GWLP_USERDATA, &b as *const Target as isize);
+            shows(first, IDC_ARROW);
+            a.cursor.set(CursorIcon::Pointer);
+            b.cursor.set(CursorIcon::Text);
+            shows(first, IDC_HAND);
+            shows(second, IDC_IBEAM);
+            for hwnd in [first, second] {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                let _ = DestroyWindow(hwnd);
+            }
+        }
+    }
+
+    /// Named as winit's own windows name them, so a cursor reads the same
+    /// over a popup as over its window, unknown ones the arrow.
+    #[test]
+    fn a_popups_cursors_are_winits() {
+        for (cursor, system) in [
+            (CursorIcon::Default, IDC_ARROW),
+            (CursorIcon::Pointer, IDC_HAND),
+            (CursorIcon::Text, IDC_IBEAM),
+            (CursorIcon::ColResize, IDC_SIZEWE),
+            (CursorIcon::RowResize, IDC_SIZENS),
+            (CursorIcon::Grabbing, IDC_SIZEALL),
+            (CursorIcon::Cell, IDC_ARROW),
+        ] {
+            assert_eq!(system_cursor(cursor), system, "{cursor:?}");
+        }
     }
 
     /// A popup root holding one panel `size` points square, rounded `radius`.
