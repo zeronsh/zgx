@@ -322,6 +322,16 @@ scrolls that way, and winit had no way to.
 `scripts/macos_swipe_probe.py` (zgx) checks the three-finger path, and the
 two-finger one where the system swipes with two fingers.
 
+## macOS: when a scroll event happened
+
+`WindowEvent::MouseWheel` says nothing of when: an app knows only when it read
+the event. Its main thread busy drawing, events a refresh apart are read
+together, and an app pacing motion from when they came moves unevenly.
+
+17. `platform::macos::take_scroll_event_time`: each `scrollWheel:`'s
+    `-[NSEvent timestamp]`, in a queue on the main thread, a `MouseWheel` at a
+    time.
+
 ## Wayland: a window's blur through `ext-background-effect-v1`
 
 `set_blur` (and `with_blur`) asked only KWin's `org_kde_kwin_blur`, so no
