@@ -868,6 +868,8 @@ pub(crate) struct ListRare {
     /// start coming in reach calls. Taken as `fill` walks the table.
     pub(crate) start: Option<Function>,
     pub(crate) start_distance: Option<f32>,
+    /// `estimate = { … }`, with `measured`: how a row's data makes its height.
+    pub(crate) estimate: Option<Rc<crate::estimate::Rule>>,
     /// `at_end = state`: kept saying whether it rests at its end.
     pub(crate) at_end: Option<Signal<Value>>,
     /// `overscroll = "contain"`: a wheel over it stays with it.
@@ -3197,6 +3199,7 @@ const WIDGET_FIELDS: &[&str] = &[
     "overscan",
     "heights",
     "measured",
+    "estimate",
     "row_text",
     "sticky",
     "placement",
@@ -5331,6 +5334,15 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Err(mlua::Error::runtime("ui.list `sticky` needs `heights`"));
             }
             let measured = table.get::<Option<bool>>("measured")?.unwrap_or(false);
+            // (Only a measured list has rows waiting to be measured.)
+            let estimate = if measured {
+                match table.get::<Option<Table>>("estimate")? {
+                    Some(rule) => Some(Rc::new(crate::estimate::Rule::read(&rule)?)),
+                    None => None,
+                }
+            } else {
+                None
+            };
             if measured && heights.is_some() {
                 return Err(mlua::Error::runtime(
                     "ui.list `measured` and `heights` don't go together: measured rows take their content's height",
@@ -5409,7 +5421,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     ));
                 }
             };
-            let rare = (sticky.is_some()
+            if estimate.is_some() && (items.is_none() || (key.is_none() && key_field.is_none())) {
+                return Err(mlua::Error::runtime(
+                    "ui.list `estimate` needs `key` and `data`: it keeps rows' heights by their keys",
+                ));
+            }
+            let rare = (estimate.is_some()
+                || sticky.is_some()
                 || row_text.is_some()
                 || end.is_some()
                 || ancestor
@@ -5418,6 +5436,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 Box::new(ListRare {
                     sticky,
                     sticky_top,
+                    estimate,
                     row_text,
                     end,
                     ancestor,
