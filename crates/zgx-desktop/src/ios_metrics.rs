@@ -10,6 +10,7 @@ use objc2::{
     runtime::{AnyObject, NSObject, NSObjectProtocol},
     sel,
 };
+use objc2_core_foundation::{CGRect, CGSize};
 use std::{
     cell::RefCell,
     io::Write,
@@ -21,6 +22,43 @@ unsafe extern "C" {
     static NSRunLoopCommonModes: *const AnyObject;
     fn task_info(task: u32, flavor: i32, info: *mut u32, count: *mut u32) -> i32;
     fn getrusage(who: i32, usage: *mut [i64; 18]) -> i32;
+    fn os_proc_available_memory() -> usize;
+    fn UIGraphicsBeginImageContextWithOptions(size: CGSize, opaque: bool, scale: f64);
+    fn UIGraphicsGetImageFromCurrentImageContext() -> *mut AnyObject;
+    fn UIGraphicsEndImageContext();
+    fn UIImagePNGRepresentation(image: *const AnyObject) -> *mut AnyObject;
+}
+
+/// `ZGX_IOS_SHOT=seconds`: after that long, what the key window shows goes to
+/// `Documents/shot.png`, which `xcrun devicectl device copy from` fetches: a phone
+/// has no `simctl io`.
+fn shoot() {
+    // SAFETY: UIKit's getters and drawing, on the main thread; the image and data
+    // are autoreleased, read here.
+    unsafe {
+        let app: Retained<AnyObject> = msg_send![class!(UIApplication), sharedApplication];
+        let windows: Retained<AnyObject> = msg_send![&*app, windows];
+        let window: Option<Retained<AnyObject>> = msg_send![&*windows, firstObject];
+        let Some(window) = window else {
+            return;
+        };
+        let bounds: CGRect = msg_send![&*window, bounds];
+        UIGraphicsBeginImageContextWithOptions(bounds.size, true, 0.);
+        let _: bool =
+            msg_send![&*window, drawViewHierarchyInRect: bounds, afterScreenUpdates: false];
+        let image = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        let data = UIImagePNGRepresentation(image);
+        if data.is_null() {
+            return;
+        }
+        let length: usize = msg_send![&*data, length];
+        let bytes: *const u8 = msg_send![&*data, bytes];
+        if let Some(home) = std::env::var_os("HOME") {
+            let path = std::path::Path::new(&home).join("Documents/shot.png");
+            let _ = std::fs::write(path, std::slice::from_raw_parts(bytes, length));
+        }
+    }
 }
 
 /// The process's memory as the system charges it, in MB.
@@ -55,6 +93,7 @@ struct Window {
     gpu_ns: u64,
     gpu_buffers: u64,
     every: Duration,
+    shot_at: Option<Instant>,
     /// `ZGX_IOS_METRICS_PASSIVE`: gaps are between drawn frames, and this
     /// sampler asks the display for nothing.
     passive: bool,
@@ -73,6 +112,10 @@ define_class!(
         fn tick(&self, _link: &AnyObject) {
             let mut window = self.ivars().borrow_mut();
             let now = Instant::now();
+            if window.shot_at.is_some_and(|at| now >= at) {
+                window.shot_at = None;
+                shoot();
+            }
             if window.passive {
                 let gaps = crate::ios_refresh::take_gaps();
                 window.gaps_ms.extend(gaps);
@@ -108,7 +151,7 @@ fn report(window: &mut Window, now: Instant) {
     };
     let buffers = gpu_buffers - window.gpu_buffers;
     let line = format!(
-        "{{\"scene\":{:?},\"seconds\":{elapsed:.1},\"frames\":{},\"gap_p50_ms\":{:.2},\"gap_p95_ms\":{:.2},\"gap_p99_ms\":{:.2},\"gap_max_ms\":{:.2},\"cpu_pct\":{:.1},\"gpu_app_pct\":{:.2},\"gpu_ms_per_buffer\":{:.3},\"gpu_buffers\":{buffers},\"memory_mb\":{:.1},\"thermal\":{thermal},\"battery\":{battery:.3}}}",
+        "{{\"scene\":{:?},\"seconds\":{elapsed:.1},\"frames\":{},\"gap_p50_ms\":{:.2},\"gap_p95_ms\":{:.2},\"gap_p99_ms\":{:.2},\"gap_max_ms\":{:.2},\"cpu_pct\":{:.1},\"gpu_app_pct\":{:.2},\"gpu_ms_per_buffer\":{:.3},\"gpu_buffers\":{buffers},\"memory_mb\":{:.1},\"available_mb\":{:.0},\"thermal\":{thermal},\"battery\":{battery:.3}}}",
         window.scene,
         gaps.len(),
         at(0.5),
@@ -119,6 +162,8 @@ fn report(window: &mut Window, now: Instant) {
         100. * (gpu_ns - window.gpu_ns) as f64 / 1e9 / elapsed,
         (gpu_ns - window.gpu_ns) as f64 / 1e6 / buffers.max(1) as f64,
         footprint_mb(),
+        // SAFETY: a libSystem query with no arguments.
+        unsafe { os_proc_available_memory() } as f64 / 1_048_576.,
     );
     println!("ZGX_METRICS {line}");
     let _ = std::io::stdout().flush();
@@ -164,6 +209,10 @@ pub(crate) fn start() {
         gpu_buffers,
         every: Duration::from_secs_f64(seconds.max(0.5)),
         passive,
+        shot_at: zgx::env::var("ZGX_IOS_SHOT")
+            .ok()
+            .and_then(|seconds| seconds.parse::<f64>().ok())
+            .map(|seconds| Instant::now() + Duration::from_secs_f64(seconds)),
         scene: zgx::env::var("ZGX_IOS_SCENE").unwrap_or_default(),
         log,
     }));
