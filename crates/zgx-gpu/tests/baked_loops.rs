@@ -666,6 +666,28 @@ fn a_layer_stays_with_its_node_across_a_scale() {
     );
 }
 
+/// Whatever moves a layer behind the renderer's back is noticed, once, and
+/// left as it is: the check says, and changes nothing.
+#[cfg(target_os = "macos")]
+fn a_layer_moved_behind_its_back_is_noticed() {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    let mut window = Placed::new(false);
+    for _ in 0..4 {
+        window.show();
+    }
+    assert_eq!(window.gpu.debug_loop_disagreements(), 0, "nothing to say");
+    // SAFETY: this thread made the layer; nothing else changes its list.
+    let sublayers = unsafe { window.host.sublayers() }.expect("sublayers");
+    let layer = sublayers
+        .iter()
+        .find(|layer| layer.zPosition() == 0.5)
+        .expect("the loop's layer");
+    layer.setFrame(CGRect::new(CGPoint::new(120., 140.), CGSize::new(20., 20.)));
+    window.show();
+    assert_eq!(window.gpu.debug_loop_disagreements(), 1, "noticed");
+    assert_eq!(window.layer(), Some((120., 140.)), "and left alone");
+}
+
 fn main() {
     #[cfg(target_os = "macos")]
     {
@@ -681,6 +703,7 @@ fn main() {
         loops_that_look_alike_share_a_sheet();
         a_layer_never_shows_a_loop_its_node_does_not();
         a_layer_is_where_its_node_is_after_any_frame();
+        a_layer_moved_behind_its_back_is_noticed();
         a_layer_goes_with_its_node_under_a_blur_too();
         a_layer_moves_with_the_frame_that_presents();
         a_layer_stays_with_its_node_across_a_scale();

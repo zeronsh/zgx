@@ -58,6 +58,31 @@ pub(crate) struct LoopSheet {
     /// fraction only once they hold still, not through a slide.
     seen: Rect,
 }
+/// What the last frame did, for a line about a layer that disagrees
+/// (`check_loops`).
+#[derive(Default)]
+pub(crate) struct LoopWatch {
+    /// The scene's mode, its window and what it asked of the frame.
+    blur: bool,
+    viewport: (f32, f32),
+    damage: usize,
+    /// A frame patched in place, rather than walked.
+    patched: bool,
+    rendered: Option<std::time::Instant>,
+    /// When the state said last changed, and when the layers' shown places
+    /// were last read (a read makes a copy of the layer: 4 times a second).
+    changed: Option<std::time::Instant>,
+    read: Option<std::time::Instant>,
+    /// Each ring and kind said once; a session's lines are few.
+    said: Vec<(u64, &'static str)>,
+    /// How many disagreements were found, said or not.
+    found: u32,
+}
+impl LoopWatch {
+    pub(crate) fn set_damage(&mut self, rects: usize) {
+        self.damage = rects;
+    }
+}
 /// A loop's state as last given its layer (`sync_loops`).
 #[derive(PartialEq)]
 pub(crate) struct LoopSaid {
@@ -410,11 +435,16 @@ impl GpuRenderer {
                 None => self.loops_said.push(said),
             }
         }
+        self.loop_watch.blur = scene.has_backdrop_blur();
+        self.loop_watch.viewport = (self.width as f32 / scale, self.height as f32 / scale);
+        self.loop_watch.patched = self.patched;
+        self.loop_watch.rendered = Some(std::time::Instant::now());
         // The same state as the last said, which stands (`set_loops`, queued
         // or applied): most frames of a stream move no ring.
         if !changed {
             return;
         }
+        self.loop_watch.changed = self.loop_watch.rendered;
         self.loops_said.truncate(self.loop_sheets.len());
         let alive = self.loop_sheets.iter().map(LoopSheet::key).collect();
         let shown = self
@@ -429,6 +459,87 @@ impl GpuRenderer {
         {
             layer.set_loops(alive, shown);
         }
+    }
+    /// Whether each layer is what its loop was last told, after a frame
+    /// presents; a disagreement is a line in the log, once for each ring and
+    /// kind, and nothing else changes. `sync_loops` should make this never
+    /// say anything: it is here to catch what that doesn't.
+    pub(crate) fn check_loops(&mut self, presented: &'static str) {
+        if self.loops_said.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let settled = self
+            .loop_watch
+            .changed
+            .is_some_and(|at| now.duration_since(at).as_millis() >= 500);
+        let read_shown = settled
+            && self
+                .loop_watch
+                .read
+                .is_none_or(|at| now.duration_since(at).as_millis() >= 250);
+        if read_shown {
+            self.loop_watch.read = Some(now);
+        }
+        let Some(layer) = self
+            .layer_present
+            .as_ref()
+            .and_then(|present| present.layer.as_ref())
+        else {
+            return;
+        };
+        for said in &self.loops_said {
+            let want = (
+                (said.frame.0 * self.scale).round() as f64 / said.point,
+                (said.frame.1 * self.scale).round() as f64 / said.point,
+            );
+            let Some(shown) = layer.loop_state(said.key, read_shown) else {
+                continue;
+            };
+            let off = |at: (f64, f64)| (at.0 - want.0).abs() > 1. || (at.1 - want.1).abs() > 1.;
+            let kind = if shown.hidden != !said.showing {
+                "shown"
+            } else if said.showing && off(shown.at) {
+                "place"
+            } else if said.showing && shown.on_screen.is_some_and(off) {
+                "on-screen"
+            } else {
+                continue;
+            };
+            self.loop_watch.found += 1;
+            if self.loop_watch.said.len() >= 32 || self.loop_watch.said.contains(&(said.key, kind))
+            {
+                continue;
+            }
+            self.loop_watch.said.push((said.key, kind));
+            let watch = &self.loop_watch;
+            eprintln!(
+                "zgx: a looping layer disagrees ({kind}): node {} layer at {:?} hidden {} on screen {:?}, \
+                 told {want:?} showing {}, opacity {}; {}, window {:?} scale {} zoom {}, \
+                 frame {} rects {} patched {} {presented}, {} ms since it rendered",
+                said.key,
+                shown.at,
+                shown.hidden,
+                shown.on_screen,
+                said.showing,
+                shown.opacity,
+                if watch.blur { "frosted" } else { "opaque" },
+                watch.viewport,
+                self.scale,
+                self.zoom,
+                self.layer_frame,
+                watch.damage,
+                watch.patched,
+                watch
+                    .rendered
+                    .map_or(0, |at| now.duration_since(at).as_millis()),
+            );
+        }
+    }
+    /// Test hook: disagreements `check_loops` has found.
+    #[doc(hidden)]
+    pub fn debug_loop_disagreements(&self) -> u32 {
+        self.loop_watch.found
     }
     /// Loops among a layer's `items` show frozen there: they go on tick by
     /// tick (`loop_sheets` leaves them when next placed).
