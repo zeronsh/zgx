@@ -4452,6 +4452,27 @@ impl Host {
             self.context.windows.file_routes.lock().unwrap().remove(&id);
         }
     }
+    /// The app is no longer in front on iOS, perhaps for a moment. The keyboard
+    /// and the field it serves stay, as UIKit's do.
+    #[cfg(target_os = "ios")]
+    fn resign_active(&mut self) {
+        self.context.ui.cancel_interactions();
+        self.context.ui.set_window_active(false);
+        self.native.pointer_left();
+        self.context
+            .ui
+            .input
+            .dispatch(&self.context.ui.scene, InputEvent::PointerLeave);
+    }
+    #[cfg(target_os = "ios")]
+    fn become_active(&mut self) {
+        self.context.ui.set_window_active(true);
+        self.force = true;
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     fn suspend(&mut self) {
         self.unregister_file_surface();
         self.context.ui.set_presented(false);
@@ -7186,6 +7207,12 @@ impl WindowManager {
             if host.context.window.is_closed() {
                 continue;
             }
+            // Back from `resign_active`, the window as it was.
+            #[cfg(target_os = "ios")]
+            if host.window.is_some() {
+                host.become_active();
+                continue;
+            }
             if let Err(e) = host.create_window(event_loop) {
                 self.fail(event_loop, e);
                 return;
@@ -7198,10 +7225,22 @@ impl WindowManager {
         }
     }
     fn suspended_turn(&mut self) {
-        self.active = false;
-        self.native.clear();
-        for host in self.hosts.values_mut() {
-            host.suspend();
+        // winit says this at `willResignActive`: for a glance at Control Center as
+        // for the app switcher, whose picture of the app is taken after it. The
+        // window stays, what it last showed with it; `Occluded` stops the drawing.
+        #[cfg(target_os = "ios")]
+        {
+            for host in self.hosts.values_mut() {
+                host.resign_active();
+            }
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            self.active = false;
+            self.native.clear();
+            for host in self.hosts.values_mut() {
+                host.suspend();
+            }
         }
     }
     fn user_event_turn(&mut self, event_loop: &ActiveEventLoop, event: Event) {

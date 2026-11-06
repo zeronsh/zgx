@@ -352,6 +352,7 @@ impl NativeHost {
         None
     }
     /// The native views went away with the window (suspend/recreate).
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     pub fn suspend(&mut self) {
         #[cfg(any(
             target_os = "macos",
