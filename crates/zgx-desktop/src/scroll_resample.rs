@@ -29,10 +29,26 @@ const WHEEL_RATE: f32 = 30.;
 /// and more) stop overlapping too.
 const WHEEL_SPIN: Duration = Duration::from_millis(120);
 
+/// The oldest an event's own time is believed, in seconds.
+const OLDEST_EVENT: f64 = 0.25;
+
 /// `ZGX_SCROLL_RESAMPLE=0` applies wheel input on arrival instead.
 pub(crate) fn enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| zgx::env::var_os("ZGX_SCROLL_RESAMPLE").is_none_or(|v| v != "0"))
+}
+
+/// The instant of an event `time` seconds after the system started, read at
+/// `now`, which is `now_ns` on that clock. Nothing an app reads is older than
+/// a long stall or from the future: past those, `now`.
+#[cfg_attr(not(all(target_os = "macos", zgx_winit_patched)), allow(dead_code))]
+pub(crate) fn happened_at(now: Instant, now_ns: u64, time: f64) -> Instant {
+    let age = now_ns as f64 / 1e9 - time;
+    if (0.0..=OLDEST_EVENT).contains(&age) {
+        now.checked_sub(Duration::from_secs_f64(age)).unwrap_or(now)
+    } else {
+        now
+    }
 }
 
 #[derive(Default)]
@@ -72,6 +88,8 @@ impl ScrollResampler {
     }
     /// Buffer pixel-precise motion that arrived at `now`.
     pub fn push_precise(&mut self, now: Instant, delta: (f32, f32)) {
+        // (Events' own times, in order: one with none is stamped when read.)
+        let now = self.points.back().map_or(now, |(at, _)| now.max(*at));
         let last = self.last_input.replace(now);
         match last {
             Some(last) if now.duration_since(last) < STALL => {
@@ -262,6 +280,52 @@ fn advance(applied: f32, target: f32, received: f32) -> f32 {
 mod tests {
     use super::*;
     const MS: Duration = Duration::from_millis(1);
+
+    /// Motion read in bursts by a busy thread moves evenly by when it happened,
+    /// and doesn't by when it was read: 120 Hz input, frames taking 12 ms.
+    #[test]
+    fn input_read_late_moves_evenly_by_its_own_time() {
+        let spread = |own_time: bool| {
+            let start = Instant::now();
+            let refresh = Duration::from_micros(8333);
+            let mut resampler = ScrollResampler::default();
+            let mut steps = Vec::new();
+            let mut event = 0;
+            let mut read_at = start;
+            for frame in 1..200_u32 {
+                // Frames start on a refresh, every other at worst, and the
+                // thread reads what came while it drew when it starts one.
+                read_at += refresh * if frame % 3 == 0 { 2 } else { 1 };
+                while start + refresh * event <= read_at {
+                    let happened = start + refresh * event;
+                    resampler.push_precise(if own_time { happened } else { read_at }, (0., 12.));
+                    event += 1;
+                }
+                let step = resampler.sample(read_at).unwrap_or_default().1;
+                let gap = if frame % 3 == 0 { 2. } else { 1. };
+                steps.push(step / gap);
+            }
+            let steady = &steps[20..];
+            let mean = steady.iter().sum::<f32>() / steady.len() as f32;
+            steady
+                .iter()
+                .fold(0_f32, |most, step| most.max((step / mean - 1.).abs()))
+        };
+        assert!(spread(true) <= 0.02, "by its own time: {}", spread(true));
+        assert!(spread(false) >= 0.2, "by when read: {}", spread(false));
+    }
+
+    /// An event's own time is believed only as far as it can be true.
+    #[test]
+    fn an_events_own_time_holds_only_within_reason() {
+        let now = Instant::now() + Duration::from_secs(10);
+        let ns = 100_000_000_000;
+        let ago = |at: Instant| now.duration_since(at).as_secs_f64();
+        assert!((ago(happened_at(now, ns, 99.99)) - 0.01).abs() < 1e-6);
+        assert_eq!(happened_at(now, ns, 100.5), now, "from the future");
+        assert_eq!(happened_at(now, ns, 90.), now, "too old");
+        assert_eq!(happened_at(now, ns, 0.), now, "another clock");
+    }
 
     /// What notches (ms from a start, points) make of each refresh at 120 Hz;
     /// all of it landed, in whole points.
