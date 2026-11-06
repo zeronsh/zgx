@@ -183,7 +183,10 @@ pub(crate) fn tokens() -> Vec<(TokenId, TokenInput)> {
         tokens.push((tok::FONT_WEIGHT_REGULAR.0, 600f32.into()));
         tokens.push((tok::FONT_WEIGHT_MEDIUM.0, 700f32.into()));
     }
-    tokens.push((tok::CONTROL_HEIGHT.0, 44f32.into()));
+    // UIKit's hit target, growing with the text it holds.
+    // SAFETY: UIKit's constant, there for the process's life.
+    let (_, body_line) = text_style(unsafe { UIFontTextStyleBody }, 22. / 17.);
+    tokens.push((tok::CONTROL_HEIGHT.0, (body_line + 12.).max(44.).into()));
     let preferences = preferences();
     if preferences.reduced_motion {
         tokens.extend([
