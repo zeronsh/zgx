@@ -5160,7 +5160,13 @@ impl GpuRenderer {
                     let size = (self.atlas_size * 2).max(self.atlas_grew_to);
                     self.reset_atlas(size.min(MAX_ATLAS))
                 }
-                result => return result,
+                result => {
+                    #[cfg(target_os = "macos")]
+                    if result.is_ok() {
+                        self.sync_loops(scene);
+                    }
+                    return result;
+                }
             }
         }
     }

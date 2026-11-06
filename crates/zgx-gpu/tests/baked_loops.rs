@@ -422,6 +422,140 @@ fn a_frame_drawn_again_for_a_shifted_layer_still_moves_a_loop() {
     assert_eq!((at.x, at.y), (30., 46.), "and stays");
 }
 
+/// A loop inside a 100-point box at (20, 20), `clip`ped or not, playing at
+/// (30, 30) in the window, on a host that says where its layer is.
+#[cfg(target_os = "macos")]
+struct Placed {
+    host: objc2::rc::Retained<objc2_quartz_core::CALayer>,
+    gpu: GpuRenderer,
+    scene: Scene,
+    node: NodeId,
+    holder: NodeId,
+}
+#[cfg(target_os = "macos")]
+impl Placed {
+    fn new(clip: bool) -> Self {
+        use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+        let host = objc2_quartz_core::CALayer::new();
+        host.setGeometryFlipped(true);
+        host.setBounds(CGRect::new(CGPoint::new(0., 0.), CGSize::new(200., 200.)));
+        let mut gpu = GpuRenderer::debug_for_layer(host.clone(), 400, 400).unwrap();
+        gpu.set_scale_factor(2.);
+        let mut scene = Scene::new(200., 200.);
+        gpu.install_text(&mut scene);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        scene.append(root, NodeKind::Rect(BLUE), fixed(200., 200.));
+        let holder = scene.append(
+            root,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip,
+                ..fixed(100., 100.)
+            },
+        );
+        scene.set_transform(holder, Transform { x: 20., y: 20. });
+        let node = scene.append(holder, NodeKind::Rect(RED), fixed(20., 20.));
+        scene.set_transform(node, Transform { x: 10., y: 10. });
+        let mut placed = Self {
+            host,
+            gpu,
+            scene,
+            node,
+            holder,
+        };
+        placed.show();
+        let frames = (0..30).map(|at| (1. - at as f32 / 60., 0.)).collect();
+        let baked = BakedLoop::new(frames, 30., Box::new(|| {}));
+        placed.scene.set_baked_loop(node, Some(Rc::new(baked)));
+        placed.show();
+        placed.show();
+        assert!(!placed.gpu.debug_loop_sheets().is_empty(), "no sheet");
+        assert_eq!(placed.layer(), Some((30., 30.)), "where it starts");
+        placed
+    }
+    fn show(&mut self) {
+        let damage = self.scene.flush().damage;
+        self.gpu.render(&self.scene, &damage).unwrap();
+        self.gpu.present().unwrap();
+    }
+    /// Where the window shows its layer; `None` when it shows none.
+    fn layer(&self) -> Option<(f64, f64)> {
+        // SAFETY: this thread made the layer; nothing else changes its list.
+        let sublayers = unsafe { self.host.sublayers() }?;
+        sublayers
+            .iter()
+            .find(|layer| layer.zPosition() == 0.5 && !layer.isHidden())
+            .map(|layer| (layer.frame().origin.x, layer.frame().origin.y))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn a_layer_never_shows_a_loop_its_node_does_not() {
+    // Past its clip in one step, as a fling's frame takes it, with nothing
+    // clipped along the way to refuse it.
+    let mut window = Placed::new(true);
+    let node = window.node;
+    window
+        .scene
+        .set_transform(node, Transform { x: 10., y: 150. });
+    window.show();
+    assert_eq!(window.layer(), None, "past its clip");
+    // And back, the same loop in the right place.
+    window
+        .scene
+        .set_transform(node, Transform { x: 40., y: 60. });
+    window.show();
+    assert_eq!(window.layer(), Some((60., 80.)), "back in its clip");
+
+    // Its clip folded to nothing.
+    let mut window = Placed::new(true);
+    let holder = window.holder;
+    window.scene.set_style(
+        holder,
+        Style {
+            clip: true,
+            ..fixed(100., 0.)
+        },
+    );
+    window.show();
+    assert_eq!(window.layer(), None, "folded away");
+
+    // What holds it gone transparent.
+    let mut window = Placed::new(false);
+    let holder = window.holder;
+    let effects = Effects {
+        opacity: 0.,
+        ..window.scene.effects(holder)
+    };
+    window.scene.set_effects(holder, effects);
+    window.show();
+    assert_eq!(window.layer(), None, "transparent");
+
+    // Off the window.
+    let mut window = Placed::new(false);
+    let holder = window.holder;
+    window
+        .scene
+        .set_transform(holder, Transform { x: 20., y: 400. });
+    window.show();
+    assert_eq!(window.layer(), None, "off the window");
+}
+
+#[cfg(target_os = "macos")]
+fn a_layer_is_where_its_node_is_after_any_frame() {
+    let mut window = Placed::new(false);
+    let holder = window.holder;
+    for y in [20., 45., 90., 33.] {
+        window.scene.set_transform(holder, Transform { x: 50., y });
+        window.show();
+        assert_eq!(window.layer(), Some((60., f64::from(y) + 10.)), "at {y}");
+        // A frame with nothing to draw changes nothing.
+        window.show();
+        assert_eq!(window.layer(), Some((60., f64::from(y) + 10.)), "at {y}");
+    }
+}
+
 fn main() {
     #[cfg(target_os = "macos")]
     {
@@ -435,5 +569,7 @@ fn main() {
         a_loop_moved_by_layout_above_it_moves_its_layer(true);
         a_frame_drawn_again_for_a_shifted_layer_still_moves_a_loop();
         loops_that_look_alike_share_a_sheet();
+        a_layer_never_shows_a_loop_its_node_does_not();
+        a_layer_is_where_its_node_is_after_any_frame();
     }
 }
