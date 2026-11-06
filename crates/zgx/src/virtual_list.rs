@@ -173,8 +173,6 @@ impl HeightSum {
 /// still has finite precision for extreme height ratios.
 #[derive(Clone, Debug)]
 pub struct HeightIndex {
-    /// Who is told of this list's rows (`VariableHeights::observe`).
-    pub(crate) observer: ObserverSlot,
     heights: Vec<f32>,
     tree: Vec<HeightSum>,
     estimate: f32,
@@ -200,18 +198,6 @@ pub trait RowObserver {
     /// Rows to build though out of view, to learn from.
     fn extra_rows(&self, rows: &mut Vec<usize>);
 }
-/// An observer, if the list has one.
-#[derive(Clone, Default)]
-pub(crate) struct ObserverSlot(pub(crate) Option<std::rc::Weak<dyn RowObserver>>);
-impl std::fmt::Debug for ObserverSlot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(if self.0.is_some() {
-            "observed"
-        } else {
-            "unobserved"
-        })
-    }
-}
 /// A row given less height than this shows nothing, and isn't built.
 pub(crate) const THINNEST_ROW: f32 = 0.01;
 impl HeightIndex {
@@ -225,7 +211,6 @@ impl HeightIndex {
     pub fn try_new(count: usize, estimate: f32) -> Result<Self, HeightError> {
         Self::validate(estimate)?;
         let mut index = Self {
-            observer: ObserverSlot::default(),
             heights: Vec::new(),
             tree: Vec::new(),
             estimate,

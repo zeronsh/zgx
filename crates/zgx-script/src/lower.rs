@@ -7785,8 +7785,10 @@ fn lower_item_list(
                 &kept,
                 cx,
             );
+            let observer: Rc<dyn zgx::virtual_list::RowObserver> = predictor.clone();
+            cx.retain(observer.clone());
             *predicting.borrow_mut() = Some(predictor);
-            kept
+            (kept, observer)
         });
         let list = match key {
             // Heights by key, kept as rows move, each read here: no item is
@@ -7800,7 +7802,12 @@ fn lower_item_list(
                     })
                 };
                 let estimate = |_: &[ListKey], _: usize| f32::NAN;
-                measured_rows(offset, rows, *overscan, keys, estimate, row)
+                match &shared_keys {
+                    Some((_, observer)) => zgx::compose::measured_rows_observed(
+                        observer, offset, rows, *overscan, keys, estimate, row,
+                    ),
+                    None => measured_rows(offset, rows, *overscan, keys, estimate, row),
+                }
             }
             None => {
                 let r = rows.clone();
@@ -7814,10 +7821,12 @@ fn lower_item_list(
                 let (key, vm, items) = (key.clone(), vm.clone(), items.clone());
                 let estimate = |_: &[ListKey], _: usize| f32::NAN;
                 match shared_keys {
-                    Some(kept) => {
+                    Some((kept, observer)) => {
                         let keys =
                             move || items.with(|l| item_keys(&vm, &key, l, &mut kept.borrow_mut()));
-                        measured_rows(offset, rows, *overscan, keys, estimate, row)
+                        zgx::compose::measured_rows_observed(
+                            &observer, offset, rows, *overscan, keys, estimate, row,
+                        )
                     }
                     None => {
                         let mut kept = KeptKeys::default();
@@ -9415,9 +9424,6 @@ fn predictor_for(
         }) as Rc<dyn Fn() -> Vec<Signal<Value>>>
     };
     let predictor = crate::predict::Predictor::new(now, key_of, named, rows.clone());
-    let observer: Rc<dyn zgx::virtual_list::RowObserver> = predictor.clone();
-    rows.observe(&observer);
-    cx.retain(observer);
     {
         let (items, predictor) = (items.clone(), predictor.clone());
         cx.retain(cx.runtime().effect(move || {

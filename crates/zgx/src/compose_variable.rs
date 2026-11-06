@@ -52,11 +52,6 @@ impl VariableHeights {
             self.changed();
         }
     }
-    /// Tells `observer` of this list's rows from now on, while it's kept
-    /// elsewhere: it holds these heights, so they can't hold it.
-    pub fn observe(&self, observer: &Rc<dyn crate::virtual_list::RowObserver>) {
-        self.index.borrow_mut().observer.0 = Some(Rc::downgrade(observer));
-    }
     /// Has the list pass again (an observer's rows to build changed).
     pub fn pass_again(&self) {
         self.changed();
@@ -145,7 +140,7 @@ pub fn variable_virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     key: impl FnMut(usize) -> K + 'static,
     build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
 ) -> View {
-    variable_list(offset, heights, overscan, key, build, false)
+    variable_list(NoWatch, offset, heights, overscan, key, build, false)
 }
 
 /// Virtualize naturally sized rows, updating a positional height estimate cache.
@@ -165,7 +160,7 @@ pub fn measured_virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     key: impl FnMut(usize) -> K + 'static,
     build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
 ) -> View {
-    variable_list(offset, heights, overscan, key, build, true)
+    variable_list(NoWatch, offset, heights, overscan, key, build, true)
 }
 /// Virtualize keyed rows of natural height, keeping each row's height by key.
 ///
@@ -178,6 +173,30 @@ pub fn measured_virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
 /// insertion and removal by key. Configure end anchoring and the default
 /// height on `heights`; mounted rows follow the `measured_virtual_list` rules.
 pub fn measured_rows<K: Eq + std::hash::Hash + Clone + 'static>(
+    offset: Signal<f32>,
+    heights: VariableHeights,
+    overscan: usize,
+    mut rows: impl FnMut() -> Vec<K> + 'static,
+    estimate: impl FnMut(&[K], usize) -> f32 + 'static,
+    build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
+) -> View {
+    rows_of(NoWatch, offset, heights, overscan, rows, estimate, build)
+}
+/// `measured_rows`, with `observer` told of its rows while it's kept.
+pub fn measured_rows_observed<K: Eq + std::hash::Hash + Clone + 'static>(
+    observer: &Rc<dyn crate::virtual_list::RowObserver>,
+    offset: Signal<f32>,
+    heights: VariableHeights,
+    overscan: usize,
+    rows: impl FnMut() -> Vec<K> + 'static,
+    estimate: impl FnMut(&[K], usize) -> f32 + 'static,
+    build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
+) -> View {
+    let watch = Observed(Rc::downgrade(observer));
+    rows_of(watch, offset, heights, overscan, rows, estimate, build)
+}
+fn rows_of<K: Eq + std::hash::Hash + Clone + 'static, W: RowWatch>(
+    watch: W,
     offset: Signal<f32>,
     heights: VariableHeights,
     overscan: usize,
@@ -304,9 +323,15 @@ pub fn measured_rows<K: Eq + std::hash::Hash + Clone + 'static>(
             cx.retain(effect);
         }
         let key = move |index: usize| described.borrow()[index].clone();
-        measured_virtual_list(offset, heights, overscan, key, move |index, key, cx| {
-            build(index, key, cx)
-        })
+        variable_list(
+            watch,
+            offset,
+            heights,
+            overscan,
+            key,
+            move |index, key, cx| build(index, key, cx),
+            true,
+        )
     })
 }
 struct Entry {
@@ -334,9 +359,51 @@ fn row_style(width: f32, height: f32, measured: bool) -> crate::scene::Style {
         }
     }
 }
+/// What a list tells of its rows. A type, not a value to look at on each
+/// pass: a list without one has none of this in its code.
+trait RowWatch: 'static {
+    const ON: bool;
+    fn pass<K>(
+        &self,
+        weak: &crate::widgets::WeakUi,
+        runtime: &crate::reactive::Runtime,
+        entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
+        width: f32,
+        extras: &mut Vec<usize>,
+    );
+}
+/// Nobody told.
+struct NoWatch;
+impl RowWatch for NoWatch {
+    const ON: bool = false;
+    fn pass<K>(
+        &self,
+        _: &crate::widgets::WeakUi,
+        _: &crate::reactive::Runtime,
+        _: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
+        _: f32,
+        _: &mut Vec<usize>,
+    ) {
+    }
+}
+/// An observer, kept elsewhere: it holds the heights, so they can't hold it.
+struct Observed(std::rc::Weak<dyn crate::virtual_list::RowObserver>);
+impl RowWatch for Observed {
+    const ON: bool = true;
+    fn pass<K>(
+        &self,
+        weak: &crate::widgets::WeakUi,
+        runtime: &crate::reactive::Runtime,
+        entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
+        width: f32,
+        extras: &mut Vec<usize>,
+    ) {
+        if let Some(observer) = self.0.upgrade() {
+            observe_rows(&observer, weak, runtime, entries, width, extras);
+        }
+    }
+}
 /// An observer told of the rows measured at `width`, and asked which to build.
-#[cold]
-#[inline(never)]
 fn observe_rows<K>(
     observer: &Rc<dyn crate::virtual_list::RowObserver>,
     weak: &crate::widgets::WeakUi,
@@ -363,7 +430,8 @@ fn observe_rows<K>(
         observer.extra_rows(extras);
     });
 }
-fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
+fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: RowWatch>(
+    watch: W,
     offset: Signal<f32>,
     heights: VariableHeights,
     overscan: usize,
@@ -517,8 +585,6 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
             // there by its key. Beside the anchor, not in it, so that other
             // lists' passes neither move nor drop a key.
             let mut anchor_key: Option<K> = None;
-            // Who's told of rows, if any: read here once, not on each pass.
-            let watcher = heights.index.borrow().observer.0.clone();
             ui.bind(root, move || {
                 heights.revision.get();
                 mounted_revision.get();
@@ -559,8 +625,8 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     }
                 }
                 let mut extras = Vec::new();
-                if let Some(observer) = watcher.as_ref().and_then(|o| o.upgrade()) {
-                    observe_rows(&observer, &weak, &runtime, &entries, width, &mut extras);
+                if W::ON {
+                    watch.pass(&weak, &runtime, &entries, width, &mut extras);
                 }
                 let revision = heights.revision.get();
                 // Rows added or removed above the anchor row: it is as many

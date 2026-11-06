@@ -23,7 +23,10 @@ use std::{
 mod animation;
 #[path = "compose_variable.rs"]
 mod variable;
-pub use variable::{VariableHeights, measured_rows, measured_virtual_list, variable_virtual_list};
+pub use variable::{
+    VariableHeights, measured_rows, measured_rows_observed, measured_virtual_list,
+    variable_virtual_list,
+};
 
 /// A local UI future, supplied to a platform's wake-driven executor.
 pub type LocalFuture = Pin<Box<dyn Future<Output = ()>>>;
