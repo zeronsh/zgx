@@ -12,6 +12,11 @@
 //! painted over it, in the window's own frames. Anywhere else the loop is
 //! refused, and goes on tick by tick from where it has reached. A new look
 //! or scale draws the sheet again.
+//!
+//! What a layer shows is worked out whole from the scene at each frame
+//! (`sync_loops`), whatever that frame's damage walked: where the node is,
+//! and whether it shows at all. A layer sits over the frames, out of reach of
+//! their clips, so nothing but this keeps it with the content around it.
 use crate::layer_present::{Buffer, LoopShown};
 use crate::{GpuRenderer, Region};
 use std::rc::Rc;
@@ -46,9 +51,22 @@ pub(crate) struct LoopSheet {
     /// Its place now, in points, and the opacity of what holds it.
     frame: (f32, f32),
     opacity: f32,
+    /// Whether its node shows now (`Scene::visible_bounds`): clipped away,
+    /// transparent or hidden, its layer hides with it.
+    showing: bool,
     /// The bounds it was last seen at: a sheet is drawn again for a new
     /// fraction only once they hold still, not through a slide.
     seen: Rect,
+}
+/// A loop's state as last given its layer (`sync_loops`).
+#[derive(PartialEq)]
+pub(crate) struct LoopSaid {
+    key: u64,
+    surface: u32,
+    frame: (f32, f32),
+    opacity: f32,
+    showing: bool,
+    point: f64,
 }
 /// What a layer shows over the window's frame: read back with it, so a
 /// capture of the frame shows what the window does (`ShownFrame::read`).
@@ -183,6 +201,7 @@ impl LoopSheet {
                 height as f64 / point,
             ),
             opacity: self.opacity,
+            hidden: !self.showing,
             rects,
             times,
             duration,
@@ -200,6 +219,7 @@ impl GpuRenderer {
         let mut over: Vec<OverFrame> = self
             .loop_sheets
             .iter()
+            .filter(|sheet| sheet.showing)
             .map(|sheet| OverFrame::Loop {
                 buffer: sheet.buffer.clone(),
                 at: (
@@ -267,9 +287,9 @@ impl GpuRenderer {
                 .as_ref()
                 .is_some_and(|present| present.layer.is_some())
     }
-    /// `items` less the looping ones a layer plays, those layers placed,
-    /// their sheets drawn if new. A frame's `items` may leave out what its
-    /// damage doesn't reach: such a loop's layer stays as it is.
+    /// `items` less the looping ones a layer plays, their sheets drawn if
+    /// new. A frame's `items` may leave out what its damage doesn't reach, or
+    /// what no longer shows: `sync_loops` places every layer all the same.
     pub(crate) fn place_loops<'a>(
         &mut self,
         scene: &Scene,
@@ -306,7 +326,6 @@ impl GpuRenderer {
                 *node == sheet.node && Rc::ptr_eq(loop_, &sheet.baked) && !loop_.refused()
             })
         });
-        let mut changed = Vec::new();
         for (item, loop_) in placed {
             let bounds = item.bounds;
             let (x, y) = (bounds.x * scale, bounds.y * scale);
@@ -317,7 +336,6 @@ impl GpuRenderer {
             } else {
                 1.
             };
-            let key = item.id.number() as u64;
             let params = scene.shader_uniforms(item.id).params;
             let at = self.loop_sheets.iter().position(|s| s.node == item.id);
             let stale = at.is_some_and(|at| {
@@ -334,30 +352,75 @@ impl GpuRenderer {
                     continue;
                 };
                 self.loop_sheets.push(sheet);
-                changed.push(key);
             }
-            let Some(sheet) = self.loop_sheets.iter_mut().find(|s| s.key() == key) else {
+            let Some(sheet) = self.loop_sheets.iter_mut().find(|s| s.node == item.id) else {
                 continue;
             };
             sheet.seen = bounds;
-            let frame = (
-                (x - sheet.fraction.0) / scale,
-                (y - sheet.fraction.1) / scale,
+            sheet.opacity = opacity;
+        }
+        items
+    }
+    /// Every loop's layer as the scene has it now, for the frame on its way:
+    /// where its node is and whether it shows, whichever path drew the frame
+    /// and whatever it walked. The whole state each time, so what a frame
+    /// drawn twice or skipped asks for can't be lost, and nothing a layer
+    /// shows depends on an earlier frame having said so.
+    pub(crate) fn sync_loops(&mut self, scene: &Scene) {
+        if self.loop_sheets.is_empty()
+            && self
+                .layer_present
+                .as_ref()
+                .and_then(|present| present.layer.as_ref())
+                .is_none_or(|layer| !layer.has_loops())
+        {
+            return;
+        }
+        // (Frames that return early never reached `place_loops`.)
+        let baked = scene.baked_loops();
+        self.loop_sheets.retain(|sheet| {
+            baked.iter().any(|(node, loop_)| {
+                *node == sheet.node && Rc::ptr_eq(loop_, &sheet.baked) && !loop_.refused()
+            })
+        });
+        let (scale, zoom) = (self.scale, self.zoom);
+        let mut changed = self.loops_said.len() != self.loop_sheets.len();
+        for (at, sheet) in self.loop_sheets.iter_mut().enumerate() {
+            let bounds = scene.bounds(sheet.node);
+            sheet.frame = (
+                (bounds.x * scale - sheet.fraction.0) / scale,
+                (bounds.y * scale - sheet.fraction.1) / scale,
             );
-            if sheet.frame != frame || sheet.opacity != opacity {
-                sheet.frame = frame;
-                sheet.opacity = opacity;
-                if !changed.contains(&key) {
-                    changed.push(key);
+            sheet.showing =
+                scene.layout_visible(sheet.node) && scene.visible_bounds(sheet.node).is_some();
+            let said = LoopSaid {
+                key: sheet.key(),
+                surface: sheet.buffer.surface.id(),
+                frame: sheet.frame,
+                opacity: sheet.opacity,
+                showing: sheet.showing,
+                point: f64::from(scale) / zoom,
+            };
+            match self.loops_said.get_mut(at) {
+                Some(was) if *was == said => {}
+                Some(was) => {
+                    *was = said;
+                    changed = true;
                 }
+                None => self.loops_said.push(said),
             }
         }
+        // The same state as the last said, which stands (`set_loops`, queued
+        // or applied): most frames of a stream move no ring.
+        if !changed {
+            return;
+        }
+        self.loops_said.truncate(self.loop_sheets.len());
         let alive = self.loop_sheets.iter().map(LoopSheet::key).collect();
         let shown = self
             .loop_sheets
             .iter()
-            .filter(|sheet| changed.contains(&sheet.key()))
-            .map(|sheet| sheet.shown(scale, self.zoom))
+            .map(|sheet| sheet.shown(scale, zoom))
             .collect();
         if let Some(layer) = self
             .layer_present
@@ -366,7 +429,6 @@ impl GpuRenderer {
         {
             layer.set_loops(alive, shown);
         }
-        items
     }
     /// Loops among a layer's `items` show frozen there: they go on tick by
     /// tick (`loop_sheets` leaves them when next placed).
@@ -418,6 +480,7 @@ impl GpuRenderer {
                 rows: twin.rows,
                 frame: (f32::NAN, f32::NAN),
                 opacity: 1.,
+                showing: true,
                 seen: Rect::default(),
             });
         }
@@ -494,6 +557,7 @@ impl GpuRenderer {
             rows,
             frame: (f32::NAN, f32::NAN),
             opacity: 1.,
+            showing: true,
             seen: Rect::default(),
         })
     }

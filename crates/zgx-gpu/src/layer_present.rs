@@ -487,6 +487,8 @@ pub(crate) struct LoopShown {
     pub rect: (f64, f64, f64, f64),
     /// The opacity of what holds it.
     pub opacity: f32,
+    /// Its node shows nothing now.
+    pub hidden: bool,
     /// Each cell of the sheet, in its unit square.
     pub rects: Vec<[f64; 4]>,
     /// When each starts in the loop, 0 to 1, and a last 1.
@@ -1510,21 +1512,15 @@ impl Layer {
     /// Show `caret` over the frames, or none; in the caller's transaction
     /// (the frame's, so the editor's caret and this one never both show,
     /// nor neither), or one of its own.
-    /// The loops' layers (loops.rs) to keep (`alive`) and to place
-    /// (`shown`) with the next frame, in its transaction: a layer and the
-    /// frame's content move together.
-    pub(crate) fn set_loops(&mut self, alive: Vec<u64>, mut shown: Vec<LoopShown>) {
-        // Set again before they apply (a frame drawn twice, `render_once`):
-        // the first's places stand, whatever the second finds unchanged. Its
-        // sheets hold them as sent, and nothing would send them again.
-        if let Some((_, due)) = self.loops_due.take() {
-            for loop_ in due {
-                if alive.contains(&loop_.key) && !shown.iter().any(|s| s.key == loop_.key) {
-                    shown.push(loop_);
-                }
-            }
-        }
+    /// The loops' layers (loops.rs) as the next frame has them, in its
+    /// transaction: a layer and the frame's content move together. The whole
+    /// state: set again before it applies, the later one stands.
+    pub(crate) fn set_loops(&mut self, alive: Vec<u64>, shown: Vec<LoopShown>) {
         self.loops_due = Some((alive, shown));
+    }
+    /// Whether a layer plays a loop now, or is about to.
+    pub(crate) fn has_loops(&self) -> bool {
+        !self.loops.is_empty() || self.loops_due.is_some()
     }
     /// What `set_loops` left for this frame; in the caller's transaction.
     fn place_loops(&mut self) {
@@ -1558,12 +1554,19 @@ impl Layer {
             } else {
                 host.bounds().size.height - y - height
             };
-            layer.setFrame(objc2_core_foundation::CGRect::new(
+            let frame = objc2_core_foundation::CGRect::new(
                 objc2_core_foundation::CGPoint::new(x, y),
                 CGSize::new(width, height),
-            ));
+            );
+            // (Asked each frame: a place it already has commits nothing.)
+            if layer.frame() != frame {
+                layer.setFrame(frame);
+            }
             if layer.opacity() != loop_.opacity {
                 layer.setOpacity(loop_.opacity);
+            }
+            if layer.isHidden() != loop_.hidden {
+                layer.setHidden(loop_.hidden);
             }
             // A new place changes no frame of the loop.
             let id = loop_.surface.id();
