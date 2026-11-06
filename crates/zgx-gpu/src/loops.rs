@@ -58,6 +58,16 @@ pub(crate) struct LoopSheet {
     /// fraction only once they hold still, not through a slide.
     seen: Rect,
 }
+/// A loop's state as last given its layer (`sync_loops`).
+#[derive(PartialEq)]
+pub(crate) struct LoopSaid {
+    key: u64,
+    surface: u32,
+    frame: (f32, f32),
+    opacity: f32,
+    showing: bool,
+    point: f64,
+}
 /// What a layer shows over the window's frame: read back with it, so a
 /// capture of the frame shows what the window does (`ShownFrame::read`).
 pub(crate) enum OverFrame {
@@ -374,9 +384,8 @@ impl GpuRenderer {
             })
         });
         let (scale, zoom) = (self.scale, self.zoom);
-        let mut alive = Vec::with_capacity(self.loop_sheets.len());
-        let mut shown = Vec::with_capacity(self.loop_sheets.len());
-        for sheet in &mut self.loop_sheets {
+        let mut changed = self.loops_said.len() != self.loop_sheets.len();
+        for (at, sheet) in self.loop_sheets.iter_mut().enumerate() {
             let bounds = scene.bounds(sheet.node);
             sheet.frame = (
                 (bounds.x * scale - sheet.fraction.0) / scale,
@@ -384,9 +393,35 @@ impl GpuRenderer {
             );
             sheet.showing =
                 scene.layout_visible(sheet.node) && scene.visible_bounds(sheet.node).is_some();
-            alive.push(sheet.key());
-            shown.push(sheet.shown(scale, zoom));
+            let said = LoopSaid {
+                key: sheet.key(),
+                surface: sheet.buffer.surface.id(),
+                frame: sheet.frame,
+                opacity: sheet.opacity,
+                showing: sheet.showing,
+                point: f64::from(scale) / zoom,
+            };
+            match self.loops_said.get_mut(at) {
+                Some(was) if *was == said => {}
+                Some(was) => {
+                    *was = said;
+                    changed = true;
+                }
+                None => self.loops_said.push(said),
+            }
         }
+        // The same state as the last said, which stands (`set_loops`, queued
+        // or applied): most frames of a stream move no ring.
+        if !changed {
+            return;
+        }
+        self.loops_said.truncate(self.loop_sheets.len());
+        let alive = self.loop_sheets.iter().map(LoopSheet::key).collect();
+        let shown = self
+            .loop_sheets
+            .iter()
+            .map(|sheet| sheet.shown(scale, zoom))
+            .collect();
         if let Some(layer) = self
             .layer_present
             .as_mut()
