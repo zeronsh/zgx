@@ -38,7 +38,7 @@ impl View {
                     x,
                     y,
                     button: PointerButton::Primary,
-                } if !cx.capture_requested() => {
+                } if !cx.keeps_press_from_drag() => {
                     origin = Some((x, y));
                     cx.capture_pointer();
                 }
