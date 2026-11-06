@@ -3963,6 +3963,7 @@ pub struct GpuRenderer {
     /// frame being drawn into one.
     #[cfg(target_os = "macos")]
     loop_sheets: Vec<loops::LoopSheet>,
+    #[cfg(target_os = "macos")]
     loops_said: Vec<loops::LoopSaid>,
     #[cfg(target_os = "macos")]
     loop_time: Option<f32>,
@@ -4484,6 +4485,7 @@ impl GpuRenderer {
             layer_present: layer_presenting.then(LayerPresent::default),
             #[cfg(target_os = "macos")]
             loop_sheets: Vec::new(),
+            #[cfg(target_os = "macos")]
             loops_said: Vec::new(),
             #[cfg(target_os = "macos")]
             loop_time: None,
