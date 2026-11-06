@@ -13,6 +13,12 @@ mod compile;
 mod composition;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod core_text_glyphs;
+/// The app's GPU work so far (iOS, `ZGX_IOS_METRICS`): nanoseconds its
+/// command buffers ran, and how many.
+#[cfg(target_os = "ios")]
+pub fn metal_gpu_time() -> (u64, u64) {
+    wgpu::hal::metal::gpu_time()
+}
 #[cfg(d3d11)]
 mod d3d11_frame;
 #[cfg(windows)]

@@ -72,6 +72,8 @@ mod composition;
 mod contain;
 pub mod file_dialog;
 #[cfg(target_os = "ios")]
+mod ios_metrics;
+#[cfg(target_os = "ios")]
 mod ios_pasteboard;
 #[cfg(target_os = "ios")]
 mod ios_scroll;

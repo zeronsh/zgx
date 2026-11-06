@@ -47,6 +47,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let rows = number("COST_ROWS", 200);
     let panes = number("COST_GLASS", 0);
+    // Left where it is: what a window that isn't changing costs.
+    let still = zgx::env::var_os("COST_STILL").is_some();
+    // Text on each pane, which puts it on the overlay plane.
+    let over = zgx::env::var_os("COST_OVER").is_some();
     Application::new()
         .window(WindowOptions::default())
         .run(move |cx| {
@@ -56,6 +60,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let tick = time.clone();
             cx.tasks.spawn(async move {
                 let start = std::time::Instant::now();
+                if still {
+                    return;
+                }
                 loop {
                     zgx::timer::sleep(Duration::from_millis(8)).await;
                     let t = start.elapsed().as_secs_f32();
@@ -95,7 +102,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .left(16.)
                     .right(16.)
                     .top(60. + pane as f32 * 90.)
-                    .h(70.),
+                    .h(70.)
+                    .when(over, |pane| pane.p(20.).child(text("Over the glass"))),
                 );
             }
             cx.render(root);
