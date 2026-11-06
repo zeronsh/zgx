@@ -2810,8 +2810,23 @@ mod mac {
         match action.as_str() {
             "Minimize" => window.miniaturize(None),
             "None" => {}
-            // "Maximize" (zoom), "Fill" and anything newer: zoom.
-            _ => window.zoom(None),
+            // "Maximize" (zoom), "Fill" and anything newer: zoom, once the
+            // event that asked has been handled. AppKit animates within
+            // `zoom:`, and winit queues what it reports while an event is being
+            // handled: every size of the animation would wait until it ended,
+            // with the last frame stretched over the window meanwhile.
+            //
+            // SAFETY: NSObject's `performSelectorOnMainThread:withObject:waitUntilDone:`
+            // with NSWindow's `zoom:`, which takes an optional sender; the
+            // run loop keeps the window until it runs.
+            _ => unsafe {
+                let _: () = msg_send![
+                    &*window,
+                    performSelectorOnMainThread: sel!(zoom:),
+                    withObject: None::<&AnyObject>,
+                    waitUntilDone: false
+                ];
+            },
         }
     }
 
