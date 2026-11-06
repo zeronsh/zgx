@@ -153,17 +153,25 @@ struct Mounted {
     content: Content,
     style: Option<GlassStyle>,
     parent: Option<NodeId>,
+    /// The host it is in (`NativePlacement::slot`).
+    slot: u8,
     frame: Option<Rect>,
     alpha: f32,
     hidden: bool,
 }
 
+/// How many overlays stack between native views: a page, what is pushed over
+/// it, a sheet or a tab bar over those. Paint above them all joins the last.
+pub(crate) const LEVELS: u8 = 4;
+
 pub(crate) struct Surfaces {
     /// Each pane in a group, with its group (`read_groups`).
     groups: HashMap<NodeId, NodeId>,
-    glass_host: Retained<AnyObject>,
-    overlay_view: Retained<AnyObject>,
-    overlay_shown: Option<Option<Rect>>,
+    /// Native views by slot, each under the overlay of the next level:
+    /// `hosts[0]`, `planes[0]`, `hosts[1]`, `planes[1]`…
+    hosts: Vec<Retained<AnyObject>>,
+    /// The overlays' views, by level from 1, and where each shows.
+    planes: Vec<(Retained<AnyObject>, Option<Option<Rect>>)>,
     mounted: HashMap<NodeId, Mounted>,
     order: Vec<NodeId>,
     zoom: f32,
@@ -190,21 +198,25 @@ impl Surfaces {
         let root: Retained<AnyObject> =
             unsafe { Retained::retain(handle.ui_view.as_ptr().cast()) }.ok_or("no view")?;
         // SAFETY: UIView's getters and setters, on the main thread checked above.
-        let (glass_host, overlay_view) = unsafe {
+        let (hosts, planes) = unsafe {
             let bounds: CGRect = msg_send![&*root, bounds];
-            let glass_host = passive_view(bounds);
-            let _: () = msg_send![&*glass_host, setAutoresizingMask: FILL];
-            let _: () = msg_send![&*root, addSubview: &*glass_host];
-            let overlay_view = passive_view(bounds);
-            let _: () = msg_send![&*overlay_view, setHidden: true];
-            let _: () = msg_send![&*root, addSubview: &*overlay_view];
-            (glass_host, overlay_view)
+            let (mut hosts, mut planes) = (Vec::new(), Vec::new());
+            for _ in 0..LEVELS {
+                let host = passive_view(bounds);
+                let _: () = msg_send![&*host, setAutoresizingMask: FILL];
+                let _: () = msg_send![&*root, addSubview: &*host];
+                hosts.push(host);
+                let plane = passive_view(bounds);
+                let _: () = msg_send![&*plane, setHidden: true];
+                let _: () = msg_send![&*root, addSubview: &*plane];
+                planes.push((plane, None));
+            }
+            (hosts, planes)
         };
         Ok(Self {
             groups: HashMap::new(),
-            glass_host,
-            overlay_view,
-            overlay_shown: None,
+            hosts,
+            planes,
             mounted: HashMap::new(),
             order: Vec::new(),
             zoom: 1.,
@@ -218,11 +230,21 @@ impl Surfaces {
         context: &zgx_gpu::GpuContext,
         scale: f32,
     ) -> Result<zgx_gpu::GpuRenderer, zgx_gpu::GpuError> {
+        self.level_renderer(1, context, scale)
+    }
+    /// A renderer presenting into the view of the overlay at `level`.
+    pub fn level_renderer(
+        &self,
+        level: u8,
+        context: &zgx_gpu::GpuContext,
+        scale: f32,
+    ) -> Result<zgx_gpu::GpuRenderer, zgx_gpu::GpuError> {
+        let plane = &self.planes[usize::from(level) - 1].0;
         // SAFETY: a UIView's setter, on the main thread.
         unsafe {
-            let _: () = msg_send![&*self.overlay_view, setContentScaleFactor: scale as f64];
+            let _: () = msg_send![&**plane, setContentScaleFactor: scale as f64];
         }
-        let view = NonNull::from(&*self.overlay_view).cast();
+        let view = NonNull::from(&**plane).cast();
         // SAFETY: the view lives as long as these surfaces, and they drop
         // the renderer first (`NativeHost::suspend`, field order there).
         unsafe {
@@ -249,15 +271,20 @@ impl Surfaces {
     }
     /// Show the overlay's view at `rect`, or hide it.
     pub fn show_overlay(&mut self, shown: Option<Rect>) {
-        if self.overlay_shown == Some(shown) {
+        self.show_level(1, shown);
+    }
+    /// Show the view of the overlay at `level` at `rect`, or hide it.
+    pub fn show_level(&mut self, level: u8, shown: Option<Rect>) {
+        let (view, was) = &mut self.planes[usize::from(level) - 1];
+        if *was == Some(shown) {
             return;
         }
-        self.overlay_shown = Some(shown);
+        *was = Some(shown);
         // SAFETY: UIView's setters, on the main thread.
         unsafe {
-            let _: () = msg_send![&*self.overlay_view, setHidden: shown.is_none()];
+            let _: () = msg_send![&**view, setHidden: shown.is_none()];
             if let Some(shown) = shown {
-                let _: () = msg_send![&*self.overlay_view, setFrame: rect(shown)];
+                let _: () = msg_send![&**view, setFrame: rect(shown)];
             }
         }
     }
@@ -311,6 +338,7 @@ impl Surfaces {
                                 content: Content::Toggle(state.clone(), target),
                                 style: None,
                                 parent: None,
+                                slot: 0,
                                 frame: None,
                                 alpha: 1.,
                                 hidden: false,
@@ -343,6 +371,7 @@ impl Surfaces {
                 content,
                 style: None,
                 parent: None,
+                slot: 0,
                 frame: None,
                 alpha: 1.,
                 hidden: false,
@@ -376,7 +405,9 @@ impl Surfaces {
             self.interactive = interactive;
             // SAFETY: UIView's setter, on the main thread.
             unsafe {
-                let _: () = msg_send![&*self.glass_host, setUserInteractionEnabled: interactive];
+                for host in &self.hosts {
+                    let _: () = msg_send![&**host, setUserInteractionEnabled: interactive];
+                }
             }
         }
         // Later paint is higher: reorder only when the order changes.
@@ -385,7 +416,7 @@ impl Surfaces {
                 if let Some(mounted) = self.mounted.get(node) {
                     let host = match mounted.parent {
                         Some(group) => self.mounted.get(&group).map(|g| content_view(&g.view)),
-                        None => Some(self.glass_host.clone()),
+                        None => Some(self.hosts[usize::from(mounted.slot)].clone()),
                     };
                     if let Some(host) = host {
                         // SAFETY: UIView's method, on the main thread.
@@ -434,13 +465,14 @@ impl Surfaces {
             .map_or((0., 0.), |frame| (frame.x, frame.y));
         let host = match parent {
             Some(group) => self.mounted.get(&group).map(|g| content_view(&g.view)),
-            None => Some(self.glass_host.clone()),
+            None => Some(self.hosts[usize::from(placement.slot)].clone()),
         };
         let Some(mounted) = self.mounted.get_mut(&placement.node) else {
             return;
         };
-        if mounted.parent != parent || mounted.frame.is_none() {
+        if mounted.parent != parent || mounted.slot != placement.slot || mounted.frame.is_none() {
             mounted.parent = parent;
+            mounted.slot = placement.slot;
             if let Some(host) = host {
                 let top = mounted.clip.as_ref().unwrap_or(&mounted.view);
                 // SAFETY: UIView's method, on the main thread.

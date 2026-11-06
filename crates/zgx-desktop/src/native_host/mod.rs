@@ -64,6 +64,16 @@ use macos as platform;
 #[cfg(target_os = "macos")]
 const SYNCED: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// An overlay above the first (`Plane::Above`).
+#[cfg(target_os = "ios")]
+struct AbovePlane {
+    renderer: zgx_gpu::GpuRenderer,
+    /// It drew this frame (present it).
+    drawn: bool,
+    /// Its view shows.
+    live: bool,
+}
+
 pub(crate) struct NativeHost {
     pub natives: NativeViews,
     /// Shared with the window's context (`WindowContext::native_diagnostics`).
@@ -99,6 +109,9 @@ pub(crate) struct NativeHost {
         all(windows, feature = "webview2")
     ))]
     overlay: Option<zgx_gpu::GpuRenderer>,
+    /// The overlays above it, from level 2, each made when first needed.
+    #[cfg(target_os = "ios")]
+    above: Vec<AbovePlane>,
     /// The overlay renderer drew this frame (present it).
     #[cfg(any(
         target_os = "macos",
@@ -186,6 +199,8 @@ impl NativeHost {
                 all(windows, feature = "webview2")
             ))]
             surfaces: None,
+            #[cfg(target_os = "ios")]
+            above: Vec::new(),
             #[cfg(any(
                 target_os = "macos",
                 target_os = "ios",
@@ -319,6 +334,8 @@ impl NativeHost {
         ))]
         {
             self.overlay = None;
+            #[cfg(target_os = "ios")]
+            self.above.clear();
             self.surfaces = None;
             self.overlay_live = false;
             self.overlay_drawn = false;
@@ -409,6 +426,10 @@ impl NativeHost {
                 }
             }
         }
+        #[cfg(target_os = "ios")]
+        let (split, damage) =
+            PlaneSplit::compute_levels(scene, &self.natives.nodes(), &self.split, ios::LEVELS);
+        #[cfg(not(target_os = "ios"))]
         let (split, damage) = PlaneSplit::compute(scene, &self.natives.nodes(), &self.split);
         let split = Rc::new(split);
         let surfaces = self.surfaces.as_mut().expect("made above");
@@ -441,6 +462,8 @@ impl NativeHost {
         if self.overlay.is_some() && self.overlay_scale != scale {
             self.overlay = None;
             self.overlay_live = false;
+            #[cfg(target_os = "ios")]
+            self.above.clear();
         }
         if split.has_overlay() && self.overlay.is_none() {
             self.overlay_scale = scale;
@@ -469,6 +492,32 @@ impl NativeHost {
                 }
             }
         }
+        #[cfg(target_os = "ios")]
+        {
+            while self.above.len() + 1 < usize::from(split.level_count()) {
+                let level = self.above.len() as u8 + 2;
+                let mut renderer = surfaces.level_renderer(level, &renderer.context(), scale)?;
+                renderer.present_with_native_views(true);
+                self.above.push(AbovePlane {
+                    renderer,
+                    drawn: false,
+                    live: false,
+                });
+            }
+            for (index, above) in self.above.iter_mut().enumerate() {
+                let level = index as u8 + 2;
+                let plane = zgx::native_view::Plane::Above(level);
+                above.renderer.set_plane(split.clone(), plane);
+                if let Some(needed) = split.bounds_at(level) {
+                    let viewport = scene.bounds(scene.root());
+                    let rect = plane_rect(above.renderer.plane_rect(), needed, viewport);
+                    above.renderer.set_plane_rect(rect);
+                    if !above.live {
+                        above.renderer.repaint_all();
+                    }
+                }
+            }
+        }
         // Zoomed again only when something native moved: the platform
         // reads only native views and backdrops (`differs`), and copying the
         // whole split every frame of a zoomed window cost its sets' and maps'
@@ -490,6 +539,13 @@ impl NativeHost {
         {
             overlay.render(scene, damage)?;
             self.overlay_drawn = true;
+        }
+        #[cfg(target_os = "ios")]
+        for (index, above) in self.above.iter_mut().enumerate() {
+            above.drawn = self.split.bounds_at(index as u8 + 2).is_some();
+            if above.drawn {
+                above.renderer.render(scene, damage)?;
+            }
         }
         Ok(())
     }
@@ -544,6 +600,20 @@ impl NativeHost {
         }
         self.overlay_live = live;
         self.overlay_drawn = false;
+        #[cfg(target_os = "ios")]
+        for (index, above) in self.above.iter_mut().enumerate() {
+            let level = index as u8 + 2;
+            let live = self.split.bounds_at(level).is_some();
+            if live && above.drawn {
+                above.renderer.present()?;
+            }
+            surfaces.show_level(level, live.then(|| above.renderer.plane_rect()).flatten());
+            if above.live && !live {
+                above.renderer.trim();
+            }
+            above.live = live;
+            above.drawn = false;
+        }
         Ok(())
     }
     /// Within the frame's transaction: move native views and backdrops to
@@ -576,6 +646,12 @@ impl NativeHost {
             && let Some(overlay) = &mut self.overlay
         {
             overlay.trim();
+        }
+        #[cfg(target_os = "ios")]
+        for (index, above) in self.above.iter_mut().enumerate() {
+            if self.split.bounds_at(index as u8 + 2).is_none() {
+                above.renderer.trim();
+            }
         }
     }
 }

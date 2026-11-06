@@ -267,6 +267,28 @@ pub enum Plane {
     Base,
     /// Above native views.
     Overlay,
+    /// A further overlay, the level given (from 2): above native views that
+    /// themselves show over the level below (`PlaneSplit::compute_levels`).
+    Above(u8),
+}
+
+impl Plane {
+    /// The plane at `level`: 0 the base, 1 the overlay.
+    pub fn at(level: u8) -> Self {
+        match level {
+            0 => Self::Base,
+            1 => Self::Overlay,
+            level => Self::Above(level),
+        }
+    }
+    /// Its place in the stack: 0 the base, 1 the overlay.
+    pub fn level(self) -> u8 {
+        match self {
+            Self::Base => 0,
+            Self::Overlay => 1,
+            Self::Above(level) => level,
+        }
+    }
 }
 
 /// Where a native view goes this frame, in window (logical) coordinates.
@@ -286,6 +308,9 @@ pub struct NativePlacement {
     /// it has a radius (an embedded page is cut to its box's corners, as a
     /// CSS iframe is), then those of rounded clipping ancestors.
     pub rounded: Vec<RoundRect>,
+    /// Which overlay it shows over (0: only the base), where a platform stacks
+    /// its planes between its views (`PlaneSplit::compute_levels`).
+    pub slot: u8,
     /// Its effective opacity (ancestors' included).
     pub opacity: f32,
     /// Paint order among native views, lowest first.
@@ -476,14 +501,21 @@ pub struct PlaneSplit {
     native_nodes: HashSet<NodeId>,
     /// Nodes whose own paint is on the overlay, with where it lands.
     overlay: HashMap<NodeId, Rect>,
+    /// The overlay paint above the first overlay, with its level.
+    levels: HashMap<NodeId, u8>,
     /// Isolated (layer) subtrees holding overlay paint, and base paint.
     overlay_layers: HashSet<NodeId>,
+    /// Which levels those layers hold (a bit each, the lowest for level 1),
+    /// where that is not the first overlay alone.
+    layer_levels: HashMap<NodeId, u16>,
     base_layers: HashSet<NodeId>,
     /// Overlay backdrop blurs with overlay paint under them (the overlay's
     /// own blur pass is needed there; elsewhere the platform's suffices).
     blur_needed: HashSet<NodeId>,
     backdrops: Vec<BackdropPlacement>,
     overlay_bounds: Option<Rect>,
+    /// Each further overlay's paint's box, from level 2.
+    above_bounds: Vec<Option<Rect>>,
     /// Layers whose split changed since the previous frame: renderers drop
     /// their cached textures.
     changed_layers: Vec<NodeId>,
@@ -500,10 +532,12 @@ struct Walk<'a> {
     scene: &'a Scene,
     natives: &'a HashSet<NodeId>,
     previous: &'a PlaneSplit,
-    /// Visible rectangles of native views painted so far.
-    native_rects: Vec<Rect>,
-    /// Where overlay paint lands so far.
-    region: Vec<Rect>,
+    /// How many overlays the platform can stack.
+    levels: u8,
+    /// Visible rectangles of native views painted so far, with their slots.
+    native_rects: Vec<(Rect, u8)>,
+    /// Where overlay paint lands so far: `region[0]` on level 1.
+    region: Vec<Vec<Rect>>,
     split: PlaneSplit,
     damage: Vec<Rect>,
     changed: HashSet<NodeId>,
@@ -616,29 +650,63 @@ fn paint_bounds(item: &PaintItem<'_>) -> Rect {
     }
 }
 impl Walk<'_> {
-    fn overlaps(&self, rect: Rect) -> bool {
-        self.native_rects
-            .iter()
-            .any(|native| native.intersects(rect))
-            || self.region.iter().any(|painted| painted.intersects(rect))
+    /// The lowest plane paint landing on `rect` can go on: above each native
+    /// view and any overlay paint it overlaps, or the base.
+    fn level_of(&self, rect: Rect) -> u8 {
+        let mut level = 0;
+        for (native, slot) in &self.native_rects {
+            if *slot >= level && native.intersects(rect) {
+                level = slot + 1;
+            }
+        }
+        for (index, painted) in self.region.iter().enumerate().skip(level.into()) {
+            if painted.iter().any(|painted| painted.intersects(rect)) {
+                level = index as u8 + 1;
+            }
+        }
+        level.min(self.levels)
     }
-    fn add_region(&mut self, rect: Rect) {
+    /// The lowest slot a native view showing at `rect` can go in: over each
+    /// plane's paint it overlaps, and each native view's slot.
+    fn slot_of(&self, rect: Rect) -> u8 {
+        if self.levels < 2 {
+            return 0;
+        }
+        let mut slot = 0;
+        for (native, other) in &self.native_rects {
+            if *other > slot && native.intersects(rect) {
+                slot = *other;
+            }
+        }
+        for (index, painted) in self.region.iter().enumerate().skip(slot.into()) {
+            if painted.iter().any(|painted| painted.intersects(rect)) {
+                slot = index as u8 + 1;
+            }
+        }
+        slot.min(self.levels - 1)
+    }
+    fn add_region(&mut self, level: u8, rect: Rect) {
+        let index = usize::from(level) - 1;
+        if self.region.len() <= index {
+            self.region.resize_with(index + 1, Vec::new);
+        }
+        let region = &mut self.region[index];
         let holds = |held: &Rect| {
             held.x <= rect.x
                 && held.y <= rect.y
                 && held.x + held.width >= rect.x + rect.width
                 && held.y + held.height >= rect.y + rect.height
         };
-        if self.region.iter().any(holds) {
+        if region.iter().any(holds) {
             return;
         }
-        self.region.push(rect);
-        if self.region.len() > REGION_LIMIT {
+        region.push(rect);
+        if region.len() > REGION_LIMIT {
             // Merge the pair whose union wastes the least area.
             let mut best = (f32::INFINITY, 0, 1);
-            for i in 0..self.region.len() {
-                for j in i + 1..self.region.len() {
-                    let (a, b) = (self.region[i], self.region[j]);
+            for i in 0..region.len() {
+                for j in i + 1..region.len() {
+                    let (a, b) = (region[i], region[j]);
                     let union = a.union(b);
                     let waste =
                         union.width * union.height - a.width * a.height - b.width * b.height;
@@ -648,15 +716,15 @@ impl Walk<'_> {
                 }
             }
             let (_, i, j) = best;
-            let merged = self.region[i].union(self.region[j]);
-            self.region.swap_remove(j);
-            self.region[i] = merged;
+            let merged = region[i].union(region[j]);
+            region.swap_remove(j);
+            region[i] = merged;
         }
     }
     /// Walk `items` (one layer's, in paint order); returns whether they hold
-    /// base paint and overlay paint.
-    fn walk(&mut self, items: &[PaintItem<'_>], context: &Context) -> (bool, bool) {
-        let (mut base, mut overlay) = (false, false);
+    /// base paint, and the overlays they hold paint on (a bit each).
+    fn walk(&mut self, items: &[PaintItem<'_>], context: &Context) -> (bool, u16) {
+        let (mut base, mut overlay) = (false, 0);
         for item in items {
             if item.border_pass {
                 continue;
@@ -702,12 +770,15 @@ impl Walk<'_> {
                 if inner_base {
                     self.split.base_layers.insert(item.id);
                 }
-                if inner_overlay {
+                if inner_overlay != 0 {
                     self.split.overlay_layers.insert(item.id);
+                }
+                if inner_overlay > 1 {
+                    self.split.layer_levels.insert(item.id, inner_overlay);
                 }
                 let was = (
                     self.previous.base_layers.contains(&item.id),
-                    self.previous.overlay_layers.contains(&item.id),
+                    self.previous.layer_mask(item.id),
                 );
                 if was != (inner_base, inner_overlay) {
                     self.changed.insert(item.id);
@@ -739,11 +810,14 @@ impl Walk<'_> {
                     size: (item.bounds.width, item.bounds.height),
                     clip,
                     rounded: own,
+                    slot: 0,
                     opacity,
                     order: self.split.natives.len(),
                 };
+                let mut placement = placement;
                 if let Some(visible) = placement.visible() {
-                    self.native_rects.push(visible);
+                    placement.slot = self.slot_of(visible);
+                    self.native_rects.push((visible, placement.slot));
                 }
                 self.split.native_nodes.insert(item.id);
                 self.split.natives.push(placement);
@@ -767,12 +841,21 @@ impl Walk<'_> {
             }) else {
                 continue;
             };
-            let on_overlay = !self.native_rects.is_empty() && self.overlaps(painted);
+            let level = if self.native_rects.is_empty() {
+                0
+            } else {
+                self.level_of(painted)
+            };
             let was = self.previous.overlay.get(&item.id).copied();
-            if on_overlay {
+            if level > 0 {
                 if item.effects.blur_radius > 0. {
                     let area = frame;
-                    if self.region.iter().any(|held| held.intersects(area)) {
+                    if self
+                        .region
+                        .iter()
+                        .flatten()
+                        .any(|held| held.intersects(area))
+                    {
                         self.split.blur_needed.insert(item.id);
                     }
                     let radii = corner_radii(item.kind, item.bounds);
@@ -788,14 +871,26 @@ impl Walk<'_> {
                     });
                 }
                 self.split.overlay.insert(item.id, painted);
-                self.split.overlay_bounds = Some(match self.split.overlay_bounds {
+                let bounds = if level == 1 {
+                    &mut self.split.overlay_bounds
+                } else {
+                    self.split.levels.insert(item.id, level);
+                    let index = usize::from(level) - 2;
+                    if self.split.above_bounds.len() <= index {
+                        self.split.above_bounds.resize(index + 1, None);
+                    }
+                    &mut self.split.above_bounds[index]
+                };
+                *bounds = Some(match *bounds {
                     Some(bounds) => bounds.union(painted),
                     None => painted,
                 });
-                self.add_region(painted);
-                overlay = true;
-                if was.is_none() {
+                self.add_region(level, painted);
+                overlay |= 1 << (level - 1);
+                let changed_level = was.is_some() && self.previous.level(item.id) != level;
+                if was.is_none() || changed_level {
                     self.damage.push(painted);
+                    self.damage.extend(was);
                     self.changed.extend(context.layers.iter().copied());
                 }
             } else {
@@ -818,6 +913,19 @@ impl PlaneSplit {
     /// and the damage its changes add: where paint moved between planes, both
     /// planes repaint. Call after the scene's layout is up to date.
     pub fn compute(scene: &Scene, natives: &[NodeId], previous: &PlaneSplit) -> (Self, Vec<Rect>) {
+        Self::compute_levels(scene, natives, previous, 1)
+    }
+    /// `compute`, for a platform that can stack `levels` overlays between its
+    /// native views: one native view over another's overlay paint then shows
+    /// over it, its slot saying so, where one overlay would cover it. Paint and
+    /// views go on the lowest plane that keeps the order of what they overlap,
+    /// so a plane exists only where they do overlap.
+    pub fn compute_levels(
+        scene: &Scene,
+        natives: &[NodeId],
+        previous: &PlaneSplit,
+        levels: u8,
+    ) -> (Self, Vec<Rect>) {
         let natives: HashSet<NodeId> = natives
             .iter()
             .copied()
@@ -856,6 +964,7 @@ impl PlaneSplit {
                 scene,
                 natives: &natives,
                 previous,
+                levels,
                 native_rects: Vec::new(),
                 region: Vec::new(),
                 split: Self::default(),
@@ -906,7 +1015,7 @@ impl PlaneSplit {
             let wanted: Vec<Rect> = walk
                 .native_rects
                 .iter()
-                .copied()
+                .map(|(rect, _)| *rect)
                 .chain(walk.split.overlay.values().copied())
                 .chain(missed)
                 .filter(|rect| !covered(rect))
@@ -978,6 +1087,9 @@ impl PlaneSplit {
         }
         split.overlay.values_mut().for_each(|r| *r = rect(*r));
         split.overlay_bounds = split.overlay_bounds.map(rect);
+        for bounds in &mut split.above_bounds {
+            *bounds = bounds.map(rect);
+        }
         split
     }
     /// Whether anything paints on the overlay plane.
@@ -1001,6 +1113,40 @@ impl PlaneSplit {
             .iter()
             .find(|(other, _)| *other == node)
             .map_or(1., |(_, zoom)| *zoom)
+    }
+    /// The overlay `node`'s own paint is on (0: the base).
+    pub fn level(&self, node: NodeId) -> u8 {
+        if !self.overlay.contains_key(&node) {
+            return 0;
+        }
+        self.levels.get(&node).copied().unwrap_or(1)
+    }
+    /// The overlays layer `node` holds paint on, a bit each.
+    fn layer_mask(&self, node: NodeId) -> u16 {
+        match self.layer_levels.get(&node) {
+            Some(mask) => *mask,
+            None => self.overlay_layers.contains(&node).into(),
+        }
+    }
+    /// How many overlays hold paint or are below one that does.
+    pub fn level_count(&self) -> u8 {
+        if self.above_bounds.is_empty() {
+            self.has_overlay().into()
+        } else {
+            self.above_bounds.len() as u8 + 1
+        }
+    }
+    /// Overlay `level`'s paint's covering box in window coordinates.
+    pub fn bounds_at(&self, level: u8) -> Option<Rect> {
+        match level {
+            0 => None,
+            1 => self.overlay_bounds,
+            level => self
+                .above_bounds
+                .get(usize::from(level) - 2)
+                .copied()
+                .flatten(),
+        }
     }
     /// Whether `node` is a native view this frame.
     pub fn is_native(&self, node: NodeId) -> bool {
@@ -1035,15 +1181,15 @@ impl PlaneSplit {
             (true, Plane::Base) => {
                 self.base_layers.contains(&item.id) || !self.overlay_layers.contains(&item.id)
             }
-            (true, Plane::Overlay) => self.overlay_layers.contains(&item.id),
+            (true, plane) => self.layer_mask(item.id) & (1 << (plane.level() - 1)) != 0,
             (false, Plane::Base) => !self.overlay.contains_key(&item.id),
-            (false, Plane::Overlay) => self.overlay.contains_key(&item.id),
+            (false, plane) => self.level(item.id) == plane.level(),
         }
     }
     /// Adjust an item a renderer of `plane` keeps: on the overlay, a backdrop
     /// blur over nothing of the overlay's own is the platform's alone.
     pub fn adjust(&self, item: &mut PaintItem<'_>, plane: Plane) {
-        if plane == Plane::Overlay
+        if plane != Plane::Base
             && !item.isolated
             && item.effects.blur_radius > 0.
             && !self.blur_needed.contains(&item.id)
@@ -1054,7 +1200,7 @@ impl PlaneSplit {
     /// Keep (and adjust) the items a renderer of `plane` draws.
     pub fn filter(&self, items: &mut Vec<PaintItem<'_>>, plane: Plane) {
         if self.natives.is_empty() {
-            if plane == Plane::Overlay {
+            if plane != Plane::Base {
                 items.clear();
             }
             return;

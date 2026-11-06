@@ -392,6 +392,12 @@ ios.stack = ui.component(function(props)
 					return -width / 3
 				end,
 				shadow = { x = -4, blur = 16, color = "#00000020" },
+				-- Quite covered once it settles: it shows nothing, and asks no
+				-- plane of its own.
+				hidden = function()
+					local depth = #pages:get()
+					return index < depth - 1 or (index < depth and drag:get() == 0 and entering:get() == 0)
+				end,
 				pointer_events = on_top,
 				Page { build = builders[id], nav = nav },
 			}
