@@ -259,6 +259,11 @@ struct FirstFont {
 }
 
 impl FontSystem {
+    /// zgx patch: gives back the scratch of shaping, for an app at rest.
+    pub fn rest(&mut self) {
+        self.shape_buffer.rest();
+    }
+
     const FONT_MATCHES_CACHE_SIZE_LIMIT: usize = 256;
     /// Create a new [`FontSystem`], that allows access to any installed system fonts
     ///

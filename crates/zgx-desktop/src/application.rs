@@ -5682,6 +5682,7 @@ impl Host {
                 self.native.trim();
                 self.context.ui.scene.borrow_mut().rest();
                 self.context.ui.semantics.borrow_mut().rest();
+                self.tree.rest();
                 release_freed_heap();
             }
         }
