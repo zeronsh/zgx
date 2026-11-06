@@ -176,7 +176,7 @@ enum Content {
     Web(#[allow(dead_code)] Rc<dyn zgx::web_view::WebViewBackend>),
     /// What says where the scroll edge effect reaches
     /// (`NativeContent::EdgeEffect`): a view above the content, as a bar is.
-    Edge(zgx::native_control::EdgeEffect),
+    Edge(#[allow(dead_code)] zgx::native_control::EdgeEffect),
     /// A `UISwitch` (`NativeContent::Toggle`).
     Toggle(Rc<ToggleState>, #[allow(dead_code)] Retained<ToggleTarget>),
     /// A `UITabBar` (`NativeContent::Tabs`), and what it tells through.

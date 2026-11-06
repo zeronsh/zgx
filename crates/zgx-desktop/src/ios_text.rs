@@ -463,11 +463,10 @@ fn in_view(r: zgx::scene::Rect) -> CGRect {
 fn offset_at_point(point: CGPoint) -> Option<usize> {
     let state = state()?;
     let (x, y) = state.origin.get();
-    let found = state
+    state
         .store
         .borrow()
-        .offset_at(point.x as f32 + x, point.y as f32 + y);
-    found
+        .offset_at(point.x as f32 + x, point.y as f32 + y)
 }
 /// `UITextSelectionRect`: one line's box of a selection.
 fn selection_rect_class() -> &'static AnyClass {
@@ -951,6 +950,12 @@ impl TextInput {
         })
     }
     /// The focused editor changed: the keyboard comes or goes with it.
+    /// Whether the keyboard is still this view's: a rotation hides it for a
+    /// moment and it comes back, a drag that dismissed it took this away.
+    pub(crate) fn holds_keyboard(&self) -> bool {
+        // SAFETY: UIResponder's getter, on the main thread.
+        unsafe { msg_send![&*self.view, isFirstResponder] }
+    }
     pub(crate) fn focus(&self, editor: Option<EditorHandle>) {
         let wanted = editor.is_some();
         if let Some(editor) = &editor {

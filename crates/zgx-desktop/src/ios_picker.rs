@@ -15,6 +15,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+#[allow(clippy::duplicated_attributes)]
 #[link(name = "PhotosUI", kind = "framework")]
 #[link(name = "UniformTypeIdentifiers", kind = "framework")]
 unsafe extern "C" {}

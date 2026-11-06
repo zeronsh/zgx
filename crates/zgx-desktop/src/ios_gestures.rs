@@ -40,6 +40,13 @@ pub(crate) fn log_follow(y: f64) {
     }
 }
 
+/// A frame of the page locked to the keyboard's edge (`ZGX_IOS_GESTURE_LOG`).
+pub(crate) fn log_follow_edge(edge: f64, predicted: f64, offset: f64) {
+    if zgx::env::var_os("ZGX_IOS_GESTURE_LOG").is_some() {
+        println!("GESTURE edge {edge:.1} predicted {predicted:.1} page {offset:.1}");
+    }
+}
+
 struct State {
     scene: Rc<RefCell<Scene>>,
     window: Arc<winit::window::Window>,

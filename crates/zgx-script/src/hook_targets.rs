@@ -49,7 +49,8 @@ pub(crate) fn declared(files: &[File]) -> Targets {
         for i in 0..t.len().saturating_sub(2) {
             if t[i].kind != Kind::Name
                 || !matches!(t[i].text.as_str(), "id" | "hook" | "class")
-                || !(t[i + 1].kind == Kind::Punct && t[i + 1].text == "=")
+                || t[i + 1].kind != Kind::Punct
+                || t[i + 1].text != "="
                 || !in_table(t, i)
             {
                 continue;

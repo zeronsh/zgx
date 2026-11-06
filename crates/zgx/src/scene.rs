@@ -7067,7 +7067,7 @@ impl Scene {
             return width;
         }
         let lines = (full / line).round();
-        if lines < 2. || lines > 6. {
+        if !(2. ..=6.).contains(&lines) {
             return width;
         }
         // As narrow as the longest line, unwrapped, over the lines: no

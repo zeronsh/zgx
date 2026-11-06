@@ -261,11 +261,13 @@ pub struct PullRefresh {
     /// Points from the window's top.
     pub top: Rc<dyn Fn() -> f32>,
     /// Told when a pull lets go past where it refreshes.
-    pub refresh: Rc<dyn Fn(Rc<dyn Fn()>)>,
+    pub refresh: Rc<dyn Fn(RefreshDone)>,
 }
+/// Called when a refresh has finished.
+pub type RefreshDone = Rc<dyn Fn()>;
+type Pulls = std::collections::HashMap<crate::scene::NodeId, PullRefresh>;
 thread_local! {
-    static PULLS: std::cell::RefCell<std::collections::HashMap<crate::scene::NodeId, PullRefresh>> =
-        std::cell::RefCell::default();
+    static PULLS: std::cell::RefCell<Pulls> = std::cell::RefCell::default();
 }
 /// Give `node`, a scroll view, the platform's pull to refresh.
 pub fn set_pull_refresh(node: crate::scene::NodeId, pull: PullRefresh) {

@@ -41,6 +41,16 @@ struct State {
     following: RefCell<Option<ScrollDriver>>,
     follow_link: RefCell<Option<Retained<AnyObject>>>,
     scroller: RefCell<Option<Retained<AnyObject>>>,
+    /// What tracks the keyboard's edge: a view on `keyboardLayoutGuide`, which
+    /// UIKit moves with the keyboard, a finger's drag of it too.
+    tracker: RefCell<Option<Retained<AnyObject>>>,
+    keyboard_link: RefCell<Option<Retained<AnyObject>>>,
+    /// The page's relation to the keyboard's edge, while there is one.
+    lock: RefCell<Option<KeyboardLock>>,
+    /// What must show above the keyboard: the app's latest word.
+    field: RefCell<Option<(ScrollDriver, f32)>>,
+    /// The edge last frame: where, when, and for how many frames it hasn't moved.
+    edge_seen: std::cell::Cell<(f64, f64, u32)>,
     /// The room below the content while the keyboard is up.
     bottom_inset: std::cell::Cell<f64>,
     /// The scroll view last moved for the keyboard, while it holds room for it.
@@ -49,8 +59,6 @@ struct State {
     refresh_ending: Rc<(std::cell::Cell<bool>, std::cell::Cell<bool>)>,
     /// A finger is dragging: UIKit's `isDragging` stays false, its pan elsewhere.
     dragging: std::cell::Cell<bool>,
-    /// A finger began dragging (`take_drag_began`).
-    drag_began: std::cell::Cell<bool>,
     /// Finds the pull to refresh at a window point, and the one in play.
     pull_at: Box<dyn Fn(f32, f32) -> Option<zgx::native_control::PullRefresh>>,
     pull: RefCell<Option<zgx::native_control::PullRefresh>>,
@@ -58,6 +66,243 @@ struct State {
     delegate: RefCell<Option<Retained<Delegate>>>,
     /// The scroller's control, kept whether or not it is on the scroller now.
     control: RefCell<Option<Retained<AnyObject>>>,
+}
+
+/// How a page moves with the keyboard's edge.
+enum KeyboardLock {
+    /// A field's bottom, at `bottom` with the page at `offset`, stays this far
+    /// above the edge once the edge reaches it; the page is at `offset` before.
+    Show {
+        driver: ScrollDriver,
+        offset: f32,
+        bottom: f32,
+    },
+    /// The keyboard goes from `top` to `end`, the page in step from `from` to `to`.
+    Hide {
+        driver: ScrollDriver,
+        from: f32,
+        to: f32,
+        top: f64,
+        end: f64,
+    },
+}
+
+/// A field's distance above the keyboard, as UIKit's own leaves about.
+const KEYBOARD_ROOM: f32 = 28.;
+/// Frames the edge must rest before the display link stops.
+const EDGE_REST_FRAMES: u32 = 8;
+
+/// The keyboard is about to move (`UIKeyboardWillChangeFrame`): `covered` is what
+/// it will cover. Lock the page to its edge, from this very frame.
+pub(crate) fn keyboard_changing(covered: f32) {
+    let Some(state) = CURRENT.with(|current| current.borrow().clone()) else {
+        return;
+    };
+    let shows_lock = state.lock.borrow().is_some();
+    if covered > 0. {
+        state.bottom_inset.set(f64::from(covered));
+        if !shows_lock {
+            let field = state.field.borrow().clone();
+            if let Some((driver, bottom)) = field
+                && let Some(metrics) = driver.metrics()
+            {
+                *state.inset_on.borrow_mut() = Some(driver.clone());
+                *state.following.borrow_mut() = Some(driver.clone());
+                *state.lock.borrow_mut() = Some(KeyboardLock::Show {
+                    driver,
+                    offset: metrics.offset + metrics.stretch,
+                    bottom,
+                });
+            }
+        }
+    } else if !shows_lock {
+        // A finger moved the page while it was up: back within its content, in
+        // step, from wherever it is.
+        let driver = state.inset_on.borrow().clone();
+        if let Some(driver) = driver
+            && let Some(metrics) = driver.metrics()
+        {
+            let from = metrics.offset + metrics.stretch;
+            let top = keyboard_edge(&state, false).unwrap_or(0.);
+            let end = root_height(&state);
+            *state.following.borrow_mut() = Some(driver.clone());
+            *state.lock.borrow_mut() = Some(KeyboardLock::Hide {
+                driver,
+                from,
+                to: from.min((metrics.extent.1 - metrics.size.1).max(0.)),
+                top,
+                end,
+            });
+        }
+    }
+    start_keyboard_link(&state);
+    crate::ios_gestures::log(&format!("keyboard will cover {covered:.0}"));
+}
+
+fn root_height(state: &State) -> f64 {
+    let tracker = state.tracker.borrow();
+    let Some(tracker) = &*tracker else {
+        return 0.;
+    };
+    // SAFETY: UIView's getters, on the main thread.
+    unsafe {
+        let parent: Option<Retained<AnyObject>> = msg_send![&**tracker, superview];
+        let Some(parent) = parent else { return 0. };
+        let bounds: CGRect = msg_send![&*parent, bounds];
+        bounds.size.height
+    }
+}
+
+/// Where the keyboard's top is now, in the window's points: as drawn, or (`model`)
+/// where it is going.
+fn keyboard_edge(state: &State, model: bool) -> Option<f64> {
+    let tracker = state.tracker.borrow();
+    let tracker = tracker.as_ref()?;
+    // SAFETY: CALayer's getters, on the main thread.
+    unsafe {
+        let layer: Retained<AnyObject> = msg_send![&**tracker, layer];
+        let shown: Option<Retained<AnyObject>> = if model {
+            None
+        } else {
+            msg_send![&*layer, presentationLayer]
+        };
+        let frame: CGRect = match shown {
+            Some(shown) => msg_send![&*shown, frame],
+            None => msg_send![&*layer, frame],
+        };
+        Some(frame.origin.y + frame.size.height)
+    }
+}
+
+fn start_keyboard_link(state: &State) {
+    if state.keyboard_link.borrow().is_some() {
+        state.edge_seen.set((state.edge_seen.get().0, 0., 0));
+        return;
+    }
+    let delegate = state.delegate.borrow();
+    let Some(delegate) = &*delegate else { return };
+    state.edge_seen.set((-1., 0., 0));
+    // SAFETY: Core Animation's constructor and methods, on the main thread; the
+    // run loop keeps the link until it is invalidated.
+    unsafe {
+        let link: Retained<AnyObject> = msg_send![class!(CADisplayLink),
+            displayLinkWithTarget: &**delegate,
+            selector: sel!(keyboardTick:)];
+        let _: () = msg_send![&*link, setPreferredFrameRateRange: crate::ios_refresh::FAST];
+        let run_loop: Retained<AnyObject> = msg_send![class!(NSRunLoop), mainRunLoop];
+        let _: () = msg_send![&*link, addToRunLoop: &*run_loop, forMode: NSRunLoopCommonModes];
+        *state.keyboard_link.borrow_mut() = Some(link);
+    }
+}
+
+/// A frame of the page locked to the keyboard's edge.
+fn keyboard_frame(state: &State, link: &AnyObject) {
+    let Some(edge) = keyboard_edge(state, false) else {
+        return;
+    };
+    // As drawn now, unpredicted: measured from video, leading it by the display
+    // link's next frame changed nothing but the risk of overshooting.
+    let _ = link;
+    let (last_edge, _, rested) = state.edge_seen.get();
+    let moving = last_edge >= 0. && (edge - last_edge).abs() > 0.05;
+    let at_target = edge;
+    state
+        .edge_seen
+        .set((edge, 0., if moving { 0 } else { rested + 1 }));
+    let lock = state.lock.borrow();
+    match &*lock {
+        Some(KeyboardLock::Show {
+            driver,
+            offset,
+            bottom,
+        }) => {
+            let need = (f64::from(*bottom + KEYBOARD_ROOM) - at_target).max(0.);
+            driver.drive(*offset + need as f32);
+            crate::ios_gestures::log_follow_edge(edge, at_target, *offset as f64 + need);
+            state.window.request_redraw();
+        }
+        Some(KeyboardLock::Hide {
+            driver,
+            from,
+            to,
+            top,
+            end,
+        }) => {
+            let gone = if end > top {
+                ((at_target - top) / (end - top)).clamp(0., 1.)
+            } else {
+                1.
+            };
+            driver.drive(*from + (*to - *from) * gone as f32);
+            state.window.request_redraw();
+        }
+        None => {}
+    }
+    drop(lock);
+    // At rest, and no finger that could move it: nothing awake until it moves.
+    if rested + 1 >= EDGE_REST_FRAMES && !state.dragging.get() {
+        finish_keyboard_move(state, edge);
+    }
+}
+
+/// The edge came to rest: the scroller takes the page from where it was left.
+fn finish_keyboard_move(state: &State, edge: f64) {
+    if let Some(link) = state.keyboard_link.borrow_mut().take() {
+        // SAFETY: CADisplayLink's method, on the main thread.
+        let _: () = unsafe { msg_send![&*link, invalidate] };
+    }
+    let gone = edge >= root_height(state) - 0.5;
+    let held = matches!(&*state.lock.borrow(), Some(KeyboardLock::Show { .. }));
+    if gone {
+        state.lock.borrow_mut().take();
+        state.following.borrow_mut().take();
+        state.inset_on.borrow_mut().take();
+        state.bottom_inset.set(0.);
+    } else if !held {
+        state.lock.borrow_mut().take();
+        state.following.borrow_mut().take();
+    }
+    if let Some(view) = &*state.scroller.borrow() {
+        // SAFETY: UIScrollView's setter, on the main thread.
+        let _: () = unsafe {
+            msg_send![&**view, setContentInset: UiEdgeInsets(0., 0., state.bottom_inset.get(), 0.)]
+        };
+    }
+    crate::ios_gestures::log(&format!("keyboard edge rests at {edge:.0}"));
+}
+
+/// A view UIKit keeps on the keyboard's top edge.
+///
+/// # Safety
+/// `root` is the window's view, on the main thread.
+unsafe fn install_tracker(state: &State, root: *const AnyObject) {
+    // SAFETY: UIKit's constructors and Auto Layout's methods, as the caller promises.
+    unsafe {
+        let tracker: Retained<AnyObject> = msg_send![class!(UIView), new];
+        let _: () = msg_send![&*tracker, setHidden: true];
+        let _: () = msg_send![&*tracker, setUserInteractionEnabled: false];
+        let _: () = msg_send![&*tracker, setAccessibilityElementsHidden: true];
+        let _: () = msg_send![&*tracker, setTranslatesAutoresizingMaskIntoConstraints: false];
+        let _: () = msg_send![&*root, addSubview: &*tracker];
+        let guide: Retained<AnyObject> = msg_send![&*root, keyboardLayoutGuide];
+        let _: () = msg_send![&*guide, setFollowsUndockedKeyboard: false];
+        let _: () = msg_send![&*guide, setUsesBottomSafeArea: false];
+        let tracker_bottom: Retained<AnyObject> = msg_send![&*tracker, bottomAnchor];
+        let guide_top: Retained<AnyObject> = msg_send![&*guide, topAnchor];
+        let on_edge: Retained<AnyObject> =
+            msg_send![&*tracker_bottom, constraintEqualToAnchor: &*guide_top];
+        let height: Retained<AnyObject> = msg_send![&*tracker, heightAnchor];
+        let one: Retained<AnyObject> = msg_send![&*height, constraintEqualToConstant: 1f64];
+        let left: Retained<AnyObject> = msg_send![&*tracker, leftAnchor];
+        let root_left: Retained<AnyObject> = msg_send![&*root, leftAnchor];
+        let at_left: Retained<AnyObject> = msg_send![&*left, constraintEqualToAnchor: &*root_left];
+        let width: Retained<AnyObject> = msg_send![&*tracker, widthAnchor];
+        let wide: Retained<AnyObject> = msg_send![&*width, constraintEqualToConstant: 1f64];
+        for constraint in [&on_edge, &one, &at_left, &wide] {
+            let _: () = msg_send![&**constraint, setActive: true];
+        }
+        *state.tracker.borrow_mut() = Some(tracker);
+    }
 }
 
 /// Leave a move with the keyboard where it is: a finger took over.
@@ -180,6 +425,11 @@ define_class!(
                 state.window.request_redraw();
             }
         }
+        // Each frame the keyboard may be moving: the page, locked to its edge.
+        #[unsafe(method(keyboardTick:))]
+        fn keyboard_tick(&self, link: &AnyObject) {
+            keyboard_frame(self.ivars(), link);
+        }
         #[unsafe(method(scrollViewDidScroll:))]
         fn did_scroll(&self, view: &AnyObject) {
             let state = self.ivars();
@@ -266,21 +516,11 @@ define_class!(
             crate::ios_gestures::log("scroll dragging");
             let state = self.ivars();
             stop_following(state, view);
+            state.lock.borrow_mut().take();
+            state.following.borrow_mut().take();
+            start_keyboard_link(state);
             state.dragging.set(true);
             state.refresh_ending.0.set(true);
-            state.drag_began.set(true);
-            // At once, under the finger: the host hears of the drag only as it
-            // ends, its loop not turning through a scroller's motion.
-            if crate::ios_system::keyboard_height() > 0. {
-                // SAFETY: UIView's getter and method, UIKit calling on the main
-                // thread.
-                unsafe {
-                    let parent: Option<Retained<AnyObject>> = msg_send![view, superview];
-                    if let Some(parent) = parent {
-                        let _: Bool = msg_send![&*parent, endEditing: true];
-                    }
-                }
-            }
             state.window.request_redraw();
         }
         #[unsafe(method(scrollViewShouldScrollToTop:))]
@@ -511,11 +751,15 @@ impl NativeScroller {
             driver: RefCell::default(),
             top: RefCell::new(Box::new(top)),
             configuring: Default::default(),
-            drag_began: std::cell::Cell::new(false),
             following: RefCell::default(),
             follow_link: RefCell::default(),
             scroller: RefCell::default(),
             inset_on: RefCell::default(),
+            tracker: RefCell::default(),
+            keyboard_link: RefCell::default(),
+            lock: RefCell::default(),
+            field: RefCell::default(),
+            edge_seen: std::cell::Cell::new((0., 0., 0)),
             bottom_inset: std::cell::Cell::new(0.),
             refresh_ending: Rc::default(),
             dragging: std::cell::Cell::new(false),
@@ -548,6 +792,10 @@ impl NativeScroller {
             let _: () = msg_send![&*root, insertSubview: &*view, atIndex: 0isize];
             // Above the base plane's layer, where a refresh control shows; it draws
             // nothing else, and no touch lands on it.
+            // The keyboard leaves with a finger, as in Messages.
+            let _: () = msg_send![&*view, setKeyboardDismissMode: 2isize];
+            install_tracker(&state, root);
+            *state.scroller.borrow_mut() = Some(view.clone());
             let root_layer: Retained<AnyObject> = msg_send![&*root, layer];
             let own: Retained<AnyObject> = msg_send![&*view, layer];
             let _: () = msg_send![&*root_layer, addSublayer: &*own];
@@ -600,7 +848,10 @@ impl NativeScroller {
             };
             // A finger on what is coasting catches it. What else is coasting has
             // no claim on this finger (`should_begin`).
-            if tracking || (moving && same) {
+            // UIKit may call it tracking before this hears of the touch: with
+            // nothing configured yet, this finger is still to be given a driver.
+            let held = self.state.driver.borrow().is_some();
+            if (tracking && held) || (moving && same) {
                 return;
             }
             match driver {
@@ -699,28 +950,16 @@ impl NativeScroller {
             "keyboard moves page to {to:.0} in {duration:.3} s, curve {curve}"
         ));
     }
-    /// The keyboard goes: back to within the content, with it, if room for it was
-    /// all that held the page there.
-    pub(crate) fn keyboard_gone(&self) {
-        let driver = self.state.inset_on.borrow().clone();
-        let Some(driver) = driver else {
-            return;
-        };
-        let Some(metrics) = driver.metrics() else {
-            *self.state.inset_on.borrow_mut() = None;
-            return;
-        };
-        let inner = (metrics.extent.1 - metrics.size.1).max(0.);
-        self.follow_keyboard(driver, (metrics.offset + metrics.stretch).min(inner), None);
+    /// What must show above the keyboard: `bottom`, in the window's points, in
+    /// `driver`'s scroll view; `None` with no field focused.
+    pub(crate) fn set_field(&self, field: Option<(ScrollDriver, f32)>) {
+        // While a lock holds, it keeps the place it was given.
+        *self.state.field.borrow_mut() = field;
     }
     /// Its pan, for what must go before it.
     pub(crate) fn pan(&self) -> Retained<AnyObject> {
         // SAFETY: UIScrollView's getter, on the main thread.
         unsafe { msg_send![&*self.view, panGestureRecognizer] }
-    }
-    /// Whether a finger began dragging this scroller since it last was asked.
-    pub(crate) fn take_drag_began(&self) -> bool {
-        self.state.drag_began.take()
     }
     /// Whether UIKit tracks scrolling for this finger: zgx offers it no pan.
     pub(crate) fn tracks(&self) -> bool {

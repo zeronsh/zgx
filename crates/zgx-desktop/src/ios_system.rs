@@ -247,6 +247,8 @@ pub(crate) fn keyboard_height() -> f32 {
                     KEYBOARD_DURATION.store(duration.to_bits(), Ordering::Relaxed);
                     KEYBOARD_CURVE.store(curve, Ordering::Relaxed);
                 }
+                // In the keyboard's own animation: what starts here starts with it.
+                crate::ios_scroll::keyboard_changing(covered);
             }
         });
         // SAFETY: NSNotificationCenter's method, with UIKit's own name; the

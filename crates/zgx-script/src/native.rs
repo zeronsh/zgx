@@ -72,7 +72,7 @@ fn pull_refresh(lua: &Lua, table: Table) -> mlua::Result<()> {
     let top: Function = table.get("top")?;
     let on_refresh: Function = table.get("on_refresh")?;
     // What ends a pull, made once: it calls what the latest pull left.
-    let current: std::rc::Rc<std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>>> =
+    let current: std::rc::Rc<std::cell::RefCell<Option<zgx::native_control::RefreshDone>>> =
         Default::default();
     let ender = current.clone();
     let done_fn = lua.create_function(move |_, ()| {
