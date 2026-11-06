@@ -513,6 +513,48 @@ fn dump_element(element: &AnyObject, depth: usize) {
 /// Haptics and alerts, as UIKit does them.
 pub(crate) struct IosSystemUi;
 impl zgx::native_control::SystemUi for IosSystemUi {
+    fn share(&self, text: Option<&str>, url: Option<&str>, files: &[String]) {
+        let Some(controller) = root_controller() else {
+            return;
+        };
+        // SAFETY: UIKit's and Foundation's constructors and methods, on the main
+        // thread.
+        unsafe {
+            let items: Retained<AnyObject> = msg_send![class!(NSMutableArray), array];
+            if let Some(text) = text {
+                let _: () = msg_send![&*items, addObject: &*ns_string(text)];
+            }
+            if let Some(url) = url {
+                let url: Option<Retained<AnyObject>> =
+                    msg_send![class!(NSURL), URLWithString: &*ns_string(url)];
+                if let Some(url) = url {
+                    let _: () = msg_send![&*items, addObject: &*url];
+                }
+            }
+            for path in files {
+                let url: Retained<AnyObject> =
+                    msg_send![class!(NSURL), fileURLWithPath: &*ns_string(path)];
+                let _: () = msg_send![&*items, addObject: &*url];
+            }
+            let activities: *const AnyObject = std::ptr::null();
+            let sheet: Retained<AnyObject> = msg_send![
+                msg_send![class!(UIActivityViewController), alloc],
+                initWithActivityItems: &*items,
+                applicationActivities: activities
+            ];
+            // On an iPad it is a popover, which needs somewhere to point.
+            let popover: Option<Retained<AnyObject>> =
+                msg_send![&*sheet, popoverPresentationController];
+            if let Some(popover) = popover {
+                let view: Retained<AnyObject> = msg_send![&*controller, view];
+                let _: () = msg_send![&*popover, setSourceView: &*view];
+            }
+            let _: () = msg_send![&*controller,
+                presentViewController: &*sheet,
+                animated: true,
+                completion: std::ptr::null::<AnyObject>()];
+        }
+    }
     fn haptic(&self, kind: &str) {
         // SAFETY: UIKit's constructors and methods, on the main thread.
         unsafe {

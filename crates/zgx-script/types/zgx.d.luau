@@ -21792,6 +21792,8 @@ declare ui: {
 	-- A tap felt in the hand (iOS): "light", "medium", "heavy", "soft", "rigid",
 	-- "success", "warning", "error" or "selection".
 	haptic: (kind: string) -> (),
+	-- The system's share sheet (iOS).
+	share: (opts: { text: string?, url: string?, files: { string }?, [number]: never }) -> (),
 	-- What VoiceOver's two-finger scrub does: answers whether it went back.
 	on_escape: (handler: () -> boolean) -> (),
 	-- A long press on the element shows these, the system's way (iOS).

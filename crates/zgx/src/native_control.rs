@@ -270,6 +270,8 @@ pub trait SystemUi {
     /// A tap felt in the hand: `"light"`, `"medium"`, `"heavy"`, `"soft"`,
     /// `"rigid"`, `"success"`, `"warning"`, `"error"` or `"selection"`.
     fn haptic(&self, kind: &str);
+    /// The system's share sheet, for text, an address and files (paths).
+    fn share(&self, text: Option<&str>, url: Option<&str>, files: &[String]);
     /// The system's alert or action sheet. `done` hears which button, from 0.
     fn alert(
         &self,

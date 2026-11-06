@@ -78,6 +78,8 @@ mod ios_metrics;
 #[cfg(target_os = "ios")]
 mod ios_pasteboard;
 #[cfg(target_os = "ios")]
+mod ios_picker;
+#[cfg(target_os = "ios")]
 mod ios_refresh;
 #[cfg(target_os = "ios")]
 mod ios_scroll;

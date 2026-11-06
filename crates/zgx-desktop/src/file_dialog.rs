@@ -440,15 +440,18 @@ async fn native_select(
     })?
     .await
 }
-/// iOS has no file panel rfd drives: a selection says the backend is missing.
+/// iOS has no file panel rfd drives: UIKit's pickers.
 #[cfg(target_os = "ios")]
 async fn native_select(
-    _kind: Kind,
-    _options: FileDialogOptions,
+    kind: Kind,
+    options: FileDialogOptions,
     _parent: Arc<Window>,
     _cancel: Arc<Cancel>,
 ) -> FileDialogResult<Vec<PathBuf>> {
-    Err(FileDialogError::BackendUnavailable)
+    let paths = crate::ios_picker::select(kind, options)
+        .await
+        .ok_or(FileDialogError::BackendUnavailable)?;
+    Ok((!paths.is_empty()).then_some(paths))
 }
 #[cfg(target_os = "macos")]
 async fn native_select(

@@ -114,6 +114,7 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
             "alert",
             "system_menu",
             "on_escape",
+            "share",
             "action_sheet",
         ],
         |lua, ui| {
@@ -137,6 +138,22 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
                 })?,
             )?;
             ui.set("system_menu", lua.create_function(system_menu)?)?;
+            ui.set(
+                "share",
+                lua.create_function(|_, table: Table| {
+                    let text: Option<String> = table.get("text")?;
+                    let url: Option<String> = table.get("url")?;
+                    let files: Vec<String> = table
+                        .get::<Option<Table>>("files")?
+                        .map(|files| files.sequence_values().collect())
+                        .transpose()?
+                        .unwrap_or_default();
+                    if let Some(system) = zgx::native_control::system_ui() {
+                        system.share(text.as_deref(), url.as_deref(), &files);
+                    }
+                    Ok(())
+                })?,
+            )?;
             ui.set(
                 "on_escape",
                 lua.create_function(|_, handler: Function| {

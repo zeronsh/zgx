@@ -126,7 +126,13 @@ local function SettingsPage(nav: any)
 				icon = "bell.badge.fill",
 				menu = function()
 					return {
-						{ title = "Share", symbol = "square.and.arrow.up" },
+						{
+							title = "Share",
+							symbol = "square.and.arrow.up",
+							on_choose = function()
+								ui.share { text = "A zgx app on iOS", url = "https://github.com" }
+							end,
+						},
 						{ title = "Mute", symbol = "bell.slash" },
 						{ title = "Remove", symbol = "trash", style = "destructive" },
 					}
