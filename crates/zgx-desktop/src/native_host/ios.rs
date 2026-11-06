@@ -487,7 +487,10 @@ impl Surfaces {
             if mounted.style != Some(style) {
                 let first = mounted.style.is_none();
                 mounted.style = Some(style);
-                restyle(&mounted.view, style, !first);
+                // Made with this style (`make_view`).
+                if !first {
+                    restyle(&mounted.view, style);
+                }
                 // SAFETY: UIView's setter, on the main thread.
                 unsafe {
                     let _: () =
@@ -518,7 +521,9 @@ fn make_toggle(state: &Rc<ToggleState>) -> (Retained<AnyObject>, Retained<Toggle
     }
 }
 
-/// A group's or pane's system view.
+/// A group's or pane's system view, made with its effect as it is to be:
+/// UIKit gives an effect's press response to a view made with it, and not to
+/// one that is handed it before its first layout.
 fn make_view(content: &GlassContent) -> Retained<AnyObject> {
     // SAFETY: UIKit's constructors and setters, on the main thread;
     // UIGlassContainerEffect and UIGlassEffect are iOS 26's.
@@ -529,29 +534,29 @@ fn make_view(content: &GlassContent) -> Retained<AnyObject> {
                 let _: () = msg_send![&*effect, setSpacing: *spacing as f64];
                 effect
             }
-            GlassContent::Pane(_) => msg_send![class!(UIGlassEffect), effectWithStyle: 0isize],
+            GlassContent::Pane(style) => glass_effect(*style.borrow()),
         };
         let view: Retained<AnyObject> =
             msg_send![msg_send![class!(UIVisualEffectView), alloc], initWithEffect: &*effect];
         passive(&view);
+        if let GlassContent::Pane(style) = content {
+            set_corners(&view, *style.borrow());
+        }
         view
     }
 }
 
-fn content_view(view: &AnyObject) -> Retained<AnyObject> {
-    // SAFETY: UIVisualEffectView's getter, on the main thread.
-    unsafe { msg_send![view, contentView] }
-}
-
-/// Give a pane's view `style`, animated as the system's changes are unless
-/// it is new.
-fn restyle(view: &AnyObject, style: GlassStyle, animate: bool) {
-    // SAFETY: UIKit's constructors and setters, on the main thread.
+/// The system's glass for `style`.
+///
+/// # Safety
+/// On the main thread.
+unsafe fn glass_effect(style: GlassStyle) -> Retained<AnyObject> {
+    let variant: isize = match style.variant {
+        GlassVariant::Regular => 0,
+        GlassVariant::Clear => 1,
+    };
+    // SAFETY: UIKit's constructors and setters, as the caller promises.
     unsafe {
-        let variant: isize = match style.variant {
-            GlassVariant::Regular => 0,
-            GlassVariant::Clear => 1,
-        };
         let effect: Retained<AnyObject> =
             msg_send![class!(UIGlassEffect), effectWithStyle: variant];
         let _: () = msg_send![&*effect, setInteractive: style.interactive];
@@ -564,6 +569,15 @@ fn restyle(view: &AnyObject, style: GlassStyle, animate: bool) {
                 alpha: channel(tint.3)];
             let _: () = msg_send![&*effect, setTintColor: &*color];
         }
+        effect
+    }
+}
+
+/// # Safety
+/// `view` is a UIView, on the main thread.
+unsafe fn set_corners(view: &AnyObject, style: GlassStyle) {
+    // SAFETY: UIKit's constructors and setter, as the caller promises.
+    unsafe {
         let corners: Retained<AnyObject> = if style.radius.is_finite() {
             let radius: Retained<AnyObject> =
                 msg_send![class!(UICornerRadius), fixedRadius: style.radius as f64];
@@ -572,17 +586,26 @@ fn restyle(view: &AnyObject, style: GlassStyle, animate: bool) {
             msg_send![class!(UICornerConfiguration), capsuleConfiguration]
         };
         let _: () = msg_send![view, setCornerConfiguration: &*corners];
-        if animate {
-            let view = Retained::retain(view as *const _ as *mut AnyObject);
-            let apply = block2::RcBlock::new(move || {
-                if let Some(view) = &view {
-                    let _: () = msg_send![&**view, setEffect: &*effect];
-                }
-            });
-            let _: () =
-                msg_send![class!(UIView), animateWithDuration: 0.35f64, animations: &*apply];
-        } else {
-            let _: () = msg_send![view, setEffect: &*effect];
-        }
+    }
+}
+
+fn content_view(view: &AnyObject) -> Retained<AnyObject> {
+    // SAFETY: UIVisualEffectView's getter, on the main thread.
+    unsafe { msg_send![view, contentView] }
+}
+
+/// Give a pane's view `style`, animated as the system's changes are.
+fn restyle(view: &AnyObject, style: GlassStyle) {
+    // SAFETY: UIKit's calls, on the main thread.
+    unsafe {
+        let effect = glass_effect(style);
+        set_corners(view, style);
+        let view = Retained::retain(view as *const _ as *mut AnyObject);
+        let apply = block2::RcBlock::new(move || {
+            if let Some(view) = &view {
+                let _: () = msg_send![&**view, setEffect: &*effect];
+            }
+        });
+        let _: () = msg_send![class!(UIView), animateWithDuration: 0.35f64, animations: &*apply];
     }
 }
