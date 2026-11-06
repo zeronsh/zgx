@@ -72,6 +72,8 @@ def bundle(binary: Path, name: str, resources: list[Path]) -> Path:
                 "MinimumOSVersion": "26.0",
                 "UIDeviceFamily": [1, 2],
                 "UILaunchScreen": {},
+                # Links a test app answers: `zgx-app://…` reaches `ui.on_open`.
+                "CFBundleURLTypes": [{"CFBundleURLName": "dev.zgx.ios", "CFBundleURLSchemes": ["zgx-app"]}],
                 "UISupportedInterfaceOrientations": [
                     "UIInterfaceOrientationPortrait",
                     "UIInterfaceOrientationLandscapeLeft",

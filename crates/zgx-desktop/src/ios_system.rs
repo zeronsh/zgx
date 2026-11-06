@@ -672,3 +672,126 @@ pub(crate) fn root_controller() -> Option<Retained<AnyObject>> {
         msg_send![&*window, rootViewController]
     }
 }
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGColorSpaceCreateDeviceRGB() -> *mut std::ffi::c_void;
+    fn CGColorSpaceRelease(space: *mut std::ffi::c_void);
+    fn CGBitmapContextCreate(
+        data: *mut std::ffi::c_void,
+        width: usize,
+        height: usize,
+        bits: usize,
+        row: usize,
+        space: *mut std::ffi::c_void,
+        info: u32,
+    ) -> *mut std::ffi::c_void;
+    fn CGBitmapContextCreateImage(context: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn CGContextDrawImage(
+        context: *mut std::ffi::c_void,
+        rect: objc2_core_foundation::CGRect,
+        image: *mut std::ffi::c_void,
+    );
+    fn CGContextRelease(context: *mut std::ffi::c_void);
+    fn CGImageGetWidth(image: *mut std::ffi::c_void) -> usize;
+    fn CGImageGetHeight(image: *mut std::ffi::c_void) -> usize;
+    fn CGImageRelease(image: *mut std::ffi::c_void);
+}
+/// A `CGImageRef`, only passed on.
+#[repr(C)]
+struct CgImage([u8; 0]);
+// SAFETY: as Core Graphics declares it, an opaque struct behind a pointer.
+unsafe impl objc2::RefEncode for CgImage {
+    const ENCODING_REF: objc2::Encoding =
+        objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGImage", &[]));
+}
+/// A bitmap context over `pixels`: RGBA, premultiplied.
+unsafe fn rgba_context(pixels: *mut u8, width: usize, height: usize) -> *mut std::ffi::c_void {
+    // SAFETY: as the caller promises, `pixels` holds `width * height * 4` bytes.
+    unsafe {
+        let space = CGColorSpaceCreateDeviceRGB();
+        // kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big.
+        let context = CGBitmapContextCreate(
+            pixels.cast(),
+            width,
+            height,
+            8,
+            width * 4,
+            space,
+            1 | (4 << 12),
+        );
+        CGColorSpaceRelease(space);
+        context
+    }
+}
+/// The pasteboard's image as straight RGBA. Asking shows iOS's paste notice, so
+/// a person's paste is what should ask.
+pub(crate) fn pasteboard_image() -> Option<(usize, usize, Vec<u8>)> {
+    // SAFETY: UIKit's and Core Graphics' getters and drawing, on the main thread.
+    unsafe {
+        let board: Retained<AnyObject> = msg_send![class!(UIPasteboard), generalPasteboard];
+        let image: Option<Retained<AnyObject>> = msg_send![&*board, image];
+        let image = image?;
+        let cg: *mut CgImage = msg_send![&*image, CGImage];
+        let cg = cg.cast::<std::ffi::c_void>();
+        if cg.is_null() {
+            return None;
+        }
+        let (width, height) = (CGImageGetWidth(cg), CGImageGetHeight(cg));
+        let mut pixels = vec![0u8; width * height * 4];
+        let context = rgba_context(pixels.as_mut_ptr(), width, height);
+        if context.is_null() {
+            return None;
+        }
+        let area = objc2_core_foundation::CGRect {
+            origin: objc2_core_foundation::CGPoint { x: 0., y: 0. },
+            size: objc2_core_foundation::CGSize {
+                width: width as f64,
+                height: height as f64,
+            },
+        };
+        CGContextDrawImage(context, area, cg);
+        CGContextRelease(context);
+        for pixel in pixels.chunks_exact_mut(4) {
+            let alpha = u32::from(pixel[3]);
+            if alpha != 0 && alpha != 255 {
+                for channel in &mut pixel[..3] {
+                    *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+                }
+            }
+        }
+        Some((width, height, pixels))
+    }
+}
+/// Put straight RGBA on the pasteboard.
+pub(crate) fn set_pasteboard_image(width: usize, height: usize, bytes: &[u8]) -> bool {
+    let mut pixels = bytes.to_vec();
+    if pixels.len() != width * height * 4 {
+        return false;
+    }
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = u32::from(pixel[3]);
+        for channel in &mut pixel[..3] {
+            *channel = ((u32::from(*channel) * alpha + 127) / 255) as u8;
+        }
+    }
+    // SAFETY: as above; the context reads `pixels`, alive through its use, and
+    // the UIImage keeps its own reference to the CGImage.
+    unsafe {
+        let context = rgba_context(pixels.as_mut_ptr(), width, height);
+        if context.is_null() {
+            return false;
+        }
+        let cg = CGBitmapContextCreateImage(context);
+        CGContextRelease(context);
+        if cg.is_null() {
+            return false;
+        }
+        let image: Retained<AnyObject> =
+            msg_send![class!(UIImage), imageWithCGImage: cg.cast::<CgImage>()];
+        CGImageRelease(cg);
+        let board: Retained<AnyObject> = msg_send![class!(UIPasteboard), generalPasteboard];
+        let _: () = msg_send![&*board, setImage: &*image];
+        true
+    }
+}

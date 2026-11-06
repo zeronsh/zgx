@@ -547,15 +547,67 @@ mod platform {
 /// application events yet.
 #[cfg(target_os = "ios")]
 mod platform {
-    use super::{ApplicationEventError, Handler, validate_id};
+    use super::{ApplicationEvent, ApplicationEventError, Handler, validate_id};
+    use objc2::{
+        ClassType, class, msg_send,
+        rc::Retained,
+        runtime::{AnyObject, Bool, ClassBuilder, NSObject, Sel},
+        sel,
+    };
+    use std::sync::OnceLock;
+
+    static HANDLER: OnceLock<Handler> = OnceLock::new();
+
+    /// `application:openURL:options:`: a link to the app, at launch too.
+    extern "C-unwind" fn open_url(
+        _: &AnyObject,
+        _: Sel,
+        _application: &AnyObject,
+        url: &AnyObject,
+        _options: *mut AnyObject,
+    ) -> Bool {
+        // SAFETY: NSURL's and NSString's getters; the bytes are read before they go.
+        let text = unsafe {
+            let text: Option<Retained<AnyObject>> = msg_send![url, absoluteString];
+            text.and_then(|text| {
+                let bytes: *const std::ffi::c_char = msg_send![&*text, UTF8String];
+                (!bytes.is_null()).then(|| {
+                    std::ffi::CStr::from_ptr(bytes)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            })
+        };
+        let (Some(text), Some(handler)) = (text, HANDLER.get()) else {
+            return Bool::NO;
+        };
+        handler(ApplicationEvent::OpenUrls(vec![text]), None);
+        Bool::YES
+    }
 
     pub(crate) struct NativeApplicationEvents;
     impl NativeApplicationEvents {
         pub(crate) fn new(
             id: &str,
-            _handler: Handler,
+            handler: Handler,
         ) -> Result<Option<Self>, ApplicationEventError> {
             validate_id(id)?;
+            let _ = HANDLER.set(handler);
+            // winit's `UIApplicationMain` names it, when it is registered.
+            if let Some(mut builder) = ClassBuilder::new(c"ZgxAppDelegate", NSObject::class()) {
+                // SAFETY: the function has the selector's signature.
+                unsafe {
+                    builder.add_method(
+                        sel!(application:openURL:options:),
+                        open_url as extern "C-unwind" fn(_, _, _, _, _) -> _,
+                    );
+                }
+                if let Some(protocol) = objc2::runtime::AnyProtocol::get(c"UIApplicationDelegate") {
+                    builder.add_protocol(protocol);
+                }
+                builder.register();
+            }
+            let _ = class!(NSObject);
             Ok(Some(Self))
         }
     }

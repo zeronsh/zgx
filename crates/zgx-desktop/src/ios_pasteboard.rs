@@ -81,10 +81,18 @@ impl Clipboard {
         Get
     }
     pub(crate) fn get_image(&mut self) -> Result<ImageData<'static>, Error> {
-        Err(Error("images on iOS's pasteboard aren't carried yet"))
+        crate::ios_system::pasteboard_image()
+            .map(|(width, height, bytes)| ImageData {
+                width,
+                height,
+                bytes: Cow::Owned(bytes),
+            })
+            .ok_or(Error("the pasteboard holds no image"))
     }
-    pub(crate) fn set_image(&mut self, _: ImageData<'_>) -> Result<(), Error> {
-        Err(Error("images on iOS's pasteboard aren't carried yet"))
+    pub(crate) fn set_image(&mut self, image: ImageData<'_>) -> Result<(), Error> {
+        crate::ios_system::set_pasteboard_image(image.width, image.height, &image.bytes)
+            .then_some(())
+            .ok_or(Error("the image couldn't go on the pasteboard"))
     }
 }
 
