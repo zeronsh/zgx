@@ -332,6 +332,18 @@ impl Surfaces {
             let parent = self.groups.get(&placement.node).copied();
             self.place(placement, parent);
         }
+        // A node scrolled quite away has no placement: its view can't stay
+        // where it last was.
+        for (node, mounted) in &mut self.mounted {
+            if !mounted.hidden && !order.contains(node) {
+                mounted.hidden = true;
+                let top = mounted.clip.as_ref().unwrap_or(&mounted.view);
+                // SAFETY: UIView's setter, on the main thread.
+                unsafe {
+                    let _: () = msg_send![&**top, setHidden: true];
+                }
+            }
+        }
         // The host passes touches to its panes only while one answers them.
         let interactive = self.mounted.values().any(|mounted| {
             mounted.style.is_some_and(|style| style.interactive)
