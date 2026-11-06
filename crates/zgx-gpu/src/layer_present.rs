@@ -479,6 +479,13 @@ pub struct Caret {
     /// Whether it shows now (a blink's phase).
     pub shown: bool,
 }
+/// A loop's layer as it stands (`Layer::loop_state`).
+pub(crate) struct LoopState {
+    pub at: (f64, f64),
+    pub hidden: bool,
+    pub opacity: f32,
+    pub on_screen: Option<(f64, f64)>,
+}
 /// A looping animation's sheet, as a layer plays it (loops.rs).
 pub(crate) struct LoopShown {
     pub key: u64,
@@ -1517,6 +1524,48 @@ impl Layer {
     /// state: set again before it applies, the later one stands.
     pub(crate) fn set_loops(&mut self, alive: Vec<u64>, shown: Vec<LoopShown>) {
         self.loops_due = Some((alive, shown));
+    }
+    /// A loop's layer as it stands: its place from the host's top left, and
+    /// with `on_screen`, where Core Animation shows it now.
+    pub(crate) fn loop_state(&self, key: u64, on_screen: bool) -> Option<LoopState> {
+        let (_, layer, _) = self.loops.iter().find(|(at, ..)| *at == key)?;
+        let flipped = self.host.isGeometryFlipped() || self.host.contentsAreFlipped();
+        let height = self.host.bounds().size.height;
+        let place = |frame: objc2_core_foundation::CGRect| {
+            let y = if flipped {
+                frame.origin.y
+            } else {
+                height - frame.origin.y - frame.size.height
+            };
+            (frame.origin.x, y)
+        };
+        // SAFETY: CALayer's method, returning a CALayer on the main thread: a
+        // copy, or nil before the layer's first commit.
+        let shown: Option<Retained<CALayer>> = on_screen
+            .then(|| unsafe { msg_send![&**layer, presentationLayer] })
+            .flatten();
+        Some(LoopState {
+            at: place(layer.frame()),
+            hidden: layer.isHidden(),
+            opacity: layer.opacity(),
+            on_screen: shown.map(|layer| place(layer.frame())),
+        })
+    }
+    /// Whether what `set_loops` left waits for its frame.
+    pub(crate) fn loops_queued(&self) -> bool {
+        self.loops_due.is_some()
+    }
+    /// Hides every loop's layer now, and drops what was waiting to place one.
+    pub(crate) fn hide_loops(&mut self) {
+        self.loops_due = None;
+        if self.loops.is_empty() {
+            return;
+        }
+        transaction(|| {
+            for (_, layer, _) in &self.loops {
+                layer.setHidden(true);
+            }
+        });
     }
     /// Whether a layer plays a loop now, or is about to.
     pub(crate) fn has_loops(&self) -> bool {

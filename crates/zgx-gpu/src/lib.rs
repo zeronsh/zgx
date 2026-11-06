@@ -3973,6 +3973,8 @@ pub struct GpuRenderer {
     #[cfg(target_os = "macos")]
     loops_said: Vec<loops::LoopSaid>,
     #[cfg(target_os = "macos")]
+    loop_watch: loops::LoopWatch,
+    #[cfg(target_os = "macos")]
     loop_time: Option<f32>,
     /// Pipelines for frames encoded with Metal directly (`render_direct`);
     /// `None` inside if they could not be built.
@@ -4494,6 +4496,8 @@ impl GpuRenderer {
             loop_sheets: Vec::new(),
             #[cfg(target_os = "macos")]
             loops_said: Vec::new(),
+            #[cfg(target_os = "macos")]
+            loop_watch: Default::default(),
             #[cfg(target_os = "macos")]
             loop_time: None,
             #[cfg(windows)]
@@ -5045,6 +5049,7 @@ impl GpuRenderer {
     pub fn render(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
         #[cfg(target_os = "macos")]
         {
+            self.loop_watch.set_damage(damage.len());
             self.idle = false;
             if let Some(views) = &mut self.views {
                 views.owed = false;
@@ -13130,6 +13135,16 @@ impl GpuRenderer {
                 .and_then(|present| present.layer.as_mut())
             {
                 layer.flush_loops();
+            }
+            #[cfg(target_os = "macos")]
+            self.check_loops(match &status {
+                Ok(PresentationStatus::Presented) => "presented",
+                Ok(_) => "not presented",
+                Err(_) => "present failed",
+            });
+            #[cfg(target_os = "macos")]
+            if status.is_err() {
+                self.hide_loops();
             }
             status
         };
