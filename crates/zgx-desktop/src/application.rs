@@ -4781,6 +4781,7 @@ impl Host {
                     && let Some(scroller) = &self.native_scroll
                 {
                     scroller.finger_down(self.context.ui.scroll_driver_at(p.x, p.y));
+                    self.touch.set_press_delay(scroller.tracks());
                 }
                 if touch.phase == winit::event::TouchPhase::Started && self.touch.idle() {
                     self.touch_focus = self.context.ui.input.focused();
@@ -5670,6 +5671,13 @@ impl Host {
                     delta_y,
                 })?;
                 self.after_scroll();
+            }
+        }
+        #[cfg(target_os = "ios")]
+        {
+            let due = self.touch.due_press(std::time::Instant::now());
+            if !due.is_empty() {
+                self.touch_steps(due)?;
             }
         }
         // A finger held on selectable text selects the word there.

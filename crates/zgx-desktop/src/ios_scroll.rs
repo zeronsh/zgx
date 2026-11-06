@@ -8,7 +8,8 @@
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
     rc::Retained,
-    runtime::{AnyObject, Bool, NSObject, NSObjectProtocol},
+    runtime::{AnyClass, AnyObject, Bool, ClassBuilder, NSObject, NSObjectProtocol, Sel},
+    sel,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -60,6 +61,32 @@ define_class!(
     }
 );
 
+/// A `UIScrollView` no touch lands on: its pan is on the window's view, and a
+/// tap on the status bar only finds a scroll view that takes interaction.
+fn scroller_class() -> &'static AnyClass {
+    static CLASS: std::sync::OnceLock<&'static AnyClass> = std::sync::OnceLock::new();
+    extern "C-unwind" fn hit_test(
+        _: &AnyObject,
+        _: Sel,
+        _: CGPoint,
+        _: *mut AnyObject,
+    ) -> *mut AnyObject {
+        std::ptr::null_mut()
+    }
+    CLASS.get_or_init(|| {
+        let mut builder = ClassBuilder::new(c"ZgxScroller", class!(UIScrollView))
+            .expect("one class of this name");
+        // SAFETY: `hit_test` has `hitTest:withEvent:`'s signature.
+        unsafe {
+            builder.add_method(
+                sel!(hitTest:withEvent:),
+                hit_test as extern "C-unwind" fn(_, _, _, _) -> _,
+            );
+        }
+        builder.register()
+    })
+}
+
 fn configure(state: &State, view: &AnyObject, driver: ScrollDriver) {
     let Some(metrics) = driver.metrics() else {
         return;
@@ -95,7 +122,6 @@ fn configure(state: &State, view: &AnyObject, driver: ScrollDriver) {
         let _: () = msg_send![view, setFrame: frame];
         let _: () = msg_send![view, setContentSize: content];
         let _: () = msg_send![view, setContentOffset: CGPoint { x: offset_x, y: offset_y }];
-        let _: () = msg_send![view, setScrollEnabled: true];
     }
     *state.driver.borrow_mut() = Some(driver);
     state.configuring.set(false);
@@ -130,17 +156,16 @@ impl NativeScroller {
         // setters, on the main thread checked above. The view keeps the pan.
         let view = unsafe {
             let root: *const AnyObject = handle.ui_view.as_ptr().cast();
-            let view: Retained<AnyObject> = msg_send![class!(UIScrollView), new];
+            let view: Retained<AnyObject> = msg_send![scroller_class(), new];
             let _: () = msg_send![&*view, setDelegate: &*delegate];
-            let _: () = msg_send![&*view, setAlpha: 0f64];
-            let _: () = msg_send![&*view, setUserInteractionEnabled: false];
+            // Not hidden or transparent, which a tap on the status bar skips:
+            // it has nothing to draw, and lies under the base plane.
             let _: () = msg_send![&*view, setAccessibilityElementsHidden: true];
             let _: () = msg_send![&*view, setShowsVerticalScrollIndicator: false];
             let _: () = msg_send![&*view, setShowsHorizontalScrollIndicator: false];
             // UIScrollViewContentInsetAdjustmentNever: zgx lays out by the
             // safe area itself.
             let _: () = msg_send![&*view, setContentInsetAdjustmentBehavior: 2isize];
-            let _: () = msg_send![&*view, setScrollEnabled: false];
             let _: () = msg_send![&*view, setScrollsToTop: true];
             let _: () = msg_send![&*root, insertSubview: &*view, atIndex: 0isize];
             let pan: Retained<AnyObject> = msg_send![&*view, panGestureRecognizer];
@@ -191,9 +216,12 @@ impl NativeScroller {
             }
             match driver {
                 Some(driver) => configure(&self.state, &self.view, driver),
+                // Left enabled: UIKit gathers a touch's recognizers before the
+                // view hears of the touch, so a disabled pan would miss it for
+                // good. With nothing to scroll it never begins.
                 None => {
                     *self.state.driver.borrow_mut() = None;
-                    let _: () = msg_send![&*self.view, setScrollEnabled: false];
+                    let _: () = msg_send![&*self.view, setContentSize: CGSize::new(0., 0.)];
                 }
             }
         }
