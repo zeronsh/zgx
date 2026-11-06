@@ -136,6 +136,15 @@ use, against a minimized one (WING-PC, medians of 4 rotated rounds).
     A window translucent by the undocumented accent API isn't recognised, and
     a window being captured while covered stops like any other.
 
+## Windows: a window's DPI read without a DC kept
+
+`hwnd_dpi` took the window's DC (`GetDC`) on every call, used it only on
+systems without `GetDpiForWindow` or `GetDpiForMonitor`, and never released
+it. The occlusion check above calls it each second, so a process used up
+GDI's 10,000 handles in an hour or two and `GetDC`'s null panicked. The DC
+is taken only where it's read and released (`ReleaseDC`); a null reads as 96
+DPI (`dpi.rs`, tested by `hwnd_dpi_keeps_no_gdi_handles`).
+
 ## X11: no waiting on an input method that has gone
 
 libX11 learns that an input method's server went (ibus-x11 killed or
