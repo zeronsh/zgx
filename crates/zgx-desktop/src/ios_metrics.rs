@@ -55,6 +55,9 @@ struct Window {
     gpu_ns: u64,
     gpu_buffers: u64,
     every: Duration,
+    /// `ZGX_IOS_METRICS_PASSIVE`: gaps are between drawn frames, and this
+    /// sampler asks the display for nothing.
+    passive: bool,
     scene: String,
     log: Option<std::fs::File>,
 }
@@ -70,7 +73,10 @@ define_class!(
         fn tick(&self, _link: &AnyObject) {
             let mut window = self.ivars().borrow_mut();
             let now = Instant::now();
-            if let Some(last) = window.last_tick.replace(now) {
+            if window.passive {
+                let gaps = crate::ios_refresh::take_gaps();
+                window.gaps_ms.extend(gaps);
+            } else if let Some(last) = window.last_tick.replace(now) {
                 window.gaps_ms.push(now.duration_since(last).as_secs_f32() * 1000.);
             }
             if now.duration_since(window.since) >= window.every {
@@ -145,6 +151,10 @@ pub(crate) fn start() {
             .ok()
     });
     let (gpu_ns, gpu_buffers) = zgx_gpu::metal_gpu_time();
+    let passive = zgx::env::var("ZGX_IOS_METRICS_PASSIVE").is_ok();
+    if passive {
+        crate::ios_refresh::record_gaps();
+    }
     let sampler = Sampler::alloc(mtm).set_ivars(RefCell::new(Window {
         since: Instant::now(),
         last_tick: None,
@@ -153,6 +163,7 @@ pub(crate) fn start() {
         gpu_ns,
         gpu_buffers,
         every: Duration::from_secs_f64(seconds.max(0.5)),
+        passive,
         scene: zgx::env::var("ZGX_IOS_SCENE").unwrap_or_default(),
         log,
     }));
@@ -163,6 +174,18 @@ pub(crate) fn start() {
         let link: Retained<AnyObject> = msg_send![class!(CADisplayLink),
             displayLinkWithTarget: &*sampler,
             selector: sel!(tick:)];
+        // As fast as the display goes, gaps saying what it does; or (passive)
+        // barely, for what the app itself asks: frames then counted in buffers.
+        let range = if passive {
+            crate::ios_refresh::CAFrameRateRange {
+                minimum: 1.,
+                maximum: 1.,
+                preferred: 1.,
+            }
+        } else {
+            crate::ios_refresh::FAST
+        };
+        let _: () = msg_send![&*link, setPreferredFrameRateRange: range];
         let run_loop: Retained<AnyObject> = msg_send![class!(NSRunLoop), mainRunLoop];
         let _: () = msg_send![&*link, addToRunLoop: &*run_loop, forMode: NSRunLoopCommonModes];
         std::mem::forget(sampler);

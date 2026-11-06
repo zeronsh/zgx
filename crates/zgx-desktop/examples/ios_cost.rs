@@ -51,6 +51,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let still = zgx::env::var_os("COST_STILL").is_some();
     // Text on each pane, which puts it on the overlay plane.
     let over = zgx::env::var_os("COST_OVER").is_some();
+    // Drawing planes stacked between native views: each a pane, and a sheet of
+    // paint over the whole window above it.
+    let levels = number("COST_LEVELS", 0);
     Application::new()
         .window(WindowOptions::default())
         .run(move |cx| {
@@ -105,6 +108,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .h(70.)
                     .when(over, |pane| pane.p(20.).child(text("Over the glass"))),
                 );
+            }
+            for level in 0..levels {
+                root = root
+                    .child(
+                        glass(|| GlassStyle {
+                            radius: 24.,
+                            ..Default::default()
+                        })
+                        .absolute()
+                        .left(16.)
+                        .right(16.)
+                        .top(120. + level as f32 * 90.)
+                        .h(70.),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(0.)
+                            .right(0.)
+                            .top(0.)
+                            .bottom(0.)
+                            .bg(rgba(0x0000_0008)),
+                    );
             }
             cx.render(root);
         })

@@ -2712,6 +2712,8 @@ impl Host {
                     if let Some(stats) = rendered {
                         let stats = stats?;
                         first_mark(&FIRST_RENDER, "first frame rendered");
+                        #[cfg(target_os = "ios")]
+                        crate::ios_refresh::frame_drawn();
                         self.native.render(&scene, damage)?;
                         if let Some(frame) = &mut self.damage_check {
                             *frame += 1;

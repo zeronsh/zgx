@@ -39,6 +39,9 @@ SCENES = [
     ("scrolling, 1 glass", {"COST_MODE": "plain", "COST_GLASS": "1"}),
     ("scrolling, 4 glass", {"COST_MODE": "plain", "COST_GLASS": "4"}),
     ("scrolling, 4 glass with text over", {"COST_MODE": "plain", "COST_GLASS": "4", "COST_OVER": "1"}),
+    ("scrolling, 1 plane over glass", {"COST_MODE": "plain", "COST_LEVELS": "1"}),
+    ("scrolling, 2 planes over glass", {"COST_MODE": "plain", "COST_LEVELS": "2"}),
+    ("scrolling, 3 planes over glass", {"COST_MODE": "plain", "COST_LEVELS": "3"}),
     ("scrolling, drawn switches", {"COST_MODE": "drawn"}),
     ("scrolling, hosted switches", {"COST_MODE": "hosted"}),
 ]
@@ -281,7 +284,7 @@ def measure(args, device):
         run(["xcrun", "devicectl", "device", "uninstall", "app", "--device", device["id"], BUNDLE], 60)
         install(app, device)
         print(f"{name} ({args.seconds:.0f} s)", flush=True)
-        launch(device, dict(environment, ZGX_IOS_METRICS=str(window), ZGX_IOS_SCENE=name))
+        launch(device, dict(environment, ZGX_IOS_METRICS=str(window), ZGX_IOS_METRICS_PASSIVE="1", ZGX_IOS_SCENE=name))
         time.sleep(args.seconds + window + 3)
         local = OUT / "metrics.jsonl"
         local.unlink(missing_ok=True)
