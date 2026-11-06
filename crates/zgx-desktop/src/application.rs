@@ -2677,6 +2677,12 @@ impl Host {
                     }
                     crate::contain::report_issues(&self.context.ui.runtime);
                     if let Some(stats) = rendered {
+                        // A frame that failed shows no looping layer over
+                        // the one before it.
+                        #[cfg(target_os = "macos")]
+                        if stats.is_err() {
+                            renderer.hide_loops();
+                        }
                         let stats = stats?;
                         first_mark(&FIRST_RENDER, "first frame rendered");
                         self.native.render(&scene, damage)?;
@@ -2697,6 +2703,8 @@ impl Host {
                         self.presentation.damaged();
                     } else {
                         undrawn = true;
+                        #[cfg(target_os = "macos")]
+                        renderer.hide_loops();
                     }
                 }
                 self.force = undrawn;
@@ -2743,6 +2751,12 @@ impl Host {
                 .as_ref()
                 .is_some_and(|renderer| renderer.planes_owed())
                 .then(|| std::time::Instant::now() + PLANE_RETRY);
+        }
+        // Looping layers go where the scene has them after every flush, frame
+        // or none. (Not over a frame that failed: it hid them.)
+        #[cfg(target_os = "macos")]
+        if !undrawn && let Some(renderer) = &mut self.renderer {
+            renderer.loops_after_flush(&scene);
         }
         if self.presentation.ready(std::time::Instant::now()) && self.renderer.is_some() {
             if self.frame_paced && !self.present_ready {
