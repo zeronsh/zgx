@@ -24,6 +24,8 @@ pub(crate) mod webkitgtk;
 pub(crate) use ghostty::processes_changed;
 #[cfg(target_os = "ios")]
 mod ios;
+#[cfg(target_os = "ios")]
+mod ios_web;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]

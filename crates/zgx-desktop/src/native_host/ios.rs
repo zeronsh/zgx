@@ -44,6 +44,45 @@ fn rect(r: Rect) -> CGRect {
 
 /// A view of ours: over the window's, untouchable and unseen by assistive
 /// technology.
+/// A `CGPathRef`, only passed on.
+#[repr(C)]
+struct CgPath([u8; 0]);
+// SAFETY: as Core Graphics declares it, an opaque struct behind a pointer.
+unsafe impl objc2::RefEncode for CgPath {
+    const ENCODING_REF: objc2::Encoding =
+        objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGPath", &[]));
+}
+
+/// Cut `clip` (showing `visible`, in the window's points) to the rounded box
+/// around its node, if any: its own corners, or a rounded parent's. The innermost
+/// is the one a row's control or a page in a card meets.
+fn set_rounded_mask(clip: &AnyObject, round: Option<&zgx::scene::RoundRect>, visible: Rect) {
+    // SAFETY: UIKit's and Core Animation's constructors and setters, on the main
+    // thread; the layer keeps its mask.
+    unsafe {
+        let layer: Retained<AnyObject> = msg_send![clip, layer];
+        let Some(round) = round else {
+            let none: *const AnyObject = std::ptr::null();
+            let _: () = msg_send![&*layer, setMask: none];
+            return;
+        };
+        let radius = round.radii.iter().copied().fold(0f32, f32::max);
+        let inside = Rect::new(
+            round.rect.x - visible.x,
+            round.rect.y - visible.y,
+            round.rect.width,
+            round.rect.height,
+        );
+        let path: Retained<AnyObject> = msg_send![class!(UIBezierPath),
+            bezierPathWithRoundedRect: rect(inside),
+            cornerRadius: radius as f64];
+        let shape: Retained<AnyObject> = msg_send![class!(CAShapeLayer), new];
+        let cg: *const CgPath = msg_send![&*path, CGPath];
+        let _: () = msg_send![&*shape, setPath: cg];
+        let _: () = msg_send![&*layer, setMask: &*shape];
+    }
+}
+
 fn plain_view(frame: CGRect) -> Retained<AnyObject> {
     // SAFETY: UIView's initializer, on the main thread.
     unsafe { msg_send![msg_send![class!(UIView), alloc], initWithFrame: frame] }
@@ -99,6 +138,8 @@ enum Content {
     Glass(GlassContent),
     /// An app's own view (`NativeContent::Platform`): it takes its touches.
     Platform,
+    /// A `WKWebView` (`NativeContent::Web`), kept while it stands here.
+    Web(#[allow(dead_code)] Rc<dyn zgx::web_view::WebViewBackend>),
     /// A `UISwitch` (`NativeContent::Toggle`).
     Toggle(Rc<ToggleState>, #[allow(dead_code)] Retained<ToggleTarget>),
     /// A `UITabBar` (`NativeContent::Tabs`), and what it tells through.
@@ -108,7 +149,10 @@ enum Content {
 impl Content {
     /// A control a person touches, cut by what clips its node.
     fn is_control(&self) -> bool {
-        matches!(self, Self::Platform | Self::Toggle(..) | Self::Tabs(..))
+        matches!(
+            self,
+            Self::Platform | Self::Web(..) | Self::Toggle(..) | Self::Tabs(..)
+        )
     }
 }
 
@@ -155,6 +199,8 @@ struct Mounted {
     parent: Option<NodeId>,
     /// The host it is in (`NativePlacement::slot`).
     slot: u8,
+    /// Whether its clip cuts it, and what it leaves.
+    cut: Option<(bool, Rect)>,
     frame: Option<Rect>,
     alpha: f32,
     hidden: bool,
@@ -321,6 +367,19 @@ impl Surfaces {
                     };
                     (view.clone(), Content::Platform)
                 }
+                NativeContent::Web(web) if !web.is_closed() && !self.mounted.contains_key(node) => {
+                    let Some(backend) = super::ios_web::backend(web) else {
+                        continue;
+                    };
+                    let Some(view) = backend
+                        .as_any()
+                        .downcast_ref::<super::ios_web::IosWebView>()
+                        .map(super::ios_web::IosWebView::view)
+                    else {
+                        continue;
+                    };
+                    (view, Content::Web(backend))
+                }
                 NativeContent::Toggle(state) if !self.mounted.contains_key(node) => {
                     if let Some((view, clip, target)) = self.reusable.pop() {
                         *target.ivars().borrow_mut() = state.clone();
@@ -339,6 +398,7 @@ impl Surfaces {
                                 style: None,
                                 parent: None,
                                 slot: 0,
+                                cut: None,
                                 frame: None,
                                 alpha: 1.,
                                 hidden: false,
@@ -357,9 +417,8 @@ impl Surfaces {
             };
             let clip = content.is_control().then(|| {
                 let clip = plain_view(rect(Rect::new(0., 0., 1., 1.)));
-                // SAFETY: UIView's setter and method, on the main thread.
+                // SAFETY: UIView's method, on the main thread.
                 unsafe {
-                    let _: () = msg_send![&*clip, setClipsToBounds: true];
                     let _: () = msg_send![&*clip, addSubview: &*view];
                 }
                 clip
@@ -372,6 +431,7 @@ impl Surfaces {
                 style: None,
                 parent: None,
                 slot: 0,
+                cut: None,
                 frame: None,
                 alpha: 1.,
                 hidden: false,
@@ -492,8 +552,25 @@ impl Surfaces {
             }
         }
         if let (Some(clip), Some(visible)) = (&mounted.clip, visible) {
+            // What cuts it, not its own box: its shadow shows past that.
+            let visible = placement
+                .clip
+                .and_then(|cut| cut.intersection(visible.union(placement.frame)))
+                .unwrap_or(visible);
             // A control shows what clips leave of it, as an image would.
-            if mounted.frame != Some(placement.frame) {
+            // Cut only where something cuts it: pressed glass grows past its box.
+            let round = placement.rounded.first();
+            let cut = placement.clip.is_some() || round.is_some();
+            let moved_cut = mounted.cut != Some((cut, visible));
+            if moved_cut {
+                mounted.cut = Some((cut, visible));
+                // SAFETY: UIView's setter, on the main thread.
+                unsafe {
+                    let _: () = msg_send![&**clip, setClipsToBounds: cut];
+                }
+                set_rounded_mask(clip, round, visible);
+            }
+            if mounted.frame != Some(placement.frame) || moved_cut {
                 mounted.frame = Some(placement.frame);
                 let inside = Rect::new(
                     placement.frame.x - visible.x,
@@ -507,6 +584,8 @@ impl Surfaces {
                     let _: () = msg_send![&*mounted.view, setFrame: rect(inside)];
                 }
             }
+        // Glass is whole or hidden: the system's ignores masks and clips (tried:
+        // layer masks and mask views), and a wrapper dims its box.
         } else if mounted.clip.is_none() && mounted.frame != Some(placement.frame) {
             mounted.frame = Some(placement.frame);
             let frame = Rect::new(

@@ -49,6 +49,18 @@ local DetailPage = ui.component(function(props: { nav: any, title: string })
 	return Detail(props.nav, props.title)
 end)
 
+local PAGE = [[<html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="font:-apple-system-body;margin:20px"><h1>A real web page</h1>
+<p>WKWebView, in a zgx box with rounded corners. It scrolls on its own, inside the zgx page.</p>
+<div style="height:1400px;border-radius:16px;background:linear-gradient(#fdb,#bdf)"></div></body></html>]]
+local WebPage = ui.component(function(props: { nav: any })
+	return ios.page {
+		title = "Web",
+		nav = props.nav,
+		ui.webview { html = PAGE, mx = 20, h = 520, rounded = 26 },
+	}
+end)
+
 -- Whether a row answers what is typed in the search field.
 local function unmatched(title: string)
 	return function()
@@ -156,6 +168,17 @@ local function SettingsPage(nav: any)
 			},
 		},
 		ios.section {
+			ios.row {
+				icon = "safari",
+				tint = "$ios.blue",
+				title = "Web page",
+				hidden = unmatched("Web page"),
+				on_click = function()
+					nav.push(function(inner: any)
+						return WebPage { nav = inner }
+					end)
+				end,
+			},
 			ios.row {
 				icon = "gear",
 				tint = "$ios.gray",
