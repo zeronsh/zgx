@@ -2615,9 +2615,14 @@ impl Host {
         {
             self.recover_renderer();
         }
+        #[cfg(target_os = "ios")]
+        let began = std::time::Instant::now();
         let drawn = self.draw_frame();
         #[cfg(target_os = "ios")]
-        crate::ios_scroll::frame_done();
+        {
+            crate::ios_scroll::frame_done();
+            crate::ios_refresh::note_draw(began);
+        }
         match drawn {
             Err(error)
                 if error

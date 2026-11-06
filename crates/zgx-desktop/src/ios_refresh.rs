@@ -65,6 +65,7 @@ thread_local! {
     static LINK: OnceCell<Option<Retained<AnyObject>>> = const { OnceCell::new() };
     static LAST: Cell<Instant> = Cell::new(Instant::now());
     static RUNNING: Cell<bool> = const { Cell::new(false) };
+    static DRAWS: Cell<Option<(Instant, Duration)>> = const { Cell::new(None) };
     /// The gaps between drawn frames, while `record_gaps` asked for them.
     static GAPS: RefCell<Option<Vec<f32>>> = const { RefCell::new(None) };
 }
@@ -93,6 +94,30 @@ fn make_link(mtm: MainThreadMarker) -> Retained<AnyObject> {
         let run_loop: Retained<AnyObject> = msg_send![class!(NSRunLoop), mainRunLoop];
         let _: () = msg_send![&*link, addToRunLoop: &*run_loop, forMode: NSRunLoopCommonModes];
         link
+    }
+}
+
+/// Gaps this long while frames follow each other go in the gesture log, for
+/// what a phone in someone's hand does: `(this draw, the last)` says whether the
+/// time went in drawing, or before it.
+const LONG_GAP: Duration = Duration::from_millis(20);
+
+/// A pass of drawing that began at `began` is over.
+pub(crate) fn note_draw(began: Instant) {
+    let took = began.elapsed();
+    let (last_began, last_took) = DRAWS
+        .with(|draws| draws.replace(Some((began, took))))
+        .unzip();
+    if let (Some(last_began), Some(last_took)) = (last_began, last_took) {
+        let gap = began.duration_since(last_began);
+        if gap >= LONG_GAP && gap < LINGER {
+            crate::ios_gestures::log(&format!(
+                "long gap {:.1} ms: this draw {:.1}, last {:.1}",
+                gap.as_secs_f64() * 1000.,
+                took.as_secs_f64() * 1000.,
+                last_took.as_secs_f64() * 1000.,
+            ));
+        }
     }
 }
 

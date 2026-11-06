@@ -16,6 +16,10 @@ unsafe extern "C" {
     fn UIAccessibilityIsReduceTransparencyEnabled() -> bool;
     fn UIAccessibilityDarkerSystemColorsEnabled() -> bool;
     fn UIAccessibilityIsBoldTextEnabled() -> bool;
+    fn UIAccessibilityShouldDifferentiateWithoutColor() -> bool;
+    fn UIAccessibilityIsInvertColorsEnabled() -> bool;
+    static UIAccessibilityShouldDifferentiateWithoutColorDidChangeNotification: *const AnyObject;
+    static UIAccessibilityInvertColorsStatusDidChangeNotification: *const AnyObject;
     static UIAccessibilityReduceMotionStatusDidChangeNotification: *const AnyObject;
     static UIAccessibilityReduceTransparencyStatusDidChangeNotification: *const AnyObject;
     static UIAccessibilityDarkerSystemColorsStatusDidChangeNotification: *const AnyObject;
@@ -36,6 +40,8 @@ pub(crate) fn preferences() -> SystemPreferences {
             reduced_motion: UIAccessibilityIsReduceMotionEnabled(),
             increased_contrast: UIAccessibilityDarkerSystemColorsEnabled(),
             reduced_transparency: UIAccessibilityIsReduceTransparencyEnabled(),
+            differentiate_without_color: UIAccessibilityShouldDifferentiateWithoutColor(),
+            inverted_colors: UIAccessibilityIsInvertColorsEnabled(),
         }
     }
 }
@@ -285,6 +291,8 @@ pub(crate) fn options_changed() -> bool {
                 UIAccessibilityReduceTransparencyStatusDidChangeNotification,
                 UIAccessibilityDarkerSystemColorsStatusDidChangeNotification,
                 UIAccessibilityBoldTextStatusDidChangeNotification,
+                UIAccessibilityShouldDifferentiateWithoutColorDidChangeNotification,
+                UIAccessibilityInvertColorsStatusDidChangeNotification,
                 UIContentSizeCategoryDidChangeNotification,
             ] {
                 let observer: Retained<AnyObject> = msg_send![&*center,

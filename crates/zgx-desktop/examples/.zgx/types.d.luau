@@ -21912,6 +21912,10 @@ declare ui: {
 		reduced_motion: ReadOnlyState<boolean>,
 		more_contrast: ReadOnlyState<boolean>,
 		reduced_transparency: ReadOnlyState<boolean>,
+		-- Meaning shouldn't rest on colour alone: show a shape or a word with it.
+		without_color: ReadOnlyState<boolean>,
+		-- The system inverts the display's colours: a photo becomes its negative.
+		inverted_colors: ReadOnlyState<boolean>,
 	},
 	-- The modifier keys held now, each `:get()` tracked: a modifier alone
 	-- too (`meta` is Command on macOS, Windows or Super elsewhere), as for

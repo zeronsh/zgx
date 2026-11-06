@@ -388,7 +388,9 @@ function ios.page(props)
 				return safe:get().top + 50
 			end,
 			pointer_events = false,
-			opacity = collapsed,
+			-- Eased, as a bar's title fades: a page raised for the keyboard
+			-- arrives at its offset all at once.
+			opacity = ui.tween(ui.computed(collapsed), { duration = 150 }),
 			ui.row {
 				absolute = true,
 				left = 0,

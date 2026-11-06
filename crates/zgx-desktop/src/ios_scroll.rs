@@ -274,6 +274,16 @@ unsafe fn keyboard_began(state: &State) -> f64 {
     }
 }
 
+/// `plain`, the place for each place of the keyboard's edge, with its start eased
+/// (`keyboard_rise`), for a keyboard going between `start` and `end`.
+fn eased(plain: impl Fn(f64) -> f32, start: f64, end: f64) -> impl Fn(f64) -> f32 {
+    let (top, bottom) = (start.min(end), start.max(end));
+    let rest = plain(bottom);
+    let total = bottom - top;
+    let contact = total - f64::from(plain(top) - rest);
+    move |edge| rest + zgx::native_control::keyboard_rise(bottom - edge, contact, total) as f32
+}
+
 fn page_views() -> Vec<Retained<AnyObject>> {
     crate::native_host::ios::held_view().into_iter().collect()
 }
@@ -361,10 +371,16 @@ fn glue_bar(state: &State, spring: KeyboardSpring, end: f64) {
     }
     // Lifted the less of the two: it is the layer that makes up the rest.
     let drawn = first.min(last);
+    let bottom = bar.bottom;
+    let up = eased(
+        move |edge| (f64::from(bottom + BAR_GAP) - edge).max(0.) as f32,
+        end + spring.from,
+        end,
+    );
     let values: Vec<f64> = spring
         .remaining()
         .into_iter()
-        .map(|left| f64::from(drawn - bar.up_for(end + spring.from * left)))
+        .map(|left| f64::from(drawn - up(end + spring.from * left)))
         .chain(std::iter::once(f64::from(drawn - last)))
         .collect();
     let duration = spring.duration * (values.len() as f64 - 1.) / (values.len() as f64 - 2.);
@@ -455,6 +471,7 @@ fn glue_to_keyboard(state: &State) {
     // Drawn with the page the lower of the two: what the move uncovers is then
     // below the content drawn, behind the keyboard.
     let drawn = first.min(last);
+    let page = eased(page, start, end);
     let values: Vec<f64> = spring
         .remaining()
         .into_iter()
@@ -611,8 +628,9 @@ fn keyboard_frame(state: &State, link: &AnyObject) {
         crate::ios_gestures::log(&format!("bar gap {:.1} edge {edge:.1}", edge - bottom));
     }
     let glued = state.glue.borrow().is_some();
-    if glued {
-        crate::ios_gestures::log_follow_edge(edge, edge, 0.);
+    if let Some(glue) = &*state.glue.borrow() {
+        let shown = f64::from(glue.drawn) - shown_translation(&page_views());
+        crate::ios_gestures::log_follow_edge(edge, edge, shown);
     }
     let lock = state.lock.borrow();
     match &*lock {

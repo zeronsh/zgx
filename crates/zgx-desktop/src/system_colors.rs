@@ -329,6 +329,7 @@ fn preferences() -> SystemPreferences {
             reduced_motion: workspace.accessibilityDisplayShouldReduceMotion(),
             increased_contrast: workspace.accessibilityDisplayShouldIncreaseContrast(),
             reduced_transparency: workspace.accessibilityDisplayShouldReduceTransparency(),
+            ..Default::default()
         }
     }
     #[cfg(windows)]
@@ -337,6 +338,7 @@ fn preferences() -> SystemPreferences {
             reduced_motion: !windows_motion().is_empty(),
             increased_contrast: windows_contrast().is_some(),
             reduced_transparency: windows_transparency_off(),
+            ..Default::default()
         }
     }
     #[cfg(target_os = "linux")]
@@ -347,6 +349,7 @@ fn preferences() -> SystemPreferences {
             increased_contrast: settings.contrast,
             // On X11 with no compositor, nothing shows through a window.
             reduced_transparency: !crate::x11_settings::composited(),
+            ..Default::default()
         }
     }
     #[cfg(target_os = "ios")]

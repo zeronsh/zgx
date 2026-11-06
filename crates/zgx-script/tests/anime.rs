@@ -1538,6 +1538,7 @@ mod baked {
                 reduced_motion: true,
                 increased_contrast: false,
                 reduced_transparency: false,
+                ..Default::default()
             });
         h.run_ms(50.);
         assert!(h.baked().is_none());

@@ -245,6 +245,25 @@ pub fn request_edge_effect(node: crate::scene::NodeId, effect: EdgeEffect) {
     PENDING_EDGES.with(|pending| pending.borrow_mut().push((node, effect)));
     crate::native_view::wake();
 }
+/// How far something resting `contact` above a keyboard rises when the keyboard
+/// has come `travel` of its `total` way up: with it from a little before they
+/// touch, at the keyboard's speed once they have. The keyboard is near its fastest
+/// by then: started there at a stroke, the thing would go from still to that speed
+/// in a frame. Quadratic, so its speed grows smoothly from none to the keyboard's;
+/// never under the plain `travel - contact`, so the keyboard never covers it.
+pub fn keyboard_rise(travel: f64, contact: f64, total: f64) -> f64 {
+    /// Half the way the blend takes, at most.
+    const EASE: f64 = 120.;
+    let ease = EASE.min(contact).min(total - contact).max(0.);
+    let past = travel - contact;
+    if past <= -ease {
+        0.
+    } else if past >= ease {
+        past
+    } else {
+        (past + ease) * (past + ease) / (4. * ease)
+    }
+}
 /// A bar that goes with the keyboard (`ui.keyboard_bar`).
 #[derive(Clone)]
 pub struct KeyboardBar {
@@ -446,4 +465,34 @@ pub fn set_system_ui(system: Rc<dyn SystemUi>) {
 /// The host's, if it has one.
 pub fn system_ui() -> Option<Rc<dyn SystemUi>> {
     SYSTEM_UI.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+mod keyboard_rise_tests {
+    use super::keyboard_rise;
+
+    #[test]
+    fn the_speed_grows_with_no_step_and_ends_riding_the_keyboard() {
+        let (contact, total) = (116., 335.);
+        assert_eq!(keyboard_rise(0., contact, total), 0.);
+        assert_eq!(keyboard_rise(total, contact, total), total - contact);
+        let mut last = (0., 0.);
+        for step in 1..=335 {
+            let travel = f64::from(step);
+            let rise = keyboard_rise(travel, contact, total);
+            let speed = rise - last.0;
+            assert!(speed >= last.1 - 1e-9, "never slows against the keyboard");
+            assert!(speed - last.1 < 0.01, "no step in speed at {travel}");
+            assert!(speed <= 1. + 1e-9, "never ahead of the keyboard");
+            assert!(rise >= travel - contact - 1e-9, "never covered at {travel}");
+            last = (rise, speed);
+        }
+    }
+
+    #[test]
+    fn what_the_keyboard_already_touches_rides_it_from_the_start() {
+        assert_eq!(keyboard_rise(40., 0., 335.), 40.);
+        // Little to rise: the blend fits in it, and it still ends in place.
+        assert_eq!(keyboard_rise(335., 325., 335.), 10.);
+    }
 }
