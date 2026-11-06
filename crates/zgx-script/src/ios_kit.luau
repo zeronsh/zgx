@@ -12,6 +12,14 @@ end
 -- Runs `state` to `target` as a critically damped spring from where it is, a
 -- frame at a time, then `done`. Only while something moves.
 local function settle(state, target, done)
+	-- Reduce Motion: there at once.
+	if ui.prefers.reduced_motion then
+		state:set(target)
+		if done then
+			done()
+		end
+		return function() end
+	end
 	local velocity = 0
 	local stop
 	local spring = 320
@@ -123,15 +131,32 @@ function ios.row(props)
 			end
 			else props.on_click,
 		props.icon and ios.tile(props.icon, props.tint or "$ios.blue") or nil,
-		ui.text {
-			props.title,
+		-- The detail beside the title, or under it where the text is too large
+		-- for both, as a Settings row does.
+		ui.row {
 			ml = if props.icon then 16 else 0,
 			grow = 1,
-			text_size = "$font.size.md",
-			color = props.color or "$text.primary",
+			shrink = 1,
+			min_w = 0,
+			flex_wrap = true,
+			items = "center",
+			justify = "between",
+			ui.text {
+				props.title,
+				wrap = true,
+				min_w = 0,
+				text_size = "$font.size.md",
+				color = props.color or "$text.primary",
+			},
+			props.detail and ui.text {
+				props.detail,
+				wrap = true,
+				min_w = 0,
+				text_size = "$font.size.md",
+				color = "$text.secondary",
+				mr = 8,
+			} or nil,
 		},
-		props.detail and ui.text { props.detail, text_size = "$font.size.md", color = "$text.secondary", mr = 8 }
-			or nil,
 		toggle and ui.native_switch { value = toggle, label = props.title } or nil,
 		(props.chevron ~= false and not toggle)
 				and ui.symbol { name = "chevron.forward", size = 14, weight = 600, color = "$text.tertiary" }
@@ -151,7 +176,7 @@ end
 function ios.search(props)
 	return ui.glass {
 		mx = props.mx or 16,
-		h = 48,
+		min_h = 48,
 		radius = 24,
 		interactive = true,
 		direction = "row",
@@ -370,6 +395,14 @@ ios.stack = ui.component(function(props)
 	end
 	local start = 0
 	local tracking = false
+	-- VoiceOver's two-finger scrub back. `active`: whether this stack shows.
+	ui.on_escape(function()
+		if #pages:get() < 2 or (props.active and not props.active()) then
+			return false
+		end
+		nav.pop()
+		return true
+	end)
 	return ui.div {
 		w = "100%",
 		h = "100%",

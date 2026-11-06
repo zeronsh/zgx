@@ -290,6 +290,9 @@ local function page(index: number)
 		end,
 		ios.stack {
 			root = if index == 1 then SettingsPage elseif index == 2 then TextPage else GlassPage,
+			active = function()
+				return tab:get() == index
+			end,
 		},
 	}
 end

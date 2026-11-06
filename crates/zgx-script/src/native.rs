@@ -113,6 +113,7 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
             "haptic",
             "alert",
             "system_menu",
+            "on_escape",
             "action_sheet",
         ],
         |lua, ui| {
@@ -136,6 +137,15 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
                 })?,
             )?;
             ui.set("system_menu", lua.create_function(system_menu)?)?;
+            ui.set(
+                "on_escape",
+                lua.create_function(|_, handler: Function| {
+                    zgx::native_control::on_escape(std::rc::Rc::new(move || {
+                        handler.call::<bool>(()).unwrap_or(false)
+                    }));
+                    Ok(())
+                })?,
+            )?;
             ui.set(
                 "native_tabs",
                 lua.create_function(|lua, table: Table| {

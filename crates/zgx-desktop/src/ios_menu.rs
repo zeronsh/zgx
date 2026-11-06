@@ -197,6 +197,27 @@ pub(crate) fn install(window: &std::sync::Arc<winit::window::Window>, scene: Rc<
     else {
         return;
     };
+    // VoiceOver's two-finger scrub reaches the view at the top of its containers.
+    extern "C-unwind" fn perform_escape(
+        _: &AnyObject,
+        _: objc2::runtime::Sel,
+    ) -> objc2::runtime::Bool {
+        objc2::runtime::Bool::new(zgx::native_control::escape())
+    }
+    // SAFETY: a method of this signature, on a class whose instances UIKit calls
+    // it on; it is the only one of the name there.
+    unsafe {
+        let imp: objc2::runtime::Imp = std::mem::transmute(
+            perform_escape
+                as extern "C-unwind" fn(&AnyObject, objc2::runtime::Sel) -> objc2::runtime::Bool,
+        );
+        objc2::ffi::class_addMethod(
+            std::ptr::from_ref(root.class()).cast_mut(),
+            objc2::sel!(accessibilityPerformEscape),
+            imp,
+            c"B@:".as_ptr(),
+        );
+    }
     let redraw = window.clone();
     let delegate = Delegate::alloc(mtm).set_ivars(Rc::new(State {
         scene,

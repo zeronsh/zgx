@@ -200,6 +200,20 @@ pub enum AlertButtonStyle {
     /// What destroys something: the system marks it.
     Destructive,
 }
+thread_local! {
+    static ESCAPES: std::cell::RefCell<Vec<Rc<dyn Fn() -> bool>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// What "go back" does: VoiceOver's two-finger scrub (the host calls [`escape`]).
+/// `handler` answers whether it went back.
+pub fn on_escape(handler: Rc<dyn Fn() -> bool>) {
+    ESCAPES.with(|escapes| escapes.borrow_mut().push(handler));
+}
+/// Go back, the latest handler first; whether one did.
+pub fn escape() -> bool {
+    let handlers = ESCAPES.with(|escapes| escapes.borrow().clone());
+    handlers.iter().rev().any(|handler| handler())
+}
+
 /// An entry of a node's system menu (`set_system_menu`).
 pub struct MenuAction {
     /// What it says.

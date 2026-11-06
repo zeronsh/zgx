@@ -3587,6 +3587,8 @@ declare ui: {
 	-- A tap felt in the hand (iOS): "light", "medium", "heavy", "soft", "rigid",
 	-- "success", "warning", "error" or "selection".
 	haptic: (kind: string) -> (),
+	-- What VoiceOver's two-finger scrub does: answers whether it went back.
+	on_escape: (handler: () -> boolean) -> (),
 	-- A long press on the element shows these, the system's way (iOS).
 	system_menu: (element: Element, build: () -> { SystemMenuItem }) -> (),
 	-- The system's alert, or action sheet (iOS). `on_choose` hears which button, from 1.
