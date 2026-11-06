@@ -3867,6 +3867,11 @@ impl Host {
             );
             self.text_input = crate::ios_text::TextInput::new(window.clone());
             crate::ios_menu::install(&window, self.context.ui.scene.clone());
+            crate::ios_gestures::install(
+                &window,
+                self.context.ui.scene.clone(),
+                self.native_scroll.as_ref().map(|s| s.pan()),
+            );
             // Listening before the first keyboard comes.
             let _ = crate::ios_system::keyboard_height();
             crate::ios_system::dump_accessibility_later(&window);

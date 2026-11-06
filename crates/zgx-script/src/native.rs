@@ -59,6 +59,46 @@ fn present_alert(table: Table, style: AlertStyle) -> mlua::Result<()> {
     Ok(())
 }
 
+/// `ui.native_pan { edge = "left" | element = …, can_begin, on_pan }`: a pan the
+/// platform recognizes. `on_pan` hears `{ phase, x, y, vx, vy }`.
+fn native_pan(lua: &Lua, table: Table) -> mlua::Result<()> {
+    use zgx::native_control::{PanEvent, PanPhase, PanTarget, add_pan};
+    let node = match table.get::<Option<mlua::UserDataRef<crate::element::ElementUd>>>("element")? {
+        Some(element) => match element.0.read(|_, id| id) {
+            Some(node) => Some(node),
+            None => return Ok(()),
+        },
+        None => None,
+    };
+    let can_begin: Option<Function> = table.get("can_begin")?;
+    let on_pan: Function = table.get("on_pan")?;
+    let told = lua.create_table()?;
+    add_pan(PanTarget {
+        node,
+        can_begin: can_begin.map(|can| {
+            std::rc::Rc::new(move || can.call::<bool>(()).unwrap_or(false))
+                as std::rc::Rc<dyn Fn() -> bool>
+        }),
+        on_pan: std::rc::Rc::new(move |event: PanEvent| {
+            let phase = match event.phase {
+                PanPhase::Began => "began",
+                PanPhase::Changed => "changed",
+                PanPhase::Ended => "ended",
+                PanPhase::Cancelled => "cancelled",
+            };
+            let _ = (|| -> mlua::Result<()> {
+                told.raw_set("phase", phase)?;
+                told.raw_set("x", event.x)?;
+                told.raw_set("y", event.y)?;
+                told.raw_set("vx", event.vx)?;
+                told.raw_set("vy", event.vy)?;
+                on_pan.call::<()>(told.clone())
+            })();
+        }),
+    });
+    Ok(())
+}
+
 /// `ui.system_menu(element, build)`: `build` gives `{ title, symbol, style, on_choose }`s.
 fn system_menu(
     _: &Lua,
@@ -114,6 +154,8 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
             "alert",
             "system_menu",
             "on_escape",
+            "native_pan",
+            "gesture_log",
             "share",
             "action_sheet",
         ],
@@ -138,6 +180,16 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
                 })?,
             )?;
             ui.set("system_menu", lua.create_function(system_menu)?)?;
+            ui.set("native_pan", lua.create_function(native_pan)?)?;
+            ui.set(
+                "gesture_log",
+                lua.create_function(|_, line: String| {
+                    if let Some(system) = zgx::native_control::system_ui() {
+                        system.log_gesture(&line);
+                    }
+                    Ok(())
+                })?,
+            )?;
             ui.set(
                 "share",
                 lua.create_function(|_, table: Table| {

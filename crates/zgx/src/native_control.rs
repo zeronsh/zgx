@@ -214,6 +214,54 @@ pub fn escape() -> bool {
     handlers.iter().rev().any(|handler| handler())
 }
 
+/// Where a pan the platform recognizes is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanPhase {
+    /// It was recognized.
+    Began,
+    /// The finger moved.
+    Changed,
+    /// The finger lifted.
+    Ended,
+    /// The platform took it away: what it moved goes back.
+    Cancelled,
+}
+/// A pan's state: how far from where it began, and how fast, in points.
+#[derive(Clone, Copy, Debug)]
+pub struct PanEvent {
+    /// Where it is.
+    pub phase: PanPhase,
+    /// Across, from where it began.
+    pub x: f32,
+    /// Down, from where it began.
+    pub y: f32,
+    /// Across, in points a second.
+    pub vx: f32,
+    /// Down, in points a second.
+    pub vy: f32,
+}
+/// A pan the platform recognizes, which an app only draws (`add_pan`).
+#[derive(Clone)]
+pub struct PanTarget {
+    /// The node it starts on, or `None` for a swipe from the leading edge.
+    pub node: Option<crate::scene::NodeId>,
+    /// Whether it may start now.
+    pub can_begin: Option<Rc<dyn Fn() -> bool>>,
+    /// Told of each of its states, always to an ending.
+    pub on_pan: Rc<dyn Fn(PanEvent)>,
+}
+thread_local! {
+    static PANS: std::cell::RefCell<Vec<PanTarget>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// Have the platform recognize this pan: the latest added wins where two could.
+pub fn add_pan(target: PanTarget) {
+    PANS.with(|pans| pans.borrow_mut().push(target));
+}
+/// The pans added.
+pub fn pans() -> Vec<PanTarget> {
+    PANS.with(|pans| pans.borrow().clone())
+}
+
 /// An entry of a node's system menu (`set_system_menu`).
 pub struct MenuAction {
     /// What it says.
@@ -275,6 +323,8 @@ pub trait SystemUi {
     /// A tap felt in the hand: `"light"`, `"medium"`, `"heavy"`, `"soft"`,
     /// `"rigid"`, `"success"`, `"warning"`, `"error"` or `"selection"`.
     fn haptic(&self, kind: &str);
+    /// A line in the record of what gestures did, to see what a stuck one did.
+    fn log_gesture(&self, line: &str);
     /// The system's share sheet, for text, an address and files (paths).
     fn share(&self, text: Option<&str>, url: Option<&str>, files: &[String]);
     /// The system's alert or action sheet. `done` hears which button, from 0.

@@ -9,22 +9,32 @@ local function clamp(value, low, high)
 	return math.max(low, math.min(high, value))
 end
 
+-- A navigation controller's decay, measured beside one: remaining distance
+-- falls about 4.3 times in each 83 ms, 99% there at about 0.35 s.
+local STIFFNESS = 600
+-- How far the page under the top one lies back, of the width.
+local PARALLAX = 0.3
+local SETTLE_MOST = 1200
+-- A release this fast decides, wherever the finger is (points a second).
+local FLING = 300
+
 -- Runs `state` to `target` as a critically damped spring from where it is, a
 -- frame at a time, then `done`. Only while something moves.
-local function settle(state, target, done)
+local function settle(state, target, done, speed)
 	-- Reduce Motion: there at once.
-	if ui.prefers.reduced_motion then
+	if ui.prefers.reduced_motion:get() then
 		state:set(target)
 		if done then
 			done()
 		end
 		return function() end
 	end
-	local velocity = 0
+	local velocity = speed or 0
 	local stop
-	local spring = 320
+	local spring = STIFFNESS
 	local damping = 2 * math.sqrt(spring)
-	local last = ui.now()
+	local began = ui.now()
+	local last = began
 	-- As often as an iPhone draws.
 	stop = ui.every(8, function()
 		local at = state:get()
@@ -35,11 +45,13 @@ local function settle(state, target, done)
 		local force = spring * (target - at) - damping * velocity
 		velocity += force * step
 		at += velocity * step
-		if math.abs(at - target) < 0.5 and math.abs(velocity) < 5 then
+		-- Whatever the timers did, it gets there.
+		if (math.abs(at - target) < 0.5 and math.abs(velocity) < 5) or now - began > SETTLE_MOST then
 			state:set(target)
 			if stop then
 				stop()
 			end
+			ui.gesture_log("settled at " .. target)
 			if done then
 				done()
 			end
@@ -371,6 +383,14 @@ ios.stack = ui.component(function(props)
 	function nav.depth()
 		return #pages:get()
 	end
+	-- The spring running: a new gesture or page takes over from it.
+	local running
+	local function run(state, target, done, speed)
+		if running then
+			running()
+		end
+		running = settle(state, target, done, speed)
+	end
 	function nav.push(build)
 		next_id += 1
 		builders[next_id] = build
@@ -378,23 +398,56 @@ ios.stack = ui.component(function(props)
 		table.insert(list, next_id)
 		entering:set(width)
 		pages:set(list)
-		ui.haptic("light")
-		settle(entering, 0)
+		run(entering, 0)
 	end
-	function nav.pop()
-		local list = pages:get()
-		if #list < 2 then
-			return
-		end
-		settle(drag, width, function()
+	local function finish_pop(speed)
+		run(drag, width, function()
 			local kept = table.clone(pages:get())
 			builders[table.remove(kept)] = nil
 			pages:set(kept)
 			drag:set(0)
-		end)
+		end, speed)
+	end
+	function nav.pop()
+		if #pages:get() < 2 then
+			return
+		end
+		finish_pop(0)
 	end
 	local start = 0
-	local tracking = false
+	-- iOS recognizes the swipe, and tells every ending; the page only follows.
+	local function shows()
+		return not props.active or props.active()
+	end
+	ui.native_pan {
+		edge = "left",
+		can_begin = function()
+			return #pages:get() > 1 and shows()
+		end,
+		on_pan = function(e)
+			if e.phase == "began" then
+				if running then
+					running()
+					running = nil
+				end
+				if entering:get() ~= 0 then
+					entering:set(0)
+				end
+				start = drag:get()
+			elseif e.phase == "changed" then
+				drag:set(clamp(start + e.x, 0, width))
+			elseif e.phase == "ended" then
+				local at = drag:get()
+				if e.vx > FLING or (at > width / 2 and e.vx > -FLING) then
+					finish_pop(e.vx)
+				else
+					run(drag, 0, nil, e.vx)
+				end
+			else
+				run(drag, 0, nil, 0)
+			end
+		end,
+	}
 	-- VoiceOver's two-finger scrub back. `active`: whether this stack shows.
 	ui.on_escape(function()
 		if #pages:get() < 2 or (props.active and not props.active()) then
@@ -420,18 +473,17 @@ ios.stack = ui.component(function(props)
 				top = 0,
 				w = "100%",
 				h = "100%",
-				-- What lies under the top page moves a third as far.
+				-- What lies under the top page moves as a navigation controller's does.
 				x = function()
 					local depth = #pages:get()
 					local moved = drag:get() + entering:get()
 					if index == depth then
 						return moved
 					elseif index == depth - 1 then
-						return (moved - width) / 3
+						return (moved - width) * PARALLAX
 					end
-					return -width / 3
+					return -width * PARALLAX
 				end,
-				shadow = { x = -4, blur = 16, color = "#00000020" },
 				-- Quite covered once it settles: it shows nothing, and asks no
 				-- plane of its own.
 				hidden = function()
@@ -442,38 +494,6 @@ ios.stack = ui.component(function(props)
 				Page { build = builders[id], nav = nav },
 			}
 		end, { display = "contents" }),
-		-- The edge a swipe back starts from.
-		ui.div {
-			absolute = true,
-			left = 0,
-			top = 0,
-			bottom = 0,
-			w = 20,
-			hidden = function()
-				return #pages:get() < 2
-			end,
-			aria_hidden = true,
-			on_press = function(event)
-				start = event.x
-				tracking = true
-			end,
-			on_pointer_move = function(event)
-				if tracking then
-					drag:set(math.max(0, event.x - start))
-				end
-			end,
-			on_release = function()
-				if not tracking then
-					return
-				end
-				tracking = false
-				if drag:get() > width * 0.35 then
-					nav.pop()
-				else
-					settle(drag, 0)
-				end
-			end,
-		},
 	}
 end)
 
@@ -489,12 +509,23 @@ ios.sheet = ui.component(function(props)
 	local window = ui.window.size
 	local detent = 1
 	local grabbed = 0
-	local start = 0
 	local function height()
 		return window:get().height
 	end
 	local function target(index)
 		return height() * detents[index] - (if detents[index] >= 1 then safe:get().top + 8 else 0)
+	end
+	local running
+	local function run(state, to, done, speed)
+		if running then
+			running()
+		end
+		running = settle(state, to, done, speed)
+	end
+	local function dismiss(speed)
+		run(rise, 0, function()
+			open:set(false)
+		end, if type(speed) == "number" then speed else 0)
 	end
 	return ui.show(
 		function()
@@ -508,8 +539,7 @@ ios.sheet = ui.component(function(props)
 			bottom = 0,
 			on_mount = function()
 				detent = 1
-				settle(rise, target(1))
-				ui.haptic("light")
+				run(rise, target(1))
 			end,
 			ui.button {
 				absolute = true,
@@ -526,11 +556,7 @@ ios.sheet = ui.component(function(props)
 				opacity = function()
 					return 0.25 * clamp(rise:get() / target(1), 0, 1)
 				end,
-				on_click = function()
-					settle(rise, 0, function()
-						open:set(false)
-					end)
-				end,
+				on_click = dismiss,
 			},
 			ui.glass {
 				absolute = true,
@@ -543,41 +569,47 @@ ios.sheet = ui.component(function(props)
 				end,
 				role = "dialog",
 				overflow = "hidden",
+				-- iOS recognizes the drag, anywhere on the sheet, and tells every
+				-- ending. Up is more of the sheet, so the speeds are negated.
+				on_mount = function(element)
+					ui.native_pan {
+						element = element,
+						on_pan = function(e)
+							if e.phase == "began" then
+								if running then
+									running()
+									running = nil
+								end
+								grabbed = rise:get()
+							elseif e.phase == "changed" then
+								rise:set(clamp(grabbed - e.y, 0, height()))
+							else
+								local speed = -e.vy
+								-- Where it would come to rest, as UIKit picks a detent.
+								local aim = rise:get() + speed * 0.2
+								if e.phase == "ended" and aim < target(1) * 0.5 then
+									dismiss(speed)
+									return
+								end
+								local nearest, gap = 1, math.huge
+								for index in ipairs(detents) do
+									local distance = math.abs(target(index) - aim)
+									if distance < gap then
+										nearest, gap = index, distance
+									end
+								end
+								detent = nearest
+								run(rise, target(nearest), nil, speed)
+							end
+						end,
+					}
+				end,
 				ui.div {
 					h = 28,
 					items = "center",
 					justify = "center",
 					label = "Sheet handle",
 					role = "button",
-					on_press = function(event)
-						start = event.y
-						grabbed = rise:get()
-					end,
-					on_pointer_move = function(event)
-						if start ~= 0 then
-							rise:set(clamp(grabbed + start - event.y, 0, height()))
-						end
-					end,
-					on_release = function()
-						start = 0
-						local at = rise:get()
-						if at < target(1) * 0.6 then
-							settle(rise, 0, function()
-								open:set(false)
-							end)
-							return
-						end
-						local nearest, gap = 1, math.huge
-						for index in ipairs(detents) do
-							local distance = math.abs(target(index) - at)
-							if distance < gap then
-								nearest, gap = index, distance
-							end
-						end
-						detent = nearest
-						ui.haptic("light")
-						settle(rise, target(nearest))
-					end,
 					ui.div { w = 36, h = 5, rounded = 3, bg = "$text.tertiary" },
 				},
 				props.build(),

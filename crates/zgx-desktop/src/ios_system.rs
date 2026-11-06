@@ -513,6 +513,9 @@ fn dump_element(element: &AnyObject, depth: usize) {
 /// Haptics and alerts, as UIKit does them.
 pub(crate) struct IosSystemUi;
 impl zgx::native_control::SystemUi for IosSystemUi {
+    fn log_gesture(&self, line: &str) {
+        crate::ios_gestures::log(line);
+    }
     fn share(&self, text: Option<&str>, url: Option<&str>, files: &[String]) {
         let Some(controller) = root_controller() else {
             return;

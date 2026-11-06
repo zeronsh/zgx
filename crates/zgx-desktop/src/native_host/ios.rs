@@ -10,6 +10,7 @@
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
     rc::Retained,
+    runtime::AnyClass,
     runtime::{AnyObject, NSObject, NSObjectProtocol},
     sel,
 };
@@ -88,12 +89,45 @@ fn plain_view(frame: CGRect) -> Retained<AnyObject> {
     unsafe { msg_send![msg_send![class!(UIView), alloc], initWithFrame: frame] }
 }
 
+/// A view touches pass through, unless on a view inside it: a host covers the
+/// window, and would take every touch from those under it.
+fn host_class() -> &'static AnyClass {
+    static CLASS: std::sync::OnceLock<&'static AnyClass> = std::sync::OnceLock::new();
+    extern "C-unwind" fn hit_test(
+        this: &AnyObject,
+        _: objc2::runtime::Sel,
+        at: CGPoint,
+        event: *mut AnyObject,
+    ) -> *mut AnyObject {
+        // SAFETY: UIView's own method, UIKit asking on the main thread.
+        let hit: *mut AnyObject =
+            unsafe { msg_send![super(this, class!(UIView)), hitTest: at, withEvent: event] };
+        if std::ptr::eq(hit.cast_const(), this) {
+            std::ptr::null_mut()
+        } else {
+            hit
+        }
+    }
+    CLASS.get_or_init(|| {
+        let mut builder =
+            objc2::runtime::ClassBuilder::new(c"ZgxHostView", class!(UIView)).expect("one class");
+        // SAFETY: the function has the selector's signature.
+        unsafe {
+            builder.add_method(
+                objc2::sel!(hitTest:withEvent:),
+                hit_test as extern "C-unwind" fn(_, _, _, _) -> _,
+            );
+        }
+        builder.register()
+    })
+}
+
 fn passive_view(frame: CGRect) -> Retained<AnyObject> {
     // SAFETY: UIView's initializer and setters, on the main thread (every
     // caller holds `Surfaces`, which is made there).
     unsafe {
         let view: Retained<AnyObject> =
-            msg_send![msg_send![class!(UIView), alloc], initWithFrame: frame];
+            msg_send![msg_send![host_class(), alloc], initWithFrame: frame];
         passive(&view);
         view
     }

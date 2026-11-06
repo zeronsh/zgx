@@ -110,6 +110,24 @@ fn scroller_class() -> &'static AnyClass {
     extern "C-unwind" fn should_begin(this: &AnyObject, _: Sel, pan: &AnyObject) -> Bool {
         // SAFETY: UIScrollView's and UIGestureRecognizer's own methods.
         unsafe {
+            // A page scrolls itself: its finger isn't zgx's to scroll with.
+            let root: Option<Retained<AnyObject>> = msg_send![pan, view];
+            if let Some(root) = root {
+                let at: CGPoint = msg_send![pan, locationInView: &*root];
+                let hit: Option<Retained<AnyObject>> =
+                    msg_send![&*root, hitTest: at, withEvent: std::ptr::null::<AnyObject>()];
+                let mut on = hit;
+                while let Some(view) = on {
+                    if std::ptr::eq(&*view, &*root) {
+                        break;
+                    }
+                    let page: bool = msg_send![&*view, isKindOfClass: class!(WKWebView)];
+                    if page {
+                        return Bool::NO;
+                    }
+                    on = msg_send![&*view, superview];
+                }
+            }
             let moving: bool = msg_send![this, isDecelerating];
             if !moving {
                 let at: CGPoint = msg_send![pan, locationInView: std::ptr::null::<AnyObject>()];
@@ -300,6 +318,11 @@ impl NativeScroller {
                 }
             }
         }
+    }
+    /// Its pan, for what must go before it.
+    pub(crate) fn pan(&self) -> Retained<AnyObject> {
+        // SAFETY: UIScrollView's getter, on the main thread.
+        unsafe { msg_send![&*self.view, panGestureRecognizer] }
     }
     /// Whether a finger began dragging this scroller since it last was asked.
     pub(crate) fn take_drag_began(&self) -> bool {

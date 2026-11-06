@@ -19989,6 +19989,20 @@ export type NativeSwitchProps = {
 	-- What assistive technology calls it.
 	label: string?,
 }
+export type NativePanEvent = {
+	phase: "began" | "changed" | "ended" | "cancelled",
+	x: number,
+	y: number,
+	vx: number,
+	vy: number,
+}
+export type NativePanOptions = {
+	edge: "left"?,
+	element: Element?,
+	can_begin: (() -> boolean)?,
+	on_pan: (e: NativePanEvent) -> (),
+	[any]: any,
+}
 export type SystemMenuItem = {
 	title: string,
 	-- An SF Symbol's name.
@@ -21792,6 +21806,11 @@ declare ui: {
 	-- A tap felt in the hand (iOS): "light", "medium", "heavy", "soft", "rigid",
 	-- "success", "warning", "error" or "selection".
 	haptic: (kind: string) -> (),
+	-- A pan the system recognizes (iOS), which the script only draws: from the
+	-- leading edge, or on an element. `on_pan` always hears an ending.
+	native_pan: (opts: NativePanOptions) -> (),
+	-- A line in the record `Documents/zgx-gesture.log` of what gestures did (iOS).
+	gesture_log: (line: string) -> (),
 	-- The system's share sheet (iOS).
 	share: (opts: { text: string?, url: string?, files: { string }?, [number]: never }) -> (),
 	-- What VoiceOver's two-finger scrub does: answers whether it went back.

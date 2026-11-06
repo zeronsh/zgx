@@ -72,6 +72,8 @@ mod composition;
 mod contain;
 pub mod file_dialog;
 #[cfg(target_os = "ios")]
+mod ios_gestures;
+#[cfg(target_os = "ios")]
 mod ios_menu;
 #[cfg(target_os = "ios")]
 mod ios_metrics;
