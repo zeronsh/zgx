@@ -7,7 +7,7 @@ use objc2::{declare_class, msg_send, msg_send_id, mutability, sel, ClassType, De
 use objc2_foundation::{CGFloat, CGPoint, CGRect, MainThreadMarker, NSObject, NSSet, NSString};
 use objc2_ui_kit::{
     UICoordinateSpace, UIEvent, UIForceTouchCapability, UIGestureRecognizer,
-    UIGestureRecognizerDelegate, UIGestureRecognizerState, UIKeyInput, UIPanGestureRecognizer,
+    UIGestureRecognizerDelegate, UIGestureRecognizerState, UIPanGestureRecognizer,
     UIPinchGestureRecognizer, UIResponder, UIRotationGestureRecognizer, UITapGestureRecognizer,
     UITextInputTraits, UITouch, UITouchPhase, UITouchType, UITraitEnvironment, UIView,
 };
@@ -359,22 +359,9 @@ declare_class!(
     unsafe impl UITextInputTraits for WinitView {
     }
 
-    unsafe impl UIKeyInput for WinitView {
-        #[method(hasText)]
-        fn has_text(&self) -> bool {
-            true
-        }
-
-        #[method(insertText:)]
-        fn insert_text(&self, text: &NSString) {
-            self.handle_insert_text(text)
-        }
-
-        #[method(deleteBackward)]
-        fn delete_backward(&self) {
-            self.handle_delete_backward()
-        }
-    }
+    // zgx: no UIKeyInput. Its own view is the keyboard's (`zgx_desktop`'s
+    // `ios_text`), and with this one claiming input too UIKit gave it the keyboard
+    // when that view let go: the keyboard never went away.
 );
 
 impl WinitView {
@@ -564,6 +551,7 @@ impl WinitView {
         app_state::handle_nonuser_events(mtm, touch_events);
     }
 
+    #[allow(dead_code)]
     fn handle_insert_text(&self, text: &NSString) {
         let window = self.window().unwrap();
         let window_id = RootWindowId(window.id());
@@ -602,6 +590,7 @@ impl WinitView {
         );
     }
 
+    #[allow(dead_code)]
     fn handle_delete_backward(&self) {
         let window = self.window().unwrap();
         let window_id = RootWindowId(window.id());

@@ -1736,6 +1736,12 @@ struct Host {
     /// UIKit's text input (`ios_text`), made with the window.
     #[cfg(target_os = "ios")]
     text_input: Option<crate::ios_text::TextInput>,
+    /// What the keyboard last covered, and the editor it was for.
+    #[cfg(target_os = "ios")]
+    keyboard_seen: (f32, Option<zgx::scene::NodeId>),
+    /// Passes left to try to show the caret above the keyboard.
+    #[cfg(target_os = "ios")]
+    keyboard_reveal: u32,
     /// What had focus before a finger pressed, for a pan to give it back.
     touch_focus: Option<zgx::scene::NodeId>,
     /// The last press was a finger's or a pen's, not a mouse's: an editor
@@ -2016,6 +2022,10 @@ impl Host {
             native_scroll: None,
             #[cfg(target_os = "ios")]
             text_input: None,
+            #[cfg(target_os = "ios")]
+            keyboard_seen: (0., None),
+            #[cfg(target_os = "ios")]
+            keyboard_reveal: 0,
             touch_focus: None,
             #[cfg(windows)]
             touch_last: false,
@@ -5719,6 +5729,61 @@ impl Host {
             {
                 self.context.window_info.keyboard.set(covered);
             }
+            // Dragging a page sends the keyboard away, as Messages' and Settings'
+            // lists do.
+            if self
+                .native_scroll
+                .as_ref()
+                .is_some_and(|s| s.take_drag_began())
+                && covered > 0.
+                && self.context.ui.focused_editor().is_some()
+            {
+                self.touch_focus = None;
+                self.context.ui.input.focus(&self.context.ui.scene, None);
+                // Told now: no event may come to tell it until the drag ends.
+                if let Some(text) = &self.text_input {
+                    text.focus(None);
+                    self.ime_target = None;
+                }
+            }
+            // A keyboard coming, or the focus moving under one, leaves the
+            // caret showing above it, as a text view's scroll view does.
+            let focused = self.context.ui.focused_editor().map(|editor| editor.node);
+            if (covered, focused) != self.keyboard_seen {
+                // Tried over a few passes: the room a page makes for the
+                // keyboard is laid out after it is told of it.
+                if covered > self.keyboard_seen.0 || focused != self.keyboard_seen.1 {
+                    self.keyboard_reveal = KEYBOARD_REVEAL_PASSES;
+                }
+                self.keyboard_seen = (covered, focused);
+            }
+            if self.keyboard_reveal > 0 {
+                self.keyboard_reveal -= 1;
+                if let Some(editor) = self.context.ui.focused_editor()
+                    && covered > 0.
+                {
+                    let (caret, bottom) = {
+                        let scene = self.context.ui.scene.borrow();
+                        let viewport = scene.bounds(scene.root());
+                        (
+                            scene.transformed_bounds(editor.caret),
+                            viewport.y + viewport.height - covered,
+                        )
+                    };
+                    const ROOM: f32 = 16.;
+                    if caret.y + caret.height + ROOM > bottom {
+                        let shown = zgx::scene::Rect::new(
+                            caret.x,
+                            caret.y,
+                            caret.width,
+                            caret.height + ROOM + covered,
+                        );
+                        self.context.ui.scroll_rect_into_view(editor.node, shown);
+                    } else {
+                        self.keyboard_reveal = 0;
+                    }
+                }
+            }
             // UIKit's text gestures lie over the focused editor.
             if let (Some(text), Some(editor)) = (&self.text_input, self.context.ui.focused_editor())
             {
@@ -8264,6 +8329,8 @@ fn is_key_window(window: &winit::window::Window) -> bool {
     view.window().is_some_and(|window| window.isKeyWindow())
 }
 
+#[cfg(target_os = "ios")]
+const KEYBOARD_REVEAL_PASSES: u32 = 12;
 static FIRST_RENDER: std::sync::Once = std::sync::Once::new();
 static FIRST_PRESENT: std::sync::Once = std::sync::Once::new();
 /// How long after the event loop starts the menu bar is made whether or not

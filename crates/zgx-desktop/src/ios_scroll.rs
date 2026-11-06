@@ -33,6 +33,8 @@ struct State {
     /// Its positions are ours being set, not UIKit's motion.
     configuring: std::cell::Cell<bool>,
     window: Arc<winit::window::Window>,
+    /// A finger began dragging (`take_drag_began`).
+    drag_began: std::cell::Cell<bool>,
 }
 
 define_class!(
@@ -57,6 +59,24 @@ define_class!(
             driver.drive(if horizontal { at.x } else { at.y } as f32);
             if let Some(metrics) = driver.metrics() {
                 (state.stretched)(metrics.stretch);
+            }
+            state.window.request_redraw();
+        }
+        #[unsafe(method(scrollViewWillBeginDragging:))]
+        fn will_begin_dragging(&self, view: &AnyObject) {
+            let state = self.ivars();
+            state.drag_began.set(true);
+            // At once, under the finger: the host hears of the drag only as it
+            // ends, its loop not turning through a scroller's motion.
+            if crate::ios_system::keyboard_height() > 0. {
+                // SAFETY: UIView's getter and method, UIKit calling on the main
+                // thread.
+                unsafe {
+                    let parent: Option<Retained<AnyObject>> = msg_send![view, superview];
+                    if let Some(parent) = parent {
+                        let _: Bool = msg_send![&*parent, endEditing: true];
+                    }
+                }
             }
             state.window.request_redraw();
         }
@@ -196,6 +216,7 @@ impl NativeScroller {
             driver: RefCell::default(),
             top: RefCell::new(Box::new(top)),
             configuring: Default::default(),
+            drag_began: std::cell::Cell::new(false),
             window: window.clone(),
         });
         CURRENT.with(|current| *current.borrow_mut() = Some(state.clone()));
@@ -279,6 +300,10 @@ impl NativeScroller {
                 }
             }
         }
+    }
+    /// Whether a finger began dragging this scroller since it last was asked.
+    pub(crate) fn take_drag_began(&self) -> bool {
+        self.state.drag_began.take()
     }
     /// Whether UIKit tracks scrolling for this finger: zgx offers it no pan.
     pub(crate) fn tracks(&self) -> bool {

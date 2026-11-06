@@ -99,6 +99,7 @@ function ios.row(props)
 	local toggle = props.toggle
 	return ui.button {
 		min_h = 60,
+		hidden = props.hidden,
 		p = 0,
 		py = 8,
 		pl = 16,
@@ -200,7 +201,8 @@ function ios.page(props)
 					return safe:get().top + 44
 				end,
 				pb = function()
-					return safe:get().bottom + 90
+					-- Room for what the keyboard covers, to scroll a field above it.
+					return math.max(safe:get().bottom + 90, ui.window.keyboard:get() + 24)
 				end,
 				pl = function()
 					return safe:get().left

@@ -8,6 +8,7 @@ local query = ui.state("query", "")
 local sheet_open = ui.state("sheet_open", false)
 local refreshed = ui.state("refreshed", 0)
 local note = ui.state("note", "")
+local lower = ui.state("lower", "")
 
 local function Detail(nav: any, title: string)
 	local enabled = ui.use_state(true)
@@ -48,6 +49,14 @@ local DetailPage = ui.component(function(props: { nav: any, title: string })
 	return Detail(props.nav, props.title)
 end)
 
+-- Whether a row answers what is typed in the search field.
+local function unmatched(title: string)
+	return function()
+		local typed = string.lower(query:get())
+		return typed ~= "" and string.find(string.lower(title), typed, 1, true) == nil
+	end
+end
+
 local function SettingsPage(nav: any)
 	local function open(title: string)
 		return function()
@@ -68,11 +77,18 @@ local function SettingsPage(nav: any)
 		ios.search { value = query, mx = 20 },
 		ui.div { h = 16 },
 		ios.section {
-			ios.row { icon = "airplane", tint = "$ios.orange", title = "Airplane Mode", toggle = airplane },
+			ios.row {
+				icon = "airplane",
+				tint = "$ios.orange",
+				title = "Airplane Mode",
+				hidden = unmatched("Airplane Mode"),
+				toggle = airplane,
+			},
 			ios.row {
 				icon = "wifi",
 				tint = "$ios.blue",
 				title = "Wi-Fi",
+				hidden = unmatched("Wi-Fi"),
 				detail = "Home",
 				on_click = open("Wi-Fi"),
 			},
@@ -80,6 +96,7 @@ local function SettingsPage(nav: any)
 				icon = "wave.3.right",
 				tint = "$ios.blue",
 				title = "Bluetooth",
+				hidden = unmatched("Bluetooth"),
 				detail = "On",
 				on_click = open("Bluetooth"),
 			},
@@ -87,6 +104,7 @@ local function SettingsPage(nav: any)
 				icon = "antenna.radiowaves.left.and.right",
 				tint = "$ios.green",
 				title = "Cellular",
+				hidden = unmatched("Cellular"),
 				last = true,
 				on_click = open("Cellular"),
 			},
@@ -96,26 +114,36 @@ local function SettingsPage(nav: any)
 				icon = "bell.badge.fill",
 				tint = "$ios.red",
 				title = "Notifications",
+				hidden = unmatched("Notifications"),
 				on_click = open("Notifications"),
 			},
 			ios.row {
 				icon = "speaker.wave.3.fill",
 				tint = "$ios.pink",
 				title = "Sounds & Haptics",
+				hidden = unmatched("Sounds & Haptics"),
 				on_click = function()
 					ui.haptic("success")
 					ui.alert {
 						title = "Sounds & Haptics",
+						hidden = unmatched("Sounds & Haptics"),
 						message = "You felt that one on a phone.",
 						buttons = { { title = "OK" } },
 					}
 				end,
 			},
-			ios.row { icon = "moon.fill", tint = "$ios.indigo", title = "Focus", on_click = open("Focus") },
+			ios.row {
+				icon = "moon.fill",
+				tint = "$ios.indigo",
+				title = "Focus",
+				hidden = unmatched("Focus"),
+				on_click = open("Focus"),
+			},
 			ios.row {
 				icon = "hourglass",
 				tint = "$ios.indigo",
 				title = "Screen Time",
+				hidden = unmatched("Screen Time"),
 				last = true,
 				on_click = open("Screen Time"),
 			},
@@ -125,6 +153,7 @@ local function SettingsPage(nav: any)
 				icon = "gear",
 				tint = "$ios.gray",
 				title = "A sheet",
+				hidden = unmatched("A sheet"),
 				on_click = function()
 					sheet_open:set(true)
 				end,
@@ -133,6 +162,7 @@ local function SettingsPage(nav: any)
 				icon = "accessibility",
 				tint = "$ios.blue",
 				title = "Accessibility",
+				hidden = unmatched("Accessibility"),
 				last = true,
 				on_click = open("Accessibility"),
 			},
@@ -160,7 +190,23 @@ local function TextPage(nav: any)
 				},
 			},
 		},
-		ui.text { "Refreshed {refreshed} times", mx = 36, color = "$text.secondary" },
+		ui.text { "Refreshed {refreshed} times", mx = 36, mb = 240, color = "$text.secondary" },
+		ios.section {
+			header = "LOW ON THE PAGE",
+			footer = "The page scrolls this field above the keyboard.",
+			ui.div {
+				px = 16,
+				py = 12,
+				ui.input {
+					value = lower,
+					label = "A field low on the page",
+					placeholder = "Tap to type",
+					bg = "#00000000",
+					border = 0,
+					focus = {},
+				},
+			},
+		},
 	}
 end
 
@@ -269,7 +315,7 @@ return ui.div {
 				p = 20,
 				gap = 12,
 				ui.text { "A sheet", heading = 2, text_size = "$font.size.lg", weight = 600, color = "$text.primary" },
-				ui.text { "Drag the handle between its detents, or down to close.", color = "$text.secondary" },
+				ui.text { "Drag the handle between its detents, or down to close.", wrap = true, color = "$text.secondary" },
 			}
 		end,
 	},
