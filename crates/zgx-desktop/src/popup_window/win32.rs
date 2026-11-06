@@ -57,7 +57,9 @@ use windows::{
                 CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GA_ROOT,
                 GW_HWNDNEXT, GWL_EXSTYLE, GWLP_HWNDPARENT, GWLP_USERDATA, GetAncestor,
                 GetClientRect, GetCursorPos, GetWindow, GetWindowLongPtrW, GetWindowRect, HTCLIENT,
-                HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW, IsWindowVisible, KillTimer,
+                HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_APPSTARTING, IDC_ARROW, IDC_CROSS,
+                IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
+                IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT, IsWindowVisible, KillTimer,
                 LoadCursorW, MA_NOACTIVATE, RegisterClassExW, SPI_SETWORKAREA, SW_HIDE,
                 SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
                 SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos,
@@ -72,9 +74,10 @@ use windows::{
             },
         },
     },
-    core::{BOOL, w},
+    core::{BOOL, PCWSTR, w},
 };
 use winit::event::{MouseButton, MouseScrollDelta, TouchPhase};
+use winit::window::CursorIcon;
 use zgx::{
     scene::{NodeId, NodeKind, Rect, Scene},
     semantics::Semantics,
@@ -87,6 +90,37 @@ const SUBCLASS_ID: usize = 0x7a67_7570; // "zgup"
 /// A mouse message's buttons still down (`MK_LBUTTON | MK_RBUTTON |
 /// MK_MBUTTON | MK_XBUTTON1 | MK_XBUTTON2`).
 const BUTTONS: usize = 0x01 | 0x02 | 0x10 | 0x20 | 0x40;
+
+thread_local! {
+    /// The cursor zgx last chose (`Application::sync_cursor`), which a popup
+    /// shows when Windows asks it for one.
+    static CURSOR: Cell<CursorIcon> = const { Cell::new(CursorIcon::Default) };
+}
+
+/// Show `cursor` over the popups too: Windows asks each window under the
+/// pointer for its own, and a popup otherwise answers the arrow.
+pub(crate) fn set_cursor(cursor: CursorIcon) {
+    CURSOR.set(cursor);
+}
+
+/// The system cursor for `cursor`, as winit's own windows pick it.
+fn system_cursor(cursor: CursorIcon) -> PCWSTR {
+    match cursor {
+        CursorIcon::Pointer => IDC_HAND,
+        CursorIcon::Text | CursorIcon::VerticalText => IDC_IBEAM,
+        CursorIcon::Crosshair | CursorIcon::Cell => IDC_CROSS,
+        CursorIcon::Move | CursorIcon::AllScroll | CursorIcon::Grab | CursorIcon::Grabbing => IDC_SIZEALL,
+        CursorIcon::NotAllowed | CursorIcon::NoDrop => IDC_NO,
+        CursorIcon::Wait => IDC_WAIT,
+        CursorIcon::Progress => IDC_APPSTARTING,
+        CursorIcon::Help => IDC_HELP,
+        CursorIcon::EResize | CursorIcon::WResize | CursorIcon::EwResize | CursorIcon::ColResize => IDC_SIZEWE,
+        CursorIcon::NResize | CursorIcon::SResize | CursorIcon::NsResize | CursorIcon::RowResize => IDC_SIZENS,
+        CursorIcon::NeResize | CursorIcon::SwResize | CursorIcon::NeswResize => IDC_SIZENESW,
+        CursorIcon::NwResize | CursorIcon::SeResize | CursorIcon::NwseResize => IDC_SIZENWSE,
+        _ => IDC_ARROW,
+    }
+}
 
 /// How many windows stay made while hidden: a menu, its submenu and a
 /// tooltip open together without making one. `ZGX_POPUP_POOL` sets
@@ -155,9 +189,11 @@ unsafe extern "system" fn popup_proc(
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST => return LRESULT(HTCLIENT as isize),
         WM_SETCURSOR => {
+            // The one zgx chose for what is under the pointer (`set_cursor`),
+            // as over the window itself: a menu row's hand, a field's I-beam.
             // SAFETY: a system cursor, set while over our window.
             unsafe {
-                if let Ok(cursor) = LoadCursorW(None, IDC_ARROW) {
+                if let Ok(cursor) = LoadCursorW(None, system_cursor(CURSOR.get())) {
                     SetCursor(Some(cursor));
                 }
             }
@@ -1314,6 +1350,20 @@ impl Drop for PopupHost {
 mod tests {
     use super::*;
     use zgx::scene::{Layout, QuadStyle, Style};
+
+    /// A popup shows the cursor zgx chose, not always the arrow: a menu
+    /// row's hand, a field's I-beam, a splitter's arrows.
+    #[test]
+    fn a_popup_shows_the_cursor_zgx_chose() {
+        assert_eq!(system_cursor(CursorIcon::Default), IDC_ARROW);
+        assert_eq!(system_cursor(CursorIcon::Pointer), IDC_HAND);
+        assert_eq!(system_cursor(CursorIcon::Text), IDC_IBEAM);
+        assert_eq!(system_cursor(CursorIcon::ColResize), IDC_SIZEWE);
+        assert_eq!(system_cursor(CursorIcon::RowResize), IDC_SIZENS);
+        set_cursor(CursorIcon::Pointer);
+        assert_eq!(system_cursor(CURSOR.get()), IDC_HAND);
+        set_cursor(CursorIcon::Default);
+    }
 
     /// A popup root holding one panel `size` points square, rounded `radius`.
     fn popup(size: f32, radius: f32) -> (Scene, NodeId) {
