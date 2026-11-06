@@ -1333,16 +1333,23 @@ impl Engine {
     /// Drops every track of these targets from every clip.
     pub(crate) fn remove_targets(&self, targets: &[Target]) {
         for clip in self.playing_clips() {
-            let mut tracks = clip.tracks.borrow_mut();
-            let had = tracks.len();
-            tracks.retain(|t| !targets.iter().any(|g| g.same(&t.target)));
             // A clip left with nothing to animate ends; one that never had
             // a track (a timer) is not about these targets and plays on.
-            let emptied = had > 0 && tracks.is_empty();
-            drop(tracks);
+            let emptied = {
+                let tracks = clip.tracks.borrow();
+                !tracks.is_empty()
+                    && tracks
+                        .iter()
+                        .all(|t| targets.iter().any(|g| g.same(&t.target)))
+            };
+            // (Its tracks still there: a loop a renderer plays is taken back
+            // through its target.)
             if emptied && !clip.is_timeline.get() {
                 clip.cancel();
             }
+            clip.tracks
+                .borrow_mut()
+                .retain(|t| !targets.iter().any(|g| g.same(&t.target)));
         }
         for target in targets {
             if let Target::Element(e) = target {

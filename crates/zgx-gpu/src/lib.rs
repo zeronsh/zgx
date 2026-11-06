@@ -3963,6 +3963,7 @@ pub struct GpuRenderer {
     /// frame being drawn into one.
     #[cfg(target_os = "macos")]
     loop_sheets: Vec<loops::LoopSheet>,
+    loops_said: Vec<loops::LoopSaid>,
     #[cfg(target_os = "macos")]
     loop_time: Option<f32>,
     /// Pipelines for frames encoded with Metal directly (`render_direct`);
@@ -4483,6 +4484,7 @@ impl GpuRenderer {
             layer_present: layer_presenting.then(LayerPresent::default),
             #[cfg(target_os = "macos")]
             loop_sheets: Vec::new(),
+            loops_said: Vec::new(),
             #[cfg(target_os = "macos")]
             loop_time: None,
             #[cfg(windows)]
@@ -5154,7 +5156,13 @@ impl GpuRenderer {
                     let size = (self.atlas_size * 2).max(self.atlas_grew_to);
                     self.reset_atlas(size.min(MAX_ATLAS))
                 }
-                result => return result,
+                result => {
+                    #[cfg(target_os = "macos")]
+                    if result.is_ok() {
+                        self.sync_loops(scene);
+                    }
+                    return result;
+                }
             }
         }
     }
