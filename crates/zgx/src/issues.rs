@@ -19,8 +19,7 @@ type Listener = dyn Fn(IssueKind, &str);
 pub enum IssueKind {
     /// Something the app should fix: a window shows it in its banner.
     Error,
-    /// The app went on with less than asked (a layer drawn coarser, an
-    /// image softer, a glyph left out, a frame skipped, a layout that didn't
+    /// The app went on with less than asked (a glyph left out, a frame skipped, a layout that didn't
     /// settle): logged once, shown in its window's banner in debug builds
     /// only.
     Degraded,
