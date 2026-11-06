@@ -7446,7 +7446,8 @@ fn name_content(ui: &Ui, scene: &crate::scene::Scene, id: NodeId) {
         pending.extend(scene.children(child).iter().rev().copied());
     }
     drop(semantics);
-    let label = parts.join(" ");
+    // iOS's cells join their parts with a comma, which VoiceOver pauses at.
+    let label = parts.join(if cfg!(target_os = "ios") { ", " } else { " " });
     ui.semantics.borrow_mut().set_label(id, &label);
 }
 /// A mounted node, from `View::on_mount`. Weak: it keeps neither the UI

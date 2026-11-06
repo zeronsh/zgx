@@ -82,9 +82,17 @@ impl Drop for Transaction {
     }
 }
 
+/// What a mounted system view is.
+#[derive(Clone)]
+enum Content {
+    Glass(GlassContent),
+    /// An app's own view (`NativeContent::Platform`): it takes its touches.
+    Platform,
+}
+
 struct Mounted {
     view: Retained<AnyObject>,
-    content: GlassContent,
+    content: Content,
     style: Option<GlassStyle>,
     parent: Option<NodeId>,
     frame: Option<Rect>,
@@ -164,8 +172,8 @@ impl Surfaces {
     pub fn differs(&self, split: &PlaneSplit, previous: &PlaneSplit) -> bool {
         split.natives() != previous.natives()
             || self.mounted.values().any(|mounted| match &mounted.content {
-                GlassContent::Pane(style) => mounted.style != Some(*style.borrow()),
-                GlassContent::Group(_) => false,
+                Content::Glass(GlassContent::Pane(style)) => mounted.style != Some(*style.borrow()),
+                _ => false,
             })
     }
     pub fn set_zoom(&mut self, zoom: f32) {
@@ -199,12 +207,21 @@ impl Surfaces {
             kept
         });
         for (node, content) in &views {
-            let NativeContent::Glass(content) = content else {
-                continue;
+            let (view, content) = match content {
+                NativeContent::Glass(content) if !self.mounted.contains_key(node) => {
+                    (make_view(content), Content::Glass(content.clone()))
+                }
+                NativeContent::Platform(view) if !self.mounted.contains_key(node) => {
+                    let Some(view) = view.downcast_ref::<Retained<AnyObject>>() else {
+                        continue;
+                    };
+                    (view.clone(), Content::Platform)
+                }
+                _ => continue,
             };
             self.mounted.entry(*node).or_insert_with(|| Mounted {
-                view: make_view(content),
-                content: content.clone(),
+                view,
+                content,
                 style: None,
                 parent: None,
                 frame: None,
@@ -221,7 +238,10 @@ impl Surfaces {
         // The host passes touches to its panes only while one answers them.
         let interactive = self.mounted.values().any(|mounted| {
             mounted.style.is_some_and(|style| style.interactive)
-                || matches!(mounted.content, GlassContent::Group(_))
+                || matches!(
+                    mounted.content,
+                    Content::Glass(GlassContent::Group(_)) | Content::Platform
+                )
         });
         if interactive != self.interactive {
             self.interactive = interactive;
@@ -326,7 +346,7 @@ impl Surfaces {
                 let _: () = msg_send![&*mounted.view, setAlpha: placement.opacity as f64];
             }
         }
-        if let GlassContent::Pane(style) = &mounted.content {
+        if let Content::Glass(GlassContent::Pane(style)) = &mounted.content {
             let style = *style.borrow();
             if mounted.style != Some(style) {
                 let first = mounted.style.is_none();

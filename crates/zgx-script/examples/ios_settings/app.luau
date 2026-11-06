@@ -16,23 +16,14 @@ local function tile(symbol, tint)
 	}
 end
 
+-- What shows of a switch; the row is the control, as UIKit's cell is.
 local function switch(state)
-	local at = ui.state("switch_at", state:get() and 22 or 0)
-	local x = ui.spring(at)
-	return ui.button {
+	return ui.div {
 		w = 63,
 		h = 28,
-		p = 0,
 		rounded = 14,
 		bg = function()
 			return state:get() and "$ios.green" or "$ios.fill"
-		end,
-		hover = {},
-		active = {},
-		role = "switch",
-		on_click = function()
-			state:set(not state:get())
-			at:set(state:get() and 22 or 0)
 		end,
 		ui.div {
 			absolute = true,
@@ -42,7 +33,9 @@ local function switch(state)
 			h = 24,
 			rounded = 12,
 			bg = "#ffffff",
-			x = x,
+			x = function()
+				return state:get() and 20 or 0
+			end,
 			shadow = { y = 2, blur = 4, color = "#00000026" },
 		},
 	}
@@ -62,6 +55,11 @@ local function row(item, last)
 		justify = "start",
 		hover = {},
 		active = { bg = "$pressed" },
+		role = item.toggle and "switch" or nil,
+		checked = item.toggle,
+		on_click = item.toggle and function()
+			item.toggle:set(not item.toggle:get())
+		end or nil,
 		tile(item.icon, item.tint),
 		ui.text { item.title, ml = 16, grow = 1, text_size = "$font.size.md", color = "$text.primary" },
 		item.detail and ui.text { item.detail, text_size = "$font.size.md", color = "$text.secondary", mr = 8 } or nil,
@@ -118,7 +116,15 @@ return ui.div {
 				return safe:get().top + 54
 			end,
 			pb = 120,
-			ui.text { "Settings", ml = 16, mb = 4, text_size = "$font.size.xxl", weight = 700, color = "$text.primary" },
+			ui.text {
+				"Settings",
+				heading = 1,
+				ml = 16,
+				mb = 4,
+				text_size = "$font.size.xxl",
+				weight = 700,
+				color = "$text.primary",
+			},
 			section {
 				{ icon = "airplane", tint = "$ios.orange", title = "Airplane Mode", toggle = airplane },
 				{ icon = "wifi", tint = "$ios.blue", title = "Wi-Fi", detail = "Home" },

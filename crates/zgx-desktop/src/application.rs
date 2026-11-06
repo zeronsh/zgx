@@ -3828,6 +3828,7 @@ impl Host {
                 window.clone(),
                 self.context.ui.main_scroll_driver(),
             );
+            crate::ios_system::dump_accessibility_later(&window);
             // What the bars leave of it, before its first frame.
             self.context
                 .window_info

@@ -381,3 +381,81 @@ unsafe fn objc2_foundation_string(text: &str) -> Retained<AnyObject> {
     // SAFETY: as above.
     unsafe { msg_send![class!(NSString), stringWithUTF8String: text.as_ptr()] }
 }
+
+/// `ZGX_IOS_AX_DUMP=1`: three seconds in, print what assistive technology is
+/// offered from `window`'s view, as `dump_element` walks it: a check of the
+/// tree where VoiceOver doesn't run (a simulator).
+pub(crate) fn dump_accessibility_later(window: &winit::window::Window) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if zgx::env::var_os("ZGX_IOS_AX_DUMP").is_none() {
+        return;
+    }
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::UiKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let view = handle.ui_view.as_ptr() as usize;
+    let fire = block2::RcBlock::new(move |_: *mut AnyObject| {
+        // SAFETY: winit's view, alive with its window for the app's life on
+        // iOS; this timer fires on the main thread.
+        println!("AX dump");
+        dump_element(unsafe { &*(view as *const AnyObject) }, 0);
+    });
+    // Twice: the first read asks the host for the tree, which comes after.
+    for delay in [3f64, 4.5] {
+        // SAFETY: NSTimer's constructor; the run loop keeps it.
+        let _: Retained<AnyObject> = unsafe {
+            msg_send![class!(NSTimer),
+                scheduledTimerWithTimeInterval: delay,
+                repeats: false,
+                block: &*fire]
+        };
+    }
+}
+
+fn dump_element(element: &AnyObject, depth: usize) {
+    let text = |value: Option<Retained<AnyObject>>| -> String {
+        // SAFETY: an NSString's UTF-8 view, copied before it can go.
+        value.map_or(String::new(), |value| unsafe {
+            let bytes: *const std::ffi::c_char = msg_send![&*value, UTF8String];
+            if bytes.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(bytes)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        })
+    };
+    // SAFETY: the UIAccessibility informal protocol, which every NSObject
+    // answers, on the main thread.
+    unsafe {
+        let is_element: objc2::runtime::Bool = msg_send![element, isAccessibilityElement];
+        if is_element.as_bool() {
+            let frame: objc2_core_foundation::CGRect = msg_send![element, accessibilityFrame];
+            let traits: u64 = msg_send![element, accessibilityTraits];
+            println!(
+                "AX {}label={:?} value={:?} hint={:?} traits={traits:#x} frame=({:.0},{:.0},{:.0},{:.0})",
+                " ".repeat(depth),
+                text(msg_send![element, accessibilityLabel]),
+                text(msg_send![element, accessibilityValue]),
+                text(msg_send![element, accessibilityHint]),
+                frame.origin.x,
+                frame.origin.y,
+                frame.size.width,
+                frame.size.height,
+            );
+        }
+        let children: Option<Retained<AnyObject>> = msg_send![element, accessibilityElements];
+        let Some(children) = children else {
+            return;
+        };
+        let count: usize = msg_send![&*children, count];
+        for index in 0..count {
+            let child: Retained<AnyObject> = msg_send![&*children, objectAtIndex: index];
+            dump_element(&child, depth + 1);
+        }
+    }
+}

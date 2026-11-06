@@ -5,6 +5,7 @@ exclude = [
     "comparisons/quickgui",
     "vendor/accesskit_atspi_common",
     "vendor/accesskit_consumer",
+    "vendor/accesskit_ios",
     "vendor/accesskit_macos",
     "vendor/accesskit_unix",
     "vendor/accesskit_windows",
@@ -80,6 +81,9 @@ wgpu-hal = { path = "vendor/wgpu-hal" }
 # AccessKit 0.26 on macOS with headings VoiceOver finds and grids that give
 # their rows: see vendor/accesskit_macos/ZGX_PATCH.md.
 accesskit_macos = { path = "vendor/accesskit_macos" }
+# AccessKit's iOS adapter with what UIKit's elements answer: see
+# vendor/accesskit_ios/ZGX_PATCH.md.
+accesskit_ios = { path = "vendor/accesskit_ios" }
 # AccessKit's consumer 0.38 with a field's error message and descriptions
 # reachable by the adapters: see vendor/accesskit_consumer/ZGX_PATCH.md.
 accesskit_consumer = { path = "vendor/accesskit_consumer" }

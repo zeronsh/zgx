@@ -88,5 +88,6 @@ pub fn symbol(name: impl Into<String>, mut style: impl FnMut() -> SymbolStyle + 
         .w(width)
         .h(height)
         .flex_shrink(0.)
+        .accessible_hidden()
     })
 }
