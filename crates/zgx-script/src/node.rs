@@ -6611,11 +6611,24 @@ pub(crate) fn retain(env: &Env, resource: Box<dyn Any>) {
         resource
     };
     match &*scope {
-        Some(scope) => scope.retained.borrow_mut().push(resource),
+        Some(scope) => keep_in(&mut scope.retained.borrow_mut(), resource),
         // While its host records its loads, the module running owns it.
         None if crate::reloads::recording() => retain_in_module(env, resource),
-        None => env.retained.borrow_mut().push(resource),
+        None => keep_in(&mut env.retained.borrow_mut(), resource),
     }
+}
+/// `resource` kept in `kept`, which lasts as long as what owns it, the whole
+/// app's life for one made in a handler at no scope. So timers that have ended
+/// go before the list grows: each `ui.after` would otherwise stay for good.
+pub(crate) fn keep_in(kept: &mut Vec<Box<dyn Any>>, resource: Box<dyn Any>) {
+    if kept.len() == kept.capacity() {
+        kept.retain(|resource| {
+            !resource
+                .downcast_ref::<crate::timers::Stop>()
+                .is_some_and(crate::timers::Stop::done)
+        });
+    }
+    kept.push(resource);
 }
 /// `resource`, made at a top level while its host records its loads: the
 /// module running owns it (a partial reload drops it as that module runs
@@ -6633,7 +6646,7 @@ fn retain_in_module(env: &Env, resource: Box<dyn Any>) {
         },
         None => resource,
     };
-    env.retained.borrow_mut().push(resource)
+    keep_in(&mut env.retained.borrow_mut(), resource)
 }
 
 /// What `scroll_padding` keeps clear: as given, or what a state or a
