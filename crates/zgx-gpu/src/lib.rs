@@ -13068,6 +13068,10 @@ impl GpuRenderer {
                 Ok(_) => "not presented",
                 Err(_) => "present failed",
             });
+            #[cfg(target_os = "macos")]
+            if status.is_err() {
+                self.hide_loops();
+            }
             status
         };
         // The frame is done once shown (see `render`).

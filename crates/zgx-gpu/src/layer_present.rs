@@ -1551,6 +1551,22 @@ impl Layer {
             on_screen: shown.map(|layer| place(layer.frame())),
         })
     }
+    /// Whether what `set_loops` left waits for its frame.
+    pub(crate) fn loops_queued(&self) -> bool {
+        self.loops_due.is_some()
+    }
+    /// Hides every loop's layer now, and drops what was waiting to place one.
+    pub(crate) fn hide_loops(&mut self) {
+        self.loops_due = None;
+        if self.loops.is_empty() {
+            return;
+        }
+        transaction(|| {
+            for (_, layer, _) in &self.loops {
+                layer.setHidden(true);
+            }
+        });
+    }
     /// Whether a layer plays a loop now, or is about to.
     pub(crate) fn has_loops(&self) -> bool {
         !self.loops.is_empty() || self.loops_due.is_some()
