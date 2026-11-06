@@ -731,12 +731,13 @@ pub(crate) fn install(lua: &mlua::Lua) {
     lua.set_app_data(Parsed::default());
 }
 
-/// A VM at rest: streams not asked for lately go. (The texts parsed stay: a
-/// chat opened again would parse them in its first frame.)
+/// A VM at rest: its parsed texts and the streams not asked for lately go. What
+/// is on show keeps its blocks; only something built again parses again.
 pub(crate) fn rest(lua: &mlua::Lua) {
     let Some(parsed) = lua.app_data_ref::<Parsed>() else {
         return;
     };
+    *parsed.texts.borrow_mut() = Texts::new();
     let mut streams = parsed.streams.borrow_mut();
     let mut order = parsed.stream_order.borrow_mut();
     let now = std::time::Instant::now();
@@ -753,7 +754,7 @@ pub(crate) fn rest(lua: &mlua::Lua) {
 }
 
 /// A stream left this long has ended, or parses again if it goes on.
-const STREAM_QUIET: std::time::Duration = std::time::Duration::from_secs(60);
+const STREAM_QUIET: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How many texts and streams a script's `ui.markdown` keeps.
 const KEPT: usize = 256;
@@ -1631,6 +1632,38 @@ mod tests {
     }
     fn plain() -> Options {
         Options::default()
+    }
+    #[test]
+    fn at_rest_parsed_text_goes_and_the_same_text_parses_the_same() {
+        let lua = mlua::Lua::new();
+        install(&lua);
+        let text = "# Title\n\nSome *words* and a [link](https://example.com).";
+        let ask = || script(&lua, (lua.create_string(text).unwrap(), None)).expect("its blocks");
+        let first = ask();
+        let held = |lua: &mlua::Lua| lua.app_data_ref::<Parsed>().expect("installed").texts.borrow().len();
+        assert_eq!(held(&lua), 1);
+        rest(&lua);
+        assert_eq!(held(&lua), 0, "nothing kept for a text no one is asking for");
+        assert_eq!(ask(), first);
+    }
+    #[test]
+    fn at_rest_a_stream_stays_until_it_has_been_quiet() {
+        let lua = mlua::Lua::new();
+        install(&lua);
+        let keyed = lua.create_table().unwrap();
+        keyed.set("key", "message-1").unwrap();
+        script(&lua, (lua.create_string("Some words").unwrap(), Some(keyed))).expect("its blocks");
+        let streams = |lua: &mlua::Lua| lua.app_data_ref::<Parsed>().expect("installed").streams.borrow().len();
+        rest(&lua);
+        assert_eq!(streams(&lua), 1, "it may go on: asked for a moment ago");
+        {
+            let parsed = lua.app_data_ref::<Parsed>().expect("installed");
+            let mut order = parsed.stream_order.borrow_mut();
+            let long_ago = std::time::Instant::now() - STREAM_QUIET - std::time::Duration::from_secs(1);
+            order.iter_mut().for_each(|(_, used)| *used = long_ago);
+        }
+        rest(&lua);
+        assert_eq!(streams(&lua), 0, "quiet this long, it has ended, or parses again if it goes on");
     }
     fn paths() -> Options {
         Options {
