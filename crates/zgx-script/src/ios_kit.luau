@@ -107,10 +107,11 @@ function ios.scroll_edge(props)
 		box.backdrop_blur = 4
 		box.mask_gradient = { angle = to_end[edge], stops = { "#000000", "#000000", "#00000000" } }
 	end
-	box.gradient = {
-		angle = to_end[edge],
-		stops = if hard then { "$surface.base", "$surface.base" } else { "#00000030", "#00000000" },
-	}
+	if hard then
+		box.bg = "$surface.base"
+	else
+		box.gradient = { angle = to_end[edge], stops = { "#00000030", "#00000000" } }
+	end
 	return ui.div(box)
 end
 

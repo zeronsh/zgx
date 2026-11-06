@@ -33,7 +33,12 @@ There is one tree of elements, zgx's, through AccessKit's iOS adapter (`vendor/a
 - System glass isn't cut by rounded or scrolling parents: it ignores masks and clips. A pane scrolled away is hidden whole.
 - Morph transitions between panes beyond a group's merging; terminals; web views' new windows, downloads, finding and printing.
 - Notifications.
+- `Documents/zgx-gesture.log` records each gesture, scroll, refresh and keyboard reveal; `ZGX_IOS_SHOT=seconds` writes the window to `Documents/shot.png`.
+
+## The edge fade
+
+`ui.scroll_edge { edge, style, size, shown, drawn }` is iOS 26's scroll edge effect on a window's edge: Apple's own, through public API. The first one puts the app in a `UIScrollView` held still, because the effect works on a scroll view's own contents, and adds a view with `UIScrollEdgeElementContainerInteraction` over the box; an app without one pays nothing. What the script paints after the node shows above the effect. Against a real navigation bar over the same content, pixels match within 1/255 where both pick the same veil; the effect picks a darkening or a lightening one from what is under it, and at some offsets the two pick differently. `drawn = true` is a blur and gradient for an edge inside the window, and what other platforms get: not Apple's, and not matched to it.
 
 ## In Luau
 
-`ui.ios` (a Settings-style app's sections, rows, pages with large titles, stacks with edge swipes, sheets, search, pull to refresh), `ui.alert`, `ui.action_sheet`, `ui.haptic`, `ui.share`, `ui.system_menu`, `ui.on_escape`, `ui.webview`. `crates/zgx-script/examples/ios_showcase` holds them in one app.
+`ui.ios` (a Settings-style app's sections, rows, pages with large titles, stacks with edge swipes, sheets, search, pull to refresh), `ui.alert`, `ui.action_sheet`, `ui.haptic`, `ui.share`, `ui.system_menu`, `ui.on_escape`, `ui.native_pan`, `ui.pull_refresh`, `ui.scroll_edge`, `ui.webview`. `crates/zgx-script/examples/ios_showcase` holds them in one app.
