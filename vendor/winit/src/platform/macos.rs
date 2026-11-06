@@ -584,6 +584,15 @@ pub fn set_navigation_swipes(swipes: Option<std::rc::Rc<dyn NavigationSwipes>>) 
     crate::platform_impl::set_navigation_swipes(swipes);
 }
 
+/// zgx patch: when the next `WindowEvent::MouseWheel` not yet asked about
+/// happened (`-[NSEvent timestamp]`: seconds since the system started, as
+/// `CLOCK_UPTIME_RAW`). An app busy when it came reads it late, with others;
+/// its motion belongs to this time. Call once per `MouseWheel`. Main thread
+/// only.
+pub fn take_scroll_event_time() -> Option<f64> {
+    crate::platform_impl::take_scroll_event_time()
+}
+
 /// zgx patch: whether a trackpad's two-finger horizontal scroll can swipe
 /// between pages (`+[NSEvent isSwipeTrackingFromScrollEventsEnabled]`): the
 /// system's "Swipe between pages" set to scroll with two fingers. Main
