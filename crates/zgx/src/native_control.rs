@@ -236,6 +236,11 @@ thread_local! {
 pub fn set_system_menu(node: crate::scene::NodeId, build: MenuBuilder) {
     MENUS.with(|menus| menus.borrow_mut().insert(node, build));
 }
+/// `node`'s own system menu, for what assistive technology offers on it.
+pub fn system_menu_of(node: crate::scene::NodeId) -> Option<Vec<MenuAction>> {
+    let build = MENUS.with(|menus| menus.borrow().get(&node).cloned())?;
+    Some(build())
+}
 /// The system menu for the window's point `(x, y)`, with the box of the node
 /// that has it: its innermost around what is there.
 pub fn system_menu_at(

@@ -86,6 +86,7 @@ arboard = { version = "3.6.1", default-features = false, features = ["image-data
 
 # The system's glass between the planes (src/native_host/ios.rs).
 [target.'cfg(target_os = "ios")'.dependencies]
+accesskit_ios = "0.1.2"
 objc2 = "=0.6.4"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
 block2 = "0.6"

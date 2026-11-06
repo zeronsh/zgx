@@ -18,3 +18,5 @@ technology beside what UIKit offers for the same screen (`ZGX_IOS_AX_DUMP=1`).
    macOS's did. `isAccessibilityElement` builds nothing now, and a read is a
    lease of 30 seconds, checked at each update (`READ_LEASE`). Tested on a
    simulator (`adapter.rs`, `shutdown_tests`).
+
+**Custom actions.** `set_custom_actions` gives each node's `accessibilityCustomActions`, asked for only as VoiceOver reaches it (`custom_actions.rs`, `node.rs`).

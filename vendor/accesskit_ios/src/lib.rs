@@ -27,6 +27,8 @@
 mod context;
 mod filters;
 mod node;
+mod custom_actions;
+pub use custom_actions::{CustomAction, set_custom_actions};
 mod util;
 
 mod adapter;

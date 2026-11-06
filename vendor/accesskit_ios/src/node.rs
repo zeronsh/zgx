@@ -304,6 +304,17 @@ declare_class!(
             .unwrap_or(UIAccessibilityExpandedStatus::Unsupported)
         }
 
+        // zgx patch: a node's system menu, as VoiceOver's actions rotor.
+        #[method(accessibilityCustomActions)]
+        fn custom_actions(&self) -> *mut objc2::runtime::AnyObject {
+            self.resolve_with_context(|node, tree, _| {
+                let (target, _) = tree.state().locate_node(node.id())?;
+                Some(crate::custom_actions::actions_for(target))
+            })
+            .flatten()
+            .unwrap_or(std::ptr::null_mut())
+        }
+
         #[method(accessibilityActivate)]
         fn activate(&self) -> bool {
             self.resolve_with_context(|node, tree, context| {

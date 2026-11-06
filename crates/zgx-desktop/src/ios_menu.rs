@@ -218,6 +218,28 @@ pub(crate) fn install(window: &std::sync::Arc<winit::window::Window>, scene: Rc<
             c"B@:".as_ptr(),
         );
     }
+    // VoiceOver offers a menu's actions in its rotor: a long press isn't its gesture.
+    let rotor_redraw = window.clone();
+    accesskit_ios::set_custom_actions(move |id| {
+        let Some(actions) =
+            crate::accessibility::scene_node_of(id.0).and_then(zgx::native_control::system_menu_of)
+        else {
+            return Vec::new();
+        };
+        actions
+            .into_iter()
+            .map(|action| {
+                let (run, redraw) = (action.run, rotor_redraw.clone());
+                accesskit_ios::CustomAction {
+                    name: action.title,
+                    run: Rc::new(move || {
+                        run();
+                        redraw.request_redraw();
+                    }),
+                }
+            })
+            .collect()
+    });
     let redraw = window.clone();
     let delegate = Delegate::alloc(mtm).set_ivars(Rc::new(State {
         scene,

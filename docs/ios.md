@@ -29,8 +29,11 @@ There is one tree of elements, zgx's, through AccessKit's iOS adapter (`vendor/a
 
 ## Not there yet
 
-- A real iPhone: GPU cost and memory of the planes and glass, feel, VoiceOver, Switch Control, Voice Control, Full Keyboard Access, and reading `/System/Library/Fonts` there.
-- Selection handles and the loupe (`UITextInteraction`); images on the clipboard; custom accessibility actions.
-- A control or pane cut by a rounded parent (a rectangle clips it); fading glass in and out.
-- Navigation bar collapse, sheets and detents, edge swipe back, context menus, haptics, pull to refresh.
-- File dialogs and prompts report the backend missing. Web views and terminals aren't hosted.
+- Checked by a person on a phone: VoiceOver, Switch Control, Voice Control, Full Keyboard Access, feel. Measured there so far: glass, planes, frame rate, launch, memory (`scripts/ios/device.py measure`).
+- System glass isn't cut by rounded or scrolling parents: it ignores masks and clips. A pane scrolled away is hidden whole.
+- Morph transitions between panes beyond a group's merging; terminals; web views' new windows, downloads, finding and printing.
+- Notifications.
+
+## In Luau
+
+`ui.ios` (a Settings-style app's sections, rows, pages with large titles, stacks with edge swipes, sheets, search, pull to refresh), `ui.alert`, `ui.action_sheet`, `ui.haptic`, `ui.share`, `ui.system_menu`, `ui.on_escape`, `ui.webview`. `crates/zgx-script/examples/ios_showcase` holds them in one app.

@@ -5141,6 +5141,7 @@ dependencies = [
  "accesskit",
  "accesskit_atspi_common",
  "accesskit_consumer",
+ "accesskit_ios",
  "accesskit_winit",
  "arboard",
  "block2 0.6.2",
