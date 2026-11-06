@@ -181,6 +181,23 @@ pub struct HeightIndex {
     /// row's height for it.
     thin: bool,
 }
+/// Told of a measured list's rows, for what predicts their heights before they
+/// are built.
+pub trait RowObserver {
+    /// The width rows are laid out at, each time the list passes.
+    fn width(&self, width: f32);
+    /// A mounted row's height at `width`, its layout current.
+    fn measured(
+        &self,
+        scene: &crate::scene::Scene,
+        row: crate::scene::NodeId,
+        index: usize,
+        width: f32,
+        height: f32,
+    );
+    /// Rows to build though out of view, to learn from.
+    fn extra_rows(&self, rows: &mut Vec<usize>);
+}
 /// A row given less height than this shows nothing, and isn't built.
 pub(crate) const THINNEST_ROW: f32 = 0.01;
 impl HeightIndex {

@@ -688,6 +688,9 @@ fn convert_in(value: mlua::Value, old: Option<&Value>, depth: u32) -> mlua::Resu
         },
         mlua::Value::UserData(ud) if ud.is::<State>() => ud.borrow::<State>()?.0.get(),
         mlua::Value::UserData(ud) if ud.is::<ReadState>() => ud.borrow::<ReadState>()?.0.0.get(),
+        mlua::Value::UserData(ud) if ud.is::<WatchedState>() => {
+            ud.borrow::<WatchedState>()?.0.0.get()
+        }
         // `ui.raw(value, reason)` is its value; only the design lint looks.
         mlua::Value::UserData(ud) if ud.is::<crate::design::RawUd>() => {
             ud.borrow::<crate::design::RawUd>()?.0.clone()
@@ -2000,7 +2003,8 @@ fn converted_from(t: &Table, lua: &Lua) -> Option<Value> {
     let cache = lua.app_data_ref::<Converted>()?;
     let ids = &cache.ids;
     let mlua::Value::LightUserData(id) = ids.raw_get::<mlua::Value>(t).ok()? else {
-        return None;
+        // (Not one the cache made: it may stand for a row being captured.)
+        return crate::predict::given_back(t);
     };
     cache
         .held
@@ -2507,6 +2511,20 @@ pub(crate) struct ReadState(pub State, pub Rc<str>);
 const WRITES: [&str; 10] = [
     "set", "update", "set_key", "append", "patch", "toggle", "add", "push", "insert", "remove",
 ];
+/// The item state of a row being captured: read through what notes what's
+/// read. A type of its own, so `State` itself pays nothing for it.
+pub(crate) struct WatchedState(pub State);
+impl UserData for WatchedState {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        add_reads(methods, |s: &WatchedState| &s.0);
+        methods.add_method("get", |lua, s: &WatchedState, ()| {
+            crate::predict::watched(&s.0.fresh().get(), lua, true)
+        });
+        methods.add_method("peek", |lua, s: &WatchedState, ()| {
+            crate::predict::watched(&s.0.fresh().with_untracked(Clone::clone), lua, true)
+        });
+    }
+}
 impl UserData for ReadState {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         add_reads(methods, |s: &ReadState| &s.0);

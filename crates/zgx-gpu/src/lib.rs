@@ -16063,6 +16063,20 @@ fn install_text(
             .borrow_mut()
             .min_content(&mut fonts.borrow_mut(), rich)
     });
+    // Off the main thread: the same faces, fonts and caches of its own.
+    let fonts = shared_fonts.clone();
+    scene.set_text_worker(Rc::new(move || {
+        let (locale, db) = {
+            let fonts = fonts.borrow();
+            (fonts.locale().to_string(), fonts.db().clone())
+        };
+        Box::new(move || {
+            Box::new(DetachedWorker {
+                fonts: FontSystem::new_with_locale_and_db(locale, db),
+                cache: Default::default(),
+            }) as Box<dyn zgx::scene::TextWorker>
+        })
+    }));
     // Apps measuring what they have not mounted keep no glyphs for it.
     let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
     scene.set_detached_rich_text_measurer(move |rich, width| {
@@ -16071,6 +16085,21 @@ fn install_text(
             .borrow_mut()
             .measure_detached(&mut fonts.borrow_mut(), rich, width)
     });
+}
+
+/// Measures for a thread of its own (`Scene::text_worker`).
+struct DetachedWorker {
+    fonts: FontSystem,
+    cache: prepared::TextCache,
+}
+impl zgx::scene::TextWorker for DetachedWorker {
+    fn measure(&mut self, rich: &zgx::rich_text::RichText, width: Option<f32>) -> (f32, f32) {
+        self.cache.measure_detached(&mut self.fonts, rich, width)
+    }
+    fn forget(&mut self) {
+        self.cache.clear();
+        self.fonts.shape_run_cache.clear();
+    }
 }
 
 pub mod assets;

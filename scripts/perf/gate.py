@@ -144,6 +144,8 @@ SCENES = [
     # same paths at a sixth of the work (`suite.py` runs `apps_bench` full
     # size).
     ('app-mail', 'zgx-script', 'list_state_bench', {'APP': 'mail', 'REPS': '2'}),
+    # A list that predicts its rows' heights (`ui.list { predict = true }`).
+    ('predict-list', 'zgx-script', 'predict_bench', {}),
     # A reply's token streamed in, a composer keystroke, a switch.
     ('app-chat', 'zgx-script', 'list_state_bench', {'APP': 'chat', 'REPS': '4'}),
     # A sort with no order kept (the honest whole sort) on its own, as the

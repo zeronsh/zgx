@@ -3382,6 +3382,20 @@ fn kind_view(
                     let (index, row) = noted.borrow().get(&identity).cloned().unwrap_or_default();
                     let item = items
                         .with_untracked(|list| list.list().get(index).cloned().unwrap_or_default());
+                    // (A row being captured notes what its parts read.)
+                    if crate::predict::recording() {
+                        return build_watched(
+                            &vm,
+                            cx,
+                            &low,
+                            &builder,
+                            &item,
+                            index + 1,
+                            live,
+                            &rows,
+                            row,
+                        );
+                    }
                     if !live {
                         return build_scoped(&vm, cx, &low, &builder, (item, index + 1));
                     }
@@ -7616,13 +7630,27 @@ fn lower_item_list(
     let live = builder.info().num_params >= 3;
     let wrapped = row_builder(builder, vm, low);
     let builder = &wrapped;
+    // `predict`: told of each row built, once the list has made it.
+    let predicting: Rc<std::cell::RefCell<Option<Rc<crate::predict::Predictor>>>> = Rc::default();
     let row = {
         let (items, builder, vm, low) = (items.clone(), builder.clone(), vm.clone(), low.clone());
+        let predicting = predicting.clone();
         move |index: Signal<usize>, _: ListKey, cx: &mut Context| -> View {
             let at = |list: &Value, i: usize| list.list().get(i).cloned().unwrap_or(Value::Nil);
             let runtime = cx.runtime();
             let first = index.with_untracked(|i| *i);
             let item = runtime.signal(items.with_untracked(|l| at(l, first)));
+            if let Some(predictor) = predicting.borrow().as_ref() {
+                item.with_untracked(|value| predictor.building(first, value));
+                struct Gone(Rc<crate::predict::Predictor>, usize, usize);
+                impl Drop for Gone {
+                    fn drop(&mut self) {
+                        self.0.unmounted(self.1, self.2);
+                    }
+                }
+                let at = item.with_untracked(crate::value::identity);
+                cx.retain(Gone(predictor.clone(), first, at));
+            }
             let shown = runtime.signal(Value::Num((first + 1) as f64));
             // Bumped as the item changes: a two-parameter row is built again.
             let changes = runtime.signal(0_u64);
@@ -7646,6 +7674,9 @@ fn lower_item_list(
             let index = crate::value::State(shown, None);
             if live {
                 let value = item.with_untracked(Clone::clone);
+                if crate::predict::recording() {
+                    return build_watched_row(&vm, cx, &low, &builder, item, &value, index);
+                }
                 let row = crate::value::State(item, None);
                 return build_scoped(&vm, cx, &low, &builder, (value, index, row));
             }
@@ -7654,6 +7685,9 @@ fn lower_item_list(
                 move || changes.get(),
                 move |_, cx| {
                     let value = item.with_untracked(Clone::clone);
+                    if crate::predict::recording() {
+                        return build_watched_plain(&vm, cx, &low, &builder, &value, index.clone());
+                    }
                     build_scoped(&vm, cx, &low, &builder, (value, index.clone()))
                 },
             )
@@ -7739,6 +7773,23 @@ fn lower_item_list(
         if *follow {
             rows = rows.anchor_end();
         }
+        // Predicting, keys are asked of the script once, by both.
+        let shared_keys = rare.as_ref().is_some_and(|rare| rare.predict).then(|| {
+            let kept = Rc::new(std::cell::RefCell::new(KeptKeys::default()));
+            let predictor = predictor_for(
+                &items,
+                key.as_ref(),
+                key_field.as_ref(),
+                vm,
+                &rows,
+                &kept,
+                cx,
+            );
+            let observer: Rc<dyn zgx::virtual_list::RowObserver> = predictor.clone();
+            cx.retain(observer.clone());
+            *predicting.borrow_mut() = Some(predictor);
+            (kept, observer)
+        });
         let list = match key {
             // Heights by key, kept as rows move, each read here: no item is
             // made a table to give its key.
@@ -7751,7 +7802,12 @@ fn lower_item_list(
                     })
                 };
                 let estimate = |_: &[ListKey], _: usize| f32::NAN;
-                measured_rows(offset, rows, *overscan, keys, estimate, row)
+                match &shared_keys {
+                    Some((_, observer)) => zgx::compose::measured_rows_observed(
+                        observer, offset, rows, *overscan, keys, estimate, row,
+                    ),
+                    None => measured_rows(offset, rows, *overscan, keys, estimate, row),
+                }
             }
             None => {
                 let r = rows.clone();
@@ -7763,10 +7819,21 @@ fn lower_item_list(
             // Heights by key, kept as rows move.
             Some(key) => {
                 let (key, vm, items) = (key.clone(), vm.clone(), items.clone());
-                let mut kept = KeptKeys::default();
-                let keys = move || items.with(|l| item_keys(&vm, &key, l, &mut kept));
                 let estimate = |_: &[ListKey], _: usize| f32::NAN;
-                measured_rows(offset, rows, *overscan, keys, estimate, row)
+                match shared_keys {
+                    Some((kept, observer)) => {
+                        let keys =
+                            move || items.with(|l| item_keys(&vm, &key, l, &mut kept.borrow_mut()));
+                        zgx::compose::measured_rows_observed(
+                            &observer, offset, rows, *overscan, keys, estimate, row,
+                        )
+                    }
+                    None => {
+                        let mut kept = KeptKeys::default();
+                        let keys = move || items.with(|l| item_keys(&vm, &key, l, &mut kept));
+                        measured_rows(offset, rows, *overscan, keys, estimate, row)
+                    }
+                }
             }
         };
         return list.keyboard_navigation(keyboard).row_text(copy);
@@ -9293,4 +9360,156 @@ fn a_rows_identity_and_key_read_as_formatted() {
         assert!(!displays_as(&value, &text[..text.len() - 1]));
         assert!(!displays_as(&value, "x"));
     }
+}
+
+/// A list's predictor, told of its data and woken to work between frames.
+fn predictor_for(
+    items: &Signal<Value>,
+    key: Option<&mlua::Function>,
+    key_field: Option<&Rc<str>>,
+    vm: &Rc<Vm>,
+    rows: &zgx::compose::VariableHeights,
+    kept: &Rc<std::cell::RefCell<KeptKeys>>,
+    cx: &mut Context,
+) -> Rc<crate::predict::Predictor> {
+    let now = {
+        let items = items.clone();
+        Rc::new(move || items.with_untracked(Clone::clone)) as Rc<dyn Fn() -> Value>
+    };
+    let key_of = {
+        let (items, key, field, vm, kept) = (
+            items.clone(),
+            key.cloned(),
+            key_field.cloned(),
+            vm.clone(),
+            kept.clone(),
+        );
+        Rc::new(move |index: usize| -> Option<Rc<str>> {
+            let item = items.with_untracked(|l| l.list().get(index).cloned())?;
+            let found = if let Some(field) = &field {
+                field_key(&item, field, index)
+            } else {
+                let key = key.as_ref()?;
+                let known = kept.borrow().get(&item);
+                match known {
+                    Some(known) => known,
+                    None => {
+                        let mut whole = kept.borrow().whole_items;
+                        let found = item_key(&vm, key, &item, index, &mut whole);
+                        let mut kept = kept.borrow_mut();
+                        kept.whole_items = whole;
+                        kept.keep(&item, &found);
+                        found
+                    }
+                }
+            };
+            match found {
+                ListKey::Str(s) => Some(s),
+                ListKey::Num(n) => Some(Rc::from(n.to_string())),
+                _ => None,
+            }
+        }) as Rc<dyn Fn(usize) -> Option<Rc<str>>>
+    };
+    let named = {
+        let vm = vm.clone();
+        Rc::new(move || {
+            vm.lua
+                .app_data_ref::<crate::node::Env>()
+                .map_or(Vec::new(), |env| {
+                    let mut all: Vec<Signal<Value>> =
+                        env.store.entries().into_iter().map(|(_, s)| s).collect();
+                    all.extend(env.shared.entries().into_iter().map(|(_, s)| s));
+                    all
+                })
+        }) as Rc<dyn Fn() -> Vec<Signal<Value>>>
+    };
+    let predictor = crate::predict::Predictor::new(now, key_of, named, rows.clone());
+    {
+        let (items, predictor) = (items.clone(), predictor.clone());
+        cx.retain(cx.runtime().effect(move || {
+            items.with(|_| ());
+            predictor.data_changed();
+        }));
+    }
+    if cx.try_service::<zgx::compose::TaskRunner>().is_some() {
+        let tasks = cx.tasks();
+        let working = Rc::new(std::cell::Cell::new(false));
+        let weak = Rc::downgrade(&predictor);
+        predictor.on_wake(Rc::new(move || {
+            if working.replace(true) {
+                return;
+            }
+            let (weak, working) = (weak.clone(), working.clone());
+            tasks.spawn(async move {
+                loop {
+                    zgx::timer::sleep(std::time::Duration::from_millis(1)).await;
+                    let Some(predictor) = weak.upgrade() else {
+                        break;
+                    };
+                    let more = predictor.tick(Some(std::time::Duration::from_millis(2)));
+                    if !more && !predictor.holding() {
+                        break;
+                    }
+                }
+                working.set(false);
+            });
+        }));
+    }
+    predictor
+}
+/// A list row being captured, with item state: its reads noted.
+#[cold]
+#[inline(never)]
+fn build_watched_row(
+    vm: &Rc<Vm>,
+    cx: &mut Context,
+    low: &Rc<Lowering>,
+    builder: &mlua::Function,
+    item: Signal<Value>,
+    value: &Value,
+    index: crate::value::State,
+) -> View {
+    let state = crate::predict::item_state(item, value, &vm.lua).ok();
+    let value = crate::predict::watched(value, &vm.lua, true).ok();
+    build_scoped(vm, cx, low, builder, (value, index, state))
+}
+/// A list row being captured, its item alone.
+#[cold]
+#[inline(never)]
+fn build_watched_plain(
+    vm: &Rc<Vm>,
+    cx: &mut Context,
+    low: &Rc<Lowering>,
+    builder: &mlua::Function,
+    value: &Value,
+    index: crate::value::State,
+) -> View {
+    let value = crate::predict::watched(value, &vm.lua, true).ok();
+    build_scoped(vm, cx, low, builder, (value, index))
+}
+/// A block of a row being captured: its item, and its state if it takes one.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn build_watched(
+    vm: &Rc<Vm>,
+    cx: &mut Context,
+    low: &Rc<Lowering>,
+    builder: &mlua::Function,
+    item: &Value,
+    place: usize,
+    live: bool,
+    rows: &Rc<std::cell::RefCell<Rows>>,
+    row: Rc<str>,
+) -> View {
+    let watched = crate::predict::watched(item, &vm.lua, true).ok();
+    if !live {
+        return build_scoped(vm, cx, low, builder, (watched, place));
+    }
+    let signal = vm.runtime.signal(item.clone());
+    if let Some(state) = rows.borrow_mut().get_mut(&row) {
+        state.item = Some(signal.clone());
+    }
+    let state = crate::predict::item_state(signal, item, &vm.lua).ok();
+    build_scoped(vm, cx, low, builder, (watched, place, state))
 }

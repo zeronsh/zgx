@@ -868,6 +868,9 @@ pub(crate) struct ListRare {
     /// start coming in reach calls. Taken as `fill` walks the table.
     pub(crate) start: Option<Function>,
     pub(crate) start_distance: Option<f32>,
+    /// `predict = true`, with `measured` and `data`: rows' heights known
+    /// before they're built, learned from those that are.
+    pub(crate) predict: bool,
     /// `at_end = state`: kept saying whether it rests at its end.
     pub(crate) at_end: Option<Signal<Value>>,
     /// `overscroll = "contain"`: a wheel over it stays with it.
@@ -1999,6 +2002,11 @@ fn read_state_of(ud: &mlua::AnyUserData) -> Option<Signal<Value>> {
     ud.borrow::<crate::value::ReadState>()
         .ok()
         .map(|s| s.0.0.clone())
+        .or_else(|| {
+            ud.borrow::<crate::value::WatchedState>()
+                .ok()
+                .map(|s| s.0.0.clone())
+        })
 }
 /// The state `value` holds, to write as well (a two-way binding, an
 /// action's target): never a plugin's read-only shared state.
@@ -3197,6 +3205,7 @@ const WIDGET_FIELDS: &[&str] = &[
     "overscan",
     "heights",
     "measured",
+    "predict",
     "row_text",
     "sticky",
     "placement",
@@ -4909,7 +4918,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let image = crate::lower::try_load_image_in(&vm, &env.assets, &env.runtime, &src);
             Ok(match image {
-                Ok(Some(image)) => (Some(image.width()), Some(image.height())),
+                Ok(Some(image)) => {
+                    if crate::predict::recording() {
+                        crate::predict::picture(&src, image.width(), image.height());
+                    }
+                    (Some(image.width()), Some(image.height()))
+                }
                 _ => (None, None),
             })
         })?,
@@ -5331,6 +5345,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Err(mlua::Error::runtime("ui.list `sticky` needs `heights`"));
             }
             let measured = table.get::<Option<bool>>("measured")?.unwrap_or(false);
+            let predict = table.get::<Option<bool>>("predict")?.unwrap_or(false);
             if measured && heights.is_some() {
                 return Err(mlua::Error::runtime(
                     "ui.list `measured` and `heights` don't go together: measured rows take their content's height",
@@ -5410,6 +5425,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 }
             };
             let rare = (sticky.is_some()
+                || predict
                 || row_text.is_some()
                 || end.is_some()
                 || ancestor
@@ -5419,6 +5435,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     sticky,
                     sticky_top,
                     row_text,
+                    predict,
                     end,
                     ancestor,
                     key_field,
@@ -5817,7 +5834,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set("sorted", lua.create_function(crate::sorted::sorted)?)?;
     ui.set("variants", lua.create_function(crate::variants::define)?)?;
     ui.set("raw", lua.create_function(crate::design::raw)?)?;
-    ui.set("markdown", lua.create_function(crate::markdown::script)?)?;
+    ui.set(
+        "markdown",
+        lua.create_function(|lua, args| {
+            let blocks = crate::markdown::script(lua, args)?;
+            // (A row being captured reads its blocks through what notes it.)
+            if crate::predict::recording() {
+                return crate::predict::watched(&blocks, lua, true);
+            }
+            mlua::IntoLua::into_lua(blocks, lua)
+        })?,
+    )?;
     ui.set(
         "on_mount",
         lua.create_function(|lua, f: Function| {

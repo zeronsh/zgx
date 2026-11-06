@@ -39,6 +39,23 @@ impl VariableHeights {
         self.end.set(true);
         self
     }
+    /// Update many heights, passing once.
+    pub fn set_heights(&self, rows: &[(usize, f32)]) {
+        let mut changed = false;
+        {
+            let mut index = self.index.borrow_mut();
+            for (row, height) in rows {
+                changed |= index.set_height(*row, *height).unwrap_or(false);
+            }
+        }
+        if changed {
+            self.changed();
+        }
+    }
+    /// Has the list pass again (an observer's rows to build changed).
+    pub fn pass_again(&self) {
+        self.changed();
+    }
     fn changed(&self) {
         self.revision
             .update(|revision| *revision = revision.wrapping_add(1));
@@ -123,7 +140,7 @@ pub fn variable_virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     key: impl FnMut(usize) -> K + 'static,
     build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
 ) -> View {
-    variable_list(offset, heights, overscan, key, build, false)
+    variable_list(NoWatch, offset, heights, overscan, key, build, false)
 }
 
 /// Virtualize naturally sized rows, updating a positional height estimate cache.
@@ -143,7 +160,7 @@ pub fn measured_virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     key: impl FnMut(usize) -> K + 'static,
     build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
 ) -> View {
-    variable_list(offset, heights, overscan, key, build, true)
+    variable_list(NoWatch, offset, heights, overscan, key, build, true)
 }
 /// Virtualize keyed rows of natural height, keeping each row's height by key.
 ///
@@ -156,6 +173,30 @@ pub fn measured_virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
 /// insertion and removal by key. Configure end anchoring and the default
 /// height on `heights`; mounted rows follow the `measured_virtual_list` rules.
 pub fn measured_rows<K: Eq + std::hash::Hash + Clone + 'static>(
+    offset: Signal<f32>,
+    heights: VariableHeights,
+    overscan: usize,
+    mut rows: impl FnMut() -> Vec<K> + 'static,
+    estimate: impl FnMut(&[K], usize) -> f32 + 'static,
+    build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
+) -> View {
+    rows_of(NoWatch, offset, heights, overscan, rows, estimate, build)
+}
+/// `measured_rows`, with `observer` told of its rows while it's kept.
+pub fn measured_rows_observed<K: Eq + std::hash::Hash + Clone + 'static>(
+    observer: &Rc<dyn crate::virtual_list::RowObserver>,
+    offset: Signal<f32>,
+    heights: VariableHeights,
+    overscan: usize,
+    rows: impl FnMut() -> Vec<K> + 'static,
+    estimate: impl FnMut(&[K], usize) -> f32 + 'static,
+    build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
+) -> View {
+    let watch = Observed(Rc::downgrade(observer));
+    rows_of(watch, offset, heights, overscan, rows, estimate, build)
+}
+fn rows_of<K: Eq + std::hash::Hash + Clone + 'static, W: RowWatch>(
+    watch: W,
     offset: Signal<f32>,
     heights: VariableHeights,
     overscan: usize,
@@ -282,9 +323,15 @@ pub fn measured_rows<K: Eq + std::hash::Hash + Clone + 'static>(
             cx.retain(effect);
         }
         let key = move |index: usize| described.borrow()[index].clone();
-        measured_virtual_list(offset, heights, overscan, key, move |index, key, cx| {
-            build(index, key, cx)
-        })
+        variable_list(
+            watch,
+            offset,
+            heights,
+            overscan,
+            key,
+            move |index, key, cx| build(index, key, cx),
+            true,
+        )
     })
 }
 struct Entry {
@@ -312,7 +359,79 @@ fn row_style(width: f32, height: f32, measured: bool) -> crate::scene::Style {
         }
     }
 }
-fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
+/// What a list tells of its rows. A type, not a value to look at on each
+/// pass: a list without one has none of this in its code.
+trait RowWatch: 'static {
+    const ON: bool;
+    fn pass<K>(
+        &self,
+        weak: &crate::widgets::WeakUi,
+        runtime: &crate::reactive::Runtime,
+        entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
+        width: f32,
+        extras: &mut Vec<usize>,
+    );
+}
+/// Nobody told.
+struct NoWatch;
+impl RowWatch for NoWatch {
+    const ON: bool = false;
+    fn pass<K>(
+        &self,
+        _: &crate::widgets::WeakUi,
+        _: &crate::reactive::Runtime,
+        _: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
+        _: f32,
+        _: &mut Vec<usize>,
+    ) {
+    }
+}
+/// An observer, kept elsewhere: it holds the heights, so they can't hold it.
+struct Observed(std::rc::Weak<dyn crate::virtual_list::RowObserver>);
+impl RowWatch for Observed {
+    const ON: bool = true;
+    fn pass<K>(
+        &self,
+        weak: &crate::widgets::WeakUi,
+        runtime: &crate::reactive::Runtime,
+        entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
+        width: f32,
+        extras: &mut Vec<usize>,
+    ) {
+        if let Some(observer) = self.0.upgrade() {
+            observe_rows(&observer, weak, runtime, entries, width, extras);
+        }
+    }
+}
+/// An observer told of the rows measured at `width`, and asked which to build.
+fn observe_rows<K>(
+    observer: &Rc<dyn crate::virtual_list::RowObserver>,
+    weak: &crate::widgets::WeakUi,
+    runtime: &crate::reactive::Runtime,
+    entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
+    width: f32,
+    extras: &mut Vec<usize>,
+) {
+    runtime.untracked(|| {
+        observer.width(width);
+        if let Some(ui) = weak.upgrade() {
+            let scene = ui.scene.borrow();
+            for entry in entries.values() {
+                let index = entry.index.with_untracked(|i| *i);
+                let Some(measurement) = &entry.measurement else {
+                    continue;
+                };
+                let (seen, height) = measurement.with_untracked(|m| *m);
+                if seen == width && width > 0. && height.is_finite() {
+                    observer.measured(&scene, entry.node, index, width, height.max(1.));
+                }
+            }
+        }
+        observer.extra_rows(extras);
+    });
+}
+fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: RowWatch>(
+    watch: W,
     offset: Signal<f32>,
     heights: VariableHeights,
     overscan: usize,
@@ -505,6 +624,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                         heights.changed();
                     }
                 }
+                let mut extras = Vec::new();
+                if W::ON {
+                    watch.pass(&weak, &runtime, &entries, width, &mut extras);
+                }
                 let revision = heights.revision.get();
                 // Rows added or removed above the anchor row: it is as many
                 // rows on, and the view stays on it if its key is there
@@ -665,6 +788,17 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     if !measured && model.may_have_thin_rows() {
                         geometry.retain(|(_, _, row_height)| *row_height >= THINNEST_ROW);
                     }
+                    // Out of view, to learn from: just past the view's foot,
+                    // where a row's lazy parts build, in order among the others.
+                    if !extras.is_empty() {
+                        for row in extras.iter().copied() {
+                            if row < length && !geometry.iter().any(|(index, ..)| *index == row) {
+                                let known = model.row_height(row).unwrap_or(1.);
+                                geometry.push((row, position + height + 1., known));
+                            }
+                        }
+                        geometry.sort_by_key(|(index, ..)| *index);
+                    }
                     // An empty list keeps whether it is at its end (it is):
                     // its first rows then follow the end as later ones do.
                     let next_anchor = match first {
@@ -731,8 +865,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     };
                     if measured
                         && let Some((_, index, top, _)) =
-                            keys.iter().find(|(key, _, top, row_height)| {
-                                top + row_height > anchor.position && measured_row(key)
+                            keys.iter().find(|(key, index, top, row_height)| {
+                                top + row_height > anchor.position
+                                    && measured_row(key)
+                                    && !extras.contains(index)
                             })
                     {
                         anchor.index = *index;
