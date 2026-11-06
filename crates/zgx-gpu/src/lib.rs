@@ -3981,6 +3981,8 @@ pub struct GpuRenderer {
     /// A directly encoded frame, committed, until it is known complete.
     #[cfg(target_os = "macos")]
     metal_inflight: RefCell<Option<metal_frame::CommandBuffer>>,
+    #[cfg(target_os = "macos")]
+    flip_pending: RefCell<Option<std::sync::Arc<(std::sync::Mutex<Option<f64>>, std::sync::Condvar)>>>,
     /// The display the window shows on and its refresh rate, for the
     /// full-rate verdict's key (`set_display_key`).
     #[cfg(target_os = "macos")]
@@ -4506,6 +4508,8 @@ impl GpuRenderer {
             metal_frame: Default::default(),
             #[cfg(target_os = "macos")]
             metal_inflight: RefCell::new(None),
+            #[cfg(target_os = "macos")]
+            flip_pending: RefCell::new(None),
             #[cfg(target_os = "macos")]
             idle: false,
             #[cfg(target_os = "macos")]
@@ -10062,6 +10066,18 @@ impl GpuRenderer {
     #[cfg(target_os = "macos")]
     fn finish_direct(&self) -> bool {
         use objc2_metal::MTLCommandBuffer;
+        if let Some(done) = self.flip_pending.borrow_mut().take() {
+            let (lock, ready) = &*done;
+            let mut state = lock.lock().unwrap();
+            while state.is_none() {
+                state = ready.wait(state).unwrap();
+            }
+            self.gpu_time.set(state.filter(|ran| *ran > 0.).map(std::time::Duration::from_secs_f64));
+            if let Some(mapped) = &self.mapped {
+                mapped.borrow_mut().completed();
+            }
+            return true;
+        }
         let Some(buffer) = self.metal_inflight.borrow_mut().take() else {
             return false;
         };
@@ -12542,10 +12558,63 @@ impl GpuRenderer {
         };
         // A drawable's frame encoded directly presented as it committed.
         let presented = present.buffers[index].0.drawable && self.metal_inflight.borrow().is_some();
+        // PROTOTYPE: wait on another thread, and flip there.
+        if self.flip_pending.borrow().is_some() {
+            self.finish_direct();
+        }
+        let mut before_slot = Some(before_present);
+        let deferred = 'plan: {
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if !*ON.get_or_init(|| std::env::var_os("ZGX_ASYNC_FLIP").is_some())
+                || self.views.is_some()
+                || present.with_natives
+                || present.buffers[index].0.drawable
+                || self.metal_inflight.borrow().is_none()
+            {
+                break 'plan false;
+            }
+            let opaque_now = self.background.3 == 255;
+            let Some(plan) = present
+                .layer
+                .as_mut()
+                .and_then(|layer| layer.plan_flip(&present.buffers[index].0, opaque_now))
+            else {
+                break 'plan false;
+            };
+            let buffer = self.metal_inflight.borrow_mut().take().expect("checked");
+            let done = std::sync::Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
+            *self.flip_pending.borrow_mut() = Some(done.clone());
+            struct Job(metal_frame::CommandBuffer, layer_present::FlipPlan, std::sync::Arc<(std::sync::Mutex<Option<f64>>, std::sync::Condvar)>);
+            // SAFETY: prototype; a command buffer may be waited on from any thread.
+            unsafe impl Send for Job {}
+            static WORKER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Job>>> = std::sync::OnceLock::new();
+            let worker = WORKER.get_or_init(|| {
+                let (tx, rx) = std::sync::mpsc::channel::<Job>();
+                std::thread::spawn(move || {
+                    for job in rx {
+                        objc2::rc::autoreleasepool(|_| {
+                            use objc2_metal::MTLCommandBuffer;
+                            let Job(buffer, plan, done) = job;
+                            buffer.waitUntilCompleted();
+                            let ran = buffer.GPUEndTime() - buffer.GPUStartTime();
+                            plan.run();
+                            *done.0.lock().unwrap() = Some(ran);
+                            done.1.notify_all();
+                        });
+                    }
+                });
+                std::sync::Mutex::new(tx)
+            });
+            if let Some(before) = before_slot.take() {
+                before();
+            }
+            worker.lock().unwrap().send(Job(buffer, plan, done)).unwrap();
+            true
+        };
         // The window server reads the surface from its next composite: the
         // frame must be complete by then.
         // (A drawable's direct frame is not waited for: it presents itself.)
-        if presented || self.finish_direct() {
+        if presented || deferred || self.finish_direct() {
             // wgpu still frees what was dropped once its own work is done.
             if present.frame.is_multiple_of(64) {
                 let _ = self.device.poll(wgpu::PollType::Poll);
@@ -12567,7 +12636,9 @@ impl GpuRenderer {
                 timeout: None,
             });
         }
-        before_present();
+        if let Some(before) = before_slot.take() {
+            before();
+        }
         let plane = present.plane();
         let opaque = self.background.3 == 255;
         let plain = present
@@ -12610,7 +12681,8 @@ impl GpuRenderer {
             .as_ref()
             .is_some_and(|views| views.planes_moved());
         let show = |layer: &mut layer_present::Layer| {
-            if buffer.drawable {
+            if deferred {
+            } else if buffer.drawable {
                 // SAFETY: The raw queue is only retained; the guard is dropped at once.
                 let queue = unsafe { self.queue.as_hal::<wgpu::hal::api::Metal>() }.map(|hal| {
                     use objc2::Message;

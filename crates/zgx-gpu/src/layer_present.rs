@@ -550,7 +550,27 @@ fn loop_animation(shown: &LoopShown) -> Option<Retained<AnyObject>> {
         Some(animation)
     }
 }
+/// PROTOTYPE: a tile flip to run on another thread once the GPU is done.
+pub(crate) struct FlipPlan {
+    plain: Retained<CALayer>,
+    tile: Retained<CALayer>,
+    probe: Option<Probe>,
+}
+// SAFETY: prototype; the layers are only touched in an explicit transaction there, and the main
+// thread joins before it touches them again.
+unsafe impl Send for FlipPlan {}
+impl FlipPlan {
+    pub(crate) fn run(self) {
+        transaction(|| {
+            hide_tiles(&self.plain, Some(&self.tile));
+            if let Some(probe) = &self.probe {
+                probe.present();
+            }
+        });
+    }
+}
 /// See `Layer::probe`.
+#[derive(Clone)]
 struct Probe {
     layer: Retained<CAMetalLayer>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
@@ -1653,6 +1673,53 @@ impl Layer {
     }
     /// Shows `buffer`'s tile on the plain layer, made (its contents set) the
     /// first time the surface shows; in the caller's transaction.
+    /// PROTOTYPE: what `show_plain` does but for the flip itself, or `None`
+    /// where the flip must go with the frame's other changes.
+    pub(crate) fn plan_flip(&mut self, buffer: &Buffer, opaque: bool) -> Option<FlipPlan> {
+        if self.video.is_some()
+            || self.drawables.as_ref().is_some_and(|d| d.shown)
+            || self.loops_due.as_ref().is_some_and(|(_, shown)| !shown.is_empty())
+        {
+            return None;
+        }
+        self.set_opaque(opaque);
+        self.flush_loops();
+        let host = self.host.bounds();
+        let id = buffer.surface.id();
+        let mut plan = None;
+        transaction(|| {
+            if self.plain.frame() != host {
+                self.plain.setFrame(host);
+            }
+            let tile = match self.tiles.iter().position(|(tile, _)| *tile == id) {
+                Some(at) => self.tiles[at].1.clone(),
+                None => {
+                    let tile = CALayer::new();
+                    fill(&tile, &self.plain, self.opaque.get());
+                    tile.setHidden(true);
+                    let surface = &*buffer.surface as *const IOSurfaceRef as *const AnyObject;
+                    // SAFETY: as `show_tile`.
+                    unsafe { tile.setContents(Some(&*surface)) };
+                    self.plain.addSublayer(&tile);
+                    self.tiles.push((id, tile.clone()));
+                    tile
+                }
+            };
+            let bounds = self.plain.bounds();
+            for (_, each) in &self.tiles {
+                if each.frame() != bounds {
+                    each.setFrame(bounds);
+                }
+            }
+            plan = Some(FlipPlan {
+                plain: self.plain.clone(),
+                tile,
+                probe: self.probe.clone(),
+            });
+        });
+        self.plain_shows.set(true);
+        plan
+    }
     fn show_tile(&mut self, buffer: &Buffer) {
         self.place_loops();
         // The plain layer exactly the host's box too: autoresizing rounds it
