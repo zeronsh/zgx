@@ -243,6 +243,11 @@ thread_local! {
 /// Give `node` the system's edge effect: the host takes it up at its next frame.
 pub fn request_edge_effect(node: crate::scene::NodeId, effect: EdgeEffect) {
     PENDING_EDGES.with(|pending| pending.borrow_mut().push((node, effect)));
+    crate::native_view::wake();
+}
+/// Whether any wait for the host to take them: they make it active.
+pub fn edge_effects_pending() -> bool {
+    PENDING_EDGES.with(|pending| !pending.borrow().is_empty())
 }
 /// What was asked for since the host last took them.
 pub fn take_edge_effects() -> Vec<(crate::scene::NodeId, EdgeEffect)> {

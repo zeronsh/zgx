@@ -287,6 +287,10 @@ impl NativeHost {
     }
     /// Whether this window has native views to keep up (now or last frame).
     pub fn active(&self) -> bool {
+        #[cfg(target_os = "ios")]
+        if zgx::native_control::edge_effects_pending() {
+            return true;
+        }
         !self.natives.is_empty() || !self.split.is_empty()
     }
     /// Whether `node` is a native view's node (pointer over the page: the
