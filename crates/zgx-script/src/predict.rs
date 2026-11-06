@@ -124,12 +124,17 @@ pub(crate) fn watched(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<ml
     }
     crate::value::to_lua(value, lua, frozen)
 }
-/// How a row's item state is made: watched while it's captured.
-pub(crate) fn item_state(signal: Signal<Value>, item: &Value) -> crate::value::State {
-    crate::value::State(
-        signal,
-        (recording() && marked(item)).then_some(crate::value::Fresh::Watch),
-    )
+/// A row's item state while it's captured: reads noted.
+pub(crate) fn item_state(
+    signal: Signal<Value>,
+    item: &Value,
+    lua: &Lua,
+) -> mlua::Result<mlua::Value> {
+    let state = crate::value::State(signal, None);
+    if marked(item) {
+        return mlua::IntoLua::into_lua(crate::value::WatchedState(state), lua);
+    }
+    mlua::IntoLua::into_lua(state, lua)
 }
 /// Stands a proxy in for `value` if it's marked.
 pub(crate) fn proxy(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<Option<mlua::Value>> {
@@ -482,6 +487,9 @@ impl Model {
             self.path(c).read = true;
             self.paths_version += 1;
             self.structure += 1;
+            if std::env::var_os("PREDICT_TRACE").is_some() {
+                eprintln!("BUMP read at {}", line!());
+            }
         }
         self.mark_read(c, row);
     }
@@ -491,6 +499,9 @@ impl Model {
             self.path(c).read = true;
             self.paths_version += 1;
             self.structure += 1;
+            if std::env::var_os("PREDICT_TRACE").is_some() {
+                eprintln!("BUMP read at {}", line!());
+            }
         }
         self.mark_read(c, row);
     }
@@ -499,6 +510,9 @@ impl Model {
             self.path(at).len_read = true;
             self.paths_version += 1;
             self.structure += 1;
+            if std::env::var_os("PREDICT_TRACE").is_some() {
+                eprintln!("BUMP read at {}", line!());
+            }
         }
         self.mark_read(at, row);
     }
@@ -1357,6 +1371,8 @@ pub(crate) struct Predictor {
     /// Something moved: there may be rows to learn from.
     extras_due: Cell<bool>,
     state_seen: RefCell<Vec<usize>>,
+    open_keys: RefCell<FxHashSet<Rc<str>>>,
+    captured_at: Cell<Option<Instant>>,
     states_asked: Cell<Option<Instant>>,
     solving: RefCell<Option<Receiver<(Vec<(u32, Solved)>, Duration)>>>,
     /// When the width last changed, when heights were last given.
@@ -1425,6 +1441,8 @@ impl Predictor {
             samples_missed: Cell::new(0),
             extras_due: Cell::new(true),
             state_seen: RefCell::default(),
+            open_keys: RefCell::default(),
+            captured_at: Cell::new(None),
             states_asked: Cell::new(None),
             solving: RefCell::default(),
             width_at: Cell::new(None),
@@ -1624,7 +1642,12 @@ impl Predictor {
             }
             let fonts_were = slot.fonts.len();
             if moved {
-                model.structure += 1;
+                {
+                    model.structure += 1;
+                    if std::env::var_os("PREDICT_TRACE").is_some() {
+                        eprintln!("BUMP line {}", line!());
+                    }
+                }
             }
             let slot = &mut model.slot_list[id as usize];
             match scene.kind(*leaf) {
@@ -1662,7 +1685,12 @@ impl Predictor {
                 _ => {}
             }
             if slot.fonts.len() != fonts_were {
-                model.structure += 1;
+                {
+                    model.structure += 1;
+                    if std::env::var_os("PREDICT_TRACE").is_some() {
+                        eprintln!("BUMP line {}", line!());
+                    }
+                }
             }
         }
         // A run list read but drawn as no one text: what its runs carry that
@@ -1692,7 +1720,12 @@ impl Predictor {
             for f in &s.flag_names {
                 if !drawn.contains(f) && !model.paths[s.path as usize].apart_flags.contains(f) {
                     model.paths[s.path as usize].apart_flags.push(f.clone());
-                    model.structure += 1;
+                    {
+                        model.structure += 1;
+                        if std::env::var_os("PREDICT_TRACE").is_some() {
+                            eprintln!("BUMP line {}", line!());
+                        }
+                    }
                 }
             }
         }
@@ -1761,7 +1794,12 @@ impl Predictor {
                             named = Some(f.clone());
                             let name_path = model.child(star, &f);
                             if !model.paths[name_path as usize].name {
-                                model.structure += 1;
+                                {
+                                    model.structure += 1;
+                                    if std::env::var_os("PREDICT_TRACE").is_some() {
+                                        eprintln!("BUMP line {}", line!());
+                                    }
+                                }
                             }
                             model.path(name_path).name = true;
                         }
@@ -1776,7 +1814,12 @@ impl Predictor {
                     }
                 }
                 if wrap.items.len() != classes || was_list != list {
-                    model.structure += 1;
+                    {
+                        model.structure += 1;
+                        if std::env::var_os("PREDICT_TRACE").is_some() {
+                            eprintln!("BUMP line {}", line!());
+                        }
+                    }
                 }
                 model.wrap = Some(wrap);
             }
@@ -1797,7 +1840,9 @@ impl Predictor {
             model.equations.pop();
         } else {
             self.needs_solve.set(true);
+            self.spent_captures.set(self.spent_captures.get() + 1);
         }
+        self.captured_at.set(Some(Instant::now()));
         // The widths most recently rested at.
         let mut widths: Vec<u32> = Vec::new();
         for e in model.equations.iter().rev() {
@@ -1811,7 +1856,6 @@ impl Predictor {
             self.needs_solve.set(true);
         }
         let spent = t.elapsed();
-        self.spent_captures.set(self.spent_captures.get() + 1);
         let (tokens, slots) = (model.token_count, model.slot_list.len());
         stats(|s| {
             s.captures += 1;
@@ -1851,6 +1895,16 @@ impl Predictor {
         let width = self.width.get();
         if width <= 0. || self.model.borrow().equations.is_empty() {
             return false;
+        }
+        // Captures come in bursts, as rows mount: work from what they found
+        // once they've paused, not after each.
+        if budget.is_some()
+            && self
+                .captured_at
+                .get()
+                .is_some_and(|t| t.elapsed() < Duration::from_millis(32))
+        {
+            return true;
         }
         let items = (self.items)();
         let rows = items.list().len();
@@ -1897,7 +1951,12 @@ impl Predictor {
                     .map(|i| (model.vocab(i), model.paths[i as usize].seen.len() > 1))
                     .collect();
                 if was != now {
-                    model.structure += 1;
+                    {
+                        model.structure += 1;
+                        if std::env::var_os("PREDICT_TRACE").is_some() {
+                            eprintln!("BUMP line {}", line!());
+                        }
+                    }
                 }
             }
             // A solve finished: its values in.
@@ -2035,33 +2094,54 @@ impl Predictor {
         let identities: Vec<usize> = states.iter().map(crate::value::identity).collect();
         if *self.state_seen.borrow() != identities {
             *self.state_seen.borrow_mut() = identities;
-            let keys: FxHashSet<Rc<str>> = (0..rows).filter_map(|i| (self.key_of)(i)).collect();
-            let mut model = self.model.borrow_mut();
-            let mut prefixes: FxHashSet<Rc<str>> = FxHashSet::default();
-            let (mut row, mut record) = (false, false);
+            // What's held open now, by key: only those it changes plan again.
+            let mut open: FxHashSet<Rc<str>> = FxHashSet::default();
             for state in &states {
                 if let Value::Map(m) = state {
-                    for (k, _) in m.iter() {
-                        if keys.contains(&**k) {
-                            row = true;
-                        } else if let Some((a, _)) = k.split_once(':')
-                            && keys.contains(a)
-                        {
-                            prefixes.insert(Rc::from(a));
-                            record = true;
+                    for (k, v) in m.iter() {
+                        if matches!(v, Value::Bool(true)) {
+                            open.insert(k.clone());
                         }
                     }
                 }
             }
-            if row != model.state_row
-                || record != model.state_record
-                || prefixes != model.open_prefixes
-            {
-                model.structure += 1;
+            let mut was = self.open_keys.borrow_mut();
+            if *was != open {
+                let changed: FxHashSet<&str> = was
+                    .symmetric_difference(&open)
+                    .map(|k| k.split_once(':').map_or(&**k, |(a, _)| a))
+                    .collect();
+                let mut plans = self.row_plans.borrow_mut();
+                let mut first = None;
+                for i in 0..rows.min(plans.len()) {
+                    if plans[i].is_some()
+                        && (self.key_of)(i).is_some_and(|key| changed.contains(&*key))
+                    {
+                        plans[i] = None;
+                        first.get_or_insert(i);
+                    }
+                }
+                drop(plans);
+                if let Some(first) = first {
+                    self.plan_at.set(self.plan_at.get().min(first));
+                    self.plan_finished.set(true);
+                }
+                let mut model = self.model.borrow_mut();
+                let row = open.iter().any(|k| !k.contains(':'));
+                let record = open.iter().any(|k| k.contains(':'));
+                // (Once each: a kind of holding open seen for the first time.)
+                if (row && !model.state_row) || (record && !model.state_record) {
+                    model.structure += 1;
+                    self.extras_due.set(true);
+                }
+                model.state_row |= row;
+                model.state_record |= record;
+                model.open_prefixes = open
+                    .iter()
+                    .filter_map(|k| k.split_once(':').map(|(a, _)| Rc::from(a)))
+                    .collect();
+                *was = open;
             }
-            model.state_row = row;
-            model.state_record = record;
-            model.open_prefixes = prefixes;
         }
         let mut plans = self.row_plans.borrow_mut();
         let mut at = self.plan_at.get();
@@ -2162,6 +2242,8 @@ impl Predictor {
         // What to build out of view, if a row still can't be said.
         if !more_planning
             && self.in_flight.get() == 0
+            && self.solving.borrow().is_none()
+            && !self.needs_solve.get()
             && self.spent_captures.get() < MOST_CAPTURES
             && self.extras.borrow().is_empty()
             && self.extras_due.replace(false)
@@ -2405,6 +2487,13 @@ impl Predictor {
         self.extras.borrow_mut().clear();
         self.spent_captures.set(MOST_CAPTURES);
         stats(|s| s.given_up = true);
+    }
+    /// Whether what it says is all it knows: nothing being solved or measured.
+    fn at_rest(&self) -> bool {
+        self.solving.borrow().is_none()
+            && !self.needs_solve.get()
+            && self.in_flight.get() == 0
+            && self.plan_at.get() >= self.row_plans.borrow().len()
     }
     /// What it says of a row now, if it can.
     fn said(&self, index: usize, width: f32) -> Option<f32> {
@@ -2776,7 +2865,14 @@ impl zgx::virtual_list::RowObserver for Predictor {
         {
             MISSES.with(|m| m.borrow_mut().push((index, said, height)));
         }
-        if self.sampled.borrow_mut().remove(&index) {
+        let was_sample = self.sampled.borrow_mut().remove(&index);
+        let at_rest = self.at_rest();
+        if was_sample && !at_rest {
+            // (Its answer was still coming: no test of it. The next sample is.)
+            self.extras_due.set(true);
+            self.wake();
+        }
+        if was_sample && at_rest {
             let said = self.said(index, width);
             if said.is_some_and(|s| (s - height).abs() < 0.05) {
                 self.streak.set(self.streak.get() + 1);
@@ -3032,5 +3128,47 @@ pub fn give_heights(rows: &[(usize, f32)], keep_measured: bool) {
             .collect();
         drop((mounted, ever));
         list.heights.set_heights(&rows);
+    }
+}
+/// Lets go of one part of what the largest list keeps: for finding what holds
+/// its memory.
+pub fn drop_part(part: &str) {
+    let lists: Vec<_> = LISTS.with(|l| l.borrow().iter().filter_map(Weak::upgrade).collect());
+    let Some(list) = lists.iter().max_by_key(|l| l.heights.len()) else {
+        return;
+    };
+    match part {
+        "plans" => {
+            *list.row_plans.borrow_mut() = Vec::new();
+            *list.planned_rows.borrow_mut() = Vec::new();
+        }
+        "tables" => {
+            *list.tables.borrow_mut() = Vec::new();
+            *list.naturals.borrow_mut() = Vec::new();
+            *list.table_of.borrow_mut() = FxHashMap::default();
+            *list.natural_of.borrow_mut() = FxHashMap::default();
+            *list.table_slot.borrow_mut() = Vec::new();
+        }
+        "equations" => {
+            let mut m = list.model.borrow_mut();
+            m.equations = Vec::new();
+            m.solved = Default::default();
+        }
+        "sets" => {
+            *list.checked.borrow_mut() = FxHashSet::default();
+            *list.ever.borrow_mut() = FxHashSet::default();
+            *list.sampled.borrow_mut() = FxHashSet::default();
+            *list.state_seen.borrow_mut() = Vec::new();
+            list.model.borrow_mut().parsed = FxHashSet::default();
+        }
+        "model" => {
+            let mut m = list.model.borrow_mut();
+            m.tokens = FxHashMap::default();
+            m.slots = FxHashMap::default();
+            m.slot_list = Vec::new();
+            m.wrap = None;
+            m.states = Vec::new();
+        }
+        _ => {}
     }
 }

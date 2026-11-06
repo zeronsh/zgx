@@ -2002,6 +2002,11 @@ fn read_state_of(ud: &mlua::AnyUserData) -> Option<Signal<Value>> {
     ud.borrow::<crate::value::ReadState>()
         .ok()
         .map(|s| s.0.0.clone())
+        .or_else(|| {
+            ud.borrow::<crate::value::WatchedState>()
+                .ok()
+                .map(|s| s.0.0.clone())
+        })
 }
 /// The state `value` holds, to write as well (a two-way binding, an
 /// action's target): never a plugin's read-only shared state.

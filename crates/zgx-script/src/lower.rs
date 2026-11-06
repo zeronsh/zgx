@@ -3383,22 +3383,25 @@ fn kind_view(
                     let item = items
                         .with_untracked(|list| list.list().get(index).cloned().unwrap_or_default());
                     // (A row being captured notes what its parts read.)
-                    let recording = crate::predict::recording();
+                    if crate::predict::recording() {
+                        return build_watched(
+                            &vm,
+                            cx,
+                            &low,
+                            &builder,
+                            &item,
+                            index + 1,
+                            live,
+                            &rows,
+                            row,
+                        );
+                    }
                     if !live {
-                        if recording {
-                            let item = crate::predict::watched(&item, &vm.lua, true);
-                            return build_scoped(&vm, cx, &low, &builder, (item.ok(), index + 1));
-                        }
                         return build_scoped(&vm, cx, &low, &builder, (item, index + 1));
                     }
                     let signal = vm.runtime.signal(item.clone());
                     if let Some(state) = rows.borrow_mut().get_mut(&row) {
                         state.item = Some(signal.clone());
-                    }
-                    if recording {
-                        let state = crate::predict::item_state(signal, &item);
-                        let item = crate::predict::watched(&item, &vm.lua, true);
-                        return build_scoped(&vm, cx, &low, &builder, (item.ok(), index + 1, state));
                     }
                     build_scoped(
                         &vm,
@@ -7672,9 +7675,7 @@ fn lower_item_list(
             if live {
                 let value = item.with_untracked(Clone::clone);
                 if crate::predict::recording() {
-                    let row = crate::predict::item_state(item, &value);
-                    let value = crate::predict::watched(&value, &vm.lua, true);
-                    return build_scoped(&vm, cx, &low, &builder, (value.ok(), index, row));
+                    return build_watched_row(&vm, cx, &low, &builder, item, &value, index);
                 }
                 let row = crate::value::State(item, None);
                 return build_scoped(&vm, cx, &low, &builder, (value, index, row));
@@ -7685,8 +7686,7 @@ fn lower_item_list(
                 move |_, cx| {
                     let value = item.with_untracked(Clone::clone);
                     if crate::predict::recording() {
-                        let value = crate::predict::watched(&value, &vm.lua, true);
-                        return build_scoped(&vm, cx, &low, &builder, (value.ok(), index.clone()));
+                        return build_watched_plain(&vm, cx, &low, &builder, &value, index.clone());
                     }
                     build_scoped(&vm, cx, &low, &builder, (value, index.clone()))
                 },
@@ -7776,7 +7776,15 @@ fn lower_item_list(
         // Predicting, keys are asked of the script once, by both.
         let shared_keys = rare.as_ref().is_some_and(|rare| rare.predict).then(|| {
             let kept = Rc::new(std::cell::RefCell::new(KeptKeys::default()));
-            let predictor = predictor_for(&items, key.as_ref(), key_field.as_ref(), vm, &rows, &kept, cx);
+            let predictor = predictor_for(
+                &items,
+                key.as_ref(),
+                key_field.as_ref(),
+                vm,
+                &rows,
+                &kept,
+                cx,
+            );
             *predicting.borrow_mut() = Some(predictor);
             kept
         });
@@ -7807,7 +7815,8 @@ fn lower_item_list(
                 let estimate = |_: &[ListKey], _: usize| f32::NAN;
                 match shared_keys {
                     Some(kept) => {
-                        let keys = move || items.with(|l| item_keys(&vm, &key, l, &mut kept.borrow_mut()));
+                        let keys =
+                            move || items.with(|l| item_keys(&vm, &key, l, &mut kept.borrow_mut()));
                         measured_rows(offset, rows, *overscan, keys, estimate, row)
                     }
                     None => {
@@ -9359,7 +9368,13 @@ fn predictor_for(
         Rc::new(move || items.with_untracked(Clone::clone)) as Rc<dyn Fn() -> Value>
     };
     let key_of = {
-        let (items, key, field, vm, kept) = (items.clone(), key.cloned(), key_field.cloned(), vm.clone(), kept.clone());
+        let (items, key, field, vm, kept) = (
+            items.clone(),
+            key.cloned(),
+            key_field.cloned(),
+            vm.clone(),
+            kept.clone(),
+        );
         Rc::new(move |index: usize| -> Option<Rc<str>> {
             let item = items.with_untracked(|l| l.list().get(index).cloned())?;
             let found = if let Some(field) = &field {
@@ -9389,11 +9404,14 @@ fn predictor_for(
     let named = {
         let vm = vm.clone();
         Rc::new(move || {
-            vm.lua.app_data_ref::<crate::node::Env>().map_or(Vec::new(), |env| {
-                let mut all: Vec<Signal<Value>> = env.store.entries().into_iter().map(|(_, s)| s).collect();
-                all.extend(env.shared.entries().into_iter().map(|(_, s)| s));
-                all
-            })
+            vm.lua
+                .app_data_ref::<crate::node::Env>()
+                .map_or(Vec::new(), |env| {
+                    let mut all: Vec<Signal<Value>> =
+                        env.store.entries().into_iter().map(|(_, s)| s).collect();
+                    all.extend(env.shared.entries().into_iter().map(|(_, s)| s));
+                    all
+                })
         }) as Rc<dyn Fn() -> Vec<Signal<Value>>>
     };
     let predictor = crate::predict::Predictor::new(now, key_of, named, rows.clone());
@@ -9419,7 +9437,9 @@ fn predictor_for(
             tasks.spawn(async move {
                 loop {
                     zgx::timer::sleep(std::time::Duration::from_millis(1)).await;
-                    let Some(predictor) = weak.upgrade() else { break };
+                    let Some(predictor) = weak.upgrade() else {
+                        break;
+                    };
                     let more = predictor.tick(Some(std::time::Duration::from_millis(2)));
                     if !more && !predictor.holding() {
                         break;
@@ -9430,4 +9450,60 @@ fn predictor_for(
         }));
     }
     predictor
+}
+/// A list row being captured, with item state: its reads noted.
+#[cold]
+#[inline(never)]
+fn build_watched_row(
+    vm: &Rc<Vm>,
+    cx: &mut Context,
+    low: &Rc<Lowering>,
+    builder: &mlua::Function,
+    item: Signal<Value>,
+    value: &Value,
+    index: crate::value::State,
+) -> View {
+    let state = crate::predict::item_state(item, value, &vm.lua).ok();
+    let value = crate::predict::watched(value, &vm.lua, true).ok();
+    build_scoped(vm, cx, low, builder, (value, index, state))
+}
+/// A list row being captured, its item alone.
+#[cold]
+#[inline(never)]
+fn build_watched_plain(
+    vm: &Rc<Vm>,
+    cx: &mut Context,
+    low: &Rc<Lowering>,
+    builder: &mlua::Function,
+    value: &Value,
+    index: crate::value::State,
+) -> View {
+    let value = crate::predict::watched(value, &vm.lua, true).ok();
+    build_scoped(vm, cx, low, builder, (value, index))
+}
+/// A block of a row being captured: its item, and its state if it takes one.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn build_watched(
+    vm: &Rc<Vm>,
+    cx: &mut Context,
+    low: &Rc<Lowering>,
+    builder: &mlua::Function,
+    item: &Value,
+    place: usize,
+    live: bool,
+    rows: &Rc<std::cell::RefCell<Rows>>,
+    row: Rc<str>,
+) -> View {
+    let watched = crate::predict::watched(item, &vm.lua, true).ok();
+    if !live {
+        return build_scoped(vm, cx, low, builder, (watched, place));
+    }
+    let signal = vm.runtime.signal(item.clone());
+    if let Some(state) = rows.borrow_mut().get_mut(&row) {
+        state.item = Some(signal.clone());
+    }
+    let state = crate::predict::item_state(signal, item, &vm.lua).ok();
+    build_scoped(vm, cx, low, builder, (watched, place, state))
 }

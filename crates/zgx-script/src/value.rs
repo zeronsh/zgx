@@ -688,6 +688,9 @@ fn convert_in(value: mlua::Value, old: Option<&Value>, depth: u32) -> mlua::Resu
         },
         mlua::Value::UserData(ud) if ud.is::<State>() => ud.borrow::<State>()?.0.get(),
         mlua::Value::UserData(ud) if ud.is::<ReadState>() => ud.borrow::<ReadState>()?.0.0.get(),
+        mlua::Value::UserData(ud) if ud.is::<WatchedState>() => {
+            ud.borrow::<WatchedState>()?.0.0.get()
+        }
         // `ui.raw(value, reason)` is its value; only the design lint looks.
         mlua::Value::UserData(ud) if ud.is::<crate::design::RawUd>() => {
             ud.borrow::<crate::design::RawUd>()?.0.clone()
@@ -2209,9 +2212,6 @@ pub struct State(pub Signal<Value>, pub(crate) Option<Fresh>);
 pub(crate) enum Fresh {
     One(zgx::reactive::Refresh),
     Two(zgx::reactive::Refresh, zgx::reactive::Refresh),
-    /// Nothing to bring up to date: an item of a row being captured, read
-    /// through what notes what's read.
-    Watch,
 }
 impl State {
     /// A state over `signal`.
@@ -2230,7 +2230,6 @@ impl State {
                 first.refresh();
                 then.refresh();
             }
-            Some(Fresh::Watch) => {}
         }
         &self.0
     }
@@ -2512,6 +2511,20 @@ pub(crate) struct ReadState(pub State, pub Rc<str>);
 const WRITES: [&str; 10] = [
     "set", "update", "set_key", "append", "patch", "toggle", "add", "push", "insert", "remove",
 ];
+/// The item state of a row being captured: read through what notes what's
+/// read. A type of its own, so `State` itself pays nothing for it.
+pub(crate) struct WatchedState(pub State);
+impl UserData for WatchedState {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        add_reads(methods, |s: &WatchedState| &s.0);
+        methods.add_method("get", |lua, s: &WatchedState, ()| {
+            crate::predict::watched(&s.0.fresh().get(), lua, true)
+        });
+        methods.add_method("peek", |lua, s: &WatchedState, ()| {
+            crate::predict::watched(&s.0.fresh().with_untracked(Clone::clone), lua, true)
+        });
+    }
+}
 impl UserData for ReadState {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         add_reads(methods, |s: &ReadState| &s.0);
@@ -2552,12 +2565,7 @@ fn add_reads<T: 'static, M: UserDataMethods<T>>(
     state: impl Fn(&T) -> &State + Copy + 'static,
 ) {
     methods.add_method("get", move |lua, s: &T, ()| {
-        let state = state(s);
-        let value = state.fresh().get();
-        if let Some(Fresh::Watch) = state.1 {
-            return crate::predict::watched(&value, lua, true);
-        }
-        read(value, lua)
+        read(state(s).fresh().get(), lua)
     });
     methods.add_method("peek", move |lua, s: &T, ()| {
         read(state(s).fresh().with_untracked(Clone::clone), lua)
