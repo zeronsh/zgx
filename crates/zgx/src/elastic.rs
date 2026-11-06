@@ -1,7 +1,7 @@
 //! Elastic (rubber-band) scrolling, as macOS's scroll views and Safari's pages
-//! do it: a trackpad gesture pushed past a scroll view's edge stretches it,
-//! harder the further it goes, and letting go springs it back. Momentum that
-//! reaches an edge bounces. The offset an app sees never leaves its range;
+//! do it: a trackpad gesture pushed past a scroll view's edge stretches it, a
+//! twentieth of the push, and letting go springs it back. Momentum that reaches
+//! an edge bounces. The offset an app sees never leaves its range;
 //! only the content's translation shows the stretch.
 //!
 //! The host turns it on (`Ui::set_elastic_scrolling`) and reports a trackpad
@@ -16,15 +16,21 @@ use crate::{
 use std::{
     cell::Cell,
     rc::{Rc, Weak},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-/// How stiff the stretch is (AppKit's and UIKit's rubber-band constant).
-const RESISTANCE: f32 = 0.55;
-/// How fast it springs back: critically damped, settled in about 0.4 s.
-const SPRING: f32 = 14.;
-/// Momentum that reaches an edge pushes past it this long, then springs back.
-const BOUNCE: Duration = Duration::from_millis(90);
+/// How much push a point of stretch takes. Measured on an `NSScrollView`, and
+/// the same in WebKit's and Chromium's: linear, with no limit.
+const PULL: f32 = 20.;
+/// How fast a stretch comes back, per second: gone in about 0.4 s.
+const REBOUND: f32 = 12.5;
+/// How far an edge's speed carries past it: a bounce peaks 80 ms in, at
+/// about 0.009 of the speed in points a second.
+const AMPLITUDE: f32 = 0.31;
+/// The fastest a bounce starts, in points a second.
+const MOST_SPEED: f32 = 20_000.;
+/// A bounce is under way this long at least, however small it starts.
+const LEAST_BOUNCE: f32 = 0.024;
 
 /// One scroll view's stretch.
 pub(crate) struct Elastic {
@@ -33,16 +39,15 @@ pub(crate) struct Elastic {
     size: Signal<(f32, f32)>,
     extent: Signal<(f32, f32)>,
     offset: Signal<f32>,
-    /// What the gesture pushed past the edge: before the spring's curve
+    /// What the gesture pushed past the edge: before `PULL`
     /// (negative before the start, positive after the end).
     pushed: Cell<f32>,
-    /// What shows: `pushed` through the curve, or the spring's position.
+    /// What shows: `pushed` over `PULL`, or the spring's position.
     pub(crate) shown: Signal<f32>,
-    /// Springing back: from where and since when, and its next step.
-    spring: Cell<Option<(f32, Instant)>>,
+    /// Springing back: from where, at what speed and since when, and its
+    /// next step.
+    spring: Cell<Option<(f32, f32, Instant)>>,
     next: Cell<Option<Instant>>,
-    /// Momentum reached the edge then: it springs back `BOUNCE` after.
-    bounced: Cell<Option<Instant>>,
 }
 impl Elastic {
     fn main(&self, size: (f32, f32)) -> f32 {
@@ -54,38 +59,23 @@ impl Elastic {
     fn limit(&self) -> f32 {
         (self.main(self.extent.with_untracked(|s| *s)) - self.length()).max(0.)
     }
-    /// `pushed` as it shows: ever less for each further pixel, never past
-    /// the view's length.
-    fn curve(&self, pushed: f32) -> f32 {
-        let length = self.length().max(1.);
-        let shown = (1. - 1. / (pushed.abs() * RESISTANCE / length + 1.)) * length;
-        shown.copysign(pushed)
-    }
-    /// What push shows `shown`: `curve`'s inverse.
-    fn uncurve(&self, shown: f32) -> f32 {
-        let length = self.length().max(1.);
-        let shown_abs = shown.abs().min(length - 0.5);
-        ((length / (length - shown_abs) - 1.) * length / RESISTANCE).copysign(shown)
-    }
     fn push(&self, delta: f32) {
         // Caught as it springs back: on from where it shows.
         if self.spring.take().is_some() {
-            self.pushed
-                .set(self.uncurve(self.shown.with_untracked(|s| *s)));
+            self.pushed.set(self.shown.with_untracked(|s| *s) * PULL);
             self.next.set(None);
         }
         let pushed = self.pushed.get() + delta;
         self.pushed.set(pushed);
-        self.shown.set(self.curve(pushed));
+        self.shown.set(pushed / PULL);
     }
     fn release(&self, now: Instant) {
         if self.shown.with_untracked(|s| *s) == 0. {
             return;
         }
         self.spring
-            .set(Some((self.shown.with_untracked(|s| *s), now)));
+            .set(Some((self.shown.with_untracked(|s| *s), 0., now)));
         self.next.set(Some(now));
-        self.bounced.set(None);
     }
     fn stretched(&self) -> bool {
         self.shown.with_untracked(|s| *s) != 0.
@@ -98,7 +88,6 @@ impl Elastic {
     fn snap(&self) {
         self.spring.set(None);
         self.next.set(None);
-        self.bounced.set(None);
         self.pushed.set(0.);
         if self.stretched() {
             self.shown.set(0.);
@@ -157,7 +146,6 @@ pub(crate) fn register(
         shown: shown.clone(),
         spring: Cell::new(None),
         next: Cell::new(None),
-        bounced: Cell::new(None),
     });
     {
         let mut state = ui.elastic_state().borrow_mut();
@@ -288,10 +276,11 @@ pub(crate) fn before_scroll(ui: &Ui, event: InputEvent) -> Option<InputEvent> {
         &mut delta_y
     };
     let pushed = view.pushed.get();
-    // Toward the content: undo the push, then scroll with what is left.
+    // Toward the content: what shows comes back as far as the hand moves, then
+    // what is left scrolls.
     if pushed * *delta < 0. {
-        let back = delta.abs().min(pushed.abs()).copysign(*delta);
-        view.push(back);
+        let back = delta.abs().min(pushed.abs() / PULL).copysign(*delta);
+        view.push(back * PULL);
         *delta -= back;
         if view.pushed.get().abs() < 0.5 {
             view.pushed.set(0.);
@@ -376,21 +365,18 @@ pub(crate) fn after_scroll(ui: &Ui, event: &InputEvent, result: &DispatchResult)
         return;
     }
     if momentum && !fingers {
-        // Momentum bounces off the edge: a moment's push, then back.
-        match view.bounced.get() {
-            // Once a gesture's momentum: what is left of it stops at the edge.
-            None if ui.elastic_state().borrow().bounced => return,
-            None => {
-                ui.elastic_state().borrow_mut().bounced = true;
-                view.bounced.set(Some(now));
-                view.next.set(Some(now + BOUNCE));
-            }
-            Some(at) if now.saturating_duration_since(at) >= BOUNCE => {
-                view.release(now);
-                return;
-            }
-            Some(_) => {}
+        // Momentum bounces off the edge, at the speed it got there. Once a
+        // gesture's momentum: what is left of it stops at the edge.
+        if ui.elastic_state().borrow().bounced {
+            return;
         }
+        ui.elastic_state().borrow_mut().bounced = true;
+        let speed = delta / ui.refresh_interval().as_secs_f32().max(0.001);
+        view.spring
+            .set(Some((0., speed.clamp(-MOST_SPEED, MOST_SPEED), now)));
+        view.next.set(Some(now));
+        keep_moving(ui, &view);
+        return;
     }
     view.push(delta);
     keep_moving(ui, &view);
@@ -473,21 +459,13 @@ fn step(ui: &Ui, view: &Rc<Elastic>, now: Instant) -> bool {
     if view.next.get().is_none_or(|next| next > now) {
         return false;
     }
-    if view.spring.get().is_none() {
-        // A bounce's push is over.
-        if view.bounced.get().is_some() {
-            view.release(now);
-        } else {
-            view.next.set(None);
-            return false;
-        }
-    }
-    let Some((from, since)) = view.spring.get() else {
+    let Some((from, speed, since)) = view.spring.get() else {
+        view.next.set(None);
         return false;
     };
     let t = now.saturating_duration_since(since).as_secs_f32();
-    let shown = from * (1. + SPRING * t) * (-SPRING * t).exp();
-    if shown.abs() < 0.5 {
+    let shown = (from + AMPLITUDE * speed * t) * (-REBOUND * t).exp();
+    if shown.abs() < 0.5 && (from != 0. || t > LEAST_BOUNCE) {
         view.snap();
     } else {
         view.shown.set(shown);
