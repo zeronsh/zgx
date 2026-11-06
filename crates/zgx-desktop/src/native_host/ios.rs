@@ -2,10 +2,11 @@
 //!
 //! A window's views, bottom to top: winit's view with the base plane's Metal
 //! layer, a view holding the glass, and a view holding the overlay plane's.
-//! Neither added view takes touches, so they reach winit's view and zgx's own
-//! hit testing, and neither is seen by assistive technology: the one tree of
-//! elements is zgx's. All of it changes in one Core Animation transaction,
-//! the planes' drawables presented inside it.
+//! Neither added view handles a touch: it reaches winit's view and zgx's own
+//! hit testing, directly or, over interactive glass (which must see touches to
+//! answer them), up the responder chain. Neither is seen by assistive
+//! technology: the one tree of elements is zgx's. All of it changes in one
+//! Core Animation transaction, the planes' drawables presented inside it.
 use objc2::{MainThreadMarker, class, msg_send, rc::Retained, runtime::AnyObject};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use std::{collections::HashMap, ptr::NonNull};
@@ -100,6 +101,7 @@ pub(crate) struct Surfaces {
     mounted: HashMap<NodeId, Mounted>,
     order: Vec<NodeId>,
     zoom: f32,
+    interactive: bool,
 }
 
 impl Surfaces {
@@ -131,6 +133,7 @@ impl Surfaces {
             mounted: HashMap::new(),
             order: Vec::new(),
             zoom: 1.,
+            interactive: false,
         })
     }
     /// A renderer presenting into the overlay's view.
@@ -214,6 +217,18 @@ impl Surfaces {
             order.push(placement.node);
             let parent = self.groups.get(&placement.node).copied();
             self.place(placement, parent);
+        }
+        // The host passes touches to its panes only while one answers them.
+        let interactive = self.mounted.values().any(|mounted| {
+            mounted.style.is_some_and(|style| style.interactive)
+                || matches!(mounted.content, GlassContent::Group(_))
+        });
+        if interactive != self.interactive {
+            self.interactive = interactive;
+            // SAFETY: UIView's setter, on the main thread.
+            unsafe {
+                let _: () = msg_send![&*self.glass_host, setUserInteractionEnabled: interactive];
+            }
         }
         // Later paint is higher: reorder only when the order changes.
         if order != self.order {
@@ -317,6 +332,11 @@ impl Surfaces {
                 let first = mounted.style.is_none();
                 mounted.style = Some(style);
                 restyle(&mounted.view, style, !first);
+                // SAFETY: UIView's setter, on the main thread.
+                unsafe {
+                    let _: () =
+                        msg_send![&*mounted.view, setUserInteractionEnabled: style.interactive];
+                }
             }
         }
     }

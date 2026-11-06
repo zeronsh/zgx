@@ -1173,6 +1173,8 @@ impl Kind {
                 | Kind::Submenu { .. }
                 | Kind::MenuItem(..)
                 | Kind::Decision(_)
+                | Kind::Glass(_)
+                | Kind::GlassGroup(_)
         ) || self.library_takes_children()
     }
     /// A component of the library holding children (a disclosure's content,
@@ -1521,10 +1523,7 @@ pub(crate) struct GlassSpec {
     pub radius: Option<Source>,
 }
 /// `ui.glass` and `ui.glass_group`, made the first time a script names one.
-pub(crate) fn install_glass(lua: &Lua) {
-    let Some(lazy) = lua.app_data_ref::<crate::lazy::Lazy>() else {
-        return;
-    };
+pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
     lazy.ui(&["glass", "glass_group"], |lua, ui| {
         ui.set(
             "glass",
@@ -6016,7 +6015,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             }
         })?,
     )?;
-    install_glass(lua);
     ui.set(
         "terminal",
         lua.create_function(|lua, table: Table| {

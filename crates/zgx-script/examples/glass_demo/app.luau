@@ -2,18 +2,19 @@
 -- and panes that merge as they near each other. On iOS through
 -- `scripts/ios/sim.py run -p zgx-run --example ios_app --resource <this folder>`.
 local apart = ui.state("apart", 8)
+local apart_eased = ui.spring(apart)
 local tinted = ui.state("tinted", false)
 local function pane(x)
 	return ui.glass {
-		position = "absolute",
+		absolute = true,
 		left = x,
 		top = 0,
 		w = 96,
 		h = 96,
 		radius = 48,
-		align = "center",
+		items = "center",
 		justify = "center",
-		ui.text { "Hi", size = 20, color = "#111111" },
+		ui.text { "Hi", text_size = 20, color = "#111111" },
 	}
 end
 local rows = {}
@@ -21,30 +22,30 @@ for i = 1, 40 do
 	rows[i] = ui.row {
 		h = 56,
 		px = 20,
-		align = "center",
+		items = "center",
 		bg = i % 2 == 0 and "#3478f6" or "#f2552c",
-		ui.text { "Row " .. i, color = "#ffffff", size = 17 },
+		ui.text { "Row " .. i, color = "#ffffff", text_size = 17 },
 	}
 end
 return ui.div {
 	w = "100%",
 	h = "100%",
 	bg = "#101018",
-	ui.scroll { w = "100%", h = "100%", ui.column { pt = 120, pb = 240, rows } },
+	ui.scroll { w = "100%", h = "100%", ui.column { pb = 240, rows } },
 	ui.glass {
-		position = "absolute",
+		absolute = true,
 		left = 16,
 		right = 16,
 		top = 60,
 		h = 56,
 		radius = 28,
 		interactive = true,
-		align = "center",
+		items = "center",
 		justify = "center",
-		ui.text { "Glass over Luau", size = 17, weight = 600, color = "#111111" },
+		ui.text { "Glass over Luau", text_size = 17, weight = 600, color = "#111111" },
 	},
 	ui.glass_group {
-		position = "absolute",
+		absolute = true,
 		left = 60,
 		bottom = 130,
 		w = 300,
@@ -52,10 +53,9 @@ return ui.div {
 		spacing = 40,
 		pane(0),
 		ui.glass {
-			position = "absolute",
-			left = function()
-				return 96 + apart:get()
-			end,
+			absolute = true,
+			left = 96,
+			x = apart_eased,
 			top = 0,
 			w = 96,
 			h = 96,
@@ -63,17 +63,18 @@ return ui.div {
 		},
 	},
 	ui.glass {
-		position = "absolute",
+		absolute = true,
 		left = 16,
 		right = 16,
 		bottom = 40,
 		h = 72,
 		radius = 24,
+		interactive = true,
 		tint = function()
 			return tinted:get() and "#34c759" or "#ffffff00"
 		end,
 		direction = "row",
-		align = "center",
+		items = "center",
 		justify = "center",
 		gap = 16,
 		ui.button {

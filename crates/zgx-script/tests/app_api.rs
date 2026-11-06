@@ -1060,3 +1060,24 @@ fn reserved_commands_publish_their_shortcuts() {
         "reserved commands are menu items too"
     );
 }
+
+/// `ui.glass` and `ui.glass_group` hold children and lay out like a box, and
+/// off iOS put no native view in the window (so it stays on one plane).
+#[test]
+fn glass_lays_out_its_children_without_a_native_view_off_ios() {
+    let mut h = Harness::inline(
+        r##"local tinted = ui.state("tinted", false)
+return ui.glass_group {
+    w = 300, h = 200, spacing = 30,
+    ui.glass {
+        id = "pane", w = 200, h = 100, radius = 40, variant = "clear",
+        interactive = true,
+        tint = function() return tinted:get() and "#34c759" or "#ffffff" end,
+        ui.text { id = "label", "Over glass" },
+    },
+}"##,
+    );
+    h.ui.prepare_frame();
+    assert!(h.natives.nodes().is_empty());
+    assert!(h.find("label").is_some());
+}

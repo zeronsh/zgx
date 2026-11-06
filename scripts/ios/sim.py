@@ -98,6 +98,7 @@ def main() -> int:
     parser.add_argument("--shot", type=Path)
     parser.add_argument("--orientation")
     parser.add_argument("--keep", action="store_true", help="leave the app running")
+    parser.add_argument("--install-only", action="store_true", help="install, launch nothing")
     args = parser.parse_args()
     if args.command == "shutdown":
         simctl("shutdown", device(), check=False)
@@ -122,8 +123,12 @@ def main() -> int:
 
     udid = device()
     identifier = "sh.zeron.zgx.ios." + name.replace("_", "-")
-    simctl("terminate", udid, identifier, check=False)
+    if not args.install_only:
+        simctl("terminate", udid, identifier, check=False)
     simctl("install", udid, str(app))
+    if args.install_only:
+        print("installed", identifier, "on", DEVICE)
+        return 0
     log = ROOT / "target" / "ios" / f"{name}.log"
     log.unlink(missing_ok=True)
     launch = dict(environment)
