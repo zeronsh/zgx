@@ -543,7 +543,29 @@ mod platform {
         }
     }
 }
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+/// iOS delivers URLs and files to its scene delegate, which winit owns: no
+/// application events yet.
+#[cfg(target_os = "ios")]
+mod platform {
+    use super::{ApplicationEventError, Handler, validate_id};
+
+    pub(crate) struct NativeApplicationEvents;
+    impl NativeApplicationEvents {
+        pub(crate) fn new(
+            id: &str,
+            _handler: Handler,
+        ) -> Result<Option<Self>, ApplicationEventError> {
+            validate_id(id)?;
+            Ok(Some(Self))
+        }
+    }
+}
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "ios"
+))]
 pub(crate) use platform::NativeApplicationEvents;
 #[cfg(test)]
 mod tests {

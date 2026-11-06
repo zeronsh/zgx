@@ -455,6 +455,14 @@ pub(crate) fn attributes(
             .with_inner_size(monitor.size())
             .with_position(monitor.position());
     }
+    // A window on a phone is the screen: the sizes asked for are a desktop's.
+    #[cfg(target_os = "ios")]
+    {
+        attrs.inner_size = None;
+        attrs.min_inner_size = None;
+        attrs.max_inner_size = None;
+        attrs.position = None;
+    }
     Ok(attrs)
 }
 

@@ -684,6 +684,8 @@ impl FontSystem {
         db.load_system_fonts();
         #[cfg(target_os = "macos")]
         load_pingfang(db);
+        #[cfg(all(feature = "std", target_os = "ios"))]
+        load_ios_fonts(db);
 
         for source in fonts {
             db.load_font_source(source);
@@ -742,6 +744,22 @@ fn load_pingfang(db: &mut fontdb::Database) {
         // Not there (another macOS): the lists' next face stands in.
         let _ = db.load_font_file(PINGFANG);
     }
+}
+
+/// zgx: iOS's faces, on a simulator under its runtime's root and not the
+/// Mac's `/System/Library/Fonts`, which `load_system_fonts` read. PingFang
+/// is kept in a private framework there too.
+#[cfg(all(feature = "std", target_os = "ios"))]
+fn load_ios_fonts(db: &mut fontdb::Database) {
+    let root = std::path::PathBuf::from(std::env::var_os("IPHONE_SIMULATOR_ROOT").unwrap_or_default());
+    if !root.as_os_str().is_empty() {
+        // Not the Mac's: they are other versions, and an app on a phone has none.
+        *db = fontdb::Database::new();
+        db.load_fonts_dir(root.join("System/Library/Fonts"));
+    }
+    let _ = db.load_font_file(
+        format!("{}/System/Library/PrivateFrameworks/FontServices.framework/CorePrivate/PingFangUI.ttc", root.display()),
+    );
 }
 
 /// zgx: whether `locale`'s language subtag is `language` (`ja` of

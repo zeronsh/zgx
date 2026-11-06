@@ -11,7 +11,7 @@ pub(crate) fn glyph_image(
     key: cosmic_text::CacheKey,
 ) -> Option<cosmic_text::SwashImage> {
     let image = swash.get_image_uncached(fonts, key);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     if image
         .as_ref()
         .is_none_or(|image| image.placement.width == 0 || image.placement.height == 0)

@@ -11,7 +11,7 @@ mod bands;
 mod compile;
 #[cfg(all(windows, feature = "composition"))]
 mod composition;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod core_text_glyphs;
 #[cfg(d3d11)]
 mod d3d11_frame;
@@ -28,7 +28,7 @@ mod fxc_child;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub mod iosurface;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[doc(hidden)]
 pub use core_text_glyphs::core_text_glyph;
 #[cfg(target_os = "macos")]
@@ -3496,6 +3496,11 @@ impl GpuContext {
                 // with the textures as large as this one makes.
                 ..if info.backend == wgpu::Backend::Gl {
                     wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits())
+                } else if cfg!(target_os = "ios") {
+                    // wgpu's defaults ask more than iOS's Metal gives (15
+                    // inter-stage variables on the simulator, not 16); what
+                    // zgx's pipelines use fits.
+                    wgpu::Limits::default().or_worse_values_from(&adapter.limits())
                 } else {
                     Default::default()
                 }

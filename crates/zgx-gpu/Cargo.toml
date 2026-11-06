@@ -71,7 +71,7 @@ wgpu = { version = "29.0.4", default-features = false, features = ["vulkan"] }
 
 # fontconfig's configuration, read as fontdb reads it, for what the system
 # font cache watches (font_cache.rs); fontdb's own, already in the tree.
-[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
 fontconfig-parser = { version = "0.5.8", default-features = false }
 
 # DXGI frame statistics for ZGX_PRESENT_LOG (dxgi.rs); the version wgpu-hal uses.

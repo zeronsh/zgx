@@ -6717,6 +6717,9 @@ impl WindowManager {
     }
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: impl std::fmt::Display) {
         if self.error.is_none() {
+            // UIKit never gives `run_app` back, so nobody would read it.
+            #[cfg(target_os = "ios")]
+            eprintln!("zgx: {error}");
             self.error = Some(error.to_string());
         }
         event_loop.exit();

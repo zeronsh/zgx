@@ -440,6 +440,16 @@ async fn native_select(
     })?
     .await
 }
+/// iOS has no file panel rfd drives: a selection says the backend is missing.
+#[cfg(target_os = "ios")]
+async fn native_select(
+    _kind: Kind,
+    _options: FileDialogOptions,
+    _parent: Arc<Window>,
+    _cancel: Arc<Cancel>,
+) -> FileDialogResult<Vec<PathBuf>> {
+    Err(FileDialogError::BackendUnavailable)
+}
 #[cfg(target_os = "macos")]
 async fn native_select(
     kind: Kind,
