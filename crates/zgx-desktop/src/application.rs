@@ -3043,7 +3043,7 @@ impl Host {
             window.set_cursor(cursor);
             // (And over its popups, which Windows asks apart.)
             #[cfg(windows)]
-            crate::popup_window::set_cursor(cursor);
+            self.popups.set_cursor(cursor);
             self.native_cursor = Some(cursor);
         }
     }

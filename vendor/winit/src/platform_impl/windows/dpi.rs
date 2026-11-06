@@ -75,8 +75,8 @@ pub fn dpi_to_scale_factor(dpi: u32) -> f64 {
 pub unsafe fn hwnd_dpi(hwnd: HWND) -> u32 {
     // zgx patch: the window's DC is taken only where it is read, and given
     // back. winit took one on every call and never released it, and the
-    // occlusion check calls this each second: GDI's 10,000 handles a process
-    // ran out within hours, and `GetDC`'s null panicked.
+    // occlusion check calls this twice a second while a window draws: GDI's
+    // 10,000 handles a process ran out within hours, and `GetDC`'s null panicked.
     if let Some(GetDpiForWindow) = *GET_DPI_FOR_WINDOW {
         // We are on Windows 10 Anniversary Update (1607) or later.
         match unsafe { GetDpiForWindow(hwnd) } {
