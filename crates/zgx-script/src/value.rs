@@ -1640,6 +1640,13 @@ fn keep_large(lua: &Lua, value: &Value, table: &Table) {
     if recent.iter().any(|(at, ..)| *at == id) {
         return;
     }
+    // Those nothing else has can't be read again: a state's value replaced,
+    // sample after sample, stays no longer than it takes to see that.
+    recent.retain(|(_, value, _)| match value {
+        Value::List(items) => Rc::strong_count(items) > 2,
+        Value::Map(fields) => Rc::strong_count(fields) > 2,
+        _ => false,
+    });
     // Held with its value, so its address is not another's meanwhile.
     let entry = (id, value.clone(), table.clone());
     if recent.len() < RECENT_LARGE {
