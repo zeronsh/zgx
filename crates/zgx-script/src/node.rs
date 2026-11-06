@@ -645,6 +645,8 @@ impl Node {
             Kind::Scene3d(_) => "scene3d",
             Kind::WebView(_) => "webview",
             Kind::Terminal(_) => "terminal",
+            Kind::Glass(_) => "glass",
+            Kind::GlassGroup(_) => "glass_group",
             Kind::Checkbox { .. } => "checkbox",
             Kind::Input { .. } => "input",
             Kind::Progress { .. } => "progress",
@@ -970,6 +972,10 @@ pub(crate) enum Kind {
     /// `ui.terminal { term = ui.term(id) }`: a terminal session, shown
     /// where the node is.
     Terminal(zgx::terminal::Terminal),
+    /// `ui.glass { ... }`: the system's glass where it has one.
+    Glass(Box<GlassSpec>),
+    /// `ui.glass_group { spacing = n, ... }`: glass that merges.
+    GlassGroup(f32),
     Checkbox {
         label: String,
         value: Signal<Value>,
@@ -1506,6 +1512,60 @@ impl Pseudo {
     }
 }
 
+/// How a `ui.glass` looks: its props, each a value or state.
+#[derive(Clone)]
+pub(crate) struct GlassSpec {
+    pub variant: Option<Source>,
+    pub tint: Option<Source>,
+    pub interactive: Option<Source>,
+    pub radius: Option<Source>,
+}
+/// `ui.glass` and `ui.glass_group`, made the first time a script names one.
+pub(crate) fn install_glass(lua: &Lua) {
+    let Some(lazy) = lua.app_data_ref::<crate::lazy::Lazy>() else {
+        return;
+    };
+    lazy.ui(&["glass", "glass_group"], |lua, ui| {
+        ui.set(
+            "glass",
+            lua.create_function(|lua, table: Table| {
+                let take = |name: &str, ty: Ty| -> mlua::Result<Option<Source>> {
+                    let value = table.get::<mlua::Value>(name)?;
+                    table.raw_set(name, mlua::Value::Nil)?;
+                    match value {
+                        mlua::Value::Nil => Ok(None),
+                        value => source(lua, ty, name, value).map(Some),
+                    }
+                };
+                let spec = GlassSpec {
+                    variant: take("variant", Ty::Str)?,
+                    tint: take("tint", Ty::Color)?,
+                    interactive: take("interactive", Ty::Bool)?,
+                    radius: take("radius", Ty::Num)?,
+                };
+                let node = fill(
+                    lua,
+                    Node::new(owner(lua)?, Kind::Glass(Box::new(spec))),
+                    Some(&table),
+                )?;
+                node_ud(lua, node)
+            })?,
+        )?;
+        ui.set(
+            "glass_group",
+            lua.create_function(|lua, table: Table| {
+                let spacing = table.get::<Option<f32>>("spacing")?.unwrap_or(20.);
+                table.raw_set("spacing", mlua::Value::Nil)?;
+                let node = fill(
+                    lua,
+                    Node::new(owner(lua)?, Kind::GlassGroup(spacing)),
+                    Some(&table),
+                )?;
+                node_ud(lua, node)
+            })?,
+        )
+    });
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Ty {
     Num,
@@ -5956,6 +6016,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             }
         })?,
     )?;
+    install_glass(lua);
     ui.set(
         "terminal",
         lua.create_function(|lua, table: Table| {

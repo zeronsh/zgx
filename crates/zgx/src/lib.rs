@@ -110,6 +110,7 @@ mod compose_drag;
 #[cfg(target_os = "macos")]
 pub mod native_surface;
 
+pub mod glass;
 pub mod native_view;
 /// The clipboard and file dialogs, as a service a host provides.
 pub mod platform;

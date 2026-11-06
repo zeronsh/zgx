@@ -38,6 +38,9 @@ pub enum NativeContent {
     /// A platform view the host knows how to mount: on macOS a
     /// `Retained<NSView>` (see `zgx_desktop::native_view`).
     Platform(Rc<dyn Any>),
+    /// The system's glass (see [`crate::glass`]).
+    #[cfg(target_os = "ios")]
+    Glass(crate::glass::GlassContent),
 }
 impl NativeContent {
     /// A short description for placeholders and diagnostics.
@@ -60,6 +63,8 @@ impl NativeContent {
                 }
             }
             Self::Platform(_) => "Native view".into(),
+            #[cfg(target_os = "ios")]
+            Self::Glass(_) => "Glass".into(),
         }
     }
 }

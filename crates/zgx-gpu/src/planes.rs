@@ -306,6 +306,9 @@ impl GpuRenderer {
         if let Some(present) = &mut self.layer_present {
             present.with_natives = natives;
         }
+        // No video layer on iOS: its one layer presents in the transaction.
+        #[cfg(target_os = "ios")]
+        self.set_transaction_present(natives);
     }
     /// Show frames on the plain layer for `duration` from now: they then
     /// change in the caller's Core Animation transaction, with native views

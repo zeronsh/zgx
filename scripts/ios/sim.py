@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-DEVICE = "zgx-ios"
+DEVICE = os.environ.get("ZGX_IOS_DEVICE", "zgx-ios-lab")
 DEVICE_TYPE = "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro"
 TARGET = "aarch64-apple-ios-sim"
 ROOT = Path(__file__).resolve().parents[2]
@@ -89,6 +89,7 @@ def main() -> int:
     parser.add_argument("-p", "--package", default="zgx-desktop")
     parser.add_argument("--example")
     parser.add_argument("--bin")
+    parser.add_argument("--name", help="the app's own name, for several apps of one binary")
     parser.add_argument("--release", action="store_true")
     parser.add_argument("--features", default="")
     parser.add_argument("--resource", action="append", default=[], type=Path)
@@ -102,7 +103,8 @@ def main() -> int:
         simctl("shutdown", device(), check=False)
         return 0
 
-    name = args.example or args.bin
+    built = args.example or args.bin
+    name = args.name or built
     environment = dict(os.environ, CARGO_PROFILE_DEV_DEBUG="0")
     # Xcode's python3 is started through xcrun, which points SDKROOT at macOS's.
     environment.pop("SDKROOT", None)
@@ -115,7 +117,7 @@ def main() -> int:
     subprocess.run(build, check=True, cwd=ROOT, env=environment)
     profile = "release" if args.release else "debug"
     directory = ROOT / "target" / TARGET / profile
-    binary = directory / "examples" / name if args.example else directory / name
+    binary = directory / "examples" / built if args.example else directory / built
     app = bundle(binary, name, args.resource)
 
     udid = device()

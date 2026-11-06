@@ -3961,7 +3961,7 @@ pub struct GpuRenderer {
     #[cfg(target_os = "macos")]
     native_surfaces: Option<native_surface::SurfaceCache>,
     /// The next present joins the Core Animation transaction that resized the layer.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     transaction_present: bool,
     /// Until when the layer keeps a third drawable after a resize (see
     /// `widen_drawables`).
@@ -4602,7 +4602,7 @@ impl GpuRenderer {
             zoom: 1.,
             #[cfg(target_os = "macos")]
             native_surfaces: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             transaction_present: false,
             #[cfg(target_os = "macos")]
             wide_until: None,
@@ -13402,8 +13402,8 @@ impl GpuRenderer {
         // SAFETY: `maximumDrawableCount` is an NSUInteger property of CAMetalLayer.
         let _: () = unsafe { objc2::msg_send![&**layer, setMaximumDrawableCount: count] };
     }
-    #[cfg(target_os = "macos")]
-    fn set_transaction_present(&mut self, enabled: bool) {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub(crate) fn set_transaction_present(&mut self, enabled: bool) {
         if self.transaction_present == enabled {
             return;
         }
@@ -16186,7 +16186,7 @@ impl surface::SurfaceSource for GpuRenderer {
                 .create_surface(self.window.as_ref().unwrap().clone())
                 .map_err(|e| GpuError(e.to_string()))?,
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             self.transaction_present = false;
         }

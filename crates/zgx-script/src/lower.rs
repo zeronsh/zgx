@@ -2616,6 +2616,41 @@ fn build_scoped_seeing(
 
 /// A web view: its page from `src` (followed) or `html`, its handlers
 /// subscribed for as long as the view is mounted.
+/// A `ui.glass`, its look read again when state it reads changes.
+fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
+    use zgx::glass::{GlassStyle, GlassVariant, glass};
+    let own = |source: &Option<Source>| source.as_ref().map(resolve_owned);
+    let (variant, tint, interactive, radius) = (
+        own(&spec.variant),
+        own(&spec.tint),
+        own(&spec.interactive),
+        own(&spec.radius),
+    );
+    let vm = vm.clone();
+    glass(move || {
+        let read = |source: &Option<Owned>, ty| {
+            source
+                .as_ref()
+                .and_then(|source| resolve(source, ty, None, &vm))
+        };
+        let mut style = GlassStyle::default();
+        if let Some(Lit::Str(variant)) = read(&variant, Ty::Str)
+            && &*variant == "clear"
+        {
+            style.variant = GlassVariant::Clear;
+        }
+        if let Some(Lit::Color(tint)) = read(&tint, Ty::Color) {
+            style.tint = Some(tint);
+        }
+        if let Some(Lit::Bool(interactive)) = read(&interactive, Ty::Bool) {
+            style.interactive = interactive;
+        }
+        if let Some(Lit::Num(radius)) = read(&radius, Ty::Num) {
+            style.radius = radius;
+        }
+        style
+    })
+}
 fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     use zgx::web_view::{WebViewEvent, web_view, web_view_src};
     let web = spec.web.clone();
@@ -2883,6 +2918,8 @@ fn kind_view(
         }
         Kind::WebView(spec) => web_view_of(spec, vm, low),
         Kind::Terminal(term) => zgx::terminal::terminal(term),
+        Kind::Glass(spec) => glass_of(spec, vm),
+        Kind::GlassGroup(spacing) => zgx::glass::glass_group(*spacing),
         #[cfg(feature = "scene3d")]
         Kind::Scene3d(spec) => crate::scene3d::lower(spec, vm, &low.assets, need(&mut cx)),
         Kind::Canvas(draw, options) => {

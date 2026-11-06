@@ -1,4 +1,4 @@
-# Web views, terminals, commands: webview, web, terminal, term, command
+# Web views, terminals, glass, commands: webview, web, terminal, term, glass, glass_group, command
 
 Native content laid out as nodes, and the app's menu commands. A web view is a WebKit page (macOS), a WebView2 page (Windows, the desktop host's `webview2` feature) or a WebKitGTK page drawn as an image (Linux, the `webkitgtk` feature, which `zgx-run` has; see [the Linux notes](../linux.md#web-views)), and a terminal is drawn by zgx (every platform, the desktop host's `terminal` feature, which zgx-run turns on) or is a Ghostty surface (macOS, the `ghostty` feature, which wins there); each is placed, sized, rounded and clipped like any node, and zgx draws over it (a frosted popover over a page works). Without a native host (headless, other platforms) each shows a labelled placeholder box and its controller still answers. Pages and sessions belong to the host, not to a run, so a reload keeps them.
 
@@ -8,6 +8,8 @@ ui.web(opts: WebOptions?) -> Web
 ui.web(id: string, opts: WebOptions?) -> Web
 ui.terminal(props: TerminalProps) -> Node
 ui.term(id: string, opts: TermOptions?) -> Term
+ui.glass(props: GlassProps) -> Node
+ui.glass_group(props: GlassGroupProps) -> Node
 ui.command(opts: CommandOptions) -> ()
 ```
 
@@ -17,6 +19,8 @@ ui.command(opts: CommandOptions) -> ()
 | `web` | a page's controller, usable before and after its view mounts. `ui.web(opts)` makes a page for this run; `ui.web(id, opts)` returns the host's page for `id`, made with `opts` the first time, kept across reloads until `web:close()` |
 | `terminal` | shows a session (`term = ui.term(id)`) |
 | `term` | the session for `id`, started the first time with `opts`; later calls return the same session, their handlers replacing the previous run's |
+| `glass` | a box of the system's Liquid Glass on iOS, drawn by the compositor from what lies under it; children draw over it. A blur under a tint elsewhere. `variant` (`"regular"`, `"clear"`), `tint`, `interactive`, `radius` |
+| `glass_group` | panes of glass inside merge within `spacing` points of each other (iOS); an ordinary box elsewhere |
 | `command` | an app command: the host shows it as a menu item (`ScriptHost::commands`) and runs it when chosen, its key working wherever focus is |
 
 ## Web view options

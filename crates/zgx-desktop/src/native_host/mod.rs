@@ -22,6 +22,8 @@ mod gtk;
 pub(crate) mod webkitgtk;
 #[cfg(all(target_os = "macos", feature = "ghostty"))]
 pub(crate) use ghostty::processes_changed;
+#[cfg(target_os = "ios")]
+mod ios;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -51,6 +53,8 @@ pub(crate) type NativeDiagnosticsHandle = Rc<()>;
 
 #[cfg(all(windows, feature = "webview2"))]
 use dcomp as platform;
+#[cfg(target_os = "ios")]
+use ios as platform;
 #[cfg(target_os = "macos")]
 use macos as platform;
 
@@ -67,41 +71,81 @@ pub(crate) struct NativeHost {
     split: Rc<PlaneSplit>,
     /// `split` in the zoomed window's points, where the platform places its
     /// views (`PlaneSplit::zoomed`); `split` itself at 100%.
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     placed: Rc<PlaneSplit>,
     /// The window's zoom (`Ui::zoom`) at the last plan.
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     zoom: f32,
     /// The window's DirectComposition tree, made with its renderer.
     #[cfg(all(windows, feature = "webview2"))]
     composition: Option<Rc<dcomp::Composition>>,
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     surfaces: Option<platform::Surfaces>,
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     overlay: Option<zgx_gpu::GpuRenderer>,
     /// The overlay renderer drew this frame (present it).
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     overlay_drawn: bool,
     /// The scale the overlay renderer and its layer were made for.
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     overlay_scale: f32,
     /// The overlay layer shows its plane (it had paint at the last present).
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     overlay_live: bool,
     /// Native geometry changed and has not been applied yet.
     #[cfg_attr(
-        not(any(target_os = "macos", all(windows, feature = "webview2"))),
+        not(any(
+            target_os = "macos",
+            target_os = "ios",
+            all(windows, feature = "webview2")
+        )),
         allow(dead_code)
     )]
     pending: bool,
     /// What clip views' hit tests consult (macOS's clip views).
     #[cfg_attr(
-        not(any(target_os = "macos", all(windows, feature = "webview2"))),
+        not(any(
+            target_os = "macos",
+            target_os = "ios",
+            all(windows, feature = "webview2")
+        )),
         allow(dead_code)
     )]
     scene: std::rc::Weak<std::cell::RefCell<Scene>>,
     #[cfg_attr(
-        not(any(target_os = "macos", all(windows, feature = "webview2"))),
+        not(any(
+            target_os = "macos",
+            target_os = "ios",
+            all(windows, feature = "webview2")
+        )),
         allow(dead_code)
     )]
     input: zgx::input::InputDispatcher,
@@ -128,27 +172,55 @@ impl NativeHost {
                 backends.contains("dx12") || backends.contains("d3d12")
             });
         #[cfg(not(all(windows, feature = "webview2")))]
-        let supported = cfg!(target_os = "macos");
+        let supported = cfg!(any(target_os = "macos", target_os = "ios"));
         natives.set_supported(supported);
         Self {
             natives,
             diagnostics: Default::default(),
             split: Rc::new(PlaneSplit::default()),
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             placed: Rc::new(PlaneSplit::default()),
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             zoom: 1.,
             #[cfg(all(windows, feature = "webview2"))]
             composition: None,
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             surfaces: None,
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             overlay: None,
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             overlay_drawn: false,
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             overlay_scale: 0.,
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             overlay_live: false,
             pending: false,
             scene: Rc::downgrade(&ui.scene),
@@ -252,7 +324,11 @@ impl NativeHost {
     }
     /// The native views went away with the window (suspend/recreate).
     pub fn suspend(&mut self) {
-        #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            all(windows, feature = "webview2")
+        ))]
         {
             self.overlay = None;
             self.surfaces = None;
@@ -264,7 +340,11 @@ impl NativeHost {
             self.composition = None;
         }
         self.split = Rc::new(PlaneSplit::default());
-        #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            all(windows, feature = "webview2")
+        ))]
         {
             self.placed = self.split.clone();
         }
@@ -272,7 +352,11 @@ impl NativeHost {
     }
 }
 
-#[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(windows, feature = "webview2")
+))]
 impl NativeHost {
     /// After the scene's flush: split this frame's paint around native views
     /// and give each plane's renderer its part, at content `scale` in a
@@ -293,6 +377,18 @@ impl NativeHost {
         if !self.active() || !self.natives.supported() {
             return Ok(Vec::new());
         }
+        #[cfg(target_os = "ios")]
+        if self.surfaces.is_none() {
+            match ios::Surfaces::new(window) {
+                Ok(surfaces) => self.surfaces = Some(surfaces),
+                Err(error) => {
+                    eprintln!("zgx: native views unavailable: {error}");
+                    self.natives.set_supported(false);
+                    return Ok(Vec::new());
+                }
+            }
+        }
+        #[cfg(not(target_os = "ios"))]
         if self.surfaces.is_none() {
             let router = platform::Router {
                 scene: self.scene.clone(),
@@ -328,6 +424,8 @@ impl NativeHost {
         let (split, damage) = PlaneSplit::compute(scene, &self.natives.nodes(), &self.split);
         let split = Rc::new(split);
         let surfaces = self.surfaces.as_mut().expect("made above");
+        #[cfg(target_os = "ios")]
+        surfaces.read_groups(scene, &self.natives);
         // A new zoom moves every view without the split changing.
         let rezoomed = self.zoom != zoom;
         if rezoomed {
@@ -365,8 +463,11 @@ impl NativeHost {
                 &renderer.context(),
                 scale,
             )?;
-            #[cfg(all(windows, feature = "webview2"))]
-            let overlay = surfaces.overlay_renderer(&renderer.context(), scale)?;
+            #[cfg(any(target_os = "ios", all(windows, feature = "webview2")))]
+            let mut overlay = surfaces.overlay_renderer(&renderer.context(), scale)?;
+            // Its drawables show in the frame's transaction, as the base's.
+            #[cfg(target_os = "ios")]
+            overlay.present_with_native_views(true);
             self.overlay = Some(overlay);
         }
         if let Some(overlay) = &mut self.overlay {
@@ -408,6 +509,8 @@ impl NativeHost {
     pub fn begin(&self) -> Option<platform::Transaction> {
         #[cfg(target_os = "macos")]
         return self.active().then(macos::Transaction::begin);
+        #[cfg(target_os = "ios")]
+        return self.active().then(ios::Transaction::begin);
         // Also for the frame that takes the last page out (DirectComposition
         // shows nothing until it commits, where Core Animation commits itself).
         #[cfg(all(windows, feature = "webview2"))]
@@ -489,7 +592,11 @@ impl NativeHost {
     }
 }
 
-#[cfg(not(any(target_os = "macos", all(windows, feature = "webview2"))))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(windows, feature = "webview2")
+)))]
 impl NativeHost {
     pub fn plan(
         &mut self,
@@ -520,7 +627,11 @@ impl NativeHost {
 /// current one while it holds `needed` without being much larger, else
 /// `needed` with a margin to grow and move into (an animating popover
 /// keeps its surfaces), within the window.
-#[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(windows, feature = "webview2")
+))]
 fn plane_rect(current: Option<Rect>, needed: Rect, viewport: Rect) -> Rect {
     let needed = needed
         .intersection(viewport)
@@ -538,7 +649,11 @@ fn plane_rect(current: Option<Rect>, needed: Rect, viewport: Rect) -> Rect {
         .unwrap_or(needed)
 }
 
-#[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(windows, feature = "webview2")
+))]
 fn contains(outer: Rect, inner: Rect) -> bool {
     outer.x <= inner.x + 0.01
         && outer.y <= inner.y + 0.01
@@ -547,7 +662,11 @@ fn contains(outer: Rect, inner: Rect) -> bool {
 }
 
 /// One shape a native view's cut masks it to, in window coordinates.
-#[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(windows, feature = "webview2")
+))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Shape {
     Rect(Rect),
@@ -555,7 +674,11 @@ enum Shape {
 }
 /// The shapes cutting a box: `clip`, unless every rounded shape lies inside
 /// it, then each rounded rectangle; `None` where a level cuts nothing.
-#[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(windows, feature = "webview2")
+))]
 fn shapes(clip: Rect, rounded: &[zgx::scene::RoundRect], levels: usize) -> Vec<Option<Shape>> {
     let rounded: Vec<zgx::scene::RoundRect> = rounded
         .iter()
