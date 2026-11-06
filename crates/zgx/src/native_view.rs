@@ -50,6 +50,9 @@ pub enum NativeContent {
     /// The system's scroll edge effect (see [`crate::native_control`]).
     #[cfg(target_os = "ios")]
     EdgeEffect(crate::native_control::EdgeEffect),
+    /// What marks a bar that goes with the keyboard: its planes are its own.
+    #[cfg(target_os = "ios")]
+    KeyboardBar,
 }
 impl NativeContent {
     /// A short description for placeholders and diagnostics.
@@ -80,6 +83,8 @@ impl NativeContent {
             Self::Tabs(_) => "Tabs".into(),
             #[cfg(target_os = "ios")]
             Self::EdgeEffect(_) => "Edge effect".into(),
+            #[cfg(target_os = "ios")]
+            Self::KeyboardBar => "Keyboard bar".into(),
         }
     }
 }
@@ -545,6 +550,9 @@ struct Walk<'a> {
     region: Vec<Vec<Rect>>,
     /// Native views all that overlaps them after must go above.
     barriers: &'a [NodeId],
+    /// Natives whose planes are to hold them alone, the top ones: what is
+    /// painted over them moves with them, and nothing else is there.
+    tops: &'a [NodeId],
     split: PlaneSplit,
     damage: Vec<Rect>,
     changed: HashSet<NodeId>,
@@ -823,7 +831,11 @@ impl Walk<'_> {
                 };
                 let mut placement = placement;
                 if let Some(visible) = placement.visible() {
-                    placement.slot = self.slot_of(visible);
+                    placement.slot = if self.tops.contains(&item.id) {
+                        self.levels.saturating_sub(2)
+                    } else {
+                        self.slot_of(visible)
+                    };
                     self.native_rects.push((visible, placement.slot));
                     if self.barriers.contains(&item.id) && self.levels > placement.slot + 1 {
                         self.add_region(placement.slot + 1, visible);
@@ -923,7 +935,7 @@ impl PlaneSplit {
     /// and the damage its changes add: where paint moved between planes, both
     /// planes repaint. Call after the scene's layout is up to date.
     pub fn compute(scene: &Scene, natives: &[NodeId], previous: &PlaneSplit) -> (Self, Vec<Rect>) {
-        Self::compute_levels(scene, natives, previous, 1, &[])
+        Self::compute_levels(scene, natives, previous, 1, &[], &[])
     }
     /// `compute`, for a platform that can stack `levels` overlays between its
     /// native views: one native view over another's overlay paint then shows
@@ -936,6 +948,7 @@ impl PlaneSplit {
         previous: &PlaneSplit,
         levels: u8,
         barriers: &[NodeId],
+        tops: &[NodeId],
     ) -> (Self, Vec<Rect>) {
         let natives: HashSet<NodeId> = natives
             .iter()
@@ -977,6 +990,7 @@ impl PlaneSplit {
                 previous,
                 levels,
                 barriers,
+                tops,
                 native_rects: Vec::new(),
                 region: Vec::new(),
                 split: Self::default(),

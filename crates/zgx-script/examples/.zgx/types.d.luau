@@ -1604,6 +1604,9 @@ export type FullScreenTransition = { phase: "entering" | "leaving", duration: nu
 declare extern type WindowApi with
 	safe_area: State<{ top: number, right: number, bottom: number, left: number }>
 	keyboard: State<number>
+	-- How far past an end the scroll view being moved shows: negative past its
+	-- start (iOS). A pull to refresh reads it.
+	overscroll: State<number>
 	titlebar_area: State<WindowRect?>
 	controls: State<WindowRect?>
 	zoom: State<number>
@@ -20012,6 +20015,73 @@ export type NativeSwitchProps = {
 	-- What assistive technology calls it.
 	label: string?,
 }
+export type ScrollEdgeOptions = {
+	edge: ("top" | "bottom" | "left" | "right")?,
+	-- "soft" fades past its box; "hard" is a veil cut at its end.
+	style: ("soft" | "hard")?,
+	-- The box's size across the edge, in points.
+	size: Reactive<number>?,
+	-- Whether it shows: a function of a scroll offset, say.
+	shown: Reactive<boolean>?,
+	-- Draw it rather than use the system's: for an edge inside the window.
+	drawn: boolean?,
+	[any]: any,
+}
+export type NativePanEvent = {
+	phase: "began" | "changed" | "ended" | "cancelled",
+	x: number,
+	y: number,
+	vx: number,
+	vy: number,
+}
+export type NativePanOptions = {
+	edge: "left"?,
+	element: Element?,
+	can_begin: (() -> boolean)?,
+	on_pan: (e: NativePanEvent) -> (),
+	[any]: any,
+}
+export type SystemMenuItem = {
+	title: string,
+	-- An SF Symbol's name.
+	symbol: string?,
+	style: ("destructive" | "default")?,
+	on_choose: (() -> ())?,
+	[number]: never,
+}
+export type AlertOptions = {
+	title: string?,
+	message: string?,
+	buttons: { { title: string, style: ("default" | "cancel" | "destructive")? } },
+	on_choose: ((button: number) -> ())?,
+}
+export type IosKit = {
+	settle: (state: State<number>, target: number, done: (() -> ())?) -> () -> (),
+	section: (props: { header: string?, footer: string?, [number]: Node }) -> Node,
+	tile: (symbol: string, tint: Color) -> Node,
+	row: (props: {
+		icon: string?,
+		tint: Color?,
+		title: string,
+		detail: string?,
+		toggle: State<boolean>?,
+		chevron: boolean?,
+		on_click: (() -> ())?,
+		last: boolean?,
+		color: Color?,
+	}) -> Node,
+	search: (props: { value: State<string>, placeholder: string?, mx: number? }) -> Node,
+	page: (props: {
+		title: string,
+		nav: any?,
+		trailing: Node?,
+		on_refresh: ((done: () -> ()) -> ())?,
+		bg: Color?,
+		[number]: any,
+	}) -> Node,
+	stack: (props: { root: (nav: any) -> Node }) -> Node,
+	sheet: (props: { open: State<boolean>, detents: { number }?, build: () -> Node }) -> Node,
+}
 export type NativeTabsProps = {
 	-- Size and position.
 	w: Props_w,
@@ -21773,6 +21843,35 @@ declare ui: {
 	native_switch: (props: NativeSwitchProps) -> Node,
 	-- The system's tab bar (iOS's UITabBar), a row of tabs elsewhere.
 	native_tabs: (props: NativeTabsProps) -> Node,
+	-- A tap felt in the hand (iOS): "light", "medium", "heavy", "soft", "rigid",
+	-- "success", "warning", "error" or "selection".
+	haptic: (kind: string) -> (),
+	-- A soft fade where content passes under an edge: on a window's edge on iOS,
+	-- the system's own; elsewhere drawn. Paint after it stays sharp above it.
+	scroll_edge: (opts: ScrollEdgeOptions) -> Node,
+	native_edge: (element: Element, edge: string, hard: boolean) -> (),
+	-- A bar that goes with the keyboard, its look in its children: a composer.
+	keyboard_bar: (props: ContainerProps?) -> Node,
+	native_keyboard_bar: (element: Element, lift: (up: number) -> ()) -> (),
+	-- The system's pull to refresh on a scroll view's element (iOS). `top` says
+	-- where its spinner hangs; `on_refresh` is given what ends it.
+	pull_refresh: (opts: { element: Element, top: () -> number, on_refresh: (done: () -> ()) -> () }) -> (),
+	-- A pan the system recognizes (iOS), which the script only draws: from the
+	-- leading edge, or on an element. `on_pan` always hears an ending.
+	native_pan: (opts: NativePanOptions) -> (),
+	-- A line in the record `Documents/zgx-gesture.log` of what gestures did (iOS).
+	gesture_log: (line: string) -> (),
+	-- The system's share sheet (iOS).
+	share: (opts: { text: string?, url: string?, files: { string }?, [number]: never }) -> (),
+	-- What VoiceOver's two-finger scrub does: answers whether it went back.
+	on_escape: (handler: () -> boolean) -> (),
+	-- A long press on the element shows these, the system's way (iOS).
+	system_menu: (element: Element, build: () -> { SystemMenuItem }) -> (),
+	-- The system's alert, or action sheet (iOS). `on_choose` hears which button, from 1.
+	alert: (opts: AlertOptions) -> (),
+	action_sheet: (opts: AlertOptions) -> (),
+	-- iOS's standard pieces, drawn from the system's colours, text and glass.
+	ios: IosKit,
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,

@@ -1080,7 +1080,8 @@ impl Focusable {
             NativeContent::Glass(_)
             | NativeContent::Toggle(_)
             | NativeContent::Tabs(_)
-            | NativeContent::EdgeEffect(_) => None,
+            | NativeContent::EdgeEffect(_)
+            | NativeContent::KeyboardBar => None,
         }
     }
     fn focused(&self) -> bool {
@@ -1199,7 +1200,8 @@ fn placeholder(content: NativeContent) -> View {
         NativeContent::Glass(_)
         | NativeContent::Toggle(_)
         | NativeContent::Tabs(_)
-        | NativeContent::EdgeEffect(_) => text(content.label()),
+        | NativeContent::EdgeEffect(_)
+        | NativeContent::KeyboardBar => text(content.label()),
     };
     div()
         .absolute()

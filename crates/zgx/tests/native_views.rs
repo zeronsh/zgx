@@ -955,6 +955,35 @@ fn stacked(a: &WebView, b: &WebView, c: &WebView) -> View {
 }
 
 #[test]
+fn a_top_view_takes_a_level_of_its_own_and_what_it_covers_stays_below() {
+    let mut ui = Ui::new(1000., 600.);
+    let natives = supported();
+    let web = || WebView::new(&ui.runtime, WebViewOptions::default());
+    let (a, b, c) = (web(), web(), web());
+    let view = ui.mount(provide(natives.clone(), stacked(&a, &b, &c)));
+    ui.prepare_frame();
+    let id = |name: &str| view.find(name).unwrap();
+    let scene = ui.scene.borrow();
+    let top = [id("c")];
+    let (split, _) = PlaneSplit::compute_levels(
+        &scene,
+        &natives.nodes(),
+        &PlaneSplit::default(),
+        4,
+        &top,
+        &top,
+    );
+    let slot = |name: &str| split.native(id(name)).unwrap().slot;
+    assert_eq!(slot("c"), 2, "the level under the last, for its paint");
+    assert_eq!((slot("a"), slot("b")), (0, 1));
+    assert_eq!(
+        split.level(id("apart")),
+        0,
+        "paint apart from it stays in the base, so doesn't go with it"
+    );
+}
+
+#[test]
 fn stacked_planes_exist_only_where_views_and_paint_overlap() {
     let mut ui = Ui::new(1000., 600.);
     let natives = supported();
@@ -964,8 +993,14 @@ fn stacked_planes_exist_only_where_views_and_paint_overlap() {
     ui.prepare_frame();
     let id = |name: &str| view.find(name).unwrap();
     let scene = ui.scene.borrow();
-    let (split, _) =
-        PlaneSplit::compute_levels(&scene, &natives.nodes(), &PlaneSplit::default(), 4, &[]);
+    let (split, _) = PlaneSplit::compute_levels(
+        &scene,
+        &natives.nodes(),
+        &PlaneSplit::default(),
+        4,
+        &[],
+        &[],
+    );
     let slot = |name: &str| split.native(id(name)).unwrap().slot;
     assert_eq!((slot("a"), slot("b"), slot("c")), (0, 1, 0));
     assert_eq!(split.level(id("cover")), 1);

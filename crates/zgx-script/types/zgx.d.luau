@@ -21822,6 +21822,9 @@ declare ui: {
 	-- the system's own; elsewhere drawn. Paint after it stays sharp above it.
 	scroll_edge: (opts: ScrollEdgeOptions) -> Node,
 	native_edge: (element: Element, edge: string, hard: boolean) -> (),
+	-- A bar that goes with the keyboard, its look in its children: a composer.
+	keyboard_bar: (props: ContainerProps?) -> Node,
+	native_keyboard_bar: (element: Element, lift: (up: number) -> ()) -> (),
 	-- The system's pull to refresh on a scroll view's element (iOS). `top` says
 	-- where its spinner hangs; `on_refresh` is given what ends it.
 	pull_refresh: (opts: { element: Element, top: () -> number, on_refresh: (done: () -> ()) -> () }) -> (),

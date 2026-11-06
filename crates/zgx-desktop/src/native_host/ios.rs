@@ -108,6 +108,41 @@ fn host_class() -> &'static AnyClass {
             hit
         }
     }
+    // Touches on interactive glass reach winit's view up the responder chain; a
+    // host above the edge effect isn't under that view, so it passes them there.
+    fn to_app(this: &AnyObject) -> Option<Retained<AnyObject>> {
+        let root = APP_VIEW.with(|slot| slot.borrow().clone())?;
+        // SAFETY: UIView's getter, UIKit asking on the main thread.
+        let inside: bool = unsafe { msg_send![this, isDescendantOfView: &*root] };
+        (!inside).then_some(root)
+    }
+    macro_rules! touches {
+        ($name:ident, $selector:ident) => {
+            extern "C-unwind" fn $name(
+                this: &AnyObject,
+                _: objc2::runtime::Sel,
+                touches: *mut AnyObject,
+                event: *mut AnyObject,
+            ) {
+                // SAFETY: UIResponder's method with what UIKit gave, on the main
+                // thread.
+                unsafe {
+                    match to_app(this) {
+                        Some(root) => {
+                            let _: () = msg_send![&*root, $selector: touches, withEvent: event];
+                        }
+                        None => {
+                            let _: () = msg_send![super(this, class!(UIView)), $selector: touches, withEvent: event];
+                        }
+                    }
+                }
+            }
+        };
+    }
+    touches!(began, touchesBegan);
+    touches!(moved, touchesMoved);
+    touches!(ended, touchesEnded);
+    touches!(cancelled, touchesCancelled);
     CLASS.get_or_init(|| {
         let mut builder =
             objc2::runtime::ClassBuilder::new(c"ZgxHostView", class!(UIView)).expect("one class");
@@ -117,6 +152,26 @@ fn host_class() -> &'static AnyClass {
                 objc2::sel!(hitTest:withEvent:),
                 hit_test as extern "C-unwind" fn(_, _, _, _) -> _,
             );
+            for (selector, method) in [
+                (
+                    objc2::sel!(touchesBegan:withEvent:),
+                    began as extern "C-unwind" fn(_, _, _, _),
+                ),
+                (
+                    objc2::sel!(touchesMoved:withEvent:),
+                    moved as extern "C-unwind" fn(_, _, _, _),
+                ),
+                (
+                    objc2::sel!(touchesEnded:withEvent:),
+                    ended as extern "C-unwind" fn(_, _, _, _),
+                ),
+                (
+                    objc2::sel!(touchesCancelled:withEvent:),
+                    cancelled as extern "C-unwind" fn(_, _, _, _),
+                ),
+            ] {
+                builder.add_method(selector, method);
+            }
         }
         builder.register()
     })
@@ -177,6 +232,8 @@ enum Content {
     /// What says where the scroll edge effect reaches
     /// (`NativeContent::EdgeEffect`): a view above the content, as a bar is.
     Edge(#[allow(dead_code)] zgx::native_control::EdgeEffect),
+    /// What marks a keyboard bar (`NativeContent::KeyboardBar`): a view that shows nothing.
+    KeyboardBar,
     /// A `UISwitch` (`NativeContent::Toggle`).
     Toggle(Rc<ToggleState>, #[allow(dead_code)] Retained<ToggleTarget>),
     /// A `UITabBar` (`NativeContent::Tabs`), and what it tells through.
@@ -266,6 +323,14 @@ unsafe fn scroll_edge_effect(
 thread_local! {
     static HELD: std::cell::RefCell<Option<Retained<AnyObject>>> =
         const { std::cell::RefCell::new(None) };
+    static APP_VIEW: std::cell::RefCell<Option<Retained<AnyObject>>> =
+        const { std::cell::RefCell::new(None) };
+    static BAR_VIEWS: std::cell::RefCell<Vec<Retained<AnyObject>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+/// The views of the top levels, which hold only what a keyboard bar shows.
+pub(crate) fn bar_views() -> Vec<Retained<AnyObject>> {
+    BAR_VIEWS.with(|slot| slot.borrow().clone())
 }
 /// The view holding all of the app that lies under the edge effect, once there
 /// is one: moved, it leaves what is above the effect where it is.
@@ -334,6 +399,7 @@ impl EdgeHost {
             let _: () = msg_send![&*scroll, addSubview: &*held];
             let _: () = msg_send![&*held, addSubview: &**root];
             HELD.with(|slot| *slot.borrow_mut() = Some(held.clone()));
+            APP_VIEW.with(|slot| *slot.borrow_mut() = Some(root.clone()));
             let above = passive_view(bounds);
             let _: () = msg_send![&*above, setAutoresizingMask: FILL];
             let _: () = msg_send![&*above, setUserInteractionEnabled: true];
@@ -502,7 +568,11 @@ impl Surfaces {
         let Some(edge_host) = &mut self.edge_host else {
             return;
         };
-        let under = edge_slot.unwrap_or(LEVELS);
+        // A keyboard bar's levels stay out of what moves with the page.
+        let has_bar = BAR_VIEWS.with(|views| !views.borrow().is_empty());
+        let under = edge_slot
+            .unwrap_or(LEVELS)
+            .min(if has_bar { LEVELS - 3 } else { LEVELS });
         if edge_host.under == under {
             return;
         }
@@ -606,6 +676,18 @@ impl Surfaces {
                 }
                 NativeContent::EdgeEffect(effect) if !self.mounted.contains_key(node) => {
                     (self.make_edge(*effect), Content::Edge(*effect))
+                }
+                NativeContent::KeyboardBar if !self.mounted.contains_key(node) => {
+                    let mut views = Vec::new();
+                    for slot in usize::from(LEVELS.saturating_sub(2))..usize::from(LEVELS) {
+                        views.push(self.hosts[slot].clone());
+                        views.push(self.planes[slot].0.clone());
+                    }
+                    BAR_VIEWS.with(|slot| *slot.borrow_mut() = views);
+                    (
+                        passive_view(rect(Rect::new(0., 0., 1., 1.))),
+                        Content::KeyboardBar,
+                    )
                 }
                 NativeContent::Toggle(state) if !self.mounted.contains_key(node) => {
                     if let Some((view, clip, target)) = self.reusable.pop() {

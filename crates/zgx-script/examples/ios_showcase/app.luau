@@ -206,8 +206,46 @@ local function SettingsPage(nav: any)
 	}
 end
 
+local function Composer()
+	local message = ui.use_state("")
+	return ui.keyboard_bar {
+		absolute = true,
+		left = 16,
+		right = 16,
+		bottom = 100,
+		ui.glass {
+			radius = 26,
+			min_h = 52,
+			interactive = true,
+			direction = "row",
+			items = "center",
+			pl = 12,
+			pr = 8,
+			ui.input {
+				value = message,
+				label = "Message",
+				placeholder = "Message",
+				grow = 1,
+				bg = "#00000000",
+				border = 0,
+				focus = {},
+			},
+			ui.button {
+				label = "Send",
+				bg = "#00000000",
+				border = 0,
+				px = 0,
+				on_click = function()
+					message:set("")
+				end,
+				ui.symbol { name = "arrow.up.circle.fill", size = 32, color = "$ios.blue" },
+			},
+		},
+	}
+end
+
 local function TextPage(nav: any)
-	return ios.page {
+	local page = ios.page {
 		title = "Notes",
 		nav = nav,
 		ios.section {
@@ -226,7 +264,7 @@ local function TextPage(nav: any)
 				},
 			},
 		},
-		ui.text { "Refreshed {refreshed} times", wrap = true, mx = 36, mb = 240, color = "$text.secondary" },
+		ui.text { "Refreshed {refreshed} times", wrap = true, mx = 36, mb = 160, color = "$text.secondary" },
 		ios.section {
 			header = "LOW ON THE PAGE",
 			footer = "The page scrolls this field above the keyboard.",
@@ -236,7 +274,7 @@ local function TextPage(nav: any)
 				ui.input {
 					-- `ZGX_APP_ARGS=lowfield`: focused by itself, to test on a phone.
 					on_mount = if ui.args[1] == "lowfield"
-						then function(element)
+						then function(element: any)
 							ui.after(1500, function()
 								tab:set(2)
 							end)
@@ -255,6 +293,7 @@ local function TextPage(nav: any)
 			},
 		},
 	}
+	return ui.div { w = "100%", h = "100%", page, Composer() }
 end
 
 local function GlassPage(_nav: any)

@@ -4118,7 +4118,7 @@ impl ScriptHost {
         // Each module made the first time a script names it (`lazy`).
         let lazy = lazy::Lazy::default();
         native::install_glass(&lazy);
-        lazy.ui(&["ios", "scroll_edge"], native::install_kit);
+        lazy.ui(&["ios", "scroll_edge", "keyboard_bar"], native::install_kit);
         lazy.ui(&["path", "linear"], canvas::install);
         #[cfg(feature = "scene3d")]
         lazy.ui(

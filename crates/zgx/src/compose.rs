@@ -6010,7 +6010,7 @@ impl ListStretch {
                 }
             });
         }
-        let shown = crate::elastic::register(ui, root, false, size, extents, offset);
+        let shown = crate::elastic::register(ui, root, false, size, extents, offset, Rc::default());
         let placed = Rc::new(Cell::new(0_f32));
         {
             let (placed, shown, scene) = (placed.clone(), shown.clone(), ui.scene.clone());
@@ -6275,6 +6275,7 @@ fn mount_scroll(
     let extent = ui.observe_content_size(content);
     // What a trackpad stretches it by past an edge (`elastic`): zero unless
     // the host scrolls elastically.
+    let end_room: Rc<Cell<f32>> = Rc::default();
     let stretch = crate::elastic::register(
         ui,
         root,
@@ -6282,6 +6283,7 @@ fn mount_scroll(
         size.clone(),
         extent.clone(),
         offset.clone(),
+        end_room.clone(),
     );
     if scrollbar {
         let main_extent = ui.signal(main_size(extent.get()));
@@ -6395,7 +6397,7 @@ fn mount_scroll(
         // Placed again from where it was asked to be at a new scale.
         let _ = pixel_scale.get();
         let (width, height) = size.get();
-        let limit = (main_size(extent.get()) - main_size((width, height))).max(0.);
+        let limit = (main_size(extent.get()) + end_room.get() - main_size((width, height))).max(0.);
         let requested = offset.get();
         let position = if requested.is_nan() {
             0.

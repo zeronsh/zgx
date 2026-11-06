@@ -2155,7 +2155,26 @@ impl Host {
     ) -> Result<(), zgx::widgets::LayoutFeedbackError> {
         for step in steps {
             match step {
-                crate::touch::Step::Dispatch(event) => self.dispatch(event)?,
+                crate::touch::Step::Dispatch(event) => {
+                    #[cfg(target_os = "ios")]
+                    let press = matches!(event, InputEvent::PointerDown { .. });
+                    self.dispatch(event)?;
+                    // A control takes no first responder from a field, as UIKit's
+                    // don't: Send keeps the keyboard up.
+                    #[cfg(target_os = "ios")]
+                    if press {
+                        let ui = &self.context.ui;
+                        let now = ui.input.focused();
+                        if now != self.touch_focus
+                            && now.is_some_and(|node| ui.editor(node).is_none())
+                            && self
+                                .touch_focus
+                                .is_some_and(|node| ui.editor(node).is_some())
+                        {
+                            ui.input.focus(&ui.scene, self.touch_focus);
+                        }
+                    }
+                }
                 crate::touch::Step::Unpress => {
                     self.dispatch(InputEvent::PointerCancel)?;
                     let ui = &self.context.ui;
@@ -2213,7 +2232,35 @@ impl Host {
             .context
             .ui
             .scroll_driver_at(at.x + at.width / 2., at.y + 1.);
-        scroller.set_field(driver.map(|driver| (driver, at.y + at.height)));
+        // Above the bar, which goes up with the keyboard.
+        let bar = self.native.keyboard_bar().map_or(0., |bar| {
+            self.context.ui.scene.borrow().bounds(bar.node).height + crate::ios_scroll::BAR_GAP
+        });
+        scroller.set_field(driver.map(|driver| (driver, at.y + at.height + bar)));
+    }
+    /// Tell the scroller of the app's keyboard bar. Whether `focused` lies in it:
+    /// the bar goes up by itself, the page stays.
+    #[cfg(target_os = "ios")]
+    fn keyboard_bar_pass(&self, focused: Option<zgx::scene::NodeId>) -> bool {
+        let Some(scroller) = &self.native_scroll else {
+            return false;
+        };
+        let scene = self.context.ui.scene.borrow();
+        let bar = self
+            .native
+            .keyboard_bar()
+            .filter(|bar| scene.contains(bar.node));
+        let Some(bar) = bar else {
+            scroller.set_bar(None);
+            return false;
+        };
+        let bounds = scene.bounds(bar.node);
+        scroller.set_bar(Some((bar.lift.clone(), bounds.y + bounds.height)));
+        let wrapper = scene.parent(bar.node);
+        focused.is_some_and(|focused| {
+            wrapper
+                .is_some_and(|wrapper| scene.ancestors(focused).any(|ancestor| ancestor == wrapper))
+        })
     }
     /// With the keyboard at rest, move the page so the field shows above it.
     #[cfg(target_os = "ios")]
@@ -5803,7 +5850,8 @@ impl Host {
             // keyboard's edge itself, as the keyboard moves (`ios_scroll`).
             let focused = self.context.ui.focused_editor().map(|editor| editor.node);
             let (was_covered, was_focused) = self.keyboard_seen;
-            if focused.is_some() {
+            let in_bar = self.keyboard_bar_pass(focused);
+            if focused.is_some() && !in_bar {
                 self.keyboard_field();
             } else if let Some(scroller) = &self.native_scroll {
                 scroller.set_field(None);

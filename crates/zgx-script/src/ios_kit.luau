@@ -236,6 +236,42 @@ function ios.row(props)
 	}
 end
 
+-- A bar that goes with the keyboard: a chat's composer. It sits where the app
+-- puts it and rises with the keyboard's top edge as the keyboard reaches it, on
+-- Core Animation's clock on iOS. Give it layout props only, and its look through
+-- its children: what it paints itself stays below, with the page.
+function ios.keyboard_bar(props)
+	local up = ui.use_state(0)
+	local box = {}
+	for key, value in props do
+		box[key] = value
+	end
+	box.y = function()
+		return -up:get()
+	end
+	if IS_IOS then
+		table.insert(
+			box,
+			1,
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				pointer_events = false,
+				aria_hidden = true,
+				on_mount = function(element)
+					ui.native_keyboard_bar(element, function(lift)
+						up:set(lift)
+					end)
+				end,
+			}
+		)
+	end
+	return ui.div(box)
+end
+
 -- A search field on glass, the system's keyboard over zgx's editor.
 function ios.search(props)
 	return ui.glass {

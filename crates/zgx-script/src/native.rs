@@ -24,6 +24,7 @@ pub(crate) fn install_kit(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     let kit: Table = crate::lazy::builtin(lua, "=ui.ios", SOURCE)?
         .call((ui.clone(), cfg!(target_os = "ios")))?;
     ui.set("scroll_edge", kit.get::<Function>("scroll_edge")?)?;
+    ui.set("keyboard_bar", kit.get::<Function>("keyboard_bar")?)?;
     ui.set("ios", kit)
 }
 
@@ -193,6 +194,7 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
             "gesture_log",
             "share",
             "native_edge",
+            "native_keyboard_bar",
             "pull_refresh",
             "action_sheet",
         ],
@@ -241,6 +243,27 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
                                 scene.borrow_mut().set_platform_painted(node, true);
                             }
                             request_edge_effect(node, EdgeEffect { edge, hard });
+                        }
+                        Ok(())
+                    },
+                )?,
+            )?;
+            ui.set(
+                "native_keyboard_bar",
+                lua.create_function(
+                    |_, (element, lift): (mlua::UserDataRef<crate::element::ElementUd>, Function)| {
+                        if let Some(node) = element.0.read(|_, id| id) {
+                            if let Some(scene) = element.0.scene() {
+                                scene.borrow_mut().set_platform_painted(node, true);
+                            }
+                            zgx::native_control::request_keyboard_bar(
+                                zgx::native_control::KeyboardBar {
+                                    node,
+                                    lift: std::rc::Rc::new(move |up| {
+                                        let _ = lift.call::<()>(up);
+                                    }),
+                                },
+                            );
                         }
                         Ok(())
                     },

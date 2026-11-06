@@ -245,6 +245,30 @@ pub fn request_edge_effect(node: crate::scene::NodeId, effect: EdgeEffect) {
     PENDING_EDGES.with(|pending| pending.borrow_mut().push((node, effect)));
     crate::native_view::wake();
 }
+/// A bar that goes with the keyboard (`ui.keyboard_bar`).
+#[derive(Clone)]
+pub struct KeyboardBar {
+    /// What marks it, filling the bar: its box says where the bar rests.
+    pub node: crate::scene::NodeId,
+    /// Told how far up it is to be drawn.
+    pub lift: Rc<dyn Fn(f32)>,
+}
+thread_local! {
+    static PENDING_BARS: std::cell::RefCell<Vec<KeyboardBar>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// Have the host make `bar` go with the keyboard.
+pub fn request_keyboard_bar(bar: KeyboardBar) {
+    PENDING_BARS.with(|pending| pending.borrow_mut().push(bar));
+    crate::native_view::wake();
+}
+/// Whether any wait for the host to take them: they make it active.
+pub fn keyboard_bars_pending() -> bool {
+    PENDING_BARS.with(|pending| !pending.borrow().is_empty())
+}
+/// What was asked for since the host last took them.
+pub fn take_keyboard_bars() -> Vec<KeyboardBar> {
+    PENDING_BARS.with(|pending| std::mem::take(&mut *pending.borrow_mut()))
+}
 /// Whether any wait for the host to take them: they make it active.
 pub fn edge_effects_pending() -> bool {
     PENDING_EDGES.with(|pending| !pending.borrow().is_empty())

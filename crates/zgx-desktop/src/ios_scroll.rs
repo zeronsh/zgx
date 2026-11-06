@@ -51,6 +51,11 @@ struct State {
     glue: RefCell<Option<Glue>>,
     /// What waits for the frame being drawn, to change in its transaction.
     after_frame: RefCell<Option<AfterFrame>>,
+    /// The bar going with the keyboard, if the app has one.
+    bar: RefCell<Option<Bar>>,
+    /// The bar moving in the render server, as `glue` for the page.
+    bar_glue: RefCell<Option<(f32, f32)>>,
+    bar_after_frame: RefCell<Option<AfterFrame>>,
     /// What must show above the keyboard: the app's latest word.
     field: RefCell<Option<(ScrollDriver, f32)>>,
     /// The edge last frame: where, when, and for how many frames it hasn't moved.
@@ -110,6 +115,7 @@ pub(crate) fn keyboard_changing(covered: f32) {
             if let Some((driver, bottom)) = field
                 && let Some(metrics) = driver.metrics()
             {
+                driver.set_end_room(covered);
                 *state.inset_on.borrow_mut() = Some(driver.clone());
                 *state.following.borrow_mut() = Some(driver.clone());
                 *state.lock.borrow_mut() = Some(KeyboardLock::Show {
@@ -155,6 +161,25 @@ struct Glue {
     drawn: f32,
     /// The offset to draw once it has.
     target: f32,
+}
+/// Told how far up a keyboard bar is to be drawn.
+pub(crate) type BarLift = Rc<dyn Fn(f32)>;
+/// A bar going with the keyboard: where it rests, and how far up it is drawn.
+struct Bar {
+    lift: BarLift,
+    bottom: f32,
+    lifted: f32,
+}
+/// How far above the keyboard a bar stays.
+pub(crate) const BAR_GAP: f32 = 8.;
+impl Bar {
+    fn up_for(&self, edge: f64) -> f32 {
+        (f64::from(self.bottom + BAR_GAP) - edge).max(0.) as f32
+    }
+    fn draw_at(&mut self, up: f32) {
+        self.lifted = up;
+        (self.lift)(up);
+    }
 }
 enum AfterFrame {
     /// The animation goes: the frame shows what it showed.
@@ -249,11 +274,12 @@ unsafe fn keyboard_began(state: &State) -> f64 {
     }
 }
 
-/// Run `values` on the held view's layer, over the keyboard's duration.
-fn start_glue(values: &[f64], duration: f64, begin: f64) {
-    let Some(held) = crate::native_host::ios::held_view() else {
-        return;
-    };
+fn page_views() -> Vec<Retained<AnyObject>> {
+    crate::native_host::ios::held_view().into_iter().collect()
+}
+
+/// Run `values` on the layers of `views`, over the keyboard's duration.
+fn start_glue(views: &[Retained<AnyObject>], values: &[f64], duration: f64, begin: f64) {
     // SAFETY: Core Animation's constructors and setters, on the main thread.
     unsafe {
         let path = crate::ios_system::objc2_foundation_string("transform.translation.y");
@@ -272,21 +298,84 @@ fn start_glue(values: &[f64], duration: f64, begin: f64) {
         let _: () = msg_send![&*animation, setFillMode: &*both];
         let _: () = msg_send![&*animation, setRemovedOnCompletion: false];
         let _: () = msg_send![&*animation, setBeginTime: begin];
-        let layer: Retained<AnyObject> = msg_send![&*held, layer];
         let key = crate::ios_system::objc2_foundation_string(GLUE_KEY);
-        let _: () = msg_send![&*layer, addAnimation: &*animation, forKey: &*key];
+        for view in views {
+            let layer: Retained<AnyObject> = msg_send![&**view, layer];
+            let _: () = msg_send![&*layer, addAnimation: &*animation, forKey: &*key];
+        }
     }
 }
 
-fn remove_glue() {
-    let Some(held) = crate::native_host::ios::held_view() else {
-        return;
-    };
+fn remove_glue(views: &[Retained<AnyObject>]) {
     // SAFETY: CALayer's method, on the main thread.
     unsafe {
-        let layer: Retained<AnyObject> = msg_send![&*held, layer];
         let key = crate::ios_system::objc2_foundation_string(GLUE_KEY);
-        let _: () = msg_send![&*layer, removeAnimationForKey: &*key];
+        for view in views {
+            let layer: Retained<AnyObject> = msg_send![&**view, layer];
+            let _: () = msg_send![&*layer, removeAnimationForKey: &*key];
+        }
+    }
+}
+
+/// How far up `views`' first layer shows, as its animation has it now.
+fn shown_translation(views: &[Retained<AnyObject>]) -> f64 {
+    let Some(view) = views.first() else {
+        return 0.;
+    };
+    // SAFETY: CALayer's getters and key-value coding, on the main thread.
+    unsafe {
+        let layer: Retained<AnyObject> = msg_send![&**view, layer];
+        let shown: Option<Retained<AnyObject>> = msg_send![&*layer, presentationLayer];
+        let Some(shown) = shown else { return 0. };
+        let path = crate::ios_system::objc2_foundation_string("transform.translation.y");
+        let value: Option<Retained<AnyObject>> = msg_send![&*shown, valueForKeyPath: &*path];
+        value.map_or(0., |value| {
+            let value: f64 = msg_send![&*value, doubleValue];
+            value
+        })
+    }
+}
+
+/// The bar where it shows now, its animation stopped.
+fn unglue_bar(state: &State) {
+    let Some((drawn, _)) = state.bar_glue.borrow_mut().take() else {
+        return;
+    };
+    let shown = shown_translation(&crate::native_host::ios::bar_views());
+    if let Some(bar) = &mut *state.bar.borrow_mut() {
+        bar.draw_at(drawn - shown as f32);
+    }
+    *state.bar_after_frame.borrow_mut() = Some(AfterFrame::Remove);
+    state.window.request_redraw();
+}
+
+/// The bar's way to the keyboard's new place: as the page's, on layers of its own.
+fn glue_bar(state: &State, spring: KeyboardSpring, end: f64) {
+    let mut bar = state.bar.borrow_mut();
+    let Some(bar) = &mut *bar else {
+        return;
+    };
+    let (first, last) = (bar.up_for(end + spring.from), bar.up_for(end));
+    if (first - last).abs() < 0.5 {
+        return;
+    }
+    // Lifted the less of the two: it is the layer that makes up the rest.
+    let drawn = first.min(last);
+    let values: Vec<f64> = spring
+        .remaining()
+        .into_iter()
+        .map(|left| f64::from(drawn - bar.up_for(end + spring.from * left)))
+        .chain(std::iter::once(f64::from(drawn - last)))
+        .collect();
+    let duration = spring.duration * (values.len() as f64 - 1.) / (values.len() as f64 - 2.);
+    crate::ios_gestures::log(&format!("keyboard bar {first:.0} to {last:.0}"));
+    *state.bar_glue.borrow_mut() = Some((drawn, last));
+    if (bar.lifted - drawn).abs() < 0.5 {
+        start_glue(&crate::native_host::ios::bar_views(), &values, duration, 0.);
+    } else {
+        bar.draw_at(drawn);
+        *state.bar_after_frame.borrow_mut() = Some(AfterFrame::Start(values));
+        state.window.request_redraw();
     }
 }
 
@@ -296,20 +385,7 @@ fn unglue(state: &State) {
     let Some(glue) = state.glue.borrow_mut().take() else {
         return;
     };
-    let shown = crate::native_host::ios::held_view().map_or(0., |held| {
-        // SAFETY: CALayer's getters and key-value coding, on the main thread.
-        unsafe {
-            let layer: Retained<AnyObject> = msg_send![&*held, layer];
-            let shown: Option<Retained<AnyObject>> = msg_send![&*layer, presentationLayer];
-            let Some(shown) = shown else { return 0. };
-            let path = crate::ios_system::objc2_foundation_string("transform.translation.y");
-            let value: Option<Retained<AnyObject>> = msg_send![&*shown, valueForKeyPath: &*path];
-            value.map_or(0., |value| {
-                let value: f64 = msg_send![&*value, doubleValue];
-                value
-            })
-        }
-    });
+    let shown = shown_translation(&page_views());
     glue.driver.drive(glue.drawn - shown as f32);
     *state.after_frame.borrow_mut() = Some(AfterFrame::Remove);
     state.window.request_redraw();
@@ -318,9 +394,7 @@ fn unglue(state: &State) {
 /// Called as the keyboard's animation is made, in its transaction.
 fn glue_to_keyboard(state: &State) {
     unglue(state);
-    if crate::native_host::ios::held_view().is_none() {
-        return;
-    }
+    unglue_bar(state);
     let (spring, end) = {
         let tracker = state.tracker.borrow();
         let Some(tracker) = &*tracker else {
@@ -342,6 +416,10 @@ fn glue_to_keyboard(state: &State) {
         crate::ios_gestures::log("keyboard: no spring to follow, by frames");
         return;
     };
+    glue_bar(state, spring, end);
+    if crate::native_host::ios::held_view().is_none() {
+        return;
+    }
     let start = end + spring.from;
     let lock = state.lock.borrow();
     // Where the page belongs for each place of the keyboard's edge.
@@ -395,7 +473,7 @@ fn glue_to_keyboard(state: &State) {
     });
     if (drawn - first).abs() < 0.5 {
         // In this transaction, so on the keyboard's clock with no begin time.
-        start_glue(&values, duration, 0.);
+        start_glue(&page_views(), &values, duration, 0.);
     } else {
         driver.drive(drawn);
         *state.after_frame.borrow_mut() = Some(AfterFrame::Start(values));
@@ -409,13 +487,19 @@ pub(crate) fn frame_done() {
         return;
     };
     let waiting = state.after_frame.borrow_mut().take();
+    run_after_frame(&state, waiting, &page_views());
+    let waiting = state.bar_after_frame.borrow_mut().take();
+    run_after_frame(&state, waiting, &crate::native_host::ios::bar_views());
+}
+
+fn run_after_frame(state: &State, waiting: Option<AfterFrame>, views: &[Retained<AnyObject>]) {
     match waiting {
-        Some(AfterFrame::Remove) => remove_glue(),
+        Some(AfterFrame::Remove) => remove_glue(views),
         Some(AfterFrame::Start(values)) => {
             // Its begin time once committed; not yet, then this joins its commit
             // and takes the same one.
             // SAFETY: Core Animation's getters, on the main thread.
-            let begin = unsafe { keyboard_began(&state) };
+            let begin = unsafe { keyboard_began(state) };
             let duration = state
                 .tracker
                 .borrow()
@@ -429,6 +513,7 @@ pub(crate) fn frame_done() {
                 })
                 .map_or(0.4, |spring| spring.duration);
             start_glue(
+                views,
                 &values,
                 duration * (values.len() as f64 - 1.) / (values.len() as f64 - 2.),
                 begin,
@@ -508,6 +593,23 @@ fn keyboard_frame(state: &State, link: &AnyObject) {
     state
         .edge_seen
         .set((edge, 0., if moving { 0 } else { rested + 1 }));
+    // A bar not on the render server's clock (a finger has the keyboard): by frames.
+    if state.bar_glue.borrow().is_none()
+        && let Some(bar) = &mut *state.bar.borrow_mut()
+    {
+        let up = bar.up_for(edge);
+        if (up - bar.lifted).abs() >= 0.25 {
+            bar.draw_at(up);
+            state.window.request_redraw();
+        }
+    }
+    if let Some((drawn, _)) = *state.bar_glue.borrow()
+        && let Some(bar) = &*state.bar.borrow()
+    {
+        let moved = shown_translation(&crate::native_host::ios::bar_views());
+        let bottom = f64::from(bar.bottom - drawn) + moved;
+        crate::ios_gestures::log(&format!("bar gap {:.1} edge {edge:.1}", edge - bottom));
+    }
     let glued = state.glue.borrow().is_some();
     if glued {
         crate::ios_gestures::log_follow_edge(edge, edge, 0.);
@@ -552,10 +654,21 @@ fn keyboard_frame(state: &State, link: &AnyObject) {
 
 /// The edge came to rest: the scroller takes the page from where it was left.
 fn finish_keyboard_move(state: &State, edge: f64) {
+    if let Some((drawn, target)) = state.bar_glue.borrow_mut().take() {
+        if (target - drawn).abs() < 0.5 {
+            remove_glue(&crate::native_host::ios::bar_views());
+        } else {
+            if let Some(bar) = &mut *state.bar.borrow_mut() {
+                bar.draw_at(target);
+            }
+            *state.bar_after_frame.borrow_mut() = Some(AfterFrame::Remove);
+            state.window.request_redraw();
+        }
+    }
     if let Some(glue) = state.glue.borrow_mut().take() {
         // The new offset's frame and the animation's end, in one transaction.
         if (glue.target - glue.drawn).abs() < 0.5 {
-            remove_glue();
+            remove_glue(&page_views());
         } else {
             glue.driver.drive(glue.target);
             *state.after_frame.borrow_mut() = Some(AfterFrame::Remove);
@@ -571,7 +684,9 @@ fn finish_keyboard_move(state: &State, edge: f64) {
     if gone {
         state.lock.borrow_mut().take();
         state.following.borrow_mut().take();
-        state.inset_on.borrow_mut().take();
+        if let Some(driver) = state.inset_on.borrow_mut().take() {
+            driver.set_end_room(0.);
+        }
         state.bottom_inset.set(0.);
     } else if !held {
         state.lock.borrow_mut().take();
@@ -1078,6 +1193,9 @@ impl NativeScroller {
             edge_seen: std::cell::Cell::new((0., 0., 0)),
             glue: RefCell::new(None),
             after_frame: RefCell::new(None),
+            bar: RefCell::new(None),
+            bar_glue: RefCell::new(None),
+            bar_after_frame: RefCell::new(None),
             bottom_inset: std::cell::Cell::new(0.),
             refresh_ending: Rc::default(),
             dragging: std::cell::Cell::new(false),
@@ -1208,6 +1326,7 @@ impl NativeScroller {
         }
         if let Some(inset) = inset {
             state.bottom_inset.set(f64::from(inset));
+            driver.set_end_room(inset);
             *state.inset_on.borrow_mut() = Some(driver.clone());
         }
         configure(state, &self.view, driver.clone(), None);
@@ -1234,7 +1353,9 @@ impl NativeScroller {
             done_driver.drive(to);
             stop_following(&done_state, &done_view);
             if inset.is_none() {
-                done_state.inset_on.borrow_mut().take();
+                if let Some(driver) = done_state.inset_on.borrow_mut().take() {
+                    driver.set_end_room(0.);
+                }
                 done_state.bottom_inset.set(0.);
                 // SAFETY: UIScrollView's setter, on the main thread.
                 let _: () = unsafe { msg_send![&*done_view, setContentInset: NO_INSETS] };
@@ -1278,6 +1399,22 @@ impl NativeScroller {
     pub(crate) fn pan(&self) -> Retained<AnyObject> {
         // SAFETY: UIScrollView's getter, on the main thread.
         unsafe { msg_send![&*self.view, panGestureRecognizer] }
+    }
+    /// The app's bar going with the keyboard, and where it rests.
+    pub(crate) fn set_bar(&self, bar: Option<(BarLift, f32)>) {
+        let mut held = self.state.bar.borrow_mut();
+        match (bar, &mut *held) {
+            // Its box is where it is drawn, lift and all.
+            (Some((_, bottom)), Some(held)) => held.bottom = bottom + held.lifted,
+            (Some((lift, bottom)), slot) => {
+                *slot = Some(Bar {
+                    lift,
+                    bottom,
+                    lifted: 0.,
+                });
+            }
+            (None, slot) => *slot = None,
+        }
     }
     /// Whether UIKit tracks scrolling for this finger: zgx offers it no pan.
     pub(crate) fn tracks(&self) -> bool {

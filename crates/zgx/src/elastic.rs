@@ -43,6 +43,9 @@ pub(crate) struct Elastic {
     next: Cell<Option<Instant>>,
     /// Momentum reached the edge then: it springs back `BOUNCE` after.
     bounced: Cell<Option<Instant>>,
+    /// Room past the content's end, while something covers that much of it (a
+    /// keyboard): scrolling there is scrolling, not stretch.
+    end_room: Rc<Cell<f32>>,
 }
 impl Elastic {
     fn main(&self, size: (f32, f32)) -> f32 {
@@ -52,7 +55,8 @@ impl Elastic {
         self.main(self.size.with_untracked(|s| *s))
     }
     fn limit(&self) -> f32 {
-        (self.main(self.extent.with_untracked(|s| *s)) - self.length()).max(0.)
+        (self.main(self.extent.with_untracked(|s| *s)) + self.end_room.get() - self.length())
+            .max(0.)
     }
     /// `pushed` as it shows: ever less for each further pixel, never past
     /// the view's length.
@@ -146,6 +150,7 @@ pub(crate) fn register(
     size: Signal<(f32, f32)>,
     extent: Signal<(f32, f32)>,
     offset: Signal<f32>,
+    end_room: Rc<Cell<f32>>,
 ) -> Signal<f32> {
     let shown = ui.signal(0_f32);
     let elastic = Rc::new(Elastic {
@@ -158,6 +163,7 @@ pub(crate) fn register(
         spring: Cell::new(None),
         next: Cell::new(None),
         bounced: Cell::new(None),
+        end_room,
     });
     {
         let mut state = ui.elastic_state().borrow_mut();
@@ -528,6 +534,12 @@ impl ScrollDriver {
             offset: view.offset.with_untracked(|o| *o),
             stretch: view.shown.with_untracked(|s| *s),
         })
+    }
+    /// Give it `room` past its content's end to scroll into, 0 for none.
+    pub fn set_end_room(&self, room: f32) {
+        if let Some(view) = self.0.upgrade() {
+            view.end_room.set(room);
+        }
     }
     /// Show position `value`, which may be past either end: the offset an app
     /// reads stays in range, and what lies beyond is stretch, as the platform

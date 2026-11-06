@@ -41,6 +41,12 @@ There is one tree of elements, zgx's, through AccessKit's iOS adapter (`vendor/a
 
 Which veil the effect shows over the same content depends on how the scroll got there: Apple's own bar, ending at one offset from three different starts, shows three different veils, and repeats exactly from a fresh launch. Don't compare zgx with a native bar at one offset and call a different veil a bug; compare one that chose the same (soft in light matches to 1/255).
 
+## The keyboard
+
+A field low on a page and a `ui.keyboard_bar` move with the keyboard in the render server, nothing drawn: `ios_scroll` reads the keyboard's spring from the layout guide's animation, in its transaction, and builds a keyframe animation that holds the gap once the keyboard reaches them. The page's offset or the bar's lift changes in one transaction with the animation's removal. The page moves only as the view under the edge effect, so it needs an edge effect: without one, and for a finger's drag or a keyboard whose animation isn't one spring, it follows by frames, a frame or two behind.
+
+`ui.keyboard_bar { absolute = true, left = 16, right = 16, bottom = 100, ... }` is a chat's composer. It takes the top two drawing levels for itself, so what it shows goes through its children; a background of its own stays behind with the page. One bar in a window. A touch on a control leaves the focused field and the keyboard alone, as UIKit's controls do.
+
 ## In Luau
 
 `ui.ios` (a Settings-style app's sections, rows, pages with large titles, stacks with edge swipes, sheets, search, pull to refresh), `ui.alert`, `ui.action_sheet`, `ui.haptic`, `ui.share`, `ui.system_menu`, `ui.on_escape`, `ui.native_pan`, `ui.pull_refresh`, `ui.scroll_edge`, `ui.webview`. `crates/zgx-script/examples/ios_showcase` holds them in one app.

@@ -117,6 +117,12 @@ pub(crate) struct NativeHost {
     /// The system's edge effects asked for (`native_control`), kept registered.
     #[cfg(target_os = "ios")]
     edge_effects: Vec<(zgx::scene::NodeId, zgx::native_view::NativeRegistration)>,
+    /// Bars going with the keyboard (`ui.keyboard_bar`), held as those are.
+    #[cfg(target_os = "ios")]
+    keyboard_bars: Vec<(
+        zgx::native_control::KeyboardBar,
+        zgx::native_view::NativeRegistration,
+    )>,
     /// The overlay renderer drew this frame (present it).
     #[cfg(any(
         target_os = "macos",
@@ -208,6 +214,8 @@ impl NativeHost {
             above: Vec::new(),
             #[cfg(target_os = "ios")]
             edge_effects: Vec::new(),
+            #[cfg(target_os = "ios")]
+            keyboard_bars: Vec::new(),
             #[cfg(any(
                 target_os = "macos",
                 target_os = "ios",
@@ -286,9 +294,16 @@ impl NativeHost {
         zgx_gpu::GpuRenderer::for_window_with_transparency(window, context, transparent)
     }
     /// Whether this window has native views to keep up (now or last frame).
+    /// The bar going with the keyboard, if the app has one.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn keyboard_bar(&self) -> Option<zgx::native_control::KeyboardBar> {
+        self.keyboard_bars.first().map(|(bar, _)| bar.clone())
+    }
     pub fn active(&self) -> bool {
         #[cfg(target_os = "ios")]
-        if zgx::native_control::edge_effects_pending() {
+        if zgx::native_control::edge_effects_pending()
+            || zgx::native_control::keyboard_bars_pending()
+        {
             return true;
         }
         !self.natives.is_empty() || !self.split.is_empty()
@@ -397,6 +412,14 @@ impl NativeHost {
                     .register(node, zgx::native_view::NativeContent::EdgeEffect(effect));
                 self.edge_effects.push((node, registration));
             }
+            self.keyboard_bars
+                .retain(|(bar, _)| scene.contains(bar.node));
+            for bar in zgx::native_control::take_keyboard_bars() {
+                let registration = self
+                    .natives
+                    .register(bar.node, zgx::native_view::NativeContent::KeyboardBar);
+                self.keyboard_bars.push((bar, registration));
+            }
         }
         // Frames go with native geometry, in one transaction, while there is any.
         renderer.present_with_native_views(self.active());
@@ -450,13 +473,20 @@ impl NativeHost {
         }
         #[cfg(target_os = "ios")]
         let (split, damage) = {
-            let barriers: Vec<_> = self.edge_effects.iter().map(|(node, _)| *node).collect();
+            let tops: Vec<_> = self.keyboard_bars.iter().map(|(bar, _)| bar.node).collect();
+            let barriers: Vec<_> = self
+                .edge_effects
+                .iter()
+                .map(|(node, _)| *node)
+                .chain(tops.iter().copied())
+                .collect();
             PlaneSplit::compute_levels(
                 scene,
                 &self.natives.nodes(),
                 &self.split,
                 ios::LEVELS,
                 &barriers,
+                &tops,
             )
         };
         #[cfg(not(target_os = "ios"))]
