@@ -1425,6 +1425,20 @@ mod baked {
     }
 
     #[test]
+    fn removing_its_target_takes_a_loop_back() {
+        // No handle needed: a script holding one only weakly loses it to the
+        // collector, and with it the way to stop the loop.
+        let mut h = Harness::playing(&format!(
+            r##"anime.animate("#box", {{ {PULSE} }})
+            ui.after(100, function() anime.utils.remove("#box") end)"##
+        ));
+        assert!(h.baked().is_some(), "baked");
+        h.run_ms(200.);
+        h.frame();
+        assert!(h.baked().is_none(), "taken back");
+    }
+
+    #[test]
     fn with_no_renderer_for_it_a_loop_ticks_as_ever() {
         let mut h = Harness::inline(&script(&format!(
             r##"anime.animate("#box", {{ {PULSE} }})"##
