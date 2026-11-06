@@ -1730,6 +1730,9 @@ struct Host {
     /// UIKit's scrolling (`ios_scroll`), made with the window.
     #[cfg(target_os = "ios")]
     native_scroll: Option<crate::ios_scroll::NativeScroller>,
+    /// UIKit's text input (`ios_text`), made with the window.
+    #[cfg(target_os = "ios")]
+    text_input: Option<crate::ios_text::TextInput>,
     /// What had focus before a finger pressed, for a pan to give it back.
     touch_focus: Option<zgx::scene::NodeId>,
     /// The last press was a finger's or a pen's, not a mouse's: an editor
@@ -2008,6 +2011,8 @@ impl Host {
             touch: Default::default(),
             #[cfg(target_os = "ios")]
             native_scroll: None,
+            #[cfg(target_os = "ios")]
+            text_input: None,
             touch_focus: None,
             #[cfg(windows)]
             touch_last: false,
@@ -2438,7 +2443,17 @@ impl Host {
             tsf.after_dispatch();
             return;
         }
-        #[cfg(not(windows))]
+        // UIKit's keyboard, over the same document as Windows' input methods.
+        #[cfg(target_os = "ios")]
+        if let Some(text) = &self.text_input {
+            if target != self.ime_target {
+                text.focus(editor);
+                self.ime_target = target;
+            }
+            text.after_dispatch();
+            return;
+        }
+        #[cfg(not(any(windows, target_os = "ios")))]
         let _ = editor;
         if let Some(window) = &self.window
             && target != self.ime_target
@@ -3829,6 +3844,7 @@ impl Host {
                 self.context.ui.main_scroll_driver(),
                 self.context.ui.scroll_driver_finder(),
             );
+            self.text_input = crate::ios_text::TextInput::new(window.clone());
             crate::ios_system::dump_accessibility_later(&window);
             // What the bars leave of it, before its first frame.
             self.context
@@ -5679,6 +5695,23 @@ impl Host {
             let due = self.touch.due_press(std::time::Instant::now());
             if !due.is_empty() {
                 self.touch_steps(due)?;
+            }
+            // The keyboard's Return, as the key it is.
+            if self
+                .text_input
+                .as_ref()
+                .is_some_and(|text| text.take_enter())
+            {
+                let modifiers = zgx::input::Modifiers::default();
+                self.dispatch(InputEvent::KeyDown {
+                    key: zgx::input::Key::Enter,
+                    modifiers,
+                    repeat: false,
+                })?;
+                self.dispatch(InputEvent::KeyUp {
+                    key: zgx::input::Key::Enter,
+                    modifiers,
+                })?;
             }
         }
         // A finger held on selectable text selects the word there.

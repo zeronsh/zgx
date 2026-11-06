@@ -93,6 +93,11 @@ impl TextStore {
     pub(crate) fn is_composing(&self) -> bool {
         self.composition.is_some()
     }
+    /// The open composition's range in the document (iOS's marked text).
+    #[cfg(target_os = "ios")]
+    pub(crate) fn composition_range(&self) -> Option<Range<usize>> {
+        self.composition.clone()
+    }
     /// The document's pieces: the committed text before the selection (its
     /// UTF-16 length and byte end), the preedit if any (in place of the
     /// selection), and the committed text after.
