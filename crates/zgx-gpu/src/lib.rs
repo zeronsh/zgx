@@ -13563,7 +13563,7 @@ impl GpuRenderer {
     /// single-pass presentation runs without a window.
     pub fn debug_enable_single_pass(&mut self) {
         self.single_pass_format = Some(wgpu::TextureFormat::Bgra8Unorm);
-        self.present_unpremultiplies = !cfg!(target_os = "macos");
+        self.present_unpremultiplies = !cfg!(target_vendor = "apple");
     }
     /// Test hook: present into a fresh offscreen drawable configured like a
     /// window (`Bgra8UnormSrgb`, non-opaque) and return its
@@ -13605,7 +13605,7 @@ impl GpuRenderer {
             });
             self.present_single_pass(&mut encoder, &frame, &raw, wgpu::TextureFormat::Bgra8Unorm);
         } else {
-            let pipeline = blit_pipeline(&self.device, srgb, !cfg!(target_os = "macos"));
+            let pipeline = blit_pipeline(&self.device, srgb, !cfg!(target_vendor = "apple"));
             let bind = blit_group(&self.device, &pipeline, &self.view);
             let view = drawable.create_view(&Default::default());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -15573,7 +15573,7 @@ fn polyline_pipeline(
 /// opaque, but Core Animation composites `CAMetalLayer` contents as
 /// premultiplied (measured: straight 50% red over black shows twice as bright).
 fn unpremultiplies(config: &wgpu::SurfaceConfiguration) -> bool {
-    config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied && !cfg!(target_os = "macos")
+    config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied && !cfg!(target_vendor = "apple")
 }
 fn blit_pipeline(
     device: &wgpu::Device,

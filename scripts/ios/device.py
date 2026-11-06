@@ -194,6 +194,8 @@ def bundle_app(binary, resources):
                     "UIInterfaceOrientationLandscapeRight",
                 ],
                 "DTPlatformName": "iphoneos",
+                # Without this an iPhone's display link stays at 60 Hz.
+                "CADisableMinimumFrameDurationOnPhone": True,
             },
             f,
         )

@@ -214,6 +214,8 @@ local function GlassPage(_nav: any)
 				bg = "#00000000",
 				hover = {},
 				active = {},
+				items = "center",
+				justify = "center",
 				on_click = function()
 					apart:set(if apart:get() < 40 then 90 else 8)
 				end,

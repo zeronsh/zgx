@@ -16,9 +16,13 @@ local function settle(state, target, done)
 	local stop
 	local spring = 200
 	local damping = 2 * math.sqrt(spring)
+	local last = ui.now()
 	stop = ui.every(16, function()
 		local at = state:get()
-		local step = 0.016
+		-- By the time that passed: a tick can come late.
+		local now = ui.now()
+		local step = math.min((now - last) / 1000, 0.05)
+		last = now
 		local force = spring * (target - at) - damping * velocity
 		velocity += force * step
 		at += velocity * step
@@ -50,6 +54,7 @@ function ios.section(props)
 		props.header and ui.text {
 			props.header,
 			mx = 36,
+			wrap = true,
 			mb = 7,
 			text_size = "$font.size.xs",
 			color = "$text.secondary",
@@ -64,6 +69,7 @@ function ios.section(props)
 		props.footer and ui.text {
 			props.footer,
 			mx = 36,
+			wrap = true,
 			mt = 7,
 			text_size = "$font.size.xs",
 			color = "$text.secondary",
@@ -362,7 +368,7 @@ ios.stack = ui.component(function(props)
 		h = "100%",
 		overflow = "hidden",
 		on_resize = function(size)
-			width = size.width
+			width = size.w
 		end,
 		ui.each(pages, function(id, index)
 			local on_top = function()
