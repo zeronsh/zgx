@@ -12,3 +12,9 @@ technology beside what UIKit offers for the same screen (`ZGX_IOS_AX_DUMP=1`).
    and no value (`NodeWrapper::label`, `value`).
 2. **A switch reads as UIKit's cell with a UISwitch**: a button and static
    text, with the toggle trait and a value of 0 or 1 (`traits`).
+3. **It lets go when nobody reads.** It shut down only on a status
+   notification, and a tree read with no status running (Voice Control, a test
+   tool, UIKit itself) got no such notification, so it stayed live for good, as
+   macOS's did. `isAccessibilityElement` builds nothing now, and a read is a
+   lease of 30 seconds, checked at each update (`READ_LEASE`). Tested on a
+   simulator (`adapter.rs`, `shutdown_tests`).

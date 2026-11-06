@@ -81,3 +81,10 @@ features = [
     "UIViewController",
     "UIWindow",
 ]
+
+# zgx patch: UIKit wants the main thread, which libtest doesn't give. Run on a
+# simulator: `xcrun simctl spawn <device> <the test binary>`.
+[[test]]
+name = "shutdown"
+path = "tests/shutdown.rs"
+harness = false

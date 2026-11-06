@@ -51,6 +51,28 @@ use crate::{
 
 const PLACEHOLDER_ROOT_ID: NodeId = NodeId(0);
 
+// zgx patch: a tree read with no status saying assistive technology runs
+// (Voice Control, Full Keyboard Access, a test tool, UIKit itself) is kept this
+// long past the last read. No status notification would ever end it otherwise,
+// and the app would go on paying for a tree nobody reads.
+const READ_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
+thread_local! {
+    static LAST_READ: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+/// Something asked for an element or its attributes.
+pub(crate) fn note_read() {
+    LAST_READ.with(|last| last.set(Some(std::time::Instant::now())));
+}
+/// As though the last read were longer ago than the lease (`tests/shutdown.rs`).
+#[doc(hidden)]
+pub fn expire_read_lease() {
+    LAST_READ.with(|last| last.set(std::time::Instant::now().checked_sub(READ_LEASE)));
+}
+fn read_lease_over() -> bool {
+    LAST_READ.with(|last| last.get().is_none_or(|at| at.elapsed() >= READ_LEASE))
+}
+
 enum State {
     Inactive {
         view: WeakId<UIView>,
@@ -319,7 +341,6 @@ impl StatusObserver {
 pub struct Adapter {
     state: Rc<RefCell<State>>,
     activation_handler: Rc<ActivationHandlerCell>,
-    #[allow(dead_code)]
     deactivation_handler: Rc<DeactivationHandlerCell>,
     status_observer: Retained<StatusObserver>,
 }
@@ -402,6 +423,11 @@ impl Adapter {
         if matches!(&*self.state.borrow(), State::Inactive { .. }) {
             return None;
         }
+        // zgx patch: nobody has read it for a while, and nothing says anyone runs.
+        if read_lease_over() && !any_assistive_tech_running() {
+            try_deactivate(&self.state, &self.deactivation_handler);
+            return None;
+        }
         let update = update_factory();
         let mut state = self.state.borrow_mut();
         match &mut *state {
@@ -450,13 +476,14 @@ impl Adapter {
     /// Indicates whether the view itself is an accessibility element.
     /// This corresponds to `isAccessibilityElement`.
     pub fn is_accessibility_element(&self) -> bool {
-        let _ = get_or_init_context(&self.state, &self.activation_handler);
+        // zgx patch: asked of any view: no tree for it, until it is read.
         false
     }
 
     /// Returns all accessibility elements in the container.
     /// This corresponds to `accessibilityElements`.
     pub fn accessibility_elements(&self) -> *mut NSArray<NSObject> {
+        note_read();
         let context = get_or_init_context(&self.state, &self.activation_handler);
         let tree = context.tree.borrow();
         let state = tree.state();
@@ -484,6 +511,7 @@ impl Adapter {
     /// Returns the accessibility element at the specified point.
     /// This corresponds to `accessibilityHitTest:`.
     pub fn hit_test(&self, point: CGPoint) -> *mut NSObject {
+        note_read();
         let context = get_or_init_context(&self.state, &self.activation_handler);
         let view = match context.view.load() {
             Some(view) => view,

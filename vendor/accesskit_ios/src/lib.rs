@@ -30,7 +30,7 @@ mod node;
 mod util;
 
 mod adapter;
-pub use adapter::Adapter;
+pub use adapter::{Adapter, expire_read_lease};
 
 mod event;
 pub use event::QueuedEvents;

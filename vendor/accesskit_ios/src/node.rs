@@ -195,6 +195,7 @@ impl NodeWrapper<'_> {
     }
 }
 
+// zgx patch: `adapter::note_read` is called for each element asked after.
 pub(crate) struct PlatformNodeIvars {
     context: Weak<Context>,
     node_id: NodeId,
@@ -488,6 +489,8 @@ impl PlatformNode {
     where
         F: FnOnce(&Node, &Tree, &Rc<Context>) -> T,
     {
+        // zgx patch: it is being read (`adapter::READ_LEASE`).
+        crate::adapter::note_read();
         let context = self.ivars().context.upgrade()?;
         let tree = context.tree.borrow();
         let tree_state = tree.state();
@@ -625,7 +628,8 @@ mod tests {
 
     #[test]
     fn value_text_string() {
-        let mut node = NodeBuilder::new(Role::Label);
+        // zgx patch: a label's text is its label (`NodeWrapper::label`).
+        let mut node = NodeBuilder::new(Role::TextInput);
         node.set_value("hello");
         assert_eq!(wrapper_value(&node), Some(Value::String("hello".into())));
     }
@@ -648,7 +652,7 @@ mod tests {
 
     #[test]
     fn value_string_over_numeric() {
-        let mut node = NodeBuilder::new(Role::Label);
+        let mut node = NodeBuilder::new(Role::TextInput);
         node.set_value("text");
         node.set_numeric_value(1.0);
         assert_eq!(wrapper_value(&node), Some(Value::String("text".into())));
