@@ -5720,6 +5720,7 @@ impl Host {
                 self.context.ui.scene.borrow_mut().rest();
                 self.context.ui.semantics.borrow_mut().rest();
                 self.tree.rest();
+                zgx::theme::Themes::of(&self.context.ui.runtime).rest();
                 release_freed_heap();
             }
         }
