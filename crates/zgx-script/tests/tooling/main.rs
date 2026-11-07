@@ -9,6 +9,8 @@ mod app_plugins;
 mod check;
 #[path = "../diagnostics.rs"]
 mod diagnostics;
+#[path = "../hover_frames.rs"]
+mod hover_frames;
 #[path = "../input_hints.rs"]
 mod input_hints;
 #[path = "../inspect_cli.rs"]
