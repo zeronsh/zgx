@@ -2264,6 +2264,9 @@ export type NodeProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: (string | ReadOnlyState<string> | (() -> string))?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Reactive<string>?,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: (string | Readable<string?> | (() -> string?))?,
@@ -2671,6 +2674,9 @@ export type Props = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -3025,6 +3031,7 @@ export type Props_checked = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_expanded = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_live = ("polite" | "assertive" | "off")?
 export type Props_description = (string | ReadOnlyState<string> | (() -> string))?
+export type Props_value_text = Reactive<string>?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
 export type Props_aria_hidden = boolean?
 export type Props_focus_group = ("vertical" | "horizontal" | "both")?
@@ -3321,6 +3328,9 @@ export type ContainerProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -3518,9 +3528,6 @@ export type ContainerProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 }
@@ -3758,6 +3765,9 @@ export type ScrollProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -3955,9 +3965,6 @@ export type ScrollProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- The scroll position in points, both ways.
@@ -4198,6 +4205,9 @@ export type TextProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -4604,6 +4614,9 @@ export type MarkdownViewProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -5080,6 +5093,9 @@ export type RichProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -5480,6 +5496,9 @@ export type ImageProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -5897,6 +5916,9 @@ export type SvgProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -6402,6 +6424,9 @@ export type Scene3DProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -6825,6 +6850,9 @@ export type CanvasProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -7257,6 +7285,9 @@ export type CheckboxProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -7667,6 +7698,9 @@ export type InputProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -8178,6 +8212,9 @@ export type ProgressProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -8998,6 +9035,9 @@ export type SegmentedProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -9410,6 +9450,9 @@ export type StepperProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -9823,6 +9866,9 @@ export type DisclosureProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -10020,9 +10066,6 @@ export type DisclosureProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	open: State<boolean>,
@@ -10250,6 +10293,9 @@ export type AccordionProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -10648,6 +10694,9 @@ export type SectionProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -10845,9 +10894,6 @@ export type SectionProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	id: any,
@@ -11074,6 +11120,9 @@ export type SeparatorProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -11480,6 +11529,9 @@ export type TabsProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -11908,6 +11960,9 @@ export type TreeProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -12332,6 +12387,9 @@ export type DataGridProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -12752,6 +12810,9 @@ export type CalendarProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -13165,6 +13226,9 @@ export type DatePickerProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -13576,6 +13640,9 @@ export type TimeFieldProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -13986,6 +14053,9 @@ export type ComboboxProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -14404,6 +14474,9 @@ export type CommandPaletteProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -14810,6 +14883,9 @@ export type SelectProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -15223,6 +15299,9 @@ export type SplitProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -15418,9 +15497,6 @@ export type SplitProps = {
 	-- focusable.
 	value: (number | State<number> | () -> number)?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- The first pane's size in points, both ways: the divider writes it as
@@ -15695,6 +15771,9 @@ export type ListProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -16190,6 +16269,9 @@ export type LayerProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -16383,9 +16465,6 @@ export type LayerProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	open: State<boolean>?,
@@ -16613,6 +16692,9 @@ export type ModalProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -16806,9 +16888,6 @@ export type ModalProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- A state, written back as it closes; or, controlled, a function saying
@@ -17054,6 +17133,9 @@ export type PopoverProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -17247,9 +17329,6 @@ export type PopoverProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- A state, written back as it closes; or, controlled, a function saying
@@ -17501,6 +17580,9 @@ export type MenuItemProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -17910,6 +17992,9 @@ export type SubmenuProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -18103,9 +18188,6 @@ export type SubmenuProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- A state, written back as it closes; or, controlled, a function saying
@@ -18339,6 +18421,9 @@ export type WebViewProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -18765,6 +18850,9 @@ export type TerminalProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -19166,6 +19254,9 @@ export type SlotProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -19618,6 +19709,9 @@ export type EachOptions = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -20034,6 +20128,9 @@ export type PresenceOptions = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
