@@ -146,6 +146,8 @@ SCENES = [
     ('app-mail', 'zgx-script', 'list_state_bench', {'APP': 'mail', 'REPS': '2'}),
     # A list with an estimate (`ui.list { estimate = … }`): it runs per row.
     ('list-estimate', 'zgx-script', 'estimate_bench', {}),
+    # New text mounting, cold: a word's first shape.
+    ('mount-text', 'zgx-script', 'mount_text_bench', {}),
     # A reply's token streamed in, a composer keystroke, a switch.
     ('app-chat', 'zgx-script', 'list_state_bench', {'APP': 'chat', 'REPS': '4'}),
     # A sort with no order kept (the honest whole sort) on its own, as the

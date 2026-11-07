@@ -22,7 +22,7 @@ const FONTS: [&[u8]; 7] = [
     include_bytes!("fonts/FixedHebrew-subset.ttf"),
 ];
 /// Family, weight, size and text, in the order shaped.
-const RUNS: [(&str, u16, f32, &str); 18] = [
+const RUNS: [(&str, u16, f32, &str); 25] = [
     ("Geist", 400, 13., "Requests 48,213"),
     ("DejaVu Sans", 400, 13., "Requests 48,213"),
     ("Geist", 400, 24., "Requests 48,213"),
@@ -41,6 +41,14 @@ const RUNS: [(&str, u16, f32, &str); 18] = [
     ("monospace", 400, 13., "ok ✓ → done"),
     ("monospace", 400, 13., "fn main() {}"),
     ("monospace", 400, 13., "שלום"),
+    // A family with no face: its fallback, kept by the run's scripts.
+    ("No Such Family", 400, 13., "Requests 48,213"),
+    ("No Such Family", 400, 13., "שלום ✓"),
+    ("No Such Family", 400, 13., "latency 12.7 ms"),
+    ("No Such Family", 700, 13., "Requests 48,213"),
+    ("No Such Family", 400, 20., "Ωmega ≠ Ω"),
+    ("No Such Family", 400, 13., "שלום"),
+    ("No Such Family", 400, 13., "Requests ✓ █"),
 ];
 
 type Glyphs = Vec<(u16, usize, usize, u32, u32, u32, String)>;
@@ -89,6 +97,33 @@ fn shape(fonts: &mut FontSystem, (family, weight, size, text): (&str, u16, f32, 
             )
         })
         .collect()
+}
+
+/// A family with no face of its own found its fallback by walking every
+/// installed face for each new word: it's kept, as a family's own face is.
+#[test]
+fn a_family_with_no_face_keeps_the_fallback_it_found() {
+    let mut fonts = fonts();
+    shape(&mut fonts, ("No Such Family", 400, 13., "one"));
+    assert_eq!(fonts.first_fonts_kept(), 1);
+    shape(&mut fonts, ("No Such Family", 400, 13., "two"));
+    assert_eq!(fonts.first_fonts_kept(), 1, "found, not searched for again");
+    // Another script's run has fallbacks of its own.
+    shape(&mut fonts, ("No Such Family", 400, 13., "שלום"));
+    assert_eq!(fonts.first_fonts_kept(), 2);
+    shape(&mut fonts, ("No Such Family", 400, 13., "שלוםם"));
+    assert_eq!(fonts.first_fonts_kept(), 2);
+}
+
+/// What a search found went by the language's fallback lists: a new language
+/// looks again.
+#[test]
+fn a_new_language_forgets_the_fallbacks_kept() {
+    let mut fonts = fonts();
+    shape(&mut fonts, ("No Such Family", 400, 13., "one"));
+    assert_eq!(fonts.first_fonts_kept(), 1);
+    fonts.set_language(Some("ja"));
+    assert_eq!(fonts.first_fonts_kept(), 0);
 }
 
 #[test]
