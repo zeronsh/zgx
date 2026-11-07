@@ -368,3 +368,37 @@ fn an_effect_gone_frees_its_textures() {
     f.gpu.trim();
     assert_eq!(f.gpu.effect_chains(), 0, "dropped with its shader");
 }
+
+#[test]
+fn a_scene_knows_whether_any_layer_shader_has_inputs() {
+    // A renderer prepares inputs only in frames that have any: the scene
+    // says so as shaders come and go, and as their nodes do.
+    let mut scene = Scene::new(SIZE as f32, SIZE as f32);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let node = scene.append(
+        scene.root(),
+        NodeKind::Container(Layout::Overlay),
+        fixed(SIZE as f32),
+    );
+    scene.set_layer_shader(node, Some(FillShader::new(SHOW_COUNT, None)));
+    assert!(!scene.has_layer_inputs(), "a plain layer shader has none");
+    let with = FillShader::with_inputs(
+        SHOW_COUNT,
+        None,
+        ShaderInputs {
+            passes: vec![pass(
+                "count",
+                "fn run(input: PassInput) -> vec4<f32> { return vec4(1.0); }",
+            )],
+            ..Default::default()
+        },
+    );
+    scene.set_layer_shader(node, Some(with.clone()));
+    assert!(scene.has_layer_inputs());
+    scene.set_layer_shader(node, None);
+    assert!(!scene.has_layer_inputs(), "its shader taken away");
+    scene.set_layer_shader(node, Some(with));
+    assert!(scene.has_layer_inputs());
+    scene.remove(node);
+    assert!(!scene.has_layer_inputs(), "its node removed");
+}

@@ -7532,6 +7532,9 @@ impl GpuRenderer {
             .any(|item| item.effects.opacity > 0. && item.effects.blur_radius > 0.);
         // Layer shaders reading what's behind them depend on it as a filter does.
         let readers = scene.has_backdrop_readers();
+        // Layer shaders with inputs, whose passes run as they're prepared:
+        // a frame with none prepares each as a plain layer shader.
+        let inputs = scene.has_layer_inputs();
         // Reconstruct every sampled backdrop pixel before replaying filters. A
         // dependency can reach another filter, so expand to a fixed point.
         let damage = if self.fresh {
@@ -7722,8 +7725,9 @@ impl GpuRenderer {
                     .then(|| scene.layer_shader(item.id))
                     .flatten()
                     .and_then(|layer| Some((layer.shader.clone()?, layer)))
-                    .filter(|(shader, layer)| {
-                        self.prepare_layer_shader(scene, item.bounds, shader, layer)
+                    .filter(|(shader, layer)| match inputs {
+                        false => self.prepare_filter(shader),
+                        true => self.prepare_layer_shader(scene, item.bounds, shader, layer),
                     });
                 // And blended with its backdrop, once that compiles (or
                 // reading it, plainly over it).
