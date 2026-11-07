@@ -2626,6 +2626,7 @@ fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
     use zgx::glass::{GlassStyle, GlassVariant, glass};
     let own = |source: &Option<Source>| source.as_ref().map(resolve_owned);
     let (clear, tint, radius) = (own(&spec.clear), own(&spec.tint), own(&spec.radius));
+    let corners = own(&spec.corners);
     let vm = vm.clone();
     glass(move || {
         let read = |source: &Option<Owned>, ty| {
@@ -2642,6 +2643,9 @@ fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
         }
         if let Some(Lit::Num(radius)) = read(&radius, Ty::Num) {
             style.radius = radius;
+        }
+        if let Some(Lit::Corners(corners)) = read(&corners, Ty::Corners) {
+            style.corners = Some(corners);
         }
         style
     })

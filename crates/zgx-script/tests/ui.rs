@@ -5252,6 +5252,35 @@ fn ui_glass_is_a_box_that_holds_children_drawn_with_no_system_glass() {
 }
 
 #[test]
+fn ui_glass_rounds_each_corner_it_is_given() {
+    let mut h = Harness::inline(
+        r##"return ui.glass { id = "pane", w = 200, h = 100,
+            corners = { tl = 56, tr = 56, br = 38, bl = 38 } }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.host.error().get(), None);
+    let pane = h.find("pane").unwrap();
+    let scene = h.ui.scene.borrow();
+    let backing = scene.children(pane)[0];
+    let corners = match scene.kind(backing) {
+        zgx::scene::NodeKind::Quad(quad) | zgx::scene::NodeKind::Panel { quad, .. } => {
+            quad.decoration.as_deref().and_then(|d| d.corners)
+        }
+        _ => None,
+    }
+    .expect("the backing's corners");
+    assert_eq!(
+        (
+            corners.top_left,
+            corners.top_right,
+            corners.bottom_right,
+            corners.bottom_left
+        ),
+        (56., 56., 38., 38.)
+    );
+}
+
+#[test]
 fn the_engine_keeps_a_layer_shader_up_with_no_script_per_frame() {
     let mut h = Harness::inline(
         r##"local on = ui.state("on", false)

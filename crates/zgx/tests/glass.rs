@@ -51,3 +51,40 @@ fn with_system_glass_a_native_view_stands_in_following_its_style() {
     ui.prepare_frame();
     assert_eq!(pane.style().variant, GlassVariant::Clear);
 }
+
+#[test]
+fn drawn_glass_rounds_each_corner_by_its_own_radius() {
+    // A sheet's: round on top, its bottom as a screen's corners less its inset.
+    let corners = zgx::decoration::Corners {
+        top_left: 56.,
+        top_right: 56.,
+        bottom_right: 38.,
+        bottom_left: 38.,
+    };
+    let natives = NativeViews::new();
+    natives.set_supported(true);
+    let mut ui = Ui::new(400., 300.);
+    ui.mount(provide(
+        natives.clone(),
+        glass(move || GlassStyle {
+            corners: Some(corners),
+            ..Default::default()
+        })
+        .w(200.)
+        .h(200.),
+    ));
+    ui.prepare_frame();
+    let scene = ui.scene.borrow();
+    let mut todo = vec![scene.root()];
+    let mut found = None;
+    while let Some(id) = todo.pop() {
+        todo.extend_from_slice(scene.children(id));
+        if let zgx::scene::NodeKind::Quad(quad) | zgx::scene::NodeKind::Panel { quad, .. } =
+            scene.kind(id)
+            && let Some(c) = quad.decoration.as_deref().and_then(|d| d.corners)
+        {
+            found = Some(c);
+        }
+    }
+    assert_eq!(found, Some(corners));
+}
