@@ -6404,7 +6404,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 let vm = env.vm.clone();
                 let done = std::cell::RefCell::new(done);
                 let elapsed_cell = std::cell::Cell::new(0f64);
-                let began = std::time::Instant::now();
+                let began = std::cell::Cell::new(None::<std::time::Instant>);
                 let (speed_from, shown_from) = (
                     velocity.get(),
                     state
@@ -6419,11 +6419,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     if stopped.get() {
                         return false;
                     }
-                    // Counted from the call, not the first frame, and by the clock: a
-                    // page's mount can take a while, and a frame come late, and the
-                    // motion keeps its time through them. (A test's clock runs ahead of it.)
+                    // Counted by the clock from its first frame, as UIKit's springs
+                    // start once the change is under way: a late frame lands where the
+                    // curve is. (A test's clock runs ahead of it.)
+                    let began = began.get().unwrap_or_else(|| {
+                        let now = std::time::Instant::now();
+                        began.set(Some(now));
+                        now
+                    });
                     elapsed_cell.set(
-                        (elapsed_cell.get() + dt_ms / 1000.).max(began.elapsed().as_secs_f64()),
+                        (elapsed_cell.get() + dt_ms / 1000.)
+                            .max(began.elapsed().as_secs_f64() + dt_ms / 1000.),
                     );
                     // Where the spring is at this time, whatever the frames: the same
                     // curve on any display, and through a late one.

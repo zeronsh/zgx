@@ -12,14 +12,18 @@ end
 -- A navigation controller's decay, measured beside one: remaining distance
 -- falls about 4.3 times in each 83 ms, 99% there at about 0.35 s.
 local STIFFNESS = 600
--- A navigation controller's, measured beside a real one: a push or pop by a button,
--- which starts a moment after the call; and what a released swipe settles on.
-local PUSH_SPRING = { stiffness = 650, damping = 56, delay = 35 }
-local POP_SPRING = { stiffness = 650, damping = 56, delay = 30 }
-local SWIPE_SPRING = { stiffness = 440, damping = 35.7 }
--- A flick this fast (points a second) leaves past the edge and comes back.
-local FLICK = 650
-local SCREEN_CORNER = 62
+-- A spring said as UIKit says one: damping ratio and response (seconds).
+local function uikit_spring(ratio, response)
+	local turn = 2 * math.pi / response
+	return { stiffness = turn * turn, damping = 2 * ratio * turn }
+end
+-- A navigation controller's own, read from UIKit as it runs: a push or pop by a
+-- button runs its progress on this spring from 8.75 a second; a finger's position
+-- is followed through the tracking spring, and a release runs on the last.
+local NAV_BUTTON = uikit_spring(1, 0.3)
+local NAV_BUTTON_SPEED = 8.75
+local NAV_TRACKING = uikit_spring(0.85, 0.08)
+local NAV_RELEASE = uikit_spring(0.85, 0.3)
 -- How far the page under the top one lies back, of the width.
 local PARALLAX = 0.3
 local SETTLE_MOST = 1200
@@ -622,12 +626,20 @@ ios.stack = ui.component(function(props)
 	-- A spring each: one taking over from the other would leave that one's page
 	-- stopped where it was, with nothing to move it on.
 	local running_drag, running_enter
-	-- From rest a button's waits as a navigation controller does; a change of mind
-	-- keeps the speed it had and goes at once.
-	local function from_button(spring, carried)
-		return if carried ~= 0
-			then { stiffness = spring.stiffness, damping = spring.damping, velocity = carried }
-			else spring
+	-- `log_motion`: each position in the gesture log, to compare with UIKit's.
+	if props.log_motion then
+		ui.effect(function()
+			ui.gesture_log(string.format("POS %.1f drag %.2f enter %.2f", ui.now(), drag:get(), entering:get()))
+		end)
+	end
+	-- A button's starts at a navigation controller's speed; a change of mind keeps
+	-- the speed it had.
+	local function from_button(direction, carried)
+		return {
+			stiffness = NAV_BUTTON.stiffness,
+			damping = NAV_BUTTON.damping,
+			velocity = if carried ~= 0 then carried else direction * NAV_BUTTON_SPEED * width,
+		}
 	end
 	local function run_drag(target, done, spring)
 		local carried = if running_drag then running_drag() else 0
@@ -636,27 +648,26 @@ ios.stack = ui.component(function(props)
 			if done then
 				done()
 			end
-		end, nil, spring or from_button(POP_SPRING, carried))
+		end, nil, spring or from_button(1, carried))
 	end
 	local function run_enter()
 		local carried = if running_enter then running_enter() else 0
 		running_enter = settle(entering, 0, function()
 			running_enter = nil
-		end, nil, from_button(PUSH_SPRING, carried))
+		end, nil, from_button(-1, carried))
 	end
-	-- What a released swipe does, as a navigation controller's: a flick home leaves
-	-- from behind the finger and quicker than it, so it passes the edge and comes back;
-	-- anything else starts from rest a moment later.
-	local function released(target, vx, at)
-		if target ~= 0 and vx >= FLICK then
-			return {
-				stiffness = SWIPE_SPRING.stiffness,
-				damping = SWIPE_SPRING.damping,
-				from = at - (0.115 * vx - 30),
-				velocity = 6 * vx - 1000,
-			}
-		end
-		return { stiffness = SWIPE_SPRING.stiffness, damping = SWIPE_SPRING.damping, delay = 12 }
+	-- A swipe's page follows the finger through a spring, and a release carries
+	-- that spring's speed home.
+	local function follow(target)
+		local carried = if running_drag then running_drag() else 0
+		running_drag = settle(drag, target, function()
+			running_drag = nil
+		end, nil, { stiffness = NAV_TRACKING.stiffness, damping = NAV_TRACKING.damping, velocity = carried })
+	end
+	local function released()
+		local carried = if running_drag then running_drag() else 0
+		running_drag = nil
+		return { stiffness = NAV_RELEASE.stiffness, damping = NAV_RELEASE.damping, velocity = carried }
 	end
 	-- Nothing may rest part way: whatever got here, a page out of place with no
 	-- spring on it goes home, and says so in the record.
@@ -732,22 +743,20 @@ ios.stack = ui.component(function(props)
 				end
 				start = drag:get()
 			elseif e.phase == "changed" then
-				drag:set(clamp(start + e.x, 0, width))
+				follow(clamp(start + e.x, 0, width))
 			elseif e.phase == "ended" then
 				holding = false
 				check_soon()
-				-- Where the finger left it, which its last move may not have drawn.
 				local at = clamp(start + e.x, 0, width)
-				drag:set(at)
 				if e.vx > FLING or (at > width / 2 and e.vx > -FLING) then
-					finish_pop(released(width, e.vx, at))
+					finish_pop(released())
 				else
-					run_drag(0, nil, released(0, e.vx, at))
+					run_drag(0, nil, released())
 				end
 			else
 				holding = false
 				check_soon()
-				run_drag(0, nil, released(0, 0, drag:get()))
+				run_drag(0, nil, released())
 			end
 		end,
 	}
@@ -790,15 +799,12 @@ ios.stack = ui.component(function(props)
 				x = function()
 					return page_x(index)
 				end,
-				-- A page in motion has the screen's rounded corners.
-				rounded = function()
-					return if index == #pages:get()
-							and index > 1
-							and drag:get() + entering:get() ~= 0
-						then SCREEN_CORNER
-						else 0
+				-- A page in motion is a card with a navigation controller's faint shadow.
+				shadow = function()
+					return if drag:get() + entering:get() ~= 0
+						then { x = 0, y = -3, blur = 12, color = "#0000000a" }
+						else false
 				end,
-				overflow = "hidden",
 				-- Quite covered once it settles: it shows nothing, and asks no
 				-- plane of its own.
 				hidden = function()
