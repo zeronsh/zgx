@@ -3059,6 +3059,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 size.clone(),
                 extent.clone(),
             );
+            let end_room = stretch.end_room.clone();
             let navigation = keyboard_navigation.then(|| {
                 crate::compose_virtual_keyboard::Navigation::new(
                     ui,
@@ -3150,7 +3151,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 let requested = offset.get();
                 // As a scroll view takes it: past the end (`math.huge`) is
                 // the end; NaN, the top.
-                let limit = (model.content_height() - height).max(0.0);
+                let limit = (model.content_height() + end_room.get() - height).max(0.0);
                 let mut position = if requested.is_nan() {
                     0.0
                 } else {
@@ -5993,6 +5994,8 @@ pub(crate) struct ListStretch {
     content: NodeId,
     placed: Rc<Cell<f32>>,
     shown: Signal<f32>,
+    /// Room past its end, while a keyboard covers that much of it.
+    pub(crate) end_room: Rc<Cell<f32>>,
 }
 impl ListStretch {
     /// `root`'s list, its rows in `content`, scrolled to `offset` within
@@ -6015,8 +6018,17 @@ impl ListStretch {
                 }
             });
         }
-        let shown =
-            crate::elastic::register(ui, root, false, size, extents, offset, Rc::default(), None);
+        let end_room: Rc<Cell<f32>> = Rc::default();
+        let shown = crate::elastic::register(
+            ui,
+            root,
+            false,
+            size,
+            extents,
+            offset,
+            end_room.clone(),
+            None,
+        );
         let placed = Rc::new(Cell::new(0_f32));
         {
             let (placed, shown, scene) = (placed.clone(), shown.clone(), ui.scene.clone());
@@ -6046,6 +6058,7 @@ impl ListStretch {
             content,
             placed,
             shown,
+            end_room,
         }
     }
     /// The list scrolled its content to `position`.

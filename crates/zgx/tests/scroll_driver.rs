@@ -18,6 +18,48 @@ fn window(content_height: f32) -> Ui {
 }
 
 #[test]
+fn room_past_a_views_end_lets_it_scroll_there_and_stay_through_a_layout() {
+    let ui = window(150.);
+    let driver = ui.scroll_driver_at(50., 50.).expect("a view with room");
+    driver.drive(100.);
+    ui.prepare_frame();
+    assert_eq!(driver.metrics().unwrap().offset, 50., "its content's end");
+    driver.set_end_room(200.);
+    driver.drive(180.);
+    ui.prepare_frame();
+    assert_eq!(driver.metrics().unwrap().offset, 180.);
+    assert_eq!(driver.metrics().unwrap().stretch, 0.);
+    driver.set_end_room(0.);
+    driver.drive(50.);
+    ui.prepare_frame();
+    assert_eq!(driver.metrics().unwrap().offset, 50.);
+}
+
+#[test]
+fn room_past_a_lists_end_lets_it_scroll_there_too() {
+    let mut ui = Ui::new(100., 100.);
+    let offset = ui.signal(0.);
+    ui.mount(
+        virtual_list(
+            offset.clone(),
+            30.,
+            1,
+            || 5,
+            |index| index,
+            |_, _, _| div().h(30.),
+        )
+        .w(100.)
+        .h(100.),
+    );
+    ui.prepare_frame();
+    let driver = ui.scroll_driver_at(50., 50.).expect("a list with room");
+    driver.set_end_room(200.);
+    driver.drive(170.);
+    ui.prepare_frame();
+    assert_eq!(driver.metrics().unwrap().offset, 170.);
+}
+
+#[test]
 fn a_held_view_stays_drawn_where_it_is_as_its_offset_goes_on() {
     let ui = window(1000.);
     let driver = ui.scroll_driver_at(50., 50.).expect("a view with room");
