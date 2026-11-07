@@ -890,6 +890,13 @@ impl LayerShader {
             .as_deref()
             .is_some_and(crate::decoration::FillShader::reads_backdrop)
     }
+    /// Whether its shader runs passes or reads inputs of its own
+    /// (`FillShader::with_inputs`).
+    pub fn has_inputs(&self) -> bool {
+        self.shader
+            .as_deref()
+            .is_some_and(|shader| shader.inputs().is_some())
+    }
 }
 /// A clip that cuts nothing, as `clipped_bounds` starts from.
 const UNCLIPPED: Rect = Rect {
@@ -1895,6 +1902,11 @@ struct ColdMaps {
     /// blur, what they show depends on that. (Here, cold: few scenes have
     /// any, and the scene's own layout is what every frame's walk reads.)
     backdrop_readers: Vec<NodeId>,
+    /// Nodes whose layer shaders have inputs (passes, pictures, boxes): a
+    /// renderer prepares those only in a frame that has any.
+    layer_inputs: Vec<NodeId>,
+    /// Nodes whose boxes layer shaders read by tag (`set_geometry_tag`).
+    geometry_nodes: Vec<(u64, NodeId)>,
 }
 /// A node painted outside its parent's fade (`Scene::set_outside_fade`).
 #[derive(Clone, Copy, Debug)]
@@ -4098,10 +4110,14 @@ impl Scene {
         let was_reading = old.is_some_and(LayerShader::reads_backdrop);
         let shaded = layer.shader.is_some();
         let reading = layer.reads_backdrop();
+        let new_shader = old.is_none_or(|old| old.shader != layer.shader);
+        // Whether it has inputs, before and after: only as its shader
+        // changes (a frame's new uniforms leave it as it was).
+        let inputs =
+            new_shader.then(|| (old.is_some_and(LayerShader::has_inputs), layer.has_inputs()));
         // Its parameters alone: it paints where it did.
-        let moved = old.is_none_or(|old| {
-            (old.bleed, old.reach) != (layer.bleed, layer.reach) || old.shader != layer.shader
-        });
+        let moved = new_shader
+            || old.is_some_and(|old| (old.bleed, old.reach) != (layer.bleed, layer.reach));
         // Its box, grown by its bleed, under the old shader: what it paints
         // (`set_effects`: damaged under the old, then the new).
         if was_shaded || shaded {
@@ -4129,6 +4145,11 @@ impl Scene {
                     }
                 }
             }
+        }
+        if let Some((had, has)) = inputs
+            && had != has
+        {
+            self.track_layer_inputs(id, has);
         }
         let extra = self.text_gradient(id).is_some() || self.drop_shadow(id).is_some();
         let node = self.node_mut(id);
@@ -4190,6 +4211,75 @@ impl Scene {
             Some(layer) => bounds.expand(layer.bleed + layer.reach),
             None => bounds,
         }
+    }
+    /// Have `id`'s box read as tag `tag`'s (`Styled::geometry_tag`). A node
+    /// has one tag.
+    pub fn set_geometry_tag(&mut self, id: NodeId, tag: u64) {
+        let nodes = &mut self.cold.get_or_insert_default().geometry_nodes;
+        match nodes.iter_mut().find(|(_, at)| *at == id) {
+            Some(entry) => entry.0 = tag,
+            None => nodes.push((tag, id)),
+        }
+    }
+    /// Each box tagged `tag`, where it is in the window, with its corner
+    /// radii, into `out`.
+    pub fn geometry_of(&self, tag: u64, out: &mut Vec<(Rect, [f32; 4])>) {
+        let live = |id: &NodeId| self.slots[id.index as usize].generation == id.generation;
+        let nodes = self
+            .cold
+            .as_deref()
+            .map_or(&[][..], |cold| &cold.geometry_nodes);
+        for (_, id) in (nodes.iter()).filter(|(of, id)| *of == tag && live(id)) {
+            let bounds = match self.transformed {
+                0 => self.world(*id).0,
+                _ => self.transformed_world_bounds(*id),
+            };
+            let radii = match &self.node(*id).kind {
+                NodeKind::Panel { quad, .. } | NodeKind::Quad(quad) => {
+                    let corners = (quad.decoration.as_ref())
+                        .and_then(|decoration| decoration.corners)
+                        .unwrap_or(crate::decoration::Corners::all(quad.radius));
+                    [
+                        corners.top_left,
+                        corners.top_right,
+                        corners.bottom_right,
+                        corners.bottom_left,
+                    ]
+                    .map(|radius| radius.min(bounds.width.min(bounds.height) / 2.))
+                }
+                _ => [0.; 4],
+            };
+            out.push((bounds, radii));
+        }
+    }
+    /// The nodes whose layer shaders have inputs, each with its box in
+    /// window points (`world_bounds`), for a renderer to run their passes.
+    #[doc(hidden)]
+    pub fn layer_input_boxes(&self) -> Vec<(NodeId, Rect)> {
+        self.cold.as_deref().map_or(Vec::new(), |cold| {
+            (cold.layer_inputs.iter())
+                .map(|id| (*id, self.world_bounds(*id)))
+                .collect()
+        })
+    }
+    /// Note that `id`'s layer shader now has inputs, or no longer has.
+    #[cold]
+    #[inline(never)]
+    fn track_layer_inputs(&mut self, id: NodeId, has: bool) {
+        match has {
+            true => self.cold.get_or_insert_default().layer_inputs.push(id),
+            false => {
+                if let Some(cold) = &mut self.cold {
+                    cold.layer_inputs.retain(|entry| *entry != id);
+                }
+            }
+        }
+    }
+    /// Whether any layer shader has inputs (passes, pictures, boxes).
+    pub fn has_layer_inputs(&self) -> bool {
+        self.cold
+            .as_deref()
+            .is_some_and(|cold| !cold.layer_inputs.is_empty())
     }
     /// Whether any layer shader reads the backdrop.
     pub fn has_backdrop_readers(&self) -> bool {
@@ -6613,6 +6703,8 @@ impl Scene {
         self.blur_nodes.retain(live);
         if let Some(cold) = &mut self.cold {
             cold.backdrop_readers.retain(live);
+            cold.layer_inputs.retain(live);
+            cold.geometry_nodes.retain(|(_, id)| live(id));
         }
         self.popups.retain(live);
         self.popups_promoted.retain(live);
@@ -6666,10 +6758,13 @@ impl Scene {
             && layer.shader.is_some()
         {
             self.filtered.set(self.filtered.get() - 1);
-            if layer.reads_backdrop()
-                && let Some(cold) = &mut self.cold
-            {
-                cold.backdrop_readers.retain(|entry| *entry != id);
+            if let Some(cold) = &mut self.cold {
+                if layer.reads_backdrop() {
+                    cold.backdrop_readers.retain(|entry| *entry != id);
+                }
+                if layer.has_inputs() {
+                    cold.layer_inputs.retain(|entry| *entry != id);
+                }
             }
         }
         self.transformed -= usize::from(node.transformed());

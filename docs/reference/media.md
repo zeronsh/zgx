@@ -123,6 +123,8 @@ Any node can show its content through a bitmap's alpha, have its box filled by a
 | `ui.layer_shader(wgsl, { fps })` | a layer shader: the source defines `fn layer(input: LayerInput) -> vec4<f32>` (straight alpha), reading `input.color` (the content's pixel there, straight alpha), `input.p`, `input.size`, `input.time`, `input.scale` and `input.params` as a fill does, and `input.radii` (the box's corners: top-left, top-right, bottom-right, bottom-left); `zgx_sample(p)` reads the content at another point, and `zgx_backdrop(p)` what lies behind the node there (the window under it, or inside an isolated group that group) |
 | `layer_shader = shader`, `layer_params = { … }` | the node and its children paint once into a cached layer, and each pixel of the box passes through the shader as the layer composites (a foil sheen, a recolour, a ripple); past the box the layer shows as painted. `layerTime` and `layerParam0` to `layerParam15` animate it without repainting the content |
 | `layer_clock = true`, `shader_clock = true` | the engine steps `input.time` on the window's frame clock, with no script per step and at most at the shader's `fps`, while the node shows and its window is presented; off screen, clipped away, faded out or hidden it holds no timer. With reduced motion it stays at 0: read `ui.prefers.reduced_motion` for a pose of your own |
+| `ui.layer_shader(wgsl, { passes, images, geometry })` | a shader with [inputs](#passes-state-and-what-a-shader-reads): passes drawn before each frame and read by name, pictures, and where tagged boxes are. Each call is one running effect with its own textures |
+| `geometry = "tag"` | this box's rounded rectangle, where it is on screen each frame, is read by shaders asking for `"tag"` |
 | `layer_on = state`, `layer_params = function() … end` | while `layer_on` is false there's no shader, no layer and no clock, as if it weren't set; a function for `layer_params` is followed as state it reads changes, compositing again without repainting |
 | `layer_bleed = n`, `layer_reach = n` | the shader runs `n` points past the box and can paint there (cut by the clips around the node, not its own), and its `zgx_backdrop` reads `n` points past that, holding at the edge beyond. A shader calling `zgx_backdrop` repaints when what it can read changes, and each one that a frame damages copies that part of the window, once |
 
@@ -195,11 +197,62 @@ What's not there:
 
 - **Pointer:** hit testing doesn't follow a warp. A warped element's clicks land where it was laid out.
 - **Reads back:** a shader's output goes to the screen and nowhere else: no script can read what it read.
-- **Several passes or state between frames** (a fluid, particles that remember): a shader has neither. Use a GPU view, below.
 
-### Several passes: a GPU view
+### Passes, state and what a shader reads
 
-In Rust, a GPU view is your own wgpu passes and textures, kept between frames:
+A shader can declare passes: WGSL functions that draw textures before each frame showing it, at a size you choose, in floats if you need them, keeping their last result if you ask. Later passes and the shader read them by name. That is enough for a fluid, particles that remember, or a picture worked out once.
+
+```lua
+-- Worked out once: a noise picture. Then a state that eases toward it each frame.
+local GROUND = [[
+fn run(input: PassInput) -> vec4<f32> {
+	return vec4<f32>(fract(sin(dot(input.pixel, vec2<f32>(12.9898, 78.233))) * 43758.5453));
+}]]
+local FLUID = [[
+fn run(input: PassInput) -> vec4<f32> {
+	return mix(zgx_fluid(input.uv), zgx_ground(input.uv), min(input.dt * 2.0, 1.0));
+}]]
+local fire = ui.layer_shader([[
+fn layer(input: LayerInput) -> vec4<f32> {
+	let f = zgx_fluid(input.p / input.size);
+	return vec4<f32>(f.rgb, f.a);
+}]], {
+	passes = {
+		-- Worked out once, then only read.
+		{ name = "ground", shader = GROUND, scale = 1, once = true },
+		-- A grid of its own, keeping its state from frame to frame.
+		{ name = "fluid", shader = FLUID, size = { 480, 160 }, format = "rgba16float", feedback = true },
+	},
+	geometry = "cards",
+})
+return ui.div { w = 240, h = 80, layer_shader = fire, layer_clock = true }
+```
+
+| In `passes` | Default | |
+| --- | --- | --- |
+| `name` | required | an identifier: `zgx_<name>(uv)` samples its texture (linearly, `uv` from 0 to 1), `zgx_<name>_texel(xy)` reads a texel, `zgx_<name>_size()` is its size |
+| `shader` | required | WGSL defining `fn run(input: PassInput) -> vec4<f32>`: what the pixel holds |
+| `size`, `scale` | `scale = 1` | `{ w, h }` pixels, or this fraction of the box's pixels (drawn afresh when they change) |
+| `format` | `"rgba8"` | or `"rgba16float"`, past 1 and below 0 |
+| `feedback` | `false` | its own last result stays readable under its name, at the cost of a second texture. Without it, a pass reading itself reads nothing |
+| `steps` | `1` | runs this many times a frame (`input.step` counts them), as a solver's iterations |
+| `once` | `false` | draws once (again if its size changes) |
+
+`PassInput` is `uv`, `pixel`, `size` (its texture's), `time`, `dt` (the time since it last ran, at most a twentieth of a second), `step`, `frame`, `scale`, `area` (the box in window points: x, y, w, h) and `params` (the shader's `layer_params`, the same four vec4s). A pass reads a later pass's last frame; every texture starts zero.
+
+`images = { name = bitmap }` samples a picture the same way. `geometry = "cards"` gives the shader and its passes the rounded boxes of the nodes with `geometry = "cards"`, up to 64, where they are this frame through springs and transforms, with no script: `zgx_rect_count()`, `zgx_rect(i)` (x, y, w, h), `zgx_rect_radii(i)` and `zgx_rect_distance(p, i)` (signed, negative inside, `p` in window points). `zgx_window(p)` turns a shader's `input.p` into window points, so a shader can cut a moving row at a fixed line. Light that falls on cards is a shader over them reading their boxes.
+
+What it costs: nothing for a shader without inputs. A shader with them holds its textures from its first draw until it's dropped, and runs its passes only for frames that show it, so one with no `layer_clock` runs them when something repaints it. Its passes compile off the frame, and until they have, its layer shows as painted. If the node stops being drawn, its time stops and so does `dt`. Boxes moving doesn't itself redraw a shader: give one that follows them `layer_clock`.
+
+Each `ui.layer_shader` call with inputs is one effect with one set of textures, and the nodes showing it share them. To give each row its own, make the shader in the row's component.
+
+Output that adds light without reading the backdrop: return the colour with alpha as its strongest channel. Over a dark scene that adds as light does, with no copy of what's behind.
+
+The [lava example](https://github.com/zeronsh/zgx/tree/main/crates/zgx-script/examples/lava) composes all of these with a real list: a floor worked out once, a stable-fluids fire in passes, light from the cards' boxes, and rows cut at a line as they sink.
+
+### In Rust: passes of your own
+
+`ShaderInputs::views` names GPU views a layer shader samples: your own wgpu passes, with the renderer's device and an encoder, so anything the device has, compute included, feeds a shader in its place in the frame. On their own, in a box of their own, a GPU view is that alone:
 
 ```rust
 use zgx::compose::{gpu_view, prelude::*};

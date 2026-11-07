@@ -28,6 +28,7 @@ mod fxc_child;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub mod iosurface;
+mod passes;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub use core_text_glyphs::core_text_glyph;
@@ -53,6 +54,7 @@ mod surface;
 #[cfg(target_os = "macos")]
 mod trial_energy;
 mod upload;
+pub use passes::check as check_layer_inputs;
 pub mod viewport;
 pub use compile::warm_fill_shader;
 pub use font_cache::set_desktop_sans_serif;
@@ -4140,6 +4142,12 @@ pub struct GpuRenderer {
     fill_shaders: FxHashMap<u64, Arc<zgx::decoration::FillShader>>,
     /// Layer shaders' pipelines by shader id (`None`: it failed to compile).
     filter_pipelines: FxHashMap<u64, compile::Compiled<wgpu::RenderPipeline>>,
+    /// Layer shaders' textures, passes and bindings, for those with inputs
+    /// (`FillShader::with_inputs`), by shader id.
+    chains: FxHashMap<u64, passes::Chain>,
+    /// Pipelines of layer shaders whose passes couldn't run this frame, put
+    /// aside so the layer composites as painted (`prepare_inputs`).
+    parked_inputs: Vec<(bool, u64, compile::Compiled<wgpu::RenderPipeline>)>,
     /// Their shaders, to tell when no scene holds one any more (`trim`).
     filter_shaders: FxHashMap<u64, Arc<zgx::decoration::FillShader>>,
     /// Blended layers' pipelines (blend.wgsl): `BLEND_PLAIN`'s, and each
@@ -4723,6 +4731,8 @@ impl GpuRenderer {
             fill_shaders_declared: 0,
             layers_declared: 0,
             filter_pipelines: FxHashMap::default(),
+            chains: FxHashMap::default(),
+            parked_inputs: Vec::new(),
             blend_pipelines: FxHashMap::default(),
             blend_layouts: std::cell::OnceCell::new(),
             backdrops: FxHashMap::default(),
@@ -5318,6 +5328,11 @@ impl GpuRenderer {
         }
     }
     fn render_once(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
+        // Layer shaders with inputs: their pipelines and this frame's passes,
+        // before anything draws them.
+        if scene.has_layer_inputs() {
+            self.prepare_inputs(scene);
+        }
         // A frame deferred but never presented draws into the retained target
         // before this one prunes images or layers it may reference.
         self.flush_pending();
@@ -6226,6 +6241,7 @@ impl GpuRenderer {
         let layout = match layout {
             AppLayout::Quads => dx12_fill::Layout::Quads,
             AppLayout::Blend => dx12_fill::Layout::Blend,
+            AppLayout::Inputs { blend, textures } => dx12_fill::Layout::Inputs { blend, textures },
         };
         // A shader naga can't write as HLSL is wgpu's to report.
         let Ok((hlsl, name)) = dx12_fill::fragment_hlsl(source, entry, layout) else {
@@ -11027,6 +11043,9 @@ impl GpuRenderer {
         pass.set_scissor_rect(x, y, w, h);
         pass.set_bind_group(0, self.source_bind(draw.source), &[]);
         pass.set_bind_group(2, bind, &[]);
+        if !self.chains.is_empty() {
+            self.bind_inputs(pass, draw.shading);
+        }
         pass.draw(0..4, draw.start..draw.end);
         stats.draw_calls += 1;
         stats.instances += (draw.end - draw.start) as usize;
@@ -11177,6 +11196,9 @@ impl GpuRenderer {
         if *current != Some(batch.shading) {
             pass.set_pipeline(pipelines(batch.shading));
             *current = Some(batch.shading);
+            if !self.chains.is_empty() {
+                self.bind_inputs(pass, batch.shading);
+            }
         }
         pass.set_scissor_rect(x, y, w, h);
         pass.set_bind_group(0, self.source_bind(batch.source), &[]);
@@ -13825,6 +13847,11 @@ impl GpuRenderer {
             self.idle = true;
         }
     }
+    /// How many effects (layer shaders with inputs) hold textures here.
+    #[doc(hidden)]
+    pub fn effect_chains(&self) -> usize {
+        self.chains.len()
+    }
     /// Drop the fill and layer shaders no one holds but this renderer (a
     /// removed node's, a reloaded script's: ids are never reused), with
     /// their pipelines, unless the kept frame still draws them.
@@ -13850,6 +13877,7 @@ impl GpuRenderer {
         self.fill_pipelines.retain(|id, _| fills.contains_key(id));
         self.filter_pipelines
             .retain(|id, _| filters.contains_key(id));
+        self.chains.retain(|id, _| filters.contains_key(id));
         self.blend_pipelines
             .retain(|id, _| *id == BLEND_PLAIN || filters.contains_key(id));
         #[cfg(target_os = "macos")]
@@ -14610,7 +14638,7 @@ pub(crate) fn fill_source(user: &str) -> String {
 /// node's box and `point` its untransformed position, so `p` is the node's.
 pub(crate) fn filter_source(user: &str) -> String {
     format!(
-        "{}\n{}\nstruct LayerInput {{ color:vec4<f32>, p:vec2<f32>, size:vec2<f32>, time:f32, scale:f32, params:array<vec4<f32>,4>, radii:vec4<f32> }}\n{}\n{user}\n{}",
+        "{}\n{}\nstruct LayerInput {{ color:vec4<f32>, p:vec2<f32>, size:vec2<f32>, time:f32, scale:f32, params:array<vec4<f32>,4>, radii:vec4<f32> }}\n{}\n{user}\n{}{}",
         include_str!("draw.wgsl"),
         include_str!("blend.wgsl"),
         "var<private> zgx_frame:vec4<f32>;
@@ -14667,7 +14695,15 @@ fn zgx_backdrop(p:vec2<f32>)->vec4<f32> {
  // Plainly over what's behind it (it reads it): source-over, exact.
  if mode==0u {return source+(1.-source.a)*beneath;}
  return zgx_blend(source,beneath,mode);
-}"
+}",
+        // Where logical `p` from the node's top-left is in its target, in
+        // points: the window's own, for a node not inside another's layer.
+        // After the user's code (lines count as written), and only where it's
+        // called: every other shader parses as before.
+        match user.contains("zgx_window") {
+            true => "\nfn zgx_window(p:vec2<f32>)->vec2<f32> { return (zgx_origin+zgx_pixels*p)/viewport.z; }",
+            false => "",
+        }
     )
 }
 /// For each backdrop-reading layer drawn first in a pass, those after it that
@@ -15867,6 +15903,11 @@ const DX12_FILL_CHECKED_WGPU_HAL: &str = "29.0.4";
 enum AppLayout {
     Quads,
     Blend,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Inputs {
+        blend: bool,
+        textures: u32,
+    },
 }
 /// Tests: end the session's FXC child, so the next app shader starts one.
 #[doc(hidden)]

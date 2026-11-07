@@ -1966,6 +1966,9 @@ fn apply_resolved(
         if let Some((bleed, reach)) = cold.and_then(|cold| cold.layer_extent) {
             scene.set_layer_extent(node, bleed, reach);
         }
+        if let Some(tag) = cold.and_then(|cold| cold.geometry_tag) {
+            scene.set_geometry_tag(node, tag);
+        }
         if let Some(mode) = rare.blend {
             scene.set_blend(node, mode);
         }
