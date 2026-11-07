@@ -49,11 +49,41 @@ impl Default for GlassStyle {
 }
 impl GlassStyle {
     /// What it draws where the system has none, `dark` or light as the theme
-    /// is: the system's glass in a key window, its face from the numbers its
-    /// own filter holds (the luma range, saturation, fill and rim colours),
-    /// its blur, rim, shadow and tint fitted to its pixels
-    /// (`scripts/glass_compare.py`).
+    /// is: on Windows its Acrylic ([`GlassStyle::drawn_acrylic`]), elsewhere
+    /// macOS's glass ([`GlassStyle::drawn_glass`]).
     pub fn drawn(&self, dark: bool) -> crate::shader_drive::ShaderDrive {
+        match cfg!(windows) {
+            true => self.drawn_acrylic(dark),
+            false => self.drawn_glass(dark),
+        }
+    }
+    /// The shadow the drawn glass casts: macOS's regular glass's (Acrylic
+    /// casts none of its own).
+    pub fn drawn_shadow(&self, dark: bool) -> Option<crate::scene::BoxShadow> {
+        match cfg!(windows) {
+            true => None,
+            false => self.drawn_glass_shadow(dark),
+        }
+    }
+    /// What it draws with Transparency effects or reduced transparency on,
+    /// as the system's goes solid: its fill nearly opaque, or on Windows
+    /// Acrylic's fallback colour.
+    pub fn drawn_opaque(&self, dark: bool) -> crate::shader_drive::ShaderDrive {
+        let mut drive = self.drawn(dark);
+        match cfg!(windows) {
+            true => drive.params[1][1] = 1.,
+            false => {
+                let gray = if dark { 44. / 255. } else { 246. / 255. };
+                drive.params[1] = [gray, gray, gray, 0.97];
+            }
+        }
+        drive
+    }
+    /// macOS's glass, as the system's is in a key window: its face from the
+    /// numbers its own filter holds (the luma range, saturation, fill and
+    /// rim colours), its blur, rim, shadow and tint fitted to its pixels
+    /// (`scripts/glass_compare.py`).
+    pub fn drawn_glass(&self, dark: bool) -> crate::shader_drive::ShaderDrive {
         thread_local! {
             static MATERIAL: std::sync::Arc<crate::decoration::FillShader> =
                 crate::decoration::FillShader::new(include_str!("glass.wgsl"), None);
@@ -70,7 +100,7 @@ impl GlassStyle {
         // The rim's colour from the face: gain, luma taken off, lift; and its
         // shadow's alpha, for the material to see past it.
         let shadow = self
-            .drawn_shadow(dark)
+            .drawn_glass_shadow(dark)
             .map_or(0., |s| f32::from(s.color.3) / 255.);
         let rim = match dark {
             false => [1.5, 1.4, 0.9, shadow],
@@ -89,7 +119,7 @@ impl GlassStyle {
     /// The shadow the drawn glass casts, as the system's regular glass does
     /// in a key window (clear casts none): fitted to its pixels. Its offset
     /// and blur are the material's too (`glass.wgsl`), which sees past it.
-    pub fn drawn_shadow(&self, dark: bool) -> Option<crate::scene::BoxShadow> {
+    pub fn drawn_glass_shadow(&self, dark: bool) -> Option<crate::scene::BoxShadow> {
         (self.variant == GlassVariant::Regular).then_some(crate::scene::BoxShadow {
             color: Color(0, 0, 0, if dark { 64 } else { 30 }),
             offset: crate::scene::Transform { x: 0., y: 8. },
@@ -97,9 +127,63 @@ impl GlassStyle {
             spread: 0.,
         })
     }
-    /// The drawn material's own source, for tests of every shader.
+    /// Windows' Acrylic, as WinUI's `AcrylicBrush` makes it, with its
+    /// theme's numbers: regular glass the base acrylic
+    /// (`AcrylicBackgroundFillColorBaseBrush`), clear the default, more
+    /// see-through (`AcrylicBackgroundFillColorDefaultBrush`). A tint is the
+    /// brush's own: its luminosity and opacity derived as the brush derives
+    /// them.
+    pub fn drawn_acrylic(&self, dark: bool) -> crate::shader_drive::ShaderDrive {
+        thread_local! {
+            static MATERIAL: std::sync::Arc<crate::decoration::FillShader> =
+                crate::decoration::FillShader::new(include_str!("glass_acrylic.wgsl"), None);
+        }
+        let hex = |v: u32| [(v >> 16) & 255, (v >> 8) & 255, v & 255].map(|c| c as f32 / 255.);
+        // Tint, tint opacity, luminosity opacity, fallback.
+        let (tint, tint_opacity, luminosity, fallback) = match (self.variant, dark) {
+            (GlassVariant::Regular, false) => (hex(0xF3F3F3), 0., 0.9, hex(0xEEEEEE)),
+            (GlassVariant::Regular, true) => (hex(0x202020), 0.5, 0.96, hex(0x1C1C1C)),
+            (GlassVariant::Clear, false) => (hex(0xFCFCFC), 0., 0.85, hex(0xF9F9F9)),
+            (GlassVariant::Clear, true) => (hex(0x2C2C2C), 0.15, 0.96, hex(0x2C2C2C)),
+        };
+        let (tint, tint_opacity, luminosity_color, luminosity) = match self.tint {
+            None => (tint, tint_opacity, tint, luminosity),
+            Some(color) => {
+                let rgb = [color.0, color.1, color.2].map(|v| f32::from(v) / 255.);
+                let alpha = f32::from(color.3) / 255.;
+                let (lum_rgb, lum_alpha) = acrylic_luminosity(rgb, alpha);
+                (
+                    rgb,
+                    alpha * acrylic_tint_opacity_modifier(rgb),
+                    lum_rgb,
+                    lum_alpha,
+                )
+            }
+        };
+        crate::shader_drive::ShaderDrive {
+            shader: Some(MATERIAL.with(std::sync::Arc::clone)),
+            params: [
+                [tint[0], tint[1], tint[2], tint_opacity],
+                [luminosity, 0., 0., 0.],
+                [fallback[0], fallback[1], fallback[2], 1.],
+                [
+                    luminosity_color[0],
+                    luminosity_color[1],
+                    luminosity_color[2],
+                    0.,
+                ],
+            ],
+            frost: 30.,
+            ..Default::default()
+        }
+    }
+    /// The drawn materials' own sources, for tests of every shader.
     pub fn material_source() -> &'static str {
         include_str!("glass.wgsl")
+    }
+    /// Acrylic's (`GlassStyle::drawn_acrylic`).
+    pub fn acrylic_source() -> &'static str {
+        include_str!("glass_acrylic.wgsl")
     }
 }
 
@@ -156,14 +240,13 @@ pub fn glass(mut style: impl FnMut() -> GlassStyle + 'static) -> View {
                 })
                 .shader_drive(move || {
                     let dark = theme.theme_kind().is_dark();
-                    let mut drive = (style.borrow_mut())().drawn(dark);
+                    let style = (style.borrow_mut())();
                     // Asked for less transparency, as the system's goes
-                    // solid: its fill nearly opaque.
-                    if themes.system_preferences().reduced_transparency {
-                        let gray = if dark { 44. / 255. } else { 246. / 255. };
-                        drive.params[1] = [gray, gray, gray, 0.97];
+                    // solid.
+                    match themes.system_preferences().reduced_transparency {
+                        true => style.drawn_opaque(dark),
+                        false => style.drawn(dark),
                     }
-                    drive
                 });
         };
         let pane = GlassPane(shared.clone());
@@ -192,4 +275,60 @@ fn radius_of(style: &GlassStyle) -> f32 {
     } else {
         9999.
     }
+}
+
+/// RGB to HSV, each 0 to 1.
+fn hsv(rgb: [f32; 3]) -> [f32; 3] {
+    let [r, g, b] = rgb;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let h = if delta == 0. {
+        0.
+    } else if max == r {
+        ((g - b) / delta).rem_euclid(6.) / 6.
+    } else if max == g {
+        ((b - r) / delta + 2.) / 6.
+    } else {
+        ((r - g) / delta + 4.) / 6.
+    };
+    let s = if max == 0. { 0. } else { delta / max };
+    [h, s, max]
+}
+fn rgb_of(hsv: [f32; 3]) -> [f32; 3] {
+    let [h, s, v] = hsv;
+    let c = v * s;
+    let h = h * 6.;
+    let x = c * (1. - (h.rem_euclid(2.) - 1.).abs());
+    let [r, g, b] = match h as u32 {
+        0 => [c, x, 0.],
+        1 => [x, c, 0.],
+        2 => [0., c, x],
+        3 => [0., x, c],
+        4 => [x, 0., c],
+        _ => [c, 0., x],
+    };
+    [r, g, b].map(|channel| channel + v - c)
+}
+/// The luminosity colour and opacity WinUI's `AcrylicBrush` takes from a
+/// tint given no luminosity opacity (`GetLuminosityColor`): its brightness
+/// held between 0.125 and 0.965, its opacity mapped from 0.15 to 1.03.
+fn acrylic_luminosity(rgb: [f32; 3], alpha: f32) -> ([f32; 3], f32) {
+    let [h, s, v] = hsv(rgb);
+    (
+        rgb_of([h, s, v.clamp(0.125, 0.965)]),
+        (alpha * 0.88 + 0.15).min(1.),
+    )
+}
+/// How far `AcrylicBrush` lets a tint's opacity reach
+/// (`GetTintOpacityModifier`): 0.45 for white, 0.85 for black, 0.9 for
+/// mid grey, the suppression fading as saturation rises.
+fn acrylic_tint_opacity_modifier(rgb: [f32; 3]) -> f32 {
+    let [_, s, v] = hsv(rgb);
+    let (lowest, deviation) = match v > 0.5 {
+        true => (0.45, 0.5),
+        false => (0.85, 0.5),
+    };
+    let suppression = (0.9 - lowest) * (1. - s * 2.).max(0.);
+    0.9 - suppression * (v - 0.5).abs() / deviation
 }
