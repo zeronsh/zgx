@@ -359,6 +359,15 @@ zgx's caption glyphs, which read `theme()`, white: unseen. It now sets
 (`platform_impl/windows/window.rs`). `scripts/windows_caption_smoke.py` (zgx)
 checks the window, with its buttons drawn.
 
+## iOS: the view's size, its appearance
+
+`inner_size` and `inner_position` answered the safe area while `Resized`
+reported the whole view, so a renderer reading one after the other drew
+stretched (`platform_impl/ios/window.rs`). They now answer the view, and a new
+safe area lays it out again, reporting its size. `theme()` answers the window's
+interface style and a change is sent as `ThemeChanged`, which iOS never did
+(`view.rs`).
+
 ## Windows: a timed wait arms its timer once per deadline
 
 A turn that waits with `ControlFlow::WaitUntil` set the high-resolution

@@ -29,8 +29,15 @@ impl Fallback for PlatformFallback {
 // Fallbacks to use after any script specific fallbacks
 fn common_fallback() -> &'static [&'static str] {
     &[
+        #[cfg(target_os = "macos")]
         ".SF NS",
+        #[cfg(target_os = "ios")]
+        "System Font",
         "Menlo",
+        // zgx: iOS's emoji as UIKit sets them: the emoji file's UI face, whose
+        // ascent and descent are the system font's.
+        #[cfg(target_os = "ios")]
+        ".Apple Color Emoji UI",
         "Apple Color Emoji",
         "Geneva",
         "Arial Unicode MS",

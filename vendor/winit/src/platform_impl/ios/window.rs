@@ -73,6 +73,22 @@ declare_class!(
     }
 );
 
+/// zgx patch: dark in dark, light otherwise, as `traitCollection` says.
+pub(crate) fn theme_of(view: &objc2_ui_kit::UIView) -> Theme {
+    // UIUserInterfaceStyleDark. Not in this objc2-ui-kit.
+    const DARK: isize = 2;
+    // SAFETY: UITraitEnvironment's and UITraitCollection's getters.
+    let style: isize = unsafe {
+        let traits: Retained<objc2::runtime::AnyObject> = msg_send_id![view, traitCollection];
+        msg_send![&*traits, userInterfaceStyle]
+    };
+    if style == DARK {
+        Theme::Dark
+    } else {
+        Theme::Light
+    }
+}
+
 impl WinitUIWindow {
     pub(crate) fn new(
         mtm: MainThreadMarker,
@@ -155,12 +171,10 @@ impl Inner {
 
     pub fn pre_present_notify(&self) {}
 
+    // zgx patch: a window's inside is its whole view, as `Resized` reports it;
+    // the safe area is the app's to read and lay out by.
     pub fn inner_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> {
-        let safe_area = self.safe_area_screen_space();
-        let position =
-            LogicalPosition { x: safe_area.origin.x as f64, y: safe_area.origin.y as f64 };
-        let scale_factor = self.scale_factor();
-        Ok(position.to_physical(scale_factor))
+        self.outer_position()
     }
 
     pub fn outer_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> {
@@ -184,13 +198,7 @@ impl Inner {
     }
 
     pub fn inner_size(&self) -> PhysicalSize<u32> {
-        let scale_factor = self.scale_factor();
-        let safe_area = self.safe_area_screen_space();
-        let size = LogicalSize {
-            width: safe_area.size.width as f64,
-            height: safe_area.size.height as f64,
-        };
-        size.to_physical(scale_factor)
+        self.outer_size()
     }
 
     pub fn outer_size(&self) -> PhysicalSize<u32> {
@@ -451,9 +459,9 @@ impl Inner {
         rwh_06::RawWindowHandle::UiKit(window_handle)
     }
 
+    // zgx patch: the window's interface style.
     pub fn theme(&self) -> Option<Theme> {
-        warn!("`Window::theme` is ignored on iOS");
-        None
+        Some(theme_of(&self.view))
     }
 
     pub fn set_content_protected(&self, _protected: bool) {}
@@ -669,6 +677,7 @@ impl Inner {
         self.window.convertRect_fromCoordinateSpace(rect, &screen_space)
     }
 
+    #[allow(dead_code)]
     fn safe_area_screen_space(&self) -> CGRect {
         let bounds = self.window.bounds();
         if app_state::os_capabilities().safe_area {

@@ -305,6 +305,8 @@ fn shape_fallback(
             metadata: attrs.metadata,
             cache_key_flags: override_fake_italic(attrs.cache_key_flags, font, attrs),
             metrics_opt: attrs.metrics_opt.map(Into::into),
+            #[cfg(any(target_os = "ios", test))]
+            platform_advance: font.platform_advance(),
         });
     }
 
@@ -1128,6 +1130,8 @@ fn shape_skip_glyphs_as(
                     metadata: attrs.metadata,
                     cache_key_flags: override_fake_italic(attrs.cache_key_flags, font, &attrs),
                     metrics_opt: attrs.metrics_opt.map(Into::into),
+                    #[cfg(any(target_os = "ios", test))]
+                    platform_advance: font.platform_advance(),
                 }
             }),
     );
@@ -1166,6 +1170,10 @@ pub struct ShapeGlyph {
     pub metadata: usize,
     pub cache_key_flags: CacheKeyFlags,
     pub metrics_opt: Option<Metrics>,
+    /// zgx: its advance comes from the platform at each size
+    /// (`platform_advance`), iOS's emoji.
+    #[cfg(any(target_os = "ios", test))]
+    pub platform_advance: bool,
 }
 
 impl ShapeGlyph {
@@ -1216,7 +1224,20 @@ impl ShapeGlyph {
     /// Get the width of the [`ShapeGlyph`] in pixels, either using the provided font size
     /// or the [`ShapeGlyph::metrics_opt`] override.
     pub fn width(&self, font_size: f32) -> f32 {
-        self.metrics_opt.map_or(font_size, |x| x.font_size) * self.x_advance
+        self.advance_at(self.metrics_opt.map_or(font_size, |x| x.font_size))
+    }
+
+    /// zgx: its advance at `size` points (`metrics_opt` already taken),
+    /// what `width` gives: the platform's for iOS's emoji.
+    #[inline(always)]
+    pub fn advance_at(&self, size: f32) -> f32 {
+        #[cfg(any(target_os = "ios", test))]
+        if self.platform_advance {
+            if let Some(advance) = crate::platform_advance::advance(self.font_id, self.glyph_id, size) {
+                return advance;
+            }
+        }
+        size * self.x_advance
     }
 }
 
@@ -3920,6 +3941,11 @@ impl ShapeLine {
                                     0.0
                                 },
                             );
+                            #[cfg(any(target_os = "ios", test))]
+                            if glyph.platform_advance {
+                                x_advance = glyph.advance_at(glyph_font_size)
+                                    + if word.blank { justification_expansion } else { 0.0 };
+                            }
                             if let Some(match_em_width) = match_mono_em_width {
                                 // Round to nearest monospace width
                                 x_advance = ((x_advance / match_em_width).round()) * match_em_width;

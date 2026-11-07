@@ -346,6 +346,37 @@ none, at the weight they were shaped at (PingFang is one variable face,
 Medium by default). There Chinese draws in PingFang itself again; elsewhere
 `hvgl` faces are passed by as above.
 
+## Advances the platform sets: iOS's emoji (zgx-cosmic-text 0.19.14)
+
+Core Text gives an emoji an advance of its own at each point size (23 points
+at 17, 38 at 34), not the emoji font's one em, and UIKit lays emoji out by
+it. On iOS, `platform_advance::register` names faces whose glyphs take their
+advance from a hook (zgx-gpu asks Core Text) at the size they are measured or
+laid out at: `ShapeGlyph::width` and `advance_at`, and the line layout. A
+font made after the registration is flagged (`Font::platform_advance`), and
+so is each glyph shaped in it. Elsewhere none of it is compiled: the flag
+exists only on iOS and in this crate's tests
+(`a_registered_faces_glyphs_measure_and_lay_out_by_the_platforms_advance`).
+iOS's fallback list takes the emoji file's UI face (`.Apple Color Emoji UI`),
+UIKit's, before its plain one.
+
+## Leading in a line's height
+
+UIKit's text styles add a font's leading after each line but the last, with
+the glyphs where the line alone puts them. zgx gives such a text a line height
+that holds the leading (`LineHeight::with_leading`), and tells the buffer how
+much of it is leading (`Buffer::set_leading`, a parameter of
+`BufferLine::layout`). Laying a line out then adds it to the line's descent, so
+the centring in `LayoutRunIter` keeps the glyphs in the line part. Nothing is
+added to `Metrics`, `LayoutRun`, `LayoutRunIter` or a glyph, and only a line
+being laid out reads it, once. zgx-gpu takes the one leading after the last
+line off a text's size.
+
+It exists only on iOS and in this crate's tests, or with `text-leading` for
+zgx's host tests. Elsewhere the fields are gone and `Buffer::set_leading` does
+nothing: an arm64 cachegrind read of it at runtime cost text 0.23% on the
+mount-text scene.
+
 ## A paragraph's words for a layout outside a line (zgx-cosmic-text 0.19.8)
 
 zgx-gpu lays out a paragraph that this crate shapes as one left-to-right span

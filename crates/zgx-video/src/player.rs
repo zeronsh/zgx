@@ -70,10 +70,16 @@ pub enum Event {
 
 /// How many bytes of drawn frames the thread keeps, for scrubbing back without
 /// playing the composition from its start.
+#[cfg(not(target_os = "ios"))]
 const CACHE_BYTES: usize = 512 << 20;
 /// How long it keeps them once nothing is asked of it: at rest, a player
 /// holds no frames.
 const CACHE_KEPT: Duration = Duration::from_secs(5);
+/// On iOS, a phone's share: the whole desktop budget filled in six seconds
+/// of a 360×640 composition at 2×, and an app's memory is what the system
+/// ends it by.
+#[cfg(target_os = "ios")]
+const CACHE_BYTES: usize = 64 << 20;
 
 /// A frame kept: its bytes (for a script), its pixel buffer (for a view on
 /// macOS, outside the pool's count once the pool's are held), or both, as

@@ -25,12 +25,16 @@ impl From<String> for FontFamily {
         Self::Named(value.into())
     }
 }
-/// Logical line-box pitch. Normal uses `ceil(font_size * 1.4)`.
+/// Logical line-box pitch. Normal uses `ceil(font_size * 1.4)`; on iOS, the
+/// system font's own line, as UIKit's labels have it.
 ///
 /// Positive finite pixel values are preserved, including pitches smaller than
 /// glyph ink. Text still obeys its allocated paint bounds: tight lines may
 /// overlap internally and ink at the outer text-box edges may be clipped.
-/// Private normalized bits give font caches stable equality and hashing.
+/// Private normalized bits give font caches stable equality and hashing. The
+/// normal line with leading (`with_leading`) lies in bits `px` never makes: a
+/// non-finite float, its low half the leading in 1/256 of a pixel, so text
+/// without leading is as it was and a `FontStyle` holds nothing more.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct LineHeight(u32);
 impl LineHeight {
@@ -46,21 +50,94 @@ impl LineHeight {
         }
     }
 
-    /// The line height in logical pixels, or `None` for normal.
+    /// The normal line and `value` logical pixels between lines, after each
+    /// but the last: a font's leading, as UIKit's text styles add it
+    /// (`UIFont.leading` of `preferredFont(forTextStyle:)`, 1.71 points at
+    /// body, -0.127 at caption 2). The first line stays the font's own, its
+    /// baseline at the ascender, and each further line is the line and its
+    /// leading below the last. Held to 1/256 of a pixel, up to 128 either way;
+    /// zero and non-finite values are the normal line.
+    pub fn with_leading(value: f32) -> Self {
+        let units = (value * 256.).round().clamp(-32767., 32767.) as i16;
+        if LEADING_KEPT && value.is_finite() && units != 0 {
+            Self(Self::LEADING | u32::from(units as u16))
+        } else {
+            Self::NORMAL
+        }
+    }
+    /// A non-finite float's bits, with a payload.
+    const LEADING: u32 = 0x7FC0_0000;
+    /// Whether it is the normal line with leading (`with_leading`).
+    #[inline]
+    pub fn has_leading(self) -> bool {
+        LEADING_KEPT && self.0 & Self::LEADING == Self::LEADING
+    }
+    /// The leading in logical pixels (`with_leading`); none otherwise.
+    #[inline]
+    pub fn leading(self) -> f32 {
+        if self.has_leading() {
+            f32::from(self.0 as u16 as i16) / 256.
+        } else {
+            0.
+        }
+    }
+    /// The line height in logical pixels, or `None` for normal, with or
+    /// without leading.
     pub fn pixels(self) -> Option<f32> {
-        (self != Self::NORMAL).then(|| f32::from_bits(self.0))
+        (self != Self::NORMAL && !self.has_leading()).then(|| f32::from_bits(self.0))
     }
 
-    /// The line pitch for text `font_size` large.
+    /// The line pitch for text `font_size` large in the system's interface
+    /// font.
     pub fn resolve(self, font_size: f32) -> f32 {
-        self.pixels().unwrap_or_else(|| {
+        self.resolve_in(&FontFamily::SansSerif, font_size)
+    }
+    /// The line pitch for text `font_size` large in `family`: on iOS the
+    /// system font's own line for its interface family (others keep 1.4
+    /// times the size until their faces' lines are read), and any leading.
+    #[inline]
+    pub fn resolve_in(self, family: &FontFamily, font_size: f32) -> f32 {
+        let normal = || {
             let size = if font_size.is_finite() {
                 font_size.max(1.)
             } else {
                 1.
             };
-            (size * 1.4).min(f32::MAX).ceil()
-        })
+            normal_line_in(family, size, cfg!(target_os = "ios"))
+        };
+        if self == Self::NORMAL {
+            normal()
+        } else if self.has_leading() {
+            normal() + self.leading()
+        } else {
+            f32::from_bits(self.0)
+        }
+    }
+}
+/// Whether leading is kept (`LineHeight::with_leading`): on iOS, whose text
+/// styles have it. Elsewhere it is the normal line and every read of it folds
+/// away, so text there is as it was; `text-leading` keeps it for host tests.
+const LEADING_KEPT: bool = cfg!(any(target_os = "ios", test, feature = "text-leading"));
+/// The normal line for `family`, iOS's system font's line where `ios` and it
+/// is the interface family.
+#[inline]
+fn normal_line_in(family: &FontFamily, size: f32, ios: bool) -> f32 {
+    normal_line(size, ios && matches!(family, FontFamily::SansSerif))
+}
+/// The system font's line on iOS, in ems: SF's ascent and descent (1950 and
+/// 494 of 2048, no line gap), which UIKit gives as `UIFont.lineHeight` at
+/// every size and weight (read in a reference app, iOS 26.5). A label's first
+/// baseline is its ascender down, so glyphs centred in this line sit where
+/// UIKit's do; 1.4 times the size put them 0.107 em lower.
+const IOS_SYSTEM_LINE: f32 = 2444. / 2048.;
+/// The normal line pitch for text `size` large: iOS's system font's line, or
+/// elsewhere 1.4 times the size rounded up to a point.
+#[inline]
+fn normal_line(size: f32, ios: bool) -> f32 {
+    if ios {
+        (size * IOS_SYSTEM_LINE).min(f32::MAX)
+    } else {
+        (size * 1.4).min(f32::MAX).ceil()
     }
 }
 /// Additional tracking in logical pixels. Native glyph clusters follow the font
@@ -675,12 +752,20 @@ impl FallbackTextLayout {
         let (mut x, mut y, mut max_x, mut pitch) = (0_f32, 0_f32, 0_f32, 0_f32);
         let mut row_start = 0;
         let mut run_index = 0;
+        // Each run's line, worked out once rather than for each grapheme.
+        let (mut line, mut line_of) = (0_f32, usize::MAX);
         for (index, grapheme) in rich.text().grapheme_indices(true) {
             while rich.runs()[run_index].range.end <= index {
                 run_index += 1;
             }
             let run = &rich.runs()[run_index];
-            let line = run.font.line_height.resolve(run.font_size);
+            if line_of != run_index {
+                line_of = run_index;
+                line = run
+                    .font
+                    .line_height
+                    .resolve_in(&run.font.family, run.font_size);
+            }
             let newline = grapheme.contains(['\r', '\n']);
             let advance = run.estimated_advance(grapheme, index);
             if newline || width.is_some_and(|w| x > 0. && x + advance > w.max(0.)) {
@@ -837,7 +922,7 @@ impl FallbackTextLayout {
             let height = if normal {
                 base.caret(0).height
             } else {
-                font.line_height.resolve(size)
+                font.line_height.resolve_in(&font.family, size)
             };
             let mut cells = Vec::new();
             let mut x = base.caret(0).x;
@@ -1022,7 +1107,7 @@ impl FallbackTextLayout {
         // order. Include the final advance, consistently with native tracking.
         let advance = (size as f64 * 0.6 + font.letter_spacing.pixels() as f64)
             .clamp(0., f32::MAX as f64) as f32;
-        let height = font.line_height.resolve(size);
+        let height = font.line_height.resolve_in(&font.family, size);
         let mut x = 0.;
         let mut y = 0.;
         let mut width = 0_f32;
@@ -1059,7 +1144,10 @@ impl FallbackTextLayout {
         width = width.max(x);
         (
             Rect::new(x, y, 1., height),
-            (width, (y + height).min(f32::MAX)),
+            (
+                width,
+                (y + height - font.line_height.leading()).min(f32::MAX),
+            ),
         )
     }
 }
@@ -1300,6 +1388,74 @@ mod tests {
             LineHeight::px(f32::from_bits(1)).pixels(),
             Some(f32::from_bits(1))
         );
+    }
+    #[test]
+    fn ios_normal_line_is_uikits_system_font_line() {
+        // `UIFont.lineHeight` of the system font, read in a reference app
+        // (iOS 26.5), at the text styles' sizes.
+        for (size, uikit) in [
+            (11., 13.1270),
+            (13., 15.5137),
+            (17., 20.2871),
+            (20., 23.8672),
+            (28., 33.4141),
+            (34., 40.5742),
+        ] {
+            assert!((normal_line(size, true) - uikit).abs() < 1e-3, "{size}");
+        }
+        assert_eq!(normal_line(10., false), 14.);
+        assert_eq!(normal_line(f32::MAX, true), f32::MAX);
+        // Only the interface family: a monospaced, serif or named face keeps
+        // its line (UIKit's are each face's own, not read yet).
+        for family in [
+            FontFamily::Monospace,
+            FontFamily::Serif,
+            FontFamily::Named("Inter".into()),
+        ] {
+            assert_eq!(normal_line_in(&family, 17., true), 24.);
+        }
+        assert!((normal_line_in(&FontFamily::SansSerif, 17., true) - 20.2871).abs() < 1e-3);
+        assert_eq!(normal_line_in(&FontFamily::SansSerif, 17., false), 24.);
+        assert_eq!(
+            LineHeight::px(30.).resolve_in(&FontFamily::Monospace, 17.),
+            30.
+        );
+    }
+    #[test]
+    fn leading_is_the_normal_line_and_space_between_lines() {
+        let body = LineHeight::with_leading(1.7129);
+        assert!(body.has_leading() && body != LineHeight::NORMAL);
+        assert!((body.leading() - 1.7129).abs() < 1. / 512.);
+        assert_eq!(body.pixels(), None);
+        let family = FontFamily::SansSerif;
+        let normal = LineHeight::NORMAL.resolve_in(&family, 17.);
+        assert_eq!(body.resolve_in(&family, 17.), normal + body.leading());
+        // Caption 2's closes its lines up.
+        let tight = LineHeight::with_leading(-0.127);
+        assert!((tight.leading() + 0.127).abs() < 1. / 512.);
+        // Zero and nonsense are the normal line; nothing else has its bits.
+        assert_eq!(LineHeight::with_leading(0.), LineHeight::NORMAL);
+        assert_eq!(LineHeight::with_leading(f32::NAN), LineHeight::NORMAL);
+        assert_eq!(LineHeight::with_leading(0.001), LineHeight::NORMAL);
+        assert_eq!(LineHeight::with_leading(1000.).leading(), 32767. / 256.);
+        for px in [f32::MIN_POSITIVE, 0.5, 22., 1e6, f32::MAX] {
+            assert!(!LineHeight::px(px).has_leading(), "{px}");
+            assert_eq!(LineHeight::px(px).leading(), 0.);
+            assert_eq!(LineHeight::px(px).resolve_in(&family, 17.), px);
+        }
+        assert!(!LineHeight::NORMAL.has_leading());
+        // A 3-line text: three lines and two leadings.
+        let font = FontStyle {
+            line_height: LineHeight::with_leading(1.75),
+            ..FontStyle::default()
+        };
+        let layout = FallbackTextLayout::with_font("a\nb\nc", 10., None, &font);
+        let line = LineHeight::NORMAL.resolve_in(&font.family, 10.);
+        assert_eq!(layout.size().1, 3. * line + 2. * 1.75);
+        assert_eq!(layout.caret(2).y, line + 1.75);
+        // In the line height's own bits: a font style is no bigger for it.
+        assert_eq!(std::mem::size_of::<LineHeight>(), 4);
+        println!("FontStyle {} bytes", std::mem::size_of::<FontStyle>());
     }
     #[test]
     fn explicit_pitch_keeps_wrapped_unicode_hit_selection_and_caret_aligned() {

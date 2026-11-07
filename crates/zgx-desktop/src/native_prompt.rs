@@ -80,6 +80,7 @@ impl PromptOptions {
         }
     }
 }
+#[cfg(not(target_os = "ios"))]
 impl From<PromptLevel> for rfd::MessageLevel {
     fn from(value: PromptLevel) -> Self {
         match value {
@@ -89,6 +90,7 @@ impl From<PromptLevel> for rfd::MessageLevel {
         }
     }
 }
+#[cfg(not(target_os = "ios"))]
 impl From<PromptButtons> for rfd::MessageButtons {
     fn from(value: PromptButtons) -> Self {
         match value {
@@ -99,6 +101,7 @@ impl From<PromptButtons> for rfd::MessageButtons {
         }
     }
 }
+#[cfg(not(target_os = "ios"))]
 impl From<rfd::MessageDialogResult> for PromptResponse {
     fn from(value: rfd::MessageDialogResult) -> Self {
         match value {
@@ -110,7 +113,15 @@ impl From<rfd::MessageDialogResult> for PromptResponse {
         }
     }
 }
-#[cfg(not(target_os = "macos"))]
+/// iOS has no message box rfd drives: a prompt says the backend is missing.
+#[cfg(target_os = "ios")]
+pub(crate) async fn show(
+    _parent: Arc<Window>,
+    _options: PromptOptions,
+) -> Result<PromptResponse, FileDialogError> {
+    Err(FileDialogError::BackendUnavailable)
+}
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub(crate) async fn show(
     parent: Arc<Window>,
     options: PromptOptions,

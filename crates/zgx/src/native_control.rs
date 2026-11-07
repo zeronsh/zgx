@@ -6,6 +6,7 @@
 //! element, so assistive technology hears zgx's tree alone, and activating
 //! that element toggles the control. Elsewhere it is drawn.
 use crate::compose::prelude::*;
+use crate::reactive::Signal;
 use crate::semantics::Role;
 use std::rc::Rc;
 
@@ -27,6 +28,39 @@ pub struct TabsState {
     pub selected: std::cell::Cell<usize>,
     /// The person chose a tab.
     pub changed: Box<dyn Fn(usize)>,
+    /// Who hears its height (the system's, as the host reads it).
+    pub height: Option<Rc<TabBarHeight>>,
+}
+
+/// Provided around a [`native_tabs`] (`compose::provide`): hears how much of
+/// the window's bottom the bar takes while it is mounted, 0 once it is gone,
+/// as a page's content ends clear of it. The system's height on iOS, as its
+/// host reads it from the bar; the bar's box elsewhere.
+pub struct TabBarHeight {
+    report: Box<dyn Fn(f32)>,
+    last: std::cell::Cell<f32>,
+}
+impl TabBarHeight {
+    /// `report` hears each height.
+    pub fn new(report: impl Fn(f32) + 'static) -> Self {
+        Self {
+            report: Box::new(report),
+            last: std::cell::Cell::new(0.),
+        }
+    }
+    /// The bar's height now: told only when it changes.
+    pub fn report(&self, height: f32) {
+        if self.last.replace(height) != height {
+            (self.report)(height);
+        }
+    }
+}
+/// Reports 0 as the bar unmounts.
+struct TabBarGone(Rc<TabBarHeight>);
+impl Drop for TabBarGone {
+    fn drop(&mut self) {
+        self.0.report(0.);
+    }
 }
 
 /// The system's tab bar: its glass, and the lens that morphs between tabs,
@@ -41,10 +75,15 @@ pub fn native_tabs(
 ) -> View {
     component(move |cx| {
         let mut selected = selected;
+        let height = cx.try_service::<TabBarHeight>();
+        if let Some(height) = &height {
+            cx.retain(TabBarGone(height.clone()));
+        }
         let state = Rc::new(TabsState {
             selected: std::cell::Cell::new(selected()),
             changed: Box::new(set),
             items,
+            height,
         });
         let current = cx.state(state.selected.get());
         {
@@ -92,8 +131,17 @@ pub fn native_tabs(
         }
         #[cfg(not(target_os = "ios"))]
         {
-            let _ = &state;
-            bar
+            match state.height.clone() {
+                Some(height) => {
+                    let runtime = cx.runtime();
+                    bar.on_mount(move |handle| {
+                        if let Some(size) = handle.observe_size() {
+                            handle.retain(runtime.effect(move || height.report(size.get().1)));
+                        }
+                    })
+                }
+                None => bar,
+            }
         }
     })
 }
@@ -180,6 +228,449 @@ pub fn native_toggle(
             )
         }
     })
+}
+
+/// What a hosted slider shows and whom it tells.
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub struct SliderState {
+    /// Its value, as last read.
+    pub value: std::cell::Cell<f32>,
+    /// The least it goes to.
+    pub min: f32,
+    /// The most it goes to.
+    pub max: f32,
+    /// What a drag lands on, from `min`.
+    pub step: Option<f32>,
+    /// The person moved it.
+    pub changed: Box<dyn Fn(f32)>,
+}
+impl SliderState {
+    /// Where a drag to `raw` lands: in the range, on a step if it has one.
+    pub fn landed(&self, raw: f32) -> f32 {
+        let raw = if raw.is_nan() { self.min } else { raw };
+        let stepped = match self.step {
+            Some(step) => self.min + ((raw - self.min) / step).round() * step,
+            None => raw,
+        };
+        stepped.clamp(self.min, self.max)
+    }
+}
+
+/// A slider over `range`, bound both ways to `value`: on iOS the system's
+/// `UISlider`, whose glass lens, glide after a release and haptics at its ends
+/// are UIKit's own; elsewhere the drawn [`slider`]. `step` is what a drag
+/// lands on and what assistive technology moves.
+pub fn native_slider(
+    label: impl Into<String>,
+    value: Signal<f32>,
+    range: std::ops::RangeInclusive<f32>,
+    step: Option<f32>,
+) -> View {
+    #[cfg(target_os = "ios")]
+    {
+        slider_stand_in(label, value, range, step)
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let view = slider(label, value, range);
+        match step {
+            Some(step) => view.step(step),
+            None => view,
+        }
+    }
+}
+
+/// The node a hosted slider stands on (iOS's [`native_slider`]): one slider to
+/// assistive technology, its value and range followed, moved a step at a time
+/// (a hundredth of the range without one), its value read as UISlider's is, a
+/// whole percent of the range. It paints nothing; the host's
+/// `UISlider` fills its box. Give it the system's height, 31 points.
+pub fn slider_stand_in(
+    label: impl Into<String>,
+    value: Signal<f32>,
+    range: std::ops::RangeInclusive<f32>,
+    step: Option<f32>,
+) -> View {
+    let (min, max) = (*range.start(), *range.end());
+    assert!(
+        min.is_finite() && max.is_finite() && min < max,
+        "slider range must be finite and increasing"
+    );
+    let label = label.into();
+    component(move |cx| {
+        let write = value.clone();
+        let state = Rc::new(SliderState {
+            value: std::cell::Cell::new(value.with_untracked(|value| *value)),
+            min,
+            max,
+            step,
+            changed: Box::new(move |next| {
+                write.set(next);
+            }),
+        });
+        {
+            let (state, value) = (state.clone(), value.clone());
+            let effect = cx.runtime().effect(move || {
+                state.value.set(value.get());
+                crate::native_view::wake();
+            });
+            cx.retain(effect);
+        }
+        let (read, adjust, percent) = (value.clone(), state.clone(), value.clone());
+        let view = div()
+            .w(240.)
+            .h(31.)
+            .flex_shrink(0.)
+            .role(Role::Slider)
+            .accessible_label(label)
+            .numeric_when(f64::from(min), f64::from(max), move || {
+                f64::from(read.get())
+            })
+            // As UISlider's reads: the share of its range, in whole percent.
+            .value_when(move || {
+                let share = (percent.get().clamp(min, max) - min) / (max - min);
+                format!("{}%", (share * 100.).round())
+            })
+            .adjustable(f64::from(step.unwrap_or((max - min) / 100.)), move |next| {
+                (adjust.changed)(adjust.landed(next as f32))
+            });
+        #[cfg(target_os = "ios")]
+        {
+            let natives = cx.try_service::<crate::native_view::NativeViews>();
+            view.on_mount(move |handle| {
+                let Some(natives) = natives else { return };
+                if natives.supported()
+                    && let Some(scene) = handle.scene()
+                    && let Ok(mut scene) = scene.try_borrow_mut()
+                {
+                    scene.set_platform_painted(handle.node(), true);
+                }
+                handle.retain(natives.register(
+                    handle.node(),
+                    crate::native_view::NativeContent::Slider(state),
+                ));
+            })
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = &state;
+            view
+        }
+    })
+}
+
+/// What a hosted segmented control shows and whom it tells.
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub struct SegmentedState {
+    /// What each segment says.
+    pub items: Vec<String>,
+    /// The chosen segment, as last read.
+    pub selected: std::cell::Cell<usize>,
+    /// The person chose a segment.
+    pub changed: Box<dyn Fn(usize)>,
+}
+
+/// One of `items`, side by side, the chosen one `selected` both ways: the
+/// system's `UISegmentedControl`, whose glass lens slides to the choice
+/// (UIKit's own). Elsewhere a drawn one is `zgx_components::segmented`.
+#[cfg(target_os = "ios")]
+pub fn native_segmented(
+    label: impl Into<String>,
+    items: Vec<String>,
+    selected: Signal<usize>,
+) -> View {
+    segmented_stand_in(label, items, selected)
+}
+
+/// The node a hosted segmented control stands on (iOS's `native_segmented`):
+/// as UIKit's reads, each segment a button named by what it says, the chosen
+/// one selected, choosing on activation. It paints nothing; the host's
+/// `UISegmentedControl` fills its box. Give it the system's height, 32 points.
+pub fn segmented_stand_in(
+    label: impl Into<String>,
+    items: Vec<String>,
+    selected: Signal<usize>,
+) -> View {
+    assert!(!items.is_empty(), "a segmented control has a segment");
+    let label = label.into();
+    component(move |cx| {
+        let write = selected.clone();
+        let state = Rc::new(SegmentedState {
+            selected: std::cell::Cell::new(selected.with_untracked(|chosen| *chosen)),
+            changed: Box::new(move |index| {
+                write.set(index);
+            }),
+            items,
+        });
+        {
+            let (state, selected) = (state.clone(), selected.clone());
+            let effect = cx.runtime().effect(move || {
+                state.selected.set(selected.get());
+                crate::native_view::wake();
+            });
+            cx.retain(effect);
+        }
+        let mut bar = row()
+            .w(240.)
+            .h(32.)
+            .flex_shrink(0.)
+            .role(Role::Group)
+            .accessible_label(label);
+        for (index, title) in state.items.iter().enumerate() {
+            let (chosen, choose) = (selected.clone(), state.clone());
+            bar = bar.child(
+                div()
+                    .flex_grow(1.)
+                    .h_full()
+                    .role(Role::Button)
+                    .accessible_label(title.clone())
+                    .selected_when(move || chosen.get() == index)
+                    .on_click(move || (choose.changed)(index)),
+            );
+        }
+        #[cfg(target_os = "ios")]
+        {
+            let natives = cx.try_service::<crate::native_view::NativeViews>();
+            bar.on_mount(move |handle| {
+                let Some(natives) = natives else { return };
+                if natives.supported()
+                    && let Some(scene) = handle.scene()
+                    && let Ok(mut scene) = scene.try_borrow_mut()
+                {
+                    scene.set_platform_painted(handle.node(), true);
+                }
+                handle.retain(natives.register(
+                    handle.node(),
+                    crate::native_view::NativeContent::Segmented(state),
+                ));
+            })
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = &state;
+            bar
+        }
+    })
+}
+
+/// What a hosted stepper shows and whom it tells.
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub struct StepperState {
+    /// Its value, as last read.
+    pub value: std::cell::Cell<f64>,
+    /// The least it goes to.
+    pub min: f64,
+    /// The most it goes to.
+    pub max: f64,
+    /// What a press adds or takes away.
+    pub step: f64,
+    /// The person stepped it.
+    pub changed: Box<dyn Fn(f64)>,
+}
+
+/// The system's `UIStepper`, `value` both ways between `min` and `max` (`min`
+/// below `max`), `step` a press: its glass, and its repeat while held (first
+/// step 0.5 s after the press, then every 0.5 s, read in UIKit), are UIKit's.
+/// It shows no number, as UIKit's doesn't: show the value beside it. Elsewhere
+/// a drawn stepper is `zgx_components::stepper`.
+#[cfg(target_os = "ios")]
+pub fn native_stepper(
+    label: impl Into<String>,
+    value: Signal<f64>,
+    range: std::ops::RangeInclusive<f64>,
+    step: f64,
+) -> View {
+    stepper_stand_in(label, value, range, step)
+}
+
+/// The node a hosted stepper stands on (iOS's `native_stepper`): a spin
+/// button to assistive technology, its value and range followed, moved a step
+/// at a time. It paints nothing; the host's `UIStepper` fills its box, the
+/// system's 94 by 32 points.
+pub fn stepper_stand_in(
+    label: impl Into<String>,
+    value: Signal<f64>,
+    range: std::ops::RangeInclusive<f64>,
+    step: f64,
+) -> View {
+    let (min, max) = (*range.start(), *range.end());
+    assert!(min < max, "a stepper's min is below its max");
+    assert!(
+        step.is_finite() && step > 0.,
+        "a stepper's step is positive"
+    );
+    let label = label.into();
+    component(move |cx| {
+        let write = value.clone();
+        let state = Rc::new(StepperState {
+            value: std::cell::Cell::new(value.with_untracked(|value| *value)),
+            min,
+            max,
+            step,
+            changed: Box::new(move |next| {
+                write.set(next);
+            }),
+        });
+        {
+            let (state, value) = (state.clone(), value.clone());
+            let effect = cx.runtime().effect(move || {
+                state.value.set(value.get());
+                crate::native_view::wake();
+            });
+            cx.retain(effect);
+        }
+        let (read, adjust) = (value.clone(), state.clone());
+        let view = div()
+            .w(94.)
+            .h(32.)
+            .flex_shrink(0.)
+            .role(Role::SpinButton)
+            .accessible_label(label)
+            .numeric_when(min, max, move || read.get())
+            .adjustable(step, move |next| (adjust.changed)(next.clamp(min, max)));
+        #[cfg(target_os = "ios")]
+        {
+            let natives = cx.try_service::<crate::native_view::NativeViews>();
+            view.on_mount(move |handle| {
+                let Some(natives) = natives else { return };
+                if natives.supported()
+                    && let Some(scene) = handle.scene()
+                    && let Ok(mut scene) = scene.try_borrow_mut()
+                {
+                    scene.set_platform_painted(handle.node(), true);
+                }
+                handle.retain(natives.register(
+                    handle.node(),
+                    crate::native_view::NativeContent::Stepper(state),
+                ));
+            })
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = &state;
+            view
+        }
+    })
+}
+
+/// How far a hosted control may draw past its box where nothing clips it: a
+/// slider's lens and its shadow, a switch's thumb stretching while held.
+#[cfg(any(target_os = "ios", test))]
+pub const CONTROL_REACH: f32 = 32.;
+
+/// What a hosted control at `frame`, showing `visible` of itself, is cut to:
+/// what clips its node (`clip`), with `CONTROL_REACH` of room around its box
+/// inside that; uncut (`visible`) when nothing clips it.
+#[cfg(any(target_os = "ios", test))]
+pub fn control_cut(
+    frame: crate::scene::Rect,
+    visible: crate::scene::Rect,
+    clip: Option<crate::scene::Rect>,
+) -> crate::scene::Rect {
+    let reach = crate::scene::Rect::new(
+        frame.x - CONTROL_REACH,
+        frame.y - CONTROL_REACH,
+        frame.width + 2. * CONTROL_REACH,
+        frame.height + 2. * CONTROL_REACH,
+    );
+    clip.and_then(|cut| cut.intersection(visible.union(reach)))
+        .unwrap_or(visible)
+}
+
+#[cfg(test)]
+mod control_cut_tests {
+    use super::{CONTROL_REACH, control_cut};
+    use crate::scene::Rect;
+
+    #[test]
+    fn a_control_draws_past_its_box_up_to_what_clips_it() {
+        let frame = Rect::new(16., 255., 370., 30.);
+        // The window clips it: its lens and shadow show around its box.
+        let window = Rect::new(0., 0., 402., 874.);
+        assert_eq!(
+            control_cut(frame, frame, Some(window)),
+            Rect::new(0., 255. - CONTROL_REACH, 402., 30. + 2. * CONTROL_REACH)
+        );
+        // A scroll view's edge through it: cut there.
+        let viewport = Rect::new(0., 265., 402., 600.);
+        let shown = Rect::new(16., 265., 370., 20.);
+        assert_eq!(control_cut(frame, shown, Some(viewport)).y, 265.);
+        // Nothing clips it: uncut.
+        assert_eq!(control_cut(frame, frame, None), frame);
+    }
+}
+
+/// Where a hosted control goes whose drawing keeps clear of the safe area, inside
+/// what holds it, and how far that holder's `sublayerTransform` moves it: its
+/// geometry stays in the middle of the window, clear of the safe area whatever
+/// the orientation, and it shows at `frame`. (`cut`: where the holder lies.)
+#[cfg(any(target_os = "ios", test))]
+pub fn control_held_clear(
+    frame: crate::scene::Rect,
+    cut: crate::scene::Rect,
+    window: (f32, f32),
+) -> ((f32, f32), (f32, f32)) {
+    let middle = (
+        (window.0 - frame.width) / 2.,
+        (window.1 - frame.height) / 2.,
+    );
+    (
+        (middle.0 - cut.x, middle.1 - cut.y),
+        (frame.x - middle.0, frame.y - middle.1),
+    )
+}
+
+#[cfg(test)]
+mod control_held_clear_tests {
+    use super::control_held_clear;
+    use crate::scene::Rect;
+
+    #[test]
+    fn it_shows_at_its_frame_with_its_geometry_in_the_middle_of_the_window() {
+        let window = (402., 874.);
+        for frame in [
+            Rect::new(292., -16., 94., 32.),
+            Rect::new(16., 850., 94., 32.),
+            Rect::new(100., 400., 94., 32.),
+        ] {
+            let cut = Rect::new(frame.x - 32., (frame.y - 32.).max(0.), 158., 96.);
+            let (at, shift) = control_held_clear(frame, cut, window);
+            // Its geometry, in the window: clear of a 62 point top and a 34 point bottom.
+            let geometry = (at.0 + cut.x, at.1 + cut.y);
+            assert!(geometry.1 >= 62. && geometry.1 + frame.height <= window.1 - 34.);
+            assert_eq!(
+                (geometry.0 + shift.0, geometry.1 + shift.1),
+                (frame.x, frame.y)
+            );
+        }
+    }
+}
+
+/// Whether a finger on a hosted control waits a moment before the control hears
+/// of it, to see if it starts a scroll (`delaysContentTouches`): on a control,
+/// not in a web page, which scrolls itself, and only where something scrolls.
+#[cfg(any(target_os = "ios", test))]
+pub fn control_press_waits(control: bool, page: bool, scrolls: impl FnOnce() -> bool) -> bool {
+    control && !page && scrolls()
+}
+
+#[cfg(test)]
+mod control_press_tests {
+    use super::control_press_waits;
+
+    #[test]
+    fn only_a_control_where_something_scrolls_waits() {
+        assert!(control_press_waits(true, false, || true));
+        assert!(
+            !control_press_waits(true, false, || false),
+            "nothing scrolls"
+        );
+        assert!(
+            !control_press_waits(false, false, || true),
+            "zgx's own view"
+        );
+        assert!(!control_press_waits(true, true, || true), "a page's own");
+    }
 }
 
 /// How a [`SystemUi::alert`] shows.
@@ -382,6 +873,17 @@ pub struct PullRefresh {
 }
 /// Called when a refresh has finished.
 pub type RefreshDone = Rc<dyn Fn()>;
+
+/// How far past its top a scroll view `height` points tall is pulled before
+/// its pull to refresh fires, as `UIRefreshControl` decides (UIKitCore,
+/// iOS 26.5, `-_updateSnappingHeight`): half the height, rounded, held under
+/// the modern spinner's `maximumSnappingHeight`, 100 × 1.125 scaled by
+/// max(height, 372) / 568. 173.1 points on an 874-point screen.
+pub fn pull_refresh_threshold(height: f64) -> f64 {
+    let half = (height * 0.5).round();
+    let most = 100. * 1.125 * height.max(372.) / 568.;
+    half.min(most).max(0.)
+}
 type Pulls = std::collections::HashMap<crate::scene::NodeId, PullRefresh>;
 thread_local! {
     static PULLS: std::cell::RefCell<Pulls> = std::cell::RefCell::default();
@@ -430,6 +932,8 @@ pub struct PanEvent {
     pub vx: f32,
     /// Down, in points a second.
     pub vy: f32,
+    /// Where the finger is, in points from the window's top left.
+    pub at: (f32, f32),
 }
 /// A pan the platform recognizes, which an app only draws (`add_pan`).
 #[derive(Clone)]
@@ -438,8 +942,36 @@ pub struct PanTarget {
     pub node: Option<crate::scene::NodeId>,
     /// Whether it may start now.
     pub can_begin: Option<Rc<dyn Fn() -> bool>>,
+    /// A row's swipe: it begins only sideways, as UIKit's swipe actions do
+    /// (`SwipePan`), if this says so of a move that way (points, right
+    /// positive). Elsewhere a pan begins whichever way it goes.
+    pub across: Option<Rc<dyn Fn(f32) -> bool>>,
     /// Told of each of its states, always to an ending.
     pub on_pan: Rc<dyn Fn(PanEvent)>,
+}
+
+/// What UIKit's swipe actions make of a finger's move from where it landed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwipePan {
+    /// Too little yet to say.
+    Waits,
+    /// It is a swipe.
+    Begins,
+    /// It is a scroll: a table's scroll view has taken it.
+    Fails,
+}
+/// A row's swipe begins once a finger has gone 25 points across
+/// (`_UISwipeActionPanGestureRecognizer`'s `_hysteresis`, UIKit 26.5), unless
+/// it has gone 10 down first, where the scroll view around it takes it
+/// (`UIScrollViewPanGestureRecognizer`'s, the first past its own wins).
+pub fn swipe_pan(dx: f32, dy: f32) -> SwipePan {
+    if dy.abs() > 10. {
+        SwipePan::Fails
+    } else if dx.abs() >= 25. {
+        SwipePan::Begins
+    } else {
+        SwipePan::Waits
+    }
 }
 thread_local! {
     static PANS: std::cell::RefCell<Vec<PanTarget>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -447,6 +979,80 @@ thread_local! {
 /// Have the platform recognize this pan: the latest added wins where two could.
 pub fn add_pan(target: PanTarget) {
     PANS.with(|pans| pans.borrow_mut().push(target));
+}
+/// A finger's part in what watches them all (`set_touch_watch`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchWatch {
+    /// One landed.
+    Down,
+    /// It lifted with no pan of a row's having taken it.
+    Up,
+}
+/// What hears each finger on the window, and says whether the rest of the
+/// window is to hear no more of it.
+pub type TouchWatcher = Rc<dyn Fn(TouchWatch, f32, f32) -> bool>;
+thread_local! {
+    static TOUCH_WATCH: std::cell::RefCell<Option<TouchWatcher>> = const { std::cell::RefCell::new(None) };
+    static SWALLOWED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CUSTOM_ACTIONS: std::cell::RefCell<std::collections::HashMap<crate::scene::NodeId, MenuBuilder>> = std::cell::RefCell::default();
+}
+/// A row with its actions open watches where fingers go, as a table does to
+/// close it: a touch elsewhere closes it, and is nothing else.
+pub fn set_touch_watch(watch: Option<TouchWatcher>) {
+    TOUCH_WATCH.with(|slot| *slot.borrow_mut() = watch);
+}
+/// Whether anything watches fingers now (the host).
+pub fn touch_watched() -> bool {
+    TOUCH_WATCH.with(|slot| slot.borrow().is_some())
+}
+/// Tell what watches of a finger (the host).
+pub fn watch_touch(phase: TouchWatch, x: f32, y: f32) {
+    let watch = TOUCH_WATCH.with(|slot| slot.borrow().clone());
+    if let Some(watch) = watch
+        && watch(phase, x, y)
+        && phase == TouchWatch::Down
+    {
+        SWALLOWED.with(|swallowed| swallowed.set(true));
+    }
+}
+/// Whether the finger just landed is nothing to the window (the host, once).
+pub fn take_swallowed_touch() -> bool {
+    SWALLOWED.with(|swallowed| swallowed.replace(false))
+}
+/// What `node` offers assistive technology as actions of its own, as a table
+/// row's swipe actions are (VoiceOver's "Actions available").
+pub fn set_custom_actions(node: crate::scene::NodeId, build: MenuBuilder) {
+    CUSTOM_ACTIONS.with(|actions| actions.borrow_mut().insert(node, build));
+}
+/// `node`'s actions, for assistive technology: those it offers and its menu's.
+pub fn custom_actions_of(node: crate::scene::NodeId) -> Option<Vec<MenuAction>> {
+    let build = CUSTOM_ACTIONS.with(|actions| actions.borrow().get(&node).cloned());
+    let own = build.map(|build| build());
+    match (own, system_menu_of(node)) {
+        (Some(mut own), Some(menu)) => {
+            own.extend(menu);
+            Some(own)
+        }
+        (own, menu) => own.or(menu),
+    }
+}
+/// The actions of what assistive technology has reached at `node`: its own, or
+/// those of the nearest node around it with some, as a cell's reach what's in it.
+pub fn custom_actions_around(
+    scene: &crate::scene::Scene,
+    node: crate::scene::NodeId,
+) -> Option<Vec<MenuAction>> {
+    std::iter::once(node)
+        .chain(scene.ancestors(node))
+        .find_map(custom_actions_of)
+}
+/// Forget the pans of nodes gone from `scene`: rows of a list come and go.
+pub fn prune_pans(scene: &crate::scene::Scene) {
+    PANS.with(|pans| {
+        pans.borrow_mut()
+            .retain(|target| target.node.is_none_or(|node| scene.contains(node)));
+    });
+    CUSTOM_ACTIONS.with(|actions| actions.borrow_mut().retain(|node, _| scene.contains(*node)));
 }
 /// The pans added.
 pub fn pans() -> Vec<PanTarget> {

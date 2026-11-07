@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.89"
 name = "zgx-cosmic-text"
-version = "0.19.13"
+version = "0.19.14"
 authors = ["Jeremy Soller <jeremy@system76.com>"]
 build = false
 autolib = false
@@ -31,6 +31,9 @@ homepage = "https://github.com/pop-os/cosmic-text"
 features = ["vi"]
 
 [features]
+# zgx: leading in a line's height kept where iOS isn't, for host tests
+# (`Buffer::set_leading`).
+text-leading = []
 default = [
     "std",
     "swash",
