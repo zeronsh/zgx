@@ -2420,33 +2420,39 @@ impl InputDispatcher {
         if !scene.has_cursors() {
             return None;
         }
-        'hits: for hit in scene.hit_test_all(x, y) {
-            if self.boxless(scene, hit) {
-                continue;
-            }
-            let mut node = Some(hit);
-            while let Some(id) = node {
-                if self
-                    .options(id)
-                    .is_some_and(|options| self.passes(scene, id, &options))
-                {
-                    match scene.own_cursor(id) {
-                        Some(cursor) => return Some(cursor),
-                        None => continue 'hits,
+        // (The hits a move's dispatch found, not walked again.)
+        scene.with_hits(x, y, |hits| {
+            'hits: for &hit in hits {
+                if self.boxless(scene, hit) {
+                    continue;
+                }
+                let mut node = Some(hit);
+                while let Some(id) = node {
+                    if self
+                        .options(id)
+                        .is_some_and(|options| self.passes(scene, id, &options))
+                    {
+                        match scene.own_cursor(id) {
+                            Some(cursor) => return Some(cursor),
+                            None => continue 'hits,
+                        }
                     }
+                    if self.has_listeners(id) {
+                        break;
+                    }
+                    node = scene.parent(id);
                 }
-                if self.has_listeners(id) {
-                    break;
-                }
-                node = scene.parent(id);
+                return scene.cursor_over(hit);
             }
-            return scene.cursor_over(hit);
-        }
-        None
+            None
+        })
     }
     fn hit_target(&self, scene: &Scene, x: f32, y: f32) -> Option<NodeId> {
+        scene.with_hits(x, y, |hits| self.hit_target_in(scene, hits))
+    }
+    fn hit_target_in(&self, scene: &Scene, hits: &[NodeId]) -> Option<NodeId> {
         let mut fallback = None;
-        'hits: for hit in scene.hit_test_all(x, y) {
+        'hits: for &hit in hits {
             if self.boxless(scene, hit) {
                 continue;
             }
