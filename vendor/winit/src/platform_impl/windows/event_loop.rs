@@ -26,6 +26,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     ValidateRect, MONITORINFO, MONITOR_DEFAULTTONULL, RDW_INTERNALPAINT, SC_SCREENSAVE,
 };
 use windows_sys::Win32::System::Ole::RevokeDragDrop;
+use windows_sys::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT};
 use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateWaitableTimerExW, GetCurrentThreadId, SetEvent, SetWaitableTimer,
     WaitForSingleObject, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS,
@@ -1100,12 +1101,98 @@ fn normalize_pointer_pressure(pressure: u32) -> Option<Force> {
 /// Emit a `ModifiersChanged` event whenever modifiers have changed.
 /// Returns the current modifier state
 fn update_modifiers(window: HWND, userdata: &WindowData) {
-    use crate::event::WindowEvent::ModifiersChanged;
+    let modifiers = LAYOUT_CACHE.lock().unwrap().get_agnostic_mods(None);
+    send_modifiers(window, userdata, modifiers);
+}
 
-    let modifiers = {
-        let mut layouts = LAYOUT_CACHE.lock().unwrap();
-        layouts.get_agnostic_mods()
-    };
+/// ZGX PATCH: the same for a mouse message, whose `wParam` says whether Shift
+/// and Control were down when it was made (`MK_SHIFT`, `MK_CONTROL`). That
+/// holds for a window without focus too, where `GetKeyState` doesn't: the
+/// keyboard updates only the focused thread's key state, so Shift with the
+/// wheel over a window behind another read as no Shift.
+fn update_mouse_modifiers(window: HWND, userdata: &WindowData, wparam: WPARAM) {
+    let modifiers = LAYOUT_CACHE.lock().unwrap().get_agnostic_mods(Some(mouse_keys(wparam)));
+    send_modifiers(window, userdata, modifiers);
+}
+
+/// Whether a mouse message's `wParam` has Shift and Control down.
+fn mouse_keys(wparam: WPARAM) -> (bool, bool) {
+    let keys = wparam as u32 & 0xffff;
+    (keys & MK_SHIFT != 0, keys & MK_CONTROL != 0)
+}
+
+#[cfg(test)]
+mod mouse_modifier_tests {
+    use std::time::Duration;
+
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::SystemServices::MK_SHIFT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WHEEL_DELTA, WM_MOUSEWHEEL};
+
+    use crate::application::ApplicationHandler;
+    use crate::event::{MouseScrollDelta, WindowEvent};
+    use crate::event_loop::{ActiveEventLoop, EventLoop};
+    use crate::platform::pump_events::EventLoopExtPumpEvents;
+    use crate::platform::windows::EventLoopBuilderExtWindows;
+    use crate::window::{Window, WindowId};
+
+    #[derive(Default)]
+    struct Wheels {
+        window: Option<Window>,
+        shift: bool,
+        seen: Vec<(MouseScrollDelta, bool)>,
+    }
+
+    impl ApplicationHandler for Wheels {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            if self.window.is_none() {
+                let attributes = Window::default_attributes().with_visible(false);
+                self.window = Some(event_loop.create_window(attributes).unwrap());
+            }
+        }
+
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+            match event {
+                WindowEvent::ModifiersChanged(modifiers) => {
+                    self.shift = modifiers.state().shift_key()
+                },
+                WindowEvent::MouseWheel { delta, .. } => self.seen.push((delta, self.shift)),
+                _ => {},
+            }
+        }
+    }
+
+    // A hidden window never has focus, so the thread's key state has no
+    // Shift: only the message says it is down, as for a window behind another.
+    #[test]
+    fn a_wheel_with_shift_down_has_shift_without_focus() {
+        let mut event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
+        let mut app = Wheels::default();
+        for _ in 0..100 {
+            event_loop.pump_app_events(Some(Duration::ZERO), &mut app);
+            if app.window.is_some() {
+                break;
+            }
+        }
+        let window = u64::from(app.window.as_ref().expect("a window").id()) as HWND;
+        let down = ((-(WHEEL_DELTA as i16)) as u16 as usize) << 16;
+        unsafe {
+            PostMessageW(window, WM_MOUSEWHEEL, down | MK_SHIFT as usize, 0);
+            PostMessageW(window, WM_MOUSEWHEEL, down, 0);
+        }
+        for _ in 0..100 {
+            event_loop.pump_app_events(Some(Duration::from_millis(1)), &mut app);
+            if app.seen.len() == 2 {
+                break;
+            }
+        }
+        let line = MouseScrollDelta::LineDelta(0.0, -1.0);
+        assert_eq!(app.seen, [(line, true), (line, false)]);
+    }
+}
+
+fn send_modifiers(window: HWND, userdata: &WindowData, modifiers: ModifiersState) {
+    use crate::event::WindowEvent::ModifiersChanged;
 
     let mut window_state = userdata.window_state.lock().unwrap();
     if window_state.modifiers_state != modifiers {
@@ -1816,7 +1903,7 @@ unsafe fn public_window_callback_inner(
             }
 
             if cursor_moved {
-                update_modifiers(window, userdata);
+                update_mouse_modifiers(window, userdata, wparam);
 
                 userdata.send_event(Event::WindowEvent {
                     window_id: RootWindowId(WindowId(window)),
@@ -1848,7 +1935,7 @@ unsafe fn public_window_callback_inner(
             let value = (wparam >> 16) as i16;
             let value = value as f32 / WHEEL_DELTA as f32;
 
-            update_modifiers(window, userdata);
+            update_mouse_modifiers(window, userdata, wparam);
 
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1868,7 +1955,7 @@ unsafe fn public_window_callback_inner(
             let value = (wparam >> 16) as i16;
             let value = -value as f32 / WHEEL_DELTA as f32; // NOTE: inverted! See https://github.com/rust-windowing/winit/pull/2105/
 
-            update_modifiers(window, userdata);
+            update_mouse_modifiers(window, userdata, wparam);
 
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1903,7 +1990,7 @@ unsafe fn public_window_callback_inner(
 
             unsafe { capture_mouse(window, &mut userdata.window_state_lock()) };
 
-            update_modifiers(window, userdata);
+            update_mouse_modifiers(window, userdata, wparam);
 
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1919,7 +2006,7 @@ unsafe fn public_window_callback_inner(
 
             unsafe { release_mouse(userdata.window_state_lock()) };
 
-            update_modifiers(window, userdata);
+            update_mouse_modifiers(window, userdata, wparam);
 
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1935,7 +2022,7 @@ unsafe fn public_window_callback_inner(
 
             unsafe { capture_mouse(window, &mut userdata.window_state_lock()) };
 
-            update_modifiers(window, userdata);
+            update_mouse_modifiers(window, userdata, wparam);
 
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1951,7 +2038,7 @@ unsafe fn public_window_callback_inner(
 
             unsafe { release_mouse(userdata.window_state_lock()) };
 
-            update_modifiers(window, userdata);
+            update_mouse_modifiers(window, userdata, wparam);
 
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1967,7 +2054,7 @@ unsafe fn public_window_callback_inner(
 
             unsafe { capture_mouse(window, &mut userdata.window_state_lock()) };
 
-            update_modifiers(window, userdata);
+            update_mouse_modifiers(window, userdata, wparam);
 
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1983,7 +2070,7 @@ unsafe fn public_window_callback_inner(
 
             unsafe { release_mouse(userdata.window_state_lock()) };
 
-            update_modifiers(window, userdata);
+            update_mouse_modifiers(window, userdata, wparam);
 
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -2000,7 +2087,7 @@ unsafe fn public_window_callback_inner(
 
             unsafe { capture_mouse(window, &mut userdata.window_state_lock()) };
 
-            update_modifiers(window, userdata);
+            update_mouse_modifiers(window, userdata, wparam);
 
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -2025,7 +2112,7 @@ unsafe fn public_window_callback_inner(
 
             unsafe { release_mouse(userdata.window_state_lock()) };
 
-            update_modifiers(window, userdata);
+            update_mouse_modifiers(window, userdata, wparam);
 
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
