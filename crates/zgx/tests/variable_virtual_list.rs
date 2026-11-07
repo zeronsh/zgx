@@ -669,3 +669,69 @@ fn an_end_anchored_list_follows_its_first_rows_after_being_empty() {
     assert_eq!(grown(1, false, true, true), 140.);
     assert_eq!(grown(0, false, false, false), 0.);
 }
+
+/// A row built already that thins to no height stays built, the same row (a
+/// row held out of a list eases to nothing in place, keeping its state), and
+/// is the same again as its height comes back. Rows never built while thin
+/// stay unbuilt: a thousand folded away build nothing.
+#[test]
+fn a_built_row_at_no_height_stays_the_same_row() {
+    let mut ui = Ui::new(240., 160.);
+    let offset = ui.signal(0.);
+    let heights = VariableHeights::new(&ui.runtime, 4, 20.);
+    let builds = Rc::new(Cell::new(0));
+    let created = builds.clone();
+    let drops = Rc::new(Cell::new(0));
+    let disposed = drops.clone();
+    let view = ui.mount(
+        variable_virtual_list(
+            offset.clone(),
+            heights.clone(),
+            0,
+            |index| index,
+            move |_, index, cx| {
+                created.set(created.get() + 1);
+                cx.retain(DropCount(disposed.clone()));
+                text(index.to_string()).id(format!("row-{index}"))
+            },
+        )
+        .size(200., 120.),
+    );
+    ui.prepare_frame();
+    let first = view.find("row-0").unwrap();
+    assert_eq!(builds.get(), 4);
+    // (Heights are positive: no height is one thinner than a row is built for.)
+    heights.set_height(0, 0.001).unwrap();
+    ui.prepare_frame();
+    assert_eq!(view.find("row-0"), Some(first), "kept at no height");
+    assert!(ui.scene.borrow().bounds(row(&ui, first)).height < 0.01);
+    assert_eq!((builds.get(), drops.get()), (4, 0));
+    heights.set_height(0, 20.).unwrap();
+    ui.prepare_frame();
+    assert_eq!(view.find("row-0"), Some(first), "the same as it comes back");
+    assert_eq!((builds.get(), drops.get()), (4, 0));
+    view.unmount();
+
+    let heights = VariableHeights::new(&ui.runtime, 1000, 20.);
+    heights
+        .replace((0..1000).map(|i| if i < 3 { 20. } else { 0.001 }))
+        .unwrap();
+    let builds = Rc::new(Cell::new(0));
+    let created = builds.clone();
+    let view = ui.mount(
+        variable_virtual_list(
+            ui.signal(0.),
+            heights.clone(),
+            0,
+            |index| index,
+            move |_, index, _| {
+                created.set(created.get() + 1);
+                text(index.to_string())
+            },
+        )
+        .size(200., 120.),
+    );
+    ui.prepare_frame();
+    assert_eq!(builds.get(), 3, "folded away, never built");
+    view.unmount();
+}

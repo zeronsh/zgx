@@ -668,7 +668,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     .map(|(index, align, _, _, keys)| (index, align, keys));
                 let asked = (serial != handled_reveal).then_some((row, align, false));
                 handled_reveal = serial;
-                let (length, total, position, target, geometry, next_anchor) = {
+                let (length, total, position, target, geometry, thin, next_anchor) = {
                     let model = heights.index.borrow();
                     let length = model.count();
                     let total = model.content_height();
@@ -793,8 +793,16 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     // it, one too thin to show isn't: rows folded away would
                     // otherwise all fit in the view, and all be built.
                     let mut geometry: Vec<_> = model.rows(range).collect();
+                    // (Set aside: one built already stays, below.)
+                    let mut thin = Vec::new();
                     if !measured && model.may_have_thin_rows() {
-                        geometry.retain(|(_, _, row_height)| *row_height >= THINNEST_ROW);
+                        geometry.retain(|row| {
+                            let keep = row.2 >= THINNEST_ROW;
+                            if !keep {
+                                thin.push(*row);
+                            }
+                            keep
+                        });
                     }
                     // An empty list keeps whether it is at its end (it is):
                     // its first rows then follow the end as later ones do.
@@ -817,13 +825,32 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         }),
                         None => None,
                     };
-                    (length, total, position, target, geometry, next_anchor)
+                    (length, total, position, target, geometry, thin, next_anchor)
                 };
                 // Release the index borrow before application key/build callbacks.
-                let keys: Vec<_> = geometry
+                let mut keys: Vec<_> = geometry
                     .into_iter()
                     .map(|(index, top, row_height)| (key(index), index, top, row_height))
                     .collect();
+                // A row built already that thinned to nothing stays built, still
+                // the same row (its state, its focus, a drag from it): a row
+                // held out of a list eases to no height in place. Thin rows
+                // never built stay unbuilt, as folded away.
+                if !thin.is_empty() {
+                    let before = keys.len();
+                    for (kept, entry) in &entries {
+                        let index = entry.index.with_untracked(|index| *index);
+                        if let Ok(at) = thin.binary_search_by_key(&index, |row| row.0)
+                            && key(index) == *kept
+                        {
+                            let (_, top, row_height) = thin[at];
+                            keys.push((kept.clone(), index, top, row_height));
+                        }
+                    }
+                    if keys.len() > before {
+                        keys.sort_by_key(|row| row.1);
+                    }
+                }
                 // Rows kept are stamped with this run: one shown twice is a
                 // key repeated, and those left unstamped go below.
                 run += 1;
