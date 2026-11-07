@@ -1062,6 +1062,21 @@ local SHEET_MEDIUM, SHEET_MEDIUM_SHORT, SHEET_SHORT = 0.56, 0.63, 568
 local SHEET_INSET = 8
 local SHEET_CORNERS_MEDIUM, SHEET_CORNERS_LARGE = 56.2, 62
 local SHEET_DIM = 0.2
+-- A drag's release, read from `_UISheetInteraction draggingEndedInSource:` and
+-- its `_UIHyperInteractor`: a speed under 250 points a second counts as none;
+-- the release projects as a scroll view does at deceleration rate 0.99
+-- (speed x 0.99 / 0.01 / 1000) and goes to the detent nearest that, the
+-- bottom of the window (dismissed) one of them, on the release spring. A flick
+-- of 1000 a second or more whose projection stays nearest the detent it
+-- left, already past that detent its way, goes one detent on instead, on the
+-- high-speed spring (damping 0.8).
+local SHEET_MIN_SPEED, SHEET_FLICK = 250, 1000
+local SHEET_PROJECTION = 0.99 / 0.01 / 1000
+local SHEET_RELEASE = uikit_spring(1, 0.3441442326)
+local SHEET_RELEASE_FAST = uikit_spring(0.8, 0.3441442326)
+-- Past the largest detent it stretches, coefficient 0.55 read from its
+-- interactor; the curve is UIScrollView's, not yet read from the sheet's.
+local SHEET_RUBBER = 0.55
 ios.sheet = ui.component(function(props)
 	local open = props.open
 	local detents = props.detents or { "medium", "large" }
@@ -1102,9 +1117,9 @@ ios.sheet = ui.component(function(props)
 		return SHEET_CORNERS_MEDIUM + (SHEET_CORNERS_LARGE - SHEET_CORNERS_MEDIUM) * largeness()
 	end)
 	local running
-	local function run(state, to, done, speed)
+	local function run(state, to, done, speed, spring)
 		local carried = if running then running() else 0
-		running = settle(state, to, done, speed or carried, SHEET_SPRING)
+		running = settle(state, to, done, speed or carried, spring or SHEET_SPRING)
 	end
 	local function dismiss(speed)
 		run(rise, 0, function()
@@ -1177,24 +1192,55 @@ ios.sheet = ui.component(function(props)
 								end
 								grabbed = rise:get()
 							elseif e.phase == "changed" then
-								rise:set(clamp(grabbed - e.y, 0, height()))
+								local wanted = grabbed - e.y
+								local most = target(#detents)
+								if wanted > most then
+									-- Stretching past the largest, as a scroll view past its end.
+									local room = height()
+									wanted = most + (1 - 1 / ((wanted - most) * SHEET_RUBBER / room + 1)) * room
+								end
+								rise:set(math.max(wanted, 0))
 							else
-								local speed = -e.vy
-								-- Where it would come to rest, as UIKit picks a detent.
-								local aim = rise:get() + speed * 0.2
-								if e.phase == "ended" and aim < target(1) * 0.5 then
-									dismiss(speed)
+								-- In UIKit's terms: the sheet's top, down positive.
+								local h = height()
+								local top = h - rise:get()
+								local v = if e.phase == "ended" then e.vy else 0
+								local moving = if math.abs(v) >= SHEET_MIN_SPEED then v else 0
+								local projected = top + moving * SHEET_PROJECTION
+								-- Its places, top first: each detent, then dismissed.
+								local places = {}
+								for index = #detents, 1, -1 do
+									table.insert(places, h - target(index))
+								end
+								table.insert(places, h)
+								local function nearest(y)
+									local best, gap = 1, math.huge
+									for index, at in ipairs(places) do
+										if math.abs(at - y) < gap then
+											best, gap = index, math.abs(at - y)
+										end
+									end
+									return best
+								end
+								local left, landing = nearest(top), nearest(projected)
+								local spring = SHEET_RELEASE
+								if
+									math.abs(v) >= SHEET_FLICK
+									and left == landing
+									and (v < 0) ~= (top >= places[left])
+								then
+									landing = clamp(left + (if v > 0 then 1 else -1), 1, #places)
+									spring = SHEET_RELEASE_FAST
+								end
+								local speed = -v
+								if landing == #places then
+									run(rise, 0, function()
+										open:set(false)
+									end, speed, spring)
 									return
 								end
-								local nearest, gap = 1, math.huge
-								for index in ipairs(detents) do
-									local distance = math.abs(target(index) - aim)
-									if distance < gap then
-										nearest, gap = index, distance
-									end
-								end
-								detent = nearest
-								run(rise, target(nearest), nil, speed)
+								detent = #detents + 1 - landing
+								run(rise, target(detent), nil, speed, spring)
 							end
 						end,
 					}
