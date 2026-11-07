@@ -65,6 +65,9 @@ pub struct EncodeOptions {
     pub quality: Option<u32>,
     /// A WAV to mux in.
     pub audio: Option<PathBuf>,
+    /// The number its first frame takes in a PNG sequence (a chunk of a
+    /// larger render's).
+    pub first_index: usize,
 }
 
 /// ffmpeg: on the PATH, or where a package manager puts it for an app the
@@ -163,6 +166,7 @@ enum Encoder {
     Pngs {
         pattern: PathBuf,
         size: (u32, u32),
+        first: usize,
     },
     Gif {
         writer: Box<gif::Encoder<std::io::BufWriter<std::fs::File>>>,
@@ -198,6 +202,7 @@ impl Encoder {
                 Ok(Self::Pngs {
                     pattern: options.output.clone(),
                     size: options.size,
+                    first: options.first_index,
                 })
             }
             Format::Gif => {
@@ -333,8 +338,12 @@ impl Encoder {
                 .expect("piped")
                 .write_all(frame)
                 .map_err(|error| format!("ffmpeg stopped taking frames: {error}")),
-            Self::Pngs { pattern, size } => {
-                let path = numbered(pattern, index);
+            Self::Pngs {
+                pattern,
+                size,
+                first,
+            } => {
+                let path = numbered(pattern, *first + index);
                 let file = std::fs::File::create(&path)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), size.0, size.1);
@@ -391,5 +400,66 @@ pub fn straighten(pixels: &mut [u8]) {
                 *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
             }
         }
+    }
+}
+
+/// Join `parts` (segments of one encoding, in order) into `output` without
+/// encoding them again, muxing `audio` in if given.
+pub fn concat(
+    parts: &[PathBuf],
+    output: &Path,
+    format: Format,
+    audio: Option<&Path>,
+) -> Result<(), String> {
+    let ffmpeg = ffmpeg().ok_or(NO_FFMPEG)?;
+    let list = output.with_file_name(format!(
+        ".{}.parts.txt",
+        output
+            .file_name()
+            .map_or("out".into(), |name| name.to_string_lossy())
+    ));
+    let text: String = parts
+        .iter()
+        .map(|part| {
+            let path = std::path::absolute(part).unwrap_or_else(|_| part.clone());
+            format!("file '{}'\n", path.to_string_lossy().replace('\'', "'\\''"))
+        })
+        .collect();
+    std::fs::write(&list, text).map_err(|error| error.to_string())?;
+    let mut command = Command::new(ffmpeg);
+    command.args(["-hide_banner", "-loglevel", "error", "-y"]);
+    command
+        .args(["-f", "concat", "-safe", "0", "-i"])
+        .arg(&list);
+    if let Some(audio) = audio {
+        command.arg("-i").arg(audio);
+        command.args(["-map", "0:v", "-map", "1:a"]);
+    }
+    command.args(["-c:v", "copy"]);
+    if audio.is_some() {
+        match format {
+            Format::ProRes => command.args(["-c:a", "pcm_s24le"]),
+            _ => command.args(["-c:a", "aac", "-b:a", "256k"]),
+        };
+        command.arg("-shortest");
+    }
+    if format != Format::ProRes {
+        command.args(["-movflags", "+faststart"]);
+    }
+    let out = command
+        .arg(output)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("couldn't run ffmpeg: {error}"));
+    let _ = std::fs::remove_file(&list);
+    let out = out?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "ffmpeg couldn't join {}: {}",
+            output.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
     }
 }

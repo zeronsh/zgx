@@ -406,3 +406,74 @@ fn a_rust_view_renders_as_a_script_does() {
     assert_eq!(reach(&frames[9]), 0, "before its sequence");
     assert!(reach(&frames[29]) >= 58, "settled by its end");
 }
+
+#[test]
+fn chunks_rendered_at_once_are_the_frames_of_one_render() {
+    let dir = app("chunks");
+    render(&options(&dir, "serial"), |_| true).unwrap();
+    let mut chunked = options(&dir, "chunked");
+    chunked.concurrency = 3;
+    let mut seen = 0;
+    let report = render(&chunked, |progress| {
+        seen = progress.done;
+        true
+    })
+    .unwrap();
+    assert_eq!((report.frames, seen), (20, 20));
+    let (serial, chunked) = (pngs(&dir.join("serial")), pngs(&dir.join("chunked")));
+    assert_eq!(chunked.len(), 20);
+    assert!(
+        serial == chunked,
+        "chunks drew other frames than one render"
+    );
+}
+
+#[test]
+fn a_chunked_mp4_has_every_frame_and_its_sound() {
+    if zgx_video::encode::ffmpeg().is_none() {
+        eprintln!("no ffmpeg here: skipped");
+        return;
+    }
+    let dir = temp_dir("chunked-mp4");
+    let tone: Vec<f32> = (0..48000 * 2)
+        .map(|i| (i as f32 * 0.03).sin() * 0.5)
+        .collect();
+    zgx_video::audio::write_wav(&dir.join("tone.wav"), &tone).unwrap();
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "A", w = 32, h = 32, fps = 30, duration = 45,
+            render = function()
+                local f = video.frame()
+                return ui.div { w_full = true, h_full = true, bg = "#123",
+                    ui.div { w = 8, h = 8, bg = "#f00", x = f:map({ 0, 44 }, { 0, 24 }) },
+                    video.audio { src = "tone.wav" } }
+            end,
+        } }
+        "##,
+    )
+    .unwrap();
+    let mut chunked = options(&dir, "out.mp4");
+    chunked.concurrency = 4;
+    render(&chunked, |_| true).unwrap();
+    let out = dir.join("out.mp4");
+    assert_eq!(
+        probe(&out, "codec_name,color_primaries,nb_frames", "v").unwrap(),
+        "h264,bt709,45"
+    );
+    assert_eq!(probe(&out, "codec_name,channels", "a").unwrap(), "aac,2");
+    let leftovers = std::fs::read_dir(&*dir)
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".part")
+        })
+        .count();
+    assert_eq!(leftovers, 0, "its chunks are removed");
+}
