@@ -5803,6 +5803,13 @@ impl GpuRenderer {
         stats: &mut GpuStats,
         room: usize,
     ) -> Result<(), GpuError> {
+        // Effect slots are drawn by the draw that follows their planning
+        // (`prepare_effects`): a layer's own draw would take any planned
+        // before it, for layers it may hold out of the cache meanwhile.
+        debug_assert!(
+            self.effect_jobs.is_empty(),
+            "effect jobs left for another draw"
+        );
         let revision = scene.layer_revision(id);
         let root = scene.bounds(id);
         let local = scene.local_transform(id);
@@ -6188,6 +6195,12 @@ impl GpuRenderer {
         if (used - existing + bytes > budget || width > limit || height > limit) && room == budget {
             self.note_layer_coarser(id);
             let room = budget.saturating_sub(used - existing).min(budget - 1);
+            // Its layers' effect slots, planned above, are planned again
+            // there. Left queued, the first of its layers drawn again (one
+            // waiting on a picture) would take them, its own slot's among
+            // them, while its texture is out of the cache.
+            let planned = std::mem::take(&mut self.effect_jobs);
+            self.forget_effects(&planned);
             return self.prepare_layer(
                 scene,
                 id,
