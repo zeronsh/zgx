@@ -77,9 +77,11 @@ return video.compositions {
 
 `video.clip { src, from, duration, trim, w, h, volume, loop, … }` shows a video file within its sequence, from frame `from` for `duration` frames, skipping `trim` frames of the file. Each frame of the video shows exactly the frame of the file its time gives. The file is decoded by ffmpeg at the composition's rate and scaled to `w` × `h` (in points, times the render's scale), and the frame is decoded before it is drawn. Played on, the decoder streams; asked for a frame behind it, as a render of a range is, it starts again from there. A clip's other properties are an image's (`fit` is `"cover"` unless given). Its sound goes into the mix unless `volume = 0`.
 
+`video.loop { duration, times, … }` plays its children over and over, `duration` frames a pass (`times` passes, or for ever). Their time starts again with each pass, and they mount again, so whatever starts as they mount starts again too. Sequences inside a loop follow the pass's time. `video.freeze { frame, … }` holds its children at one frame of their time.
+
 ## Sound
 
-`video.audio { src, from, duration, trim, volume, fade_in, fade_out, loop }` places a sound file within the sequence it appears in; it adds no node. Sounds are mixed sample by sample into one stereo track at 48 kHz and muxed into H.264, HEVC and ProRes files. WAV is read directly. Other formats are read through ffmpeg, or through afconvert on macOS.
+`video.audio { src, from, duration, trim, volume, fade_in, fade_out, loop }` places a sound file within the sequence it appears in; it adds no node. `volume` may be a function of the frame from the sound's start (a fade, or ducking under a voice): it is read once a frame when the sound is placed, and the mix goes smoothly between those values. Sounds are mixed sample by sample into one stereo track at 48 kHz and muxed into H.264, HEVC and ProRes files. WAV is read directly. Other formats are read through ffmpeg, or through afconvert on macOS.
 
 ## Rendering
 
