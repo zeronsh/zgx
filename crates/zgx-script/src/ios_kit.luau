@@ -639,6 +639,9 @@ function ios.page(props)
 					mt = LARGE_TITLE_TOP - BAR,
 					mb = BAR_LARGE - LARGE_TITLE_TOP - LARGE_TITLE_HEIGHT,
 					text_size = 34,
+					-- UIKit's label is the font's own height; zgx's normal is 1.4 times
+					-- the size, which would sit the glyphs 3.5 points low.
+					line_height = LARGE_TITLE_HEIGHT,
 					weight = 700,
 					color = "$text.primary",
 					opacity = ui.tween(collapsed, { duration = 200, ease = LARGE_TITLE_EASE, from = 1, to = 0 }),
@@ -675,6 +678,7 @@ function ios.page(props)
 			ui.text {
 				props.title,
 				text_size = 17,
+				line_height = SMALL_TITLE_HEIGHT,
 				weight = 600,
 				color = "$text.primary",
 				aria_hidden = true,
