@@ -20179,6 +20179,23 @@ export type CaseKey = string | number | boolean
 export type TweenEnd = number | string | { number }
 export type TweenOptions = { duration: number?, ease: Easing?, from: TweenEnd?, to: TweenEnd?, [number]: never }
 export type SpringOptions = { stiffness: number?, damping: number?, from: TweenEnd?, to: TweenEnd?, [number]: never }
+export type SpringToOptions = {
+	response: number?,
+	bounce: number?,
+	stiffness: number?,
+	damping: number?,
+	-- Points a second to start from, for what a gesture hands over.
+	velocity: number?,
+	-- Where the spring itself begins, if not at the state: the state stays where it
+	-- is until the spring has passed it.
+	from: number?,
+	-- Ms before it moves.
+	delay: number?,
+	-- Ms, by when it lands whatever the spring says.
+	most: number?,
+	-- When it arrives.
+	done: (() -> ())?,
+}
 export type LoopOptions = {
 	duration: number?,
 	ease: Easing?,
@@ -20588,6 +20605,9 @@ declare ui: {
 	tween: (state: State<any>, opts: TweenOptions?) -> Binding,
 	spring: (state: State<any>, opts: SpringOptions?) -> Binding,
 	loop: (opts: LoopOptions?) -> Binding,
+	-- Run a state to `target` on a spring now, in Rust. The function it returns
+	-- stops it and says how fast it was going.
+	spring_to: (state: State<number>, target: number, opts: SpringToOptions?) -> () -> number,
 	-- White pixels with the alpha `alpha(x, y)` gives (0 to 1), for masks.
 	bitmap: (w: number, h: number, alpha: (x: number, y: number) -> number) -> Bitmap,
 	-- A WGSL fill: `fn fill(input: FillInput) -> vec4<f32>`, with input.p,
