@@ -163,7 +163,7 @@ impl super::CommandEncoder {
             .pending_label
             .take()
             .expect("command buffer used outside begin_encoding/end_encoding");
-        let queue = &self.queue_shared.raw;
+        let queue = self.queue_shared.raw();
         let retain_references = self.shared.settings.retain_command_buffer_references;
         self.queue_shared
             .command_buffer_created_not_submitted

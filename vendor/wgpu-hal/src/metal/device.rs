@@ -1851,7 +1851,7 @@ impl crate::Device for super::Device {
         // reads it, and signalling it costs every submission kernel work.
         Ok(super::Fence {
             completed_value: Arc::new(atomic::AtomicU64::new(0)),
-            pending_command_buffers: Vec::new(),
+            pending_command_buffers: Default::default(),
             shared_event: None,
         })
     }
@@ -1862,7 +1862,7 @@ impl crate::Device for super::Device {
 
     unsafe fn get_fence_value(&self, fence: &super::Fence) -> DeviceResult<crate::FenceValue> {
         let mut max_value = fence.completed_value.load(atomic::Ordering::Acquire);
-        for &(value, ref cmd_buf) in fence.pending_command_buffers.iter() {
+        for &(value, ref cmd_buf) in fence.pending_command_buffers.lock().iter() {
             if cmd_buf.status() == MTLCommandBufferStatus::Completed {
                 max_value = value;
             }
@@ -1879,13 +1879,19 @@ impl crate::Device for super::Device {
             return Ok(true);
         }
 
-        let cmd_buf = match fence
+        let found = fence
             .pending_command_buffers
+            .lock()
             .iter()
             .find(|&&(value, _)| value >= wait_value)
-        {
-            Some((_, cmd_buf)) => cmd_buf,
+            .map(|(_, cmd_buf)| cmd_buf.clone());
+        let cmd_buf = match &found {
+            Some(cmd_buf) => cmd_buf,
             None => {
+                // (Gone between the two looks: it completed.)
+                if wait_value <= fence.completed_value.load(atomic::Ordering::Acquire) {
+                    return Ok(true);
+                }
                 log::error!("No active command buffers for fence value {wait_value}");
                 return Err(crate::DeviceError::Lost);
             }
