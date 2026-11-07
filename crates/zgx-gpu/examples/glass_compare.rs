@@ -11,6 +11,8 @@
 //!
 //! `GLASS_PANES=0`: the backdrop alone, for the system's to lie over.
 //! `GLASS_DARK=1`: a dark appearance. `GLASS_CLEAR=1`: the clear variant.
+//! `GLASS_ACRYLIC=1`: Windows' Acrylic in place of macOS's glass, and
+//! `GLASS_OPAQUE=1` its fallback colour (Transparency effects off).
 //! `GLASS_TINT=r,g,b,a` (0-1): a tint. To try values: `FROST`, and `PARAMS`,
 //! sixteen numbers in place of the material's.
 //! Run: cargo run -p zgx-gpu --example glass_compare -- out.png
@@ -80,7 +82,15 @@ fn main() {
         }),
         radius: if large { 24. } else { 16. },
     };
-    let mut drive = style.drawn(dark);
+    // Windows' Acrylic, or macOS's glass, whichever this runs on.
+    let acrylic = std::env::var_os("GLASS_ACRYLIC").is_some();
+    let mut drive = match acrylic {
+        true => style.drawn_acrylic(dark),
+        false => style.drawn_glass(dark),
+    };
+    if std::env::var_os("GLASS_OPAQUE").is_some() {
+        drive.params[1][1] = 1.;
+    }
     if let Some(frost) = numbers("FROST") {
         drive.frost = frost[0];
     }
@@ -173,7 +183,7 @@ fn main() {
             root,
             NodeKind::Quad(QuadStyle {
                 radius: style.radius,
-                shadow: style.drawn_shadow(dark),
+                shadow: style.drawn_glass_shadow(dark).filter(|_| !acrylic),
                 ..Default::default()
             }),
             fixed(w, h),
