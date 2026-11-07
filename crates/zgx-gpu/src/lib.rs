@@ -16152,11 +16152,17 @@ pub fn shader_modules() -> Vec<(&'static str, String)> {
         ("present, sRGB, alpha after", present(true, true)),
     ]
     .into_iter()
-    // The glass material: an app's shader to FXC, as any of theirs.
-    .chain([(
-        "glass material",
-        filter_source(zgx::glass::GlassStyle::material_source()),
-    )])
+    // The glass materials: an app's shader to FXC, as any of theirs.
+    .chain([
+        (
+            "glass material",
+            filter_source(zgx::glass::GlassStyle::material_source()),
+        ),
+        (
+            "acrylic material",
+            filter_source(zgx::glass::GlassStyle::acrylic_source()),
+        ),
+    ])
     .collect()
 }
 /// The polyline strokes' module: the quad shader (draw.wgsl), whose vertex
