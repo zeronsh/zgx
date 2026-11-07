@@ -1606,6 +1606,9 @@ pub(crate) struct UiStorage {
     /// (`tab_into_next_row`).
     row_focus: Cell<Option<RowFocus>>,
     content_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
+    /// Bumped as any of those is published resized, once a measured list asks
+    /// for it (`Ui::content_size_revision`).
+    content_revision: RefCell<Option<Signal<u64>>>,
     /// Nodes' laid-out sizes (`observe_size`): read only when layout runs.
     observed_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
     observed_bounds: RefCell<crate::scene::NodeMap<Signal<Rect>>>,
@@ -1880,6 +1883,7 @@ impl Ui {
             refocus_trail: RefCell::new(None),
             row_focus: Cell::new(None),
             content_sizes: RefCell::default(),
+            content_revision: RefCell::default(),
             observed_sizes: RefCell::default(),
             observed_bounds: RefCell::default(),
             observed_visibility: RefCell::default(),
@@ -2656,6 +2660,29 @@ impl Ui {
             .insert(node, signal.clone());
         self.storage.editor_layout_revision.set(None);
         signal
+    }
+    /// `content_size_revision` bumped, if a measured list asked for it: out of
+    /// line, as most apps have none.
+    #[inline(never)]
+    fn content_sizes_published(&self) {
+        let revision = self.storage.content_revision.borrow().clone();
+        if let Some(revision) = revision {
+            revision.mutate(|serial| {
+                *serial = serial.wrapping_add(1);
+                true
+            });
+        }
+    }
+    /// A revision bumped after each publication of content sizes in which any
+    /// changed: what reads many nodes' sizes (a measured list's rows) reads
+    /// it, and theirs untracked, rather than tracking each one.
+    pub(crate) fn content_size_revision(&self) -> Signal<u64> {
+        if let Some(revision) = &*self.storage.content_revision.borrow() {
+            return revision.clone();
+        }
+        let revision = self.signal(0_u64);
+        *self.storage.content_revision.borrow_mut() = Some(revision.clone());
+        revision
     }
     /// Observe the node's laid-out size (its border box), published after
     /// each layout that runs: unlike `observe_bounds`, nothing an ancestor
@@ -4020,12 +4047,17 @@ impl Ui {
             // Publish outside every storage/scene borrow: geometry subscribers can
             // mount, dispose, translate, or reenter frame preparation.
             self.runtime.batch(|| {
+                let mut any = false;
                 for (node, signal, size) in sizes {
                     if self.scene.borrow().contains(node)
                         && signal.with_untracked(|told| resized(*told, size))
                     {
                         signal.set(size);
+                        any = true;
                     }
+                }
+                if any {
+                    self.content_sizes_published();
                 }
                 // Changed, as gathered above (what reads them runs after
                 // the batch): set without comparing again.
