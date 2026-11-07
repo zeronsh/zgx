@@ -2295,6 +2295,19 @@ impl Host {
         #[cfg(all(target_os = "macos", zgx_winit_patched))]
         crate::swipes::after_scroll(&self.context.ui, self.window.as_deref());
     }
+    /// Dispatch a scroll, `wheel` when it's a mouse wheel's notches.
+    fn dispatch_wheel(
+        &mut self,
+        event: InputEvent,
+        wheel: bool,
+    ) -> Result<(), zgx::widgets::LayoutFeedbackError> {
+        if wheel {
+            let shift = self.modifiers.shift;
+            zgx::input::mouse_wheel(shift, || self.dispatch(event))
+        } else {
+            self.dispatch(event)
+        }
+    }
     fn dispatch_prevented(
         &mut self,
         event: InputEvent,
@@ -5141,12 +5154,14 @@ impl Host {
                     zgx_gpu::present_log::log(|| {
                         format!("scroll-applied source=direct dx={dx:.3} dy={dy:.3}")
                     });
-                    self.dispatch(InputEvent::Scroll {
+                    let event = InputEvent::Scroll {
                         x: self.cursor.0,
                         y: self.cursor.1,
                         delta_x: dx,
                         delta_y: dy,
-                    })?;
+                    };
+                    let wheel = matches!(delta, MouseScrollDelta::LineDelta(x, y) if !continuous_lines(x, y));
+                    self.dispatch_wheel(event, wheel)?;
                     self.after_scroll();
                 }
                 if let Some(
@@ -5155,17 +5170,21 @@ impl Host {
                 ) = gesture
                 {
                     // What the refreshes have not applied yet, first.
+                    let wheel = self.scroll.wheel_only();
                     if let Some((delta_x, delta_y)) = self.scroll.flush() {
                         zgx_gpu::present_log::log(|| {
                             format!("scroll-applied source=end dx={delta_x:.3} dy={delta_y:.3}")
                         });
                         let (x, y) = self.scroll.position;
-                        self.dispatch(InputEvent::Scroll {
-                            x,
-                            y,
-                            delta_x,
-                            delta_y,
-                        })?;
+                        self.dispatch_wheel(
+                            InputEvent::Scroll {
+                                x,
+                                y,
+                                delta_x,
+                                delta_y,
+                            },
+                            wheel,
+                        )?;
                     }
                     self.dispatch(InputEvent::ScrollGesture(gesture))?;
                     // Lifted: the coast starts from the fingers' speed.
@@ -5936,6 +5955,7 @@ impl Host {
         if self.scroll.pending() {
             // Each refresh applies the motion due by then; with no refreshes
             // coming (hidden, minimized), everything applies at once.
+            let wheel = self.scroll.wheel_only();
             let delta = if !self.frames_presented() {
                 zgx::profile::note(|| {
                     "scroll input applied at once: the window isn't presenting (hidden, \
@@ -5963,12 +5983,15 @@ impl Host {
                     )
                 });
                 let (x, y) = self.scroll.position;
-                self.dispatch(InputEvent::Scroll {
-                    x,
-                    y,
-                    delta_x,
-                    delta_y,
-                })?;
+                self.dispatch_wheel(
+                    InputEvent::Scroll {
+                        x,
+                        y,
+                        delta_x,
+                        delta_y,
+                    },
+                    wheel,
+                )?;
                 self.after_scroll();
             }
         }

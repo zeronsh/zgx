@@ -6,7 +6,8 @@
 //! - `p` (`s`: runs), `h` (`l`: level, `s`), `code` (`lang`, `text`, and
 //!   what [`Options::code`] adds), `ul` / `ol` (`start`, `items`: a list of
 //!   block lists), `quote` (`b`), `hr`, `table` (`head`: cells, `rows`:
-//!   rows of cells; a cell is runs), `img` (`src`, `alt`).
+//!   rows of cells; a cell is runs; `align`: each column's side, `"start"`,
+//!   `"center"`, `"end"`, or `""` where the source says none), `img` (`src`, `alt`).
 //!
 //! A list item's own text (a tight list's, never a paragraph) is a `p`
 //! with `tight`, which has no space under it.
@@ -27,7 +28,7 @@ pub(crate) mod view;
 pub use mend::PENDING_LINK_URL;
 
 use crate::Value;
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use std::rc::Rc;
 
 /// How text is read.
@@ -1009,6 +1010,7 @@ enum Frame {
         rows: Vec<Value>,
         row: Vec<Value>,
         in_head: bool,
+        align: Vec<Value>,
     },
 }
 
@@ -1274,11 +1276,23 @@ impl Builder<'_> {
                     items: Vec::new(),
                 }),
                 Tag::Item => self.frames.push(Frame::Blocks(Vec::new())),
-                Tag::Table(_) => self.frames.push(Frame::Table {
+                Tag::Table(align) => self.frames.push(Frame::Table {
                     head: Vec::new(),
                     rows: Vec::new(),
                     row: Vec::new(),
                     in_head: false,
+                    align: align
+                        .iter()
+                        .map(|side| {
+                            match side {
+                                Alignment::None => "",
+                                Alignment::Left => "start",
+                                Alignment::Center => "center",
+                                Alignment::Right => "end",
+                            }
+                            .into()
+                        })
+                        .collect(),
                 }),
                 Tag::TableHead => {
                     if let Some(Frame::Table { in_head, .. }) = self.frames.last_mut() {
@@ -1399,9 +1413,13 @@ impl Builder<'_> {
                     }
                 }
                 TagEnd::Table => {
-                    if let Some(Frame::Table { head, rows, .. }) = self.frames.pop() {
+                    if let Some(Frame::Table {
+                        head, rows, align, ..
+                    }) = self.frames.pop()
+                    {
                         self.block(map(vec![
                             ("t", "table".into()),
+                            ("align", Value::List(align.into())),
                             ("head", Value::List(head.into())),
                             ("rows", Value::List(rows.into())),
                         ]));

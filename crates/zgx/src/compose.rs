@@ -510,6 +510,8 @@ pub(crate) struct Rare {
     follow_end: Option<bool>,
     /// `View::overscroll_contain`: a wheel over it stays with it.
     overscroll_contain: bool,
+    /// `View::wheel_across`: a mouse wheel moves it sideways.
+    wheel_across: bool,
     animation: Option<animation::Animated>,
     keyboard_navigation: Option<bool>,
     /// `View::on_end`, `on_start`, `at_end`: a virtual list's edges.
@@ -616,6 +618,9 @@ impl Rare {
         }
         if self.overscroll_contain {
             inner.overscroll_contain = true;
+        }
+        if self.wheel_across {
+            inner.wheel_across = true;
         }
         if self.drag_preview.is_some() {
             inner.drag_preview = self.drag_preview;
@@ -919,6 +924,20 @@ impl View {
     /// goes on to them.
     pub fn overscroll_contain(mut self) -> Self {
         self.rare_mut().overscroll_contain = true;
+        self
+    }
+    /// Let a mouse wheel, which has no sideways axis, move this `scroll_x`:
+    /// with Shift held, always and only it (at its edges too); without, once
+    /// the pointer has been moved onto it, until it reaches its edge, where
+    /// the wheel goes on to the views around it as usual. A view that slid
+    /// under a resting pointer leaves the wheel alone, so a page being read
+    /// isn't caught by what scrolls past. A trackpad, which has a sideways
+    /// axis, moves it as any `scroll_x`, except that a swipe mostly down
+    /// leaves it still rather than moving it by the swipe's drift. Macs report
+    /// Shift and the wheel as sideways motion themselves, which every
+    /// `scroll_x` takes.
+    pub fn wheel_across(mut self) -> Self {
+        self.rare_mut().wheel_across = true;
         self
     }
     /// Keep a scroll viewport at its end while its content grows, as long as
@@ -4794,7 +4813,7 @@ struct Opened {
     root: NodeId,
     child_parent: NodeId,
     submenu_indicator: bool,
-    scroll_offset: Option<(Signal<f32>, bool, bool)>,
+    scroll_offset: Option<(Signal<f32>, bool, bool, bool)>,
     scroll_nodes: Option<(NodeId, NodeId)>,
     scrollbar: bool,
     follow_end: bool,
@@ -5206,7 +5225,8 @@ fn open_element(
             });
             ui.semantics.borrow_mut().set(root, semantics);
             let contain = rare.as_deref().is_some_and(|r| r.overscroll_contain);
-            scroll_offset = Some((offset, horizontal, contain));
+            let across = rare.as_deref().is_some_and(|r| r.wheel_across);
+            scroll_offset = Some((offset, horizontal, contain, across));
             root
         }
         Kind::VirtualList(build) => {
@@ -5715,7 +5735,7 @@ fn open_element(
             },
         );
     }
-    let scroll_nodes = scroll_offset.as_ref().map(|(_, horizontal, _)| {
+    let scroll_nodes = scroll_offset.as_ref().map(|(_, horizontal, _, _)| {
         let viewport = ui.container(root, Layout::Overlay, Default::default());
         let content = ui.container(
             viewport,
@@ -5836,11 +5856,12 @@ fn close_element(ui: &mut Ui, opened: Opened) -> NodeId {
         let indicator = mount(ui, root, text("›"), environment.clone());
         ui.semantics.borrow_mut().remove(indicator);
     }
-    if let (Some((offset, horizontal, contain)), Some((viewport, content))) =
+    if let (Some((offset, horizontal, contain, across)), Some((viewport, content))) =
         (scroll_offset, scroll_nodes)
     {
         mount_scroll(
             ui, root, viewport, content, offset, horizontal, scrollbar, follow_end, contain,
+            across,
         );
     }
     if let Some(mut compute) = compute {
@@ -6318,6 +6339,8 @@ fn mount_scroll(
     follow_end: bool,
     // `View::overscroll_contain`: a wheel at its edge stays here.
     contain: bool,
+    // `View::wheel_across`: a mouse wheel moves it sideways.
+    across: bool,
 ) {
     use crate::scene::{Style, Transform};
     let main_size = move |size: (f32, f32)| if horizontal { size.0 } else { size.1 };
@@ -6368,9 +6391,19 @@ fn mount_scroll(
     let wheel_extent = extent.clone();
     let wheel_offset = offset.clone();
     let weak = ui.downgrade();
+    // `across`: the pointer was moved onto it, rather than it sliding under
+    // the pointer (which moves hover, but no pointer).
+    let pointed = std::cell::Cell::new(false);
     ui.on_event(root, false, move |cx| {
         if cx.phase == EventPhase::Capture {
             return;
+        }
+        if across {
+            match cx.event {
+                InputEvent::PointerMove { .. } => pointed.set(true),
+                InputEvent::PointerLeave => pointed.set(false),
+                _ => {}
+            }
         }
         if matches!(cx.event, InputEvent::Focus) && cx.target != root {
             let Some(ui) = weak.upgrade() else {
@@ -6425,8 +6458,25 @@ fn mount_scroll(
                 }
                 _ => (delta_x, delta_y),
             };
-            let delta = if horizontal { delta_x } else { delta_y };
+            // A mouse wheel going sideways; Shift's holds at the edges too.
+            let shift = crate::input::mouse_wheel_shift();
+            let wheeled = across
+                && delta_x == 0.
+                && delta_y != 0.
+                && shift.is_some_and(|shift| shift || pointed.get());
+            let delta = if wheeled {
+                delta_y
+            } else if horizontal {
+                delta_x
+            } else {
+                delta_y
+            };
             if !delta.is_finite() {
+                return;
+            }
+            // Mostly the other way, this swipe isn't this view's: it stays
+            // still, and the swipe goes to the views around it.
+            if across && !wheeled && delta_y.abs() > delta_x.abs() {
                 return;
             }
             // A wheel's horizontal delta is physical: to the right is back
@@ -6439,7 +6489,19 @@ fn mount_scroll(
             let limit =
                 (main_size(wheel_extent.get()) as f64 - main_size(wheel_size.get()) as f64).max(0.);
             let after = (before as f64 + delta as f64).clamp(0., limit) as f32;
-            if before != after {
+            if wheeled {
+                // The wheel's one axis is this view's now: nothing goes on,
+                // unless it's at its edge (and without Shift, says the wheel).
+                if before != after {
+                    wheel_offset.set(after);
+                }
+                if before != after || shift == Some(true) {
+                    cx.prevent_default();
+                    cx.stop_propagation();
+                } else if contain {
+                    cx.scrolled(horizontal);
+                }
+            } else if before != after {
                 wheel_offset.set(after);
                 cx.scrolled(horizontal);
             } else if contain && delta != 0. {
