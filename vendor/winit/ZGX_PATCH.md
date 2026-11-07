@@ -395,3 +395,14 @@ take Shift and Control from `wParam` (`update_mouse_modifiers` in
 `platform_impl/windows/event_loop.rs`; Alt and the Windows key are not in it,
 and are read as before). `a_wheel_with_shift_down_has_shift_without_focus`
 posts a wheel with `MK_SHIFT` to a hidden window.
+
+
+## X11: a pointer event's unchanged modifiers aren't worked out again
+
+Every XInput2 pointer event (each move of a 1000 Hz mouse) carries the
+keyboard's modifiers and group, which winit gave `xkb_state_update_mask`
+each time. That call sets the state from its masks alone, so the same masks
+again change nothing, yet xkbcommon worked out the effective modifiers and
+LEDs anew: about 400 instructions a move. `XkbState` keeps the masks it last
+gave and skips the call when they're the same
+(`platform_impl/linux/common/xkb/state.rs`).

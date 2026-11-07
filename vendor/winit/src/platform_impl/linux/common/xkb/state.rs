@@ -19,6 +19,9 @@ use crate::platform_impl::common::xkb::{make_string_with, XKBH};
 pub struct XkbState {
     state: NonNull<xkb_state>,
     modifiers: ModifiersState,
+    /// ZGX PATCH: the masks last given to `xkb_state_update_mask`, which sets
+    /// the state from them alone: the same again changes nothing.
+    masks: Option<[u32; 6]>,
 }
 
 impl XkbState {
@@ -39,7 +42,7 @@ impl XkbState {
 
     fn new_inner(state: NonNull<xkb_state>) -> Self {
         let modifiers = ModifiersState::default();
-        let mut this = Self { state, modifiers };
+        let mut this = Self { state, modifiers, masks: None };
         this.reload_modifiers();
         this
     }
@@ -105,6 +108,13 @@ impl XkbState {
         latched_group: u32,
         locked_group: u32,
     ) {
+        // ZGX PATCH: X11 gives every pointer event the modifiers (each move
+        // of a 1000 Hz mouse); xkbcommon worked out the same state again.
+        let masks =
+            [mods_depressed, mods_latched, mods_locked, depressed_group, latched_group, locked_group];
+        if self.masks.replace(masks) == Some(masks) {
+            return;
+        }
         let mask = unsafe {
             (XKBH.xkb_state_update_mask)(
                 self.state.as_ptr(),
