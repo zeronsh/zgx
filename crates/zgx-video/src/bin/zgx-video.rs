@@ -7,7 +7,7 @@ use std::time::Duration;
 use zgx_video::{Format, RenderOptions};
 
 const USAGE: &str = "usage: zgx video render <dir> [composition] <out> [options]
-       zgx video still <dir> [composition] <frame> <out.png> [--scale S] [--props JSON]
+       zgx video still <dir> [composition] <frame> <out.png> [--scale S] [--props JSON] [--thumbnail WIDTH]
        zgx video list <dir> [--props JSON]
        zgx video studio <dir> [--preview-scale S]
 
@@ -32,9 +32,12 @@ ProRes need ffmpeg on the PATH.
   --concurrency N     render N chunks of frames at once, each on its own thread
                       with its own stage and encoder (the CPUs' count, at
                       most 4, by default; 1 renders one frame after another)
+  --every-nth-frame N keep one frame in N, the file's rate divided by N
+  --thumbnail W       (still) no wider than W pixels
   --quiet             no progress";
 
 struct Parsed {
+    thumbnail: Option<u32>,
     shot: Option<PathBuf>,
     shot_size: (f32, f32),
     positional: Vec<String>,
@@ -53,6 +56,7 @@ fn parse_props(text: &str) -> Result<Json, String> {
 
 fn parse(args: Vec<String>) -> Result<Parsed, String> {
     let mut parsed = Parsed {
+        thumbnail: None,
         shot: None,
         shot_size: (1440., 900.),
         positional: Vec::new(),
@@ -96,6 +100,10 @@ fn parse(args: Vec<String>) -> Result<Parsed, String> {
             "--concurrency" | "-j" => {
                 options.concurrency = number("--concurrency", value("--concurrency")?)?
             }
+            "--every-nth-frame" => {
+                options.every_nth = number("--every-nth-frame", value("--every-nth-frame")?)?
+            }
+            "--thumbnail" => parsed.thumbnail = Some(number("--thumbnail", value("--thumbnail")?)?),
             "--quiet" | "-q" => parsed.quiet = true,
             "--screenshot" => parsed.shot = Some(value("--screenshot")?.into()),
             "--preview-scale" => {
@@ -265,6 +273,7 @@ fn still(args: Vec<String>) -> Result<(), String> {
     let Parsed {
         positional,
         mut options,
+        thumbnail,
         ..
     } = parse(args)?;
     let (script, composition, frame, output) = match positional.as_slice() {
@@ -275,19 +284,9 @@ fn still(args: Vec<String>) -> Result<(), String> {
     let frame: u64 = frame.parse().map_err(|_| format!("no frame {frame}"))?;
     options.script = script.into();
     options.composition = composition;
-    options.output = output.into();
-    options.format = Some(Format::Png);
-    options.frames = Some((frame, frame));
-    let dir = std::env::temp_dir().join(format!("zgx-still-{}", std::process::id()));
-    let out = options.output.clone();
-    options.output = dir.clone();
-    let report = zgx_video::render(&options, |_| true);
-    let moved = report.and_then(|_| {
-        std::fs::rename(dir.join("00000.png"), &out).map_err(|error| error.to_string())
-    });
-    let _ = std::fs::remove_dir_all(&dir);
-    moved?;
-    println!("{}", out.display());
+    let still = zgx_video::render_still(&options, frame, thumbnail)?;
+    still.write_png(output.as_ref())?;
+    println!("{}: {}x{}", output, still.width, still.height);
     Ok(())
 }
 

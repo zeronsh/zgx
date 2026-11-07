@@ -477,3 +477,76 @@ fn a_chunked_mp4_has_every_frame_and_its_sound() {
         .count();
     assert_eq!(leftovers, 0, "its chunks are removed");
 }
+
+#[test]
+fn a_still_is_that_frame_of_a_render_and_a_thumbnail_fits_its_width() {
+    let dir = app("still");
+    let mut whole = options(&dir, "whole");
+    whole.transparent = true;
+    render(&whole, |_| true).unwrap();
+    let mut still_options = options(&dir, "unused");
+    still_options.transparent = true;
+    let still = zgx_video::render_still(&still_options, 13, None).unwrap();
+    assert_eq!((still.width, still.height), (64, 48));
+    let file = std::fs::File::open(dir.join("whole/00013.png")).unwrap();
+    let mut reader = png::Decoder::new(std::io::BufReader::new(file))
+        .read_info()
+        .unwrap();
+    let mut rendered = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut rendered).unwrap();
+    assert!(
+        still.pixels == rendered,
+        "the still differs from that frame of a render"
+    );
+    let thumb = zgx_video::render_still(&options(&dir, "unused"), 13, Some(32)).unwrap();
+    assert_eq!((thumb.width, thumb.height), (32, 24));
+    still.write_png(&dir.join("s.png")).unwrap();
+    assert!(dir.join("s.png").exists());
+    assert!(
+        zgx_video::render_still(&options(&dir, "unused"), 99, None)
+            .unwrap_err()
+            .contains("no frame 99")
+    );
+}
+
+#[test]
+fn every_nth_frame_keeps_those_frames_at_their_rate() {
+    let dir = app("nth");
+    render(&options(&dir, "all"), |_| true).unwrap();
+    let mut nth = options(&dir, "nth");
+    nth.every_nth = 3;
+    let report = render(&nth, |_| true).unwrap();
+    assert_eq!(report.frames, 7);
+    let (all, nth) = (pngs(&dir.join("all")), pngs(&dir.join("nth")));
+    assert_eq!(nth.len(), 7);
+    assert!(nth[0] == all[0] && nth[2] == all[6] && nth[6] == all[18]);
+    let mut gif = options(&dir, "nth.gif");
+    gif.every_nth = 2;
+    render(&gif, |_| true).unwrap();
+    let file = std::fs::File::open(dir.join("nth.gif")).unwrap();
+    let mut decoder = gif::DecodeOptions::new().read_info(file).unwrap();
+    let (mut count, mut delay) = (0, 0);
+    while let Some(frame) = decoder.read_next_frame().unwrap() {
+        count += 1;
+        delay += u32::from(frame.delay);
+    }
+    assert_eq!((count, delay), (10, 67), "10 frames over the same 0.67 s");
+}
+
+#[test]
+fn every_nth_frame_in_chunks_is_every_nth_frame() {
+    let dir = app("nth-chunks");
+    let mut serial = options(&dir, "serial");
+    serial.every_nth = 3;
+    render(&serial, |_| true).unwrap();
+    let mut chunked = options(&dir, "chunked");
+    chunked.every_nth = 3;
+    chunked.concurrency = 3;
+    render(&chunked, |_| true).unwrap();
+    let (serial, chunked) = (pngs(&dir.join("serial")), pngs(&dir.join("chunked")));
+    assert_eq!(chunked.len(), 7);
+    assert!(
+        serial == chunked,
+        "chunks kept other frames than one render"
+    );
+}

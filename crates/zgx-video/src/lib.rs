@@ -12,6 +12,6 @@ pub mod stage;
 pub mod studio;
 pub use encode::Format;
 pub use film::{Film, Ticks, Timing};
-pub use render::{Progress, RenderOptions, Report, render};
+pub use render::{Progress, RenderOptions, Report, Still, render, render_still};
 pub use script::{AudioClip, Composition, ScriptStage, Track, compositions};
 pub use stage::{Stage, StageOptions};

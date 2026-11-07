@@ -43,6 +43,9 @@ pub struct RenderOptions {
     /// stage and an encoder of its own (1: one after another). A GIF is
     /// always made in one.
     pub concurrency: usize,
+    /// Keep one frame in this many (1: all), the file's rate divided by it:
+    /// a GIF made light.
+    pub every_nth: u64,
 }
 impl Default for RenderOptions {
     fn default() -> Self {
@@ -62,6 +65,7 @@ impl Default for RenderOptions {
             mute: false,
             hold_timeout: Duration::from_secs(60),
             concurrency: 1,
+            every_nth: 1,
         }
     }
 }
@@ -197,15 +201,16 @@ pub(crate) fn render_film<P: Playing>(
         format,
         output: options.output.clone(),
         size,
-        fps: ticks.output_fps,
+        fps: ticks.output_fps / options.every_nth.max(1) as f64,
         quality: options.quality,
         audio: audio.clone(),
         first_index: 0,
     })?;
-    let total = end - first + 1;
+    let every = options.every_nth.max(1);
+    let total = (end - first) / every + 1;
     let film = playing.film();
     let result = (|| {
-        for frame in first..=end {
+        for (done, frame) in (first..=end).step_by(every as usize).enumerate() {
             let mut pixels = sink.buffer();
             film.draw_output(frame, &mut pixels, options.hold_timeout)?;
             if transparent {
@@ -213,7 +218,7 @@ pub(crate) fn render_film<P: Playing>(
             }
             sink.push(pixels)?;
             if !progress(Progress {
-                done: frame - first + 1,
+                done: done as u64 + 1,
                 total,
             }) {
                 return Err("stopped".to_owned());
@@ -353,10 +358,12 @@ fn render_chunks(
         ((composition.width * options.scale).round() as u32).max(1),
         ((composition.height * options.scale).round() as u32).max(1),
     );
-    let total = end - first + 1;
+    // The frames kept, one in `every_nth`, split by their place among them.
+    let every = options.every_nth.max(1);
+    let total = (end - first) / every + 1;
     let count = (options.concurrency as u64).clamp(1, total);
     let chunks: Vec<(u64, u64)> = (0..count)
-        .map(|k| (first + total * k / count, first + total * (k + 1) / count))
+        .map(|k| (total * k / count, total * (k + 1) / count))
         .filter(|(from, to)| from < to)
         .collect();
     let encoded = matches!(format, Format::H264 | Format::Hevc | Format::ProRes);
@@ -404,12 +411,12 @@ fn render_chunks(
                         format,
                         output,
                         size,
-                        fps: ticks.output_fps,
+                        fps: ticks.output_fps / every as f64,
                         quality: options.quality,
                         audio: None,
-                        first_index: (from - first) as usize,
+                        first_index: from as usize,
                     })?;
-                    for frame in from..to {
+                    for frame in (from..to).map(|place| first + place * every) {
                         if stop.load(Ordering::Relaxed) {
                             return Err("stopped".to_owned());
                         }
@@ -476,5 +483,85 @@ fn render_chunks(
         size,
         elapsed,
         rate: total as f64 / elapsed.as_secs_f64().max(1e-6),
+    })
+}
+
+/// One frame of a composition, its pixels straight RGBA.
+#[derive(Clone, Debug)]
+pub struct Still {
+    /// Its width in pixels.
+    pub width: u32,
+    /// Its height.
+    pub height: u32,
+    /// Its pixels, a row at a time.
+    pub pixels: Vec<u8>,
+}
+impl Still {
+    /// Written as a PNG at `path`.
+    pub fn write_png(&self, path: &Path) -> Result<(), String> {
+        let file =
+            std::fs::File::create(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), self.width, self.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+        writer
+            .write_image_data(&self.pixels)
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Frame `frame` of the composition `options` names, drawn as a render of the
+/// whole would draw it, without encoding anything: a still, or with
+/// `max_width` a thumbnail no wider than that many pixels. `options.output`
+/// and `options.format` are unused; `transparent` keeps its background clear.
+pub fn render_still(
+    options: &RenderOptions,
+    frame: u64,
+    max_width: Option<u32>,
+) -> Result<Still, String> {
+    let mut scale = options.scale;
+    if let Some(widest) = max_width {
+        let list = crate::script::compositions(
+            &options.script,
+            options.composition.as_deref(),
+            &options.props,
+        )?;
+        let width = match &options.composition {
+            Some(id) => list
+                .iter()
+                .find(|comp| &comp.id == id)
+                .map(|comp| comp.width),
+            None => list.first().map(|comp| comp.width),
+        }
+        .ok_or("no such composition")?;
+        scale = scale.min(widest as f32 / width.max(1.));
+    }
+    let background = if options.transparent {
+        Color(0, 0, 0, 0)
+    } else {
+        Color(0, 0, 0, 255)
+    };
+    let mut stage = ScriptStage::new(
+        &options.script,
+        options.composition.as_deref(),
+        &options.props,
+        scale,
+        background,
+        options.timing(),
+    )?;
+    let last = stage.output_frames().saturating_sub(1);
+    if frame > last {
+        return Err(format!("no frame {frame}; it has {} frames", last + 1));
+    }
+    let mut pixels = Vec::new();
+    stage.draw_output(frame, &mut pixels, options.hold_timeout)?;
+    straighten(&mut pixels);
+    let (width, height) = stage.stage.pixel_size();
+    Ok(Still {
+        width,
+        height,
+        pixels,
     })
 }
