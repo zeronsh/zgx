@@ -272,12 +272,16 @@ impl LayoutCache {
         }
     }
 
-    pub fn get_agnostic_mods(&mut self) -> ModifiersState {
+    /// ZGX PATCH: `held` is Shift and Control as a mouse message gives them,
+    /// in place of the thread's key state (`update_mouse_modifiers`).
+    pub fn get_agnostic_mods(&mut self, held: Option<(bool, bool)>) -> ModifiersState {
         let (_, layout) = self.get_current_layout();
         let filter_out_altgr = layout.has_alt_graph && key_pressed(VK_RMENU);
+        let (shift, control) =
+            held.unwrap_or_else(|| (key_pressed(VK_SHIFT), key_pressed(VK_CONTROL)));
         let mut mods = ModifiersState::empty();
-        mods.set(ModifiersState::SHIFT, key_pressed(VK_SHIFT));
-        mods.set(ModifiersState::CONTROL, key_pressed(VK_CONTROL) && !filter_out_altgr);
+        mods.set(ModifiersState::SHIFT, shift);
+        mods.set(ModifiersState::CONTROL, control && !filter_out_altgr);
         mods.set(ModifiersState::ALT, key_pressed(VK_MENU) && !filter_out_altgr);
         mods.set(ModifiersState::SUPER, key_pressed(VK_LWIN) || key_pressed(VK_RWIN));
         mods

@@ -382,3 +382,16 @@ window that never took focus) the app heard every pointer move on the
 screen, in or out of its windows. A choice other than `WhenFocused`, which
 needs the focus, is now selected when it is made
 (`platform_impl/linux/x11/mod.rs`). zgx asks for none.
+
+## Windows: a mouse message's Shift and Control are the message's
+
+Every mouse message's `wParam` says whether Shift and Control were down when
+it was made (`MK_SHIFT`, `MK_CONTROL`), but winit read them from the
+thread's key state (`GetKeyState`) instead. The keyboard updates only the
+focused thread's, so over a window behind another (Windows sends the wheel to
+the window under the pointer) Shift with the wheel read as no Shift, and zgx
+scrolled down where browsers scroll across. Moves, buttons and both wheels now
+take Shift and Control from `wParam` (`update_mouse_modifiers` in
+`platform_impl/windows/event_loop.rs`; Alt and the Windows key are not in it,
+and are read as before). `a_wheel_with_shift_down_has_shift_without_focus`
+posts a wheel with `MK_SHIFT` to a hidden window.

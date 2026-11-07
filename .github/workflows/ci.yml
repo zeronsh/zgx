@@ -495,6 +495,8 @@ jobs:
       - run: cargo test -p winit --lib --locked occlusion_area
       - run: cargo test -p winit --lib --locked hwnd_dpi_keeps_no_gdi_handles
       - run: cargo test -p winit --lib --locked a_deadline_already_armed_isnt_armed_again
+      # A mouse message's Shift and Control, to a window without focus.
+      - run: cargo test -p winit --lib --locked a_wheel_with_shift_down_has_shift_without_focus
       # The watchdog's budgets and memory limits, whose timing is each OS's,
       # one at a time: run together on the runner's three cores, five busy
       # tests kept the watchdog's thread off a core 130 ms (a runaway
