@@ -105,8 +105,11 @@ The extension of `<out>` picks the format: `.mp4` is H.264, `.mov` ProRes 4444, 
 | `--motion-blur N`, `--shutter F` | N samples blended per frame, spanning F of its time (0.5) |
 | `--mute` | leave the sound out |
 | `--concurrency N`, `-j N` | render N chunks of frames at once, each on a thread of its own with its own virtual clock, stage and encoder (the CPUs' count, at most 4, by default). A chunk moves to its first frame without drawing the ones before it, so it draws what a render of the whole draws there. PNGs number as one sequence, and an encoded video's chunks are joined without encoding them again, with the sound added once. A GIF renders in one chunk |
+| `--every-nth-frame N` | keep one frame in N, the file's rate divided by N (a light GIF) |
 
 On an Apple M-series Mac shared with other work, the showcase with 4-sample motion blur renders in 77–80 s in one chunk and 30–31 s in four, about 2.6× faster; without blur, encoding bounds it at about 1.3–1.6×. In an earlier, quieter run, the showcase (1920×1080, 60 fps, 1,980 frames, shaders, blur and glass in most of them) renders in 43 s with 4-sample motion blur, about 46 frames a second. At half scale without blur it renders over 500 frames a second, encoding included. Those are single runs.
+
+`zgx video still <dir> [composition] <frame> out.png [--thumbnail WIDTH]` writes one frame, as a render of the whole would draw it, with nothing encoded: a poster, or with `--thumbnail` one no wider than `WIDTH` pixels. In Rust, `zgx_video::render_still(&options, frame, max_width)` returns it as a `Still` (`width`, `height` and straight RGBA `pixels`), and `Still::write_png` saves it.
 
 ## Studio
 
