@@ -100,6 +100,7 @@ pub mod memory;
 pub mod decoration;
 pub mod glass;
 pub mod shader_drive;
+pub mod symbol;
 
 pub mod svg;
 

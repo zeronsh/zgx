@@ -4142,6 +4142,7 @@ impl ScriptHost {
         let lazy = lazy::Lazy::default();
         lazy.ui(&["path", "linear"], canvas::install);
         lazy.ui(&["glass"], node::install_glass);
+        lazy.ui(&["symbol"], node::install_symbol);
         #[cfg(feature = "scene3d")]
         lazy.ui(
             &["scene3d", "mesh", "light", "group", "model"],

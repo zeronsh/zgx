@@ -28,6 +28,8 @@ mod panic_recovery;
 mod reactive_dependencies;
 #[path = "../shader_drive.rs"]
 mod shader_drive;
+#[path = "../symbol.rs"]
+mod symbol;
 #[path = "../widgets.rs"]
 mod widgets;
 
