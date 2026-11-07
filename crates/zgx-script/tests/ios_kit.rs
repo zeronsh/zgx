@@ -778,3 +778,76 @@ fn a_pages_bar_and_titles_sit_where_uikits_do_at_each_dynamic_type_size() {
         );
     }
 }
+
+#[test]
+fn an_open_sheet_is_read_alone_and_voiceovers_scrub_closes_it() {
+    let mut h = Harness::inline(
+        r#"local open = ui.state("open", true)
+        return ui.div { w = "100%", h = "100%",
+            ui.text { id = "shown", function() return if open:get() then "open" else "closed" end },
+            ui.ios.sheet { open = open, build = function() return ui.text { "Inside" } end },
+        }"#,
+    );
+    h.ui.set_assistive_technology(true);
+    h.frames(2);
+    h.advance_ms(800.);
+    assert_eq!(h.error(), None);
+    // The sheet is modal, as UIKit's is: assistive technology reads it alone.
+    let dialogs = with_role(&mut h, Role::Dialog);
+    assert_eq!(dialogs.len(), 1, "{dialogs:?}");
+    assert!(dialogs[0].modal, "{:?}", dialogs[0]);
+    // Its dimming is no button to find: UIKit's dimming view isn't read.
+    assert!(
+        with_role(&mut h, Role::Button)
+            .iter()
+            .all(|n| n.label != "Dismiss"),
+        "the dimming is read"
+    );
+    // The two-finger scrub closes it.
+    assert!(zgx::native_control::escape(), "the scrub is taken");
+    h.advance_ms(800.);
+    assert_eq!(h.text("shown"), "closed");
+    // Closed, a scrub is no longer its to take.
+    assert!(!zgx::native_control::escape());
+}
+
+#[test]
+fn a_pushed_pages_back_button_is_read_first_and_named_for_the_page_before() {
+    let mut h = Harness::inline(
+        r#"local ios = ui.ios
+        return ios.stack {
+            root = function(nav)
+                return ios.page {
+                    title = "Settings",
+                    nav = nav,
+                    ios.section {
+                        ios.row { title = "Wi-Fi", on_click = function()
+                            nav.push(function(inner)
+                                return ios.page { title = "Wi-Fi", nav = inner, ios.section { ios.row { title = "Join" } } }
+                            end)
+                        end },
+                    },
+                }
+            end,
+        }"#,
+    );
+    h.ui.scene.borrow_mut().resize(402., 874.);
+    h.ui.set_assistive_technology(true);
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    h.click(r#"role:button "Wi-Fi""#);
+    h.advance_ms(1000.);
+    assert_eq!(h.error(), None);
+    // As UIKit's: the bar's back button first, named for the page it goes back
+    // to, then the page.
+    let buttons: Vec<String> = with_role(&mut h, Role::Button)
+        .into_iter()
+        .map(|n| n.label)
+        .collect();
+    assert_eq!(
+        buttons.first().map(String::as_str),
+        Some("Settings"),
+        "{buttons:?}"
+    );
+    assert!(buttons.iter().any(|l| l == "Join"), "{buttons:?}");
+}

@@ -4449,6 +4449,9 @@ fn styled(
         if a11y.hidden {
             view = view.accessible_hidden();
         }
+        if a11y.modal {
+            view = view.accessible_modal();
+        }
         if let Some(axis) = a11y.focus_group {
             view = view.focus_group(axis);
         }

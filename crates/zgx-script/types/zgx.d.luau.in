@@ -2208,6 +2208,9 @@ export type NodeProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: boolean?,
+	-- While it shows, assistive technology reads it alone, not what lies behind
+	-- it (aria-modal): a sheet or dialog the app builds itself.
+	aria_modal: boolean?,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"

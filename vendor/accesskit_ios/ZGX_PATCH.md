@@ -18,6 +18,19 @@ technology beside what UIKit offers for the same screen (`ZGX_IOS_AX_DUMP=1`).
    macOS's did. `isAccessibilityElement` builds nothing now, and a read is a
    lease of 30 seconds, checked at each update (`READ_LEASE`). Tested on a
    simulator (`adapter.rs`, `shutdown_tests`).
+4. **A heading holding only its text is one element** (`filters.rs`). A zgx
+   text with a style that changes (a function, a tween) holds its text in a
+   node of its own: the heading became a container and VoiceOver focused the
+   text, static text with no header trait, out of the headings rotor.
+5. **Taking focus alone makes no leaf of what holds controls** (`filters.rs`,
+   `NodeWrapper::has_own_action`). zgx gives a dialog, a menu, a grid and a
+   list item the Focus action, for a keyboard; any action made a node one
+   element, so a sheet (a dialog) hid its grabber and content inside one empty
+   element. A list item holding only its text is still one element.
+6. **A modal node showing is all that is read** (`filters::modal_root`, the
+   view's `accessibilityElements`), as UIKit reads only a view that is
+   `accessibilityViewIsModal`: with a sheet up, VoiceOver read the page and
+   tabs behind it too.
 
 **Custom actions.** `set_custom_actions` gives each node's `accessibilityCustomActions`, asked for only as VoiceOver reaches it (`custom_actions.rs`, `node.rs`).
 

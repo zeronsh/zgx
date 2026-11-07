@@ -103,8 +103,13 @@ impl NodeWrapper<'_> {
     }
 
     pub(crate) fn has_non_scroll_action(&self) -> bool {
+        self.0.supports_action(Action::Focus, &filter) || self.has_own_action()
+    }
+
+    // zgx patch: what it does besides taking focus, which a dialog, a menu, a
+    // grid or a list item does only for a keyboard (`filters.rs`).
+    pub(crate) fn has_own_action(&self) -> bool {
         self.0.supports_action(Action::Click, &filter)
-            || self.0.supports_action(Action::Focus, &filter)
             || self.0.supports_action(Action::Increment, &filter)
             || self.0.supports_action(Action::Decrement, &filter)
             || self.0.supports_action(Action::Expand, &filter)

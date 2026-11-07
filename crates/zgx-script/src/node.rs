@@ -42,7 +42,8 @@ pub(crate) struct Node {
     /// A container's `label`: the name assistive technology reads for it
     /// (a switch, an icon button). Widgets read their own `label`.
     pub label: Option<Rc<str>>,
-    /// `role`, `heading`, `selected`, `live`, `description`, `aria_hidden`:
+    /// `role`, `heading`, `selected`, `live`, `description`, `aria_hidden`,
+    /// `aria_modal`:
     /// what assistive technology hears beyond the name, boxed (most nodes
     /// say none of it).
     pub a11y: Option<Box<A11y>>,
@@ -3087,6 +3088,8 @@ pub(crate) struct A11y {
     /// A `description` given as a state or function.
     pub description_of: Option<Source>,
     pub hidden: bool,
+    /// `aria_modal = true`: while it shows, nothing else is read.
+    pub modal: bool,
     pub focus_group: Option<zgx::input::FocusGroup>,
     /// A `label` given as a state or function.
     pub label: Option<Source>,
@@ -4382,6 +4385,9 @@ fn fill_from(
             },
             "aria_hidden" => {
                 node.a11y.get_or_insert_default().hidden = lua.unpack(value)?;
+            }
+            "aria_modal" => {
+                node.a11y.get_or_insert_default().modal = lua.unpack(value)?;
             }
             "focus_group" => {
                 let axis: String = lua.unpack(value)?;

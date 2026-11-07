@@ -480,6 +480,14 @@ function ios.composer(props)
 				ui.gesture_log(string.format("COMPOSER %.1f w %.1f h %.1f", ui.now(), size.w, size.h))
 			end or nil,
 			opacity = if still then ui.tween(fade, { duration = 120 }) else nil,
+			-- Add first, as VoiceOver reads left to right: it sits before the text.
+			button {
+				left = 4,
+				w = 32,
+				label = "Add",
+				on_click = props.on_plus,
+				symbol = ui.symbol { name = "plus", size = 18, weight = 500, color = "$text.secondary" },
+			},
 			-- The text: beside the buttons at rest, above them open.
 			ui.div {
 				ml = channel(focused, 38, 14),
@@ -556,13 +564,6 @@ function ios.composer(props)
 			-- The buttons' row: nothing at rest, where they sit beside the text.
 			ui.div { h = channel(focused, 0, ROW - 9) },
 			button {
-				left = 4,
-				w = 32,
-				label = "Add",
-				on_click = props.on_plus,
-				symbol = ui.symbol { name = "plus", size = 18, weight = 500, color = "$text.secondary" },
-			},
-			button {
 				right = 4,
 				w = 36,
 				label = "Send",
@@ -626,6 +627,10 @@ end
 -- the stack, for the back button.
 function ios.page(props)
 	declare_titles()
+	-- Its stack's back button is named for it.
+	if props.nav and props.nav.titled then
+		props.nav.titled(props.title)
+	end
 	local safe = ui.window.safe_area
 	local offset = ui.use_state(0)
 	local children = {}
@@ -773,6 +778,20 @@ ios.stack = ui.component(function(props)
 	local nav = {}
 	function nav.depth()
 		return #pages:get()
+	end
+	-- Each page's title, by its id, as its `ios.page` says it: what the back
+	-- button is named for, as UIKit's is named for the page it goes back to.
+	local titles = {}
+	local titles_seen = ui.use_state(0)
+	local function nav_of(id)
+		return setmetatable({
+			titled = function(title)
+				if titles[id] ~= title then
+					titles[id] = title
+					titles_seen:set(titles_seen:get() + 1)
+				end
+			end,
+		}, { __index = nav })
 	end
 	-- A spring each: one taking over from the other would leave that one's page
 	-- stopped where it was, with nothing to move it on.
@@ -1057,6 +1076,47 @@ ios.stack = ui.component(function(props)
 		on_resize = function(size)
 			width = size.w
 		end,
+		-- One back button over the pages, as a navigation controller's: its glass
+		-- shows from a push and goes when the pop is done; its chevron fades. First
+		-- in the tree, as VoiceOver reads a navigation bar before the page, and
+		-- raised over the pages that follow it.
+		ui.glass {
+			absolute = true,
+			z = 1,
+			left = 16,
+			top = function()
+				return ui.window.safe_area:get().top + 3
+			end,
+			w = 44,
+			h = 44,
+			radius = 22,
+			interactive = true,
+			hidden = function()
+				return #pages:get() < 2
+			end,
+			ui.button {
+				w = 44,
+				h = 44,
+				p = 0,
+				rounded = 22,
+				bg = "#00000000",
+				hover = {},
+				active = {},
+				-- Named for the page it goes back to, as UIKit's back button is.
+				label = function()
+					titles_seen:get()
+					local list = pages:get()
+					return titles[list[#list - 1]] or "Back"
+				end,
+				items = "center",
+				justify = "center",
+				opacity = chevron,
+				on_click = function()
+					nav.pop()
+				end,
+				ui.symbol { name = "chevron.backward", size = 18, weight = 600, color = "$text.primary" },
+			},
+		},
 		ui.each(pages, function(id, index)
 			-- What lies under the top page moves as a navigation controller's does.
 			local function page_x(at)
@@ -1102,7 +1162,7 @@ ios.stack = ui.component(function(props)
 						or (index < depth and drag:get() == 0 and entering:get() == 0 and not crossfading:get())
 				end,
 				pointer_events = on_top,
-				Page { build = builders[id], nav = nav },
+				Page { build = builders[id], nav = nav_of(id) },
 				-- What a navigation controller lays over the page behind, and the
 				-- soft edge of the page coming over it (measured beside one:
 				-- black at 10%, gone as the top page goes; a 9 point edge).
@@ -1145,39 +1205,6 @@ ios.stack = ui.component(function(props)
 				},
 			}
 		end, { display = "contents" }),
-		-- One back button over the pages, as a navigation controller's: its glass
-		-- shows from a push and goes when the pop is done; its chevron fades.
-		ui.glass {
-			absolute = true,
-			left = 16,
-			top = function()
-				return ui.window.safe_area:get().top + 3
-			end,
-			w = 44,
-			h = 44,
-			radius = 22,
-			interactive = true,
-			hidden = function()
-				return #pages:get() < 2
-			end,
-			ui.button {
-				w = 44,
-				h = 44,
-				p = 0,
-				rounded = 22,
-				bg = "#00000000",
-				hover = {},
-				active = {},
-				label = "Back",
-				items = "center",
-				justify = "center",
-				opacity = chevron,
-				on_click = function()
-					nav.pop()
-				end,
-				ui.symbol { name = "chevron.backward", size = 18, weight = 600, color = "$text.primary" },
-			},
-		},
 	}
 end)
 
@@ -1268,6 +1295,15 @@ ios.sheet = ui.component(function(props)
 			open:set(false)
 		end, if type(speed) == "number" then speed else 0)
 	end
+	-- VoiceOver's two-finger scrub closes it, as it does UIKit's sheet: its
+	-- dimming isn't something to find and tap.
+	ui.on_escape(function()
+		if not open:get() then
+			return false
+		end
+		dismiss()
+		return true
+	end)
 	return ui.show(
 		function()
 			return open:get() or rise:get() > 0
@@ -1294,6 +1330,8 @@ ios.sheet = ui.component(function(props)
 				hover = {},
 				active = {},
 				label = "Dismiss",
+				-- UIKit's dimming view isn't read: the scrub above dismisses.
+				aria_hidden = true,
 				bg = "#000000",
 				opacity = function()
 					return SHEET_DIM * clamp(rise:get() / target(1), 0, 1)
@@ -1321,6 +1359,8 @@ ios.sheet = ui.component(function(props)
 				end,
 				corners = corners,
 				role = "dialog",
+				-- Read alone while it shows, as UIKit's sheet is.
+				aria_modal = true,
 				overflow = "hidden",
 				-- iOS recognizes the drag, anywhere on the sheet, and tells every
 				-- ending. Up is more of the sheet, so the speeds are negated.

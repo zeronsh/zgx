@@ -489,6 +489,16 @@ impl Adapter {
         let state = tree.state();
         let node = state.root();
 
+        // zgx patch: a modal node showing is all that is read (`modal_root`).
+        if let Some(modal) = crate::filters::modal_root(&node) {
+            let only: Vec<Retained<NSObject>> = context
+                .get_or_create_platform_node(modal.id())
+                .map(PlatformNode::into_ns_object)
+                .into_iter()
+                .collect();
+            return Retained::autorelease_return(NSArray::from_vec(only));
+        }
+
         let platform_nodes = if filter(&node) == FilterResult::Include {
             context
                 .get_or_create_platform_node(node.id())
