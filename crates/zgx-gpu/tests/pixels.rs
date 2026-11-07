@@ -789,6 +789,48 @@ fn image_count_budget_leaves_images_out_and_recovers_after_removal() {
     assert_eq!(gpu.readback().unwrap()[..4], [255, 0, 0, 255]);
 }
 
+/// At the count of images a window may hold, those not drawn this frame give
+/// way: a page of small pictures scrolled through leaves none out.
+#[test]
+fn image_count_budget_lets_images_not_drawn_go_first() {
+    let _gpu_fixture = gpu_fixture();
+    let mut gpu = GpuRenderer::new(8, 8).unwrap();
+    let mut scene = Scene::new(8., 8.);
+    let stack = scene.append(
+        scene.root(),
+        NodeKind::Container(Layout::Overlay),
+        fixed(8., 8.),
+    );
+    let image = || {
+        let image = zgx::image::ImageData::new(1, 1, vec![255, 0, 0, 255]).unwrap();
+        NodeKind::Image(std::sync::Arc::new(image))
+    };
+    let first: Vec<_> = (0..16_384)
+        .map(|_| scene.append(stack, image(), fixed(1., 1.)))
+        .collect();
+    let d = scene.flush().damage;
+    gpu.render(&scene, &d).unwrap();
+    assert_eq!(gpu.debug_cache_stats().image_textures, 16_384);
+    // Still in the scene, far out of view, and a new one comes.
+    scene.set_style(
+        stack,
+        Style {
+            margin: Insets {
+                top: -100_000.,
+                ..Default::default()
+            },
+            ..fixed(8., 8.)
+        },
+    );
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let later = scene.append(scene.root(), image(), fixed(8., 8.));
+    let d = scene.flush().damage;
+    gpu.render(&scene, &d).unwrap();
+    assert_eq!(gpu.take_issues(), Vec::<String>::new());
+    assert_eq!(gpu.readback().unwrap()[..4], [255, 0, 0, 255]);
+    drop((first, later));
+}
+
 #[test]
 fn blur_inside_isolated_layer_rebuilds_on_backdrop_mutation() {
     let _gpu_fixture = gpu_fixture();
