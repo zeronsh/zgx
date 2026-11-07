@@ -3452,9 +3452,7 @@ pub(crate) fn mount(
 ) -> NodeId {
     let depth = ui.mount_depth();
     if crate::stack_low(depth) {
-        return stacker::grow(crate::STACK_SEGMENT, || {
-            mount(ui, parent, view, environment)
-        });
+        return crate::on_segment(|| mount(ui, parent, view, environment));
     }
     // Extract closures while retaining the root refinements on their wrapper.
     let kind = std::mem::replace(&mut view.kind, Kind::Container(Layout::Column));
