@@ -70,13 +70,24 @@ local function set_prop(key: string, value: any)
 		ui.invoke("studio.open", { id = comp.id, props = props_now(), frame = playhead:peek() })
 	end
 end
+local renders_asked = ui.state("renders_asked", 0)
+-- The renders asked for, the latest first.
+local renders: any = ui.computed(function(): any
+	local list = table.clone(studio:get().renders or {})
+	table.sort(list, function(a: any, b: any)
+		return a.number > b.number
+	end)
+	return list
+end)
 local function render_now()
 	local comp = open:peek()
 	if comp then
+		-- Each render a file of its own: the queue may hold several of one.
+		renders_asked:add(1)
 		ui.call("studio.render", {
 			id = comp.id,
 			props = props_now(),
-			output = `{studio:peek().path or "."}/out/{comp.id}.mp4`,
+			output = `{studio:peek().path or "."}/out/{comp.id}-{renders_asked:peek()}.mp4`,
 		})
 	end
 end
@@ -320,14 +331,7 @@ local function props_panel(): any
 		ui.button {
 			id = "render",
 			label = "Render",
-			on_click = function()
-				local job = studio:peek().render
-				if job and job.state == "running" then
-					ui.invoke("studio.cancel", nil)
-				else
-					render_now()
-				end
-			end,
+			on_click = render_now,
 			h = 38,
 			rounded = 9,
 			items = "center",
@@ -338,56 +342,119 @@ local function props_panel(): any
 			weight = 600,
 			text_size = 13,
 			function()
-				local job = field("render", nil)
-				return if job and job.state == "running" then "Stop" else "Render MP4"
+				local busy = false
+				for _, job in field("renders", {}) do
+					busy = busy or job.state == "running" or job.state == "queued"
+				end
+				return if busy then "Add to queue" else "Render MP4"
 			end,
 		},
-		ui.show(
-			function()
-				return field("render", nil) ~= nil
-			end,
-			ui.column {
-				gap = 6,
-				ui.div {
-					h = 4,
-					rounded = 2,
-					bg = palette.raised,
-					overflow = "hidden",
-					ui.div {
-						h = 4,
-						rounded = 2,
-						bg = function()
-							local job = field("render", {})
-							return if job.state == "failed" then palette.bad else palette.good
-						end,
-						w = function()
-							local job = field("render", {})
-							if job.state == "done" then
-								return "100%"
-							end
-							return `{math.floor((job.done or 0) / math.max(job.total or 1, 1) * 100)}%`
-						end,
+		ui.column {
+			id = "renders",
+			gap = 8,
+			ui.each(renders, function(job: any, _i: number, item: any)
+				local function now(): any
+					return item:get()
+				end
+				return ui.column {
+					gap = 4,
+					ui.row {
+						gap = 6,
+						items = "center",
+						ui.text {
+							function()
+								local j = now()
+								return `#{j.number} {j.id or ""}`
+							end,
+							text_size = 12,
+							weight = 600,
+							color = palette.text,
+							grow = 1,
+							truncate = true,
+						},
+						ui.text {
+							function()
+								local j = now()
+								if j.state == "running" then
+									return `{j.done}/{j.total}`
+								end
+								return j.state
+							end,
+							text_size = 11,
+							color = function()
+								local state = now().state
+								return if state == "failed"
+									then palette.bad
+									elseif state == "done" then palette.good
+									else palette.dim
+							end,
+						},
+						ui.show(
+							function()
+								local state = now().state
+								return state == "running" or state == "queued"
+							end,
+							ui.button {
+								label = `Stop render {job.number}`,
+								on_click = function()
+									ui.invoke("studio.cancel", now().number)
+								end,
+								w = 20,
+								h = 20,
+								rounded = 5,
+								items = "center",
+								justify = "center",
+								bg = palette.raised,
+								hover = { bg = palette.line },
+								color = palette.dim,
+								text_size = 11,
+								"✕",
+							}
+						),
 					},
-				},
-				ui.text {
-					function()
-						local job = field("render", {})
-						if job.state == "running" then
-							return `Frame {job.done or 0} of {job.total or 0}`
-						elseif job.state == "done" then
-							return `{job.said}\n{job.output}`
-						elseif job.state == "failed" then
-							return job.said
-						end
-						return "Stopped"
-					end,
-					text_size = 11,
-					wrap = true,
-					color = palette.dim,
-					selectable = true,
-				},
-			}
-		),
+					ui.div {
+						h = 3,
+						rounded = 2,
+						bg = palette.raised,
+						overflow = "hidden",
+						ui.div {
+							h = 3,
+							rounded = 2,
+							bg = function()
+								return if now().state == "failed" then palette.bad else palette.good
+							end,
+							w = function()
+								local j = now()
+								if j.state == "done" then
+									return "100%"
+								end
+								return `{math.floor((j.done or 0) / math.max(j.total or 1, 1) * 100)}%`
+							end,
+						},
+					},
+					ui.show(
+						function()
+							local state = now().state
+							return state == "done" or state == "failed"
+						end,
+						ui.text {
+							function()
+								local j = now()
+								return if j.state == "done" then `{j.said}\n{j.output}` else j.said
+							end,
+							text_size = 11,
+							wrap = true,
+							color = palette.dim,
+							selectable = true,
+						}
+					),
+				}
+			end, {
+				key = function(job: any)
+					return job.number
+				end,
+			}),
+		},
 	}
 end
 
