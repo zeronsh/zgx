@@ -2393,6 +2393,9 @@ export type NodeProps = {
 	live: ("polite" | "assertive" | "off")?,
 	-- Read after its name, as a hint (`aria-description`).
 	description: string?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Reactive<string>?,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: (string | Readable<string?> | (() -> string?))?,
@@ -2799,6 +2802,9 @@ export type Props = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -3153,6 +3159,7 @@ export type Props_checked = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_expanded = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_live = ("polite" | "assertive" | "off")?
 export type Props_description = string?
+export type Props_value_text = Reactive<string>?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
 export type Props_aria_hidden = boolean?
 export type Props_focus_group = ("vertical" | "horizontal" | "both")?
@@ -3448,6 +3455,9 @@ export type ContainerProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -3645,9 +3655,6 @@ export type ContainerProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 }
@@ -3881,6 +3888,9 @@ export type ScrollProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -4078,9 +4088,6 @@ export type ScrollProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- The scroll position in points, both ways.
@@ -4320,6 +4327,9 @@ export type TextProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -4725,6 +4735,9 @@ export type MarkdownViewProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -5200,6 +5213,9 @@ export type RichProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -5599,6 +5615,9 @@ export type ImageProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -6015,6 +6034,9 @@ export type SvgProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -6519,6 +6541,9 @@ export type Scene3DProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -6941,6 +6966,9 @@ export type CanvasProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -7372,6 +7400,9 @@ export type CheckboxProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -7781,6 +7812,9 @@ export type InputProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -8291,6 +8325,9 @@ export type ProgressProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -9109,6 +9146,9 @@ export type SegmentedProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -9520,6 +9560,9 @@ export type StepperProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -9932,6 +9975,9 @@ export type DisclosureProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -10129,9 +10175,6 @@ export type DisclosureProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	open: State<boolean>,
@@ -10358,6 +10401,9 @@ export type AccordionProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -10755,6 +10801,9 @@ export type SectionProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -10952,9 +11001,6 @@ export type SectionProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	id: any,
@@ -11180,6 +11226,9 @@ export type SeparatorProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -11585,6 +11634,9 @@ export type TabsProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -12012,6 +12064,9 @@ export type TreeProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -12435,6 +12490,9 @@ export type DataGridProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -12854,6 +12912,9 @@ export type CalendarProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -13266,6 +13327,9 @@ export type DatePickerProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -13676,6 +13740,9 @@ export type TimeFieldProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -14085,6 +14152,9 @@ export type ComboboxProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -14502,6 +14572,9 @@ export type CommandPaletteProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -14907,6 +14980,9 @@ export type SelectProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -15319,6 +15395,9 @@ export type SplitProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -15514,9 +15593,6 @@ export type SplitProps = {
 	-- focusable.
 	value: (number | State<number> | () -> number)?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- The first pane's size in points, both ways: the divider writes it as
@@ -15790,6 +15866,9 @@ export type ListProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -16284,6 +16363,9 @@ export type LayerProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -16477,9 +16559,6 @@ export type LayerProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	open: State<boolean>?,
@@ -16706,6 +16785,9 @@ export type ModalProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -16899,9 +16981,6 @@ export type ModalProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- A state, written back as it closes; or, controlled, a function saying
@@ -17146,6 +17225,9 @@ export type PopoverProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -17339,9 +17421,6 @@ export type PopoverProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- A state, written back as it closes; or, controlled, a function saying
@@ -17592,6 +17671,9 @@ export type MenuItemProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -18000,6 +18082,9 @@ export type SubmenuProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -18193,9 +18278,6 @@ export type SubmenuProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- A state, written back as it closes; or, controlled, a function saying
@@ -18428,6 +18510,9 @@ export type WebViewProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -18853,6 +18938,9 @@ export type TerminalProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -19253,6 +19341,9 @@ export type SlotProps = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -19704,6 +19795,9 @@ export type EachOptions = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -20119,6 +20213,9 @@ export type PresenceOptions = {
 	live: Props_live,
 	-- Read after its name, as a hint (`aria-description`).
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,

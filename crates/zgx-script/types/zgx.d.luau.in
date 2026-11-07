@@ -2193,6 +2193,9 @@ export type NodeProps = {
 	live: ("polite" | "assertive" | "off")?,
 	-- Read after its name, as a hint (`aria-description`).
 	description: string?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Reactive<string>?,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: (string | Readable<string?> | (() -> string?))?,
@@ -2403,9 +2406,6 @@ export type ContainerProps = Merge<Props, {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 }>

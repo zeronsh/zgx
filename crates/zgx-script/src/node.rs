@@ -4286,6 +4286,13 @@ fn fill_from(
                 let axis: String = lua.unpack(value)?;
                 node.a11y.get_or_insert_default().focus_group = Some(focus_group(&axis)?);
             }
+            // What it reads as besides its name (`aria-valuetext`), any
+            // element's: read here, among the keys a table has, so elements
+            // without one never look it up. A slider's range reads it again.
+            "value_text" => {
+                let range = (node.a11y.get_or_insert_default().range).get_or_insert_default();
+                range.value_text = Some(source(lua, Ty::Str, "value_text", value)?);
+            }
             name if WIDGET_FIELDS.contains(&name) => {}
             name => {
                 let Some(prop) = Prop::parse(name) else {
@@ -4807,10 +4814,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     matches!(a11y.role, Some(Role::Slider | Role::SpinButton))
                 }) {
                     read_range(lua, &mut node, table)?;
-                } else {
-                    // What it reads as besides its name (`aria-valuetext`):
-                    // a row's detail, as a Settings cell's value.
-                    read_value_text(lua, &mut node, table)?;
                 }
             }
             node_ud(lua, node)
@@ -4830,7 +4833,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             if let Some(table) = &table {
                 button_look(lua, table)?;
                 fill_from(lua, &mut node, table, None, lint)?;
-                read_value_text(lua, &mut node, table)?;
             }
             node_ud(lua, node)
         })?,
