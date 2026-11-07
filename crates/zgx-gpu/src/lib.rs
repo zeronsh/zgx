@@ -1588,6 +1588,8 @@ fn within(outer: Rect, inner: Rect) -> bool {
         && inner.y + inner.height <= outer.y + outer.height
 }
 /// A layer's repaint, counted in the frame's `stats`.
+/// The plain upload path's vertex buffer as made, and as given back at rest.
+const VERTICES_AT_REST: usize = 4096;
 fn add_layer_stats(stats: &mut GpuStats, result: &GpuStats) {
     stats.draw_calls += result.draw_calls;
     stats.render_passes += result.render_passes;
@@ -4517,7 +4519,7 @@ impl GpuRenderer {
         let blit_bind = blit.as_ref().map(|p| blit_group(&device, p, &view));
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("retained frame vertices"),
-            size: 4096,
+            size: VERTICES_AT_REST as u64,
             usage: wgpu::BufferUsages::VERTEX
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::STORAGE,
@@ -4649,7 +4651,7 @@ impl GpuRenderer {
             atlas_epoch: 1,
             frame: 0,
             vertices,
-            vertex_capacity: 4096,
+            vertex_capacity: VERTICES_AT_REST,
             frame_quads: Vec::new(),
             frame_points: Vec::new(),
             kept: None,
@@ -13698,8 +13700,30 @@ impl GpuRenderer {
                 }
             }
         }
+        // Vertex memory, from the largest frame drawn (a long list scrolled,
+        // a big page): back to a small frame's. The ring drops the buffers
+        // the GPU is done with (their mapping callbacks run first); the
+        // plain path's buffer goes back to its first size, and its staging
+        // belt's chunks go with the belt. The next frame makes what it needs.
         if let Some(mapped) = &mut self.mapped {
-            mapped.get_mut().trim();
+            let _ = self.device.poll(wgpu::PollType::Poll);
+            let ring = mapped.get_mut();
+            ring.trim();
+            self.vertex_capacity = ring.bytes();
+        } else if self.vertex_capacity > VERTICES_AT_REST {
+            self.vertex_capacity = VERTICES_AT_REST;
+            self.vertices = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("retained frame vertices"),
+                size: VERTICES_AT_REST as u64,
+                usage: wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            self.belt = RefCell::new(wgpu::util::StagingBelt::new(
+                self.device.clone(),
+                256 * 1024,
+            ));
         }
         #[cfg(d3d11)]
         if let Some(state) = &mut self.d3d11 {
@@ -18216,5 +18240,76 @@ mod thread_safety_tests {
         send_sync::<crate::canvas::HeadlessCanvases>();
         send_sync::<crate::svg::SvgCache>();
         send_sync::<crate::viewport::ViewportFrame<'static>>();
+    }
+}
+
+#[cfg(test)]
+mod rest_tests {
+    use super::*;
+    use zgx::scene::{Color, Layout, Style, Transform};
+
+    fn fixed(width: f32, height: f32) -> Style {
+        Style {
+            width: Some(width),
+            height: Some(height),
+            ..Default::default()
+        }
+    }
+    /// A scene of `count` small boxes: one frame of that many quads.
+    fn boxes(count: usize) -> Scene {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        for index in 0..count {
+            let node = scene.append(
+                scene.root(),
+                NodeKind::Rect(Color(40, (index % 200) as u8, 90, 255)),
+                fixed(3., 3.),
+            );
+            let (x, y) = ((index % 130) as f32 * 3., (index / 130 % 100) as f32 * 3.);
+            scene.set_transform(node, Transform { x, y });
+        }
+        scene
+    }
+    fn draw(gpu: &mut GpuRenderer, scene: &mut Scene) {
+        let report = scene.flush();
+        gpu.render(scene, &report.damage).unwrap();
+    }
+
+    /// A window that drew one big frame (a long list scrolled, a big page)
+    /// and went back to a small one gives its vertex memory back at rest, as
+    /// its other caches: on either upload path.
+    #[test]
+    fn vertex_memory_returns_to_a_small_frames_at_rest() {
+        for ring in [true, false] {
+            let mut gpu = GpuRenderer::new(400, 300).unwrap();
+            if !ring {
+                gpu.mapped = None;
+            }
+            let mut small = boxes(20);
+            draw(&mut gpu, &mut small);
+            gpu.trim();
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            gpu.trim();
+            let baseline = gpu.debug_cache_stats().vertex_buffer_bytes;
+            let mut big = boxes(40_000);
+            draw(&mut gpu, &mut big);
+            let peak = gpu.debug_cache_stats().vertex_buffer_bytes;
+            assert!(
+                peak > 4 * 1024 * 1024,
+                "ring {ring}: {peak} bytes for the big frame"
+            );
+            // Back to the small page, then at rest.
+            let mut small = boxes(20);
+            draw(&mut gpu, &mut small);
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            gpu.trim();
+            let rest = gpu.debug_cache_stats().vertex_buffer_bytes;
+            assert!(
+                rest <= baseline.max(4096),
+                "ring {ring}: {rest} bytes at rest, {baseline} before"
+            );
+            // And the next frame draws.
+            draw(&mut gpu, &mut small);
+        }
     }
 }
