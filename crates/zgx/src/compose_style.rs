@@ -1963,6 +1963,9 @@ fn apply_resolved(
         if let Some(uniforms) = cold.and_then(|cold| cold.layer_uniforms.as_ref()) {
             scene.set_layer_uniforms(node, *uniforms);
         }
+        if let Some((bleed, reach)) = cold.and_then(|cold| cold.layer_extent) {
+            scene.set_layer_extent(node, bleed, reach);
+        }
         if let Some(mode) = rare.blend {
             scene.set_blend(node, mode);
         }

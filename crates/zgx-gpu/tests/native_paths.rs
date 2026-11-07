@@ -280,6 +280,7 @@ fn run(name: &str, scene: Scene, scale: f32, ticks: u32, resize: bool) -> (Vec<S
     let host = objc2_quartz_core::CALayer::new();
     let (w, h) = pixels(size);
     let mut layer = GpuRenderer::debug_for_layer(host.clone(), w, h).unwrap();
+    layer.debug_wait_for_shaders();
     layer.set_scale_factor(scale);
     let mut offscreen = GpuRenderer::new(w, h).unwrap();
     offscreen.set_scale_factor(scale);

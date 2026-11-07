@@ -4,7 +4,7 @@
 //   co = (1 - ab) * cs·as + (1 - as) * cb·ab + as·ab * B(cb, cs), ao = as + ab - as·ab
 // Appended to draw.wgsl; a blended layer's quad carries its mode in
 // `mask.z` and reads the backdrop, a copy of the target under it, by pixel.
-@group(2) @binding(0) var zgx_backdrop:texture_2d<f32>;
+@group(2) @binding(0) var zgx_behind:texture_2d<f32>;
 
 fn zgx_lum(c:vec3<f32>)->f32 { return dot(c,vec3(0.3,0.59,0.11)); }
 fn zgx_clip_color(c:vec3<f32>)->vec3<f32> {
@@ -69,5 +69,5 @@ fn zgx_blend(s:vec4<f32>, d:vec4<f32>, mode:u32)->vec4<f32> {
 }
 // The backdrop's pixel under this fragment.
 fn zgx_beneath(position:vec4<f32>)->vec4<f32> {
- return textureLoad(zgx_backdrop,vec2<i32>(position.xy),0);
+ return textureLoad(zgx_behind,vec2<i32>(position.xy),0);
 }

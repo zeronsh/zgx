@@ -1075,7 +1075,7 @@ impl Focusable {
         match content {
             NativeContent::Web(web) => Some(Self::Web(web.clone())),
             NativeContent::Terminal(term) => Some(Self::Terminal(term.clone())),
-            NativeContent::Platform(_) => None,
+            NativeContent::Platform(_) | NativeContent::Glass(_) => None,
         }
     }
     fn focused(&self) -> bool {
@@ -1189,7 +1189,7 @@ fn placeholder(content: NativeContent) -> View {
                 }
             })
         }
-        NativeContent::Platform(_) => text(content.label()),
+        NativeContent::Platform(_) | NativeContent::Glass(_) => text(content.label()),
     };
     div()
         .absolute()

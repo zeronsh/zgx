@@ -431,6 +431,84 @@ pub(crate) struct Shaders {
     pub layer: Option<Arc<zgx::decoration::FillShader>>,
     /// `layer_params`: the layer shader's sixteen values, as four vec4s.
     pub layer_params: Option<[[f32; 4]; 4]>,
+    /// `layer_bleed`: how far past the box the layer shader paints.
+    pub layer_bleed: Option<f32>,
+    /// `layer_reach`: how far past that its `zgx_backdrop` reads.
+    pub layer_reach: Option<f32>,
+    /// `layer_clock`, `shader_clock`, `layer_on`, `layer_params` as a function:
+    /// the engine keeps it up (boxed: few shaders are).
+    pub drive: Option<DriveBox>,
+}
+/// How a `ui.glass` looks: its props, each a value or state.
+#[derive(Clone)]
+pub(crate) struct GlassSpec {
+    pub clear: Option<Source>,
+    pub tint: Option<Source>,
+    pub radius: Option<Source>,
+}
+/// `ui.glass`, made the first time a script names it.
+pub(crate) fn install_glass(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+    ui.set(
+        "glass",
+        lua.create_function(|lua, table: Table| {
+            let take = |name: &str, ty: Ty| -> mlua::Result<Option<Source>> {
+                let value = table.get::<mlua::Value>(name)?;
+                table.raw_set(name, mlua::Value::Nil)?;
+                match value {
+                    mlua::Value::Nil => Ok(None),
+                    value => source(lua, ty, name, value).map(Some),
+                }
+            };
+            let spec = GlassSpec {
+                clear: take("clear", Ty::Bool)?,
+                tint: take("tint", Ty::Color)?,
+                radius: take("radius", Ty::Num)?,
+            };
+            let node = fill(
+                lua,
+                Node::new(owner(lua)?, Kind::Glass(Box::new(spec))),
+                Some(&table),
+            )?;
+            node_ud(lua, node)
+        })?,
+    )
+}
+/// A box of `DriveProps` dropped out of line, so what drops a node stays as
+/// small as with no such field: every node's drop inlines this one's check.
+#[derive(Clone, Default)]
+pub(crate) struct DriveBox(std::mem::ManuallyDrop<Box<DriveProps>>);
+impl Drop for DriveBox {
+    #[inline(always)]
+    fn drop(&mut self) {
+        // SAFETY: dropped once, here, and never read after.
+        drop_drive(unsafe { std::mem::ManuallyDrop::take(&mut self.0) });
+    }
+}
+#[cold]
+#[inline(never)]
+fn drop_drive(_: Box<DriveProps>) {}
+impl std::ops::Deref for DriveBox {
+    type Target = DriveProps;
+    fn deref(&self) -> &DriveProps {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for DriveBox {
+    fn deref_mut(&mut self) -> &mut DriveProps {
+        &mut self.0
+    }
+}
+/// What has the engine keep a node's shader up.
+#[derive(Clone, Default)]
+pub(crate) struct DriveProps {
+    /// `layer_clock`: the engine steps the layer shader's time.
+    pub layer_clock: bool,
+    /// `shader_clock`: the engine steps the shader fill's time.
+    pub shader_clock: bool,
+    /// `layer_on`: while false, no layer shader and no layer.
+    pub layer_on: Option<Source>,
+    /// `layer_params` as a function: followed.
+    pub layer_params_of: Option<Function>,
 }
 /// `ui.layer_shader(source, opts)`: a compiled layer shader, for
 /// `layer_shader` (see `zgx::scene::LayerShader`).
@@ -440,7 +518,7 @@ impl UserData for LayerShaderUd {}
 /// `shader_params` and `layer_params`: up to four vec4s, lists of numbers
 /// or colors (0 to 1); theme colours (`"$accent"`) bind to `tokens`' slots
 /// where it has them.
-fn shader_params(
+pub(crate) fn shader_params(
     lua: &Lua,
     value: &mlua::Value,
     name: &str,
@@ -625,6 +703,8 @@ impl Node {
                 && self.props.iter().any(|(p, _)| *p == Prop::Tint)
             // A sweeping mask runs on the component's frame clock.
             || self.mask.as_ref().is_some_and(|m| m.sweep.is_some())
+            // So does a shader the engine keeps up.
+            || self.shaders.as_ref().is_some_and(|s| s.drive.is_some())
     }
     /// The element kind selectors match (`button`, `text`…).
     pub fn tag(&self) -> &'static str {
@@ -641,6 +721,7 @@ impl Node {
             Kind::Image { .. } => "image",
             Kind::Svg { .. } => "svg",
             Kind::Canvas(..) => "canvas",
+            Kind::Glass(_) => "glass",
             #[cfg(feature = "scene3d")]
             Kind::Scene3d(_) => "scene3d",
             Kind::WebView(_) => "webview",
@@ -964,6 +1045,8 @@ pub(crate) enum Kind {
     /// reads changes; with its `view` and `grid`, if any.
     /// `draw` may be absent when `each` draws it.
     Canvas(Option<Function>, Option<Box<CanvasOptions>>),
+    /// `ui.glass { ... }`: the system's glass where it has one.
+    Glass(Box<GlassSpec>),
     /// `ui.scene3d { … }`: a 3D scene (zgx-3d) in a GPU view.
     #[cfg(feature = "scene3d")]
     Scene3d(Rc<crate::scene3d::Scene3dSpec>),
@@ -1159,6 +1242,7 @@ impl Kind {
             Kind::Column
                 | Kind::Row
                 | Kind::Div
+                | Kind::Glass(_)
                 | Kind::Overlay
                 | Kind::Button
                 | Kind::Scroll { .. }
@@ -3848,8 +3932,38 @@ fn fill_from(
                     Some(ud.borrow::<LayerShaderUd>()?.0.clone());
             }
             "layer_params" => {
-                node.shaders.get_or_insert_default().layer_params =
-                    Some(shader_params(lua, &value, "layer_params", None)?);
+                let shaders = node.shaders.get_or_insert_default();
+                match &value {
+                    mlua::Value::Function(f) => {
+                        shaders.drive.get_or_insert_default().layer_params_of = Some(f.clone());
+                    }
+                    _ => {
+                        shaders.layer_params =
+                            Some(shader_params(lua, &value, "layer_params", None)?);
+                    }
+                }
+            }
+            "layer_clock" | "shader_clock" => {
+                let on = lua.unpack::<bool>(value)?;
+                let shaders = node.shaders.get_or_insert_default();
+                let drive = shaders.drive.get_or_insert_default();
+                match key {
+                    "layer_clock" => drive.layer_clock = on,
+                    _ => drive.shader_clock = on,
+                }
+            }
+            "layer_on" => {
+                let on = source(lua, Ty::Bool, key, value)?;
+                let shaders = node.shaders.get_or_insert_default();
+                shaders.drive.get_or_insert_default().layer_on = Some(on);
+            }
+            "layer_bleed" | "layer_reach" => {
+                let length = lua.unpack::<f32>(value)?;
+                let shaders = node.shaders.get_or_insert_default();
+                match key {
+                    "layer_bleed" => shaders.layer_bleed = Some(length),
+                    _ => shaders.layer_reach = Some(length),
+                }
             }
             "mask" => {
                 let (bitmap, t) = match &value {
@@ -6056,7 +6170,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 shaders
                     .borrow_mut()
                     .entry(key.clone())
-                    .or_insert_with(|| zgx::decoration::FillShader::new(key.0.clone(), fps))
+                    .or_insert_with(|| {
+                        // Compiled from now, off the frame, so the first frame
+                        // drawing it (a one-shot's) finds it ready.
+                        let shader = zgx::decoration::FillShader::new(key.0.clone(), fps);
+                        zgx::decoration::declare_layer_shader(&shader);
+                        shader
+                    })
                     .clone()
             });
             Ok(LayerShaderUd(shader))

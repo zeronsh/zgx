@@ -111,6 +111,7 @@ return ui.overlay {
 
 ## Masks and shaders
 
+
 Any node can show its content through a bitmap's alpha, have its box filled by a WGSL function, or composite its content through one; see [properties](properties.md#paint):
 
 | | |
@@ -119,8 +120,11 @@ Any node can show its content through a bitmap's alpha, have its box filled by a
 | `mask = bitmap` or `mask = { bitmap, w = …, h = …, x = …, y = …, sweep = … }` | the content shows through the bitmap's alpha, drawn `w` by `h` (the bitmap's size) from (`x`, `y`), unsmoothed; `maskX` and `maskY` animate its place, and `sweep = { x, y, duration, frame_rate }` moves it by (`x`, `y`) every `duration` ms, over and over, on the engine's own clock (a text shimmer: no script, style pass or layout per step, only the masked node composites again; 4 steps a second while it doesn't show) |
 | `ui.shader(wgsl, { fps })` | a fill: the source defines `fn fill(input: FillInput) -> vec4<f32>` (straight alpha), reading `input.p` (points from the box's top left), `input.size`, `input.time` (seconds), `input.scale` (pixels per point) and `input.params` (four `vec4`s); `fps` caps how often time repaints it |
 | `bg_shader = shader`, `shader_params = { … }` | fill the box with it, over `bg` and under the border and children; parameters are colors (0 to 1) or lists of four numbers; `shaderTime` and `shaderParam0` to `shaderParam15` animate |
-| `ui.layer_shader(wgsl, { fps })` | a layer shader: the source defines `fn layer(input: LayerInput) -> vec4<f32>` (straight alpha), reading `input.color` (the content's pixel there, straight alpha), `input.p`, `input.size`, `input.time`, `input.scale` and `input.params` as a fill does; `zgx_sample(p)` reads the content at another point of the box |
+| `ui.layer_shader(wgsl, { fps })` | a layer shader: the source defines `fn layer(input: LayerInput) -> vec4<f32>` (straight alpha), reading `input.color` (the content's pixel there, straight alpha), `input.p`, `input.size`, `input.time`, `input.scale` and `input.params` as a fill does, and `input.radii` (the box's corners: top-left, top-right, bottom-right, bottom-left); `zgx_sample(p)` reads the content at another point, and `zgx_backdrop(p)` what lies behind the node there (the window under it, or inside an isolated group that group) |
 | `layer_shader = shader`, `layer_params = { … }` | the node and its children paint once into a cached layer, and each pixel of the box passes through the shader as the layer composites (a foil sheen, a recolour, a ripple); past the box the layer shows as painted. `layerTime` and `layerParam0` to `layerParam15` animate it without repainting the content |
+| `layer_clock = true`, `shader_clock = true` | the engine steps `input.time` on the window's frame clock, with no script per step and at most at the shader's `fps`, while the node shows and its window is presented; off screen, clipped away, faded out or hidden it holds no timer. With reduced motion it stays at 0: read `ui.prefers.reduced_motion` for a pose of your own |
+| `layer_on = state`, `layer_params = function() … end` | while `layer_on` is false there's no shader, no layer and no clock, as if it weren't set; a function for `layer_params` is followed as state it reads changes, compositing again without repainting |
+| `layer_bleed = n`, `layer_reach = n` | the shader runs `n` points past the box and can paint there (cut by the clips around the node, not its own), and its `zgx_backdrop` reads `n` points past that, holding at the edge beyond. A shader calling `zgx_backdrop` repaints when what it can read changes, and each one that a frame damages copies that part of the window, once |
 
 ## Example
 
@@ -176,3 +180,70 @@ return ui.column {
 - A drawn path cannot grow (`a drawn path cannot be extended`): build paths whole, then draw them.
 - `ui.shader` checks the WGSL when it is made: a source that does not compile is a script error with its line. A shader is compiled once per source and `fps`. Its pipeline compiles from then on, off the frame, on a thread of its own: declared ahead of its first draw (at a module's top, say), it is ready by then. A frame that draws it before it is ready doesn't wait: the box shows its `bg` colour meanwhile and the window draws again once the pipeline is ready (a compile can take 70 to 360 ms on macOS).
 - A mask's bitmap is sampled without smoothing, which suits dithers and sprites; scale it with `w` and `h`, not by making it larger.
+
+## Making effects
+
+These are what an effect is made from, so an effect you write costs what it uses and nothing else:
+
+- **Shape:** `input.radii` and `input.size` give the box, for a signed distance to its rounded corners. Nothing past the box runs without `layer_bleed`.
+- **Time and motion:** `layer_clock` steps time without script. A one-shot writes when it started to `layer_params`, or animates a parameter with `anime.animate(el, { layerParam0 = … })`, and turns itself off with `layer_on` when done. A pool of them is yours to keep.
+- **Seed, scale and motion:** a seed is a parameter; `input.scale` is pixels per point; `ui.prefers.reduced_motion` follows the system.
+- **First draw:** `ui.layer_shader` compiles off the frame from when it's called, so declare it ahead of when it must show.
+- **Frost:** `backdrop_blur` on the same node runs first, and `zgx_backdrop` reads it blurred.
+
+What's not there:
+
+- **Pointer:** hit testing doesn't follow a warp. A warped element's clicks land where it was laid out.
+- **Reads back:** a shader's output goes to the screen and nowhere else: no script can read what it read.
+- **Several passes or state between frames** (a fluid, particles that remember): a shader has neither. Use a GPU view, below.
+
+### Several passes: a GPU view
+
+In Rust, a GPU view is your own wgpu passes and textures, kept between frames:
+
+```rust
+use zgx::compose::{gpu_view, prelude::*};
+use zgx_gpu::viewport::{self, Viewport, ViewportFrame};
+
+#[derive(Default)]
+struct Fluid {
+    // Your textures, kept from frame to frame, and your pipelines.
+}
+impl Viewport for Fluid {
+    fn render(&mut self, frame: &mut ViewportFrame<'_>) {
+        // Record as many passes as it takes into `frame.encoder`, the last
+        // into `frame.target`, premultiplied, `frame.size` device pixels.
+    }
+    fn device_changed(&mut self) {
+        // Drop what was made with the old device.
+    }
+}
+
+fn fluid() -> View {
+    let view = viewport::view(Fluid::default());
+    view.animate(true); // or `view.invalidate()` when it changes
+    gpu_view("A fluid", &view).w(320.).h(240.)
+}
+```
+
+**What it costs:** a texture of its box's size while it shows, and your passes for each frame it's invalidated or animating. While it's neither, nothing but compositing that texture when something over or under it changes. An animating one holds the frame clock while it shows, and only then.
+
+**How it composites:** as an image, on every renderer that draws through wgpu (Metal, Direct3D 12, Vulkan, GL): clipped, rounded, faded and transformed as any image is, in paint order, on whichever plane its place in the window puts it around native views. Direct3D 11 (opt-in) may hand it another device, which is what `device_changed` is for. An opaque one drawn whole and flat with nothing painted over it may present as a plane of its own where the window's frames go through layers (macOS): that's only a cheaper way to show the same pixels.
+
+**What it can't do:** it reads nothing of the window behind it. A layer shader over it reads it as it reads anything painted. `crates/zgx-3d` is one, end to end.
+
+## Glass
+
+`ui.glass { clear, tint, radius, ... }` is a box of glass holding what you put in it. On macOS 26 it's the system's own `NSGlassEffectView`, between the window's planes, drawn by the window server from what lies under it; a window with none pays nothing. Everywhere else (Windows, Linux, older macOS) it draws a material measured against the system's, following the theme's light or dark and the system's reduced transparency, with the same script. It takes no pointer events of its own, and assistive technology hears its node.
+
+| Option | Type | Default | |
+| --- | --- | --- | --- |
+| `clear` | `Reactive<boolean>` | `false` | the more see-through of the system's glasses |
+| `tint` | `Reactive<Color>` | none | a colour it takes on |
+| `radius` | `Reactive<number>` | `24` | its corners' radius in points |
+
+```luau
+return ui.glass { w = 300, h = 200, radius = 24, ui.text { "Over the glass" } }
+```
+
+In Rust, `zgx::glass::glass(GlassStyle::default)`. For the window itself, `WindowOptions::glass` with `Glass::new(GlassMaterial::Liquid)` puts the system's glass behind the whole window on macOS 26, and on older macOS and elsewhere its heads-up glass.
