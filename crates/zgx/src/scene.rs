@@ -6083,11 +6083,16 @@ impl Scene {
     /// The box around bytes `range` of text node `id` as it shows them, in
     /// the window's points (through any transform or zoom): across every
     /// line the range runs on; for an empty range, its caret's place (no
-    /// width, the line's height). `None` for a node with no text, or one
-    /// masked (a password). Shapes the text: for an input method asking
-    /// where a range is (Windows' `GetTextExt`), not for every frame.
+    /// width, the line's height). `None` for a node with no text, one
+    /// masked (a password), or one no longer in the scene: an input method
+    /// may ask after the editor it was told of is gone. Shapes the text:
+    /// for an input method asking where a range is (Windows'
+    /// `GetTextExt`), not for every frame.
     pub fn text_range_area(&self, id: NodeId, range: std::ops::Range<usize>) -> Option<Rect> {
         use unicode_segmentation::UnicodeSegmentation;
+        if !self.contains(id) {
+            return None;
+        }
         let text = match self.kind(id) {
             NodeKind::Text { text, .. } => text.clone(),
             NodeKind::RichText { text } => text.text_arc(),

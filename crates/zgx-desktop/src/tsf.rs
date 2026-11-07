@@ -22,7 +22,7 @@ use crate::text_store::{Change, TextStore};
 use std::{cell::RefCell, rc::Rc};
 use windows::{
     Win32::{
-        Foundation::{E_INVALIDARG, E_NOTIMPL, HWND, POINT, RECT},
+        Foundation::{E_INVALIDARG, E_NOTIMPL, E_UNEXPECTED, HWND, POINT, RECT},
         Graphics::Gdi::ClientToScreen,
         System::{
             Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemAlloc, FORMATETC, IDataObject},
@@ -296,6 +296,15 @@ fn at(acp: i32) -> usize {
     usize::try_from(acp).unwrap_or(0)
 }
 
+/// A COM method's `body`: a panic in it fails the call (`E_UNEXPECTED`)
+/// instead of ending the app. Windows calls the store from inside its own
+/// message handling (`PeekMessage`), and a panic can't unwind out through
+/// a COM call: Rust aborts the process there, with no window to say so.
+fn guard<T>(body: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(body))
+        .unwrap_or_else(|_| Err(E_UNEXPECTED.into()))
+}
+
 /// Tell the input method the input scope changed: focus moved to an editor
 /// of another mode, or the focused one's mode changed. One context serves
 /// every editor in the window, and an input method reads the scope again
@@ -317,13 +326,28 @@ fn retell_scope(shared: &Rc<RefCell<Shared>>) {
     }
 }
 
+/// A lock the store has granted: given back as this drops, a panic under
+/// it included (`guard` fails the call then), so the next request isn't
+/// told the store is busy for good.
+struct Held<'a>(&'a RefCell<Shared>);
+impl<'a> Held<'a> {
+    fn take(shared: &'a RefCell<Shared>, flags: u32) -> Self {
+        shared.borrow_mut().lock = flags & TS_LF_READWRITE.0;
+        Self(shared)
+    }
+}
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut shared) = self.0.try_borrow_mut() {
+            shared.lock = 0;
+        }
+    }
+}
+
 /// Grant lock `flags` now: hold it while the sink reads or edits.
 fn grant(shared: &Rc<RefCell<Shared>>, flags: u32) -> HRESULT {
-    let sink = {
-        let mut s = shared.borrow_mut();
-        s.lock = flags & TS_LF_READWRITE.0;
-        s.sink.clone()
-    };
+    let held = Held::take(shared, flags);
+    let sink = shared.borrow().sink.clone();
     // SAFETY: the sink is alive while advised.
     let result = sink.map_or(HRESULT(0), |sink| unsafe {
         sink.OnLockGranted(TEXT_STORE_LOCK_FLAGS(flags & TS_LF_READWRITE.0))
@@ -331,9 +355,11 @@ fn grant(shared: &Rc<RefCell<Shared>>, flags: u32) -> HRESULT {
     });
     // What the input method edited under the lock it knows of: the
     // document's length from here.
-    let mut s = shared.borrow_mut();
-    s.lock = 0;
-    s.told_len = s.store.len();
+    {
+        let mut s = shared.borrow_mut();
+        s.told_len = s.store.len();
+    }
+    drop(held);
     result
 }
 
@@ -387,21 +413,23 @@ impl ITextStoreACP2_Impl for Store_Impl {
         Ok(())
     }
     fn RequestLock(&self, flags: u32) -> Result<HRESULT> {
-        let busy = {
-            let shared = self.0.borrow();
-            shared.lock != 0
-        };
-        if busy {
-            if flags & TS_LF_SYNC != 0 {
-                return Ok(TS_E_SYNCHRONOUS);
+        guard(|| {
+            let busy = {
+                let shared = self.0.borrow();
+                shared.lock != 0
+            };
+            if busy {
+                if flags & TS_LF_SYNC != 0 {
+                    return Ok(TS_E_SYNCHRONOUS);
+                }
+                let mut shared = self.0.borrow_mut();
+                // A write asked for wins over a read.
+                let wanted = shared.pending.unwrap_or(0) | (flags & TS_LF_READWRITE.0);
+                shared.pending = Some(wanted);
+                return Ok(TS_S_ASYNC);
             }
-            let mut shared = self.0.borrow_mut();
-            // A write asked for wins over a read.
-            let wanted = shared.pending.unwrap_or(0) | (flags & TS_LF_READWRITE.0);
-            shared.pending = Some(wanted);
-            return Ok(TS_S_ASYNC);
-        }
-        Ok(grant(&self.0, flags))
+            Ok(grant(&self.0, flags))
+        })
     }
     fn GetStatus(&self) -> Result<TS_STATUS> {
         Ok(TS_STATUS {
@@ -431,38 +459,42 @@ impl ITextStoreACP2_Impl for Store_Impl {
         selection: *mut TS_SELECTION_ACP,
         fetched: *mut u32,
     ) -> Result<()> {
-        let shared = self.read()?;
-        if count == 0 || (index != 0 && index != TS_DEFAULT_SELECTION) {
-            // SAFETY: the caller's out pointer.
-            unsafe { *fetched = 0 };
-            return Ok(());
-        }
-        let (start, end, at_start) = shared.store.selection();
-        // SAFETY: the caller's out pointers, for `count` (at least one).
-        unsafe {
-            *selection = TS_SELECTION_ACP {
-                acpStart: acp(start),
-                acpEnd: acp(end),
-                style: TS_SELECTIONSTYLE {
-                    ase: if at_start { TS_AE_START } else { TS_AE_END },
-                    fInterimChar: false.into(),
-                },
-            };
-            *fetched = 1;
-        }
-        Ok(())
+        guard(|| {
+            let shared = self.read()?;
+            if count == 0 || (index != 0 && index != TS_DEFAULT_SELECTION) {
+                // SAFETY: the caller's out pointer.
+                unsafe { *fetched = 0 };
+                return Ok(());
+            }
+            let (start, end, at_start) = shared.store.selection();
+            // SAFETY: the caller's out pointers, for `count` (at least one).
+            unsafe {
+                *selection = TS_SELECTION_ACP {
+                    acpStart: acp(start),
+                    acpEnd: acp(end),
+                    style: TS_SELECTIONSTYLE {
+                        ase: if at_start { TS_AE_START } else { TS_AE_END },
+                        fInterimChar: false.into(),
+                    },
+                };
+                *fetched = 1;
+            }
+            Ok(())
+        })
     }
     fn SetSelection(&self, count: u32, selection: *const TS_SELECTION_ACP) -> Result<()> {
-        let mut shared = self.write()?;
-        if count == 0 {
-            return Ok(());
-        }
-        // SAFETY: at least one selection from the caller.
-        let s = unsafe { *selection };
-        shared
-            .store
-            .set_selection(at(s.acpStart), at(s.acpEnd), s.style.ase == TS_AE_START);
-        Ok(())
+        guard(|| {
+            let mut shared = self.write()?;
+            if count == 0 {
+                return Ok(());
+            }
+            // SAFETY: at least one selection from the caller.
+            let s = unsafe { *selection };
+            shared
+                .store
+                .set_selection(at(s.acpStart), at(s.acpEnd), s.style.ase == TS_AE_START);
+            Ok(())
+        })
     }
     fn GetText(
         &self,
@@ -476,29 +508,31 @@ impl ITextStoreACP2_Impl for Store_Impl {
         runs_given: *mut u32,
         next: *mut i32,
     ) -> Result<()> {
-        let shared = self.read()?;
-        let len = shared.store.len();
-        let end = if end < 0 { len } else { at(end).min(len) };
-        let units = shared.store.text(at(start), end);
-        let n = units.len().min(text_wanted as usize);
-        // SAFETY: the caller's buffers, `text_wanted` and `runs_wanted` long.
-        unsafe {
-            if !text.is_null() && n > 0 {
-                std::ptr::copy_nonoverlapping(units.as_ptr(), text.0, n);
+        guard(|| {
+            let shared = self.read()?;
+            let len = shared.store.len();
+            let end = if end < 0 { len } else { at(end).min(len) };
+            let units = shared.store.text(at(start), end);
+            let n = units.len().min(text_wanted as usize);
+            // SAFETY: the caller's buffers, `text_wanted` and `runs_wanted` long.
+            unsafe {
+                if !text.is_null() && n > 0 {
+                    std::ptr::copy_nonoverlapping(units.as_ptr(), text.0, n);
+                }
+                *text_given = n as u32;
+                if runs_wanted > 0 && !runs.is_null() && n > 0 {
+                    *runs = TS_RUNINFO {
+                        uCount: n as u32,
+                        r#type: TS_RT_PLAIN,
+                    };
+                    *runs_given = 1;
+                } else if !runs_given.is_null() {
+                    *runs_given = 0;
+                }
+                *next = acp(at(start) + n);
             }
-            *text_given = n as u32;
-            if runs_wanted > 0 && !runs.is_null() && n > 0 {
-                *runs = TS_RUNINFO {
-                    uCount: n as u32,
-                    r#type: TS_RT_PLAIN,
-                };
-                *runs_given = 1;
-            } else if !runs_given.is_null() {
-                *runs_given = 0;
-            }
-            *next = acp(at(start) + n);
-        }
-        Ok(())
+            Ok(())
+        })
     }
     fn SetText(
         &self,
@@ -508,18 +542,20 @@ impl ITextStoreACP2_Impl for Store_Impl {
         text: &PCWSTR,
         cch: u32,
     ) -> Result<TS_TEXTCHANGE> {
-        let mut shared = self.write()?;
-        // SAFETY: `cch` units at `text`, from the caller.
-        let units = unsafe { std::slice::from_raw_parts(text.0, cch as usize) };
-        let range = shared
-            .store
-            .replace(at(start), at(end), units)
-            .unwrap_or(at(start)..at(start));
-        shared.told_len = shared.store.len();
-        Ok(TS_TEXTCHANGE {
-            acpStart: start,
-            acpOldEnd: end,
-            acpNewEnd: acp(range.end),
+        guard(|| {
+            let mut shared = self.write()?;
+            // SAFETY: `cch` units at `text`, from the caller.
+            let units = unsafe { std::slice::from_raw_parts(text.0, cch as usize) };
+            let range = shared
+                .store
+                .replace(at(start), at(end), units)
+                .unwrap_or(at(start)..at(start));
+            shared.told_len = shared.store.len();
+            Ok(TS_TEXTCHANGE {
+                acpStart: start,
+                acpOldEnd: end,
+                acpNewEnd: acp(range.end),
+            })
         })
     }
     fn GetFormattedText(&self, _start: i32, _end: i32) -> Result<IDataObject> {
@@ -553,37 +589,39 @@ impl ITextStoreACP2_Impl for Store_Impl {
         end_out: *mut i32,
         change: *mut TS_TEXTCHANGE,
     ) -> Result<()> {
-        let mut shared = self.write()?;
-        let (start, end, _) = shared.store.selection();
-        let range = if flags & TF_IAS_QUERYONLY.0 != 0 {
-            start..end
-        } else {
-            // SAFETY: `cch` units at `text`, from the caller.
-            let units = unsafe { std::slice::from_raw_parts(text.0, cch as usize) };
-            let range = shared
-                .store
-                .replace(start, end, units)
-                .unwrap_or(start..start);
-            shared.told_len = shared.store.len();
-            range
-        };
-        // SAFETY: the caller's out pointers, each optional.
-        unsafe {
-            if !start_out.is_null() {
-                *start_out = acp(range.start);
+        guard(|| {
+            let mut shared = self.write()?;
+            let (start, end, _) = shared.store.selection();
+            let range = if flags & TF_IAS_QUERYONLY.0 != 0 {
+                start..end
+            } else {
+                // SAFETY: `cch` units at `text`, from the caller.
+                let units = unsafe { std::slice::from_raw_parts(text.0, cch as usize) };
+                let range = shared
+                    .store
+                    .replace(start, end, units)
+                    .unwrap_or(start..start);
+                shared.told_len = shared.store.len();
+                range
+            };
+            // SAFETY: the caller's out pointers, each optional.
+            unsafe {
+                if !start_out.is_null() {
+                    *start_out = acp(range.start);
+                }
+                if !end_out.is_null() {
+                    *end_out = acp(range.end);
+                }
+                if !change.is_null() {
+                    *change = TS_TEXTCHANGE {
+                        acpStart: acp(start),
+                        acpOldEnd: acp(end),
+                        acpNewEnd: acp(range.end),
+                    };
+                }
             }
-            if !end_out.is_null() {
-                *end_out = acp(range.end);
-            }
-            if !change.is_null() {
-                *change = TS_TEXTCHANGE {
-                    acpStart: acp(start),
-                    acpOldEnd: acp(end),
-                    acpNewEnd: acp(range.end),
-                };
-            }
-        }
-        Ok(())
+            Ok(())
+        })
     }
     fn InsertEmbeddedAtSelection(
         &self,
@@ -645,36 +683,38 @@ impl ITextStoreACP2_Impl for Store_Impl {
         values: *mut TS_ATTRVAL,
         fetched: *mut u32,
     ) -> Result<()> {
-        let scope = {
-            let mut shared = self.0.borrow_mut();
-            std::mem::take(&mut shared.scope_asked).then(|| shared.store.input_scope())
-        };
-        let (Some(scope), true) = (scope, count > 0 && !values.is_null()) else {
-            // SAFETY: the caller's out pointer.
-            unsafe { *fetched = 0 };
-            return Ok(());
-        };
-        // The scope as the framework takes it: an ITfInputScope in a
-        // VT_UNKNOWN, which the caller releases.
-        let mut value = VARIANT::default();
-        let scopes: ITfInputScope = Scopes(InputScope(scope)).into();
-        // SAFETY: a zeroed VARIANT, its type and pointer set as one; the
-        // caller's buffer, `count` long, and out pointer.
-        unsafe {
-            let inner = &mut *value.Anonymous.Anonymous;
-            inner.vt = VT_UNKNOWN;
-            inner.Anonymous.punkVal = std::mem::ManuallyDrop::new(Some(scopes.into()));
-            values.write(TS_ATTRVAL {
-                idAttr: GUID_PROP_INPUTSCOPE,
-                dwOverlapId: 0,
-                varValue: value,
-            });
-            *fetched = 1;
-        }
-        Ok(())
+        guard(|| {
+            let scope = {
+                let mut shared = self.0.borrow_mut();
+                std::mem::take(&mut shared.scope_asked).then(|| shared.store.input_scope())
+            };
+            let (Some(scope), true) = (scope, count > 0 && !values.is_null()) else {
+                // SAFETY: the caller's out pointer.
+                unsafe { *fetched = 0 };
+                return Ok(());
+            };
+            // The scope as the framework takes it: an ITfInputScope in a
+            // VT_UNKNOWN, which the caller releases.
+            let mut value = VARIANT::default();
+            let scopes: ITfInputScope = Scopes(InputScope(scope)).into();
+            // SAFETY: a zeroed VARIANT, its type and pointer set as one; the
+            // caller's buffer, `count` long, and out pointer.
+            unsafe {
+                let inner = &mut *value.Anonymous.Anonymous;
+                inner.vt = VT_UNKNOWN;
+                inner.Anonymous.punkVal = std::mem::ManuallyDrop::new(Some(scopes.into()));
+                values.write(TS_ATTRVAL {
+                    idAttr: GUID_PROP_INPUTSCOPE,
+                    dwOverlapId: 0,
+                    varValue: value,
+                });
+                *fetched = 1;
+            }
+            Ok(())
+        })
     }
     fn GetEndACP(&self) -> Result<i32> {
-        Ok(acp(self.read()?.store.len()))
+        guard(|| Ok(acp(self.read()?.store.len())))
     }
     fn GetActiveView(&self) -> Result<u32> {
         Ok(VIEW)
@@ -690,21 +730,23 @@ impl ITextStoreACP2_Impl for Store_Impl {
         rect: *mut RECT,
         clipped: *mut BOOL,
     ) -> Result<()> {
-        let shared = self.read()?;
-        // Where the range shows; the caret's place where its text has no
-        // lines to ask (a password's).
-        let end = if end < 0 { shared.store.len() } else { at(end) };
-        let area = shared
-            .store
-            .area(at(start), end)
-            .or_else(|| shared.store.editor().map(EditorHandle::input_method_area))
-            .unwrap_or_default();
-        // SAFETY: the caller's out pointers.
-        unsafe {
-            *rect = Store::screen(&shared, area);
-            *clipped = false.into();
-        }
-        Ok(())
+        guard(|| {
+            let shared = self.read()?;
+            // Where the range shows; the caret's place where its text has no
+            // lines to ask (a password's).
+            let end = if end < 0 { shared.store.len() } else { at(end) };
+            let area = shared
+                .store
+                .area(at(start), end)
+                .or_else(|| shared.store.editor().map(EditorHandle::input_method_area))
+                .unwrap_or_default();
+            // SAFETY: the caller's out pointers.
+            unsafe {
+                *rect = Store::screen(&shared, area);
+                *clipped = false.into();
+            }
+            Ok(())
+        })
     }
     fn GetScreenExt(&self, _view: u32) -> Result<RECT> {
         let shared = self.0.borrow();
@@ -725,14 +767,16 @@ impl ITextStoreACP2_Impl for Store_Impl {
 
 impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
     fn OnStartComposition(&self, view: Ref<ITfCompositionView>) -> Result<BOOL> {
-        // Over the range it opens on: empty to compose at the caret, over
-        // committed text to reconvert it.
-        let (start, len) = extent(view.ok()?).unwrap_or((0, 0));
-        self.0
-            .borrow_mut()
-            .store
-            .start_composition(start..start + len);
-        Ok(true.into())
+        guard(|| {
+            // Over the range it opens on: empty to compose at the caret, over
+            // committed text to reconvert it.
+            let (start, len) = extent(view.ok()?).unwrap_or((0, 0));
+            self.0
+                .borrow_mut()
+                .store
+                .start_composition(start..start + len);
+            Ok(true.into())
+        })
     }
     fn OnUpdateComposition(
         &self,
@@ -744,10 +788,12 @@ impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
         Ok(())
     }
     fn OnEndComposition(&self, _view: Ref<ITfCompositionView>) -> Result<()> {
-        let mut shared = self.0.borrow_mut();
-        shared.store.end_composition();
-        shared.told_len = shared.store.len();
-        Ok(())
+        guard(|| {
+            let mut shared = self.0.borrow_mut();
+            shared.store.end_composition();
+            shared.told_len = shared.store.len();
+            Ok(())
+        })
     }
 }
 
@@ -758,39 +804,41 @@ impl ITfTextEditSink_Impl for Store_Impl {
         read: u32,
         _record: Ref<ITfEditRecord>,
     ) -> Result<()> {
-        // (No borrow is held across the framework's calls.)
-        let attributes = {
-            let mut shared = self.0.borrow_mut();
-            if !shared.store.is_composing() {
-                return Ok(());
-            }
-            if shared.attributes.is_none() {
-                // SAFETY: COM is initialized on this thread (`Tsf::new`).
-                shared.attributes = unsafe {
-                    CoCreateInstance::<_, ITfCategoryMgr>(
-                        &CLSID_TF_CategoryMgr,
-                        None,
-                        CLSCTX_INPROC_SERVER,
-                    )
-                    .and_then(|category| {
-                        CoCreateInstance::<_, ITfDisplayAttributeMgr>(
-                            &CLSID_TF_DisplayAttributeMgr,
+        guard(|| {
+            // (No borrow is held across the framework's calls.)
+            let attributes = {
+                let mut shared = self.0.borrow_mut();
+                if !shared.store.is_composing() {
+                    return Ok(());
+                }
+                if shared.attributes.is_none() {
+                    // SAFETY: COM is initialized on this thread (`Tsf::new`).
+                    shared.attributes = unsafe {
+                        CoCreateInstance::<_, ITfCategoryMgr>(
+                            &CLSID_TF_CategoryMgr,
                             None,
                             CLSCTX_INPROC_SERVER,
                         )
-                        .map(|display| (category, display))
-                    })
-                    .ok()
-                };
-            }
-            shared.attributes.clone()
-        };
-        let (Some(context), Some((category, display))) = (context.ok().ok(), attributes) else {
-            return Ok(());
-        };
-        let clauses = clauses(context, read, &category, &display).unwrap_or_default();
-        self.0.borrow_mut().store.mark_clauses(&clauses);
-        Ok(())
+                        .and_then(|category| {
+                            CoCreateInstance::<_, ITfDisplayAttributeMgr>(
+                                &CLSID_TF_DisplayAttributeMgr,
+                                None,
+                                CLSCTX_INPROC_SERVER,
+                            )
+                            .map(|display| (category, display))
+                        })
+                        .ok()
+                    };
+                }
+                shared.attributes.clone()
+            };
+            let (Some(context), Some((category, display))) = (context.ok().ok(), attributes) else {
+                return Ok(());
+            };
+            let clauses = clauses(context, read, &category, &display).unwrap_or_default();
+            self.0.borrow_mut().store.mark_clauses(&clauses);
+            Ok(())
+        })
     }
 }
 
@@ -1087,5 +1135,82 @@ mod tests {
                 .unwrap();
             assert_eq!(fetched, 0);
         }
+    }
+
+    /// Windows asks where text is from inside its own message handling, so
+    /// it can ask after the focused editor left the scene and before zgx
+    /// tells it focus moved: the store still answers (the caret's place,
+    /// empty), where a panic in the COM call would end the app.
+    #[test]
+    fn the_store_answers_for_an_editor_gone_from_the_scene() {
+        let mut ui = Ui::new(400., 200.);
+        let value = ui.signal(String::from("hello"));
+        let view = ui.mount(column().child(text_input("Name", value).id("name")));
+        ui.prepare_frame();
+        let shared = Rc::new(RefCell::new(Shared {
+            store: TextStore::new(),
+            sink: None,
+            lock: 0,
+            pending: None,
+            hwnd: HWND::default(),
+            scale: 1.,
+            told_len: 0,
+            layout_changed: false,
+            attributes: None,
+            scope_asked: false,
+            told_scope: 0,
+        }));
+        let store: ITextStoreACP2 = Store(shared.clone()).into();
+        ui.input.focus(&ui.scene, view.find("name"));
+        shared.borrow_mut().store.focus(ui.focused_editor());
+        ui.remove(view.node());
+        ui.prepare_frame();
+        // Under a read lock, as the framework asks.
+        shared.borrow_mut().lock = TS_LF_READ.0;
+        // SAFETY: the store's own methods, with out pointers valid for each.
+        unsafe {
+            let (mut rect, mut clipped) = (RECT::default(), BOOL::default());
+            for (start, end) in [(0, 5), (2, 2), (0, -1)] {
+                store
+                    .GetTextExt(VIEW, start, end, &mut rect, &mut clipped)
+                    .unwrap();
+            }
+            assert_eq!(store.GetEndACP().unwrap(), 5, "its text is the model's");
+        }
+    }
+
+    /// A panic in a COM method fails the call instead of unwinding into
+    /// Windows, which would abort the app.
+    #[test]
+    fn a_panic_in_a_com_method_fails_the_call() {
+        let failed = guard::<()>(|| panic!("a bug"));
+        assert_eq!(failed.unwrap_err().code(), E_UNEXPECTED);
+        assert_eq!(guard(|| Ok(7)).unwrap(), 7);
+    }
+
+    /// A panic under a granted lock gives the lock back, so the store isn't
+    /// busy for good after a call `guard` failed.
+    #[test]
+    fn a_panic_under_a_lock_gives_it_back() {
+        let shared = RefCell::new(Shared {
+            store: TextStore::new(),
+            sink: None,
+            lock: 0,
+            pending: None,
+            hwnd: HWND::default(),
+            scale: 1.,
+            told_len: 0,
+            layout_changed: false,
+            attributes: None,
+            scope_asked: false,
+            told_scope: 0,
+        });
+        let failed = guard::<()>(|| {
+            let _held = Held::take(&shared, TS_LF_READWRITE.0);
+            assert_ne!(shared.borrow().lock, 0, "held");
+            panic!("a bug under the lock");
+        });
+        assert!(failed.is_err());
+        assert_eq!(shared.borrow().lock, 0, "given back");
     }
 }
