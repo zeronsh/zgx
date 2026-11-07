@@ -61,6 +61,47 @@ fn main() {
         );
         println!("menu_services: each of the app's menus shows once");
 
+        // The app's own application-menu items lead the application menu,
+        // over Services, and no menu of their own shows in the bar; a title
+        // or state change among them is shown in place.
+        let own = |updates: &str, enabled: bool| {
+            [
+                AppMenu::new(
+                    zgx_desktop::APPLICATION_MENU,
+                    [
+                        AppMenuEntry::item(updates, "updates").enabled(enabled),
+                        AppMenuEntry::Separator,
+                        AppMenuEntry::item("Settings…", "settings")
+                            .accelerator(MenuAccelerator::primary(Key::Character(",".into()))),
+                    ],
+                ),
+                AppMenu::new("View", [AppMenuEntry::item("Sidebar", "sidebar")]),
+            ]
+        };
+        assert_eq!(
+            debug_menu_bar_titles(&own("Check for Updates…", true)).unwrap(),
+            ["Application", "View", "Window"]
+        );
+        let zgx_desktop::app_menu::MenuChange {
+            in_place, items, ..
+        } = debug_menu_change(
+            &own("Check for Updates…", true),
+            &own("Checking for Updates…", false),
+        )
+        .unwrap();
+        assert!(
+            in_place,
+            "the application menu's items weren't changed in place"
+        );
+        let titles: Vec<&str> = items.iter().map(|(t, ..)| t.as_str()).collect();
+        assert_eq!(&titles[..2], ["Checking for Updates…", ""], "{titles:?}");
+        assert_eq!(titles[2], "Settings…", "{titles:?}");
+        assert!(
+            titles[3..].contains(&"Services") && !items[0].1,
+            "{items:?}"
+        );
+        println!("menu_services: the app's own items lead the application menu");
+
         // The app's menus changing only their items' titles and states are
         // shown in place: AppKit keeps the bar it shows (a new main menu is
         // drawn again, a flash across the bar), its items as asked. Any other
