@@ -7075,6 +7075,7 @@ impl WindowManager {
                 eprintln!("zgx: the standard menus: {error}");
             }
         }
+        crate::app_menu::settle_menu_bar();
     }
     fn resumed_turn(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
