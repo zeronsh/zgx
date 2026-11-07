@@ -99,6 +99,7 @@ pub mod memory;
 
 pub mod decoration;
 pub mod glass;
+pub mod native_control;
 pub mod shader_drive;
 
 pub mod svg;
