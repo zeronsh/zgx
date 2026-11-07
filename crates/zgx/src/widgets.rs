@@ -711,10 +711,18 @@ impl EditorHandle {
         ))
     }
     /// Where an input method's candidates go, in the window's points: under
-    /// the clause it converts (`composition_area`), else at the caret.
+    /// the clause it converts (`composition_area`), else at the caret; an
+    /// empty rect once the editor is gone from the scene (Windows' input
+    /// method may still ask, before it hears focus moved).
     pub fn input_method_area(&self) -> Rect {
-        self.composition_area()
-            .unwrap_or_else(|| self.scene.borrow().transformed_bounds(self.caret))
+        self.composition_area().unwrap_or_else(|| {
+            let scene = self.scene.borrow();
+            if scene.contains(self.caret) {
+                scene.transformed_bounds(self.caret)
+            } else {
+                Rect::default()
+            }
+        })
     }
     /// Where bytes `range` of the text it shows (its committed text with
     /// any composition in place of the selection) are, in the window's
