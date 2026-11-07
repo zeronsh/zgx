@@ -309,3 +309,64 @@ fn a_script_error_while_it_plays_stops_the_render_and_says_where() {
     let error = stage.step_to(5).unwrap_err();
     assert!(error.contains("boom"), "{error}");
 }
+
+#[test]
+fn audio_data_draws_a_tones_band_at_its_time() {
+    let dir = temp_dir("audio-data");
+    // Silence for half a second, then a 1 kHz tone for one.
+    let rate = 48_000usize;
+    let tone: Vec<f32> = (0..rate * 3 / 2)
+        .flat_map(|i| {
+            let v = if i < rate / 2 {
+                0.
+            } else {
+                (2. * std::f32::consts::PI * 1000. * i as f32 / rate as f32).sin() * 0.9
+            };
+            [v, v]
+        })
+        .collect();
+    zgx_video::audio::write_wav(&dir.join("tone.wav"), &tone).unwrap();
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "V", w = 32, h = 100, fps = 30, duration = 45,
+            render = function()
+                local song = video.audio_data("tone.wav")
+                assert(math.abs(song.seconds - 1.5) < 0.01, "its length")
+                local row = { direction = "row", items = "end", w = 32, h = 100, bg = "#000000" }
+                for i = 1, 32 do
+                    table.insert(row, ui.div { w = 1, bg = "#ff0000",
+                        h = function() return song:bars({ count = 32 })[i] * 100 end })
+                end
+                return ui.div(row)
+            end,
+        } }
+        "##,
+    )
+    .unwrap();
+    let mut stage = script_stage(&dir, json!({}));
+    let mut pixels = Vec::new();
+    let height = |pixels: &[u8], x: u32| {
+        (0..100u32)
+            .filter(|y| pixel(pixels, 32, x, *y)[0] > 128)
+            .count()
+    };
+    let band = ((1000f32 / 40.).ln() / (16_000f32 / 40.).ln() * 32.) as u32;
+    stage.step_to(6).unwrap();
+    stage.draw(&mut pixels).unwrap();
+    assert_eq!(height(&pixels, band), 0, "silent at 0.2 s");
+    stage.step_to(30).unwrap();
+    stage.draw(&mut pixels).unwrap();
+    assert!(
+        height(&pixels, band) > 90,
+        "its band at 1 s: {}",
+        height(&pixels, band)
+    );
+    assert!(
+        height(&pixels, 3) < 30,
+        "a far band: {}",
+        height(&pixels, 3)
+    );
+}
