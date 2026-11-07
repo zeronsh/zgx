@@ -428,26 +428,28 @@ fn corner_of(scene: &Scene, root: NodeId, rect: Rect) -> DWM_WINDOW_CORNER_PREFE
     }
 }
 /// What popup `root` shows the acrylic blur behind, as macOS's popups show
-/// AppKit's material: its panel's box (`super::panel_of`, in its window's
-/// coordinates), when the panel is a box with a translucent fill (a clear
+/// AppKit's material: its panel (`super::panel_of`) and the panel's box, in
+/// its window's coordinates, when the panel is a box with a translucent fill (a clear
 /// one is no glass, but what lays its content out) and the root holds
 /// nothing past it but its shadow.
 ///
 /// Its window is then that box and no more, so the blur, which fills the
 /// window, stops at the panel's edge: DWM rounds it with the panel
 /// (`corner_of`) and shadows it, as it frames Windows 11's own menus, and
-/// the panel's own shadow past it is cut. A popover's arrow past the panel
+/// the panel's own shadow is not drawn: the window cuts it past the panel,
+/// and under a translucent fill it darkened the blur (`GpuRenderer::
+/// set_unshadowed`). A popover's arrow past the panel
 /// would be cut too, so a root holding more has none. The blur can't fade
 /// as AppKit's material does: through a popup's fade (a tooltip's, a menu's
 /// opening) it shows whole, rather than the window changing its box and
 /// shadow as the fade ends.
-fn system_glass(scene: &Scene, root: NodeId) -> Option<Rect> {
+fn system_glass(scene: &Scene, root: NodeId) -> Option<(NodeId, Rect)> {
     let panel = super::panel_of(scene, root)?;
     let (NodeKind::Quad(quad) | NodeKind::Panel { quad, .. }) = scene.kind(panel) else {
         return None;
     };
     let translucent = (1..255).contains(&quad.fill.3);
-    (translucent && scene.children(root).len() == 1).then(|| scene.bounds(panel))
+    (translucent && scene.children(root).len() == 1).then(|| (panel, scene.bounds(panel)))
 }
 impl Panel {
     fn new() -> Result<Self, String> {
@@ -1222,7 +1224,7 @@ impl PopupHost {
             let system = (self.accent && !dragged)
                 .then(|| system_glass(scene, root))
                 .flatten()
-                .and_then(|panel| panel.intersection(bounds));
+                .and_then(|(panel, rect)| Some((panel, rect.intersection(bounds)?)));
             changed |= system.is_some() != panel.accent;
             // At its window's scale (see `screens_in`).
             let renderer = match panel.renderer(context, scale) {
@@ -1232,7 +1234,8 @@ impl PopupHost {
                     return Ok(());
                 }
             };
-            renderer.set_popup(root, system.unwrap_or(bounds));
+            renderer.set_popup(root, system.map_or(bounds, |(_, rect)| rect));
+            renderer.set_unshadowed(system.map(|(panel, _)| panel));
             let rect = renderer.plane_rect().unwrap_or(bounds);
             let resized = panel
                 .rect
@@ -1605,7 +1608,7 @@ mod tests {
     fn a_translucent_panel_takes_the_blur_behind_its_box_alone() {
         let tint = Color(30, 30, 30, 160);
         let (scene, root, ink) = glass(tint, true, false);
-        let panel = system_glass(&scene, root).expect("the panel's blur");
+        let (_, panel) = system_glass(&scene, root).expect("the panel's blur");
         assert_eq!(panel, Rect::new(40., 40., 100., 100.));
         assert!(
             ink.width > panel.width && ink.height > panel.height,
@@ -1615,7 +1618,7 @@ mod tests {
         // Over its whole ink, DWM frames none of it (zgx draws the shadow).
         assert_eq!(corner_of(&scene, root, ink), DWMWCP_DONOTROUND);
         let (scene, root, ink) = glass(tint, false, false);
-        assert_eq!(system_glass(&scene, root), Some(ink));
+        assert_eq!(system_glass(&scene, root).map(|(_, rect)| rect), Some(ink));
         for (fill, arrow) in [
             (Color(30, 30, 30, 255), false),
             (Color(0, 0, 0, 0), false),

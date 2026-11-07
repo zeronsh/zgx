@@ -507,8 +507,12 @@ apps and the desktop, and the panel's tint lies over it. A system backdrop
 window, and a flat colour behind one never activated, and a popup must not
 take activation from its window, which keeps the keyboard. The accent's blur
 fills the window, so the window is the panel's box alone, which DWM rounds
-and shadows; the panel's own shadow past it is cut, and so is DWM's rim (the
-panel draws its own edge). DWM's corners are 8 or 4 pixels at 100%, so a panel
+and shadows. The panel's own shadow is not drawn (`GpuRenderer::
+set_unshadowed`): the window cut it past the panel, and zgx draws a box's
+shadow whole under it, so through the translucent fill it darkened the blur,
+by half under a menu's shadow of alpha 0.5. DWM's rim goes too (the panel
+draws its own edge). A small popup's blur takes in its window above it: over
+white, 204 where a large one far from it reads 218, as a plain window's. DWM's corners are 8 or 4 pixels at 100%, so a panel
 rounded otherwise shows a sliver of blur, or loses one, at its corners. A
 popover with an arrow, a drag preview and an opaque panel have no accent. The
 blur can't fade: through a popup's fade it shows whole. With Transparency
