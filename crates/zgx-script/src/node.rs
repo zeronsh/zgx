@@ -3139,7 +3139,8 @@ fn read_range(lua: &Lua, node: &mut Node, table: &Table) -> mlua::Result<()> {
     node.a11y.get_or_insert_default().range = Some(Box::new(range));
     Ok(())
 }
-/// A slider's `value_text` from `table`, if it has one.
+/// What an element reads as besides its name (`value_text`), a slider's
+/// or any other's, from `table`, if it has one.
 #[inline(never)]
 fn read_value_text(lua: &Lua, node: &mut Node, table: &Table) -> mlua::Result<()> {
     let text = table.get::<mlua::Value>("value_text")?;
@@ -4365,6 +4366,13 @@ fn fill_from(
             "focus_group" => {
                 let axis: String = lua.unpack(value)?;
                 node.a11y.get_or_insert_default().focus_group = Some(focus_group(&axis)?);
+            }
+            // What it reads as besides its name (`aria-valuetext`), any
+            // element's: read here, among the keys a table has, so elements
+            // without one never look it up. A slider's range reads it again.
+            "value_text" => {
+                let range = (node.a11y.get_or_insert_default().range).get_or_insert_default();
+                range.value_text = Some(source(lua, Ty::Str, "value_text", value)?);
             }
             name if WIDGET_FIELDS.contains(&name) => {}
             name => {
