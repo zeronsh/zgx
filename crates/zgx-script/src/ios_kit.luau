@@ -215,6 +215,8 @@ function ios.section(props)
 		mb = 35,
 		props.header and ui.text {
 			props.header,
+			-- A heading, as a table's section header is (VoiceOver's headings rotor).
+			heading = 2,
 			mx = 36,
 			wrap = true,
 			mb = 7,
@@ -276,7 +278,11 @@ function ios.row(props)
 		justify = "start",
 		hover = {},
 		active = { bg = "$pressed" },
+		-- As a Settings cell reads: the title its name, the detail its value,
+		-- and one element with its switch.
 		role = if toggle then "switch" else "button",
+		label = props.title,
+		value_text = props.detail,
 		checked = toggle,
 		on_click = if toggle
 			then function()
@@ -310,7 +316,7 @@ function ios.row(props)
 				mr = 8,
 			} or nil,
 		},
-		toggle and ui.native_switch { value = toggle, label = props.title } or nil,
+		toggle and ui.native_switch { value = toggle, label = props.title, aria_hidden = true } or nil,
 		(props.chevron ~= false and not toggle)
 				and ui.symbol { name = "chevron.forward", size = 14, weight = 600, color = "$text.tertiary" }
 			or nil,

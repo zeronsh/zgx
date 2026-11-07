@@ -23,7 +23,7 @@ use objc2_ui_kit::{
     UIAccessibilityTraitButton, UIAccessibilityTraitHeader, UIAccessibilityTraitImage,
     UIAccessibilityTraitLink, UIAccessibilityTraitNone, UIAccessibilityTraitNotEnabled,
     UIAccessibilityTraitSearchField, UIAccessibilityTraitSelected, UIAccessibilityTraitStaticText,
-    UIAccessibilityTraitUpdatesFrequently, UIAccessibilityTraits,
+    UIAccessibilityTraitTabBar, UIAccessibilityTraitUpdatesFrequently, UIAccessibilityTraits,
 };
 use std::rc::{Rc, Weak};
 
@@ -145,6 +145,9 @@ impl NodeWrapper<'_> {
             Role::Heading => unsafe { UIAccessibilityTraitHeader },
             Role::Slider | Role::SpinButton => unsafe { UIAccessibilityTraitAdjustable },
             Role::SearchInput => unsafe { UIAccessibilityTraitSearchField },
+            // zgx patch: as UITabBar's, so VoiceOver counts its tabs ("Tab, 2
+            // of 4").
+            Role::TabList => unsafe { UIAccessibilityTraitTabBar },
             _ => unsafe { UIAccessibilityTraitNone },
         };
 
