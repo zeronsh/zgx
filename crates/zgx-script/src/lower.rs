@@ -2136,6 +2136,7 @@ fn quick(item: &Value) -> Quick {
         Value::Map(m) => Quick::At(Rc::as_ptr(m).cast::<()>() as usize),
         Value::Element(e) => Quick::At(e.address()),
         Value::Image(image) => Quick::At(std::sync::Arc::as_ptr(image).cast::<()>() as usize),
+        Value::Folded(folded) => Quick::At(Rc::as_ptr(folded).cast::<()>() as usize),
     }
 }
 /// Hashes items' contents to match rows (equal contents are compared
@@ -7556,6 +7557,7 @@ impl KeptKeys {
 
 /// An item's `field` as a list key: a number, string or boolean, else its
 /// index.
+#[inline]
 fn field_key(item: &Value, field: &str, index: usize) -> ListKey {
     item.field(field)
         .and_then(ListKey::of)
