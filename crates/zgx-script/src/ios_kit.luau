@@ -344,6 +344,11 @@ function ios.composer(props)
 			radius = channel(focused, 20, 24),
 			interactive = true,
 			direction = "column",
+			-- `log_motion`: its size each frame in the gesture log, to compare with
+			-- the keyboard's.
+			on_resize = props.log_motion and function(size)
+				ui.gesture_log(string.format("COMPOSER %.1f w %.1f h %.1f", ui.now(), size.w, size.h))
+			end or nil,
 			opacity = if still then ui.tween(fade, { duration = 120 }) else nil,
 			-- The text: beside the buttons at rest, above them open.
 			ui.div {
@@ -390,6 +395,9 @@ function ios.composer(props)
 					border = 0,
 					focus = {},
 					on_focus = function()
+						if props.log_motion then
+							ui.gesture_log(string.format("COMPOSER %.1f focus", ui.now()))
+						end
 						focused:set(true)
 						if still then
 							fade:set(0.6)
@@ -399,6 +407,9 @@ function ios.composer(props)
 						end
 					end,
 					on_blur = function()
+						if props.log_motion then
+							ui.gesture_log(string.format("COMPOSER %.1f blur", ui.now()))
+						end
 						focused:set(false)
 						if still then
 							fade:set(0.6)

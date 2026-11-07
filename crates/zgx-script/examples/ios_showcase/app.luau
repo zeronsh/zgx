@@ -208,7 +208,7 @@ end
 
 local function Composer()
 	local message = ui.use_state("")
-	return ios.composer { value = message, placeholder = "Message" }
+	return ios.composer { value = message, placeholder = "Message", log_motion = true }
 end
 
 local function TextPage(nav: any)
