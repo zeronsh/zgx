@@ -1,8 +1,9 @@
 //! Glass: the system's own material where the platform has one, the same box
 //! drawn elsewhere.
 //!
-//! On macOS 26 a [`glass`] box is backed by an `NSGlassEffectView`, which the
-//! window server draws from what lies under it. It's a native view between the
+//! On macOS 26 a [`glass`] box is backed by an `NSGlassEffectView`, and on iOS
+//! by a `UIGlassEffect` view, which the system's compositor draws from what
+//! lies under it. It's a native view between the
 //! window's planes ([`crate::native_view`]), so a window with no glass keeps
 //! one plane and pays nothing. Its children are ordinary nodes on the plane
 //! above it, and it's one node for input and assistive technology: the system's
@@ -35,15 +36,22 @@ pub struct GlassStyle {
     pub variant: GlassVariant,
     /// A colour it takes on.
     pub tint: Option<Color>,
+    /// It answers presses as the system's controls do (iOS).
+    pub interactive: bool,
     /// Its corners' radius in points; `f32::INFINITY` for a capsule.
     pub radius: f32,
+    /// Each corner's own radius, over `radius` (iOS and the drawn glass;
+    /// macOS's takes one, `radius`).
+    pub corners: Option<crate::decoration::Corners>,
 }
 impl Default for GlassStyle {
     fn default() -> Self {
         Self {
             variant: GlassVariant::Regular,
             tint: None,
+            interactive: false,
             radius: 24.,
+            corners: None,
         }
     }
 }
@@ -109,6 +117,54 @@ impl GlassPane {
     }
 }
 
+/// What an iOS glass node's system view is.
+#[cfg(target_os = "ios")]
+#[derive(Clone)]
+pub enum GlassContent {
+    /// A pane of glass.
+    Pane(GlassPane),
+    /// A group whose panes merge within `spacing` points of each other.
+    Group(f32),
+}
+
+/// A group whose [`glass`] descendants merge and separate as they come within
+/// `spacing` points of each other, as the system's do. Where the system has no
+/// such group (all but iOS), an ordinary box.
+pub fn glass_group(spacing: f32) -> View {
+    #[cfg(target_os = "ios")]
+    {
+        let backing = component(move |cx| {
+            let natives = cx.try_service::<NativeViews>();
+            div()
+                .absolute()
+                .left(0.)
+                .top(0.)
+                .w_full()
+                .h_full()
+                .on_mount(move |handle| {
+                    let Some(natives) = natives.filter(|n| n.supported() && n.glass_supported())
+                    else {
+                        return;
+                    };
+                    if let Some(scene) = handle.scene()
+                        && let Ok(mut scene) = scene.try_borrow_mut()
+                    {
+                        scene.set_platform_painted(handle.node(), true);
+                    }
+                    handle.retain(
+                        natives.register(handle.node(), NativeContent::GlassGroup(spacing)),
+                    );
+                })
+        });
+        div().relative().child(backing)
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = spacing;
+        div()
+    }
+}
+
 /// A box of glass: add children, size and place it like any `div`. `style`
 /// runs again when state it reads changes.
 pub fn glass(mut style: impl FnMut() -> GlassStyle + 'static) -> View {
@@ -126,16 +182,18 @@ pub fn glass(mut style: impl FnMut() -> GlassStyle + 'static) -> View {
             let rounded = style();
             let theme = cx.theme();
             let themes = crate::theme::Themes::of(&cx.runtime());
-            return filling()
-                .rounded(radius_of(&rounded))
-                .shader_drive(move || {
-                    let mut drive = style().drawn(theme.theme_kind().is_dark());
-                    // Asked for less transparency, as the system's goes solid.
-                    if themes.system_preferences().reduced_transparency {
-                        drive.params[0][3] = 0.97;
-                    }
-                    drive
-                });
+            let filled = match rounded.corners {
+                Some(corners) => filling().rounded_corners(corners),
+                None => filling().rounded(radius_of(&rounded)),
+            };
+            return filled.shader_drive(move || {
+                let mut drive = style().drawn(theme.theme_kind().is_dark());
+                // Asked for less transparency, as the system's goes solid.
+                if themes.system_preferences().reduced_transparency {
+                    drive.params[0][3] = 0.97;
+                }
+                drive
+            });
         };
         let pane = GlassPane(shared.clone());
         let effect = cx.runtime().effect(move || {

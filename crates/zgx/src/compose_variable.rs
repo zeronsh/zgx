@@ -453,6 +453,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                 size.clone(),
                 extent.clone(),
             );
+            let end_room = stretch.end_room.clone();
             let navigation = keyboard_navigation.then(|| {
                 crate::compose_virtual_keyboard::Navigation::new_variable(
                     ui,
@@ -626,7 +627,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     let model = heights.index.borrow();
                     let length = model.count();
                     let total = model.content_height();
-                    let limit = (total - height).max(0.);
+                    let limit = (total + end_room.get() - height).max(0.);
                     // As a scroll view takes it: past the end (`math.huge`)
                     // is the end; NaN, the top.
                     let mut position = if requested.is_nan() {

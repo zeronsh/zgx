@@ -10,3 +10,8 @@ RUST_MIN_STACK = "8388608"
 # paid for them in release builds (a fifth of a filter over a list). Debug
 # builds keep them (luau0-src defines LUAU_ENABLE_ASSERT there).
 LUAU_CXXFLAGS = "-DNDEBUG"
+
+# What the iOS code needs (Liquid Glass is iOS 26's), and what Rust's linker
+# needs told: its default, iOS 10, lacks symbols mimalloc's C links against.
+# Read only when building for iOS.
+IPHONEOS_DEPLOYMENT_TARGET = "26.0"

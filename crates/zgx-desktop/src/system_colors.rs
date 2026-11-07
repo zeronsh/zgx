@@ -81,7 +81,11 @@ fn tokens() -> Vec<(TokenId, TokenInput)> {
         }
         tokens
     }
-    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    #[cfg(target_os = "ios")]
+    {
+        crate::ios_system::tokens()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", windows, target_os = "linux")))]
     {
         Vec::new()
     }
@@ -325,6 +329,7 @@ fn preferences() -> SystemPreferences {
             reduced_motion: workspace.accessibilityDisplayShouldReduceMotion(),
             increased_contrast: workspace.accessibilityDisplayShouldIncreaseContrast(),
             reduced_transparency: workspace.accessibilityDisplayShouldReduceTransparency(),
+            ..Default::default()
         }
     }
     #[cfg(windows)]
@@ -333,6 +338,7 @@ fn preferences() -> SystemPreferences {
             reduced_motion: !windows_motion().is_empty(),
             increased_contrast: windows_contrast().is_some(),
             reduced_transparency: windows_transparency_off(),
+            ..Default::default()
         }
     }
     #[cfg(target_os = "linux")]
@@ -343,9 +349,14 @@ fn preferences() -> SystemPreferences {
             increased_contrast: settings.contrast,
             // On X11 with no compositor, nothing shows through a window.
             reduced_transparency: !crate::x11_settings::composited(),
+            ..Default::default()
         }
     }
-    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    #[cfg(target_os = "ios")]
+    {
+        crate::ios_system::preferences()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", windows, target_os = "linux")))]
     {
         SystemPreferences::default()
     }
@@ -528,6 +539,10 @@ pub(crate) fn sync(ui: &zgx::widgets::Ui) {
     tokens.extend(transparency_tokens(preferences));
     ui.theme().set_system_tokens(tokens);
     ui.theme().set_system_preferences(preferences);
+    #[cfg(target_os = "ios")]
+    if zgx_gpu::text::set_bold_text(crate::ios_system::bold_text()) {
+        ui.scene.borrow_mut().fonts_replaced();
+    }
     if let Some(interval) = double_click_time() {
         ui.input.set_double_click_time(interval);
     }
@@ -834,7 +849,11 @@ pub(crate) fn display_options_changed() -> bool {
         });
         CHANGED.swap(false, Ordering::Relaxed)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "ios")]
+    {
+        crate::ios_system::options_changed()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     {
         false
     }

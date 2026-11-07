@@ -1538,6 +1538,7 @@ mod baked {
                 reduced_motion: true,
                 increased_contrast: false,
                 reduced_transparency: false,
+                ..Default::default()
             });
         h.run_ms(50.);
         assert!(h.baked().is_none());
@@ -1675,6 +1676,218 @@ fn a_tween_on_a_node_runs_none_of_its_functions_as_it_moves() {
     assert_eq!(h.fill("box"), Color(0, 255, 0, 255));
     h.run_ms(1000.);
     assert_eq!(width(&mut h), 200.);
+}
+
+/// `x` as it goes to `to` on a click of `go`, sampled every 17 ms for `samples`.
+fn spring_path(options: &str, samples: usize) -> Vec<f32> {
+    let mut h = Harness::inline(&format!(
+        r##"local at = ui.state("at", 0)
+        return ui.column {{
+            ui.div {{ id = "box", w = 20, h = 20, x = ui.spring(at, {options}) }},
+            ui.button {{ "Go", id = "go", on_click = function() at:set(100) end }},
+        }}"##
+    ));
+    h.frames(2);
+    h.click("go");
+    (0..samples)
+        .map(|_| {
+            h.run_ms(17.);
+            h.x("box")
+        })
+        .collect()
+}
+
+#[test]
+fn a_springs_bounce_decides_whether_it_overshoots() {
+    let still = spring_path("{ response = 300, bounce = 0 }", 120);
+    let top = still.iter().copied().fold(f32::MIN, f32::max);
+    assert!(top <= 100.01, "no bounce, no overshoot: {top}");
+    assert_eq!(*still.last().unwrap(), 100.);
+    let lively = spring_path("{ response = 300, bounce = 0.3 }", 120);
+    let top = lively.iter().copied().fold(f32::MIN, f32::max);
+    assert!((101. ..125.).contains(&top), "a little past: {top}");
+    assert_eq!(*lively.last().unwrap(), 100., "and it settles");
+}
+
+#[test]
+fn a_spring_named_is_the_same_spring_and_a_shorter_response_is_quicker() {
+    let named = spring_path("ui.springs.snappy", 40);
+    let said = spring_path("{ response = 350, bounce = 0.15 }", 40);
+    for (named, said) in named.iter().zip(&said) {
+        assert!((named - said).abs() < 1., "{named} {said}");
+    }
+    let slow = spring_path("{ response = 600 }", 10);
+    let quick = spring_path("{ response = 150 }", 10);
+    assert!(quick[9] > slow[9] * 1.5, "{} {}", quick[9], slow[9]);
+}
+
+#[test]
+fn a_spring_takes_the_side_it_goes_toward_and_waits_its_delay() {
+    let up = spring_path("{ response = 600, up = { response = 150 } }", 10);
+    let down = spring_path("{ response = 600, down = { response = 150 } }", 10);
+    assert!(up[9] > down[9] * 1.5, "{} {}", up[9], down[9]);
+    let held = spring_path("{ response = 150, delay = 60 }", 20);
+    assert!(held[1] == 0., "not yet: {}", held[1]);
+    assert!(held[19] > 10., "then it goes: {}", held[19]);
+}
+
+#[test]
+fn a_spring_turned_back_midway_carries_its_speed() {
+    let mut h = Harness::inline(
+        r##"local at = ui.state("at", 0)
+        return ui.column {
+            ui.div { id = "box", w = 20, h = 20, x = ui.spring(at, { response = 400 }) },
+            ui.button { "Go", id = "go", on_click = function() at:set(100) end },
+            ui.button { "Back", id = "back", on_click = function() at:set(0) end },
+        }"##,
+    );
+    h.frames(2);
+    h.click("go");
+    h.run_ms(100.);
+    let at = h.x("box");
+    h.run_ms(17.);
+    let moved = h.x("box") - at;
+    assert!(moved > 0.);
+    h.click("back");
+    let before = h.x("box");
+    h.run_ms(17.);
+    // A spring that forgot its speed would start back at once, at a rate its pull
+    // alone gives; this one is still carrying what it had.
+    let turned = h.x("box") - before;
+    assert!(turned.abs() < moved, "no jump: {moved} then {turned}");
+}
+
+/// What a state does run to 100 from 0, sampled each frame, and how long it went on.
+fn spring_to_path(options: &str) -> Vec<f32> {
+    let mut h = Harness::inline(&format!(
+        r##"local at = ui.state("at", 0)
+        local shown = ui.state("shown", "going")
+        return ui.column {{
+            ui.div {{ id = "box", w = 20, h = 20, x = at }},
+            ui.text {{ "{{shown}}", id = "said" }},
+            ui.button {{ "Go", id = "go", on_click = function()
+                ui.spring_to(at, 100, {{ {options}, done = function() shown:set("arrived") end }})
+            end }},
+        }}"##
+    ));
+    h.frames(2);
+    h.click("go");
+    let path = (0..90)
+        .map(|_| {
+            h.run_ms(17.);
+            h.x("box")
+        })
+        .collect();
+    assert_eq!(h.text("said"), "arrived");
+    path
+}
+
+#[test]
+fn a_spring_over_a_small_range_runs_to_the_end() {
+    // An opacity, 0 to 1 on a 0.415 s spring: it eases all the way, not
+    // jumping to 1 once within half a unit (a point's tolerance).
+    let mut h = Harness::inline(
+        r##"local shown = ui.state("shown", 0)
+        return ui.column {
+            ui.div { id = "box", w = 20, h = 20, x = function() return shown:get() * 100 end },
+            ui.button { "Go", id = "go", on_click = function()
+                ui.spring_to(shown, 1, { stiffness = 229.2, damping = 30.28 })
+            end },
+        }"##,
+    );
+    h.frames(2);
+    h.click("go");
+    let path: Vec<f32> = (0..40)
+        .map(|_| {
+            h.run_ms(17.);
+            h.x("box")
+        })
+        .collect();
+    // Critically damped at 15.14 a second: about 72% of the way at 170 ms.
+    let at = path[9];
+    assert!(
+        (55. ..85.).contains(&at),
+        "part way at 170 ms: {at} ({path:?})"
+    );
+    assert!(
+        path.windows(2).all(|pair| pair[1] - pair[0] < 20.),
+        "no jump: {path:?}"
+    );
+    assert_eq!(*path.last().unwrap(), 100.);
+}
+
+#[test]
+fn a_state_runs_to_its_target_on_a_spring_with_no_script_each_frame() {
+    let stiffness = 600f64;
+    let path = spring_to_path("stiffness = 600, damping = 48.99, most = 1200");
+    assert_eq!(*path.last().unwrap(), 100.);
+    assert!(
+        path.windows(2).all(|pair| pair[0] <= pair[1]),
+        "critically damped: no way back"
+    );
+    // The closed form of a critically damped spring, at some step.
+    let rate = stiffness.sqrt();
+    let at = |ms: f64| {
+        let t = ms / 1000.;
+        100. * (1. - (1. + rate * t) * (-rate * t).exp())
+    };
+    let i = 9;
+    let (ms, found) = (i as f64 * 17., f64::from(path[i]));
+    assert!(
+        (found - at(ms)).abs() < 1.,
+        "{found} at {ms} ms, against {}",
+        at(ms)
+    );
+}
+
+#[test]
+fn a_spring_with_little_damping_passes_its_target_and_comes_back() {
+    let path = spring_to_path("stiffness = 440, damping = 35.7, velocity = 3000, most = 1200");
+    let peak = path.iter().copied().fold(0f32, f32::max);
+    assert!(peak > 101., "past it: {peak}");
+    assert_eq!(*path.last().unwrap(), 100.);
+}
+
+#[test]
+fn a_delay_holds_a_spring_and_from_waits_until_it_has_passed() {
+    let path = spring_to_path("stiffness = 650, damping = 56, delay = 40");
+    assert_eq!(path[0], 0., "still waiting");
+    assert!(path[5] > 0., "then moves");
+    // Starting behind the state, it stays until the spring reaches it.
+    let path = spring_to_path("stiffness = 440, damping = 35.7, from = -200, velocity = 6000");
+    assert!(path.iter().all(|at| *at >= 0.), "never back: {path:?}");
+    assert!(path.iter().any(|at| *at > 90.));
+}
+
+#[test]
+fn a_state_given_a_speed_starts_with_it_and_stopping_says_it() {
+    let moving = spring_to_path("stiffness = 600, damping = 48.99, velocity = 2000");
+    let still = spring_to_path("stiffness = 600, damping = 48.99");
+    assert!(
+        moving[1] > still[1] * 1.5,
+        "{} against {}",
+        moving[1],
+        still[1]
+    );
+    let mut h = Harness::inline(
+        r##"local at = ui.state("at", 0)
+        local said = ui.state("said", "none")
+        local stop
+        return ui.column {
+            ui.div { id = "box", w = 20, h = 20, x = at },
+            ui.text { "{said}", id = "said" },
+            ui.button { "Go", id = "go", on_click = function() stop = ui.spring_to(at, 100, { stiffness = 600, damping = 48.99 }) end },
+            ui.button { "Stop", id = "stop", on_click = function() said:set(if stop() > 100 then "fast" else "slow") end },
+        }"##,
+    );
+    h.frames(2);
+    h.click("go");
+    h.run_ms(40.);
+    h.click("stop");
+    assert_eq!(h.text("said"), "fast");
+    let at = h.x("box");
+    h.run_ms(100.);
+    assert_eq!(h.x("box"), at, "and it stays where it was stopped");
 }
 
 /// A box bound to a spring of a keyboard's stiffness, from 0 to 100 on "go".

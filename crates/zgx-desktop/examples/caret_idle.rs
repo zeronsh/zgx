@@ -10,7 +10,7 @@ use zgx::compose::prelude::*;
 use zgx_desktop::{Application, WindowOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let focus = !zgx::env::var_os("ZGX_FOCUS").is_some_and(|v| v == "0");
+    let focus = zgx::env::var_os("ZGX_FOCUS").is_none_or(|v| v != "0");
     let text = std::env::var("ZGX_TEXT").unwrap_or_else(|_| "Reading, not typing".into());
     let at: Option<usize> = std::env::var("ZGX_CARET_AT")
         .ok()

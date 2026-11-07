@@ -41,7 +41,7 @@ static IDENTITY: OnceLock<Identity> = OnceLock::new();
 pub(crate) fn set_identity(identity: Identity) {
     let _ = IDENTITY.set(identity);
 }
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(dead_code))]
 fn identity() -> Identity {
     IDENTITY.get().cloned().unwrap_or_default()
 }

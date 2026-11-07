@@ -11,7 +11,7 @@ pub(crate) fn glyph_image(
     key: cosmic_text::CacheKey,
 ) -> Option<cosmic_text::SwashImage> {
     let image = swash.get_image_uncached(fonts, key);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     if image
         .as_ref()
         .is_none_or(|image| image.placement.width == 0 || image.placement.height == 0)
@@ -23,6 +23,28 @@ pub(crate) fn glyph_image(
 use std::{ops::Range, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 use zgx::scene::Rect;
+
+/// iOS's Bold Text: all text a step or two heavier, as the system's is.
+static BOLD_TEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether text is shown heavier; whether that changed, so text shapes again.
+pub fn set_bold_text(on: bool) -> bool {
+    BOLD_TEXT.swap(on, std::sync::atomic::Ordering::Relaxed) != on
+}
+/// The weight text of `weight` shows at.
+pub fn shown_weight(weight: u16) -> u16 {
+    if !BOLD_TEXT.load(std::sync::atomic::Ordering::Relaxed) {
+        return weight;
+    }
+    bolder(weight)
+}
+fn bolder(weight: u16) -> u16 {
+    match weight {
+        0..=400 => 600,
+        401..=600 => 700,
+        heavier => (heavier + 100).min(900),
+    }
+}
+
 /// The width text wraps at: the box's, and a thousandth of a point more.
 /// A box sized to its text gets that width back through layout arithmetic
 /// (a bubble's padding added, then taken off), where a float's last bit
@@ -115,6 +137,43 @@ fn font_features(settings: &[([u8; 4], u32)]) -> cosmic_text::FontFeatures {
     }
     features
 }
+/// iOS's system font's tracking at `size` points, in ems: the normal row of
+/// its `trak` table (SFUI.ttf, iOS 26), units of 1/2048 em, between its sizes.
+#[cfg(target_os = "ios")]
+fn system_tracking(size: f32) -> f32 {
+    const TABLE: [(f32, f32); 21] = [
+        (6., 82.),
+        (9., 38.),
+        (10., 24.),
+        (11., 12.),
+        (12., 0.),
+        (13., -12.),
+        (14., -22.),
+        (15., -32.),
+        (16., -40.),
+        (17., -52.),
+        (20., -46.),
+        (22., -24.),
+        (24., 6.),
+        (28., 28.),
+        (32., 26.),
+        (36., 21.),
+        (50., 14.),
+        (64., 7.),
+        (80., 0.),
+        (100., 0.),
+        (138., 0.),
+    ];
+    let units = match TABLE.iter().position(|(at, _)| *at >= size) {
+        Some(0) => TABLE[0].1,
+        Some(next) => {
+            let ((a, ua), (b, ub)) = (TABLE[next - 1], TABLE[next]);
+            ua + (ub - ua) * (size - a) / (b - a)
+        }
+        None => 0.,
+    };
+    units / 2048.
+}
 pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> {
     use zgx::text_layout::FontFamily;
     let family = match &font.family {
@@ -135,7 +194,9 @@ pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> 
         // titles get their display cut, tighter and narrower.
         .optical(size.round().clamp(1., 1000.) as u16)
         .masked(font.masked)
-        .weight(cosmic_text::Weight(font.weight.clamp(1, 1000)))
+        .weight(cosmic_text::Weight(
+            shown_weight(font.weight).clamp(1, 1000),
+        ))
         .style(if font.italic {
             cosmic_text::Style::Italic
         } else {
@@ -143,6 +204,12 @@ pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> 
         });
     let spacing = font.letter_spacing.pixels();
     if spacing == 0. {
+        // What UIKit does for its system font, unasked: a face's tracking at
+        // this size. Text with a spacing of its own keeps it.
+        #[cfg(target_os = "ios")]
+        if matches!(font.family, FontFamily::SansSerif) {
+            return attrs.letter_spacing(system_tracking(size));
+        }
         attrs
     } else {
         // cosmic-text 0.14 accepts tracking in EM, while our public styles use
@@ -190,14 +257,14 @@ fn fallback_spans<'a>(
         .map(|f| {
             let id = fonts.query_face(
                 family(f),
-                cosmic_text::Weight(font.weight),
+                cosmic_text::Weight(shown_weight(font.weight)),
                 if font.italic {
                     cosmic_text::Style::Italic
                 } else {
                     cosmic_text::Style::Normal
                 },
             );
-            id.and_then(|id| fonts.get_font(id, cosmic_text::Weight(font.weight)))
+            id.and_then(|id| fonts.get_font(id, cosmic_text::Weight(shown_weight(font.weight))))
         })
         .collect();
     let mut ranges: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
@@ -2661,6 +2728,15 @@ mod monospace_fallback_tests {
 
 #[cfg(test)]
 mod wash_tests {
+    #[test]
+    fn bold_text_makes_every_weight_heavier_and_keeps_their_order() {
+        let shown: Vec<u16> = [100, 400, 500, 600, 700, 800, 900]
+            .map(super::bolder)
+            .to_vec();
+        assert_eq!(shown, [600, 600, 700, 700, 800, 900, 900]);
+        assert!(shown.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
     use super::*;
     use zgx::{
         rich_text::{RichText, TextRun},

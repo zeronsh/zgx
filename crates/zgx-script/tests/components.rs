@@ -1289,6 +1289,32 @@ fn a_labelled_canvas_is_an_image_and_an_unlabelled_one_is_decoration() {
 }
 
 #[test]
+fn a_rows_detail_is_its_value_as_a_settings_cell_reads() {
+    // UIKit's Settings cell: the title its label, the detail its value.
+    let mut h = Harness::inline(
+        r#"local network = ui.state("network", "Home")
+        return ui.column {
+            ui.button { id = "wifi", label = "Wi-Fi", value_text = network,
+                ui.text { "Wi-Fi" }, ui.text { "{network}" } },
+            ui.div { id = "plain", role = "group", label = "Plain", value_text = "Some" },
+            ui.button { "Move", id = "move", on_click = function() network:set("Office") end },
+        }"#,
+    );
+    h.ui.set_assistive_technology(true);
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    let wifi = node(&mut h, "wifi");
+    assert_eq!(
+        (wifi.label.as_str(), wifi.value.as_deref()),
+        ("Wi-Fi", Some("Home"))
+    );
+    assert_eq!(node(&mut h, "plain").value.as_deref(), Some("Some"));
+    h.click("move");
+    h.frames(1);
+    assert_eq!(node(&mut h, "wifi").value.as_deref(), Some("Office"));
+}
+
+#[test]
 fn any_element_is_a_slider_with_its_value_range_text_and_what_moves_it() {
     let mut h = Harness::inline(
         r#"local effort = ui.state("effort", 2)
@@ -1345,4 +1371,37 @@ fn any_element_is_a_slider_with_its_value_range_text_and_what_moves_it() {
 #[should_panic(expected = "a slider role needs a finite `min` below its `max`")]
 fn a_slider_role_needs_its_range() {
     Harness::inline(r#"return ui.div { role = "slider", label = "Level", value = 1 }"#);
+}
+
+#[test]
+fn a_hint_from_state_follows_it() {
+    // A sheet grabber's: what a double tap does depends on where it stands.
+    let mut h = Harness::inline(
+        r#"local large = ui.state("large", false)
+        return ui.column {
+            ui.button { id = "grabber", label = "Sheet Grabber",
+                description = function()
+                    return if large:get() then "Double tap to collapse the sheet." else "Double tap to expand the sheet."
+                end,
+                on_click = function() large:set(not large:get()) end },
+            ui.div { id = "fixed", role = "group", label = "Fixed", description = "Still here" },
+            ui.button { id = "none", label = "None", description = ui.state("hint", "") },
+        }"#,
+    );
+    h.ui.set_assistive_technology(true);
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    let hint = |h: &mut Harness, id: &str| node(h, id).description;
+    assert_eq!(
+        hint(&mut h, "grabber").as_deref(),
+        Some("Double tap to expand the sheet.")
+    );
+    assert_eq!(hint(&mut h, "fixed").as_deref(), Some("Still here"));
+    assert_eq!(hint(&mut h, "none"), None, "an empty hint is none");
+    h.click("grabber");
+    h.frames(1);
+    assert_eq!(
+        hint(&mut h, "grabber").as_deref(),
+        Some("Double tap to collapse the sheet.")
+    );
 }

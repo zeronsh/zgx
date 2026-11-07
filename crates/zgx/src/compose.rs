@@ -665,6 +665,18 @@ impl Rare {
         inner.keymap.extend(self.keymap);
         inner.mount_flags |= self.mount_flags;
         inner.conditional.extend(self.conditional);
+        // What it is to assistive technology, as set outside a component
+        // over what the component set (`aria_hidden` on a switch a row
+        // already stands for): each part the outer view set wins.
+        if self.accessible_label.is_some() {
+            inner.accessible_label = self.accessible_label;
+        }
+        if let Some(outer) = self.accessibility {
+            match &mut inner.accessibility {
+                Some(own) => (*outer).merge_into(own),
+                None => inner.accessibility = Some(outer),
+            }
+        }
     }
 }
 impl View {
@@ -1394,6 +1406,14 @@ impl View {
     /// count, a "Sent" note, a message arriving.
     pub fn live(mut self, live: Live) -> Self {
         self.accessibility_mut().live = Some(live);
+        self
+    }
+    /// Read after the name, as a hint (`aria-description`), followed: a
+    /// sheet grabber's "Double tap to expand" or "collapse" as the sheet
+    /// stands. Worked out only while assistive technology listens, as
+    /// `accessible_label_when`; empty says none.
+    pub fn description_when(mut self, description: impl FnMut() -> String + 'static) -> Self {
+        self.accessibility_mut().description_when = Some(Box::new(description));
         self
     }
     /// Read after the name, as a hint (`aria-description`).
@@ -3080,6 +3100,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 size.clone(),
                 extent.clone(),
             );
+            let end_room = stretch.end_room.clone();
             let navigation = keyboard_navigation.then(|| {
                 crate::compose_virtual_keyboard::Navigation::new(
                     ui,
@@ -3172,7 +3193,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 let requested = offset.get();
                 // As a scroll view takes it: past the end (`math.huge`) is
                 // the end; NaN, the top.
-                let limit = (model.content_height() - height).max(0.0);
+                let limit = (model.content_height() + end_room.get() - height).max(0.0);
                 let mut position = if requested.is_nan() {
                     0.0
                 } else {
@@ -3459,9 +3480,7 @@ pub(crate) fn mount(
 ) -> NodeId {
     let depth = ui.mount_depth();
     if crate::stack_low(depth) {
-        return stacker::grow(crate::STACK_SEGMENT, || {
-            mount(ui, parent, view, environment)
-        });
+        return crate::on_segment(|| mount(ui, parent, view, environment));
     }
     // Extract closures while retaining the root refinements on their wrapper.
     let kind = std::mem::replace(&mut view.kind, Kind::Container(Layout::Column));
@@ -5128,6 +5147,12 @@ fn open_element(
         } => {
             dim_when_disabled(&mut view);
             let mut defaults = widget_style(|w| &w.editor);
+            // Its height follows Dynamic Type's token as it changes; built
+            // once, a larger text size would clip the text.
+            #[cfg(target_os = "ios")]
+            if !multiline {
+                defaults = defaults.h(tok::CONTROL_HEIGHT);
+            }
             // The default outline is drawn over; a border the app gives
             // takes room, as CSS's does, unless it says otherwise.
             let own_border =
@@ -5563,6 +5588,11 @@ fn open_element(
         }
         if let Some(mode) = rare.as_deref().and_then(|r| r.input_mode) {
             editor.set_input_mode(mode);
+            if mode == crate::text_edit::InputMode::Search {
+                ui.semantics
+                    .borrow_mut()
+                    .update(editor.node, |node| node.search = true);
+            }
         }
         if let Some(check) = rare.as_deref_mut().and_then(|r| r.spellcheck.take())
             && rare.as_deref().and_then(|r| r.secure) != Some(true)
@@ -6007,6 +6037,11 @@ pub(crate) struct ListStretch {
     content: NodeId,
     placed: Rc<Cell<f32>>,
     shown: Signal<f32>,
+    /// Room past its end, while a keyboard covers that much of it.
+    pub(crate) end_room: Rc<Cell<f32>>,
+    /// Where it is drawn instead while something else moves it on screen
+    /// (`ScrollDriver::hold`): its offset and rows go on.
+    held: Signal<Option<f32>>,
 }
 impl ListStretch {
     /// `root`'s list, its rows in `content`, scrolled to `offset` within
@@ -6029,14 +6064,27 @@ impl ListStretch {
                 }
             });
         }
-        let shown = crate::elastic::register(ui, root, false, size, extents, offset);
+        let end_room: Rc<Cell<f32>> = Rc::default();
+        let held = ui.signal(None::<f32>);
+        let shown = crate::elastic::register(
+            ui,
+            root,
+            false,
+            size,
+            extents,
+            offset,
+            end_room.clone(),
+            Some(held.clone()),
+        );
         let placed = Rc::new(Cell::new(0_f32));
         {
             let (placed, shown, scene) = (placed.clone(), shown.clone(), ui.scene.clone());
+            let held = held.clone();
             let pixel_scale = ui.pixel_scale();
             let mut first = true;
             ui.bind(root, move || {
                 let stretch = shown.get();
+                let held = held.get();
                 // Placed again from where it was asked to be at a new scale.
                 let _ = pixel_scale.get();
                 // The list places its content as it mounts (`place`).
@@ -6049,7 +6097,7 @@ impl ListStretch {
                         content,
                         crate::scene::Transform {
                             x: 0.,
-                            y: -(placed.get() + stretch),
+                            y: -held.unwrap_or(placed.get() + stretch),
                         },
                     );
                 }
@@ -6059,17 +6107,20 @@ impl ListStretch {
             content,
             placed,
             shown,
+            end_room,
+            held,
         }
     }
     /// The list scrolled its content to `position`.
     pub(crate) fn place(&self, scene: &mut crate::scene::Scene, position: f32) {
         self.placed.set(position);
         let stretch = self.shown.with_untracked(|s| *s);
+        let held = self.held.with_untracked(|held| *held);
         scene.set_transform(
             self.content,
             crate::scene::Transform {
                 x: 0.,
-                y: -(position + stretch),
+                y: -held.unwrap_or(position + stretch),
             },
         );
     }
@@ -6294,6 +6345,8 @@ fn mount_scroll(
     let extent = ui.observe_content_size(content);
     // What a trackpad stretches it by past an edge (`elastic`): zero unless
     // the host scrolls elastically.
+    let end_room: Rc<Cell<f32>> = Rc::default();
+    let held = ui.signal(None::<f32>);
     let stretch = crate::elastic::register(
         ui,
         root,
@@ -6301,6 +6354,8 @@ fn mount_scroll(
         size.clone(),
         extent.clone(),
         offset.clone(),
+        end_room.clone(),
+        Some(held.clone()),
     );
     if scrollbar {
         let main_extent = ui.signal(main_size(extent.get()));
@@ -6414,7 +6469,7 @@ fn mount_scroll(
         // Placed again from where it was asked to be at a new scale.
         let _ = pixel_scale.get();
         let (width, height) = size.get();
-        let limit = (main_size(extent.get()) - main_size((width, height))).max(0.);
+        let limit = (main_size(extent.get()) + end_room.get() - main_size((width, height))).max(0.);
         let requested = offset.get();
         let position = if requested.is_nan() {
             0.
@@ -6467,7 +6522,8 @@ fn mount_scroll(
         // shows no stretch: whatever a gesture left goes as it ends
         // (`elastic`).
         let stretch = if limit > 0. { stretch.get() } else { 0. };
-        scene.set_transform(content, translation(position + stretch, rtl));
+        let drawn = held.get().unwrap_or(position + stretch);
+        scene.set_transform(content, translation(drawn, rtl));
     });
 }
 #[cfg(target_os = "macos")]
@@ -7182,6 +7238,8 @@ pub(crate) struct Accessibility {
     numeric: Option<(f64, f64, NumericValue)>,
     live: Option<Live>,
     description: Option<String>,
+    /// `View::description_when`: a hint worked out from state.
+    description_when: Option<Box<dyn FnMut() -> String>>,
     error: Option<Box<dyn FnMut() -> Option<String>>>,
     hidden: bool,
     focus_group: Option<crate::input::FocusGroup>,
@@ -7189,6 +7247,57 @@ pub(crate) struct Accessibility {
     /// `View::adjustable`: what moves a custom slider (boxed: few views
     /// have one).
     adjust: Option<Box<Adjust>>,
+}
+impl Accessibility {
+    /// `Rare::merge_into`'s part for assistive technology: what the outer
+    /// view set, over the inner's.
+    fn merge_into(self, inner: &mut Accessibility) {
+        let outer = self;
+        if outer.role.is_some() {
+            inner.role = outer.role;
+        }
+        if outer.level.is_some() {
+            inner.level = outer.level;
+        }
+        if outer.selected.is_some() {
+            inner.selected = outer.selected;
+        }
+        if outer.checked.is_some() {
+            inner.checked = outer.checked;
+        }
+        inner.radio_item |= outer.radio_item;
+        if outer.expanded.is_some() {
+            inner.expanded = outer.expanded;
+        }
+        if outer.value.is_some() {
+            inner.value = outer.value;
+        }
+        if outer.numeric.is_some() {
+            inner.numeric = outer.numeric;
+        }
+        if outer.live.is_some() {
+            inner.live = outer.live;
+        }
+        if outer.description.is_some() {
+            inner.description = outer.description;
+        }
+        if outer.description_when.is_some() {
+            inner.description_when = outer.description_when;
+        }
+        if outer.error.is_some() {
+            inner.error = outer.error;
+        }
+        inner.hidden |= outer.hidden;
+        if outer.focus_group.is_some() {
+            inner.focus_group = outer.focus_group;
+        }
+        if outer.label.is_some() {
+            inner.label = outer.label;
+        }
+        if outer.adjust.is_some() {
+            inner.adjust = outer.adjust;
+        }
+    }
 }
 /// What moves a custom slider or spin button (`View::adjustable`): its
 /// step, whether the keys do as well as assistive technology, and what
@@ -7232,6 +7341,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         numeric,
         live,
         description,
+        description_when,
         error,
         hidden,
         focus_group,
@@ -7305,6 +7415,19 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             }
             let label = label();
             tree.borrow_mut().update(root, |node| node.label = label);
+        });
+    }
+    if let Some(mut description) = description_when {
+        let tree = ui.semantics.clone();
+        let assistive = assistive.clone();
+        ui.bind(root, move || {
+            if !assistive.get() {
+                return;
+            }
+            let text = description();
+            tree.borrow_mut().update(root, |node| {
+                node.description = (!text.is_empty()).then_some(text)
+            });
         });
     }
     if let Some(mut checked) = checked {
@@ -7472,7 +7595,8 @@ fn name_content(ui: &Ui, scene: &crate::scene::Scene, id: NodeId) {
         pending.extend(scene.children(child).iter().rev().copied());
     }
     drop(semantics);
-    let label = parts.join(" ");
+    // iOS's cells join their parts with a comma, which VoiceOver pauses at.
+    let label = parts.join(if cfg!(target_os = "ios") { ", " } else { " " });
     ui.semantics.borrow_mut().set_label(id, &label);
 }
 /// A mounted node, from `View::on_mount`. Weak: it keeps neither the UI

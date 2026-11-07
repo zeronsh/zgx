@@ -439,40 +439,6 @@ pub(crate) struct Shaders {
     /// the engine keeps it up (boxed: few shaders are).
     pub drive: Option<DriveBox>,
 }
-/// How a `ui.glass` looks: its props, each a value or state.
-#[derive(Clone)]
-pub(crate) struct GlassSpec {
-    pub clear: Option<Source>,
-    pub tint: Option<Source>,
-    pub radius: Option<Source>,
-}
-/// `ui.glass`, made the first time a script names it.
-pub(crate) fn install_glass(lua: &Lua, ui: &Table) -> mlua::Result<()> {
-    ui.set(
-        "glass",
-        lua.create_function(|lua, table: Table| {
-            let take = |name: &str, ty: Ty| -> mlua::Result<Option<Source>> {
-                let value = table.get::<mlua::Value>(name)?;
-                table.raw_set(name, mlua::Value::Nil)?;
-                match value {
-                    mlua::Value::Nil => Ok(None),
-                    value => source(lua, ty, name, value).map(Some),
-                }
-            };
-            let spec = GlassSpec {
-                clear: take("clear", Ty::Bool)?,
-                tint: take("tint", Ty::Color)?,
-                radius: take("radius", Ty::Num)?,
-            };
-            let node = fill(
-                lua,
-                Node::new(owner(lua)?, Kind::Glass(Box::new(spec))),
-                Some(&table),
-            )?;
-            node_ud(lua, node)
-        })?,
-    )
-}
 /// A box of `DriveProps` dropped out of line, so what drops a node stays as
 /// small as with no such field: every node's drop inlines this one's check.
 #[derive(Clone, Default)]
@@ -721,11 +687,15 @@ impl Node {
             Kind::Image { .. } => "image",
             Kind::Svg { .. } => "svg",
             Kind::Canvas(..) => "canvas",
-            Kind::Glass(_) => "glass",
             #[cfg(feature = "scene3d")]
             Kind::Scene3d(_) => "scene3d",
             Kind::WebView(_) => "webview",
             Kind::Terminal(_) => "terminal",
+            Kind::Glass(_) => "glass",
+            Kind::GlassGroup(_) => "glass_group",
+            Kind::Symbol(_) => "symbol",
+            Kind::Toggle(..) => "native_switch",
+            Kind::Tabs(..) => "native_tabs",
             Kind::Checkbox { .. } => "checkbox",
             Kind::Input { .. } => "input",
             Kind::Progress { .. } => "progress",
@@ -1045,8 +1015,6 @@ pub(crate) enum Kind {
     /// reads changes; with its `view` and `grid`, if any.
     /// `draw` may be absent when `each` draws it.
     Canvas(Option<Function>, Option<Box<CanvasOptions>>),
-    /// `ui.glass { ... }`: the system's glass where it has one.
-    Glass(Box<GlassSpec>),
     /// `ui.scene3d { … }`: a 3D scene (zgx-3d) in a GPU view.
     #[cfg(feature = "scene3d")]
     Scene3d(Rc<crate::scene3d::Scene3dSpec>),
@@ -1055,6 +1023,18 @@ pub(crate) enum Kind {
     /// `ui.terminal { term = ui.term(id) }`: a terminal session, shown
     /// where the node is.
     Terminal(zgx::terminal::Terminal),
+    /// `ui.glass { ... }`: the system's glass where it has one.
+    Glass(Box<GlassSpec>),
+    /// `ui.glass_group { spacing = n, ... }`: glass that merges.
+    GlassGroup(f32),
+    /// `ui.symbol { name = "wifi", ... }`: a system symbol.
+    Symbol(Box<SymbolSpec>),
+    /// `ui.native_switch { value = state, label = "…" }`: the system's on and off
+    /// control where it has one.
+    Toggle(String, Signal<Value>),
+    /// `ui.native_tabs { value = state, items = { { title, symbol }, … } }`:
+    /// the system's tab bar where it has one.
+    Tabs(Vec<(String, String)>, Signal<Value>),
     Checkbox {
         label: String,
         value: Signal<Value>,
@@ -1242,7 +1222,6 @@ impl Kind {
             Kind::Column
                 | Kind::Row
                 | Kind::Div
-                | Kind::Glass(_)
                 | Kind::Overlay
                 | Kind::Button
                 | Kind::Scroll { .. }
@@ -1253,6 +1232,8 @@ impl Kind {
                 | Kind::Submenu { .. }
                 | Kind::MenuItem(..)
                 | Kind::Decision(_)
+                | Kind::Glass(_)
+                | Kind::GlassGroup(_)
         ) || self.library_takes_children()
     }
     /// A component of the library holding children (a disclosure's content,
@@ -1554,6 +1535,72 @@ pub(crate) struct Anim {
     pub from: Option<Value>,
     pub to: Option<Value>,
 }
+/// One spring: a unit mass on a stiffness and a damping, starting `delay_ms` after
+/// its goal changes.
+#[derive(Clone, Copy)]
+pub(crate) struct SpringParams {
+    pub stiffness: f32,
+    pub damping: f32,
+    pub delay_ms: f32,
+}
+/// How far from its goal a spring is `t` seconds on and how fast it is going, from
+/// `left` away at `speed`: stiffness and damping for a mass of 1, in closed form.
+fn spring_at(left: f64, speed: f64, stiffness: f64, damping: f64, t: f64) -> (f64, f64) {
+    let half = damping / 2.;
+    let rest = half * half - stiffness;
+    if rest > 1e-6 {
+        let root = rest.sqrt();
+        let (fast, slow) = (-half - root, -half + root);
+        let a = (speed - fast * left) / (slow - fast);
+        let b = left - a;
+        let (a_now, b_now) = (a * (slow * t).exp(), b * (fast * t).exp());
+        (a_now + b_now, a_now * slow + b_now * fast)
+    } else if rest < -1e-6 {
+        let turn = (-rest).sqrt();
+        let (a, b) = (left, (speed + half * left) / turn);
+        let (cos, sin) = ((turn * t).cos(), (turn * t).sin());
+        let decay = (-half * t).exp();
+        let now = decay * (a * cos + b * sin);
+        (now, decay * (b * turn * cos - a * turn * sin) - half * now)
+    } else {
+        let b = speed + half * left;
+        let decay = (-half * t).exp();
+        let now = (left + b * t) * decay;
+        (now, b * decay - half * now)
+    }
+}
+
+impl SpringParams {
+    /// From a table: `response` (ms, the time of one undamped swing) and `bounce`
+    /// (0 settles without overshoot, higher overshoots more) as SwiftUI's springs
+    /// say it, or `stiffness` and `damping`; and `delay`. What it leaves out is
+    /// `base`'s.
+    fn read(table: &Table, base: Self) -> mlua::Result<Self> {
+        let mut params = base;
+        if let Some(response) = table.get::<Option<f32>>("response")? {
+            let bounce = table.get::<Option<f32>>("bounce")?.unwrap_or(0.);
+            let rate = std::f32::consts::TAU / (response.max(1.) / 1000.);
+            let fraction = if bounce >= 0. {
+                1. - bounce
+            } else {
+                1. / (1. + bounce)
+            };
+            params.stiffness = rate * rate;
+            params.damping = 2. * fraction * rate;
+        }
+        if let Some(stiffness) = table.get::<Option<f32>>("stiffness")? {
+            params.stiffness = stiffness;
+        }
+        if let Some(damping) = table.get::<Option<f32>>("damping")? {
+            params.damping = damping;
+        }
+        if let Some(delay) = table.get::<Option<f32>>("delay")? {
+            params.delay_ms = delay;
+        }
+        Ok(params)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum Curve {
     /// `ms`: the duration in milliseconds, as everywhere in scripts.
@@ -1562,8 +1609,11 @@ pub(crate) enum Curve {
         ease: crate::anime::ease::Ease,
     },
     Spring {
-        stiffness: f32,
-        damping: f32,
+        /// As it moves unless `up` or `down` says otherwise.
+        both: SpringParams,
+        /// Toward a higher value and a lower: an opening and a closing differ.
+        up: Option<SpringParams>,
+        down: Option<SpringParams>,
     },
     /// `fps` caps the frames a decorative loop asks for.
     Loop {
@@ -1592,6 +1642,26 @@ impl Pseudo {
     }
 }
 
+/// How a `ui.glass` looks: its props, each a value or state.
+#[derive(Clone)]
+pub(crate) struct GlassSpec {
+    /// `clear = true`, as `variant = "clear"`.
+    pub clear: Option<Source>,
+    pub variant: Option<Source>,
+    pub tint: Option<Source>,
+    pub interactive: Option<Source>,
+    pub radius: Option<Source>,
+    /// Each corner's own (`{ tl, tr, br, bl }` or four numbers).
+    pub corners: Option<Source>,
+}
+/// How a `ui.symbol` looks: its props, each a value or state.
+#[derive(Clone)]
+pub(crate) struct SymbolSpec {
+    pub name: String,
+    pub size: Option<Source>,
+    pub weight: Option<Source>,
+    pub color: Option<Source>,
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Ty {
     Num,
@@ -3011,6 +3081,8 @@ pub(crate) struct A11y {
     pub expanded: Option<Source>,
     pub live: Option<zgx::semantics::Live>,
     pub description: Option<Rc<str>>,
+    /// A `description` given as a state or function.
+    pub description_of: Option<Source>,
     pub hidden: bool,
     pub focus_group: Option<zgx::input::FocusGroup>,
     /// A `label` given as a state or function.
@@ -3067,7 +3139,8 @@ fn read_range(lua: &Lua, node: &mut Node, table: &Table) -> mlua::Result<()> {
     node.a11y.get_or_insert_default().range = Some(Box::new(range));
     Ok(())
 }
-/// A slider's `value_text` from `table`, if it has one.
+/// What an element reads as besides its name (`value_text`), a slider's
+/// or any other's, from `table`, if it has one.
 #[inline(never)]
 fn read_value_text(lua: &Lua, node: &mut Node, table: &Table) -> mlua::Result<()> {
     let text = table.get::<mlua::Value>("value_text")?;
@@ -4274,10 +4347,16 @@ fn fill_from(
             "error" => {
                 node.a11y.get_or_insert_default().error = Some(source(lua, Ty::Str, "error", value)?);
             }
-            "description" => {
-                node.a11y.get_or_insert_default().description =
-                    Some(lua.unpack::<String>(value)?.into());
-            }
+            "description" => match value {
+                mlua::Value::String(text) => {
+                    node.a11y.get_or_insert_default().description = Some(text.to_str()?.as_ref().into());
+                }
+                // Followed: a state or a function giving the hint as things stand.
+                value => {
+                    node.a11y.get_or_insert_default().description_of =
+                        Some(source(lua, Ty::Str, "description", value)?);
+                }
+            },
             "aria_hidden" => {
                 node.a11y.get_or_insert_default().hidden = lua.unpack(value)?;
             }
@@ -4806,6 +4885,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     matches!(a11y.role, Some(Role::Slider | Role::SpinButton))
                 }) {
                     read_range(lua, &mut node, table)?;
+                } else {
+                    // What it reads as besides its name (`aria-valuetext`):
+                    // a row's detail, as a Settings cell's value.
+                    read_value_text(lua, &mut node, table)?;
                 }
             }
             node_ud(lua, node)
@@ -4825,6 +4908,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             if let Some(table) = &table {
                 button_look(lua, table)?;
                 fill_from(lua, &mut node, table, None, lint)?;
+                read_value_text(lua, &mut node, table)?;
             }
             node_ud(lua, node)
         })?,
@@ -6329,10 +6413,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 ms: duration.unwrap_or(ms),
                 ease: ease.unwrap_or(e),
             },
-            Curve::Spring { stiffness, damping } => Curve::Spring {
-                stiffness: opts.get::<Option<f32>>("stiffness")?.unwrap_or(stiffness),
-                damping: opts.get::<Option<f32>>("damping")?.unwrap_or(damping),
-            },
+            Curve::Spring { both, .. } => {
+                let both = SpringParams::read(&opts, both)?;
+                let side = |name: &str| -> mlua::Result<Option<SpringParams>> {
+                    opts.get::<Option<Table>>(name)?
+                        .map(|table| SpringParams::read(&table, both))
+                        .transpose()
+                };
+                Curve::Spring {
+                    both,
+                    up: side("up")?,
+                    down: side("down")?,
+                }
+            }
             Curve::Loop {
                 ms,
                 ease: e,
@@ -6384,8 +6477,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "spring",
         lua.create_function(move |lua, (state, opts): (mlua::Value, Option<Table>)| {
             let curve = Curve::Spring {
-                stiffness: 260.,
-                damping: 24.,
+                both: SpringParams {
+                    stiffness: 260.,
+                    damping: 24.,
+                    delay_ms: 0.,
+                },
+                up: None,
+                down: None,
             };
             anim(
                 lua,
@@ -6395,6 +6493,112 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             )
         })?,
     )?;
+    // A state run to a value now, by Rust: for what a gesture hands over to a spring,
+    // whose starting speed and ending the binding of `ui.spring` can't say.
+    ui.set(
+        "spring_to",
+        lua.create_function(
+            |lua, (state, target, opts): (mlua::Value, f64, Option<Table>)| {
+                let env = env(lua)?;
+                let state = expect_state(&state, "ui.spring_to's state")?;
+                let opts = match opts {
+                    Some(opts) => opts,
+                    None => lua.create_table()?,
+                };
+                let params = SpringParams::read(
+                    &opts,
+                    SpringParams {
+                        stiffness: 260.,
+                        damping: 24.,
+                        delay_ms: 0.,
+                    },
+                )?;
+                let velocity = Rc::new(std::cell::Cell::new(
+                    opts.get::<Option<f64>>("velocity")?.unwrap_or(0.),
+                ));
+                let most = opts.get::<Option<f64>>("most")?.unwrap_or(5000.) / 1000.;
+                let done = opts.get::<Option<Function>>("done")?;
+                let stopped = Rc::new(std::cell::Cell::new(false));
+                let (running, stop) = (velocity.clone(), stopped.clone());
+                let vm = env.vm.clone();
+                let done = std::cell::RefCell::new(done);
+                let elapsed_cell = std::cell::Cell::new(0f64);
+                let began = std::time::Instant::now();
+                let (speed_from, shown_from) = (
+                    velocity.get(),
+                    state
+                        .with_untracked(|value| value.as_f64())
+                        .unwrap_or(target),
+                );
+                // Where the spring itself begins, if not at the state: the state stays
+                // where it is until the spring has passed it.
+                let from = opts.get::<Option<f64>>("from")?.unwrap_or(shown_from);
+                let delay = f64::from(params.delay_ms) / 1000.;
+                // At rest within a thousandth of the way it goes (half a point at
+                // most): an opacity's 0 to 1 runs to the end, not to 0.5 of it.
+                let span = (from - target).abs().max(speed_from.abs() * 0.1);
+                let rest = (span * 1e-3).clamp(1e-6, 0.5);
+                env.engine.tick_with(Rc::new(move |dt_ms| {
+                    if stopped.get() {
+                        return false;
+                    }
+                    // By the clock from the call: a late frame lands where the curve is,
+                    // and `delay` is how long after the call it starts, as UIKit's do.
+                    // (A test's clock runs ahead of it.)
+                    elapsed_cell.set(
+                        (elapsed_cell.get() + dt_ms / 1000.).max(began.elapsed().as_secs_f64()),
+                    );
+                    // Where the spring is at this time, whatever the frames: the same
+                    // curve on any display, and through a late one.
+                    let (left, speed) = spring_at(
+                        from - target,
+                        speed_from,
+                        f64::from(params.stiffness),
+                        f64::from(params.damping),
+                        (elapsed_cell.get() - delay).max(0.),
+                    );
+                    let at = if (target + left - shown_from) * (target - shown_from) < 0. {
+                        shown_from
+                    } else {
+                        target + left
+                    };
+                    running.set(speed);
+                    let settled =
+                        left.abs() < rest && speed.abs() < rest * 10. || elapsed_cell.get() > most;
+                    state.set(Value::from(if settled { target } else { at }));
+                    if settled {
+                        running.set(0.);
+                        if let (Some(done), Some(vm)) = (done.borrow_mut().take(), vm.upgrade())
+                            && let Err(error) = vm.call::<()>(&done, ())
+                        {
+                            vm.report(error);
+                        }
+                    }
+                    !settled
+                }));
+                // Stops it, and says how fast it was going.
+                lua.create_function(move |_, ()| {
+                    stop.set(true);
+                    Ok(velocity.get())
+                })
+            },
+        )?,
+    )?;
+    // Springs by name, for `ui.spring(state, ui.springs.snappy)`.
+    let springs = lua.create_table()?;
+    for (name, response, bounce) in [
+        ("smooth", 500., 0.),
+        ("snappy", 350., 0.15),
+        ("bouncy", 450., 0.3),
+    ] {
+        let spring = lua.create_table()?;
+        spring.set("response", response)?;
+        spring.set("bounce", bounce)?;
+        spring.set_readonly(true);
+        springs.set(name, spring)?;
+    }
+    springs.set_readonly(true);
+    ui.set("springs", springs)?;
     ui.set(
         "loop",
         lua.create_function(move |lua, opts: Option<Table>| {

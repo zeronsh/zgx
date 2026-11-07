@@ -344,6 +344,7 @@ mod other {
             _: Option<(f32, f32)>,
         ) {
         }
+        #[cfg_attr(target_os = "ios", allow(dead_code))]
         pub fn hide_all(&mut self, _: &winit::window::Window) {}
     }
     pub(crate) fn popup_screens(_: &winit::window::Window) -> Vec<Rect> {

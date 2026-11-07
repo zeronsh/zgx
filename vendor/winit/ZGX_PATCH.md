@@ -358,3 +358,12 @@ zgx's caption glyphs, which read `theme()`, white: unseen. It now sets
 `preferred_theme` and `current_theme`, as making a window with a theme does
 (`platform_impl/windows/window.rs`). `scripts/windows_caption_smoke.py` (zgx)
 checks the window, with its buttons drawn.
+
+## iOS: the view's size, its appearance
+
+`inner_size` and `inner_position` answered the safe area while `Resized`
+reported the whole view, so a renderer reading one after the other drew
+stretched (`platform_impl/ios/window.rs`). They now answer the view, and a new
+safe area lays it out again, reporting its size. `theme()` answers the window's
+interface style and a change is sent as `ThemeChanged`, which iOS never did
+(`view.rs`).

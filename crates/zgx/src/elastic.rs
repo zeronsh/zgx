@@ -52,6 +52,11 @@ pub(crate) struct Elastic {
     /// next step.
     spring: Cell<Option<(f32, f32, Instant)>>,
     next: Cell<Option<Instant>>,
+    /// Room past the content's end, while something covers that much of it (a
+    /// keyboard): scrolling there is scrolling, not stretch.
+    end_room: Rc<Cell<f32>>,
+    /// Drawn here whatever its offset says (`ScrollDriver::hold`); a list's has none.
+    held: Option<Signal<Option<f32>>>,
 }
 impl Elastic {
     fn main(&self, size: (f32, f32)) -> f32 {
@@ -61,7 +66,8 @@ impl Elastic {
         self.main(self.size.with_untracked(|s| *s))
     }
     fn limit(&self) -> f32 {
-        (self.main(self.extent.with_untracked(|s| *s)) - self.length()).max(0.)
+        (self.main(self.extent.with_untracked(|s| *s)) + self.end_room.get() - self.length())
+            .max(0.)
     }
     fn push(&self, delta: f32) {
         // Caught as it springs back: on from where it shows.
@@ -141,6 +147,7 @@ pub(crate) struct State {
 }
 
 /// `root`'s scroll view stretches: its translation adds `shown`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn register(
     ui: &mut Ui,
     root: NodeId,
@@ -148,6 +155,8 @@ pub(crate) fn register(
     size: Signal<(f32, f32)>,
     extent: Signal<(f32, f32)>,
     offset: Signal<f32>,
+    end_room: Rc<Cell<f32>>,
+    held: Option<Signal<Option<f32>>>,
 ) -> Signal<f32> {
     let shown = ui.signal(0_f32);
     let elastic = Rc::new(Elastic {
@@ -159,6 +168,8 @@ pub(crate) fn register(
         shown: shown.clone(),
         spring: Cell::new(None),
         next: Cell::new(None),
+        end_room,
+        held,
     });
     {
         let mut state = ui.elastic_state().borrow_mut();
@@ -512,6 +523,133 @@ fn step(ui: &Ui, view: &Rc<Elastic>, now: Instant) -> bool {
         view.next.set(Some(now + ui.refresh_interval()));
     }
     true
+}
+
+/// A scroll view driven from outside: a platform's own scroller tracks the
+/// finger, coasts and rubber-bands, and each of its positions lands here.
+#[derive(Clone)]
+pub struct ScrollDriver(Weak<Elastic>);
+
+/// A driven scroll view's measures, in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollMetrics {
+    /// It scrolls across, not down.
+    pub horizontal: bool,
+    /// Its own size.
+    pub size: (f32, f32),
+    /// Its content's size.
+    pub extent: (f32, f32),
+    /// How far along it has scrolled.
+    pub offset: f32,
+    /// How far past either end it shows (`ScrollDriver::drive`).
+    pub stretch: f32,
+}
+
+impl ScrollDriver {
+    /// Its measures, while it is mounted.
+    pub fn metrics(&self) -> Option<ScrollMetrics> {
+        let view = self.0.upgrade()?;
+        Some(ScrollMetrics {
+            horizontal: view.horizontal,
+            size: view.size.with_untracked(|s| *s),
+            extent: view.extent.with_untracked(|s| *s),
+            offset: view.offset.with_untracked(|o| *o),
+            stretch: view.shown.with_untracked(|s| *s),
+        })
+    }
+    /// Keep drawing it at `at` as its offset goes on (the host moves what is
+    /// drawn itself, a page riding a keyboard), or back to its offset: everything
+    /// that reads the offset follows, with nothing of it drawn again. False if
+    /// this kind of scroll view can't.
+    pub fn hold(&self, at: Option<f32>) -> bool {
+        let Some(view) = self.0.upgrade() else {
+            return false;
+        };
+        let Some(held) = &view.held else {
+            return false;
+        };
+        if held.with_untracked(|now| *now != at) {
+            held.set(at);
+        }
+        true
+    }
+    /// Give it `room` past its content's end to scroll into, 0 for none.
+    pub fn set_end_room(&self, room: f32) {
+        if let Some(view) = self.0.upgrade() {
+            view.end_room.set(room);
+        }
+    }
+    /// Show position `value`, which may be past either end: the offset an app
+    /// reads stays in range, and what lies beyond is stretch, as the platform
+    /// curved it.
+    pub fn drive(&self, value: f32) {
+        let Some(view) = self.0.upgrade() else {
+            return;
+        };
+        view.snap();
+        let offset = value.clamp(0., view.limit());
+        if view.offset.with_untracked(|o| *o) != offset {
+            view.offset.set(offset);
+        }
+        let stretch = value - offset;
+        if view.shown.with_untracked(|s| *s) != stretch {
+            view.shown.set(stretch);
+        }
+    }
+    /// Whether this is the same scroll view as `other`.
+    pub fn same(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+}
+
+/// The innermost scroll view at (`x`, `y`) that has room to scroll.
+pub(crate) fn driver_at(ui: &Ui, x: f32, y: f32) -> Option<ScrollDriver> {
+    let scene = ui.scene.borrow();
+    let state = ui.elastic_state().borrow();
+    driver_in(&scene, &state, x, y)
+}
+
+pub(crate) fn driver_in(
+    scene: &crate::scene::Scene,
+    state: &State,
+    x: f32,
+    y: f32,
+) -> Option<ScrollDriver> {
+    let hit = scene.hit_test(x, y)?;
+    let around = || {
+        std::iter::once(hit)
+            .chain(scene.ancestors(hit))
+            .filter_map(|node| {
+                state
+                    .views
+                    .iter()
+                    .find(|(root, _)| *root == node)
+                    .and_then(|(_, view)| view.upgrade())
+            })
+    };
+    around()
+        .find(|view| !view.fits())
+        // A list shorter than its box still gives under a finger, on iOS.
+        .or_else(|| {
+            if cfg!(target_os = "ios") {
+                around().find(|view| !view.horizontal)
+            } else {
+                None
+            }
+        })
+        .map(|view| ScrollDriver(Rc::downgrade(&view)))
+}
+
+/// The tallest mounted scroll view with room to scroll: what a tap on the
+/// status bar scrolls to its top.
+pub(crate) fn main_driver(state: &State) -> Option<ScrollDriver> {
+    state
+        .views
+        .iter()
+        .filter_map(|(_, view)| view.upgrade())
+        .filter(|view| !view.horizontal && !view.fits())
+        .max_by(|a, b| a.length().total_cmp(&b.length()))
+        .map(|view| ScrollDriver(Rc::downgrade(&view)))
 }
 
 /// The fingers' speed along one axis, as AppKit's scroll views measure it:
