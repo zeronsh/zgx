@@ -227,3 +227,117 @@ fn the_date_and_chance_are_the_same_each_time() {
     std::thread::sleep(Duration::from_millis(1100));
     assert_eq!(once, film(script, 1, Duration::ZERO));
 }
+
+/// How many pixels of `a` and `b` differ by more than a little, and where the
+/// first is.
+fn differ(a: &[u8], b: &[u8], width: u32) -> (usize, (u32, u32)) {
+    let mut count = 0;
+    let mut first = (0, 0);
+    for (i, (x, y)) in a.chunks(4).zip(b.chunks(4)).enumerate() {
+        if x.iter().zip(y).any(|(p, q)| p.abs_diff(*q) > 6) {
+            if count == 0 {
+                first = (i as u32 % width, i as u32 / width);
+            }
+            count += 1;
+        }
+    }
+    (count, first)
+}
+
+#[test]
+fn a_frame_is_the_same_whether_those_before_it_were_drawn_or_not() {
+    // A blurred circle in a box fading and scaling in, then out of it.
+    let script = r##"
+        local n = ui.state("n", 0)
+        ui.every(33, function() n:add(1) end)
+        return ui.div { w = 500, h = 300, bg = "#120a2c",
+            ui.div {
+                absolute = true, top = 0, left = 0, right = 0, bottom = 0,
+                opacity = function() return math.min(n:get() / 10, 1) end,
+                scale = function() return 1.25 - 0.25 * math.min(n:get() / 10, 1) end,
+                ui.div {
+                    absolute = true, left = 40, top = 30, w = 200, h = 200, rounded = 100, blur = 24,
+                    gradient = { angle = 135, stops = { "#ff5a5f", "#ff5a5f55" } },
+                    x = function() return math.sin(n:get() * 0.2) * 60 end,
+                },
+            },
+        }
+    "##;
+    let at = 20;
+    let drawn = std::thread::spawn(move || {
+        let mut stage = inline(script, 500., 300., 30.);
+        let mut pixels = Vec::new();
+        for _ in 0..at {
+            stage.draw(&mut pixels).unwrap();
+            stage.step().unwrap();
+        }
+        stage.draw(&mut pixels).unwrap();
+        pixels
+    });
+    let fresh = std::thread::spawn(move || {
+        let mut stage = inline(script, 500., 300., 30.);
+        let mut pixels = Vec::new();
+        stage.step_to(at).unwrap();
+        stage.draw(&mut pixels).unwrap();
+        pixels
+    });
+    let (drawn, fresh) = (drawn.join().unwrap(), fresh.join().unwrap());
+    let (count, first) = differ(&drawn, &fresh, 500);
+    assert!(count == 0, "{count} pixels differ, first at {first:?}");
+}
+
+#[test]
+fn repainting_what_changed_draws_what_painting_it_all_draws() {
+    let script = r##"
+        local n = ui.state("n", 0)
+        ui.every(33, function() n:add(1) end)
+        local orb = function(left, size, color, speed)
+            return ui.div {
+                absolute = true, left = left, top = 30, w = size, h = size, rounded = size / 2, blur = 24,
+                gradient = { angle = 135, stops = { color, color .. "55" } },
+                x = function() return math.sin(n:get() * speed) * 60 end,
+                y = function() return math.cos(n:get() * speed) * 40 end,
+            }
+        end
+        return ui.div { w = 500, h = 300, bg = "#120a2c",
+            orb(40, 160, "#ff5a5f", 0.2), orb(180, 200, "#06d6a0", 0.13), orb(300, 140, "#4cc9f0", 0.17),
+            ui.text { "GLASS", text_size = 90, weight = 900, color = "#ffffff", absolute = true, left = 90, top = 90 },
+            ui.div {
+                absolute = true, left = 30, top = 180, w = 200, h = 100, rounded = 20, backdrop_blur = 34,
+                bg = "#ffffff22", y = function() return math.sin(n:get() * 0.1) * 20 end,
+            },
+            ui.div {
+                absolute = true, top = 40, w = 120, h = 120, rounded = 60,
+                left = function() return n:get() * 8 end,
+                layer_shader = ui.layer_shader("fn layer(input: LayerInput) -> vec4<f32> { let b = zgx_backdrop(input.p + vec2(6.0, 0.0)); return vec4(b.rgb, 1.0); }"),
+            },
+        }
+    "##;
+    let frames = 40;
+    let film = |partial: bool| {
+        std::thread::spawn(move || {
+            let mut stage = inline(script, 500., 300., 30.);
+            let mut out = Vec::new();
+            for _ in 0..frames {
+                let mut pixels = Vec::new();
+                if partial {
+                    stage.draw_damaged(&mut pixels).unwrap();
+                } else {
+                    stage.draw(&mut pixels).unwrap();
+                }
+                out.push(pixels);
+                stage.step().unwrap();
+            }
+            out
+        })
+    };
+    let (partly, whole) = (film(true), film(false));
+    let (partly, whole) = (partly.join().unwrap(), whole.join().unwrap());
+    for (frame, (a, b)) in partly.iter().zip(&whole).enumerate() {
+        let (count, first) = differ(a, b, 500);
+        assert!(
+            count == 0,
+            "frame {frame}: {count} pixels differ, first at {first:?}"
+        );
+    }
+}

@@ -182,6 +182,20 @@ impl Stage {
     /// premultiplied alpha, a row at a time.
     pub fn draw(&mut self, pixels: &mut Vec<u8>) -> Result<(), GpuError> {
         let mut scene = self.ui.scene.borrow_mut();
+        scene.flush();
+        // Whole, each time: a frame owes nothing to the frames drawn before it,
+        // so a frame reached by seeking is the frame reached by playing.
+        let whole = [scene.bounds(scene.root())];
+        self.gpu.render(&scene, &whole)?;
+        drop(scene);
+        *pixels = self.gpu.readback()?;
+        Ok(())
+    }
+    /// [`Stage::draw`], repainting only what changed since it last drew, as a
+    /// window does: for comparing the two.
+    #[doc(hidden)]
+    pub fn draw_damaged(&mut self, pixels: &mut Vec<u8>) -> Result<(), GpuError> {
+        let mut scene = self.ui.scene.borrow_mut();
         let report = scene.flush();
         self.gpu.render(&scene, &report.damage)?;
         drop(scene);
