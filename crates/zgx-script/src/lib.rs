@@ -436,6 +436,8 @@ pub(crate) struct Vm {
     pub(crate) warnings: SharedWarnings,
     /// Makes a pointer event's table (`point_table`), compiled once.
     pub(crate) point: std::cell::OnceCell<mlua::Function>,
+    /// Whether the collector's goal is the tight one (`collector_goal`).
+    gc_tight: Cell<bool>,
 }
 impl Vm {
     /// A pointer event's table for a handler: `x`, `y`, `local_x`,
@@ -465,6 +467,26 @@ impl Vm {
         };
         make.call((x, y, local_x, local_y, shift, ctrl, alt, meta, cmd))
     }
+    /// The collector's goal for what a cycle may leave, set as an outermost
+    /// call starts: Luau's own (the heap may double) for a heap under
+    /// `GC_TIGHT_FROM`, and `GC_TIGHT_GOAL` above it. The collector can't see
+    /// what a script's objects hold in Rust (a node's userdata, far more than
+    /// its own bytes), so a large heap left to double keeps rows long gone and
+    /// all they hold; a small one costs little either way, and a tighter goal
+    /// would mark it more often for nothing.
+    fn collector_goal(&self) {
+        let tight = self.gc_tight.get();
+        let Some(goal) = collector_goal_for(self.lua.used_memory(), tight) else {
+            return;
+        };
+        self.gc_tight.set(!tight);
+        // SAFETY: the collector's own setting, between calls into the VM.
+        let _ = unsafe {
+            self.lua.exec_raw::<()>((), |state| {
+                mlua::ffi::lua_gc(state, mlua::ffi::LUA_GCSETGOAL, goal);
+            })
+        };
+    }
     /// Runs `f` with its own budget. A nested call (a component built
     /// while a handler runs) stops the outer call's clock meanwhile.
     pub(crate) fn guard<R>(
@@ -486,6 +508,7 @@ impl Vm {
         // interrupt set early just checks it sooner.
         if outer.is_none() {
             self.interrupt.publish(Some(started.due()));
+            self.collector_goal();
         }
         // Ended as the call returns or a host function's panic unwinds out
         // of it (caught by the app's turn or an effect): no call is left
@@ -4082,6 +4105,7 @@ impl ScriptHost {
             locate: self.0.locate.clone(),
             warnings: self.0.warnings.clone(),
             point: Default::default(),
+            gc_tight: Cell::new(false),
         });
         let store = self
             .0
@@ -4402,6 +4426,26 @@ fn collect_fully(lua: &mlua::Lua) {
         held = now;
     }
 }
+/// `LUA_GCSETGOAL`, in percent: Luau's own, and the tight one for a heap past
+/// `GC_TIGHT_FROM` (`Vm::collector_goal`).
+const GC_GOAL_DEFAULT: std::ffi::c_int = 200;
+/// Measured on an M5 Max, 5 rounds: a dashboard whose heap peaks at 115 MB
+/// peaks 18% lower for 2.2% more instructions a frame; the mail and list
+/// examples and the mount and update benches, under it, don't move.
+const GC_TIGHT_GOAL: std::ffi::c_int = 150;
+/// The heap past which the collector's goal is `GC_TIGHT_GOAL` (it goes back
+/// below three quarters of this).
+const GC_TIGHT_FROM: usize = 32 << 20;
+/// The goal to set for a heap of `used` bytes, if it changes: tight past
+/// `GC_TIGHT_FROM`, Luau's own again only below three quarters of it, so a
+/// heap near the line doesn't switch at every call.
+fn collector_goal_for(used: usize, tight: bool) -> Option<std::ffi::c_int> {
+    match tight {
+        false if used > GC_TIGHT_FROM => Some(GC_TIGHT_GOAL),
+        true if used < GC_TIGHT_FROM * 3 / 4 => Some(GC_GOAL_DEFAULT),
+        _ => None,
+    }
+}
 /// What the host gives back as it goes idle: its scripts' garbage, then the
 /// pictures no node shows (the image cache keeps up to its budget of them
 /// while the app is in use, so a page shown again is instant).
@@ -4414,6 +4458,31 @@ fn trim_idle(inner: &Inner) {
 
 #[cfg(test)]
 mod tests {
+    /// The collector's goal tightens past `GC_TIGHT_FROM` and loosens only
+    /// well below it: a small heap keeps Luau's own, a heap near the line
+    /// doesn't switch back and forth.
+    #[test]
+    fn the_collector_tightens_for_a_large_heap_alone() {
+        use super::{GC_GOAL_DEFAULT, GC_TIGHT_FROM, GC_TIGHT_GOAL, collector_goal_for};
+        assert_eq!(
+            collector_goal_for(8 << 20, false),
+            None,
+            "a small heap keeps Luau's"
+        );
+        assert_eq!(
+            collector_goal_for(GC_TIGHT_FROM + 1, false),
+            Some(GC_TIGHT_GOAL)
+        );
+        assert_eq!(
+            collector_goal_for(GC_TIGHT_FROM - 1, true),
+            None,
+            "no switch just under"
+        );
+        assert_eq!(
+            collector_goal_for(GC_TIGHT_FROM / 2, true),
+            Some(GC_GOAL_DEFAULT)
+        );
+    }
     use super::*;
 
     thread_local! {
@@ -4520,6 +4589,7 @@ mod tests {
             locate: Rc::default(),
             warnings: Rc::default(),
             point: Default::default(),
+            gc_tight: Cell::new(false),
         };
         let host = vm
             .lua
