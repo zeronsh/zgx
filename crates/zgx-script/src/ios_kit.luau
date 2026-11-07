@@ -27,6 +27,11 @@ local NAV_PUSH_START = 53
 local NAV_POP_START = 40
 local NAV_TRACKING = uikit_spring(0.85, 0.08)
 local NAV_RELEASE = uikit_spring(0.85, 0.3)
+-- A release's speed, as UIKit's interactive pop decides it: the finger's, or 4.25
+-- times it when the finger's average speed (each sample a third of it, in widths
+-- a second) is over 1.5.
+local NAV_FLICK_AVERAGE = 1.5
+local NAV_FLICK_BOOST = 4.25
 -- How far the page under the top one lies back, of the width.
 local PARALLAX = 0.3
 local SETTLE_MOST = 1200
@@ -669,10 +674,20 @@ ios.stack = ui.component(function(props)
 			running_drag = nil
 		end, nil, { stiffness = NAV_TRACKING.stiffness, damping = NAV_TRACKING.damping, velocity = carried })
 	end
-	local function released()
-		local carried = if running_drag then running_drag() else 0
+	-- The finger's speed in widths a second, averaged as UIKit averages it.
+	local average = 0
+	local function sample(vx, first)
+		local now = vx / width
+		average = if first then now else average * 2 / 3 + now / 3
+	end
+	-- From where it is, at the finger's speed, or more for a flick.
+	local function released(vx)
+		if running_drag then
+			running_drag()
+		end
 		running_drag = nil
-		return { stiffness = NAV_RELEASE.stiffness, damping = NAV_RELEASE.damping, velocity = carried }
+		local speed = if average > NAV_FLICK_AVERAGE then vx * NAV_FLICK_BOOST else vx
+		return { stiffness = NAV_RELEASE.stiffness, damping = NAV_RELEASE.damping, velocity = speed }
 	end
 	-- Nothing may rest part way: whatever got here, a page out of place with no
 	-- spring on it goes home, and says so in the record.
@@ -747,21 +762,23 @@ ios.stack = ui.component(function(props)
 					entering:set(0)
 				end
 				start = drag:get()
+				sample(e.vx, true)
 			elseif e.phase == "changed" then
+				sample(e.vx, false)
 				follow(clamp(start + e.x, 0, width))
 			elseif e.phase == "ended" then
 				holding = false
 				check_soon()
 				local at = clamp(start + e.x, 0, width)
 				if e.vx > FLING or (at > width / 2 and e.vx > -FLING) then
-					finish_pop(released())
+					finish_pop(released(e.vx))
 				else
-					run_drag(0, nil, released())
+					run_drag(0, nil, released(e.vx))
 				end
 			else
 				holding = false
 				check_soon()
-				run_drag(0, nil, released())
+				run_drag(0, nil, released(0))
 			end
 		end,
 	}
