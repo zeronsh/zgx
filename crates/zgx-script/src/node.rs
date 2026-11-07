@@ -1558,6 +1558,70 @@ pub(crate) struct Anim {
     pub from: Option<Value>,
     pub to: Option<Value>,
 }
+#[derive(Clone, Copy)]
+pub(crate) struct SpringParams {
+    pub stiffness: f32,
+    pub damping: f32,
+    pub delay_ms: f32,
+}
+/// How far from its goal a spring is `t` seconds on and how fast it is going, from
+/// `left` away at `speed`: stiffness and damping for a mass of 1, in closed form.
+fn spring_at(left: f64, speed: f64, stiffness: f64, damping: f64, t: f64) -> (f64, f64) {
+    let half = damping / 2.;
+    let rest = half * half - stiffness;
+    if rest > 1e-6 {
+        let root = rest.sqrt();
+        let (fast, slow) = (-half - root, -half + root);
+        let a = (speed - fast * left) / (slow - fast);
+        let b = left - a;
+        let (a_now, b_now) = (a * (slow * t).exp(), b * (fast * t).exp());
+        (a_now + b_now, a_now * slow + b_now * fast)
+    } else if rest < -1e-6 {
+        let turn = (-rest).sqrt();
+        let (a, b) = (left, (speed + half * left) / turn);
+        let (cos, sin) = ((turn * t).cos(), (turn * t).sin());
+        let decay = (-half * t).exp();
+        let now = decay * (a * cos + b * sin);
+        (now, decay * (b * turn * cos - a * turn * sin) - half * now)
+    } else {
+        let b = speed + half * left;
+        let decay = (-half * t).exp();
+        let now = (left + b * t) * decay;
+        (now, b * decay - half * now)
+    }
+}
+
+impl SpringParams {
+    /// From a table: `response` (ms, the time of one undamped swing) and `bounce`
+    /// (0 settles without overshoot, higher overshoots more) as SwiftUI's springs
+    /// say it, or `stiffness` and `damping`; and `delay`. What it leaves out is
+    /// `base`'s.
+    fn read(table: &Table, base: Self) -> mlua::Result<Self> {
+        let mut params = base;
+        if let Some(response) = table.get::<Option<f32>>("response")? {
+            let bounce = table.get::<Option<f32>>("bounce")?.unwrap_or(0.);
+            let rate = std::f32::consts::TAU / (response.max(1.) / 1000.);
+            let fraction = if bounce >= 0. {
+                1. - bounce
+            } else {
+                1. / (1. + bounce)
+            };
+            params.stiffness = rate * rate;
+            params.damping = 2. * fraction * rate;
+        }
+        if let Some(stiffness) = table.get::<Option<f32>>("stiffness")? {
+            params.stiffness = stiffness;
+        }
+        if let Some(damping) = table.get::<Option<f32>>("damping")? {
+            params.damping = damping;
+        }
+        if let Some(delay) = table.get::<Option<f32>>("delay")? {
+            params.delay_ms = delay;
+        }
+        Ok(params)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum Curve {
     /// `ms`: the duration in milliseconds, as everywhere in scripts.
@@ -6411,6 +6475,97 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 curve,
             )
         })?,
+    )?;
+    // A state run to a value now, by Rust: for what a gesture hands over to a spring,
+    // whose starting speed and ending the binding of `ui.spring` can't say.
+    ui.set(
+        "spring_to",
+        lua.create_function(
+            |lua, (state, target, opts): (mlua::Value, f64, Option<Table>)| {
+                let env = env(lua)?;
+                let state = expect_state(&state, "ui.spring_to's state")?;
+                let opts = match opts {
+                    Some(opts) => opts,
+                    None => lua.create_table()?,
+                };
+                let params = SpringParams::read(
+                    &opts,
+                    SpringParams {
+                        stiffness: 260.,
+                        damping: 24.,
+                        delay_ms: 0.,
+                    },
+                )?;
+                let velocity = Rc::new(std::cell::Cell::new(
+                    opts.get::<Option<f64>>("velocity")?.unwrap_or(0.),
+                ));
+                let most = opts.get::<Option<f64>>("most")?.unwrap_or(5000.) / 1000.;
+                let done = opts.get::<Option<Function>>("done")?;
+                let stopped = Rc::new(std::cell::Cell::new(false));
+                let (running, stop) = (velocity.clone(), stopped.clone());
+                let vm = env.vm.clone();
+                let done = std::cell::RefCell::new(done);
+                let elapsed_cell = std::cell::Cell::new(0f64);
+                let began = std::time::Instant::now();
+                let (speed_from, shown_from) = (
+                    velocity.get(),
+                    state
+                        .with_untracked(|value| value.as_f64())
+                        .unwrap_or(target),
+                );
+                // Where the spring itself begins, if not at the state: the state stays
+                // where it is until the spring has passed it.
+                let from = opts.get::<Option<f64>>("from")?.unwrap_or(shown_from);
+                let delay = f64::from(params.delay_ms) / 1000.;
+                // At rest within a thousandth of the way it goes (half a point at
+                // most): an opacity's 0 to 1 runs to the end, not to 0.5 of it.
+                let span = (from - target).abs().max(speed_from.abs() * 0.1);
+                let rest = (span * 1e-3).clamp(1e-6, 0.5);
+                env.engine.tick_with(Rc::new(move |dt_ms| {
+                    if stopped.get() {
+                        return false;
+                    }
+                    // By the clock from the call: a late frame lands where the curve is,
+                    // and `delay` is how long after the call it starts, as UIKit's do.
+                    // (A test's clock runs ahead of it.)
+                    elapsed_cell.set(
+                        (elapsed_cell.get() + dt_ms / 1000.).max(began.elapsed().as_secs_f64()),
+                    );
+                    // Where the spring is at this time, whatever the frames: the same
+                    // curve on any display, and through a late one.
+                    let (left, speed) = spring_at(
+                        from - target,
+                        speed_from,
+                        f64::from(params.stiffness),
+                        f64::from(params.damping),
+                        (elapsed_cell.get() - delay).max(0.),
+                    );
+                    let at = if (target + left - shown_from) * (target - shown_from) < 0. {
+                        shown_from
+                    } else {
+                        target + left
+                    };
+                    running.set(speed);
+                    let settled =
+                        left.abs() < rest && speed.abs() < rest * 10. || elapsed_cell.get() > most;
+                    state.set(Value::from(if settled { target } else { at }));
+                    if settled {
+                        running.set(0.);
+                        if let (Some(done), Some(vm)) = (done.borrow_mut().take(), vm.upgrade())
+                            && let Err(error) = vm.call::<()>(&done, ())
+                        {
+                            vm.report(error);
+                        }
+                    }
+                    !settled
+                }));
+                // Stops it, and says how fast it was going.
+                lua.create_function(move |_, ()| {
+                    stop.set(true);
+                    Ok(velocity.get())
+                })
+            },
+        )?,
     )?;
     ui.set(
         "loop",

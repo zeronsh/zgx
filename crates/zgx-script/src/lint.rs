@@ -254,6 +254,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "raw",
     "tween",
     "spring",
+    "spring_to",
     "loop",
     "web",
     "term",
