@@ -7294,6 +7294,30 @@ impl GpuRenderer {
         merged: Option<Vec<Rect>>,
         record: bool,
     ) -> Result<GpuStats, GpuError> {
+        // The effect slots this frame takes to draw: a frame that fails
+        // (a layer's glyphs past the atlas) draws none of them, and they
+        // draw again with the next, or they'd composite what their slots
+        // held before, for good.
+        let planned: Vec<(NodeId, effects::Purpose)> = match MODE {
+            PATCH => Vec::new(),
+            _ => (self.effect_jobs.iter())
+                .map(|job| (job.node, job.purpose))
+                .collect(),
+        };
+        let result = self.render_flat_taking::<MODE>(scene, items, damage, merged, record);
+        if result.is_err() {
+            self.forget_slots(&planned);
+        }
+        result
+    }
+    fn render_flat_taking<const MODE: u8>(
+        &mut self,
+        scene: &Scene,
+        items: Vec<zgx::scene::PaintItem<'_>>,
+        damage: &[Rect],
+        merged: Option<Vec<Rect>>,
+        record: bool,
+    ) -> Result<GpuStats, GpuError> {
         let mut stats = GpuStats::default();
         // Made already (a kept frame, patched, or one made to keep): drawn
         // as it is (it holds its background).
