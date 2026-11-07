@@ -882,7 +882,9 @@ ios.stack = ui.component(function(props)
 					return 1
 				end
 				local moved = (drag:get() + entering:get()) / width
-				return clamp((0.88 - moved) / 0.78, 0, 1)
+				-- Never quite 0: in the tree from the call, as UIKit's is, so its glass
+				-- is made then and not on a frame of the motion.
+				return clamp((0.88 - moved) / 0.78, 0.001, 1)
 			end,
 			ui.button {
 				w = 44,

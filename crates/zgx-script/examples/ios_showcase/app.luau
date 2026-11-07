@@ -339,6 +339,8 @@ local function page(index: number)
 			return tab:get() ~= index
 		end,
 		ios.stack {
+			-- Each position in the gesture log, to compare with UIKit's.
+			log_motion = true,
 			root = if index == 1 then SettingsPage elseif index == 2 then TextPage else GlassPage,
 			active = function()
 				return tab:get() == index
