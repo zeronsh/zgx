@@ -3216,12 +3216,17 @@ impl Host {
     /// locked as it ends. After every input event and every turn of the
     /// loop, so a lock a script ends from a timer, or a node gone, lets
     /// it go.
+    #[inline]
     fn sync_pointer_lock(&mut self) {
-        let ui = &self.context.ui;
-        // No lock asked for or held, as nearly always: nothing to look at.
-        if self.pointer_lock.is_none() && !ui.input.pointer_locked() {
-            return;
+        // No lock asked for or held, as nearly always: nothing to look at
+        // (inlined where every event calls it).
+        if self.pointer_lock.is_some() || self.context.ui.input.pointer_locked() {
+            self.sync_held_pointer_lock();
         }
+    }
+    #[inline(never)]
+    fn sync_held_pointer_lock(&mut self) {
+        let ui = &self.context.ui;
         let mut want = ui.input.pointer_lock(&ui.scene.borrow());
         // A window without the keyboard doesn't take the pointer (a lock
         // asked for as its focus went, or a seat with no keyboard); one
@@ -6632,11 +6637,16 @@ impl WindowManager {
     }
     /// The locked pointer's motion heard so far, to its window
     /// (`Host::flush_motion`).
+    #[inline]
     fn flush_motion(&mut self, event_loop: &ActiveEventLoop) {
-        // Motion is heard only while a pointer is locked.
-        if !self.device_events {
-            return;
+        // Motion is heard only while a pointer is locked (inlined where
+        // every window event calls it).
+        if self.device_events {
+            self.flush_locked_motion(event_loop);
         }
+    }
+    #[inline(never)]
+    fn flush_locked_motion(&mut self, event_loop: &ActiveEventLoop) {
         let mut failed = None;
         for host in self.hosts.values_mut() {
             if host.pending_motion != (0., 0.)

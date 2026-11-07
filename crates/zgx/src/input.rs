@@ -1800,6 +1800,7 @@ impl InputDispatcher {
     }
     /// Whether a node has locked the pointer, gone from the scene or not:
     /// a host's quick look before `pointer_lock`.
+    #[inline]
     pub fn pointer_locked(&self) -> bool {
         self.state.borrow().pointer_lock.is_some()
     }
