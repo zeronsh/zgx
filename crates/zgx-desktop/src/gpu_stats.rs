@@ -30,6 +30,7 @@ impl GpuStatsLog {
         sum.layer_repaints += frame.layer_repaints;
         sum.layer_cache_hits += frame.layer_cache_hits;
         sum.layer_texture_allocations += frame.layer_texture_allocations;
+        sum.scroll_copies += frame.scroll_copies;
         if self.since.elapsed() < Duration::from_secs(1) {
             return;
         }
@@ -38,11 +39,12 @@ impl GpuStatsLog {
         let prepared = renderer.text_cache().borrow().bytes();
         let mb = |bytes: usize| bytes as f64 / (1024. * 1024.);
         eprintln!(
-            "GPU_STATS frames={} draws={} passes={} blur_passes={} instances={} \
+            "GPU_STATS scroll_copies={} frames={} draws={} passes={} blur_passes={} instances={} \
              damaged_mpx={:.1} geometry={} glyphs={} vbuf_allocs={} layer_repaints={} \
              layer_hits={} layer_allocs={} | layers={} ({:.1} MB) atlas={:.1} MB \
              images={:.1} MB vertices={:.1} MB shaped={:.1} MB prepared={:.1}+{:.1} MB \
              device={}",
+            sum.scroll_copies,
             self.frames,
             sum.draw_calls,
             sum.render_passes,

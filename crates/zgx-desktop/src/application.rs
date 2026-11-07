@@ -2739,7 +2739,12 @@ impl Host {
                 // Steady frames render at a time of their own within their
                 // wait for the refresh point (`Latch::hold`).
                 #[cfg(target_os = "macos")]
-                if let Some((origin, period)) = self.refresh_grid() {
+                // Diagnostic `ZGX_LATE_HOLD`: a late-started scroll frame renders
+                // at once, and only its hand-over waits for the grid's point.
+                let late_held = crate::scroll_resample::diag("ZGX_LATE_HOLD").is_some()
+                    && self.frame_interval >= crate::scroll_resample::SLOW_REFRESH
+                    && self.scroll.active(std::time::Instant::now());
+                if let Some((origin, period)) = self.refresh_grid().filter(|_| !late_held) {
                     let at = self.latch.hold(std::time::Instant::now(), origin, period);
                     let _wait = zgx::profile::span(zgx::profile::Phase::Wait);
                     sleep_until(at);
@@ -2940,8 +2945,15 @@ impl Host {
                     self.presented_at = Some(std::time::Instant::now());
                     if scroll_steps() {
                         let at = std::time::Instant::now();
-                        let left = self.frame_timer.next_deadline(at, self.frame_interval).saturating_duration_since(at);
-                        eprintln!("zgx-scroll shown {} left {} work 0", zgx_gpu::present_log::now_ns(), left.as_micros());
+                        let left = self
+                            .frame_timer
+                            .next_deadline(at, self.frame_interval)
+                            .saturating_duration_since(at);
+                        eprintln!(
+                            "zgx-scroll shown {} left {} work 0",
+                            zgx_gpu::present_log::now_ns(),
+                            left.as_micros()
+                        );
                     }
                     self.late_sample.handed_over(std::time::Instant::now());
                     // What it shows now, for `Ui::snapshot` (the last frame's
@@ -4855,7 +4867,10 @@ impl Host {
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 if scroll_steps() {
-                    eprintln!("zgx-scroll event {} None {delta:?} {phase:?}", zgx_gpu::present_log::now_ns());
+                    eprintln!(
+                        "zgx-scroll event {} None {delta:?} {phase:?}",
+                        zgx_gpu::present_log::now_ns()
+                    );
                 }
                 self.wheel_tape.borrow_mut().received(
                     std::time::Instant::now(),
@@ -5745,7 +5760,10 @@ impl Host {
                     )
                 });
                 if scroll_steps() {
-                    eprintln!("zgx-scroll step {} {delta_x} {delta_y}", zgx_gpu::present_log::now_ns());
+                    eprintln!(
+                        "zgx-scroll step {} {delta_x} {delta_y}",
+                        zgx_gpu::present_log::now_ns()
+                    );
                 }
                 let (x, y) = self.scroll.position;
                 self.dispatch(InputEvent::Scroll {
@@ -6023,6 +6041,7 @@ impl Host {
         // refresh it's for, with nothing to wait for (`LateSample`).
         if self.frame_interval >= crate::scroll_resample::SLOW_REFRESH
             && crate::scroll_resample::diag("ZGX_LATE_OFF").is_none()
+            && crate::scroll_resample::diag("ZGX_LATE_HOLD").is_none()
             && self.scroll.active(now)
         {
             self.latch = Latch::default();

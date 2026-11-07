@@ -824,13 +824,14 @@ mod tests {
 /// Diagnostic switches, read once each.
 pub(crate) fn diag(name: &str) -> Option<String> {
     use std::sync::OnceLock;
-    static VARS: OnceLock<[Option<String>; 4]> = OnceLock::new();
+    static VARS: OnceLock<[Option<String>; 5]> = OnceLock::new();
     let vars = VARS.get_or_init(|| {
         [
             "ZGX_DRAIN_OFF",
             "ZGX_WHOLE_PX",
             "ZGX_LATE_OFF",
             "ZGX_LATE_FRAC",
+            "ZGX_LATE_HOLD",
         ]
         .map(|v| std::env::var(v).ok())
     });
@@ -839,6 +840,7 @@ pub(crate) fn diag(name: &str) -> Option<String> {
         "ZGX_WHOLE_PX",
         "ZGX_LATE_OFF",
         "ZGX_LATE_FRAC",
+        "ZGX_LATE_HOLD",
     ]
     .iter()
     .position(|v| *v == name)?;
