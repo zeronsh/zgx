@@ -201,6 +201,9 @@ pub struct DebugCacheStats {
     pub layers_coarser: usize,
     /// Their bytes.
     pub layer_bytes: usize,
+    /// Pipelines of an app's own shaders (fills, layer shaders and their
+    /// blends) held.
+    pub shader_pipelines: usize,
 }
 const SHAPE_BUDGET: usize = 8 * 1024 * 1024;
 /// Shaping frames a cached word survives without being used.
@@ -4880,6 +4883,14 @@ impl GpuRenderer {
                 .filter(|id| self.layers.contains_key(id))
                 .count(),
             layer_bytes: self.layers.values().map(|l| l.bytes).sum(),
+            // (Not zgx's own plain blend's, kept as any built-in pipeline is.)
+            shader_pipelines: self.fill_pipelines.len()
+                + self.filter_pipelines.len()
+                + self
+                    .blend_pipelines
+                    .keys()
+                    .filter(|id| **id != BLEND_PLAIN)
+                    .count(),
         }
     }
     /// At the first frame, a swap chain made opaque under a background that
@@ -18311,5 +18322,147 @@ mod rest_tests {
             // And the next frame draws.
             draw(&mut gpu, &mut small);
         }
+    }
+    /// A big page: `count` rows of text in many sizes, pictures, layers with
+    /// an opacity, and a layer shader. Every renderer cache fills.
+    fn big_page(count: usize) -> Scene {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        for index in 0..count {
+            let y = (index % 60) as f32 * 5.;
+            let text = scene.append(
+                scene.root(),
+                NodeKind::Text {
+                    text: format!(
+                        "Row {index}: {}",
+                        "the quick brown fox jumps ".repeat(1 + index % 3)
+                    )
+                    .into(),
+                    color: Color(220, 220, 230, 255),
+                    font_size: 9. + (index % 23) as f32,
+                },
+                Style::default(),
+            );
+            scene.set_transform(text, Transform { x: 0., y });
+            if index % 4 == 0 {
+                let pixels: Vec<u8> = (0..32 * 32)
+                    .flat_map(|p| [(p % 255) as u8, index as u8, 90, 255])
+                    .collect();
+                let image = Arc::new(zgx::image::ImageData::new(32, 32, pixels).unwrap());
+                let node = scene.append(scene.root(), NodeKind::Image(image), fixed(16., 16.));
+                scene.set_transform(
+                    node,
+                    Transform {
+                        x: (index % 20) as f32 * 18.,
+                        y,
+                    },
+                );
+            }
+            if index % 10 == 0 {
+                let layer = scene.append(
+                    scene.root(),
+                    NodeKind::Container(Layout::Overlay),
+                    fixed(60., 30.),
+                );
+                scene.set_effects(
+                    layer,
+                    zgx::scene::Effects {
+                        opacity: 0.8,
+                        ..Default::default()
+                    },
+                );
+                scene.append(
+                    layer,
+                    NodeKind::Rect(Color(90, 40, 200, 255)),
+                    fixed(60., 30.),
+                );
+                scene.set_transform(
+                    layer,
+                    Transform {
+                        x: (index % 6) as f32 * 60.,
+                        y,
+                    },
+                );
+                if index % 20 == 0 {
+                    scene.set_layer_shader(
+                        layer,
+                        Some(zgx::decoration::FillShader::new(
+                            format!("fn layer(input: LayerInput) -> vec4<f32> {{ return input.color * {}.0 / 100.0; }}", 50 + index % 40),
+                            None,
+                        )),
+                    );
+                }
+            }
+        }
+        scene
+    }
+    fn rest(gpu: &mut GpuRenderer) -> DebugCacheStats {
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        gpu.trim();
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        gpu.trim();
+        gpu.debug_cache_stats()
+    }
+
+    /// After one big page, a window back on a small one and at rest holds
+    /// what it held for the small one alone: every cache, the renderer made
+    /// as the adapter has it (CI runs it on each platform's). The glyph atlas
+    /// keeps its size until a long idle (`trim_atlas`, which the host calls
+    /// then), and gives it back there.
+    #[test]
+    fn every_cache_returns_to_a_small_frames_at_rest() {
+        let mut gpu = GpuRenderer::new(400, 300).unwrap();
+        gpu.debug_wait_for_shaders();
+        let mut small = boxes(20);
+        draw(&mut gpu, &mut small);
+        let baseline = rest(&mut gpu);
+        let mut big = big_page(600);
+        draw(&mut gpu, &mut big);
+        draw(&mut gpu, &mut big);
+        let peak = gpu.debug_cache_stats();
+        // The big page gone (its nodes, its shaders), the small one again.
+        drop(big);
+        let mut small = boxes(20);
+        draw(&mut gpu, &mut small);
+        let at_rest = rest(&mut gpu);
+        // The big page did fill every cache.
+        assert!(peak.shaped_nodes > 0 && peak.atlas_entries > 0, "{peak:?}");
+        assert!(
+            peak.image_textures > 0 && peak.layer_textures > 0,
+            "{peak:?}"
+        );
+        assert!(
+            peak.shader_pipelines > 0 && peak.vertex_buffer_bytes > 1 << 20,
+            "{peak:?}"
+        );
+        let held = |stats: &DebugCacheStats| {
+            [
+                stats.shaped_nodes,
+                stats.shaped_bytes,
+                stats.cached_quads,
+                stats.atlas_entries,
+                stats.swash_images,
+                stats.swash_outlines,
+                stats.image_textures,
+                stats.image_bytes,
+                stats.canvas_raster_bytes,
+                stats.svg_raster_bytes,
+                stats.layer_textures,
+                stats.layer_bytes,
+                stats.shader_pipelines,
+            ]
+        };
+        assert_eq!(held(&at_rest), held(&baseline), "{at_rest:?}");
+        assert!(
+            at_rest.vertex_buffer_bytes <= baseline.vertex_buffer_bytes.max(4096),
+            "{at_rest:?}"
+        );
+        // A long idle: the atlas too, back to its first size (a page of text
+        // grows it to that at once).
+        gpu.trim_atlas();
+        let first = (INITIAL_ATLAS * INITIAL_ATLAS * 4) as usize;
+        assert!(gpu.debug_cache_stats().atlas_bytes <= first.max(baseline.atlas_bytes));
+        // And the next frame draws.
+        draw(&mut gpu, &mut small);
     }
 }
