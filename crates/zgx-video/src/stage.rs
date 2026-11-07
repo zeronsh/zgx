@@ -24,6 +24,8 @@ pub struct StageOptions {
     pub scale: f32,
     /// What's behind the view. Transparent keeps the view's own alpha.
     pub background: Color,
+    /// Fonts its text may name, beside the system's.
+    pub fonts: Vec<zgx_gpu::text::FontData>,
 }
 impl Default for StageOptions {
     fn default() -> Self {
@@ -33,6 +35,7 @@ impl Default for StageOptions {
             fps: 30.,
             scale: 1.,
             background: Color(0, 0, 0, 255),
+            fonts: Vec::new(),
         }
     }
 }
@@ -58,6 +61,24 @@ pub struct Stage {
     frame: u64,
     /// Fields drop in order: what waits on the clock goes before it.
     clock: VirtualClock,
+    /// Its thread decodes every picture a frame draws, until it goes.
+    _whole_frames: WholeFrames,
+}
+
+/// This thread's frames decode every picture they draw while it lives (see
+/// `zgx::image::set_whole_frames_on_this_thread`), as it was put back after:
+/// a stage made on an app's own thread (`render_still` from a window's) leaves
+/// that thread's pictures decoding off it, as a window's should.
+struct WholeFrames(bool);
+impl WholeFrames {
+    fn on() -> Self {
+        Self(zgx::image::set_whole_frames_on_this_thread(true))
+    }
+}
+impl Drop for WholeFrames {
+    fn drop(&mut self) {
+        zgx::image::set_whole_frames_on_this_thread(self.0);
+    }
 }
 
 impl Stage {
@@ -67,10 +88,22 @@ impl Stage {
         build: impl FnOnce(Setting<'_>) -> Result<View, String>,
     ) -> Result<Self, String> {
         let clock = VirtualClock::new();
+        // A frame drawn without a picture's pixels would be written out so: a
+        // large one decodes as it's first drawn, as a small one does, rather
+        // than off the thread for a later frame. Put back when it goes, or if
+        // it fails to be made.
+        let whole_frames = WholeFrames::on();
         let (width, height) = pixels(&options);
         let mut gpu = GpuRenderer::new(width, height).map_err(|error| error.to_string())?;
         gpu.set_scale_factor(options.scale);
         gpu.set_background(options.background);
+        {
+            let text = gpu.text_system();
+            let mut text = text.borrow_mut();
+            for font in &options.fonts {
+                font.install(&mut text);
+            }
+        }
         let mut ui = Ui::new(options.width, options.height);
         ui.contain_layout_feedback();
         {
@@ -99,6 +132,7 @@ impl Stage {
             options,
             frame: 0,
             clock,
+            _whole_frames: whole_frames,
         };
         stage.settle();
         stage.lay_out()?;

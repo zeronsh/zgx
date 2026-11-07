@@ -56,6 +56,7 @@ end)
             fps: 60.,
             scale: 1.,
             background: Color(0, 0, 0, 255),
+            ..Default::default()
         },
         |setting| {
             let host = ScriptHost::new(setting.runtime, &app);

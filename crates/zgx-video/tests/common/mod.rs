@@ -15,6 +15,7 @@ pub fn inline(script: &str, width: f32, height: f32, fps: f64) -> Stage {
             fps,
             scale: 1.,
             background: Color(0, 0, 0, 255),
+            ..Default::default()
         },
         move |setting| {
             let host = ScriptHost::inline(setting.runtime, "app", script);

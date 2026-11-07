@@ -277,6 +277,7 @@ pub fn film(
             fps: ticks.stage_fps(),
             scale: options.scale,
             background,
+            ..Default::default()
         },
         |setting| {
             let frame = setting.runtime.signal(0f64);

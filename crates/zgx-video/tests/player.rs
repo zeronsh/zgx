@@ -32,6 +32,7 @@ fn a_player_shows_its_compositions_frame_in_any_view() {
             fps: 60.,
             scale: 1.,
             background: Color(255, 255, 255, 255),
+            ..Default::default()
         },
         |setting| {
             let player = Player::new(setting.runtime, &path, 1.)?;
@@ -78,6 +79,7 @@ fn a_script_plays_a_player_its_host_exposes() {
             fps: 60.,
             scale: 1.,
             background: Color(255, 255, 255, 255),
+            ..Default::default()
         },
         |setting| {
             let player = Player::new(setting.runtime, &path, 1.)?;
