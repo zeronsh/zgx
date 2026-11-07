@@ -54,10 +54,18 @@ pub enum Phase {
     /// Waiting for the display: a frame held to render or hand over at its
     /// point in a refresh (macOS's pacing). Time, not work.
     Wait,
+    /// TEMPORARY (mount split): removing nodes, their effects and what they held.
+    Teardown,
+    /// TEMPORARY: the mount walk (`mount_element`) less what it encloses.
+    Mount,
+    /// TEMPORARY: making scene nodes (`Scene::append`, `Scene::set_kind`).
+    Node,
+    /// TEMPORARY: text measured outside layout.
+    EagerText,
 }
 
 /// Every phase, in report order.
-pub const PHASES: [Phase; 12] = [
+pub const PHASES: [Phase; 16] = [
     Phase::Input,
     Phase::Script,
     Phase::Update,
@@ -70,6 +78,10 @@ pub const PHASES: [Phase; 12] = [
     Phase::Submit,
     Phase::Present,
     Phase::Wait,
+    Phase::Teardown,
+    Phase::Mount,
+    Phase::Node,
+    Phase::EagerText,
 ];
 
 /// Frames between reports.
@@ -91,12 +103,24 @@ impl Phase {
             Phase::Submit => "submit",
             Phase::Present => "present",
             Phase::Wait => "wait",
+            Phase::Teardown => "teardown",
+            Phase::Mount => "mount",
+            Phase::Node => "node",
+            Phase::EagerText => "eager-text",
         }
     }
     /// Phases that run many times a frame inside another: timed, but not
     /// counted (a count costs a system call).
     fn nested(self) -> bool {
-        matches!(self, Phase::Style | Phase::Text)
+        matches!(
+            self,
+            Phase::Style
+                | Phase::Text
+                | Phase::Teardown
+                | Phase::Mount
+                | Phase::Node
+                | Phase::EagerText
+        )
     }
 }
 
@@ -154,7 +178,7 @@ pub fn span(phase: Phase) -> Span {
     if !enabled() {
         return Span { phase: None };
     }
-    enter(phase);
+    let phase = enter(phase);
     Span { phase: Some(phase) }
 }
 
@@ -172,15 +196,8 @@ impl Drop for Span {
 /// others this is nothing at all, not even the check [`span`] makes.
 #[inline(always)]
 pub fn nested(phase: Phase) -> Span {
-    #[cfg(feature = "profile-nested")]
-    {
-        span(phase)
-    }
-    #[cfg(not(feature = "profile-nested"))]
-    {
-        let _ = phase;
-        Span { phase: None }
-    }
+    // TEMPORARY (mount split): nested phases always measured.
+    span(phase)
 }
 
 /// One frame is done: counts toward the next report.
@@ -411,7 +428,7 @@ impl Profile {
 }
 
 #[cold]
-fn enter(phase: Phase) {
+fn enter(phase: Phase) -> Phase {
     // Nested phases run hundreds of times a frame: too many intervals to
     // read, and each signpost costs.
     if !phase.nested() && reported() {
@@ -419,12 +436,20 @@ fn enter(phase: Phase) {
     }
     PROFILE.with(|profile| {
         let mut profile = profile.borrow_mut();
+        // TEMPORARY: text measured with no layout open is eager.
+        let phase = match phase {
+            Phase::Text if !profile.open.iter().any(|open| open.0 == Phase::Layout) => {
+                Phase::EagerText
+            }
+            phase => phase,
+        };
         let counted = !phase.nested();
         let count = profile.now(phase);
         let now = Instant::now();
         profile.credit(now, count, counted);
         profile.open.push((phase, now, count));
-    });
+        phase
+    })
 }
 
 #[cold]
@@ -692,7 +717,7 @@ mod signpost {
     /// names must be).
     static NAMES: [&std::ffi::CStr; PHASES.len()] = [
         c"input", c"script", c"update", c"style", c"layout", c"text", c"damage", c"paint",
-        c"encode", c"submit", c"present", c"wait",
+        c"encode", c"submit", c"present", c"wait", c"teardown", c"mount", c"node", c"eager-text",
     ];
     struct Log(*mut c_void);
     // SAFETY: An os_log_t is usable from any thread.

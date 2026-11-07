@@ -6266,6 +6266,7 @@ impl Scene {
     /// Change what `id` is or paints, invalidating only what the change
     /// affects.
     pub fn set_kind(&mut self, id: NodeId, kind: NodeKind) {
+        let _span = crate::profile::nested(crate::profile::Phase::Node);
         if self.node(id).kind == kind {
             return;
         }
@@ -6384,6 +6385,7 @@ impl Scene {
     }
     /// Append a node of `kind` with `style` as `parent`'s last child.
     pub fn append(&mut self, parent: NodeId, kind: NodeKind, mut style: Style) -> NodeId {
+        let _span = crate::profile::nested(crate::profile::Phase::Node);
         self.content_revision = self.content_revision.wrapping_add(1);
         if let Some(options) = &style.layout_options {
             let normalized = (**options).normalized();
