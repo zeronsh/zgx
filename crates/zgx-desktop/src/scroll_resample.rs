@@ -224,6 +224,16 @@ impl ScrollResampler {
         (delta != (0., 0.)).then_some(delta)
     }
     fn delay(&self) -> Duration {
+        // Diagnostic: a fixed delay at a slow refresh.
+        static FIXED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+        let fixed = *FIXED.get_or_init(|| {
+            zgx::env::var_os("ZGX_FIXED_DELAY").and_then(|v| v.to_str()?.parse().ok())
+        });
+        if let Some(ms) = fixed
+            && self.refresh >= SLOW_REFRESH
+        {
+            return Duration::from_millis(ms);
+        }
         if self.refresh >= SLOW_REFRESH
             && self
                 .interval
