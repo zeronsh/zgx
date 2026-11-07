@@ -18452,7 +18452,44 @@ mod rest_tests {
                 stats.shader_pipelines,
             ]
         };
-        assert_eq!(held(&at_rest), held(&baseline), "{at_rest:?}");
+        // Which pipelines, if any stay: each shader's id, who holds it and
+        // its source's start.
+        let kept = |gpu: &GpuRenderer| {
+            let shader = |id: &u64| {
+                let held = gpu
+                    .fill_shaders
+                    .get(id)
+                    .or_else(|| gpu.filter_shaders.get(id));
+                held.map(|s| {
+                    (
+                        Arc::strong_count(s),
+                        s.source().chars().take(60).collect::<String>(),
+                    )
+                })
+            };
+            let fills: Vec<_> = gpu
+                .fill_pipelines
+                .keys()
+                .map(|id| (*id, shader(id)))
+                .collect();
+            let filters: Vec<_> = gpu
+                .filter_pipelines
+                .keys()
+                .map(|id| (*id, shader(id)))
+                .collect();
+            let blends: Vec<_> = gpu
+                .blend_pipelines
+                .keys()
+                .map(|id| (*id, shader(id)))
+                .collect();
+            format!("fills {fills:?}, filters {filters:?}, blends {blends:?}")
+        };
+        assert_eq!(
+            held(&at_rest),
+            held(&baseline),
+            "{at_rest:?}; {}",
+            kept(&gpu)
+        );
         assert!(
             at_rest.vertex_buffer_bytes <= baseline.vertex_buffer_bytes.max(4096),
             "{at_rest:?}"
