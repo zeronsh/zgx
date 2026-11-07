@@ -358,7 +358,7 @@ fn select_all_and_presses_elsewhere() {
 }
 
 #[test]
-fn links_and_buttons_inside_click_and_a_drag_from_one_selects() {
+fn buttons_inside_click_and_a_drag_from_one_neither_clicks_nor_selects() {
     let mut ui = Ui::new(400., 300.);
     let clicks = Rc::new(Cell::new(0));
     let counted = clicks.clone();
@@ -378,14 +378,15 @@ fn links_and_buttons_inside_click_and_a_drag_from_one_selects() {
     release(&mut ui, x, y);
     assert_eq!(clicks.get(), 1);
     assert!(!ui.has_text_selection());
-    // A drag from it selects, and it does not activate.
+    // A drag from it is the button's (as a Mac button's): it selects
+    // nothing, and let go away from it, it does not activate.
     press(&mut ui, x, y, false);
     move_to(&mut ui, x + 2., y);
     assert!(!ui.has_text_selection(), "within the press's slop");
     move_to(&mut ui, 200., 290.);
     release(&mut ui, 200., 290.);
     assert_eq!(clicks.get(), 1);
-    assert_eq!(ui.selected_text(), "Press\nAfter");
+    assert!(!ui.has_text_selection(), "{:?}", ui.selected_text());
 }
 
 /// A button that is itself the selectable root clicks, and a drag from it
@@ -2007,4 +2008,95 @@ mod mark_shapes {
         assert!(scene.text_mark_pieces(node, 0., 0., 1.).is_none());
         assert_eq!(scene.text_marks(node).len(), 1);
     }
+}
+
+/// A press that shakes (a hand's tremor, a trackpad's click) less than the
+/// system's drag threshold selects nothing, as a click in a Mac text view
+/// doesn't: across a character, or across a line's edge to the next line.
+/// Moved past it, the selection runs from where the press began.
+#[test]
+fn a_press_that_shakes_within_the_drag_threshold_selects_nothing() {
+    let mut ui = Ui::new(400., 300.);
+    document(
+        &mut ui,
+        vec![text("Hello world"), text("Second paragraph"), text("Third")],
+    );
+    // Across a character's middle (12 → 15: "l" starts at 12, ends at 18).
+    press(&mut ui, 14., 10., false);
+    move_to(&mut ui, 16., 11.);
+    assert!(!ui.has_text_selection(), "{:?}", ui.selected_text());
+    release(&mut ui, 16., 11.);
+    assert!(!ui.has_text_selection(), "{:?}", ui.selected_text());
+    // Beside a line's end, slipping down into the next paragraph's line.
+    press(&mut ui, 200., 21.5, false);
+    move_to(&mut ui, 200., 24.5);
+    assert!(!ui.has_text_selection(), "{:?}", ui.selected_text());
+    release(&mut ui, 200., 24.5);
+    assert!(!ui.has_text_selection(), "{:?}", ui.selected_text());
+    // Past it, from where it began, not where the shake took it.
+    press(&mut ui, 12., 10., false);
+    move_to(&mut ui, 14., 10.);
+    move_to(&mut ui, 30., 10.);
+    release(&mut ui, 30., 10.);
+    assert_eq!(ui.selected_text(), "llo");
+    // A shaking press on it ends it, as a click does.
+    press(&mut ui, 50., 30., false);
+    move_to(&mut ui, 52., 31.);
+    release(&mut ui, 52., 31.);
+    assert!(!ui.has_text_selection(), "{:?}", ui.selected_text());
+}
+
+/// A selection in a virtual list's row that scrolled away comes back with
+/// that row, found by its key: rows added above it meanwhile (a chat's
+/// older messages arriving) never move it onto another row's text. (Its
+/// old place showing another row, with its own out of view, it ends.)
+#[test]
+fn a_parked_selection_comes_back_on_its_own_row_after_rows_are_added_above() {
+    let mut ui = Ui::new(400., 300.);
+    let offset = ui.signal(0.);
+    let keys = ui.signal((0..100).collect::<Vec<i32>>());
+    let (count, key) = (keys.clone(), keys.clone());
+    let _view = ui.mount(
+        column()
+            .w(300.)
+            .text_size(10.)
+            .line_height(20.)
+            .selectable(true)
+            .child(
+                virtual_list(
+                    offset.clone(),
+                    20.,
+                    1,
+                    move || count.with(|k| k.len()),
+                    move |index| key.with(|k| k[index]),
+                    |_, key, _| text(format!("Row {key}")),
+                )
+                .w(300.)
+                .h(100.),
+            ),
+    );
+    ui.prepare_frame();
+    // Row 1 at 20, row 2 at 40.
+    drag(&mut ui, (6., 30.), (18., 50.));
+    assert_eq!(ui.selected_text(), "ow 1\nRow");
+    offset.set(1_000.);
+    ui.prepare_frame();
+    assert!(!ui.has_text_selection(), "nothing selected is mounted");
+    // Ten rows arrive above.
+    keys.set((-10..100).collect());
+    ui.prepare_frame();
+    // Where its rows are now, they show selected.
+    offset.set(200.);
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "ow 1\nRow");
+    // Away again, ten more above, and back at the top: rows -20 to -16
+    // show, none of them selected.
+    offset.set(1_000.);
+    ui.prepare_frame();
+    keys.set((-20..100).collect());
+    ui.prepare_frame();
+    offset.set(0.);
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "", "not on other rows");
+    assert!(highlighted(&ui).is_empty());
 }
