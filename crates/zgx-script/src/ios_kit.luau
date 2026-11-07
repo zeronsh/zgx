@@ -17,6 +17,19 @@ local function uikit_spring(ratio, response)
 	local turn = 2 * math.pi / response
 	return { stiffness = turn * turn, damping = 2 * ratio * turn }
 end
+-- A navigation bar's, read from UIKit (iOS 26.5) as a table under it scrolls:
+-- 54 points tall, 106 with its large title; the large title's top 57.7 below
+-- the safe area at 34 points, the small one's 11.7 at 17. Once the large title
+-- has scrolled under the bar, the large title fades out on a 0.2 s
+-- ease-in-out (its own CABasicAnimation) and the small one fades in rising 15
+-- points on a critically damped spring of 0.447 s (fit to UIKit's frames, rms
+-- 0.001: SwiftUI hosts it, so its spring isn't read yet). Both run by time,
+-- not with the scroll: the same at two drag speeds.
+local BAR, BAR_LARGE = 54, 106
+local LARGE_TITLE_TOP, LARGE_TITLE_HEIGHT = 57.7, 40.7
+local SMALL_TITLE_TOP, SMALL_TITLE_HEIGHT, SMALL_TITLE_RISE = 11.7, 20.7, 15
+local LARGE_TITLE_EASE = "cubicBezier(0.42, 0, 0.58, 1)"
+local TITLE_SPRING = uikit_spring(1, 0.447)
 -- A navigation controller's own, read from UIKit as it runs: a push or pop by a
 -- button runs its progress on this spring from 8.75 a second; a finger's position
 -- is followed through the tracking spring, and a release runs on the last.
@@ -569,10 +582,10 @@ function ios.page(props)
 	for index, child in ipairs(props) do
 		children[index] = child
 	end
-	local TITLE_AT = 44
-	local collapsed = function()
-		return clamp((offset:get() - TITLE_AT) / 10, 0, 1)
-	end
+	-- Collapsed once the large title has scrolled under the bar.
+	local collapsed = ui.computed(function()
+		return offset:get() >= BAR_LARGE - BAR
+	end)
 	return ui.div {
 		w = "100%",
 		h = "100%",
@@ -608,7 +621,7 @@ function ios.page(props)
 			end,
 			ui.column {
 				pt = function()
-					return safe:get().top + 44
+					return safe:get().top + BAR
 				end,
 				pb = function()
 					return safe:get().bottom + 90
@@ -623,10 +636,12 @@ function ios.page(props)
 					props.title,
 					heading = 1,
 					ml = 16,
-					mb = 4,
-					text_size = "$font.size.xxl",
+					mt = LARGE_TITLE_TOP - BAR,
+					mb = BAR_LARGE - LARGE_TITLE_TOP - LARGE_TITLE_HEIGHT,
+					text_size = 34,
 					weight = 700,
 					color = "$text.primary",
+					opacity = ui.tween(collapsed, { duration = 200, ease = LARGE_TITLE_EASE, from = 1, to = 0 }),
 				},
 				children,
 			},
@@ -635,7 +650,7 @@ function ios.page(props)
 		-- small title and its buttons on glass, above it.
 		ios.scroll_edge {
 			size = function()
-				return safe:get().top + 44
+				return safe:get().top + BAR
 			end,
 			shown = function()
 				return offset:get() > 0
@@ -645,29 +660,24 @@ function ios.page(props)
 			absolute = true,
 			left = 0,
 			right = 0,
-			top = 0,
-			h = function()
-				return safe:get().top + 50
+			top = function()
+				return safe:get().top + SMALL_TITLE_TOP
 			end,
+			h = SMALL_TITLE_HEIGHT,
 			pointer_events = false,
-			-- Eased, as a bar's title fades: a page raised for the keyboard
-			-- arrives at its offset all at once.
-			opacity = ui.tween(ui.computed(collapsed), { duration = 150 }),
-			ui.row {
-				absolute = true,
-				left = 0,
-				right = 0,
-				bottom = 0,
-				h = 44,
-				items = "center",
-				justify = "center",
-				ui.text {
-					props.title,
-					text_size = "$font.size.md",
-					weight = 600,
-					color = "$text.primary",
-					aria_hidden = true,
-				},
+			opacity = ui.spring(collapsed, { stiffness = TITLE_SPRING.stiffness, damping = TITLE_SPRING.damping }),
+			y = ui.spring(
+				collapsed,
+				{ stiffness = TITLE_SPRING.stiffness, damping = TITLE_SPRING.damping, from = SMALL_TITLE_RISE, to = 0 }
+			),
+			items = "center",
+			justify = "center",
+			ui.text {
+				props.title,
+				text_size = 17,
+				weight = 600,
+				color = "$text.primary",
+				aria_hidden = true,
 			},
 		},
 		props.trailing and ui.div {
