@@ -222,6 +222,22 @@ pub enum InputEvent {
         /// Down the window.
         y: f32,
     },
+    /// The mouse moved by `dx`, `dy` while the pointer is locked
+    /// (`InputDispatcher::lock_pointer`): the device's own motion as the
+    /// platform reports it raw (about a point a count; unaccelerated where
+    /// the platform gives it so), as the DOM's `movementX`. The pointer
+    /// itself stays where it locked. It goes to the locking node; with no
+    /// lock, nowhere.
+    PointerMotion {
+        /// Across, positive to the right.
+        dx: f32,
+        /// Down, positive downward.
+        dy: f32,
+    },
+    /// The node took the pointer's lock (`true`) or lost it (`false`): it
+    /// let it go, Escape was pressed, the window lost focus, it went from
+    /// the scene or another node locked it.
+    PointerLockChange(bool),
     /// The pointer left the node (or the window).
     PointerLeave,
     /// The platform took the pointer away mid-gesture: a press ends without
@@ -536,6 +552,10 @@ impl EventContext {
 /// last event: longer than the gaps between a gesture's and its momentum's
 /// events, shorter than a person's pause between gestures.
 const SCROLL_LATCH: Duration = Duration::from_millis(300);
+/// How long after a press, a release or a key a node may lock the pointer
+/// (`InputDispatcher::lock_pointer`), as a browser's transient activation:
+/// a page can't take the pointer from someone who did nothing.
+pub const POINTER_LOCK_ACTIVATION: Duration = Duration::from_secs(1);
 /// How a node takes input.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NodeInput {
@@ -755,6 +775,12 @@ struct State {
     /// The last interaction was the pointer (a press), not the keyboard:
     /// what it focuses shows no focus ring (`focus_visible_now`).
     pointer_modality: bool,
+    /// The node the pointer is locked to (`lock_pointer`): every pointer
+    /// event goes to it, the mouse's own motion as `PointerMotion`.
+    pointer_lock: Option<NodeId>,
+    /// When a person last pressed, released or typed: the pointer locks
+    /// only just after (`POINTER_LOCK_ACTIVATION`).
+    activation: Option<Instant>,
 }
 /// Routes input events to the nodes listening for them, and holds focus,
 /// pointer capture, modal scopes and key bindings. Clones share one
@@ -1474,6 +1500,11 @@ impl InputDispatcher {
     pub fn focus_scrolls(&self) -> bool {
         !self.state.borrow().in_place
     }
+    /// Where the pointer last was over the window, in its points (where it
+    /// stays while locked); None while it is outside.
+    pub fn pointer(&self) -> Option<(f32, f32)> {
+        self.state.borrow().pointer
+    }
     /// The node under the pointer that takes input (its hit target), while
     /// it still listens.
     pub fn hovered(&self) -> Option<NodeId> {
@@ -1702,6 +1733,142 @@ impl InputDispatcher {
     /// The node capturing the pointer, if any.
     pub fn captured(&self) -> Option<NodeId> {
         self.state.borrow().captured
+    }
+    /// Lock the pointer to `node`, as the DOM's `requestPointerLock`: a
+    /// game's look about, a 3D view's orbit. Every press, release and wheel
+    /// goes to it wherever the pointer is; the mouse's own motion comes as
+    /// `PointerMotion`, the pointer staying put; the host hides and holds
+    /// it (`pointer_lock`). It hears `PointerLockChange(true)`, then
+    /// `false` as it ends: `unlock_pointer`, Escape (which goes nowhere
+    /// else), the window losing focus, the node leaving the scene or
+    /// another node locking it.
+    ///
+    /// Only within `POINTER_LOCK_ACTIVATION` of a press, a release or a key
+    /// (in their handlers, as the web allows it), and only an enabled node
+    /// in the scene: false otherwise, nothing changed. True if it already
+    /// holds the lock.
+    pub fn lock_pointer(&self, scene: &Rc<RefCell<Scene>>, node: NodeId) -> bool {
+        {
+            let state = self.state.borrow();
+            if state.pointer_lock == Some(node) {
+                return true;
+            }
+            let active = state
+                .activation
+                .is_some_and(|at| at.elapsed() < POINTER_LOCK_ACTIVATION);
+            if !active {
+                return false;
+            }
+        }
+        if !scene.borrow().contains(node) || !self.enabled(&scene.borrow(), node) {
+            return false;
+        }
+        let old = {
+            let mut state = self.state.borrow_mut();
+            // The lock has the pointer now: a capture or a press it held
+            // ends, its release going to the locking node.
+            state.captured = None;
+            state.capture_button = None;
+            state.pressed = None;
+            state.pointer_lock.replace(node)
+        };
+        if let Some(old) = old.filter(|id| scene.borrow().contains(*id)) {
+            self.route(scene, old, InputEvent::PointerLockChange(false));
+        }
+        self.route(scene, node, InputEvent::PointerLockChange(true));
+        true
+    }
+    /// End the pointer's lock, if any (the DOM's `exitPointerLock`): the
+    /// node that held it hears `PointerLockChange(false)`.
+    pub fn unlock_pointer(&self, scene: &Rc<RefCell<Scene>>) {
+        let Some(old) = self.state.borrow_mut().pointer_lock.take() else {
+            return;
+        };
+        if scene.borrow().contains(old) {
+            self.route(scene, old, InputEvent::PointerLockChange(false));
+        }
+    }
+    /// The node the pointer is locked to: what a host hides and holds the
+    /// pointer for, and sends `PointerMotion` while it is. None once that
+    /// node has left the scene or is disabled (the host then calls
+    /// `unlock_pointer`, and the lock ends).
+    pub fn pointer_lock(&self, scene: &Scene) -> Option<NodeId> {
+        self.state
+            .borrow()
+            .pointer_lock
+            .filter(|id| scene.contains(*id) && self.enabled(scene, *id))
+    }
+    /// Pointer events while `locked` holds the pointer: they go to it,
+    /// wherever the pointer is, and a primary press and release on it is a
+    /// click. Escape ends the lock and goes nowhere else; a move (the
+    /// pointer stays put) and a leave go nowhere. None for what dispatches
+    /// as ever (keys, text, focus).
+    fn dispatch_locked(
+        &self,
+        scene: &Rc<RefCell<Scene>>,
+        locked: NodeId,
+        event: &InputEvent,
+        modifiers: Option<Modifiers>,
+    ) -> Option<DispatchResult> {
+        let swallowed = DispatchResult {
+            target: Some(locked),
+            default_prevented: true,
+            focus_changed: false,
+        };
+        match event {
+            InputEvent::KeyDown {
+                key: Key::Escape, ..
+            } => {
+                self.unlock_pointer(scene);
+                Some(swallowed)
+            }
+            InputEvent::PointerMove { .. }
+            | InputEvent::PointerEnter
+            | InputEvent::PointerLeave
+            | InputEvent::PointerLockChange(_) => Some(swallowed),
+            InputEvent::PointerDown { .. }
+            | InputEvent::PointerUp { .. }
+            | InputEvent::PointerCancel
+            | InputEvent::PointerMotion { .. }
+            | InputEvent::Scroll { .. }
+            | InputEvent::Pinch { .. } => {
+                let press = matches!(event, InputEvent::PointerDown { .. });
+                let ctx = self.route_pointer(
+                    scene,
+                    locked,
+                    event.clone(),
+                    modifiers.unwrap_or_default(),
+                    u8::from(press),
+                    false,
+                );
+                match event {
+                    InputEvent::PointerDown {
+                        button: PointerButton::Primary,
+                        ..
+                    } => self.state.borrow_mut().pressed = Some(locked),
+                    InputEvent::PointerUp {
+                        button: PointerButton::Primary,
+                        ..
+                    } => {
+                        let pressed = self.state.borrow_mut().pressed.take();
+                        if pressed == Some(locked)
+                            && !ctx.prevented
+                            && self.pointer_lock(&scene.borrow()) == Some(locked)
+                        {
+                            self.dispatch_to(scene, locked, InputEvent::Activate);
+                        }
+                    }
+                    InputEvent::PointerCancel => self.state.borrow_mut().pressed = None,
+                    _ => {}
+                }
+                Some(DispatchResult {
+                    target: Some(locked),
+                    default_prevented: ctx.prevented,
+                    focus_changed: false,
+                })
+            }
+            _ => None,
+        }
     }
     fn set_capture(&self, node: Option<NodeId>, event: &InputEvent) {
         let mut state = self.state.borrow_mut();
@@ -2536,6 +2703,41 @@ impl InputDispatcher {
                 }
             }
             _ => {}
+        }
+        // A person's own press, release or key: what may lock the pointer
+        // (`lock_pointer`) just after.
+        if matches!(
+            event,
+            InputEvent::PointerDown { .. }
+                | InputEvent::PointerUp { .. }
+                | InputEvent::KeyDown { repeat: false, .. }
+                | InputEvent::KeyUp { .. }
+        ) {
+            self.state.borrow_mut().activation = Some(Instant::now());
+        }
+        if self.state.borrow().pointer_lock.is_some() {
+            // (Its borrow ends here: the listeners below change the scene.)
+            let live = self.pointer_lock(&scene.borrow());
+            match live {
+                Some(locked) => {
+                    if let Some(result) = self.dispatch_locked(scene, locked, &event, modifiers) {
+                        return result;
+                    }
+                }
+                // Its node left the scene or was disabled.
+                None => self.unlock_pointer(scene),
+            }
+            // The window lost focus: the pointer is the system's again.
+            if matches!(event, InputEvent::Blur) {
+                self.unlock_pointer(scene);
+            }
+        }
+        // Motion and lock changes are a lock's: without one, no node's.
+        if matches!(
+            event,
+            InputEvent::PointerMotion { .. } | InputEvent::PointerLockChange(_)
+        ) {
+            return DispatchResult::default();
         }
         if self.dispatch_drag(scene, &event) {
             return DispatchResult {

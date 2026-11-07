@@ -11,6 +11,7 @@ on_double_click: (((e: PointerEvent) -> ()) | Action)?
 on_navigate: (((e: NavigateEvent) -> ()) | Action)?
 on_hover: (((inside: boolean) -> ()) | Action)?
 on_pointer_move: (((e: PointerEvent) -> ()) | Action)?
+on_pointer_lock: ((locked: boolean) -> ())?
 on_key: (((e: KeyEvent) -> boolean?) | Action)?
 on_key_up: (((key: string) -> ()) | Action)?
 on_focus: (Handler | Action)?
@@ -48,7 +49,8 @@ on_drag_spring: ((payload: any) -> boolean?)?
 | `on_file_drop` | the dropped files, each a `File` (`{ path, name, size, type }`), then `{ x, y, local_x, local_y }` | files are dropped on it from outside the window (Finder, Explorer, a file manager), as react-dropzone's `onDrop`. The innermost node with `on_file_drop` takes them. Send them with `ui.fetch`'s `file` or `multipart` ([the network](state.md#the-clipboard-and-files)) |
 | `on_file_hover` | `true`, then `false` | files dragged from outside the window come over it or anything in it, then leave it, are dropped or the drag ends (react-dropzone's `isDragActive`): a drop zone's highlight, or on the window's root, a "Drop files to upload" overlay |
 | `on_hover` | `true`, then `false` | once when the pointer comes inside the node or anything in it, once when it is outside all of them (the DOM's `mouseenter` and `mouseleave`); leaving the window, the window going to the back, and the pointer moving onto a page or a terminal count as leaving |
-| `on_pointer_move` | `{ x, y, local_x, local_y }` | the pointer moves over it (or anywhere, while it holds the pointer) |
+| `on_pointer_move` | `{ x, y, local_x, local_y, dx, dy, locked }` (`dx`, `dy`: how far it moved since the last move, in the window's points, as the DOM's `movementX`) | the pointer moves over it (or anywhere, while it holds the pointer). While the pointer is [locked](#locking-the-pointer) to it or inside it: the mouse's own motion as `dx`, `dy`, with `locked = true`, `x` and `y` staying where it locked |
+| `on_pointer_lock` | `true`, then `false` | it took the pointer's [lock](#locking-the-pointer) (`el:lock_pointer()`), then lost it: let go, Escape, the window losing focus, the node leaving or another node locking it |
 | `on_key` | `{ key, code, shift, ctrl, alt, meta, cmd, repeat, editing }` (`code`: the physical key, as the DOM's `KeyboardEvent.code`, `"KeyA"`, `"Digit1"`; `editing`: a text field holds focus, so a bare-key shortcut gives way) | a key goes down while it, or a node inside it, has focus. Return `true` to consume the key: the default action and the ancestors' handlers do not see it |
 | `on_key_up` | the key's name | the key comes up |
 | `on_focus`, `on_blur` | nothing | it takes or loses keyboard focus |
@@ -206,6 +208,8 @@ declare extern type Element with
 	y: number?
 	function focus(self): boolean
 	function blur(self): ()
+	function lock_pointer(self): boolean
+	function unlock_pointer(self): ()
 	function has_class(self, class: string): boolean
 	function select_all(self): boolean
 	function set_selection(self, a: number, b: number?): boolean
@@ -221,12 +225,54 @@ end
 | `width`, `height`, `x`, `y` | its laid-out box, in points from the window's top left; nil while it is not in a scene. Read as they are, not followed (a ref's `width` and `height` are) |
 | `focus(options?)` | keyboard focus to it or its first shown focusable descendant, scrolled into view in the scroll views and lists holding it (`{ scroll = false }`: left where it is, the web's `preventScroll`); whether it took |
 | `blur()` | clears keyboard focus when it is on the element or inside it |
+| `lock_pointer()`, `unlock_pointer()` | the pointer [locked](#locking-the-pointer) to it, or let go; `lock_pointer` says whether it holds it |
 | `has_class(class)` | whether its `class` names `class` |
 | `select_all()`, `set_selection(a, b)` | an input's selection, in characters (Unicode code points from 0, as `utf8.len` counts them); `b` defaults to `a`, a caret. False for other elements |
 | `selection()` | an input's anchor and focus (where the caret is); nil for other elements |
 | `snapshot(max_width?)` | a picture of it as the window last showed it, at most `max_width` pixels wide (480 if not given): the `src` of an image showing it (`ui.image { src = el:snapshot(240) }`, a pane's thumbnail), replaced on each call and forgotten as its node goes. Nil if it is not laid out or the host takes none (the desktop host on macOS takes them); native views in it (a page, a terminal) show as what is under them, so ask a terminal itself (`term:snapshot`) |
 
 A ref (`ui.ref()`, given to nodes as `ref = r`) answers `r:get()` and `r.element` (its first mounted element, else nil), `r:peek()` (the same, without following), `r.mounted`, `r.count`, `r:elements()` (every mounted node sharing it, in document order), and `r.width` and `r.height` (its element's laid-out size, nil while none is mounted). Reading `get`, `element`, `mounted`, `count`, `elements`, `width` or `height` in an effect or a computed follows the ref (and `width` and `height` follow layout resizing the element), so an effect that needs the element runs again once it mounts. A ref has no `focus` or other element methods: ask its element (`local el = r:get(); if el then el:focus() end`).
+
+### Locking the pointer
+
+A game that looks about with the mouse, or a 3D view that orbits however far it is dragged, locks the pointer to its element, as the DOM's Pointer Lock: `el:lock_pointer()`. The pointer is hidden and held in place, so it never reaches the window's edge; every press, release and wheel goes to the element wherever it is; and its `on_pointer_move` hears the mouse's own motion as `dx`, `dy` (`locked = true`), `x` and `y` staying where it locked.
+
+- It locks only in a press's, a release's or a key's handler, or within a second of one: nothing takes the pointer without the person doing something. `lock_pointer` returns whether it holds it.
+- Escape always lets it go, and goes nowhere else (no `on_key` hears it). So do the window losing focus, the element leaving or being disabled, another element locking it and `el:unlock_pointer()`. The element's `on_pointer_lock` hears `true` as it locks and `false` as it ends, whatever ended it: a game pauses there. The pointer shows again where it locked.
+- `dx` and `dy` are the platform's raw report: about a point a count, unaccelerated where the platform gives it so (Windows, X11), with the system's acceleration on macOS. Scale them by a sensitivity of your own.
+- A press and release while locked still clicks the element (`on_click`); a locked press focuses nothing.
+
+```lua
+local yaw, pitch = ui.state("yaw", 0), ui.state("pitch", 0)
+local playing = ui.state("playing", false)
+local view = ui.ref()
+
+return ui.div {
+	ref = view,
+	w_full = true,
+	h_full = true,
+	on_press = function()
+		local el = view:get()
+		if el and not playing:peek() then
+			el:lock_pointer()
+		end
+	end,
+	on_pointer_lock = function(locked)
+		playing:set(locked)
+	end,
+	on_pointer_move = function(e)
+		if e.locked then
+			yaw:set(yaw:peek() + (e.dx or 0) * 0.003)
+			pitch:set(math.clamp(pitch:peek() - (e.dy or 0) * 0.003, -1.5, 1.5))
+		end
+	end,
+	ui.text {
+		function()
+			return if playing:get() then "Esc to let go" else "Click to look about"
+		end,
+	},
+}
+```
 
 ### Container queries
 

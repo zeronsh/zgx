@@ -42,5 +42,7 @@ mod key_activation_target;
 mod native_pointer;
 #[path = "../pointer_drag_buttons.rs"]
 mod pointer_drag_buttons;
+#[path = "../pointer_lock.rs"]
+mod pointer_lock;
 #[path = "../zoom.rs"]
 mod zoom;

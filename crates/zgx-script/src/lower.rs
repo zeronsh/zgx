@@ -5290,6 +5290,8 @@ fn with_events(
     // script's own) keeps it until release, wherever it goes.
     let captures = press.is_some() && (moved.is_some() || release.is_some());
     let (vm, actions) = (vm.clone(), low.actions.clone());
+    // Where the last move was, for the next one's `dx`, `dy`.
+    let mut last: Option<(f32, f32)> = None;
     view.on_event(move |event| {
         let lua = &vm.lua;
         let local = |x: f32, y: f32| {
@@ -5350,8 +5352,27 @@ fn with_events(
                     run(h, &vm, &actions, p);
                 }
             }
+            // `dx`, `dy`: how far it moved since the last move heard, in
+            // the window's points (the DOM's `movementX`).
             InputEvent::PointerMove { x, y } => {
-                if let (Some(h), Ok(p)) = (&moved, point(*x, *y)) {
+                let (dx, dy) = last.map_or((0., 0.), |(lx, ly)| (x - lx, y - ly));
+                last = Some((*x, *y));
+                if let (Some(h), Ok(p)) = (&moved, point(*x, *y))
+                    && p.set("dx", dx).and_then(|_| p.set("dy", dy)).is_ok()
+                {
+                    run(h, &vm, &actions, p);
+                }
+            }
+            // The mouse's motion while the pointer is locked: `dx`, `dy`
+            // as it moved, `x`, `y` where it stays.
+            InputEvent::PointerMotion { dx, dy } => {
+                let (x, y) = handle.get().and_then(|h| h.pointer()).unwrap_or_default();
+                if let (Some(h), Ok(p)) = (&moved, point(x, y))
+                    && p.set("dx", *dx)
+                        .and_then(|_| p.set("dy", *dy))
+                        .and_then(|_| p.set("locked", true))
+                        .is_ok()
+                {
                     run(h, &vm, &actions, p);
                 }
             }
@@ -5361,6 +5382,7 @@ fn with_events(
                 }
             }
             InputEvent::PointerLeave => {
+                last = None;
                 if let Some(h) = &hover {
                     run(h, &vm, &actions, false);
                 }
@@ -5466,6 +5488,9 @@ fn with_rare(
     }
     if let Some(handler) = &rare.double_click {
         view = with_double_click(view, handler.clone(), vm, low, handle.clone());
+    }
+    if let Some(handler) = &rare.pointer_lock {
+        view = with_pointer_lock(view, handler.clone(), vm, low);
     }
     if rare.capture_keys {
         view = view.capture_keys(true);
@@ -5672,6 +5697,19 @@ fn with_double_click(
 /// between pages over it navigates where nothing under the fingers scrolls
 /// that way.
 #[inline(never)]
+/// `on_pointer_lock`: the node took the pointer's lock or lost it. Its own
+/// lock alone: a descendant's goes by.
+fn with_pointer_lock(view: View, handler: Handler, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
+    let (vm, actions) = (vm.clone(), low.actions.clone());
+    view.on_event(move |event| {
+        if event.phase == EventPhase::Target
+            && let InputEvent::PointerLockChange(locked) = event.event
+        {
+            run(&handler, &vm, &actions, locked);
+        }
+    })
+}
+
 fn with_navigate(view: View, handler: Handler, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     let (vm, actions) = (vm.clone(), low.actions.clone());
     view.on_navigate(move |navigation| {

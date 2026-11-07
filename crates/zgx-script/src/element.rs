@@ -1507,5 +1507,17 @@ impl UserData for ElementUd {
             }
             Ok(())
         });
+        // The pointer locked to the element (the DOM's
+        // `requestPointerLock`): only in a press's, a release's or a key's
+        // handler (or just after); whether it holds it.
+        methods.add_method("lock_pointer", |_, e, ()| {
+            Ok(e.0.handle.get().is_some_and(|h| h.lock_pointer()))
+        });
+        methods.add_method("unlock_pointer", |_, e, ()| {
+            if let Some(handle) = e.0.handle.get() {
+                handle.unlock_pointer();
+            }
+            Ok(())
+        });
     }
 }

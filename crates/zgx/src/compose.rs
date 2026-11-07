@@ -7874,6 +7874,28 @@ impl NodeHandle {
             ui.input.focus(&ui.scene, None);
         }
     }
+    /// Lock the pointer to the node (`InputDispatcher::lock_pointer`): only
+    /// just after a press, a release or a key. Whether it holds it now.
+    pub fn lock_pointer(&self) -> bool {
+        let Some(ui) = self.ui.upgrade() else {
+            return false;
+        };
+        ui.input.lock_pointer(&ui.scene, self.node)
+    }
+    /// Let the pointer go, if the node holds its lock.
+    pub fn unlock_pointer(&self) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        if ui.input.pointer_lock(&ui.scene.borrow()) == Some(self.node) {
+            ui.input.unlock_pointer(&ui.scene);
+        }
+    }
+    /// Where the pointer last was over the window (where it stays while it
+    /// is locked), in the window's points; None outside it.
+    pub fn pointer(&self) -> Option<(f32, f32)> {
+        self.ui.upgrade()?.input.pointer()
+    }
 }
 /// Reference to a Ui-owned component tree. Drop does not unmount; call `unmount`.
 #[derive(Clone)]
