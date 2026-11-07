@@ -1279,6 +1279,34 @@ const INPUT_FULL_RATE: std::time::Duration = std::time::Duration::from_millis(25
 /// no older than a frame started as the refresh began would be by then, and
 /// the frames after it start earlier.
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq)]
+enum FastStart {
+    Off,
+    At(f64),
+    Late,
+}
+/// Diagnostic: `ZGX_FAST_START`: unset, today's grid; `link`, frames on the
+/// link; `late`, as late as they make the next point; else ms after the tick.
+#[cfg(target_os = "macos")]
+fn fast_start() -> FastStart {
+    static START: std::sync::OnceLock<(FastStart, bool)> = std::sync::OnceLock::new();
+    START.get_or_init(fast_start_read).0
+}
+#[cfg(target_os = "macos")]
+fn fast_link() -> bool {
+    static START: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *START.get_or_init(|| fast_start_read().1)
+}
+#[cfg(target_os = "macos")]
+fn fast_start_read() -> (FastStart, bool) {
+    match std::env::var("ZGX_FAST_START").ok().as_deref() {
+        None => (FastStart::Off, false),
+        Some("link") => (FastStart::Off, true),
+        Some("late") => (FastStart::Late, false),
+        Some(ms) => (FastStart::At(ms.parse().unwrap_or(0.)), false),
+    }
+}
+#[cfg(target_os = "macos")]
 struct LateSample {
     /// How long frames lately took from starting to handed over (the most,
     /// forgotten over seconds).
@@ -1305,7 +1333,20 @@ impl LateSample {
     /// How long into a refresh a frame starts.
     fn wait(&self, period: std::time::Duration) -> std::time::Duration {
         if period < crate::scroll_resample::SLOW_REFRESH {
-            return std::time::Duration::ZERO;
+            // Diagnostic: when in a fast refresh a scroll's frames start.
+            return match fast_start() {
+                FastStart::At(ms) => std::time::Duration::from_secs_f64(ms / 1e3),
+                // As late as the frame still hands over before the next point:
+                // the link fires 2.5 ms before a point, 2 ms is the lead, 1.5 the room.
+                FastStart::Late => {
+                    let room = period + std::time::Duration::from_micros(2500);
+                    room.saturating_sub(
+                        Latch::LEAD + std::time::Duration::from_micros(1500) + self.work,
+                    )
+                    .min(period)
+                }
+                FastStart::Off => std::time::Duration::ZERO,
+            };
         }
         period.saturating_sub(Latch::LEAD + Self::MARGIN + self.work)
     }
@@ -5989,7 +6030,11 @@ impl Host {
         }
         // A scroll at a slow refresh starts each frame so late it makes the
         // refresh it's for, with nothing to wait for (`LateSample`).
-        if self.frame_interval >= crate::scroll_resample::SLOW_REFRESH && self.scroll.active(now) {
+        if (self.frame_interval >= crate::scroll_resample::SLOW_REFRESH
+            || fast_link()
+            || fast_start() != FastStart::Off)
+            && self.scroll.active(now)
+        {
             self.latch = Latch::default();
             return None;
         }
@@ -6053,7 +6098,7 @@ impl Host {
             // updates, scrolling) a timer paces them on the grid the link last
             // reported, and the link (a thread spinning to each refresh) runs
             // again only to resync.
-            let animating = wanted && rate.is_none() && !scrolling;
+            let animating = wanted && rate.is_none() && (!scrolling || fast_link());
             self.link_paced = animating;
             if let Some(renderer) = &mut self.renderer {
                 renderer.set_full_rate(wanted && rate.is_none());
