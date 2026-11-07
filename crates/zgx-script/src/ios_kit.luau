@@ -22,6 +22,9 @@ end
 -- is followed through the tracking spring, and a release runs on the last.
 local NAV_BUTTON = uikit_spring(1, 0.3)
 local NAV_BUTTON_SPEED = 8.75
+-- When it starts after the call, measured beside UIKit on an iPhone at 120 Hz (ms).
+local NAV_PUSH_START = 53
+local NAV_POP_START = 40
 local NAV_TRACKING = uikit_spring(0.85, 0.08)
 local NAV_RELEASE = uikit_spring(0.85, 0.3)
 -- How far the page under the top one lies back, of the width.
@@ -635,10 +638,14 @@ ios.stack = ui.component(function(props)
 	-- A button's starts at a navigation controller's speed; a change of mind keeps
 	-- the speed it had.
 	local function from_button(direction, carried)
+		if carried ~= 0 then
+			return { stiffness = NAV_BUTTON.stiffness, damping = NAV_BUTTON.damping, velocity = carried }
+		end
 		return {
 			stiffness = NAV_BUTTON.stiffness,
 			damping = NAV_BUTTON.damping,
-			velocity = if carried ~= 0 then carried else direction * NAV_BUTTON_SPEED * width,
+			velocity = direction * NAV_BUTTON_SPEED * width,
+			delay = if direction > 0 then NAV_POP_START else NAV_PUSH_START,
 		}
 	end
 	local function run_drag(target, done, spring)
