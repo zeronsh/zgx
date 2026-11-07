@@ -5647,6 +5647,8 @@ impl Scene {
             .copy_from_slice(children);
         self.invalidate_layout(parent);
         self.children_changed(parent);
+        // In another order, another may be hit on top.
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
         true
     }
     /// Installs the native font engine for editor geometry and intrinsic measurement.
@@ -7494,6 +7496,8 @@ impl Scene {
                     order
                 })
         };
+        // Painted, and hit, in another order (`interaction_revision`).
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
         let maps = self.cold.get_or_insert_default();
         let had = match order {
             Some(order) => maps.stacked.insert(parent, order).is_some(),
@@ -7952,6 +7956,9 @@ impl Scene {
         if paints {
             self.damage_subtree(id);
             self.invalidate(id, PAINT);
+            // Clipped otherwise, say: what is under the pointer may differ
+            // (`interaction_revision`).
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
         }
         match HELD {
             true => self.invalidate_layout_with::<true>(id, false, true, owner),
@@ -12846,6 +12853,56 @@ mod tests {
             color: Color(255, 255, 255, 255),
             font_size: 16.0,
         }
+    }
+    /// What is under a still pointer can change without anything moving: a
+    /// clip, children reordered, a paint order. `interaction_revision`, on
+    /// which a host keeps the cursor it last worked out, moves with each.
+    #[test]
+    fn what_is_hit_changing_moves_the_interaction_revision() {
+        let fixed = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let mut scene = Scene::new(200., 200.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let holder = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            fixed(100., 100.),
+        );
+        let a = scene.append(
+            holder,
+            NodeKind::Rect(Color(1, 1, 1, 255)),
+            fixed(100., 100.),
+        );
+        let b = scene.append(
+            holder,
+            NodeKind::Rect(Color(2, 2, 2, 255)),
+            fixed(100., 100.),
+        );
+        scene.flush();
+        let mut seen = scene.interaction_revision();
+        let mut moved = |scene: &Scene, what: &str| {
+            let now = scene.interaction_revision();
+            assert_ne!(now, seen, "{what}");
+            seen = now;
+        };
+        scene.set_style(
+            holder,
+            Style {
+                clip: true,
+                ..fixed(100., 100.)
+            },
+        );
+        moved(&scene, "clipped");
+        scene.set_style(holder, fixed(100., 100.));
+        moved(&scene, "unclipped");
+        assert!(scene.reorder_children(holder, &[b, a]));
+        moved(&scene, "reordered");
+        scene.set_z(b, 3);
+        moved(&scene, "raised");
+        assert_eq!(scene.hit_test_all(50., 50.).first().copied(), Some(b));
     }
     /// A text's proof that it holds no right-to-left script goes with its
     /// text: changed to Hebrew, its ink is its whole box again.
