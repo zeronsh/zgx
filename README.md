@@ -12,6 +12,7 @@ zgx is a retained-mode GUI framework in Rust for macOS, Windows and Linux. Compo
 - **3D:** a retained world in any box, drawing only when it changes: PBR materials, glTF models with animations and skins, image-based light, shadows, tone mapping, picking and orbit controls ([Rust](docs/3d.md), [Luau](docs/reference/3d.md)).
 - **The platform:** native menus and dialogs, multiple windows, system notifications and icon badges, the clipboard and primary selection, drag and drop, touch and pen, the system's accent, appearance, text size, reduced motion, contrast and transparency, and the user's language direction.
 - **Accessibility** through AccessKit (VoiceOver, Narrator, Orca): roles, headings, live regions, selection and keyboard-only use, with focus groups as ARIA's composite widgets.
+- **Video** (`zgx-video`): an interface rendered offscreen a frame at a time to H.264, ProRes or GIF, on a virtual clock that every animation, timer and shader follows, with a studio to preview it ([video](docs/video.md)).
 - **Scripting:** Luau with types, a linter, hot reload that keeps state, anime.js-style animation, routing, data loading and live connections, localized messages, sandboxed plugins, and `zgx new`, `zgx test` and `zgx-run` to start, test and run an app. Release builds carry scripts compiled into the binary.
 
 ## Quick start
@@ -91,4 +92,4 @@ Every scene, charted: [zgui-performance.pages.dev](https://zgui-performance.page
 
 ## Docs
 
-[Getting started](docs/getting-started.md), [coming from React](docs/coming-from-react.md), [components](docs/composition.md), [styling](docs/styling.md), [layout](docs/layout.md), [scripting](docs/scripting.md), [Luau reference](docs/reference/index.md), [Windows](docs/windows.md), [Linux](docs/linux.md), [changes](CHANGELOG.md), [roadmap](docs/ROADMAP.md). MIT licensed.
+[Getting started](docs/getting-started.md), [coming from React](docs/coming-from-react.md), [components](docs/composition.md), [styling](docs/styling.md), [layout](docs/layout.md), [scripting](docs/scripting.md), [video](docs/video.md), [Luau reference](docs/reference/index.md), [Windows](docs/windows.md), [Linux](docs/linux.md), [changes](CHANGELOG.md), [roadmap](docs/ROADMAP.md). MIT licensed.

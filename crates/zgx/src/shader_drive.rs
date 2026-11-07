@@ -131,7 +131,7 @@ fn mount(
         let drive = make();
         let reduced = themes.system_preferences().reduced_motion;
         let shows = presented.get() && visible.get();
-        let now = Instant::now();
+        let now = crate::clock::now();
         let Some(ui) = weak.upgrade() else { return };
         if let Ok(mut scene) = ui.scene.try_borrow_mut()
             && scene.contains(node)

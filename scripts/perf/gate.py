@@ -146,6 +146,12 @@ SCENES = [
     ('fx-none', 'zgx-3d', 'fx_bench', {'SCENE': 'none', 'ZGX_GPU_NOOP': '1'}),
     ('fx-layer', 'zgx-3d', 'fx_bench', {'SCENE': 'layer', 'ZGX_GPU_NOOP': '1'}),
     ('fx-reader', 'zgx-3d', 'fx_bench', {'SCENE': 'reader', 'ZGX_GPU_NOOP': '1'}),
+    # A video's frames (zgx-video's `examples/bench`): its script, animations,
+    # timers and shader clock stepped on a virtual clock (`zgx::clock`), each
+    # frame drawn whole by wgpu's no-op backend. What making video costs;
+    # every other cell runs without a virtual clock, which must cost them
+    # nothing.
+    ('video', 'zgx-video', 'video_bench', {'ZGX_GPU_NOOP': '1'}),
     # The example apps' common interactions (`support/apps.rs`), small and
     # undrawn but for their canvases' CPU work, run by list_state_bench (no
     # binary of their own to link): the
@@ -180,8 +186,8 @@ SCENES = [
 # test waits for its fake server's timer thread, a handoff between threads
 # that real time decides.
 SPREAD = {'app-chat': 0.2, '3d-textured': 0.06, '3d-mixed': 0.08, 'spans-md': 0.08}
-# Built alone: see `build`.
-ALONE = 'zgx-3d'
+# Built apart from the rest, each: see `build`.
+ALONE = ('zgx-3d', 'zgx-video')
 
 # A Luau scene's count follows where the heap places things (the value
 # cache and Luau's tables hash by address, its collector marks in their
@@ -276,9 +282,11 @@ def build(checkout, target, into):
     env = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_INCREMENTAL='0',
                CARGO_PROFILE_RELEASE_DEBUG='0')
     # Cargo turns a feature on for everything one build selects, and
-    # zgx-3d's bench takes wgpu's no-op backend: built apart, the other
-    # benches link the wgpu they always did.
-    for part in ([s for s in scenes if s[1] != ALONE], [s for s in scenes if s[1] == ALONE]):
+    # zgx-3d's and zgx-video's benches take wgpu's no-op backend: each built
+    # apart, the other benches link the wgpu they always did.
+    parts = [[s for s in scenes if s[1] not in ALONE]]
+    parts += [[s for s in scenes if s[1] == alone] for alone in ALONE]
+    for part in parts:
         if not part:
             continue
         command = ['cargo', 'build', '--release', '--locked', '--quiet']

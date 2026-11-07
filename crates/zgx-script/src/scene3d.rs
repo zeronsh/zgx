@@ -961,7 +961,7 @@ pub(crate) fn lower(
                 if degrees == 0. {
                     // Not turning: look again in a while, no frame asked.
                     zgx::timer::sleep(std::time::Duration::from_millis(250)).await;
-                    last = std::time::Instant::now();
+                    last = zgx::clock::now();
                     continue;
                 }
                 let frame = frames.next().await;
