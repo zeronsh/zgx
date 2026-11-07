@@ -1808,6 +1808,10 @@ struct Host {
     /// Where the trackpad's scroll gesture is: what its phases report
     /// (`InputEvent::ScrollGesture`, for elastic scrolling).
     trackpad: Trackpad,
+    /// A trackpad scroll's momentum, made here as AppKit's scroll views make
+    /// it: the system's momentum events go unused (`coast`).
+    #[cfg(target_os = "macos")]
+    coast: crate::coast::Coast,
     /// Devtools' wheel recordings, and what they play back (`Ui::wheel_tape`).
     wheel_tape: std::rc::Rc<std::cell::RefCell<crate::wheel_tape::Tape>>,
     /// Native views (web pages) over and under this window's zgx content.
@@ -2073,6 +2077,8 @@ impl Host {
             #[cfg(windows)]
             tsf_tried: false,
             trackpad: Trackpad::Idle,
+            #[cfg(target_os = "macos")]
+            coast: Default::default(),
             wheel_tape,
             pending_file_drops: Default::default(),
             hovered_files: Vec::new(),
@@ -4842,6 +4848,26 @@ impl Host {
                 } else {
                     None
                 };
+                // The system's momentum goes unused on macOS: the fingers'
+                // speed as they lifted made one already (`coast`), as an
+                // `NSScrollView` ignores the system's.
+                #[cfg(target_os = "macos")]
+                if matches!(delta, MouseScrollDelta::PixelDelta(_))
+                    && (self.trackpad == Trackpad::Momentum
+                        || gesture == Some(zgx::input::ScrollGesture::MomentumEnded))
+                {
+                    return Ok(());
+                }
+                #[cfg(target_os = "macos")]
+                if gesture == Some(zgx::input::ScrollGesture::Began) {
+                    self.stop_coast()?;
+                    self.coast.touched(std::time::Instant::now());
+                    crate::coast::fingers_down(true);
+                }
+                #[cfg(target_os = "macos")]
+                if gesture == Some(zgx::input::ScrollGesture::Ended) {
+                    crate::coast::fingers_down(false);
+                }
                 if let Some(
                     gesture @ (zgx::input::ScrollGesture::Began
                     | zgx::input::ScrollGesture::MomentumBegan),
@@ -4857,6 +4883,10 @@ impl Host {
                     self.context.viewport.with_untracked(|viewport| *viewport),
                 );
                 let (dx, dy) = wheel_delta(delta, self.scale_factor, step);
+                #[cfg(target_os = "macos")]
+                if self.trackpad == Trackpad::Fingers {
+                    self.coast.scrolled((dx, dy), crate::coast::event_time());
+                }
                 // Receipt, application and presentation share the log's host
                 // clock. This is host receipt, not the native event timestamp.
                 zgx_gpu::present_log::log(|| {
@@ -4944,6 +4974,16 @@ impl Host {
                         })?;
                     }
                     self.dispatch(InputEvent::ScrollGesture(gesture))?;
+                    // Lifted: the coast starts from the fingers' speed.
+                    #[cfg(target_os = "macos")]
+                    if gesture == zgx::input::ScrollGesture::Ended
+                        && self.coast.lifted(std::time::Instant::now())
+                    {
+                        self.dispatch(InputEvent::ScrollGesture(
+                            zgx::input::ScrollGesture::MomentumBegan,
+                        ))?;
+                        self.sync_frames();
+                    }
                 }
             }
             WindowEvent::Focused(false) => {
@@ -5588,6 +5628,17 @@ impl Host {
         }
         zgx::memory::answer(report);
     }
+    /// A coast cut short (the fingers back down): its momentum ends there.
+    #[cfg(target_os = "macos")]
+    fn stop_coast(&mut self) -> Result<(), Box<dyn Error>> {
+        if self.coast.active() {
+            self.coast.stop();
+            self.dispatch(InputEvent::ScrollGesture(
+                zgx::input::ScrollGesture::MomentumEnded,
+            ))?;
+        }
+        Ok(())
+    }
     fn update(&mut self) -> Result<bool, Box<dyn Error>> {
         // Native views' reports (navigation, script replies), and keyboard
         // focus they took or gave back, at this safe point.
@@ -5732,6 +5783,35 @@ impl Host {
             // A link or button under the finger gives the press up now, so
             // lifting there selects rather than clicks.
             self.dispatch(InputEvent::PointerMove { x, y })?;
+        }
+        // A trackpad's coast moves to where it is when this refresh shows;
+        // with no refreshes coming, to its end at once.
+        #[cfg(target_os = "macos")]
+        if self.coast.active() && (self.frame_arrived || !self.frames_presented()) {
+            let shows = match self.frames_presented() {
+                true => std::time::Instant::now() + self.frame_interval,
+                false => self.coast.ends().unwrap_or_else(std::time::Instant::now),
+            };
+            if let Some(((delta_x, delta_y), done)) = self.coast.sample(shows) {
+                if delta_x != 0. || delta_y != 0. {
+                    zgx_gpu::present_log::log(|| {
+                        format!("scroll-applied source=coast dx={delta_x:.3} dy={delta_y:.3}")
+                    });
+                    let (x, y) = self.scroll.position;
+                    self.dispatch(InputEvent::Scroll {
+                        x,
+                        y,
+                        delta_x,
+                        delta_y,
+                    })?;
+                    self.after_scroll();
+                }
+                if done {
+                    self.dispatch(InputEvent::ScrollGesture(
+                        zgx::input::ScrollGesture::MomentumEnded,
+                    ))?;
+                }
+            }
         }
         // A fling coasts a step each refresh, and stops at the end of what
         // it scrolls.
@@ -6012,6 +6092,8 @@ impl Host {
     fn sync_frames(&mut self) {
         let now = std::time::Instant::now();
         let scrolling = self.scroll.active(now) || self.touch.flinging();
+        #[cfg(target_os = "macos")]
+        let scrolling = scrolling || self.coast.active();
         let wanted = (self.frames.wants_frame() || scrolling) && self.frames_presented();
         if !wanted {
             self.frame_heartbeat = None;
