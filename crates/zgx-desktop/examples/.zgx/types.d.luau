@@ -20700,7 +20700,9 @@ export type IosKit = {
 		[number]: any,
 	}) -> Node,
 	stack: (props: { root: (nav: any) -> Node }) -> Node,
-	sheet: (props: { open: State<boolean>, detents: { number }?, build: () -> Node }) -> Node,
+	-- `detents`: "medium" and "large" as UIKit resolves them, or heights in
+	-- points; smallest first (default both).
+	sheet: (props: { open: State<boolean>, detents: { "medium" | "large" | number }?, build: () -> Node }) -> Node,
 }
 export type NativeTabsProps = {
 	-- Size and position.

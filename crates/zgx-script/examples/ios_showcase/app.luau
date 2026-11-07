@@ -206,6 +206,14 @@ local function SettingsPage(nav: any)
 	}
 end
 
+-- `sheet` (`ZGX_APP_ARGS`): the sheet opens on its own at 1.5 s, as Ref's
+-- `MODE=sheet` presents UIKit's, to compare the two.
+if ui.args[1] == "sheet" then
+	ui.after(1500, function()
+		sheet_open:set(true)
+	end)
+end
+
 -- `composer_loop` (`ZGX_APP_ARGS`): the composer opens and closes ten times on its
 -- own, each frame logged, to compare with the keyboard on a phone.
 local composer_editor = ui.ref()
@@ -399,7 +407,8 @@ return ui.div {
 	},
 	ios.sheet {
 		open = sheet_open,
-		detents = { 0.45, 1 },
+		detents = { "medium", "large" },
+		log_motion = true,
 		build = function()
 			return ui.column {
 				p = 20,

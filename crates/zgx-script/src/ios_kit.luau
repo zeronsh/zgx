@@ -990,12 +990,28 @@ ios.stack = ui.component(function(props)
 end)
 
 -- A sheet that rises from the bottom over a dimmed page, on glass where the
--- system's are: `open`, a state; `detents`, its heights as fractions of the
--- window, smallest first; `build`, its content. A drag on its handle moves
+-- system's are: `open`, a state; `detents`, "medium" and "large" (or
+-- heights in points), smallest first; `build`, its content. A drag on it moves
 -- between them, and past the smallest closes it.
+--
+-- As UIKit's (`UISheetPresentationController`, iOS 26), read from it: every
+-- move is a critically damped spring of response 0.344 s (mass 1, stiffness
+-- 333.33, damping 36.515: the springs it adds to the sheet's layers on a
+-- detent change; present and dismiss follow the same curve, within 1 pt).
+-- The largest detent is the window less its safe area at both ends; medium is
+-- 0.56 of that (0.63 in a window 568 points tall or less), as its detent block
+-- has it; the sheet is a detent tall plus the bottom safe area. Medium is the
+-- full-width sheet scaled to leave 8 points at the sides and bottom, top
+-- corners 56.2 (62 at large); large is opaque, on the page's background. The
+-- page under it dims to 20% black.
+local SHEET_SPRING = { stiffness = 333.3333, damping = 36.5148 }
+local SHEET_MEDIUM, SHEET_MEDIUM_SHORT, SHEET_SHORT = 0.56, 0.63, 568
+local SHEET_INSET = 8
+local SHEET_CORNERS_MEDIUM, SHEET_CORNERS_LARGE = 56.2, 62
+local SHEET_DIM = 0.2
 ios.sheet = ui.component(function(props)
 	local open = props.open
-	local detents = props.detents or { 0.5, 1 }
+	local detents = props.detents or { "medium", "large" }
 	local rise = ui.use_state(0)
 	local safe = ui.window.safe_area
 	local window = ui.window.size
@@ -1004,13 +1020,38 @@ ios.sheet = ui.component(function(props)
 	local function height()
 		return window:get().height
 	end
+	-- The sheet's height at detent `index`.
 	local function target(index)
-		return height() * detents[index] - (if detents[index] >= 1 then safe:get().top + 8 else 0)
+		local area = safe:get()
+		local most = height() - area.top - area.bottom
+		local d = detents[index]
+		local value = if d == "large"
+			then most
+			elseif d == "medium" then most * (if height() > SHEET_SHORT then SHEET_MEDIUM else SHEET_MEDIUM_SHORT)
+			else math.min(d, most)
+		return value + area.bottom
 	end
+	-- How far from the smallest detent toward the largest it is, 0 to 1.
+	local function largeness()
+		local low, high = target(1), target(#detents)
+		if high <= low then
+			return 1
+		end
+		return clamp((rise:get() - low) / (high - low), 0, 1)
+	end
+	-- `log_motion`: its top each frame in the gesture log, to compare with UIKit's.
+	if props.log_motion then
+		ui.effect(function()
+			ui.gesture_log(string.format("SHEET %.1f top %.2f", ui.now(), height() - rise:get()))
+		end)
+	end
+	local corners = ui.computed(function()
+		return SHEET_CORNERS_MEDIUM + (SHEET_CORNERS_LARGE - SHEET_CORNERS_MEDIUM) * largeness()
+	end)
 	local running
 	local function run(state, to, done, speed)
 		local carried = if running then running() else 0
-		running = settle(state, to, done, speed or carried)
+		running = settle(state, to, done, speed or carried, SHEET_SPRING)
 	end
 	local function dismiss(speed)
 		run(rise, 0, function()
@@ -1044,19 +1085,30 @@ ios.sheet = ui.component(function(props)
 				label = "Dismiss",
 				bg = "#000000",
 				opacity = function()
-					return 0.25 * clamp(rise:get() / target(1), 0, 1)
+					return SHEET_DIM * clamp(rise:get() / target(1), 0, 1)
 				end,
 				on_click = dismiss,
 			},
 			ui.glass {
 				absolute = true,
-				left = 8,
-				right = 8,
-				bottom = 8,
-				radius = 32,
+				left = 0,
+				right = 0,
+				bottom = 0,
 				h = function()
 					return math.max(rise:get(), 1)
 				end,
+				-- Medium is the whole sheet made smaller, about its bottom edge,
+				-- and lifted off it: 8 points clear at the sides and bottom.
+				origin = { 0.5, 1 },
+				scale = function()
+					local width = math.max(window:get().width, 1)
+					local small = (width - 2 * SHEET_INSET) / width
+					return small + (1 - small) * largeness()
+				end,
+				y = function()
+					return -SHEET_INSET * (1 - largeness())
+				end,
+				radius = corners,
 				role = "dialog",
 				overflow = "hidden",
 				-- iOS recognizes the drag, anywhere on the sheet, and tells every
@@ -1094,13 +1146,24 @@ ios.sheet = ui.component(function(props)
 						end,
 					}
 				end,
+				-- Large is opaque, on the page's background.
 				ui.div {
-					h = 28,
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = 0,
+					bottom = 0,
+					bg = "$surface.base",
+					opacity = largeness,
+				},
+				-- UIKit's grabber: 36 by 5, 5 points below the top.
+				ui.div {
+					h = 15,
+					pt = 5,
 					items = "center",
-					justify = "center",
 					label = "Sheet handle",
 					role = "button",
-					ui.div { w = 36, h = 5, rounded = 3, bg = "$text.tertiary" },
+					ui.div { w = 36, h = 5, rounded = 2.5, bg = "$text.tertiary" },
 				},
 				props.build(),
 			},
