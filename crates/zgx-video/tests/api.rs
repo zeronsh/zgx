@@ -370,3 +370,71 @@ fn audio_data_draws_a_tones_band_at_its_time() {
         height(&pixels, 3)
     );
 }
+
+#[test]
+fn captions_show_their_cue_at_its_time_word_by_word() {
+    let dir = temp_dir("captions");
+    std::fs::write(
+        dir.join("subs.srt"),
+        "1\n00:00:01,000 --> 00:00:02,000\nMMMM WWWW\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "C", w = 300, h = 60, fps = 30, duration = 90,
+            render = function()
+                local cues = video.captions_of("subs.srt")
+                assert(#cues == 1 and cues[1].text == "MMMM WWWW", "its cue")
+                return ui.column { w = 300, h = 60, bg = "#000000", items = "center",
+                    video.captions { cues = cues, words = true, text_size = 40,
+                        color = "#0000ff", active_color = "#ffff00", upcoming_color = "#00ff00" } }
+            end,
+        } }
+        "##,
+    )
+    .unwrap();
+    let mut stage = script_stage(&dir, json!({}));
+    let mut pixels = Vec::new();
+    // Pixels near a colour, left of the middle and right of it.
+    let count = |pixels: &[u8], rgb: [u8; 3]| {
+        let mut sides = (0, 0);
+        for y in 0..60u32 {
+            for x in 0..300u32 {
+                let p = pixel(pixels, 300, x, y);
+                if (0..3).all(|c| p[c].abs_diff(rgb[c]) < 60) {
+                    if x < 150 { sides.0 += 1 } else { sides.1 += 1 }
+                }
+            }
+        }
+        sides
+    };
+    stage.step_to(15).unwrap();
+    stage.draw(&mut pixels).unwrap();
+    assert_eq!(
+        count(&pixels, [255, 255, 0]),
+        (0, 0),
+        "nothing before its cue"
+    );
+    stage.step_to(36).unwrap();
+    stage.draw(&mut pixels).unwrap();
+    let (yellow, green) = (count(&pixels, [255, 255, 0]), count(&pixels, [0, 255, 0]));
+    assert!(
+        yellow.0 > 50 && yellow.1 == 0,
+        "the first word is being said: {yellow:?}"
+    );
+    assert!(green.1 > 50, "the second is to come: {green:?}");
+    stage.step_to(54).unwrap();
+    stage.draw(&mut pixels).unwrap();
+    let (yellow, blue) = (count(&pixels, [255, 255, 0]), count(&pixels, [0, 0, 255]));
+    assert!(
+        yellow.1 > 50 && yellow.0 == 0,
+        "then the second: {yellow:?}"
+    );
+    assert!(blue.0 > 50, "the first said: {blue:?}");
+    stage.step_to(70).unwrap();
+    stage.draw(&mut pixels).unwrap();
+    assert_eq!(count(&pixels, [0, 0, 255]), (0, 0), "gone after it");
+}
