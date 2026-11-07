@@ -4409,6 +4409,7 @@ impl Ui {
             crate::elastic::next_step(self),
             crate::caret_blink::next(self),
             crate::find::next_step(self),
+            self.scene.borrow().snaps_settle_at(),
         ]
         .into_iter()
         .flatten()
@@ -4441,9 +4442,11 @@ impl Ui {
             return Ok(false);
         }
         let keys = self.input.advance_key_sequence(&self.scene, now);
-        if keys {
+        let settled = self.scene.borrow_mut().settle_snaps(now);
+        if keys || settled {
             self.try_prepare_frame()?;
         }
+        let keys = keys || settled;
         // A selection drag held past a scroll viewport's edge.
         let keys = if self.advance_selection_scroll(now) {
             self.try_prepare_frame()?;
