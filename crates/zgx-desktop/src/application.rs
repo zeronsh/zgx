@@ -1285,11 +1285,23 @@ const INPUT_FULL_RATE: std::time::Duration = std::time::Duration::from_millis(25
 /// makes that refresh, as a system scroll view's does, it's the frame's work
 /// and a few milliseconds old. One that runs long shows on the refresh after,
 /// no older than a frame started as the refresh began would be by then, and
-/// the frames after it start earlier.
+/// the frames after it start earlier. Ready, it still hands over at the grid's
+/// point (`Latch::decide`), as other steady frames do: handed over as soon as
+/// drawn, 6.5 ms before the refresh, each cost the window server 10-20% more
+/// (M1 Max at 60 Hz), the same frames held there the same as frames started
+/// as the refresh began.
+/// Whether a frame drawn now started late (`LateSample`): a scroll's, at a slow
+/// refresh. At a faster one (120 Hz) frames keep the grid's own timing.
+#[cfg(target_os = "macos")]
+fn starts_late(refresh: std::time::Duration, scrolling: bool) -> bool {
+    scrolling && refresh >= crate::scroll_resample::SLOW_REFRESH
+}
 #[cfg(target_os = "macos")]
 struct LateSample {
-    /// How long frames lately took from starting to handed over (the most,
-    /// forgotten over seconds).
+    /// How long frames lately took from starting to ready to hand over (the
+    /// most, forgotten over seconds): their wait at the grid's point not
+    /// counted, or it would start them ever earlier, until as the refresh
+    /// begins.
     work: std::time::Duration,
     started: Option<std::time::Instant>,
 }
@@ -2734,9 +2746,16 @@ impl Host {
                 window.request_redraw();
             } else {
                 // Steady frames render at a time of their own within their
-                // wait for the refresh point (`Latch::hold`).
+                // wait for the refresh point (`Latch::hold`); a scroll's at a
+                // slow refresh started late already (`LateSample`), and render
+                // at once.
                 #[cfg(target_os = "macos")]
-                if let Some((origin, period)) = self.refresh_grid() {
+                let started_late = starts_late(
+                    self.frame_interval,
+                    self.scroll.active(std::time::Instant::now()),
+                );
+                #[cfg(target_os = "macos")]
+                if let Some((origin, period)) = self.refresh_grid().filter(|_| !started_late) {
                     let at = self.latch.hold(std::time::Instant::now(), origin, period);
                     let _wait = zgx::profile::span(zgx::profile::Phase::Wait);
                     sleep_until(at);
@@ -2895,6 +2914,10 @@ impl Host {
                 {
                     self.latch_holding = hold.is_some();
                 }
+                // When the frame was ready to hand over, before any wait for
+                // the grid's point (`LateSample::handed_over`).
+                #[cfg(target_os = "macos")]
+                let ready_at = std::cell::Cell::new(None);
                 let status = renderer.present_with_notify(|| {
                     window.pre_present_notify();
                     #[cfg(windows)]
@@ -2904,6 +2927,7 @@ impl Host {
                     }
                     #[cfg(target_os = "macos")]
                     if let Some((origin, period)) = grid {
+                        ready_at.set(Some(std::time::Instant::now()));
                         let at = latch.decide(std::time::Instant::now(), origin, period);
                         let _wait = zgx::profile::span(zgx::profile::Phase::Wait);
                         sleep_until(at);
@@ -2949,7 +2973,8 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 {
                     self.presented_at = Some(std::time::Instant::now());
-                    self.late_sample.handed_over(std::time::Instant::now());
+                    self.late_sample
+                        .handed_over(ready_at.get().unwrap_or_else(std::time::Instant::now));
                     // What it shows now, for `Ui::snapshot` (the last frame's
                     // surface is the renderer's to reuse again).
                     *self.shown.borrow_mut() = renderer
@@ -6102,12 +6127,6 @@ impl Host {
             .resized_at
             .is_some_and(|at| now.duration_since(at) < RESIZE_SETTLE)
         {
-            self.latch = Latch::default();
-            return None;
-        }
-        // A scroll at a slow refresh starts each frame so late it makes the
-        // refresh it's for, with nothing to wait for (`LateSample`).
-        if self.frame_interval >= crate::scroll_resample::SLOW_REFRESH && self.scroll.active(now) {
             self.latch = Latch::default();
             return None;
         }
@@ -9572,6 +9591,45 @@ mod tests {
                 ages.push(start + period * on - at);
             }
             (ages, shown)
+        }
+        /// A frame waits for the grid's point after it is ready: what it
+        /// counts as its work is until ready, or the wait would start the
+        /// frames after ever earlier, until as the refresh begins.
+        #[test]
+        fn a_frame_held_for_the_grid_counts_its_work_not_its_wait() {
+            let ages = |count_the_wait: bool| {
+                let start = Instant::now();
+                let mut late = LateSample::default();
+                let mut now = start;
+                let mut age = Duration::ZERO;
+                for _ in 0..600 {
+                    let refreshes = (now - start).as_secs_f64() / SIXTY.as_secs_f64();
+                    let next = start + SIXTY.mul_f64(refreshes.floor() + 1.);
+                    let at = late.deadline(now, next, SIXTY);
+                    late.start(at);
+                    let ready = at + ms(2);
+                    // Handed over at the grid's point, 2 ms before the refresh.
+                    let by = (ready + ms(2) - start).as_secs_f64() / SIXTY.as_secs_f64();
+                    let refresh = start + SIXTY * by.ceil() as u32;
+                    let point = refresh - ms(2);
+                    late.handed_over(if count_the_wait { point } else { ready });
+                    now = point;
+                    age = refresh - at;
+                }
+                age
+            };
+            assert!(ages(false) < ms(9), "late: {:?}", ages(false));
+            assert!(ages(true) > ms(14), "the wait counted: {:?}", ages(true));
+        }
+        #[test]
+        fn only_a_scroll_at_a_slow_refresh_starts_late() {
+            use super::super::starts_late;
+            assert!(starts_late(SIXTY, true), "a scroll at 60 Hz");
+            assert!(!starts_late(SIXTY, false), "no scroll");
+            assert!(
+                !starts_late(Duration::from_micros(8_333), true),
+                "a scroll at 120 Hz"
+            );
         }
         #[test]
         fn a_faster_refresh_starts_as_it_begins() {
