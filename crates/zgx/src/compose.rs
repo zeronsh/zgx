@@ -1447,6 +1447,13 @@ impl View {
         self.accessibility_mut().hidden = true;
         self
     }
+    /// While this shows, assistive technology reads it alone, not what lies
+    /// behind it (`aria-modal`): a sheet or dialog an app builds itself.
+    /// `modal` views are so already.
+    pub fn accessible_modal(mut self) -> Self {
+        self.accessibility_mut().modal = true;
+        self
+    }
     /// One Tab stop for the focusable views inside, the arrows along
     /// `axis` (and Home, End) moving among them, as ARIA's composite
     /// widgets behave: Tab lands on the one last focused, or the selected
@@ -7216,6 +7223,8 @@ pub(crate) struct Accessibility {
     description_when: Option<Box<dyn FnMut() -> String>>,
     error: Option<Box<dyn FnMut() -> Option<String>>>,
     hidden: bool,
+    /// `View::accessible_modal`: while it shows, nothing else is read.
+    modal: bool,
     focus_group: Option<crate::input::FocusGroup>,
     label: Option<Box<dyn FnMut() -> String>>,
     /// `View::adjustable`: what moves a custom slider (boxed: few views
@@ -7259,6 +7268,7 @@ impl Accessibility {
             inner.error = outer.error;
         }
         inner.hidden |= outer.hidden;
+        inner.modal |= outer.modal;
         if outer.focus_group.is_some() {
             inner.focus_group = outer.focus_group;
         }
@@ -7315,6 +7325,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         description_when,
         error,
         hidden,
+        modal,
         focus_group,
         label,
         adjust,
@@ -7370,6 +7381,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             node.live = live.or(node.live);
             node.description = description.or(node.description.take());
             node.hidden |= hidden;
+            node.modal |= modal;
         });
     }
     // A name or value worked out from state is read by assistive technology
