@@ -40,6 +40,17 @@ fn plane_pixels(rect: Rect, scale: f32) -> (f32, f32, f32, f32) {
     (left, top, right, bottom)
 }
 
+/// Whether the frame presented (`size`) may show in a plane's box (`rect`): one
+/// drawn for it, or no box or no frame yet, where nothing can show stretched and
+/// asking again would draw every frame for nothing.
+#[cfg(any(test, target_os = "ios"))]
+fn presented_fits(size: Option<(u32, u32)>, rect: Option<Rect>, scale: f32) -> bool {
+    match (rect, size) {
+        (Some(rect), Some(size)) => plane_frame_fits(size, rect, scale),
+        _ => true,
+    }
+}
+
 /// Whether a frame of `size` pixels was drawn for a plane in `rect`: a box that
 /// moved can round a pixel either way, which a frame shown unscaled doesn't mind.
 #[cfg(any(test, target_os = "ios"))]
@@ -347,12 +358,7 @@ impl GpuRenderer {
     /// to show it in: never shown in a box it wasn't drawn for.
     #[cfg(target_os = "ios")]
     pub fn presented_fits_plane(&self) -> bool {
-        match (self.plane_rect(), self.presented_size) {
-            (Some(rect), Some(size)) => plane_frame_fits(size, rect, self.scale),
-            // No box yet, or nothing shown: nothing to show stretched, and asking
-            // again would draw every frame for nothing.
-            _ => true,
-        }
+        presented_fits(self.presented_size, self.plane_rect(), self.scale)
     }
     /// The frame last presented's size in pixels, for the record.
     #[cfg(target_os = "ios")]
@@ -452,6 +458,20 @@ fn window_span(start: i64, size: u32, whole: u32) -> (u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plane_with_no_box_or_no_frame_asks_for_nothing() {
+        // Answering no here asked for a frame again each frame, forever: a window
+        // with such a plane never rested.
+        assert!(presented_fits(Some((1, 1)), None, 3.));
+        assert!(presented_fits(None, Some(Rect::new(0., 0., 62., 67.)), 3.));
+        assert!(presented_fits(None, None, 3.));
+        assert!(!presented_fits(
+            Some((186, 202)),
+            Some(Rect::new(0., 0., 420., 874.)),
+            3.
+        ));
+    }
 
     #[test]
     fn a_small_planes_frame_doesnt_fit_a_page_sized_box() {

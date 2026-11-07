@@ -1807,6 +1807,26 @@ fn a_state_runs_to_its_target_on_a_spring_with_no_script_each_frame() {
 }
 
 #[test]
+fn a_bound_spring_keeps_time_when_the_display_says_a_shorter_interval() {
+    // iOS can report a refresh shorter than the time between its frames: a spring
+    // stepping by that interval ran a third as fast as the keyboard it followed.
+    let mut h = Harness::inline(
+        r##"local open = ui.state("open", false)
+        return ui.column {
+            ui.div { id = "box", w = 20, h = 20, x = ui.spring(open, { from = 0, to = 100, stiffness = 555.0265, damping = 47.118 }) },
+            ui.button { "Go", id = "go", on_click = function() open:set(true) end },
+        }"##,
+    );
+    h.report_interval(std::time::Duration::from_secs_f64(1. / 240.));
+    h.frames(2);
+    h.click("go");
+    // 190 ms on: a critically damped spring of this stiffness has some 6% left.
+    h.frames(12);
+    let x = h.x("box");
+    assert!(x > 85., "only at {x} after 190 ms");
+}
+
+#[test]
 fn a_spring_with_little_damping_passes_its_target_and_comes_back() {
     let path = spring_to_path("stiffness = 440, damping = 35.7, velocity = 3000, most = 1200");
     let peak = path.iter().copied().fold(0f32, f32::max);

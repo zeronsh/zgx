@@ -255,6 +255,9 @@ pub struct TestApp {
     pub clock: FrameClock,
     /// Display frames delivered so far.
     pub frame: Cell<u64>,
+    /// The refresh interval its frames report, if not their 60 Hz spacing
+    /// (`report_interval`).
+    reported: Cell<Option<Duration>>,
     /// When it started, the time frames count from.
     pub start: Instant,
     /// Native views (web pages, terminals) the script placed: headless, they
@@ -348,6 +351,7 @@ impl TestApp {
             executor,
             clock,
             frame: Cell::new(0),
+            reported: Cell::new(None),
             start: Instant::now(),
             natives,
             desktop: None,
@@ -398,6 +402,7 @@ impl TestApp {
             executor: self.executor.clone(),
             clock: self.clock.clone(),
             frame: Cell::new(self.frame.get()),
+            reported: Cell::new(self.reported.get()),
             start: self.start,
             natives,
             desktop: self.desktop.clone(),
@@ -451,7 +456,7 @@ impl TestApp {
         self.clock.deliver(Frame {
             index,
             time: self.start + interval * index as u32,
-            interval,
+            interval: self.reported.get().unwrap_or(interval),
         });
         self.settle();
         self.lay_out();
@@ -479,6 +484,11 @@ impl TestApp {
     /// two frames.
     fn run_timers(&self, to: Duration) {
         self.host.0.timers.run_test_timers(to, || self.settle());
+    }
+    /// Have frames report `interval` as the display's refresh, while still
+    /// coming 1/60 s apart: a display that says one rate and draws another.
+    pub fn report_interval(&self, interval: Duration) {
+        self.reported.set(Some(interval));
     }
     /// `n` frames: an animation's worth.
     pub fn frames(&self, n: usize) {

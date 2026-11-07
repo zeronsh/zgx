@@ -104,6 +104,10 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
             let mut seen = chasing;
             let mut due: Option<Instant> = None;
             let mut params = None;
+            // When it last stepped: a spring steps by the time that passed, not by
+            // a refresh interval a display reports (iOS's can be shorter than its
+            // frames, and a frame can be late).
+            let mut stepped: Option<Instant> = None;
             loop {
                 let goal = target.get();
                 let current = value.with_untracked(|v| *v);
@@ -129,7 +133,13 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
                         });
                     }
                     Curve::Spring { both, up, down } => {
-                        let dt = frame.interval.as_secs_f64().min(1. / 30.);
+                        let dt = stepped
+                            .map_or(frame.interval, |last| {
+                                frame.time.saturating_duration_since(last)
+                            })
+                            .as_secs_f64()
+                            .min(1. / 30.);
+                        stepped = Some(frame.time);
                         let goal = target.get();
                         // A new goal picks its spring by the way it lies from the last,
                         // not by where the value is: past its goal in an overshoot, it
