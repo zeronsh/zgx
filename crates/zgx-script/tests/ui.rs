@@ -5230,3 +5230,59 @@ fn a_theme_tables_font_families_reach_its_text() {
     assert_eq!(family(&mut h, "plain"), plain);
     assert_eq!(family(&mut h, "mono"), mono);
 }
+
+#[test]
+fn ui_glass_is_a_box_that_holds_children_drawn_with_no_system_glass() {
+    let mut h = Harness::inline(
+        r##"return ui.glass { id = "pane", w = 200, h = 100, clear = false, radius = 16,
+            ui.text { id = "inside", "Over it" } }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.host.error().get(), None);
+    assert!(h.find("inside").is_some());
+    let pane = h.find("pane").unwrap();
+    let scene = h.ui.scene.borrow();
+    // Its material drawn: a layer shader reading what's behind it, under its children.
+    let backing = scene.children(pane)[0];
+    assert!(
+        scene
+            .layer_shader(backing)
+            .is_some_and(|l| l.reads_backdrop())
+    );
+}
+
+#[test]
+fn the_engine_keeps_a_layer_shader_up_with_no_script_per_frame() {
+    let mut h = Harness::inline(
+        r##"local on = ui.state("on", false)
+        local level = ui.state("level", 0.25)
+        local shader = ui.layer_shader("fn layer(input: LayerInput) -> vec4<f32> { return input.color; }")
+        return ui.column {
+            ui.button { id = "switch", w = 40, h = 20, on_click = function() on:set(true) end, "On" },
+            ui.button { id = "raise", w = 40, h = 20, on_click = function() level:set(0.75) end, "Up" },
+            ui.div { id = "pane", w = 40, h = 20, bg = "#222222", layer_shader = shader,
+                layer_bleed = 8, layer_clock = true, layer_on = on,
+                layer_params = function() return { { level:get(), 0, 0, 0 } } end },
+        }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.host.error().get(), None);
+    let pane = h.find("pane").unwrap();
+    assert!(!h.ui.scene.borrow().is_layer(pane), "off, no layer");
+    h.click("switch");
+    h.frames(2);
+    {
+        let scene = h.ui.scene.borrow();
+        let layer = scene.layer_shader(pane).expect("its shader");
+        assert!(layer.shader.is_some());
+        assert_eq!(layer.bleed, 8.);
+        assert_eq!(layer.uniforms.params[0][0], 0.25);
+    }
+    h.click("raise");
+    h.frames(2);
+    let scene = h.ui.scene.borrow();
+    assert_eq!(
+        scene.layer_shader(pane).unwrap().uniforms.params[0][0],
+        0.75
+    );
+}

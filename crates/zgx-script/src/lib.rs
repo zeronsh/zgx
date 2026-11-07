@@ -4084,6 +4084,7 @@ impl ScriptHost {
         // Each module made the first time a script names it (`lazy`).
         let lazy = lazy::Lazy::default();
         lazy.ui(&["path", "linear"], canvas::install);
+        lazy.ui(&["glass"], node::install_glass);
         #[cfg(feature = "scene3d")]
         lazy.ui(
             &["scene3d", "mesh", "light", "group", "model"],

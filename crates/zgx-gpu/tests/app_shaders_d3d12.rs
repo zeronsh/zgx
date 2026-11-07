@@ -99,6 +99,25 @@ fn scene() -> Scene {
             scene.set_blend(layer, blend);
         }
     }
+    // A layer shader reading what's behind it, past its box, and painting
+    // past its box too.
+    let reader = scene.append(
+        scene.root(),
+        NodeKind::Container(Layout::Overlay),
+        fixed(20., 20.),
+    );
+    scene.set_transform(reader, Transform { x: 60., y: 10. });
+    scene.set_layer_shader(
+        reader,
+        Some(FillShader::new(
+            "fn layer(input: LayerInput) -> vec4<f32> {
+                let behind = zgx_backdrop(input.p + vec2(6.0, 3.0));
+                return vec4(behind.gbr, behind.a);
+            }",
+            None,
+        )),
+    );
+    scene.set_layer_extent(reader, 2., 8.);
     scene
 }
 
@@ -136,15 +155,15 @@ fn an_apps_shaders_built_through_a_child_draw_as_wgpu_builds_them() {
     let through_child = started.elapsed();
     let compiled = zgx_gpu::app_shaders_compiled_in_child() - before;
     // The first draw's cost: each frame makes its device and builds the
-    // three shaders (`--nocapture` shows it).
+    // four shaders (`--nocapture` shows it).
     println!(
-        "first frame with 3 app shaders: {in_process:?} built in the process, \
+        "first frame with 4 app shaders: {in_process:?} built in the process, \
          {through_child:?} through children ({compiled} compiled)"
     );
-    // The fill, the layer shader and the blended layer shader (with an
-    // empty cache; a warm one reads them back).
+    // The fill, the layer shader, the blended layer shader and the one
+    // reading the backdrop (with an empty cache; a warm one reads them back).
     if std::env::var_os("ZGX_EXPECT_COLD_CACHE").is_some() {
-        assert_eq!(compiled, 3, "each shader compiled in a child");
+        assert_eq!(compiled, 4, "each shader compiled in a child");
     }
     assert!(wgpu.iter().any(|&b| b != 0), "the frame drew something");
     let differing = wgpu

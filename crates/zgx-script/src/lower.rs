@@ -854,7 +854,12 @@ fn plugin_page(plugin: &Rc<str>, node: &Node, low: &Rc<Lowering>) -> View {
             .filter(|(owner, _, _)| **owner == **plugin)
             .map(|(_, n, stats)| counted(lower(n, low), stats)),
     );
-    div().child(zgx::compose::confined(plugin_view(page, low)))
+    // An isolated group: all it can read of what's behind it (`zgx_backdrop`,
+    // a backdrop blur) is its own, never the sealed region's under it.
+    div().child(zgx::compose::confined(plugin_view(
+        page.isolated(true),
+        low,
+    )))
 }
 /// The slot a plugin's page goes to: `ui.contribute("plugin_page", …)`.
 const PLUGIN_PAGE: &str = "plugin_page";
@@ -2616,6 +2621,84 @@ fn build_scoped_seeing(
 
 /// A web view: its page from `src` (followed) or `html`, its handlers
 /// subscribed for as long as the view is mounted.
+/// A `ui.glass`, its look read again when state it reads changes.
+fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
+    use zgx::glass::{GlassStyle, GlassVariant, glass};
+    let own = |source: &Option<Source>| source.as_ref().map(resolve_owned);
+    let (clear, tint, radius) = (own(&spec.clear), own(&spec.tint), own(&spec.radius));
+    let vm = vm.clone();
+    glass(move || {
+        let read = |source: &Option<Owned>, ty| {
+            source
+                .as_ref()
+                .and_then(|source| resolve(source, ty, None, &vm))
+        };
+        let mut style = GlassStyle::default();
+        if read(&clear, Ty::Bool) == Some(Lit::Bool(true)) {
+            style.variant = GlassVariant::Clear;
+        }
+        if let Some(Lit::Color(tint)) = read(&tint, Ty::Color) {
+            style.tint = Some(tint);
+        }
+        if let Some(Lit::Num(radius)) = read(&radius, Ty::Num) {
+            style.radius = radius;
+        }
+        style
+    })
+}
+/// What keeps `shaders` up: `layer_clock`, `shader_clock`, `layer_on` and
+/// `layer_params` as a function, read again as what they read changes.
+#[cold]
+#[inline(never)]
+fn drive_of(
+    shaders: &crate::node::Shaders,
+    vm: &Rc<Vm>,
+) -> Option<Box<dyn FnMut() -> zgx::shader_drive::ShaderDrive>> {
+    let vm = vm.clone();
+    let props = shaders.drive.as_ref()?;
+    let fill = shaders.layer.is_none();
+    let shader = shaders.layer.clone().or_else(|| shaders.fill.clone())?;
+    let clock = if fill {
+        props.shader_clock
+    } else {
+        props.layer_clock
+    };
+    let literal = match fill {
+        true => shaders.params,
+        false => shaders.layer_params,
+    };
+    let params_of = props.layer_params_of.clone();
+    let on = props.layer_on.as_ref().map(resolve_owned);
+    let (bleed, reach) = (
+        shaders.layer_bleed.unwrap_or(0.),
+        shaders.layer_reach.unwrap_or(0.),
+    );
+    let mut last = literal.unwrap_or_default();
+    Some(Box::new(move || {
+        if let Some(f) = &params_of {
+            let read = vm.call::<mlua::Value>(f, ()).and_then(|value| {
+                crate::node::shader_params(&vm.lua, &value, "layer_params", None)
+            });
+            match read {
+                Ok(params) => last = params,
+                Err(e) => vm.report(e),
+            }
+        }
+        let shows = on
+            .as_ref()
+            .and_then(|on| resolve(on, Ty::Bool, None, &vm))
+            .is_none_or(|lit| lit == Lit::Bool(true));
+        zgx::shader_drive::ShaderDrive {
+            shader: shows.then(|| shader.clone()),
+            fill,
+            params: last,
+            bleed,
+            reach,
+            frost: 0.,
+            running: clock,
+        }
+    }))
+}
 fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     use zgx::web_view::{WebViewEvent, web_view, web_view_src};
     let web = spec.web.clone();
@@ -2885,6 +2968,7 @@ fn kind_view(
         Kind::Terminal(term) => zgx::terminal::terminal(term),
         #[cfg(feature = "scene3d")]
         Kind::Scene3d(spec) => crate::scene3d::lower(spec, vm, &low.assets, need(&mut cx)),
+        Kind::Glass(spec) => glass_of(spec, vm),
         Kind::Canvas(draw, options) => {
             let (draw, vm) = (draw.clone(), vm.clone());
             let theme = match cx.as_deref().map(Context::theme) {
@@ -3792,17 +3876,27 @@ fn styled(
         view = swept(view, low);
     }
     let shaders = node.shaders.as_deref();
-    let shader =
-        shaders.and_then(|s| Some((s.fill.clone()?, s.params.unwrap_or_default(), s.tokens)));
+    let shader = shaders.and_then(|s| {
+        Some((
+            s.fill.clone()?,
+            s.params.unwrap_or_default(),
+            s.tokens,
+            s.drive.is_some(),
+        ))
+    });
     // Parameters with no fill of their own: an image's (its `characters`
     // reveal), set on its node all the same.
     let params_only = shaders.and_then(|s| s.params.filter(|_| s.fill.is_none()));
     // A layer shader, with its literal parameters unless animated (boxed:
     // the style closure below holds it, and few nodes have one).
-    let layer = shaders.and_then(|s| {
+    // (Kept up by the engine, `shader_drive`: its uniforms stay the scene's, for
+    // a restyle not to put its time back.)
+    let layer = shaders.filter(|s| s.drive.is_none()).and_then(|s| {
         Some(Box::new((
             s.layer.clone()?,
             s.layer_params.unwrap_or_default(),
+            s.layer_bleed.unwrap_or(0.),
+            s.layer_reach.unwrap_or(0.),
         )))
     });
     if !dynamic.is_empty()
@@ -3874,12 +3968,14 @@ fn styled(
                 None => styles,
             };
             let styles = match layer.as_deref() {
-                Some((shader, params)) => {
+                Some((shader, params, bleed, reach)) => {
                     let animated = element
                         .as_ref()
                         .and_then(|e| e.animated.borrow().layer.as_deref().copied());
                     styles
                         .layer_shader(shader.clone())
+                        .layer_bleed(*bleed)
+                        .layer_reach(*reach)
                         .layer_uniforms(animated.unwrap_or(zgx::decoration::ShaderUniforms {
                             time: 0.,
                             params: *params,
@@ -3889,7 +3985,7 @@ fn styled(
             };
             // A shader fill, with its literal parameters unless animated.
             match &shader {
-                Some((fill, params, tokens)) => {
+                Some((fill, params, tokens, driven)) => {
                     let animated = element.as_ref().and_then(|e| e.animated.borrow().shader);
                     let uniforms = animated.unwrap_or(zgx::decoration::ShaderUniforms {
                         time: 0.,
@@ -3904,7 +4000,10 @@ fn styled(
                                 styles.token(zgx::theme::Field::ShaderParam(slot as u8), *token);
                         }
                     }
-                    styles.bg_shader(fill.clone()).shader_uniforms(uniforms)
+                    match driven {
+                        true => styles.bg_shader(fill.clone()),
+                        false => styles.bg_shader(fill.clone()).shader_uniforms(uniforms),
+                    }
                 }
                 None => match params_only {
                     Some(params) => styles.shader_uniforms(
@@ -3951,6 +4050,12 @@ fn styled(
                 _ => view.disabled_style(style),
             };
         }
+    }
+    // Its shader kept up by the engine, once it has its style.
+    if let Some(s) = shaders.filter(|s| s.drive.is_some())
+        && let Some(make) = drive_of(s, vm)
+    {
+        view = zgx::shader_drive::attach(need(&mut cx), view, make);
     }
     if let Some(disabled) = &node.disabled {
         let (disabled, vm) = (resolve_owned(disabled), vm.clone());

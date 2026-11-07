@@ -1038,6 +1038,14 @@ impl Application {
         // take AppKit's Services menu meanwhile.
         #[cfg(target_os = "macos")]
         winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut event_loop, false);
+        // A probe's window beside someone's work: shown, not taken to the front.
+        #[cfg(target_os = "macos")]
+        if zgx::env::var_os("ZGX_NO_ACTIVATE").is_some() {
+            winit::platform::macos::EventLoopBuilderExtMacOS::with_activate_ignoring_other_apps(
+                &mut event_loop,
+                false,
+            );
+        }
         let event_loop = event_loop.build()?;
         zgx::profile::mark("event loop");
         zgx::memory::set_hosted();

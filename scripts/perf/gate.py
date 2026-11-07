@@ -138,6 +138,14 @@ SCENES = [
     ('3d-textured', 'zgx-3d', 'world_bench', {'SCENE': 'textured', 'MESHES': '2000', 'FRAMES': '30'}),
     ('3d-mixed', 'zgx-3d', 'world_bench', {'SCENE': 'mixed', 'MESHES': '2000', 'FRAMES': '30'}),
     ('widgets', 'zgx', 'widget_bench', {}),
+    # Effects' CPU work through the whole renderer, drawn by wgpu's no-op
+    # backend: a scene of boxes as they are, then the same with an animated
+    # layer shader painting past its box, and with one reading what's behind
+    # it (damage, the backdrop's copy and a pass of its own): what zero can
+    # be told from, what an effect costs the frame that has one.
+    ('fx-none', 'zgx-3d', 'fx_bench', {'SCENE': 'none', 'ZGX_GPU_NOOP': '1'}),
+    ('fx-layer', 'zgx-3d', 'fx_bench', {'SCENE': 'layer', 'ZGX_GPU_NOOP': '1'}),
+    ('fx-reader', 'zgx-3d', 'fx_bench', {'SCENE': 'reader', 'ZGX_GPU_NOOP': '1'}),
     # The example apps' common interactions (`support/apps.rs`), small and
     # undrawn but for their canvases' CPU work, run by list_state_bench (no
     # binary of their own to link): the

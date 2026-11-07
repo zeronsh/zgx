@@ -97,6 +97,8 @@ pub mod image_cache;
 pub mod memory;
 
 pub mod decoration;
+pub mod glass;
+pub mod shader_drive;
 
 pub mod svg;
 
