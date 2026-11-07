@@ -5613,7 +5613,8 @@ impl Host {
                 });
                 self.scroll.flush()
             } else if self.frame_arrived {
-                self.scroll.sample(std::time::Instant::now())
+                self.scroll
+                    .sample(std::time::Instant::now(), self.frame_interval)
             } else {
                 None
             };
