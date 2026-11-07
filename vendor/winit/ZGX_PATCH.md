@@ -372,3 +372,12 @@ for a new one; a wait the timer itself ends (consuming its signal), or a
 failed wait, leaves it unarmed (`event_loop.rs`, `HighResolutionTimer`,
 tested by `a_deadline_already_armed_isnt_armed_again`).
 
+## X11: a choice of device events applies at once
+
+`EventLoop::listen_device_events` only stored the choice, which took effect
+at a window's next focus change. The loop selects XInput2's raw events on the
+root as it starts, as though focused, so until then (and for good, for a
+window that never took focus) the app heard every pointer move on the
+screen, in or out of its windows. A choice other than `WhenFocused`, which
+needs the focus, is now selected when it is made
+(`platform_impl/linux/x11/mod.rs`). zgx asks for none.
