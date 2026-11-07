@@ -1222,7 +1222,6 @@ impl Kind {
             Kind::Column
                 | Kind::Row
                 | Kind::Div
-                | Kind::Glass(_)
                 | Kind::Overlay
                 | Kind::Button
                 | Kind::Scroll { .. }

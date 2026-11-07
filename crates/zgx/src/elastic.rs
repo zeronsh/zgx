@@ -52,8 +52,6 @@ pub(crate) struct Elastic {
     /// next step.
     spring: Cell<Option<(f32, f32, Instant)>>,
     next: Cell<Option<Instant>>,
-    /// Momentum reached the edge then: it springs back `BOUNCE` after.
-    bounced: Cell<Option<Instant>>,
     /// Room past the content's end, while something covers that much of it (a
     /// keyboard): scrolling there is scrolling, not stretch.
     end_room: Rc<Cell<f32>>,
@@ -170,7 +168,6 @@ pub(crate) fn register(
         shown: shown.clone(),
         spring: Cell::new(None),
         next: Cell::new(None),
-        bounced: Cell::new(None),
         end_room,
         held,
     });
