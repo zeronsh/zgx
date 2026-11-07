@@ -568,6 +568,25 @@ pub(crate) struct Rare {
     /// Conditional children (`child_when`), mounted after the others.
     conditional: Vec<RegionBuilder>,
 }
+/// `Rare::merge_into`'s part for assistive technology (a control a row already
+/// stands for, hidden from outside it): each part the outer view set wins.
+#[cold]
+#[inline(never)]
+fn merge_accessibility(
+    label: Option<String>,
+    accessibility: Option<Box<Accessibility>>,
+    inner: &mut Rare,
+) {
+    if label.is_some() {
+        inner.accessible_label = label;
+    }
+    if let Some(outer) = accessibility {
+        match &mut inner.accessibility {
+            Some(own) => (*outer).merge_into(own),
+            None => inner.accessibility = Some(outer),
+        }
+    }
+}
 impl Rare {
     /// `View::refine`'s part: what an outer view sets over its inner one.
     fn merge_into(self, inner: &mut Rare) {
@@ -666,16 +685,9 @@ impl Rare {
         inner.mount_flags |= self.mount_flags;
         inner.conditional.extend(self.conditional);
         // What it is to assistive technology, as set outside a component
-        // over what the component set (`aria_hidden` on a switch a row
-        // already stands for): each part the outer view set wins.
-        if self.accessible_label.is_some() {
-            inner.accessible_label = self.accessible_label;
-        }
-        if let Some(outer) = self.accessibility {
-            match &mut inner.accessibility {
-                Some(own) => (*outer).merge_into(own),
-                None => inner.accessibility = Some(outer),
-            }
+        // over what the component set: rare, so out of line.
+        if self.accessible_label.is_some() || self.accessibility.is_some() {
+            merge_accessibility(self.accessible_label, self.accessibility, inner);
         }
     }
 }
