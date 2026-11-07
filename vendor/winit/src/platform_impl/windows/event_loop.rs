@@ -19,7 +19,7 @@ use crate::utils::Lazy;
 use windows_sys::Win32::Devices::HumanInterfaceDevice::MOUSE_MOVE_RELATIVE;
 use windows_sys::Win32::Foundation::{
     GetLastError, FALSE, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_FAILED, WAIT_OBJECT_0,
-    WPARAM,
+    WAIT_TIMEOUT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromRect, MonitorFromWindow, RedrawWindow, ScreenToClient,
@@ -881,9 +881,11 @@ fn wait_for_messages_impl(
             // Treat it as spurious wake up.
             tracing::warn!("Failed to MsgWaitForMultipleObjectsEx: error code {}", GetLastError(),);
         }
-        // The timer ended the wait (its signal now consumed), or the wait
-        // failed: armed for nothing now.
-        if use_timer && (result == WAIT_OBJECT_0 || result == WAIT_FAILED) {
+        // The deadline came, whether the timer ended the wait (its signal now
+        // consumed) or the wait's own timeout beat it by a tick, or the wait
+        // failed: armed for nothing now. (A deadline passed is never waited
+        // for again, and arming anew resets a signal left behind.)
+        if use_timer && matches!(result, WAIT_OBJECT_0 | WAIT_TIMEOUT | WAIT_FAILED) {
             if let Some(timer) = high_resolution_timer.as_mut() {
                 timer.armed = None;
             }
@@ -2879,11 +2881,14 @@ mod timer_tests {
         wait_with_a_message(&mut timer, ControlFlow::Wait);
         wait_with_a_message(&mut timer, ControlFlow::WaitUntil(later + Duration::from_secs(1)));
         assert_eq!(arms() - start, 2);
-        // A deadline the timer itself ends the wait for: armed again after.
+        // A deadline the wait reaches (the timer's signal or the wait's own
+        // timeout, whichever comes first) leaves it unarmed: the same deadline
+        // again would arm it again, and a new one does.
         let soon = Instant::now() + Duration::from_millis(5);
         wait_for_messages_impl(&mut timer, None, ControlFlow::WaitUntil(soon), None);
-        assert!(Instant::now() >= soon - Duration::from_millis(1), "the timer ended the wait");
         assert_eq!(arms() - start, 3);
-        assert!(timer.as_ref().is_some_and(|t| t.armed.is_none()), "its signal consumed");
+        assert!(timer.as_ref().is_some_and(|t| t.armed.is_none()), "unarmed at its deadline");
+        wait_with_a_message(&mut timer, ControlFlow::WaitUntil(later + Duration::from_secs(2)));
+        assert_eq!(arms() - start, 4, "armed anew after");
     }
 }
