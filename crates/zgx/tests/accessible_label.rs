@@ -200,3 +200,39 @@ fn removed_text_leaves_no_label_waiting() {
         "row 3 at 299"
     );
 }
+
+#[test]
+fn what_is_said_outside_a_component_reaches_the_node_it_builds() {
+    // A component's own view names itself; whoever places it may rename it,
+    // or hide it where something else already speaks for it.
+    let switch = || {
+        component(|_| {
+            div()
+                .id("inner")
+                .role(Role::Switch)
+                .accessible_label("Inner name")
+                .size(40., 20.)
+        })
+    };
+    let mut ui = Ui::new(400., 200.);
+    let view = ui.mount(
+        column()
+            .child(
+                div()
+                    .id("renamed")
+                    .child(switch().accessible_label("Wi-Fi")),
+            )
+            .child(div().id("hidden").child(switch().accessible_hidden())),
+    );
+    ui.prepare_frame();
+    let semantics = ui.semantics.borrow();
+    let scene = ui.scene.borrow();
+    let inner = |parent: &str| {
+        let parent = view.find(parent).unwrap();
+        let node = scene.children(parent)[0];
+        semantics.get(node).cloned().unwrap()
+    };
+    assert_eq!(inner("renamed").label, "Wi-Fi");
+    assert_eq!(inner("renamed").role, Role::Switch, "its own role kept");
+    assert!(inner("hidden").hidden, "hidden as asked");
+}
