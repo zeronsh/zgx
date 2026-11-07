@@ -29,6 +29,9 @@ ProRes need ffmpeg on the PATH.
   --motion-blur N     blend N samples into each frame
   --shutter F         how much of a frame's time they span (0.5)
   --mute              leave its sounds out
+  --concurrency N     render N chunks of frames at once, each on its own thread
+                      with its own stage and encoder (the CPUs' count, at
+                      most 4, by default; 1 renders one frame after another)
   --quiet             no progress";
 
 struct Parsed {
@@ -53,7 +56,10 @@ fn parse(args: Vec<String>) -> Result<Parsed, String> {
         shot: None,
         shot_size: (1440., 900.),
         positional: Vec::new(),
-        options: RenderOptions::default(),
+        options: RenderOptions {
+            concurrency: std::thread::available_parallelism().map_or(1, |n| n.get().min(4)),
+            ..RenderOptions::default()
+        },
         dataset: None,
         quiet: false,
     };
@@ -87,6 +93,9 @@ fn parse(args: Vec<String>) -> Result<Parsed, String> {
             "--motion-blur" => options.samples = number("--motion-blur", value("--motion-blur")?)?,
             "--shutter" => options.shutter = number("--shutter", value("--shutter")?)?,
             "--mute" => options.mute = true,
+            "--concurrency" | "-j" => {
+                options.concurrency = number("--concurrency", value("--concurrency")?)?
+            }
             "--quiet" | "-q" => parsed.quiet = true,
             "--screenshot" => parsed.shot = Some(value("--screenshot")?.into()),
             "--preview-scale" => {

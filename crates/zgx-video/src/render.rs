@@ -39,6 +39,10 @@ pub struct RenderOptions {
     pub mute: bool,
     /// How long a frame may wait for what the script holds it for.
     pub hold_timeout: Duration,
+    /// Chunks of frames rendered at once, each on a thread of its own with a
+    /// stage and an encoder of its own (1: one after another). A GIF is
+    /// always made in one.
+    pub concurrency: usize,
 }
 impl Default for RenderOptions {
     fn default() -> Self {
@@ -57,6 +61,7 @@ impl Default for RenderOptions {
             shutter: 0.5,
             mute: false,
             hold_timeout: Duration::from_secs(60),
+            concurrency: 1,
         }
     }
 }
@@ -115,6 +120,9 @@ pub fn render(
     progress: impl FnMut(Progress) -> bool,
 ) -> Result<Report, String> {
     let timing = options.timing();
+    if options.concurrency > 1 && options.resolved_format()? != Format::Gif {
+        return render_chunks(options, progress);
+    }
     render_film(options, progress, |background| {
         ScriptStage::new(
             &options.script,
@@ -192,6 +200,7 @@ pub(crate) fn render_film<P: Playing>(
         fps: ticks.output_fps,
         quality: options.quality,
         audio: audio.clone(),
+        first_index: 0,
     })?;
     let total = end - first + 1;
     let film = playing.film();
@@ -291,4 +300,181 @@ fn mix_range(
 /// Whether `path` names a frame pattern or directory rather than a file.
 pub fn is_sequence(path: &Path) -> bool {
     path.extension().is_none() || path.to_string_lossy().contains("%04d")
+}
+
+/// [`render`], in `options.concurrency` chunks of frames at once: each on a
+/// thread of its own, with a virtual clock, a stage and an encoder of its own.
+/// A chunk moves to its first frame without drawing the ones before it, and
+/// draws what a render of them all draws there. PNGs are numbered as one
+/// sequence; an encoded video's chunks are joined, not encoded again.
+fn render_chunks(
+    options: &RenderOptions,
+    mut progress: impl FnMut(Progress) -> bool,
+) -> Result<Report, String> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let started = Instant::now();
+    let format = options.resolved_format()?;
+    let transparent = options.transparent && format.has_alpha();
+    let background = if transparent {
+        Color(0, 0, 0, 0)
+    } else {
+        Color(0, 0, 0, 255)
+    };
+    // The composition's measure, as its props make it.
+    let list = crate::script::compositions(
+        &options.script,
+        options.composition.as_deref(),
+        &options.props,
+    )?;
+    let composition = match &options.composition {
+        Some(id) => list
+            .into_iter()
+            .find(|comp| &comp.id == id)
+            .ok_or_else(|| format!("no composition `{id}`"))?,
+        None => list
+            .into_iter()
+            .next()
+            .expect("compositions() returns some"),
+    };
+    let ticks = crate::film::Ticks::of(options.timing(), composition.fps);
+    let frames = ((composition.duration as f64 / composition.fps) * ticks.output_fps)
+        .round()
+        .max(1.) as u64;
+    let last = frames - 1;
+    let (first, end) = options.frames.unwrap_or((0, last));
+    let end = end.min(last);
+    if first > end {
+        return Err(format!(
+            "frames {first} to {end} hold nothing; it has {frames} frames"
+        ));
+    }
+    let size = (
+        ((composition.width * options.scale).round() as u32).max(1),
+        ((composition.height * options.scale).round() as u32).max(1),
+    );
+    let total = end - first + 1;
+    let count = (options.concurrency as u64).clamp(1, total);
+    let chunks: Vec<(u64, u64)> = (0..count)
+        .map(|k| (first + total * k / count, first + total * (k + 1) / count))
+        .filter(|(from, to)| from < to)
+        .collect();
+    let encoded = matches!(format, Format::H264 | Format::Hevc | Format::ProRes);
+    let audio = if options.mute || !encoded {
+        None
+    } else {
+        let (clips, fps) = placed_audio(options)?;
+        mix_range(clips, fps, ticks.output_fps, first, end)?
+    };
+    let part = |k: usize| -> PathBuf {
+        let name = options
+            .output
+            .file_name()
+            .map_or("out".into(), |name| name.to_string_lossy().into_owned());
+        let ext = options
+            .output
+            .extension()
+            .map_or("mp4".into(), |ext| ext.to_string_lossy().into_owned());
+        options
+            .output
+            .with_file_name(format!(".{name}.part{k}.{ext}"))
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tell, heard) = std::sync::mpsc::channel::<Result<(), String>>();
+    let outcome = std::thread::scope(|scope| {
+        for (k, &(from, to)) in chunks.iter().enumerate() {
+            let (tell, stop) = (tell.clone(), stop.clone());
+            let output = if encoded {
+                part(k)
+            } else {
+                options.output.clone()
+            };
+            let options = options.clone();
+            scope.spawn(move || {
+                let result = (|| {
+                    let mut stage = ScriptStage::new(
+                        &options.script,
+                        options.composition.as_deref(),
+                        &options.props,
+                        options.scale,
+                        background,
+                        options.timing(),
+                    )?;
+                    let mut sink = Sink::start(EncodeOptions {
+                        format,
+                        output,
+                        size,
+                        fps: ticks.output_fps,
+                        quality: options.quality,
+                        audio: None,
+                        first_index: (from - first) as usize,
+                    })?;
+                    for frame in from..to {
+                        if stop.load(Ordering::Relaxed) {
+                            return Err("stopped".to_owned());
+                        }
+                        let mut pixels = sink.buffer();
+                        stage.draw_output(frame, &mut pixels, options.hold_timeout)?;
+                        if transparent {
+                            straighten(&mut pixels);
+                        }
+                        sink.push(pixels)?;
+                        let _ = tell.send(Ok(()));
+                    }
+                    drop(stage);
+                    sink.finish()
+                })();
+                if let Err(error) = result {
+                    stop.store(true, Ordering::Relaxed);
+                    let _ = tell.send(Err(error));
+                }
+            });
+        }
+        drop(tell);
+        let mut done = 0;
+        let mut failed = None;
+        for message in heard {
+            match message {
+                Ok(()) => {
+                    done += 1;
+                    if !progress(Progress { done, total }) {
+                        stop.store(true, Ordering::Relaxed);
+                        failed.get_or_insert_with(|| "stopped".to_owned());
+                    }
+                }
+                Err(error) => {
+                    // The first chunk's error says why; the others only stopped.
+                    if failed.is_none() || failed.as_deref() == Some("stopped") {
+                        failed = Some(error);
+                    }
+                }
+            }
+        }
+        failed.map_or(Ok(()), Err)
+    });
+    let joined = outcome.and_then(|()| {
+        if encoded {
+            let parts: Vec<PathBuf> = (0..chunks.len()).map(part).collect();
+            crate::encode::concat(&parts, &options.output, format, audio.as_deref())
+        } else {
+            Ok(())
+        }
+    });
+    if encoded {
+        for k in 0..chunks.len() {
+            let _ = std::fs::remove_file(part(k));
+        }
+    }
+    if let Some(audio) = audio {
+        let _ = std::fs::remove_file(audio);
+    }
+    joined?;
+    let elapsed = started.elapsed();
+    Ok(Report {
+        output: options.output.clone(),
+        frames: total,
+        size,
+        elapsed,
+        rate: total as f64 / elapsed.as_secs_f64().max(1e-6),
+    })
 }
