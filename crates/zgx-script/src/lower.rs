@@ -5290,17 +5290,16 @@ fn with_events(
         let held = event.pointer_modifiers();
         let point = |x: f32, y: f32| -> mlua::Result<mlua::Table> {
             let (lx, ly) = local(x, y);
-            let t = lua.create_table()?;
-            t.set("x", x)?;
-            t.set("y", y)?;
-            t.set("local_x", lx)?;
-            t.set("local_y", ly)?;
-            t.set("shift", held.shift)?;
-            t.set("ctrl", held.control)?;
-            t.set("alt", held.alt)?;
-            t.set("meta", held.meta)?;
-            t.set("cmd", held.primary_shortcut())?;
-            Ok(t)
+            vm.point_table(
+                (x, y, lx, ly),
+                (
+                    held.shift,
+                    held.control,
+                    held.alt,
+                    held.meta,
+                    held.primary_shortcut(),
+                ),
+            )
         };
         if captures
             && event.phase == EventPhase::Target
