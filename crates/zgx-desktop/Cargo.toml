@@ -65,7 +65,7 @@ zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
 winit = "0.30.13"
 softbuffer = "0.4.8"
 fontdue = "0.9.3"
-cosmic-text = { package = "zgx-cosmic-text", version = "0.19.10", path = "../../vendor/cosmic-text" }
+cosmic-text = { package = "zgx-cosmic-text", version = "0.19.11", path = "../../vendor/cosmic-text" }
 accesskit = "0.24.1"
 # The adapters' (through accesskit_winit), named for its `links` metadata:
 # with the repository's (vendor/accesskit_consumer) a field's error message

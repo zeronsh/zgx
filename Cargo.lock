@@ -5102,7 +5102,7 @@ dependencies = [
 
 [[package]]
 name = "zgx-cosmic-text"
-version = "0.19.10"
+version = "0.19.11"
 dependencies = [
  "bitflags 2.13.2",
  "fontdb",

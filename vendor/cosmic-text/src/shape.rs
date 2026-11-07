@@ -576,21 +576,33 @@ fn shape_run(
             font
         }
         None => {
-            // zgx patch: no font at all (none installed, or none fontconfig
-            // finds): the run shapes to nothing, rather than panicking each
-            // frame.
-            let Some(font) = font_iter.next() else {
-                drop(font_iter);
-                font_system.shape_buffer.scripts = scripts;
-                no_font();
-                return;
-            };
-            if font_iter.gave_default()
-                && (attrs.family != Family::Monospace || font_iter.is_default_face(&font))
-            {
-                font_iter.font_system().keep_first_font(&attrs, &fonts, &font);
+            // zgx patch: its family has no face of its own: what its search
+            // found for runs of these scripts.
+            if let Some((font, place)) = font_iter.font_system().first_fallback(&attrs, &scripts) {
+                font_iter.pass_to(place);
+                font
+            } else {
+                // zgx patch: no font at all (none installed, or none fontconfig
+                // finds): the run shapes to nothing, rather than panicking each
+                // frame.
+                let Some(font) = font_iter.next() else {
+                    drop(font_iter);
+                    font_system.shape_buffer.scripts = scripts;
+                    no_font();
+                    return;
+                };
+                if font_iter.gave_default()
+                    && (attrs.family != Family::Monospace || font_iter.is_default_face(&font))
+                {
+                    font_iter.font_system().keep_first_font(&attrs, &fonts, &font);
+                } else if attrs.family != Family::Monospace && font_iter.past_default() {
+                    let place = font_iter.place();
+                    font_iter
+                        .font_system()
+                        .keep_first_fallback(&attrs, &scripts, &font, place);
+                }
+                font
             }
-            font
         }
     };
 

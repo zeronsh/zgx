@@ -198,6 +198,14 @@ pub struct MonospaceFallbackInfo {
     id: fontdb::ID,
 }
 
+/// zgx patch: where a fallback search stopped (`FontFallbackIter::place`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SearchPlace {
+    script_i: (usize, usize),
+    common_i: usize,
+    other_i: usize,
+}
+
 #[derive(Debug)]
 pub struct FontFallbackIter<'a> {
     font_system: &'a mut FontSystem,
@@ -271,6 +279,32 @@ impl<'a> FontFallbackIter<'a> {
     /// face (`gave_default`), that face known already.
     pub(crate) fn pass_default(&mut self) {
         self.default_i = 1;
+    }
+
+    /// zgx patch: where the search stands, its default family passed, for
+    /// `pass_to`. It looks at a word's characters only for monospace: a
+    /// family with no face of its own finds the same fallback for every run
+    /// of the same scripts, and walked every installed face to do so per word.
+    pub(crate) fn place(&self) -> SearchPlace {
+        SearchPlace {
+            script_i: self.script_i,
+            common_i: self.common_i,
+            other_i: self.other_i,
+        }
+    }
+
+    /// zgx patch: as `next` leaves it after giving the font found at `place`.
+    pub(crate) fn pass_to(&mut self, place: SearchPlace) {
+        self.default_i = 1;
+        self.script_i = place.script_i;
+        self.common_i = place.common_i;
+        self.other_i = place.other_i;
+    }
+
+    /// zgx patch: whether the search gave its font with its default family
+    /// passed and none left to look at: one `pass_to` can come back to.
+    pub(crate) fn past_default(&self) -> bool {
+        self.default_i == 1 && !self.end
     }
 
     pub fn check_missing(&self, word: &str) {
