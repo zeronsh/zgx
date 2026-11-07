@@ -1289,6 +1289,32 @@ fn a_labelled_canvas_is_an_image_and_an_unlabelled_one_is_decoration() {
 }
 
 #[test]
+fn a_rows_detail_is_its_value_as_a_settings_cell_reads() {
+    // UIKit's Settings cell: the title its label, the detail its value.
+    let mut h = Harness::inline(
+        r#"local network = ui.state("network", "Home")
+        return ui.column {
+            ui.button { id = "wifi", label = "Wi-Fi", value_text = network,
+                ui.text { "Wi-Fi" }, ui.text { "{network}" } },
+            ui.div { id = "plain", role = "group", label = "Plain", value_text = "Some" },
+            ui.button { "Move", id = "move", on_click = function() network:set("Office") end },
+        }"#,
+    );
+    h.ui.set_assistive_technology(true);
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    let wifi = node(&mut h, "wifi");
+    assert_eq!(
+        (wifi.label.as_str(), wifi.value.as_deref()),
+        ("Wi-Fi", Some("Home"))
+    );
+    assert_eq!(node(&mut h, "plain").value.as_deref(), Some("Some"));
+    h.click("move");
+    h.frames(1);
+    assert_eq!(node(&mut h, "wifi").value.as_deref(), Some("Office"));
+}
+
+#[test]
 fn any_element_is_a_slider_with_its_value_range_text_and_what_moves_it() {
     let mut h = Harness::inline(
         r#"local effort = ui.state("effort", 2)
