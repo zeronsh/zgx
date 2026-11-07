@@ -287,7 +287,7 @@ fn fluid() -> View {
 
 ## Glass
 
-`ui.glass { clear, tint, radius, ... }` is a box of glass holding what you put in it. On macOS 26 it's the system's own `NSGlassEffectView`, between the window's planes, drawn by the window server from what lies under it; a window with none pays nothing. Everywhere else (Windows, Linux, older macOS) it draws the system's glass as a focused window shows it, made from the numbers the system's own filter holds and checked against its pixels (the regular glass with its shadow, a tint following its lightness), following the theme's light or dark and the system's reduced transparency, with the same script. It takes no pointer events of its own, and assistive technology hears its node.
+`ui.glass { clear, tint, radius, ... }` is a box of glass holding what you put in it. On macOS 26 it's the system's own `NSGlassEffectView`, between the window's planes, drawn by the window server from what lies under it; a window with none pays nothing. On Windows it draws Windows' Acrylic, as WinUI's `AcrylicBrush` makes it (its fallback colour with Transparency effects off). Elsewhere (Linux, older macOS) it draws macOS's glass as a focused window shows it, made from the numbers the system's own filter holds and checked against its pixels (the regular glass with its shadow, a tint following its lightness), following the theme's light or dark and the system's reduced transparency, with the same script. It takes no pointer events of its own, and assistive technology hears its node.
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |
