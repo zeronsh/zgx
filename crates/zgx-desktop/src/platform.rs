@@ -119,19 +119,19 @@ impl Platform for Desktop {
         // The launcher runs detached: nothing waits on the browser.
         crate::url::valid_url(url) && open::that_detached(url).is_ok()
     }
-    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    #[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
     fn misspellings(&self, text: &str) -> Vec<std::ops::Range<usize>> {
         spelling::misspellings(text)
     }
-    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    #[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
     fn spelling_guesses(&self, word: &str) -> Vec<String> {
         spelling::guesses(word)
     }
-    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    #[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
     fn learn_spelling(&self, word: &str) {
         spelling::learn(word);
     }
-    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    #[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
     fn ignore_spelling(&self, word: &str) {
         spelling::ignore(word);
     }
@@ -215,11 +215,16 @@ impl Platform for Desktop {
                 .map_err(|e| e.to_string())
         })
     }
+    /// iOS: a save's file, written, goes to the export picker.
+    #[cfg(target_os = "ios")]
+    fn file_written(&self, path: &std::path::Path) {
+        crate::ios_picker::written(path);
+    }
 }
 
 /// UTF-16 offset `units` into `text` as a UTF-8 byte offset: where the
 /// system's spelling checkers count.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "ios"))]
 fn byte_offset(text: &str, units: usize) -> usize {
     let mut seen = 0;
     for (byte, c) in text.char_indices() {
@@ -233,6 +238,107 @@ fn byte_offset(text: &str, units: usize) -> usize {
 
 #[cfg(target_os = "linux")]
 use crate::linux_spelling as spelling;
+
+/// iOS's spelling: `UITextChecker`, one for the app so what it ignores lasts,
+/// in the person's language.
+#[cfg(target_os = "ios")]
+mod spelling {
+    use super::byte_offset;
+    use crate::ios_text::NSRange;
+    use objc2::{
+        class, msg_send,
+        rc::Retained,
+        runtime::{AnyObject, Bool},
+    };
+    use objc2_foundation::{NSArray, NSString};
+    use std::ops::Range;
+
+    thread_local! {
+        static CHECKER: Retained<AnyObject> =
+            // SAFETY: `UITextChecker` takes `new`, on the main thread here.
+            unsafe { msg_send![class!(UITextChecker), new] };
+    }
+    fn language() -> Retained<NSString> {
+        // SAFETY: a class method answering an array of strings.
+        let languages: Retained<NSArray<NSString>> =
+            unsafe { msg_send![class!(NSLocale), preferredLanguages] };
+        languages
+            .firstObject()
+            .unwrap_or_else(|| NSString::from_str("en"))
+    }
+    pub(super) fn misspellings(text: &str) -> Vec<Range<usize>> {
+        let string = NSString::from_str(text);
+        let length = string.length();
+        let whole = NSRange {
+            location: 0,
+            length,
+        };
+        let language = language();
+        let mut found = Vec::new();
+        let mut from = 0;
+        CHECKER.with(|checker| {
+            while from < length {
+                // SAFETY: the method's own arguments, the range the string's
+                // and the start inside it (`from < length`).
+                let range: NSRange = unsafe {
+                    msg_send![
+                        &**checker,
+                        rangeOfMisspelledWordInString: &*string,
+                        range: whole,
+                        startingAt: from as isize,
+                        wrap: Bool::NO,
+                        language: &*language
+                    ]
+                };
+                // NSNotFound's location, or nothing further.
+                if range.length == 0 || range.location >= length {
+                    break;
+                }
+                found.push(
+                    byte_offset(text, range.location)
+                        ..byte_offset(text, range.location + range.length),
+                );
+                from = range.location + range.length;
+            }
+        });
+        found
+    }
+    pub(super) fn guesses(word: &str) -> Vec<String> {
+        let string = NSString::from_str(word);
+        let range = NSRange {
+            location: 0,
+            length: string.length(),
+        };
+        let language = language();
+        CHECKER.with(|checker| {
+            // SAFETY: the method's own arguments, and the array it answers is
+            // of strings or nil.
+            let guesses: Option<Retained<NSArray<NSString>>> = unsafe {
+                msg_send![
+                    &**checker,
+                    guessesForWordRange: range,
+                    inString: &*string,
+                    language: &*language
+                ]
+            };
+            guesses
+                .map(|guesses| guesses.iter().map(|guess| guess.to_string()).collect())
+                .unwrap_or_default()
+        })
+    }
+    pub(super) fn learn(word: &str) {
+        let string = NSString::from_str(word);
+        // SAFETY: a class method taking the word.
+        let () = unsafe { msg_send![class!(UITextChecker), learnWord: &*string] };
+    }
+    pub(super) fn ignore(word: &str) {
+        let string = NSString::from_str(word);
+        CHECKER.with(|checker| {
+            // SAFETY: the method takes the word.
+            let () = unsafe { msg_send![&**checker, ignoreWord: &*string] };
+        });
+    }
+}
 
 /// macOS's bookmarks: a folder the user picked reached on a later launch,
 /// wherever it was moved or renamed. Security-scoped in the sandbox, which

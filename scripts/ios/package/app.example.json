@@ -1,0 +1,17 @@
+{
+  "name": "Synth",
+  "display_name": "Synth",
+  "bundle_id": "com.example.synth",
+  "version": "1.0",
+  "build": "1",
+  "icon": "icon.png",
+  "package": "zgx-run",
+  "example": "ios_app",
+  "resources": ["crates/zgx-script/examples/ios_showcase"],
+  "audio": {
+    "session_category": "playback",
+    "background": true,
+    "microphone": "Synth listens to you to tune its notes."
+  },
+  "url_schemes": ["synth"]
+}

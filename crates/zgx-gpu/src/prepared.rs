@@ -156,6 +156,9 @@ impl Key {
         range.hash(hasher);
         size.to_bits().hash(hasher);
         padding.to_bits().hash(hasher);
+        #[cfg(target_os = "ios")]
+        crate::text::shown_weight(font.weight).hash(hasher);
+        #[cfg(not(target_os = "ios"))]
         font.weight.hash(hasher);
         font.italic.hash(hasher);
     }
@@ -805,7 +808,28 @@ struct Entry {
     /// The `trim` that last found it drawn.
     drawn: u64,
 }
+/// `size` without the leading after its last line.
+#[inline]
+fn trimmed(size: (f32, f32), leading: f32) -> (f32, f32) {
+    if leading == 0. {
+        size
+    } else {
+        (size.0, (size.1 - leading).max(0.))
+    }
+}
 impl Entry {
+    /// The part of each line height that is leading
+    /// (`LineHeight::with_leading`): the most of its spans'. Asked where a
+    /// size is worked out or lines are laid out, not of each measure.
+    #[inline]
+    fn leading(&self) -> f32 {
+        #[cfg(any(target_os = "ios", feature = "text-leading"))]
+        return (self.key.spans.iter())
+            .map(|(_, font, ..)| font.line_height.leading())
+            .fold(0., f32::max);
+        #[cfg(not(any(target_os = "ios", feature = "text-leading")))]
+        0.
+    }
     fn shaped_bytes(&self) -> usize {
         match (&self.lines, &self.words) {
             (Some(_), _) => self.key.text.len() * SHAPED_BYTES_PER_CHAR + 512,
@@ -829,9 +853,13 @@ impl Entry {
             self.laid = Some(width);
             return;
         }
+        #[cfg(any(target_os = "ios", feature = "text-leading"))]
+        let leading = self.leading();
         let lines = self.lines.as_mut().expect("shaped lines");
         for line in lines.iter_mut() {
             line.reset_layout();
+            #[cfg(any(target_os = "ios", feature = "text-leading"))]
+            line.set_leading(leading);
             line.layout(
                 fonts,
                 self.metrics.font_size,
@@ -987,6 +1015,8 @@ impl Entry {
                     })
             }
         };
+        // Worked out once for a width: no leading after the last line.
+        let size = trimmed(size, self.leading());
         if self.sizes.len() == SIZES {
             self.sizes.remove(0);
         }
@@ -1306,7 +1336,8 @@ impl TextCache {
         let Some(compact) = &entry.compact else {
             return (self.sized(fonts, hash, width), 0.);
         };
-        let reach = compact.size_reach(&self.slab, width, entry.metrics.line_height);
+        let mut reach = compact.size_reach(&self.slab, width, entry.metrics.line_height);
+        reach.0 = trimmed(reach.0, entry.leading());
         if entry.sizes.len() == SIZES {
             entry.sizes.remove(0);
         }
@@ -1712,7 +1743,7 @@ impl TextCache {
                 text,
                 font_size,
                 font,
-            } if caret_row => (
+            } if caret_row && !font.line_height.has_leading() => (
                 &**text,
                 smallvec::smallvec![one(text, font, font_size)],
                 font,
@@ -1721,7 +1752,7 @@ impl TextCache {
             Source::Plain { .. } => return None,
             Source::Rich(rich) => match rich.runs() {
                 [] => return None,
-                [run] if caret_row => (
+                [run] if caret_row && !run.font.line_height.has_leading() => (
                     rich.text(),
                     smallvec::smallvec![one(rich.text(), &run.font, run.font_size)],
                     &run.font,
@@ -1751,13 +1782,20 @@ impl TextCache {
                         {
                             end += 1;
                         }
+                        // Its leading is laid out by the line, not from words.
+                        if run.font.line_height.has_leading() {
+                            return None;
+                        }
                         let size = run.font_size.max(1.);
                         at = runs[end - 1].range.end;
                         merged.push(words::Run {
                             end: at,
                             font: &run.font,
                             size: run.font_size,
-                            span: Some((run.font.line_height.resolve(size), index)),
+                            span: Some((
+                                run.font.line_height.resolve_in(&run.font.family, size),
+                                index,
+                            )),
                         });
                         index = end;
                     }
@@ -1828,7 +1866,7 @@ impl TextCache {
         extended: &[u64],
     ) -> u64 {
         let size = plain.font_size;
-        let metrics = Metrics::new(size, font.line_height.resolve(size));
+        let metrics = Metrics::new(size, font.line_height.resolve_in(&font.family, size));
         if known {
             let entry = self.entries.get_mut(&hash).expect("cached");
             entry.words = Some(plain);
@@ -2212,6 +2250,58 @@ mod tests {
     /// the bit: words and blanks, punctuation, hyphens, non-breaking and
     /// leading spaces, emoji and combining marks, at three sizes; and it is
     /// worked out so for ordinary words, not measured from the copy.
+    #[cfg(any(target_os = "ios", feature = "text-leading"))]
+    #[test]
+    fn leading_goes_between_lines_in_every_measure_and_layout() {
+        let mut fonts = FontSystem::new();
+        let text: Arc<str> = "Hamburgefonstiv\nHamburgefonstiv\nHamburgefonstiv".into();
+        let plain = FontStyle::default();
+        let led = FontStyle {
+            line_height: zgx::text_layout::LineHeight::with_leading(1.75),
+            ..FontStyle::default()
+        };
+        let mut cache = TextCache::default();
+        let before = cache.measure_plain(&mut fonts, &text, 17., &plain, None);
+        let line = before.1 / 3.;
+        let size = cache.measure_plain(&mut fonts, &text, 17., &led, None);
+        assert_eq!(size, (before.0, before.1 + 2. * 1.75));
+        // Again, from what it remembers for the width.
+        assert_eq!(
+            cache.measure_plain(&mut fonts, &text, 17., &led, None),
+            size
+        );
+        assert_eq!(
+            cache
+                .measure_plain_reach(&mut fonts, &text, 17., &led, Some(400.))
+                .0,
+            size
+        );
+        let tops = |laid: Laid<'_>| {
+            laid.runs(None)
+                .map(|run| (run.line_top, run.line_y))
+                .collect::<Vec<_>>()
+        };
+        let plain_runs = tops(cache.layout_plain(&mut fonts, &text, 17., &plain, None));
+        let led_runs = tops(cache.layout_plain(&mut fonts, &text, 17., &led, None));
+        for (i, (plain, led)) in plain_runs.iter().zip(&led_runs).enumerate() {
+            let shift = i as f32 * 1.75;
+            assert_eq!(led.0, plain.0 + shift, "{i}");
+            // The baseline where the line alone puts it.
+            assert!(
+                (led.1 - (plain.1 + shift)).abs() < 1e-3,
+                "{i}: {led:?} {plain:?}"
+            );
+        }
+        assert_eq!(led_runs[1].0, line + 1.75);
+        let rich_led = rich(&text, &[(text.len(), led.clone(), 17.)]);
+        assert_eq!(cache.measure(&mut fonts, &rich_led, None), size);
+        let shaped = ShapedText::with_font(&mut fonts, text.clone(), 17., None, &led);
+        assert_eq!(shaped.size(), size);
+        // One line: no leading at all, its words or its shape.
+        let one: Arc<str> = "Hamburgefonstiv".into();
+        let single = rich(&one, &[(one.len(), led.clone(), 17.)]);
+        assert_eq!(cache.measure(&mut fonts, &single, None).1, line);
+    }
     #[test]
     fn min_content_from_its_words_is_its_broken_copys_size() {
         let texts = [

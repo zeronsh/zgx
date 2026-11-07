@@ -6,8 +6,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use core_foundation::base::{CFIndex, CFRelease};
 use core_foundation::runloop::{
-    kCFRunLoopAfterWaiting, kCFRunLoopBeforeWaiting, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
-    kCFRunLoopExit, CFRunLoopActivity, CFRunLoopAddObserver, CFRunLoopAddSource, CFRunLoopGetMain,
+    kCFRunLoopAfterWaiting, kCFRunLoopBeforeWaiting, kCFRunLoopCommonModes, kCFRunLoopExit,
+    CFRunLoopActivity, CFRunLoopAddObserver, CFRunLoopAddSource, CFRunLoopGetMain,
     CFRunLoopObserverCreate, CFRunLoopObserverRef, CFRunLoopSourceContext, CFRunLoopSourceCreate,
     CFRunLoopSourceInvalidate, CFRunLoopSourceRef, CFRunLoopSourceSignal, CFRunLoopWakeUp,
 };
@@ -306,10 +306,12 @@ impl<T: 'static> EventLoop<T> {
             UIApplicationMain(
                 *_NSGetArgc(),
                 NonNull::new(*_NSGetArgv()).unwrap(),
-                // We intentionally override neither the application nor the delegate, to allow the
-                // user to do so themselves!
+                // zgx: its delegate, where the system says what to open
+                // (`zgx_desktop`'s `native_events`), when it has registered it.
                 None,
-                None,
+                objc2::runtime::AnyClass::get("ZgxAppDelegate")
+                    .map(|_| objc2_foundation::NSString::from_str("ZgxAppDelegate"))
+                    .as_deref(),
             )
         };
         unreachable!()
@@ -460,6 +462,11 @@ fn setup_control_flow_observers() {
         }
 
         let main_loop = CFRunLoopGetMain();
+        // zgx patch: in the common modes, as macOS's (`observer.rs`), not the
+        // default mode alone. While UIKit tracks a finger or a scroll view
+        // decelerates the run loop is in `UITrackingRunLoopMode`: the waker's
+        // timer (common modes) fired there, but no observer ran the loop's
+        // iteration, so an app's timers and wakes waited for the scroll to end.
 
         let begin_observer = CFRunLoopObserverCreate(
             ptr::null_mut(),
@@ -469,7 +476,7 @@ fn setup_control_flow_observers() {
             control_flow_begin_handler,
             ptr::null_mut(),
         );
-        CFRunLoopAddObserver(main_loop, begin_observer, kCFRunLoopDefaultMode);
+        CFRunLoopAddObserver(main_loop, begin_observer, kCFRunLoopCommonModes);
 
         let main_end_observer = CFRunLoopObserverCreate(
             ptr::null_mut(),
@@ -479,7 +486,7 @@ fn setup_control_flow_observers() {
             control_flow_main_end_handler,
             ptr::null_mut(),
         );
-        CFRunLoopAddObserver(main_loop, main_end_observer, kCFRunLoopDefaultMode);
+        CFRunLoopAddObserver(main_loop, main_end_observer, kCFRunLoopCommonModes);
 
         let end_observer = CFRunLoopObserverCreate(
             ptr::null_mut(),
@@ -489,6 +496,6 @@ fn setup_control_flow_observers() {
             control_flow_end_handler,
             ptr::null_mut(),
         );
-        CFRunLoopAddObserver(main_loop, end_observer, kCFRunLoopDefaultMode);
+        CFRunLoopAddObserver(main_loop, end_observer, kCFRunLoopCommonModes);
     }
 }

@@ -64,6 +64,8 @@ pub struct FakeDesktop {
     clicks: Clicks,
     /// The links opened (`Platform::open_url`), in order.
     opened: RefCell<Vec<String>>,
+    /// The files written (`Platform::file_written`), in order.
+    written: RefCell<Vec<std::path::PathBuf>>,
 }
 /// Notifications clicked, not yet heard, and who waits for the next.
 type Clicks = std::sync::Arc<
@@ -119,6 +121,11 @@ impl FakeDesktop {
     /// The links opened so far (a link's `href`, Open Link), in order.
     pub fn opened(&self) -> Vec<String> {
         self.opened.borrow().clone()
+    }
+    /// The files the app wrote, as the platform heard (`ui.write_file`), in
+    /// order: where iOS hands a saved file to its export picker.
+    pub fn written(&self) -> Vec<std::path::PathBuf> {
+        self.written.borrow().clone()
     }
     /// The clipboard's text.
     pub fn clipboard(&self) -> String {
@@ -188,6 +195,9 @@ impl zgx::platform::Platform for FakeDesktop {
         self.asked.borrow_mut().push(picker);
         let path = self.saves.borrow_mut().pop_front();
         Box::pin(async move { Ok(path) })
+    }
+    fn file_written(&self, path: &std::path::Path) {
+        self.written.borrow_mut().push(path.to_path_buf());
     }
     fn open_folder(
         &self,

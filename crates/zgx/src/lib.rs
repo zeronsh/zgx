@@ -44,7 +44,7 @@ pub(crate) mod editor_autocorrect;
 pub(crate) mod editor_lines;
 pub(crate) mod editor_menu;
 pub(crate) mod editor_spell;
-pub(crate) mod elastic;
+pub mod elastic;
 pub mod find;
 mod find_text;
 pub(crate) mod paging;
@@ -101,7 +101,6 @@ pub mod memory;
 
 pub mod decoration;
 pub mod glass;
-pub mod native_control;
 pub mod shader_drive;
 
 pub mod svg;
@@ -116,9 +115,11 @@ mod compose_drag;
 #[cfg(target_os = "macos")]
 pub mod native_surface;
 
+pub mod native_control;
 pub mod native_view;
 /// The clipboard and file dialogs, as a service a host provides.
 pub mod platform;
+pub mod symbol;
 pub mod terminal;
 pub mod web_view;
 

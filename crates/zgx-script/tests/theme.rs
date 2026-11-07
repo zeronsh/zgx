@@ -365,6 +365,7 @@ fn ui_prefers_follows_the_systems_display_settings() {
         reduced_motion: true,
         increased_contrast: false,
         reduced_transparency: true,
+        ..Default::default()
     });
     h.frames(1);
     assert_eq!(h.text("p"), "true false true", "as the system changes");

@@ -276,6 +276,10 @@ struct EditorHint {
     /// The caret's colour and width, if not the text's and the app's
     /// (`EditorHandle::set_caret_style`).
     caret: Cell<(Option<Color>, Option<f32>)>,
+    /// The platform shows the selection and caret over it, with its handles
+    /// (`EditorHandle::set_platform_selection`; iOS).
+    #[cfg(target_os = "ios")]
+    platform_selection: Cell<bool>,
     select_on_focus: Cell<bool>,
     /// A text area: once its text holds a line break, it is laid out a line
     /// at a time at any length (`editor_lines`), so an edit shapes the line
@@ -285,6 +289,10 @@ struct EditorHint {
     contain: Cell<bool>,
     /// A password field: its text shows masked and never leaves it.
     secure: Cell<bool>,
+    /// The byte of a password field's character just typed, shown as itself;
+    /// `u32::MAX` none.
+    #[cfg(target_os = "ios")]
+    secure_reveal: Cell<u32>,
     /// What kind of text it takes (`View::input_mode`).
     input_mode: Cell<crate::text_edit::InputMode>,
     /// Misspelled words (`View::spellcheck`), as byte ranges: marked with a
@@ -496,15 +504,27 @@ impl Drop for CodeHint {
     }
 }
 impl EditorHint {
+    /// The platform draws the selection and caret (iOS): never elsewhere.
+    #[inline(always)]
+    fn platform_drawn(&self) -> bool {
+        #[cfg(target_os = "ios")]
+        return self.platform_selection.get();
+        #[cfg(not(target_os = "ios"))]
+        false
+    }
     fn new(value: EditorValue, lines: bool) -> Self {
         Self {
             value,
             placeholder: RefCell::default(),
+            #[cfg(target_os = "ios")]
+            platform_selection: Cell::new(false),
             caret: Cell::default(),
             select_on_focus: Cell::default(),
             lines,
             contain: Cell::default(),
             secure: Cell::default(),
+            #[cfg(target_os = "ios")]
+            secure_reveal: Cell::new(u32::MAX),
             input_mode: Cell::default(),
             misspelled: RefCell::default(),
             clause: Cell::default(),
@@ -624,6 +644,13 @@ const AWAY_MENU: u8 = 2;
 /// holding it. The selection it opened on stays drawn while it shows, as
 /// AppKit's does. `tracked`: a draw reading it is drawn again as the menu
 /// closes.
+/// Whether a press leaves focus on an editor (`focused`: whether what has
+/// focus is one, and takes text) given what it would focus instead (`next`,
+/// likewise): iOS's rule, that only a field takes the keyboard from a field.
+#[cfg(any(target_os = "ios", test))]
+fn press_keeps_field(focused: Option<bool>, next: Option<bool>) -> bool {
+    focused == Some(true) && next != Some(true)
+}
 fn context_menu_holds(storage: &std::rc::Weak<UiStorage>, editor: NodeId, tracked: bool) -> bool {
     let Some(storage) = storage.upgrade() else {
         return false;
@@ -822,6 +849,15 @@ impl EditorHandle {
     pub fn set_select_on_focus(&self, select: bool) {
         self.hint.select_on_focus.set(select);
     }
+    /// Show a password field's character at `byte` as itself, or stop:
+    /// UITextField shows the character just typed for two seconds.
+    #[cfg(target_os = "ios")]
+    pub fn set_reveal_at(&self, byte: Option<usize>) {
+        let at = byte.map_or(u32::MAX, |byte| byte.min(u32::MAX as usize - 1) as u32);
+        if self.hint.secure_reveal.replace(at) != at {
+            (self.refresh)();
+        }
+    }
     /// Whether it is a password's (`set_secure`).
     pub fn is_secure(&self) -> bool {
         self.hint.secure.get()
@@ -857,6 +893,11 @@ impl EditorHandle {
         *current = next;
         drop(current);
         self.refresh();
+    }
+    /// Its text's size and font.
+    pub fn typography(&self) -> (f32, FontStyle) {
+        let typography = self.typography.borrow();
+        (typography.1, typography.2.clone())
     }
     /// The placeholder, if any.
     pub fn placeholder(&self) -> Option<String> {
@@ -930,6 +971,14 @@ impl EditorHandle {
     pub fn set_caret_style(&self, color: Option<Color>, width: Option<f32>) {
         let width = width.filter(|w| w.is_finite() && *w >= 0.);
         if self.hint.caret.replace((color, width)) != (color, width) {
+            self.refresh();
+        }
+    }
+    /// Whether the platform draws the selection and caret, with its own
+    /// handles and loupe (iOS's `UITextInteraction`), and the editor none.
+    #[cfg(target_os = "ios")]
+    pub fn set_platform_selection(&self, platform: bool) {
+        if self.hint.platform_selection.replace(platform) != platform {
             self.refresh();
         }
     }
@@ -2020,6 +2069,23 @@ impl Ui {
             wheel_in_window: Cell::new(false),
             document_listeners: RefCell::new(Vec::new()),
         });
+        // As a UITextField keeps first responder through a tap on a button, a
+        // switch or nothing (read in a reference app, iOS 26.5): only another
+        // field takes the keyboard from a field. It ends with `blur`.
+        #[cfg(target_os = "ios")]
+        {
+            let weak = Rc::downgrade(&storage);
+            storage.input.set_press_keeps_focus(move |focused, next| {
+                weak.upgrade().is_some_and(|storage| {
+                    let editors = storage.editors.borrow();
+                    press_keeps_field(
+                        editors.get(&focused).map(|e| !e.is_read_only()),
+                        next.and_then(|next| editors.get(&next))
+                            .map(|e| !e.is_read_only()),
+                    )
+                })
+            });
+        }
         storage.input.set_semantics(&storage.semantics);
         let ui = Self::from_storage(storage);
         // Tab out of a list's row goes on to the row next to it, built if
@@ -3086,6 +3152,116 @@ impl Ui {
     /// behind look alike on screen; these tell them apart.
     pub fn scroll_report(&self, id: NodeId) -> Option<(f32, f32, f32)> {
         crate::elastic::report(self, id)
+    }
+    /// The innermost scroll view at (`x`, `y`) with room to scroll, for a
+    /// platform's own scroller to drive.
+    pub fn scroll_driver_at(&self, x: f32, y: f32) -> Option<crate::elastic::ScrollDriver> {
+        crate::elastic::driver_at(self, x, y, None)
+    }
+    /// Whether a press at (`x`, `y`) reaches something it acts on, what
+    /// assistive technology meets as a control: a resting thumb on none of
+    /// them leaves the press to the next finger (iOS).
+    #[cfg(any(target_os = "ios", test))]
+    pub fn pressable_at(&self, x: f32, y: f32) -> bool {
+        self.control_at(x, y).is_some()
+    }
+    /// Whether presses at `a` and `b` are for one finger between them: both on
+    /// rows of one scroll view, as a `UITableView`'s (`View::table_row`).
+    /// Anything else takes each its own (iOS).
+    #[cfg(any(target_os = "ios", test))]
+    pub fn presses_share(&self, a: (f32, f32), b: (f32, f32)) -> bool {
+        let scene = self.scene.borrow();
+        let semantics = self.semantics.borrow();
+        let table_of = |(x, y): (f32, f32)| {
+            let control = self.control_at(x, y)?;
+            semantics.get(control)?.table_row.then_some(())?;
+            scene.ancestors(control).find(|node| {
+                semantics
+                    .get(*node)
+                    .is_some_and(|node| node.role == crate::semantics::Role::ScrollView)
+            })
+        };
+        table_of(a).is_some_and(|table| table_of(b) == Some(table))
+    }
+    /// The control a press at (`x`, `y`) reaches: the nearest to the point.
+    #[cfg(any(target_os = "ios", test))]
+    fn control_at(&self, x: f32, y: f32) -> Option<NodeId> {
+        use crate::semantics::Role;
+        let scene = self.scene.borrow();
+        let semantics = self.semantics.borrow();
+        let hit = scene.hit_test(x, y)?;
+        std::iter::once(hit)
+            .chain(scene.ancestors(hit))
+            .find(|node| {
+                semantics.get(*node).is_some_and(|node| {
+                    matches!(
+                        node.role,
+                        Role::Button
+                            | Role::Link
+                            | Role::Slider
+                            | Role::TextInput
+                            | Role::MultilineTextInput
+                            | Role::MenuItem
+                            | Role::ListBoxOption
+                            | Role::Tab
+                            | Role::RadioButton
+                            | Role::Switch
+                            | Role::CheckBox
+                            | Role::SpinButton
+                    )
+                })
+            })
+    }
+    /// The innermost scroll view at (`x`, `y`) with room to scroll across
+    /// (`horizontal`) or down: the one UIKit's nested scroll views give a
+    /// finger that moves that way first.
+    pub fn scroll_driver_along(
+        &self,
+        x: f32,
+        y: f32,
+        horizontal: bool,
+    ) -> Option<crate::elastic::ScrollDriver> {
+        crate::elastic::driver_at(self, x, y, Some(horizontal))
+    }
+    /// What finds the innermost scroll view with room to scroll at a point,
+    /// across (`Some(true)`), down (`Some(false)`) or either way, for a
+    /// platform's own scroller to drive.
+    pub fn scroll_driver_finder(
+        &self,
+    ) -> impl Fn(f32, f32, Option<bool>) -> Option<crate::elastic::ScrollDriver> + use<> {
+        let storage = Rc::downgrade(&self.storage);
+        let scene = Rc::downgrade(&self.scene);
+        move |x, y, along| {
+            let (storage, scene) = (storage.upgrade()?, scene.upgrade()?);
+            let scene = scene.try_borrow().ok()?;
+            let state = storage.elastic.try_borrow().ok()?;
+            crate::elastic::driver_in(&scene, &state, x, y, along)
+        }
+    }
+    /// What finds where a driven scroll view shows, its box in window
+    /// points, for a platform's own scroller to lie over it (iOS's draws its
+    /// scroll indicator there).
+    pub fn scroll_driver_frame_finder(
+        &self,
+    ) -> impl Fn(&crate::elastic::ScrollDriver) -> Option<crate::scene::Rect> + use<> {
+        let storage = Rc::downgrade(&self.storage);
+        let scene = Rc::downgrade(&self.scene);
+        move |driver| {
+            let (storage, scene) = (storage.upgrade()?, scene.upgrade()?);
+            let scene = scene.try_borrow().ok()?;
+            let state = storage.elastic.try_borrow().ok()?;
+            crate::elastic::driver_frame(&scene, &state, driver)
+        }
+    }
+    /// What finds the tallest scroll view with room to scroll, for a
+    /// platform's own scroller to drive (a tap on iOS's status bar).
+    pub fn main_scroll_driver(&self) -> impl Fn() -> Option<crate::elastic::ScrollDriver> + use<> {
+        let storage = Rc::downgrade(&self.storage);
+        move || {
+            let storage = storage.upgrade()?;
+            let state = storage.elastic.borrow();
+            crate::elastic::main_driver(&state)
+        }
     }
     /// Take a trackpad's swipe between pages as navigation, as Safari does:
     /// a gesture that starts across where nothing under it scrolls that way
@@ -5278,6 +5454,8 @@ impl Ui {
             let (color, size, font) = draw_typography.borrow().clone();
             let font = crate::text_layout::FontStyle {
                 masked: draw_hint.secure.get(),
+                #[cfg(target_os = "ios")]
+                reveal_at: draw_hint.secure_reveal.get(),
                 ..font
             };
             // The gutter: as wide as the last line's number (two digits at
@@ -5415,7 +5593,10 @@ impl Ui {
             );
             let font = editor_font(&s, root, &font).into_owned();
             s.set_font(text, font.clone());
-            let caret_color = draw_hint.caret.get().0.unwrap_or(color);
+            let caret_color = match draw_hint.platform_drawn() {
+                true => Color(0, 0, 0, 0),
+                false => draw_hint.caret.get().0.unwrap_or(color),
+            };
             s.set_kind(caret, NodeKind::Rect(caret_color));
             let wrap_width = draw_wrap.get().then_some(inner_width.max(1.));
             // The committed text's revision tells its layout it is the same
@@ -5917,6 +6098,7 @@ impl Ui {
                     }),
                     rects: rects
                         .into_iter()
+                        .filter(|_| !draw_hint.platform_drawn())
                         .map(|(x, y, w, h)| Rect::new(x, y, w, h))
                         .collect(),
                     text_color: None,
@@ -6116,22 +6298,47 @@ impl Ui {
                     layout.selection_within(range.clone(), scroll.1, scroll.1 + inner_height)
                 })
                 .filter_map(|r| {
+                    #[cfg(not(target_os = "ios"))]
                     let y = mark_y(r, 2., 2., scroll.1, inner_height);
+                    #[cfg(target_os = "ios")]
+                    let y = mark_y(
+                        r,
+                        uikit_mark_above(r.height, size),
+                        2.,
+                        scroll.1,
+                        inner_height,
+                    );
                     (y >= 0. && y < inner_height).then_some((r.x - scroll.0, y, r.width))
                 })
                 .collect();
+            // Each dot its own mark, as tall as it's wide.
+            #[cfg(target_os = "ios")]
+            let (marks, mark_height) = {
+                let dot = uikit_dot_size(size);
+                let dots: Vec<_> = marks
+                    .into_iter()
+                    .flat_map(|(x, y, w)| uikit_dots(x, w, dot).map(move |x| (x, y, dot)))
+                    .collect();
+                (dots, dot)
+            };
+            #[cfg(not(target_os = "ios"))]
+            let mark_height = 2.;
             let mut spelled = spell_nodes.borrow_mut();
             while spelled.len() > marks.len() {
                 s.remove(spelled.pop().unwrap());
             }
             if !marks.is_empty() {
                 draw_hint.themed.set(draw_hint.themed.get() | THEMED_DANGER);
+                #[cfg(not(target_os = "ios"))]
                 let danger = theme.color_untracked(tok::DANGER);
+                // UIColor.systemRed, whatever the app's own danger is.
+                #[cfg(target_os = "ios")]
+                let danger = uikit_system_red(theme.theme_kind().is_dark());
                 while spelled.len() < marks.len() {
                     spelled.push(s.append(preedit_layer, spelling_mark(danger), Style::default()));
                 }
                 for (id, (x, y, w)) in spelled.iter().zip(marks) {
-                    s.set_style(*id, fixed(w, 2.));
+                    s.set_style(*id, fixed(w, mark_height));
                     s.set_transform(*id, Transform { x, y });
                     if matches!(s.kind(*id), NodeKind::Quad(q) if q.border_color != danger) {
                         s.set_kind(*id, spelling_mark(danger));
@@ -6553,6 +6760,8 @@ impl Ui {
         *interaction_refresh.borrow_mut() = Some(Rc::downgrade(&arm));
         let draw = refresh.clone();
         let tab_indent = hint.clone();
+        #[cfg(target_os = "ios")]
+        let press_focused = focused.clone();
         self.on_event(root, true, move |cx| {
             if cx.phase != EventPhase::Target {
                 return;
@@ -6709,6 +6918,14 @@ impl Ui {
                         .borrow_mut()
                         .commit_preedit(&normalize_text(&t, multiline));
                 }
+                // Once focused, a touch is `UITextInteraction`'s: it reaches this
+                // too, up the responder chain, and moving the caret first left
+                // UIKit no tap on the caret to open its menu for.
+                #[cfg(target_os = "ios")]
+                InputEvent::PointerDown {
+                    button: PointerButton::Primary,
+                    ..
+                } if hint.platform_drawn() && *press_focused.borrow() => {}
                 InputEvent::PointerDown {
                     x,
                     y,
@@ -7688,7 +7905,55 @@ impl Ui {
         });
     }
 }
+/// A misspelled word's mark on iOS: one of UITextField's round dots, its
+/// radius past what its box holds so it's a circle at any size.
+#[cfg(target_os = "ios")]
+fn spelling_mark(color: Color) -> NodeKind {
+    NodeKind::Quad(crate::scene::QuadStyle {
+        fill: color,
+        border_color: color,
+        radius: 100.,
+        ..Default::default()
+    })
+}
+/// UITextField's spelling dot at a text `size`, across (READ by size in a
+/// reference app, iOS 26.5: these steps, not a formula).
+#[cfg(any(target_os = "ios", test))]
+fn uikit_dot_size(size: f32) -> f32 {
+    match size {
+        size if size < 23. => 3.,
+        size if size < 31. => 4.,
+        size if size < 38. => 5.,
+        _ => 6.,
+    }
+}
+/// The left edge of each of UITextField's dots under a word at `x`, `width`
+/// wide: as many whole dots as fit with a point between, centred (READ, 11
+/// words and sizes).
+#[cfg(any(target_os = "ios", test))]
+fn uikit_dots(x: f32, width: f32, dot: f32) -> impl Iterator<Item = f32> {
+    let pitch = dot + 1.;
+    let count = ((width + 1.) / pitch).floor().max(0.) as u32;
+    let first = x + (width - (count as f32 * pitch - 1.)) / 2.;
+    (0..count).map(move |at| first + at as f32 * pitch)
+}
+/// How far above the bottom of a line `height` tall a dot's top goes: at the
+/// system font's baseline, the line centred on its box (`IOS_SYSTEM_LINE`).
+#[cfg(target_os = "ios")]
+fn uikit_mark_above(height: f32, size: f32) -> f32 {
+    (height - size * (2444. / 2048.)) / 2. + size * (494. / 2048.)
+}
+/// `UIColor.systemRed` (READ, iOS 26.5).
+#[cfg(target_os = "ios")]
+fn uikit_system_red(dark: bool) -> Color {
+    if dark {
+        Color(0xff, 0x42, 0x45, 0xff)
+    } else {
+        Color(0xff, 0x38, 0x3c, 0xff)
+    }
+}
 /// A misspelled word's mark: a dotted line, as macOS draws one.
+#[cfg(not(target_os = "ios"))]
 fn spelling_mark(color: Color) -> NodeKind {
     NodeKind::Quad(crate::scene::QuadStyle {
         border_color: color,
@@ -7950,6 +8215,49 @@ fn input_draw_pending(node: NodeId, scene: &Rc<RefCell<Scene>>) -> bool {
     })
 }
 
+#[cfg(test)]
+mod uikit_spelling_dots {
+    use super::{uikit_dot_size, uikit_dots};
+
+    #[test]
+    fn dots_are_sized_and_laid_out_as_a_text_field_reads() {
+        for (size, dot) in [
+            (11., 3.),
+            (17., 3.),
+            (22., 3.),
+            (23., 4.),
+            (30., 4.),
+            (31., 5.),
+            (36., 5.),
+            (40., 6.),
+            (60., 6.),
+        ] {
+            assert_eq!(uikit_dot_size(size), dot, "{size}");
+        }
+        // Words' widths and how many dots UITextField gave them.
+        for (width, dot, count) in [
+            (24.47, 3., 6),
+            (32.66, 3., 8),
+            (32.33, 3., 8),
+            (54.77, 3., 13),
+            (72.87, 3., 18),
+            (99.83, 3., 25),
+            (37.84, 3., 9),
+            (43.66, 3., 11),
+            (68.01, 3., 17),
+            (85.87, 4., 17),
+            (103.69, 5., 17),
+        ] {
+            let dots: Vec<f32> = uikit_dots(10., width, dot).collect();
+            assert_eq!(dots.len(), count, "{width} at {dot}");
+            // Centred under the word.
+            let left = dots[0] - 10.;
+            let right = 10. + width - (dots[count - 1] + dot);
+            assert!((left - right).abs() < 0.001, "{width}: {left} and {right}");
+        }
+        assert_eq!(uikit_dots(10., 1., 3.).count(), 0);
+    }
+}
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
@@ -9032,6 +9340,23 @@ mod layout_drag_tests {
         eprintln!("drag: {passes:.2} passes, {measures:.0} measures a frame, {nodes} nodes");
         assert!(passes <= 3.2, "{passes:.2} passes a frame");
         assert!(measures <= 2200., "{measures:.0} measures a frame");
+    }
+}
+
+#[cfg(test)]
+mod press_keeps_field_tests {
+    use super::press_keeps_field as keeps;
+    #[test]
+    fn only_a_field_takes_the_keyboard_from_a_field() {
+        // A field has it: a press on nothing, a button, read-only text keeps it.
+        assert!(keeps(Some(true), None));
+        assert!(keeps(Some(true), Some(false)));
+        // Another field takes it.
+        assert!(!keeps(Some(true), Some(true)));
+        // Anything else moves focus as it does elsewhere.
+        assert!(!keeps(None, None));
+        assert!(!keeps(None, Some(true)));
+        assert!(!keeps(Some(false), None));
     }
 }
 

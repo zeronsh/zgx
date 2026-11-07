@@ -14,11 +14,12 @@ use crate::{BuildHasher, Font, FontMatchKey, FontSystem, HashMap, ShapeBuffer};
 #[path = "other.rs"]
 mod platform;
 
-#[cfg(target_os = "macos")]
+// zgx: iOS has macOS's faces, with its system face under another name.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[path = "macos.rs"]
 mod platform;
 
-#[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
+#[cfg(all(unix, not(any(target_os = "android", target_os = "macos", target_os = "ios"))))]
 #[path = "unix.rs"]
 mod platform;
 

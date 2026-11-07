@@ -15,6 +15,20 @@ use crate::{CacheKey, CacheKeyFlags, Color, FontSystem, HashMap};
 pub use swash::scale::image::{Content as SwashContent, Image as SwashImage};
 pub use swash::zeno::{Angle, Command, Placement, Transform};
 
+/// zgx: whether `cache_key`'s outlines are hinted. Never on iOS, where Core
+/// Text draws them as they are: swash's hinting of a font with no instructions
+/// (SF has none) is an autohinter, which put a capital's top and bar most of a
+/// pixel from UIKit's at 3x, and differently for each glyph.
+#[inline]
+fn hinted(cache_key: CacheKey) -> bool {
+    hinted_on(cfg!(target_os = "ios"), cache_key.flags)
+}
+
+#[inline]
+fn hinted_on(ios: bool, flags: CacheKeyFlags) -> bool {
+    !ios && !flags.contains(CacheKeyFlags::DISABLE_HINTING)
+}
+
 fn swash_image(
     font_system: &mut FontSystem,
     context: &mut ScaleContext,
@@ -34,7 +48,7 @@ fn swash_image(
     let mut scaler = context
         .builder(font.as_swash())
         .size(f32::from_bits(cache_key.font_size_bits))
-        .hint(!cache_key.flags.contains(CacheKeyFlags::DISABLE_HINTING));
+        .hint(hinted(cache_key));
     if let Some(variation) = variable_width {
         let wght = (
             swash::Tag::from_be_bytes(*b"wght"),
@@ -120,7 +134,7 @@ fn swash_outline_commands(
     let mut scaler = context
         .builder(font.as_swash())
         .size(f32::from_bits(cache_key.font_size_bits))
-        .hint(!cache_key.flags.contains(CacheKeyFlags::DISABLE_HINTING));
+        .hint(hinted(cache_key));
     if let Some(variation) = variable_width {
         let wght = (
             swash::Tag::from_be_bytes(*b"wght"),
@@ -340,5 +354,19 @@ mod test {
             normalized, reference,
             "normalized_coords match clean render"
         );
+    }
+}
+
+#[cfg(test)]
+mod hinting_tests {
+    use super::{hinted_on, CacheKeyFlags};
+
+    #[test]
+    fn ios_never_hints_as_core_text_does_not() {
+        assert!(!hinted_on(true, CacheKeyFlags::empty()));
+        assert!(!hinted_on(true, CacheKeyFlags::DISABLE_HINTING));
+        // Elsewhere as before: hinted unless asked not to be.
+        assert!(hinted_on(false, CacheKeyFlags::empty()));
+        assert!(!hinted_on(false, CacheKeyFlags::DISABLE_HINTING));
     }
 }

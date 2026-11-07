@@ -40,6 +40,8 @@ pub enum Field {
     /// The line height, `Styled::line_height`; a value that is not a number gives
     /// `line_height_normal`.
     LineHeight,
+    /// The space between lines, `Styled::leading`.
+    Leading,
     /// The letter spacing, `Styled::letter_spacing`.
     LetterSpacing,
     /// The font weight, held between 1 and 1000, `Styled::font_weight`.
@@ -367,6 +369,9 @@ pub(crate) fn apply(styles: &mut Styles, field: Field, value: &TokenValue) {
         Field::TextSize => {
             s.text_size(number());
         }
+        Field::Leading => {
+            s.leading(number());
+        }
         Field::LineHeight => {
             match value.number() {
                 Some(n) => s.line_height(n),
@@ -470,7 +475,7 @@ fn sets(styles: &Styles, field: Field) -> u8 {
         Field::Margin(_) => sides(styles.margin.is_some(), styles.margin_sides),
         Field::Gap => all(styles.gap.is_some()),
         Field::TextSize => all(styles.text_size.is_some()),
-        Field::LineHeight => all(styles.line_height.is_some()),
+        Field::LineHeight | Field::Leading => all(styles.line_height.is_some()),
         Field::LetterSpacing => all(styles.rare().letter_spacing.is_some()),
         Field::FontWeight => all(styles.font_weight.is_some()),
         Field::FontFamily => all(styles.font_family.is_some()),

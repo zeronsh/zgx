@@ -1345,6 +1345,51 @@ fn glyph_texture(color: bool, scale: f32) -> f32 {
         1.
     }
 }
+/// Where CoreGraphics puts a glyph at `exact` device pixels from its text's
+/// start, in a font `pixels` large: on the whole pixel before it above 33 1/3
+/// pixels, the half before it down to 16 2/3, the third before it below. Read
+/// on iOS 26.5's simulator by drawing a glyph into a bitmap context at 96
+/// offsets per size: the same at 1x, 2x and 3x, and UILabel, UITextField and
+/// UITextView land as it says (UIKit asks for subpixel positioning and
+/// quantization at every size, so this is CoreGraphics' own). The edges are
+/// between 33.3125 and 33.34375, and 16.65625 and 16.6875. Quarter-pixel bins
+/// put zgx's glyphs up to a pixel late. A third falls in the nearest of
+/// those bins when drawn.
+fn core_text_glyph_x(exact: f32, pixels: f32) -> f32 {
+    let steps = if pixels > 100. / 3. {
+        1.
+    } else if pixels > 50. / 3. {
+        2.
+    } else {
+        3.
+    };
+    (exact * steps).floor() / steps
+}
+/// Whether a glyph of face `id` is placed by `core_text_glyph_x`: on iOS, all
+/// but the emoji, pictures Core Text draws where they fall (snapped, some land
+/// a pixel from UIKit's). The last face's answer is kept: lines are mostly one
+/// face, and this is asked of every glyph.
+#[cfg(target_os = "ios")]
+#[inline]
+fn snaps_to_core_text_pixels(id: cosmic_text::fontdb::ID) -> bool {
+    thread_local! {
+        static LAST: std::cell::Cell<Option<(cosmic_text::fontdb::ID, bool)>> =
+            const { std::cell::Cell::new(None) };
+    }
+    LAST.with(|last| match last.get() {
+        Some((face, snaps)) if face == id => snaps,
+        _ => {
+            let snaps = !cosmic_text::platform_advance::has(id);
+            last.set(Some((id, snaps)));
+            snaps
+        }
+    })
+}
+#[cfg(not(target_os = "ios"))]
+#[inline(always)]
+fn snaps_to_core_text_pixels(_: cosmic_text::fontdb::ID) -> bool {
+    false
+}
 /// `glyphs_of`, each glyph's run from `style` (given its line).
 fn styled_glyphs<'a>(
     mut glyphs: Vec<Glyph>,
@@ -1367,7 +1412,11 @@ fn styled_glyphs<'a>(
             // subpixel bin zero), as Windows' own text is: a stem a quarter
             // pixel off lands on two columns at part strength, which reads
             // as blur on a ~96 dpi screen. Its line keeps its layout.
-            let p = if sharp {
+            let p = if snaps_to_core_text_pixels(glyph.font_id) {
+                let exact = (glyph.x + glyph.font_size * glyph.x_offset) * scale;
+                let placed = core_text_glyph_x(exact, glyph.font_size * scale);
+                glyph.physical((placed - exact, 0.), scale)
+            } else if sharp {
                 let exact = (glyph.x + glyph.font_size * glyph.x_offset) * scale;
                 let placed = line_start.round() + (exact - line_start).round();
                 glyph.physical((placed - exact, 0.), scale)
@@ -5879,6 +5928,8 @@ impl GpuRenderer {
             self.flush_pending();
             self.recycle_atlas();
             self.scale = scale;
+            #[cfg(target_os = "ios")]
+            core_text_glyphs::set_scale(scale);
             self.layers.clear();
             self.shapes.clear();
             // GPU views draw their next frames at the new scale.
@@ -10006,7 +10057,9 @@ impl GpuRenderer {
                             } else {
                                 let mut b = Buffer::new_empty(Metrics::new(
                                     font_size.max(1.),
-                                    item.font.line_height.resolve(font_size),
+                                    item.font
+                                        .line_height
+                                        .resolve_in(&item.font.family, font_size),
                                 ));
                                 b.set_size(text::wrap_width(Some(wrap)), Some(bounds.height));
                                 text::set_buffer_text(
@@ -19135,6 +19188,27 @@ mod raster_step_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod core_text_glyph_x_tests {
+    #[test]
+    fn large_text_floors_to_pixels_and_small_to_half_pixels() {
+        use super::core_text_glyph_x as x;
+        // UIKit's 17 point body at 3x is 51 pixels; rel from a run of H's.
+        assert_eq!([x(0., 51.), x(36.557, 51.), x(73.114, 51.)], [0., 36., 73.]);
+        assert_eq!(x(109.99, 51.), 109.);
+        // At and below 33 1/3 pixels, the half before it.
+        assert_eq!([x(24.686, 33.), x(49.372, 33.)], [24.5, 49.]);
+        assert_eq!(x(24.4, 33.), 24.);
+        // The changes, read between 33.3125 and 33.34375, and 16.65625 and
+        // 16.6875 pixels.
+        assert_eq!(x(24.75, 33.3125), 24.5);
+        assert_eq!(x(24.75, 33.34375), 24.);
+        assert_eq!(x(24.75, 16.6875), 24.5);
+        assert_eq!(x(24.75, 16.65625), 24.0 + 2. / 3.);
+        assert_eq!(x(24.2, 8.), 24.);
     }
 }
 
