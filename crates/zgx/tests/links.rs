@@ -465,3 +465,50 @@ fn a_paragraphs_menu_told_the_span_hears_its_links_and_passes_them_on() {
     assert_eq!(told.borrow()[1].as_ref().unwrap().index, 3);
     assert!(view.find("link-copy").is_some());
 }
+
+/// A paragraph with no link watches no box (each watched box is published
+/// at every layout that moves it); given one, it watches its own and its
+/// link is placed over its words, and follows them when the paragraph
+/// narrows (its first line's piece, here).
+#[test]
+fn a_paragraph_watches_its_box_only_once_it_has_a_link() {
+    let mut ui = Ui::new(600., 400.);
+    let linked = ui.signal(false);
+    let width = ui.signal(400_f32);
+    let read = linked.clone();
+    let read_width = width.clone();
+    let _mounted = ui.mount(
+        column().child(
+            rich_text_signal(move || {
+                let words = text_span("Read the docs for the details of the layout below.");
+                match read.get() {
+                    true => vec![text_span("Start: "), words.href("https://example.org/docs")],
+                    false => vec![text_span("Start: "), words],
+                }
+            })
+            .text_wrap(true)
+            .reactive_style(move || Styles::new().w(read_width.get())),
+        ),
+    );
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    assert_eq!(ui.observer_counts()[2], 0, "no box watched without a link");
+    linked.set(true);
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    assert!(
+        ui.observer_counts()[2] > 0,
+        "its box watched once it has a link"
+    );
+    let link = links(&ui)[0];
+    let wide = ui.scene.borrow().bounds(link);
+    assert!(wide.width > 0. && wide.height > 0.);
+    width.set(120.);
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    let narrow = ui.scene.borrow().bounds(link);
+    assert!(
+        narrow.width < wide.width,
+        "the link's box follows its words as their line narrows: {wide:?} then {narrow:?}"
+    );
+}
