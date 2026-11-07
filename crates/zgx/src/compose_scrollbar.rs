@@ -320,7 +320,7 @@ pub(crate) fn mount(
                 .borrow_mut()
                 .push(Rc::downgrade(&shown));
         }
-        let now = Instant::now();
+        let now = crate::clock::now();
         match last.replace(value) {
             // Turned on: hidden until the user scrolls.
             None => shown.hide(),

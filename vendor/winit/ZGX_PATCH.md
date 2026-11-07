@@ -367,3 +367,17 @@ stretched (`platform_impl/ios/window.rs`). They now answer the view, and a new
 safe area lays it out again, reporting its size. `theme()` answers the window's
 interface style and a change is sent as `ThemeChanged`, which iOS never did
 (`view.rs`).
+
+## Windows: a timed wait arms its timer once per deadline
+
+A turn that waits with `ControlFlow::WaitUntil` set the high-resolution
+timer (`SetWaitableTimer`) again on every turn, even for the deadline it was
+already armed for. Under a burst of input (a 1000 Hz mouse: a turn a move)
+that is a kernel call a move for nothing: 9,938 in 10 s of a bare window
+under one deadline on WING-PC, none with this. (Its CPU time is below what
+Windows' 15.6 ms accounting can tell apart; a zgx window waiting with no
+deadline, as one idle under the pointer does, never arms it.) The timer now keeps the deadline it is armed for and is armed only
+for a new one; a wait the timer itself ends (consuming its signal), or a
+failed wait, leaves it unarmed (`event_loop.rs`, `HighResolutionTimer`,
+tested by `a_deadline_already_armed_isnt_armed_again`).
+

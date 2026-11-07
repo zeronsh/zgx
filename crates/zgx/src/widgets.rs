@@ -1653,6 +1653,8 @@ pub(crate) struct UiStorage {
     pub(crate) find_off: Cell<bool>,
     /// Virtual lists' rows' indices from their places, by list.
     pub(crate) list_rows: RefCell<std::collections::HashMap<NodeId, crate::find::RowIndex>>,
+    /// How far a wheel's line scrolls each list, by its root: a row's height.
+    pub(crate) wheel_lines: RefCell<std::collections::HashMap<NodeId, f32>>,
     /// What the last primary press went to: the keyboard scrolls the scroll
     /// view around it (`scroll_keys`).
     last_pressed: Cell<Option<NodeId>>,
@@ -1909,6 +1911,7 @@ impl Ui {
             find: RefCell::new(None),
             find_off: Cell::new(false),
             list_rows: Default::default(),
+            wheel_lines: Default::default(),
             last_pressed: Cell::new(None),
             elastic: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
@@ -3005,6 +3008,20 @@ impl Ui {
     /// (`set_navigation_swipes`), once: the host has the platform track it.
     pub fn take_navigation_swipe(&self) -> bool {
         std::mem::take(&mut self.storage.elastic.borrow_mut().asked)
+    }
+    /// How far a wheel's line scrolls what is under (`x`, `y`), if it says:
+    /// a list's row height (the innermost list there), as a table's rows set
+    /// an `NSTableView`'s line. None elsewhere: the platform's line.
+    pub fn wheel_line_at(&self, x: f32, y: f32) -> Option<f32> {
+        let lines = self.storage.wheel_lines.borrow();
+        if lines.is_empty() {
+            return None;
+        }
+        let scene = self.scene.borrow();
+        let hit = scene.hit_test(x, y)?;
+        std::iter::once(hit)
+            .chain(scene.ancestors(hit))
+            .find_map(|node| lines.get(&node).copied())
     }
     pub(crate) fn elastic_state(&self) -> &RefCell<crate::elastic::State> {
         &self.storage.elastic
@@ -5526,7 +5543,7 @@ impl Ui {
             if caret_shown {
                 // A bare insertion point: no composition, no selection.
                 let bare = e.preedit().is_none() && selection.range().is_empty();
-                draw_blink.restart(caret, caret_color, Instant::now(), bare);
+                draw_blink.restart(caret, caret_color, crate::clock::now(), bare);
             } else {
                 draw_blink.release(caret);
             }
@@ -6359,7 +6376,7 @@ impl Ui {
                 {
                     return;
                 }
-                let now = Instant::now();
+                let now = crate::clock::now();
                 let old = storage
                     .interaction
                     .borrow_mut()

@@ -1469,6 +1469,19 @@ impl TextCache {
             self.entries.shrink_to_fit();
         }
     }
+    /// A window at rest: as `trim`, and what is kept only to make the next
+    /// text quicker goes with it, its blocks otherwise holding on to pages of
+    /// the heap freed all around them. Texts on screen are kept whole; what
+    /// goes costs allocating it again, not shaping it.
+    pub fn rest(&mut self, drawn: impl IntoIterator<Item = u64>) {
+        self.trim(drawn);
+        self.words.sweep();
+        self.spare = Vec::new();
+        self.spare_long = Vec::new();
+        self.spare_lists = Vec::new();
+        self.spare_words = Vec::new();
+        self.clamped = FxHashMap::default();
+    }
     /// cosmic-text's run cache swept of words unused lately, once it has
     /// grown a quarter past what the last sweep left (and `WORDS_FLOOR` at
     /// least), looked at once prepared text has outgrown its budget

@@ -231,7 +231,7 @@ fn active(ui: &Ui) -> Option<Rc<Elastic>> {
 /// A trackpad gesture's phase: what lifting the fingers or the momentum's
 /// end lets spring back.
 pub(crate) fn gesture(ui: &Ui, phase: ScrollGesture) {
-    let now = Instant::now();
+    let now = crate::clock::now();
     let release = {
         let mut state = ui.elastic_state().borrow_mut();
         match phase {
@@ -370,7 +370,7 @@ pub(crate) fn after_scroll(ui: &Ui, event: &InputEvent, result: &DispatchResult)
     if first && fingers && horizontal && swipe(ui, result.target) {
         return;
     }
-    let now = Instant::now();
+    let now = crate::clock::now();
     let view = active(ui)
         .filter(|view| view.horizontal == horizontal && view.stretched())
         .or_else(|| {

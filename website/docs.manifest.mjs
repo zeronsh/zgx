@@ -66,6 +66,8 @@ export const sets = [
         description: 'Rotate, scale, reflect, shear and translate images and SVG about their centre, as paint.' },
       { slug: '3d', src: 'docs/3d.md', title: '3D scenes',
         description: 'A retained 3D world in any box: meshes, glTF models with animations and skins, image-based light, tone mapping and camera controls.' },
+      { slug: 'video', src: 'docs/video.md', title: 'Video',
+        description: 'An interface rendered offscreen a frame at a time, on a virtual clock every animation follows, to H.264, ProRes or GIF, with a studio.' },
       '---Behaviour---',
       { slug: 'actions', src: 'docs/actions.md', title: 'Actions and key bindings' },
       { slug: 'i18n', src: 'docs/i18n.md', title: 'Localized text',

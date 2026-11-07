@@ -69,6 +69,19 @@ impl SvgCache {
             }
         }
     }
+    /// A window at rest: the rasters no node shows go. An icon shown again is
+    /// rasterized again.
+    pub fn rest(&mut self) {
+        let bytes = &mut self.bytes;
+        self.entries.retain(|_, entry| {
+            if entry.users == 0 {
+                *bytes -= entry.image.pixels().len();
+            }
+            entry.users > 0
+        });
+        self.entries.shrink_to_fit();
+        self.nodes.shrink_to_fit();
+    }
     /// The image ids of the rasters it holds.
     pub fn image_ids(&self) -> impl Iterator<Item = u64> + '_ {
         self.entries.values().map(|e| e.image.id())

@@ -666,6 +666,87 @@ fn a_layer_stays_with_its_node_across_a_scale() {
     );
 }
 
+/// A layer is read back at each frame: whatever moved it behind the
+/// renderer's back is noticed, and put back.
+#[cfg(target_os = "macos")]
+fn a_layer_moved_behind_its_back_is_put_back() {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    let mut window = Placed::new(false);
+    for _ in 0..4 {
+        window.show();
+    }
+    assert_eq!(window.gpu.debug_loop_disagreements(), 0, "nothing to say");
+    let move_it = |window: &Placed| {
+        // SAFETY: this thread made the layer; nothing else changes its list.
+        let sublayers = unsafe { window.host.sublayers() }.expect("sublayers");
+        let layer = sublayers
+            .iter()
+            .find(|layer| layer.zPosition() == 0.5)
+            .expect("the loop's layer");
+        layer.setFrame(CGRect::new(CGPoint::new(120., 140.), CGSize::new(20., 20.)));
+    };
+    move_it(&window);
+    // No damage, so no frame: the next flush alone puts it back.
+    window.scene.flush();
+    window.gpu.loops_after_flush(&window.scene);
+    assert_eq!(window.layer(), Some((30., 30.)), "put back");
+    assert_eq!(window.gpu.debug_loop_disagreements(), 1, "and noticed");
+    // Hidden behind its back too, with a frame this time.
+    move_it(&window);
+    let holder = window.holder;
+    window
+        .scene
+        .set_transform(holder, Transform { x: 25., y: 20. });
+    window.show();
+    assert_eq!(window.layer(), Some((35., 30.)), "where the node went");
+}
+
+/// A move the frame loop draws nothing for: the layer goes all the same.
+#[cfg(target_os = "macos")]
+fn a_flush_with_no_frame_still_places_a_layer() {
+    let mut window = Placed::new(false);
+    let holder = window.holder;
+    window
+        .scene
+        .set_transform(holder, Transform { x: 50., y: 60. });
+    window.scene.flush();
+    window.gpu.loops_after_flush(&window.scene);
+    assert_eq!(window.layer(), Some((60., 70.)), "with no frame");
+    // A frame waiting: the layer waits with it.
+    window
+        .scene
+        .set_transform(holder, Transform { x: 70., y: 80. });
+    let damage = window.scene.flush().damage;
+    window.gpu.render(&window.scene, &damage).unwrap();
+    window.gpu.loops_after_flush(&window.scene);
+    assert_eq!(window.layer(), Some((60., 70.)), "not before its frame");
+    window.gpu.present().unwrap();
+    assert_eq!(window.layer(), Some((80., 90.)), "with it");
+}
+
+/// A frame that failed shows no ring, and the next that doesn't shows it,
+/// where the scene has it.
+#[cfg(target_os = "macos")]
+fn a_failed_frame_hides_the_layers() {
+    let mut window = Placed::new(false);
+    let holder = window.holder;
+    window
+        .scene
+        .set_transform(holder, Transform { x: 50., y: 60. });
+    let damage = window.scene.flush().damage;
+    window.gpu.render(&window.scene, &damage).unwrap();
+    window.gpu.hide_loops();
+    assert_eq!(window.layer(), None, "hidden");
+    window.gpu.present().unwrap();
+    assert_eq!(window.layer(), None, "its queued place is gone with it");
+    window
+        .scene
+        .set_transform(holder, Transform { x: 70., y: 80. });
+    window.show();
+    assert_eq!(window.layer(), Some((80., 90.)), "back, from the scene");
+    assert_eq!(window.gpu.debug_loop_disagreements(), 0, "nothing to say");
+}
+
 fn main() {
     #[cfg(target_os = "macos")]
     {
@@ -681,6 +762,9 @@ fn main() {
         loops_that_look_alike_share_a_sheet();
         a_layer_never_shows_a_loop_its_node_does_not();
         a_layer_is_where_its_node_is_after_any_frame();
+        a_layer_moved_behind_its_back_is_put_back();
+        a_flush_with_no_frame_still_places_a_layer();
+        a_failed_frame_hides_the_layers();
         a_layer_goes_with_its_node_under_a_blur_too();
         a_layer_moves_with_the_frame_that_presents();
         a_layer_stays_with_its_node_across_a_scale();

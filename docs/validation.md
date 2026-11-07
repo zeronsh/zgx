@@ -42,6 +42,16 @@ It opens windows for the whole run (a cycle a second); leave the machine to it. 
 
 `examples/failures.rs` fails twice while it animates, for `scripts/failures_smoke.py` (a Linux native smoke): a task panics, which the host contains and shows in a banner, then its GPU device is lost (`WindowHandle::debug_lose_gpu`), and it makes a new renderer and draws on. `crates/zgx-gpu/tests/device_loss.rs` checks the renderer's side; `crates/zgx-script/tests/failures.rs` a script's runtime error, a missing image and a missing font.
 
+### A window at rest on macOS
+
+A window left alone after a scroll sets no timer, runs no display link and wakes no thread of its own. Measured on an M5 Max, release build, with a plain scroll app: real system scroll events were posted (a flick and its coast), then the window was left for 60 s. The process's own counters (`proc_pid_rusage`) and a 20 s `sample` were read over that time. Two runs of each:
+
+- Scrolled, then 60 s at rest: 24.7–25.2 ms CPU and 20 interrupt wakeups, the same as a window never scrolled (23.0–25.4 ms, 19–20). A scroll leaves nothing running.
+- A bare AppKit window, active and key: 33.9–35.0 ms CPU and 6–7 wakeups over the same 60 s.
+- What wakes it: once the startup trim has run, 1.35 s after launch, every wait is untimed (`ControlFlow::Wait`). Every thread is parked. The main thread works 10 ms in 20 s, answering system messages on its run loop, mostly an accessibility client reading the focused element, and updates once after each.
+
+zgx's extra wakeups over a bare window are those messages; the run loop has no timer of zgx's in it. A richer accessibility tree may draw more queries from a client, and their number depends on the clients running.
+
 ### NVIDIA on Windows: devices made and released concurrently
 
 On an RTX 4090 with NVIDIA's driver 32.0.16.1742 (Windows 11), Direct3D 12 devices made and released on many threads at once can hang the process or crash it. This is the driver's, not zgx's:
