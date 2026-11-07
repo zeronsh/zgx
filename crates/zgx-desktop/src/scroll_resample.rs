@@ -86,7 +86,8 @@ impl ScrollResampler {
                 // before it, not the whole idle gap.
                 let delay = self.delay();
                 self.points.clear();
-                self.applied = self.received;
+                // A stalled frame may not have delivered the previous event
+                // yet. Keep that debt: the next sample (or flush) pays it.
                 self.points
                     .push_back((now.checked_sub(delay).unwrap_or(now), self.received));
             }
@@ -416,6 +417,35 @@ mod tests {
         let first = resampler.sample(start + 9 * MS).unwrap_or_default().1;
         let rest = resampler.sample(start + 200 * MS).unwrap_or_default().1;
         assert!((first + rest - 24.).abs() < 1e-3);
+        assert!(!resampler.pending());
+    }
+
+    #[test]
+    fn restarting_after_a_stall_preserves_undelivered_motion() {
+        for gap in [49, 50, 60, 100] {
+            for delta in [(10., 20.), (-10., -20.), (-10., 20.)] {
+                let start = Instant::now();
+                let mut resampler = ScrollResampler::default();
+                resampler.push_precise(start, delta);
+                let first = resampler.sample(start + 2 * MS).unwrap_or_default();
+                resampler.push_precise(start + gap * MS, delta);
+                let rest = resampler.flush().unwrap_or_default();
+                assert!((first.0 + rest.0 - 2. * delta.0).abs() < 1e-3);
+                assert!((first.1 + rest.1 - 2. * delta.1).abs() < 1e-3);
+                assert!(!resampler.pending());
+            }
+        }
+    }
+
+    #[test]
+    fn restarting_after_a_stall_delivers_the_debt_on_a_frame() {
+        let start = Instant::now();
+        let mut resampler = ScrollResampler::default();
+        resampler.push_precise(start, (0., 10.));
+        let first = resampler.sample(start + 2 * MS).unwrap_or_default().1;
+        resampler.push_precise(start + 60 * MS, (0., 10.));
+        let rest = resampler.sample(start + 100 * MS).unwrap_or_default().1;
+        assert!((first + rest - 20.).abs() < 1e-3);
         assert!(!resampler.pending());
     }
 
