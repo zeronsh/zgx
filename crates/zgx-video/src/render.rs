@@ -109,7 +109,7 @@ impl RenderOptions {
             None if is_sequence(&self.output) => Ok(Format::Png),
             None => Format::of_path(&self.output).ok_or_else(|| {
                 format!(
-                    "{}: say which format with --codec (h264, hevc, prores, png, gif)",
+                    "{}: say which format with --codec (h264, hevc, prores, vp9, av1, png, gif)",
                     self.output.display()
                 )
             }),
@@ -188,7 +188,7 @@ pub(crate) fn render_film<P: Playing>(
         ));
     }
     let size = film.stage.pixel_size();
-    let takes_sound = matches!(format, Format::H264 | Format::Hevc | Format::ProRes);
+    let takes_sound = format.is_encoded();
     let audio = if options.mute || !takes_sound {
         None
     } else {
@@ -366,7 +366,7 @@ fn render_chunks(
         .map(|k| (total * k / count, total * (k + 1) / count))
         .filter(|(from, to)| from < to)
         .collect();
-    let encoded = matches!(format, Format::H264 | Format::Hevc | Format::ProRes);
+    let encoded = format.is_encoded();
     let audio = if options.mute || !encoded {
         None
     } else {

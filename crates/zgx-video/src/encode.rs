@@ -16,18 +16,25 @@ pub enum Format {
     Hevc,
     /// ProRes 4444 in a MOV, alpha kept.
     ProRes,
+    /// VP9 in a WebM, alpha kept, Opus sound: for the web.
+    WebM,
+    /// AV1 in an MP4: smaller than H.264 at the same quality.
+    Av1,
     /// A numbered PNG for each frame, alpha kept.
     Png,
     /// An animated GIF.
     Gif,
 }
 impl Format {
-    /// The format a name says (`h264`, `hevc`, `prores`, `png`, `gif`).
+    /// The format a name says (`h264`, `hevc`, `prores`, `vp9` or `webm`,
+    /// `av1`, `png`, `gif`).
     pub fn named(name: &str) -> Option<Self> {
         Some(match name {
             "h264" | "avc" | "mp4" => Self::H264,
             "hevc" | "h265" => Self::Hevc,
             "prores" | "mov" => Self::ProRes,
+            "vp9" | "webm" => Self::WebM,
+            "av1" => Self::Av1,
             "png" => Self::Png,
             "gif" => Self::Gif,
             _ => return None,
@@ -38,6 +45,7 @@ impl Format {
         match path.extension()?.to_str()? {
             "mp4" | "m4v" => Some(Self::H264),
             "mov" => Some(Self::ProRes),
+            "webm" => Some(Self::WebM),
             "gif" => Some(Self::Gif),
             "png" => Some(Self::Png),
             _ => None,
@@ -45,7 +53,14 @@ impl Format {
     }
     /// Whether it keeps alpha.
     pub fn has_alpha(self) -> bool {
-        matches!(self, Self::ProRes | Self::Png | Self::Gif)
+        matches!(self, Self::ProRes | Self::WebM | Self::Png | Self::Gif)
+    }
+    /// Whether ffmpeg encodes it, with its sound muxed in.
+    pub fn is_encoded(self) -> bool {
+        matches!(
+            self,
+            Self::H264 | Self::Hevc | Self::ProRes | Self::WebM | Self::Av1
+        )
     }
 }
 
@@ -224,7 +239,9 @@ impl Encoder {
                     fps: options.fps,
                 })
             }
-            Format::H264 | Format::Hevc | Format::ProRes => Self::ffmpeg(options),
+            Format::H264 | Format::Hevc | Format::ProRes | Format::WebM | Format::Av1 => {
+                Self::ffmpeg(options)
+            }
         }
     }
     fn ffmpeg(options: &EncodeOptions) -> Result<Self, String> {
@@ -297,6 +314,28 @@ impl Encoder {
                 command.args(["-pix_fmt", "yuva444p10le", "-alpha_bits", "16"]);
                 command.args(["-vendor", "apl0"]);
             }
+            Format::WebM if has("libvpx-vp9") => {
+                // Alpha as VP9 keeps it: 4:2:0 with an alpha plane, which
+                // browsers play; no alternate reference frames, which drop it.
+                command.args(["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=lanczos+accurate_rnd+full_chroma_int:in_color_matrix=bt709:out_color_matrix=bt709:in_range=pc:out_range=tv,format=yuva420p,setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709"]);
+                command.args(["-c:v", "libvpx-vp9", "-b:v", "0"]);
+                command.args(["-crf", &(quality + 15).min(63).to_string()]);
+                command.args(["-row-mt", "1", "-deadline", "good", "-cpu-used", "2"]);
+                command.args(["-auto-alt-ref", "0"]);
+            }
+            Format::WebM => return Err("this ffmpeg has no VP9 encoder (libvpx-vp9)".into()),
+            Format::Av1 if has("libsvtav1") => {
+                command.args(["-vf", limited, "-c:v", "libsvtav1", "-preset", "6"]);
+                command.args(["-crf", &(quality + 14).min(63).to_string()]);
+                command.args(["-svtav1-params", "tune=0"]);
+            }
+            Format::Av1 if has("libaom-av1") => {
+                command.args(["-vf", limited, "-c:v", "libaom-av1", "-cpu-used", "6"]);
+                command.args(["-crf", &(quality + 14).min(63).to_string(), "-b:v", "0"]);
+            }
+            Format::Av1 => {
+                return Err("this ffmpeg has no AV1 encoder (libsvtav1 or libaom-av1)".into());
+            }
             _ => unreachable!("not ffmpeg's"),
         }
         command.args(["-colorspace", "bt709", "-color_primaries", "bt709"]);
@@ -304,11 +343,12 @@ impl Encoder {
         if options.audio.is_some() {
             match options.format {
                 Format::ProRes => command.args(["-c:a", "pcm_s24le"]),
+                Format::WebM => command.args(["-c:a", "libopus", "-b:a", "192k"]),
                 _ => command.args(["-c:a", "aac", "-b:a", "256k"]),
             };
             command.arg("-shortest");
         }
-        if options.format != Format::ProRes {
+        if matches!(options.format, Format::H264 | Format::Hevc | Format::Av1) {
             command.args(["-movflags", "+faststart"]);
         }
         command.arg(&options.output);
@@ -439,11 +479,12 @@ pub fn concat(
     if audio.is_some() {
         match format {
             Format::ProRes => command.args(["-c:a", "pcm_s24le"]),
+            Format::WebM => command.args(["-c:a", "libopus", "-b:a", "192k"]),
             _ => command.args(["-c:a", "aac", "-b:a", "256k"]),
         };
         command.arg("-shortest");
     }
-    if format != Format::ProRes {
+    if matches!(format, Format::H264 | Format::Hevc | Format::Av1) {
         command.args(["-movflags", "+faststart"]);
     }
     let out = command

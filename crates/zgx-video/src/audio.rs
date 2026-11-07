@@ -220,10 +220,13 @@ pub fn mixed_file(clips: &[AudioClip], fps: f64, frames: u64) -> Result<Option<P
         }
     }
     let mixed = mix(clips, fps, frames, |path| sounds.get(path).cloned());
+    // A name of its own: renders in one process at once (a host's, a test
+    // run's) each mix to a file the others don't remove.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
-        "zgx-video-mix-{}-{:x}.wav",
+        "zgx-video-mix-{}-{}.wav",
         std::process::id(),
-        mixed.len()
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     write_wav(&path, &mixed).map_err(|error| error.to_string())?;
     Ok(Some(path))

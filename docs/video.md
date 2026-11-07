@@ -91,7 +91,7 @@ zgx video still <dir> [composition] <frame> <out.png>
 zgx video list <dir>
 ```
 
-The extension of `<out>` picks the format: `.mp4` is H.264, `.mov` ProRes 4444, `.gif` a GIF, and a directory or a path holding `%04d` gives a PNG for each frame. `--codec h264|hevc|prores|png|gif` overrides the extension. H.264, HEVC and ProRes go through ffmpeg (found on the PATH, or where Homebrew puts it), fed raw frames through a pipe and tagged Rec. 709. PNGs and GIFs need nothing.
+The extension of `<out>` picks the format: `.mp4` is H.264, `.mov` ProRes 4444, `.webm` VP9 with its alpha kept (and Opus sound) for the web, `.gif` a GIF, and a directory or a path holding `%04d` gives a PNG for each frame. `--codec h264|hevc|prores|vp9|av1|png|gif` overrides the extension (`av1` writes AV1 in an MP4, by SVT-AV1 or libaom). H.264, HEVC, ProRes, VP9 and AV1 go through ffmpeg (found on the PATH, or where Homebrew puts it), fed raw frames through a pipe and tagged Rec. 709. PNGs and GIFs need nothing.
 
 | Option | |
 | --- | --- |
