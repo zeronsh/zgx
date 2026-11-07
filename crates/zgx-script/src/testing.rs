@@ -490,6 +490,13 @@ impl TestApp {
     pub fn report_interval(&self, interval: Duration) {
         self.reported.set(Some(interval));
     }
+    /// Let `n` frames' time pass with none delivered, as a late frame or a
+    /// hidden window does: the next frame comes that much later.
+    pub fn skip_frames(&self, n: u64) {
+        let interval = Duration::from_secs_f64(1. / 60.);
+        self.frame.set(self.frame.get() + n);
+        self.run_timers(self.host.0.timers.test_now() + interval * n as u32);
+    }
     /// `n` frames: an animation's worth.
     pub fn frames(&self, n: usize) {
         for _ in 0..n {

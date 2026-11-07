@@ -23,7 +23,10 @@ use std::{
 mod animation;
 #[path = "compose_variable.rs"]
 mod variable;
-pub use variable::{VariableHeights, measured_rows, measured_virtual_list, variable_virtual_list};
+pub use variable::{
+    RowsWatch, VariableHeights, measured_rows, measured_rows_watched, measured_virtual_list,
+    variable_virtual_list,
+};
 
 /// A local UI future, supplied to a platform's wake-driven executor.
 pub type LocalFuture = Pin<Box<dyn Future<Output = ()>>>;
@@ -53,7 +56,7 @@ impl TaskToken {
 }
 /// Provider bridging components to a native or headless executor.
 #[derive(Clone)]
-pub struct TaskRunner(Rc<dyn Fn(LocalFuture) -> TaskToken>);
+pub struct TaskRunner(pub(crate) Rc<dyn Fn(LocalFuture) -> TaskToken>);
 impl TaskRunner {
     /// Runs each future with `spawn`, which returns the token that cancels it.
     pub fn new(spawn: impl Fn(LocalFuture) -> TaskToken + 'static) -> Self {
@@ -1456,6 +1459,17 @@ impl View {
                 ui.on_document_event(handle.node, listener);
             }
         })
+    }
+    /// Keep this view's shader as `make` says, read again when what it reads
+    /// changes, its time stepped by the engine while it runs: see
+    /// `crate::shader_drive`. A shader with none of that wants only
+    /// `Styled::layer_shader`. Last in its chain: what it returns wraps the
+    /// view, already styled.
+    pub fn shader_drive(
+        self,
+        make: impl FnMut() -> crate::shader_drive::ShaderDrive + 'static,
+    ) -> View {
+        component(move |cx| crate::shader_drive::attach(cx, self, make))
     }
     /// Run `f` with the mounted node once the view has mounted.
     pub fn on_mount(mut self, f: impl FnOnce(NodeHandle) + 'static) -> Self {

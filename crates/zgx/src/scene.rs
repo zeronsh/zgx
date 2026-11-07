@@ -860,16 +860,36 @@ impl BlendMode {
 /// layer's straight-alpha pixel there), `p` (the pixel's logical position
 /// from the node's top-left, in its own untransformed space), `size` (the
 /// node's logical size), `time`, `scale` and `params` as `FillInput` has
-/// them. It may call `zgx_sample(p)` for the layer's pixel at another
-/// logical position. It runs over the node's box, which its ink then always
-/// covers: the layer past the box composites as painted. Applied after any
-/// content blur and mask, under the node's opacity.
+/// them, and `radii` (the box's corner radii: top-left, top-right,
+/// bottom-right, bottom-left). It may call `zgx_sample(p)` for the layer's
+/// pixel at another logical position, and `zgx_backdrop(p)` for what lies
+/// behind the node there: what's painted under it in the window, or inside
+/// another layer in that layer. It runs over the node's box grown by `bleed`,
+/// which its ink then always covers: the layer past that composites as
+/// painted. Applied after any content blur and mask, under the node's opacity.
+///
+/// A shader reading the backdrop repaints when what's behind it changes, over
+/// everything it can read, and copies that (as a blend mode does, once a
+/// frame it's damaged). `reach` says how far past the box and bleed it reads;
+/// reads beyond that come back as the nearest point within it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LayerShader {
     /// The shader; `None` while only uniforms are set.
     pub shader: Option<Arc<crate::decoration::FillShader>>,
     /// Its time and parameters.
     pub uniforms: crate::decoration::ShaderUniforms,
+    /// How many points past the box the shader paints (a glow, a ripple).
+    pub bleed: f32,
+    /// How many points past the box and bleed `zgx_backdrop` reads.
+    pub reach: f32,
+}
+impl LayerShader {
+    /// Whether it reads what lies behind the node.
+    pub fn reads_backdrop(&self) -> bool {
+        self.shader
+            .as_deref()
+            .is_some_and(crate::decoration::FillShader::reads_backdrop)
+    }
 }
 /// A clip that cuts nothing, as `clipped_bounds` starts from.
 const UNCLIPPED: Rect = Rect {
@@ -1871,6 +1891,10 @@ struct ColdMaps {
     language_revision: u64,
     /// Drop shadows (`set_drop_shadow`).
     drop_shadows: NodeMap<DropShadow>,
+    /// Nodes whose layer shaders read what's behind them: as a backdrop
+    /// blur, what they show depends on that. (Here, cold: few scenes have
+    /// any, and the scene's own layout is what every frame's walk reads.)
+    backdrop_readers: Vec<NodeId>,
 }
 /// A node painted outside its parent's fade (`Scene::set_outside_fade`).
 #[derive(Clone, Copy, Debug)]
@@ -4021,11 +4045,27 @@ impl Scene {
         id: NodeId,
         shader: Option<Arc<crate::decoration::FillShader>>,
     ) {
-        let uniforms = self
-            .layer_shader(id)
-            .map(|layer| layer.uniforms)
-            .unwrap_or_default();
-        self.set_layer(id, LayerShader { shader, uniforms });
+        let held = self.layer_shader(id).cloned().unwrap_or_default();
+        self.set_layer(id, LayerShader { shader, ..held });
+    }
+    /// How far past `id`'s box its layer shader paints and reads: `bleed`
+    /// points past it the shader runs (a glow's or a ripple's reach, cut by
+    /// the clips around the node as anything it paints is), and `reach`
+    /// points past that `zgx_backdrop` reads. Composites only. Nonfinite or
+    /// negative values are zero.
+    pub fn set_layer_extent(&mut self, id: NodeId, bleed: f32, reach: f32) {
+        fn length(value: f32) -> f32 {
+            if value.is_finite() { value.max(0.) } else { 0. }
+        }
+        let held = self.layer_shader(id).cloned().unwrap_or_default();
+        self.set_layer(
+            id,
+            LayerShader {
+                bleed: length(bleed),
+                reach: length(reach),
+                ..held
+            },
+        );
     }
     /// Set the uniforms `id`'s layer shader draws with: its time (quantized
     /// to the shader's frame rate) and user parameters. Composites only, as
@@ -4040,26 +4080,52 @@ impl Scene {
         }
         uniforms.time = finite(uniforms.time);
         uniforms.params = uniforms.params.map(|row| row.map(finite));
-        let shader = self.layer_shader(id).and_then(|layer| layer.shader.clone());
-        if let Some(fps) = shader.as_deref().and_then(|shader| shader.fps()) {
+        let held = self.layer_shader(id).cloned().unwrap_or_default();
+        if let Some(fps) = held.shader.as_deref().and_then(|shader| shader.fps()) {
             uniforms.time = (uniforms.time * fps).floor() / fps;
         }
-        self.set_layer(id, LayerShader { shader, uniforms });
+        self.set_layer(id, LayerShader { uniforms, ..held });
     }
     fn set_layer(&mut self, id: NodeId, layer: LayerShader) {
         let old = self.layer_shader(id);
         if old.map_or(layer == LayerShader::default(), |old| *old == layer) {
             return;
         }
-        // What it shades lies within what the subtree paints anyway.
-        if old.is_some_and(|old| old.shader.is_some()) || layer.shader.is_some() {
-            self.damage_subtree(id);
-        }
+        let was_shaded = old.is_some_and(|old| old.shader.is_some());
+        let was_reading = old.is_some_and(LayerShader::reads_backdrop);
         let shaded = layer.shader.is_some();
+        let reading = layer.reads_backdrop();
+        // Its parameters alone: it paints where it did.
+        let moved = old.is_none_or(|old| {
+            (old.bleed, old.reach) != (layer.bleed, layer.reach) || old.shader != layer.shader
+        });
+        // Its box, grown by its bleed, under the old shader: what it paints
+        // (`set_effects`: damaged under the old, then the new).
+        if was_shaded || shaded {
+            self.damage_shaded(id);
+        }
         if layer == LayerShader::default() {
             self.layer_shaders.remove(&id);
         } else {
             self.layer_shaders.insert(id, layer);
+        }
+        // Shaded, its damage reaches its box and bleed (`descend`), as a
+        // content blur's does.
+        match (was_shaded, shaded) {
+            (false, true) => self.filtered.set(self.filtered.get() + 1),
+            (true, false) => self.filtered.set(self.filtered.get() - 1),
+            _ => {}
+        }
+        // What it reads depends on what's behind it, as a backdrop blur.
+        if reading != was_reading {
+            match reading {
+                true => self.cold.get_or_insert_default().backdrop_readers.push(id),
+                false => {
+                    if let Some(cold) = &mut self.cold {
+                        cold.backdrop_readers.retain(|entry| *entry != id);
+                    }
+                }
+            }
         }
         let extra = self.text_gradient(id).is_some() || self.drop_shadow(id).is_some();
         let node = self.node_mut(id);
@@ -4069,6 +4135,68 @@ impl Scene {
             self.promoted_count += 1;
         }
         self.invalidate(id, COMPOSITE);
+        if shaded && moved {
+            self.damage_shaded(id);
+        }
+    }
+    /// Damage what a shaded node paints: its box and bleed (it may paint
+    /// anywhere there, a box of no colour too), and what its subtree does.
+    #[cold]
+    #[inline(never)]
+    fn damage_shaded(&mut self, id: NodeId) {
+        if !self.contains(id) {
+            return;
+        }
+        self.damage_subtree(id);
+        // Only if it's laid out and shown.
+        if let Some((bounds, clip)) = self.shaded_extent(id)
+            && let Some(bounds) = bounds.intersection(clip)
+        {
+            self.add_damage(bounds);
+        }
+    }
+    /// A shaded node's box and bleed in the window, and the clip around it.
+    fn shaded_extent(&self, id: NodeId) -> Option<(Rect, Rect)> {
+        let node = self.node(id);
+        if node.measurement.is_none() && node.bounds == Rect::default() {
+            return None;
+        }
+        if !self.shown(id) {
+            return None;
+        }
+        let (transform, clip, placement) = match node.parent {
+            Some(parent) => self.context(parent),
+            None => (Transform::default(), Some(self.viewport), None),
+        };
+        // (Its placement's spread holds its bleed.)
+        let (_, bounds, _, placement) = self.descend(id, transform, clip, placement);
+        match placement {
+            Some(placement) => Some((placement.shows(bounds)?, self.viewport)),
+            None => Some((bounds, clip.unwrap_or(self.viewport))),
+        }
+    }
+    /// Where a backdrop filter's output depends on what's behind it, in the
+    /// window: its box, and for a layer shader reading the backdrop its bleed
+    /// and reach too.
+    fn backdrop_region(&self, id: NodeId) -> Rect {
+        let bounds = match self.transformed {
+            0 => self.world(id).0,
+            _ => self.transformed_world_bounds(id),
+        };
+        match self.layer_shader(id).filter(|layer| layer.reads_backdrop()) {
+            Some(layer) => bounds.expand(layer.bleed + layer.reach),
+            None => bounds,
+        }
+    }
+    /// Whether any layer shader reads the backdrop.
+    pub fn has_backdrop_readers(&self) -> bool {
+        !self.backdrop_readers().is_empty()
+    }
+    /// Nodes whose layer shaders read what's behind them.
+    fn backdrop_readers(&self) -> &[NodeId] {
+        self.cold
+            .as_deref()
+            .map_or(&[], |cold| &cold.backdrop_readers)
     }
     /// `id`'s shader uniforms (see `crate::decoration::FillShader`). An
     /// image with none of its own draws with its view's: the nearest of the
@@ -6473,6 +6601,9 @@ impl Scene {
         let slots = &self.slots;
         let live = |id: &NodeId| slots[id.index as usize].generation == id.generation;
         self.blur_nodes.retain(live);
+        if let Some(cold) = &mut self.cold {
+            cold.backdrop_readers.retain(live);
+        }
         self.popups.retain(live);
         self.popups_promoted.retain(live);
         self.overflow_fades.retain(|(id, _)| live(id));
@@ -6520,8 +6651,16 @@ impl Scene {
         if !self.directions.is_empty() {
             self.directions.remove(&id);
         }
-        if !self.layer_shaders.is_empty() {
-            self.layer_shaders.remove(&id);
+        if !self.layer_shaders.is_empty()
+            && let Some(layer) = self.layer_shaders.remove(&id)
+            && layer.shader.is_some()
+        {
+            self.filtered.set(self.filtered.get() - 1);
+            if layer.reads_backdrop()
+                && let Some(cold) = &mut self.cold
+            {
+                cold.backdrop_readers.retain(|entry| *entry != id);
+            }
         }
         self.transformed -= usize::from(node.transformed());
         self.filtered
@@ -7244,20 +7383,36 @@ impl Scene {
     #[cold]
     #[inline(never)]
     fn ink_drop_shadows(&mut self) {
-        let Some(cold) = &self.cold else { return };
-        let mut shadowed: Vec<(usize, NodeId, DropShadow)> = (cold.drop_shadows.iter())
-            .filter(|(id, _)| self.contains(**id))
-            .map(|(id, shadow)| {
+        let shadowed = self.cold.iter().flat_map(|cold| cold.drop_shadows.keys());
+        let bleeding = (self.layer_shaders.iter())
+            .filter(|(_, layer)| layer.shader.is_some() && layer.bleed > 0.)
+            .map(|(id, _)| id);
+        let mut spread: Vec<(usize, NodeId)> = shadowed
+            .chain(bleeding)
+            .filter(|id| self.contains(**id))
+            .map(|id| {
                 let depth = std::iter::successors(Some(*id), |n| self.node(*n).parent).count();
-                (depth, *id, *shadow)
+                (depth, *id)
             })
             .collect();
-        shadowed.sort_by_key(|s| std::cmp::Reverse(s.0));
-        for (_, id, shadow) in shadowed {
+        spread.sort_by_key(|s| std::cmp::Reverse(s.0));
+        for (_, id) in spread {
+            // (Valid too at the second of a node with both.)
             if self.node(id).bounds_valid.get() & INK_VALID != 0 {
                 continue;
             }
-            let ink = self.ink(id).map(|ink| ink.union(shadow.ink(ink)));
+            let node = self.node(id);
+            let bleed = match self.layer_shader(id) {
+                Some(layer) if layer.shader.is_some() => {
+                    layer.bleed * stretch(node.projective(node.bounds))
+                }
+                _ => 0.,
+            };
+            let shadow = self.drop_shadow(id).copied();
+            let ink = self.ink(id).map(|ink| {
+                let ink = ink.expand(bleed);
+                shadow.map_or(ink, |shadow| ink.union(shadow.ink(ink)))
+            });
             self.node(id).ink.set(ink);
         }
     }
@@ -8932,12 +9087,20 @@ impl Scene {
         }
         let (transform, bounds, clip, placement) = self.descend(id, parent, parent_clip, placement);
         // Inside a layer it starts, nothing cuts its own paint.
-        let own = match self.paints_past_clip(id) {
-            true if node.transformed() || node.filtered() => None,
-            true => parent_clip,
-            false => clip,
+        let (own, painted) = match node.layered && node.layer_shaded() {
+            // A layer shader paints its box, a box of no colour too (as a
+            // backdrop blur does: `painted_of`), cut by the clips around it.
+            true => (parent_clip, node.effects.blur_radius.max(1.)),
+            false => (
+                match self.paints_past_clip(id) {
+                    true if node.transformed() || node.filtered() => None,
+                    true => parent_clip,
+                    false => clip,
+                },
+                node.effects.blur_radius,
+            ),
         };
-        self.damage_painted_placed(id, bounds, node.effects.blur_radius, own, placement);
+        self.damage_painted_placed(id, bounds, painted, own, placement);
         for index in 0..self.children_raw(self.node(id)).len() {
             let child = self.children_raw(self.node(id))[index];
             crate::deep(level + 1, || {
@@ -8958,9 +9121,10 @@ impl Scene {
         placement: Option<Placement>,
     ) -> (Transform, Rect, Option<Rect>, Option<Placement>) {
         let node = self.node(id);
-        // A drop shadow spreads what its layer paints too (`set_drop_shadow`).
-        let shadow = match node.layered && self.has_drop_shadows() {
-            true => self.drop_shadow(id),
+        // A drop shadow spreads what its layer paints too (`set_drop_shadow`),
+        // as a layer shader's bleed does.
+        let spreads = match node.layered {
+            true => self.layer_spread(id),
             false => None,
         };
         let transform = Transform {
@@ -8968,7 +9132,7 @@ impl Scene {
             y: parent.y + node.transform.y,
         };
         let bounds = node.bounds.translated(transform);
-        if !node.transformed() && !node.filtered() && shadow.is_none() {
+        if !node.transformed() && !node.filtered() && spreads.is_none() {
             let clip = if clip_axes(&node.style) != (false, false) {
                 clipped_bounds(parent_clip, bounds, &node.style)
             } else {
@@ -8985,7 +9149,9 @@ impl Scene {
             false => 0.,
         };
         // (Its furthest offset and its blur's reach, every way at once.)
+        let (shadow, bleed) = spreads.unwrap_or((None, 0.));
         let spread = spread
+            + bleed * stretch(matrix)
             + shadow.map_or(0., |shadow| {
                 let reach =
                     shadow.offset.x.abs().max(shadow.offset.y.abs()) + filter_spread(shadow.blur);
@@ -9012,6 +9178,15 @@ impl Scene {
             .then(|| clipped_bounds(None, bounds, &node.style))
             .flatten();
         (transform, bounds, clip, Some(placement))
+    }
+    /// What spreads layer `id`'s paint past what it holds: its drop shadow,
+    /// and its layer shader's bleed. `None` if neither.
+    #[cold]
+    #[inline(never)]
+    fn layer_spread(&self, id: NodeId) -> Option<(Option<&DropShadow>, f32)> {
+        let bleed = self.layer_shader(id).map_or(0., |layer| layer.bleed);
+        let shadow = self.drop_shadow(id);
+        (shadow.is_some() || bleed > 0.).then_some((shadow, bleed))
     }
     /// What `id`'s children paint under (see `descend`), from the root down.
     fn context(&self, id: NodeId) -> (Transform, Option<Rect>, Option<Placement>) {
@@ -11170,7 +11345,8 @@ impl Scene {
         {
             self.place_mask_gradients();
         }
-        if self.has_drop_shadows() {
+        // (Drop shadows and layer shaders both count in `filtered`.)
+        if self.filtered.get() != 0 {
             self.ink_drop_shadows();
         }
         let _span = crate::profile::span(crate::profile::Phase::Damage);
@@ -11205,19 +11381,18 @@ impl Scene {
         if self.has_text_shadows() || self.text_shadows_shown() {
             self.damage_text_shadows();
         }
-        if (!self.damage.is_empty() || self.damage_grid.is_some()) && !self.blur_nodes.is_empty() {
+        if (!self.damage.is_empty() || self.damage_grid.is_some())
+            && (!self.blur_nodes.is_empty() || !self.backdrop_readers().is_empty())
+        {
             let mut blur_regions: Vec<(Rect, bool)> = self
                 .blur_nodes
                 .iter()
+                .chain(self.backdrop_readers())
                 .filter_map(|id| {
-                    let (bounds, effects, _) = self.world(*id);
+                    let (_, effects, _) = self.world(*id);
                     // Fully transparent filters cannot change the visible backdrop.
                     // Hide/show still damages both old and new subtree bounds.
-                    let bounds = match self.transformed {
-                        0 => bounds,
-                        _ => self.transformed_world_bounds(*id),
-                    };
-                    (effects.opacity > 0.0).then_some((bounds, false))
+                    (effects.opacity > 0.0).then(|| (self.backdrop_region(*id), false))
                 })
                 .collect();
             loop {
@@ -11326,6 +11501,104 @@ impl Scene {
             transform.y += 0.;
         }
         transform
+    }
+    /// The largest band of `clip` a move can copy: clear of every backdrop blur
+    /// that shows, and of what such a bar paints around itself (a shadow, which
+    /// a copy would carry and `copy_blocker` refuses): three times its blur's sigma.
+    /// All of `clip` if none touches it; none if little's left.
+    fn clear_of_blurs(&self, clip: Rect) -> Option<Rect> {
+        let mut clear = clip;
+        let mut touched = false;
+        for blur in &self.blur_nodes {
+            let (bounds, effects, _) = self.world(*blur);
+            if effects.opacity <= 0. {
+                continue;
+            }
+            let reach = (effects.blur_radius * 3.).ceil();
+            let wide = Rect::new(
+                bounds.x - reach,
+                bounds.y - reach,
+                bounds.width + reach * 2.,
+                bounds.height + reach * 2.,
+            );
+            if !wide.intersects(clear) {
+                continue;
+            }
+            touched = true;
+            let bands = [
+                Rect::new(clear.x, clear.y, clear.width, wide.y - clear.y),
+                Rect::new(
+                    clear.x,
+                    wide.y + wide.height,
+                    clear.width,
+                    clear.y + clear.height - wide.y - wide.height,
+                ),
+                Rect::new(clear.x, clear.y, wide.x - clear.x, clear.height),
+                Rect::new(
+                    wide.x + wide.width,
+                    clear.y,
+                    clear.x + clear.width - wide.x - wide.width,
+                    clear.height,
+                ),
+            ];
+            clear = bands
+                .into_iter()
+                .filter(|band| band.width > 0. && band.height > 0.)
+                .max_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))?;
+        }
+        if let Some(cold) = self.cold.as_deref()
+            && !cold.backdrop_readers.is_empty()
+        {
+            clear = self.clear_of_readers(&cold.backdrop_readers, clear, &mut touched)?;
+        }
+        // A band too small for the copy to pay isn't one.
+        if touched && clear.width * clear.height < clip.width * clip.height * 0.25 {
+            return None;
+        }
+        Some(clear)
+    }
+    /// `clear_of_blurs` for nodes reading the backdrop: the largest band of
+    /// `clear` none of them reads (`touched` if any reached it).
+    #[cold]
+    #[inline(never)]
+    fn clear_of_readers(
+        &self,
+        readers: &[NodeId],
+        mut clear: Rect,
+        touched: &mut bool,
+    ) -> Option<Rect> {
+        for reader in readers {
+            let (_, effects, _) = self.world(*reader);
+            if effects.opacity <= 0. {
+                continue;
+            }
+            let wide = self.backdrop_region(*reader);
+            if !wide.intersects(clear) {
+                continue;
+            }
+            *touched = true;
+            let bands = [
+                Rect::new(clear.x, clear.y, clear.width, wide.y - clear.y),
+                Rect::new(
+                    clear.x,
+                    wide.y + wide.height,
+                    clear.width,
+                    clear.y + clear.height - wide.y - wide.height,
+                ),
+                Rect::new(clear.x, clear.y, wide.x - clear.x, clear.height),
+                Rect::new(
+                    wide.x + wide.width,
+                    clear.y,
+                    clear.x + clear.width - wide.x - wide.width,
+                    clear.height,
+                ),
+            ];
+            clear = bands
+                .into_iter()
+                .filter(|band| band.width > 0. && band.height > 0.)
+                .max_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))?;
+        }
+        Some(clear)
     }
     /// Moves reported by the most recent flush.
     pub fn scroll_moves(&self) -> &[ScrollMove] {
@@ -11531,18 +11804,19 @@ impl Scene {
             }
             let clip = self.world_clip(id);
             let isolated = layered;
-            let filtered = |scene: &Self, clip: Rect| {
-                scene.blur_nodes.iter().any(|blur| {
-                    let (bounds, effects, _) = scene.world(*blur);
-                    effects.opacity > 0. && bounds.intersects(clip)
-                })
-            };
-            let usable = clip.filter(|clip| {
-                !isolated
-                    && dx.abs() < clip.width
-                    && dy.abs() < clip.height
-                    && !filtered(self, *clip)
-            });
+            // Clear of what blurs what's behind it: a glass bar over the view takes
+            // only the view's band it reaches, and what's beside it still moves.
+            let clear = clip.and_then(|clip| self.clear_of_blurs(clip));
+            let usable = clear
+                .filter(|clear| !isolated && dx.abs() < clear.width && dy.abs() < clear.height);
+            // What of the view the band leaves repaints.
+            if let (Some(clip), Some(clear)) = (clip, usable)
+                && clear != clip
+            {
+                for rest in rect_minus(clip, clear) {
+                    self.add_damage(rest);
+                }
+            }
             match usable {
                 Some(clip) => moves.push(ScrollMove {
                     node: id,
@@ -11683,6 +11957,10 @@ impl Scene {
                 let nested = self
                     .drop_shadow(item.id)
                     .map_or(nested, |shadow| nested.union(shadow.ink(nested)));
+                // And its layer shader's bleed.
+                let nested = self.layer_shader(item.id).map_or(nested, |layer| {
+                    nested.union(item.bounds.expand(layer.bleed))
+                });
                 match item.projective() {
                     Some(matrix) if matrix.affine().is_none() => {
                         // In perspective, nearly at the eye, it reaches far
@@ -11728,10 +12006,10 @@ impl Scene {
     pub fn content_revision(&self) -> u64 {
         self.content_revision
     }
-    /// True when any node applies a backdrop blur, whose output depends on
-    /// pixels outside its own subtree.
+    /// True when any node applies a backdrop blur or reads the backdrop, whose
+    /// output depends on pixels outside its own subtree.
     pub fn has_backdrop_blur(&self) -> bool {
-        !self.blur_nodes.is_empty()
+        !self.blur_nodes.is_empty() || !self.backdrop_readers().is_empty()
     }
     /// The paint items in paint order: the window's with `None` (popups left
     /// out), or popup `root`'s alone.
@@ -16435,4 +16713,23 @@ mod text_lines_tests {
             assert!(pair[0].range.end <= pair[1].range.start, "{wrapped:?}");
         }
     }
+}
+
+/// What of `outer` lies outside `inner`, which it holds: up to four rectangles.
+fn rect_minus(outer: Rect, inner: Rect) -> impl Iterator<Item = Rect> {
+    let bottom = inner.y + inner.height;
+    let right = inner.x + inner.width;
+    [
+        Rect::new(outer.x, outer.y, outer.width, inner.y - outer.y),
+        Rect::new(
+            outer.x,
+            bottom,
+            outer.width,
+            outer.y + outer.height - bottom,
+        ),
+        Rect::new(outer.x, inner.y, inner.x - outer.x, inner.height),
+        Rect::new(right, inner.y, outer.x + outer.width - right, inner.height),
+    ]
+    .into_iter()
+    .filter(|rect| rect.width > 0. && rect.height > 0.)
 }

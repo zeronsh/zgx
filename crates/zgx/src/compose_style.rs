@@ -10,6 +10,11 @@ use crate::{
 };
 use std::num::NonZeroU32;
 
+/// How much of a draggable a clickable inside it covers for a press on it to
+/// be the draggable's still: a row with its padding is, a tab's close button
+/// isn't (`EventContext::keeps_press_from_drag`).
+const FILLS_DRAG: f32 = 0.75;
+
 /// What text inherits. A colour, size or family that comes from a theme
 /// token stays the token: each text node resolves it from its own theme
 /// scope, so a theme change restyles the text that shows it without
@@ -827,7 +832,21 @@ pub(crate) fn mount_style_with_intrinsic(
                     state.pointer_active = true;
                     state.pressed_outside = false;
                     if event.target == node && presses {
-                        event.capture_pointer();
+                        // Around what covers most of it, nothing much else
+                        // is there to press.
+                        let fills = owner.upgrade().map_or_else(Vec::new, |ui| {
+                            let scene = ui.scene.borrow();
+                            let own = scene.bounds(node);
+                            let area = own.width * own.height;
+                            scene
+                                .ancestors(node)
+                                .take_while(|id| {
+                                    let around = scene.bounds(*id);
+                                    area >= around.width * around.height * FILLS_DRAG
+                                })
+                                .collect()
+                        });
+                        event.capture_filling(fills);
                     }
                 }
                 InputEvent::PointerUp {
@@ -1943,6 +1962,9 @@ fn apply_resolved(
         }
         if let Some(uniforms) = cold.and_then(|cold| cold.layer_uniforms.as_ref()) {
             scene.set_layer_uniforms(node, *uniforms);
+        }
+        if let Some((bleed, reach)) = cold.and_then(|cold| cold.layer_extent) {
+            scene.set_layer_extent(node, bleed, reach);
         }
         if let Some(mode) = rare.blend {
             scene.set_blend(node, mode);

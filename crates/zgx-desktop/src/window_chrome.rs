@@ -75,6 +75,9 @@ pub enum GlassMaterial {
     /// A dark, saturated heads-up-display glass.
     #[default]
     Hud,
+    /// The system's newest glass: macOS 26's `NSGlassEffectView`, where it
+    /// has one; elsewhere, as `Hud`.
+    Liquid,
     /// The colourless material under a window's own background.
     UnderWindowBackground,
     /// The material behind a page's content.
@@ -114,7 +117,7 @@ impl GlassMaterial {
             Self::HeaderView => 10,
             Self::Sheet => 11,
             Self::WindowBackground => 12,
-            Self::Hud => 13,
+            Self::Hud | Self::Liquid => 13,
             Self::FullScreenUi => 15,
             Self::ToolTip => 17,
             Self::ContentBackground => 18,
@@ -391,6 +394,7 @@ mod win {
             | GlassMaterial::Sidebar => DWMSBT_MAINWINDOW,
             GlassMaterial::Titlebar | GlassMaterial::HeaderView => DWMSBT_TABBEDWINDOW,
             GlassMaterial::Hud
+            | GlassMaterial::Liquid
             | GlassMaterial::Menu
             | GlassMaterial::Popover
             | GlassMaterial::ToolTip
@@ -2482,8 +2486,11 @@ mod mac {
         else {
             return;
         };
+        let liquid = objc2::runtime::AnyClass::get(c"NSGlassEffectView");
         for view in frame.subviews() {
-            if view.isKindOfClass(GlassView::class()) {
+            if view.isKindOfClass(GlassView::class())
+                || liquid.is_some_and(|class| view.isKindOfClass(class))
+            {
                 view.removeFromSuperview();
             }
         }
@@ -2506,6 +2513,30 @@ mod mac {
             return;
         };
         let mtm = window.mtm();
+        // The system's newest, behind the whole window, where it has one.
+        if glass.material == crate::GlassMaterial::Liquid
+            && let Some(class) = objc2::runtime::AnyClass::get(c"NSGlassEffectView")
+        {
+            // SAFETY: `new` on an NSView subclass on the main thread, and its
+            // own setters.
+            let effect: Retained<NSView> = unsafe {
+                let effect: Retained<NSView> = msg_send![class, new];
+                let _: () = msg_send![&*effect, setCornerRadius: radius(window)];
+                effect
+            };
+            effect.setFrame(frame.bounds());
+            effect.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewHeightSizable,
+            );
+            frame.addSubview_positioned_relativeTo(
+                &effect,
+                objc2_app_kit::NSWindowOrderingMode::Below,
+                Some(&content),
+            );
+            window.invalidateShadow();
+            return;
+        }
         // SAFETY: NSView's designated initializer, on a fresh allocation
         // with its ivars set.
         let effect: Retained<GlassView> = unsafe {
@@ -2810,8 +2841,23 @@ mod mac {
         match action.as_str() {
             "Minimize" => window.miniaturize(None),
             "None" => {}
-            // "Maximize" (zoom), "Fill" and anything newer: zoom.
-            _ => window.zoom(None),
+            // "Maximize" (zoom), "Fill" and anything newer: zoom, once the
+            // event that asked has been handled. AppKit animates within
+            // `zoom:`, and winit queues what it reports while an event is being
+            // handled: every size of the animation would wait until it ended,
+            // with the last frame stretched over the window meanwhile.
+            //
+            // SAFETY: NSObject's `performSelectorOnMainThread:withObject:waitUntilDone:`
+            // with NSWindow's `zoom:`, which takes an optional sender; the
+            // run loop keeps the window until it runs.
+            _ => unsafe {
+                let _: () = msg_send![
+                    &*window,
+                    performSelectorOnMainThread: sel!(zoom:),
+                    withObject: None::<&AnyObject>,
+                    waitUntilDone: false
+                ];
+            },
         }
     }
 

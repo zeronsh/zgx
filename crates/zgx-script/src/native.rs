@@ -374,6 +374,7 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
                         }
                     };
                     let spec = GlassSpec {
+                        clear: take("clear", Ty::Bool)?,
                         variant: take("variant", Ty::Str)?,
                         tint: take("tint", Ty::Color)?,
                         interactive: take("interactive", Ty::Bool)?,

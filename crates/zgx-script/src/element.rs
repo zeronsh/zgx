@@ -1238,6 +1238,10 @@ pub(crate) struct ElementUd(pub Rc<Element>);
 /// set: a handler setting the text, then selecting in it, selects in the
 /// new text (`Runtime::settle`).
 fn settle(lua: &mlua::Lua) {
+    // Most find nothing due: no clocks read for it, each a system call.
+    if crate::node::env(lua).is_ok_and(|env| env.runtime.nothing_due()) {
+        return;
+    }
     off_clock(lua, |runtime| runtime.settle());
 }
 /// `work` with the runtime, off the calling script's clock: what an input's

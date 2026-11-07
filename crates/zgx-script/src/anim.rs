@@ -133,12 +133,17 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
                         });
                     }
                     Curve::Spring { both, up, down } => {
-                        let dt = stepped
+                        // The time since its last frame, at most a quarter second (a
+                        // window back after a while catches up that much, not all of
+                        // it at once); past a frame and a half, in steps no longer than
+                        // a 120 Hz frame's: the same curve at 24 Hz as at 120, and
+                        // stable whatever the gap.
+                        let elapsed = stepped
                             .map_or(frame.interval, |last| {
                                 frame.time.saturating_duration_since(last)
                             })
                             .as_secs_f64()
-                            .min(1. / 30.);
+                            .min(0.25);
                         stepped = Some(frame.time);
                         let goal = target.get();
                         // A new goal picks its spring by the way it lies from the last,
@@ -160,11 +165,24 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
                             chasing = goal;
                         }
                         let chosen = params.unwrap_or(*both);
-                        let (x, to) = (f64::from(value.with_untracked(|v| *v)), f64::from(chasing));
-                        velocity += (-f64::from(chosen.stiffness) * (x - to)
-                            - f64::from(chosen.damping) * velocity)
-                            * dt;
-                        let x = x + velocity * dt;
+                        let (mut x, to) =
+                            (f64::from(value.with_untracked(|v| *v)), f64::from(chasing));
+                        // A frame on time at 40 Hz or faster is one step: only a late
+                        // frame or a slower display's is cut up.
+                        let on_time =
+                            elapsed <= frame.interval.as_secs_f64() * 1.5 && elapsed <= 0.025;
+                        let steps = if on_time {
+                            1.
+                        } else {
+                            (elapsed * 120.).ceil().max(1.)
+                        };
+                        let dt = elapsed / steps;
+                        for _ in 0..steps as usize {
+                            velocity += (-f64::from(chosen.stiffness) * (x - to)
+                                - f64::from(chosen.damping) * velocity)
+                                * dt;
+                            x += velocity * dt;
+                        }
                         let settle = 1e-3 * to.abs().max(1.);
                         // A value past f32's range (or none) lands on its
                         // goal: it can't be shown, and would never settle.

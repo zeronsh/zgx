@@ -1007,6 +1007,12 @@ fn check(ui: &Ui, labels: &HashMap<NodeId, Label>) -> Vec<Warning> {
                 .children(id)
                 .iter()
                 .filter(in_flow)
+                // A child that asks for none of the room isn't squeezed.
+                .filter(|c| {
+                    let child = scene.style(**c);
+                    !(zero_w && (child.width == Some(0.) || child.max_width == Some(0.)))
+                        && !(zero_h && (child.height == Some(0.) || child.max_height == Some(0.)))
+                })
                 .filter(|c| shows_content(&scene, **c, 0))
                 .count()
         } else {
@@ -1040,6 +1046,12 @@ fn check(ui: &Ui, labels: &HashMap<NodeId, Label>) -> Vec<Warning> {
             ));
             collapsed.insert(id);
         } else if parent_collapsed && (zero_w || zero_h) {
+            collapsed.insert(id);
+        } else if (deliberate_w && item.bounds.width <= 0.5)
+            || (deliberate_h && item.bounds.height <= 0.5)
+        {
+            // Zero on purpose, and what's inside knows (an anchor for what
+            // overflows it, a panel slid shut): nothing in it is squeezed.
             collapsed.insert(id);
         }
         // Content overflowing a clip that does not scroll.

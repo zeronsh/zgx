@@ -51,6 +51,8 @@ mod layout_unsettled;
 mod lazy_ui;
 #[path = "../list_edges.rs"]
 mod list_edges;
+#[path = "../list_estimate.rs"]
+mod list_estimate;
 #[path = "../list_failed_key.rs"]
 mod list_failed_key;
 #[path = "../list_focus_scroll.rs"]
@@ -65,6 +67,8 @@ mod list_key_field;
 mod list_keys_read;
 #[path = "../list_long_budget.rs"]
 mod list_long_budget;
+#[path = "../list_reindex.rs"]
+mod list_reindex;
 #[path = "../list_tab_rows.rs"]
 mod list_tab_rows;
 #[path = "../list_thin_rows.rs"]

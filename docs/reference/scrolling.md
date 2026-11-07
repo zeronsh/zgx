@@ -40,6 +40,7 @@ A child with `sticky_top` holds at the top as the view scrolls past it, inside i
 | `height` | `number` | `28` | every row's height, in points (positive); with `measured`, the estimate for a row not yet measured |
 | `virtualize` | `"ancestor"` | none | it doesn't scroll itself but with the scroll view around it (a panel that scrolls as a whole, its sections lists): as tall as all its rows, it builds only those that view shows (with `overscan`), again as it scrolls or resizes. With `height` or `heights`, not `measured`; the view's wheel and scrollbar are the list's, and `offset`, `scrollbar` and the edge callbacks don't apply |
 | `measured` | `boolean` | `false` | rows take their content's height (wrapped text, images), measured as they mount; not with `heights` |
+| `estimate` | [`ListEstimate`](#estimates) | none | with `measured`, `data` and `key`: how a row's data makes its height, so the scrollbar tells the truth before rows are built |
 | `follow` | `boolean` | `false` | with `measured` or `heights`: resting at the end, it stays at the end as rows are added and measured (a chat); scrolled away, it stays where it is |
 | `heights` | `{ number }`, a state of one, or a function returning one | none | each row's own height instead, in order; the count is its length. A row of 0 takes no room and isn't built, nor one under a hundredth of a point: rows folded away cost nothing, however many |
 | `sticky` | `{ number }`, a state of one, or a function returning one | none | with `heights`, and with or without `key`: rows (from 1) that stick to the top while the rows after them scroll past, each pushed up by the next (section headers, a diff's file headers); the one in charge is built again over the list, as any row is |
@@ -139,6 +140,54 @@ return ui.list {
 	end,
 }
 ```
+
+
+### Estimates
+
+A list of `measured` rows knows a row's height once it's built. Until then the row stands at `height`, so the scrollbar is the wrong length and a dragged thumb lands far from where it points. `estimate` says once how a row's data makes its height. Rust runs it per row, with no script: each row's text is scanned once, and a new width is arithmetic over that. Rows still measure as they mount.
+
+```luau
+local rows = ui.state("rows", { { id = "a", text = "Hello", kind = "note" } })
+return ui.list {
+	data = rows,
+	key = "id",
+	measured = true,
+	estimate = {
+		height = 24,
+		text = { field = "text", size = 14, line = 20, char = 0.49, inset = 24 },
+		by = "kind",
+		cases = { note = { height = 18 } },
+		has = { attachments = { height = 60 } },
+	},
+	row = function(r)
+		return ui.text { r.text, wrap = true, p = 12 }
+	end,
+}
+```
+
+A part adds any of these up:
+
+| Field | Type | |
+| --- | --- | --- |
+| `height` | `number` | points it always adds |
+| `text` | a text, or a list of them | wrapped text, below |
+| `each`, `item` | field name, part | a part for each item of a list field |
+| `by`, `cases`, `default` | field name, `{ [value]: part }`, part | a part by a field's value |
+| `has` | `{ [field]: part }` | a part for each field that holds anything |
+
+A text has:
+
+| Field | Default | |
+| --- | --- | --- |
+| `field` | required | the field holding it |
+| `size`, `line` | `14`, 1.4 times `size` | its font's size and a line's height |
+| `char` | `0.5` | a narrow character's average width, in ems; wide characters (Han, kana, Hangul, emoji) count an em |
+| `word` | `5` | an average word's length in characters: wrapping leaves about half of one unused on each line |
+| `inset`, `most`, `minus`, `share` | `0`, none, `0`, `1` | its column: `share` of (the list less `inset`, at most `most`, less `minus`) |
+| `most_lines`, `beyond` | none, `0` | clamped to this many lines, and what shows beyond them then |
+| `markdown` | none | it's Markdown: `{ paragraph, heading, item, code, table }`, what each kind of source line adds. A paragraph's or an item's source lines flow as one, however they were wrapped; code and table lines stay one each |
+
+It's an estimate: fit it to a few rows by eye or by measuring. A row's real height replaces it as the row mounts, without moving what's in view. A row's height can't come from anything but its data here: state, pictures not sized in the data and the like are only known once it's built.
 
 ## Example
 

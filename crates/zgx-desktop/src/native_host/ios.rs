@@ -610,7 +610,7 @@ impl Surfaces {
     pub fn differs(&self, split: &PlaneSplit, previous: &PlaneSplit) -> bool {
         split.natives() != previous.natives()
             || self.mounted.values().any(|mounted| match &mounted.content {
-                Content::Glass(GlassContent::Pane(style)) => mounted.style != Some(*style.borrow()),
+                Content::Glass(GlassContent::Pane(pane)) => mounted.style != Some(pane.style()),
                 _ => false,
             })
     }
@@ -692,8 +692,13 @@ impl Surfaces {
         });
         for (node, content) in &views {
             let (view, content) = match content {
-                NativeContent::Glass(content) if !self.mounted.contains_key(node) => {
-                    (make_view(content), Content::Glass(content.clone()))
+                NativeContent::Glass(pane) if !self.mounted.contains_key(node) => {
+                    let content = GlassContent::Pane(pane.clone());
+                    (make_view(&content), Content::Glass(content))
+                }
+                NativeContent::GlassGroup(spacing) if !self.mounted.contains_key(node) => {
+                    let content = GlassContent::Group(*spacing);
+                    (make_view(&content), Content::Glass(content))
                 }
                 NativeContent::Platform(view) if !self.mounted.contains_key(node) => {
                     let Some(view) = view.downcast_ref::<Retained<AnyObject>>() else {
@@ -864,7 +869,7 @@ impl Surfaces {
         // The box a group's node fills, whose descendants merge.
         let boxes: Vec<(NodeId, NodeId)> = views
             .iter()
-            .filter(|(_, content)| matches!(content, NativeContent::Glass(GlassContent::Group(_))))
+            .filter(|(_, content)| matches!(content, NativeContent::GlassGroup(_)))
             .filter_map(|(node, _)| Some((*node, scene.parent(*node)?)))
             .collect();
         if boxes.is_empty() {
@@ -892,10 +897,10 @@ impl Surfaces {
         if let Some(mounted) = self.mounted.get_mut(&placement.node)
             && !std::mem::replace(&mut mounted.placed, true)
             && group_older
-            && let Content::Glass(GlassContent::Pane(style)) = &mounted.content
+            && let Content::Glass(GlassContent::Pane(pane)) = &mounted.content
         {
             // SAFETY: as `materialize` asks, here on the main thread.
-            unsafe { materialize(&mounted.view, *style.borrow()) };
+            unsafe { materialize(&mounted.view, pane.style()) };
         }
     }
     fn place_inner(&mut self, placement: &NativePlacement, parent: Option<NodeId>) {
@@ -1022,8 +1027,8 @@ impl Surfaces {
                 let _: () = msg_send![&*mounted.view, setAlpha: placement.opacity as f64];
             }
         }
-        if let Content::Glass(GlassContent::Pane(style)) = &mounted.content {
-            let style = *style.borrow();
+        if let Content::Glass(GlassContent::Pane(pane)) = &mounted.content {
+            let style = pane.style();
             if mounted.style != Some(style) {
                 let first = mounted.style.is_none();
                 mounted.style = Some(style);
@@ -1181,13 +1186,13 @@ fn make_view(content: &GlassContent) -> Retained<AnyObject> {
                 let _: () = msg_send![&*effect, setSpacing: *spacing as f64];
                 effect
             }
-            GlassContent::Pane(style) => glass_effect(*style.borrow()),
+            GlassContent::Pane(pane) => glass_effect(pane.style()),
         };
         let view: Retained<AnyObject> =
             msg_send![msg_send![class!(UIVisualEffectView), alloc], initWithEffect: &*effect];
         passive(&view);
-        if let GlassContent::Pane(style) = content {
-            set_corners(&view, *style.borrow());
+        if let GlassContent::Pane(pane) = content {
+            set_corners(&view, pane.style());
         }
         view
     }

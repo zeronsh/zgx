@@ -1,39 +1,53 @@
-//! A glass box off iOS (headless): it lays out and holds children like a
-//! `div`, draws the stand-in look, and leaves the window with no native views,
-//! so it stays on one plane.
-use std::rc::Rc;
-use zgx::{
-    compose::prelude::*,
-    glass::{GlassStyle, glass, glass_group},
-    native_view::NativeViews,
-    widgets::Ui,
-};
+//! A glass box: the system's where the host has it, its material drawn where not.
+use zgx::compose::prelude::*;
+use zgx::glass::{GlassStyle, GlassVariant, glass};
+use zgx::native_view::{NativeContent, NativeViews};
+use zgx::widgets::Ui;
+
+fn pane() -> View {
+    glass(GlassStyle::default)
+        .w(100.)
+        .h(100.)
+        .child(text("Over"))
+}
 
 #[test]
-fn glass_is_ordinary_paint_without_the_systems_material() {
-    let mut ui = Ui::new(400., 300.);
+fn with_no_system_glass_its_material_is_drawn() {
     let natives = NativeViews::new();
     natives.set_supported(true);
-    let held = Rc::new(std::cell::Cell::new(None));
-    let child = held.clone();
-    let view = provide(
-        natives.clone(),
-        glass_group(40.).w(400.).h(300.).child(
-            glass(GlassStyle::default)
-                .absolute()
-                .left(10.)
-                .top(20.)
-                .w(120.)
-                .h(80.)
-                .child(div().w(50.).h(30.).on_mount(move |handle| {
-                    child.set(Some(handle.node()));
-                })),
-        ),
-    );
-    ui.mount(view);
+    let mut ui = Ui::new(400., 300.);
+    ui.mount(provide(natives.clone(), pane()));
     ui.prepare_frame();
-    assert!(natives.is_empty(), "no native view off iOS");
-    let scene = ui.scene.borrow();
-    let inside = scene.bounds(held.get().expect("the child mounted"));
-    assert_eq!((inside.x, inside.y), (10., 20.), "children sit in its box");
+    assert!(natives.is_empty());
+}
+
+#[test]
+fn with_system_glass_a_native_view_stands_in_following_its_style() {
+    let natives = NativeViews::new();
+    natives.set_supported(true);
+    natives.set_glass_supported(true);
+    let mut ui = Ui::new(400., 300.);
+    let variant = ui.signal(GlassVariant::Regular);
+    let read = variant.clone();
+    ui.mount(provide(
+        natives.clone(),
+        glass(move || GlassStyle {
+            variant: read.get(),
+            ..Default::default()
+        })
+        .w(100.)
+        .h(100.),
+    ));
+    ui.prepare_frame();
+    let [(node, content)] = &natives.views()[..] else {
+        panic!("one native view")
+    };
+    assert!(ui.scene.borrow().is_platform_painted(*node));
+    let NativeContent::Glass(pane) = content else {
+        panic!("glass")
+    };
+    assert_eq!(pane.style().variant, GlassVariant::Regular);
+    variant.set(GlassVariant::Clear);
+    ui.prepare_frame();
+    assert_eq!(pane.style().variant, GlassVariant::Clear);
 }

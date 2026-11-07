@@ -854,7 +854,12 @@ fn plugin_page(plugin: &Rc<str>, node: &Node, low: &Rc<Lowering>) -> View {
             .filter(|(owner, _, _)| **owner == **plugin)
             .map(|(_, n, stats)| counted(lower(n, low), stats)),
     );
-    div().child(zgx::compose::confined(plugin_view(page, low)))
+    // An isolated group: all it can read of what's behind it (`zgx_backdrop`,
+    // a backdrop blur) is its own, never the sealed region's under it.
+    div().child(zgx::compose::confined(plugin_view(
+        page.isolated(true),
+        low,
+    )))
 }
 /// The slot a plugin's page goes to: `ui.contribute("plugin_page", …)`.
 const PLUGIN_PAGE: &str = "plugin_page";
@@ -2656,7 +2661,8 @@ fn symbol_view(
 fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
     use zgx::glass::{GlassStyle, GlassVariant, glass};
     let own = |source: &Option<Source>| source.as_ref().map(resolve_owned);
-    let (variant, tint, interactive, radius) = (
+    let (clear, variant, tint, interactive, radius) = (
+        own(&spec.clear),
         own(&spec.variant),
         own(&spec.tint),
         own(&spec.interactive),
@@ -2670,8 +2676,8 @@ fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
                 .and_then(|source| resolve(source, ty, None, &vm))
         };
         let mut style = GlassStyle::default();
-        if let Some(Lit::Str(variant)) = read(&variant, Ty::Str)
-            && &*variant == "clear"
+        if read(&clear, Ty::Bool) == Some(Lit::Bool(true))
+            || matches!(read(&variant, Ty::Str), Some(Lit::Str(variant)) if &*variant == "clear")
         {
             style.variant = GlassVariant::Clear;
         }
@@ -2695,6 +2701,59 @@ fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
         }
         style
     })
+}
+/// What keeps `shaders` up: `layer_clock`, `shader_clock`, `layer_on` and
+/// `layer_params` as a function, read again as what they read changes.
+#[cold]
+#[inline(never)]
+fn drive_of(
+    shaders: &crate::node::Shaders,
+    vm: &Rc<Vm>,
+) -> Option<Box<dyn FnMut() -> zgx::shader_drive::ShaderDrive>> {
+    let vm = vm.clone();
+    let props = shaders.drive.as_ref()?;
+    let fill = shaders.layer.is_none();
+    let shader = shaders.layer.clone().or_else(|| shaders.fill.clone())?;
+    let clock = if fill {
+        props.shader_clock
+    } else {
+        props.layer_clock
+    };
+    let literal = match fill {
+        true => shaders.params,
+        false => shaders.layer_params,
+    };
+    let params_of = props.layer_params_of.clone();
+    let on = props.layer_on.as_ref().map(resolve_owned);
+    let (bleed, reach) = (
+        shaders.layer_bleed.unwrap_or(0.),
+        shaders.layer_reach.unwrap_or(0.),
+    );
+    let mut last = literal.unwrap_or_default();
+    Some(Box::new(move || {
+        if let Some(f) = &params_of {
+            let read = vm.call::<mlua::Value>(f, ()).and_then(|value| {
+                crate::node::shader_params(&vm.lua, &value, "layer_params", None)
+            });
+            match read {
+                Ok(params) => last = params,
+                Err(e) => vm.report(e),
+            }
+        }
+        let shows = on
+            .as_ref()
+            .and_then(|on| resolve(on, Ty::Bool, None, &vm))
+            .is_none_or(|lit| lit == Lit::Bool(true));
+        zgx::shader_drive::ShaderDrive {
+            shader: shows.then(|| shader.clone()),
+            fill,
+            params: last,
+            bleed,
+            reach,
+            frost: 0.,
+            running: clock,
+        }
+    }))
 }
 fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     use zgx::web_view::{WebViewEvent, web_view, web_view_src};
@@ -3896,17 +3955,27 @@ fn styled(
         view = swept(view, low);
     }
     let shaders = node.shaders.as_deref();
-    let shader =
-        shaders.and_then(|s| Some((s.fill.clone()?, s.params.unwrap_or_default(), s.tokens)));
+    let shader = shaders.and_then(|s| {
+        Some((
+            s.fill.clone()?,
+            s.params.unwrap_or_default(),
+            s.tokens,
+            s.drive.is_some(),
+        ))
+    });
     // Parameters with no fill of their own: an image's (its `characters`
     // reveal), set on its node all the same.
     let params_only = shaders.and_then(|s| s.params.filter(|_| s.fill.is_none()));
     // A layer shader, with its literal parameters unless animated (boxed:
     // the style closure below holds it, and few nodes have one).
-    let layer = shaders.and_then(|s| {
+    // (Kept up by the engine, `shader_drive`: its uniforms stay the scene's, for
+    // a restyle not to put its time back.)
+    let layer = shaders.filter(|s| s.drive.is_none()).and_then(|s| {
         Some(Box::new((
             s.layer.clone()?,
             s.layer_params.unwrap_or_default(),
+            s.layer_bleed.unwrap_or(0.),
+            s.layer_reach.unwrap_or(0.),
         )))
     });
     if !dynamic.is_empty()
@@ -3978,12 +4047,14 @@ fn styled(
                 None => styles,
             };
             let styles = match layer.as_deref() {
-                Some((shader, params)) => {
+                Some((shader, params, bleed, reach)) => {
                     let animated = element
                         .as_ref()
                         .and_then(|e| e.animated.borrow().layer.as_deref().copied());
                     styles
                         .layer_shader(shader.clone())
+                        .layer_bleed(*bleed)
+                        .layer_reach(*reach)
                         .layer_uniforms(animated.unwrap_or(zgx::decoration::ShaderUniforms {
                             time: 0.,
                             params: *params,
@@ -3993,7 +4064,7 @@ fn styled(
             };
             // A shader fill, with its literal parameters unless animated.
             match &shader {
-                Some((fill, params, tokens)) => {
+                Some((fill, params, tokens, driven)) => {
                     let animated = element.as_ref().and_then(|e| e.animated.borrow().shader);
                     let uniforms = animated.unwrap_or(zgx::decoration::ShaderUniforms {
                         time: 0.,
@@ -4008,7 +4079,10 @@ fn styled(
                                 styles.token(zgx::theme::Field::ShaderParam(slot as u8), *token);
                         }
                     }
-                    styles.bg_shader(fill.clone()).shader_uniforms(uniforms)
+                    match driven {
+                        true => styles.bg_shader(fill.clone()),
+                        false => styles.bg_shader(fill.clone()).shader_uniforms(uniforms),
+                    }
                 }
                 None => match params_only {
                     Some(params) => styles.shader_uniforms(
@@ -4055,6 +4129,12 @@ fn styled(
                 _ => view.disabled_style(style),
             };
         }
+    }
+    // Its shader kept up by the engine, once it has its style.
+    if let Some(s) = shaders.filter(|s| s.drive.is_some())
+        && let Some(make) = drive_of(s, vm)
+    {
+        view = zgx::shader_drive::attach(need(&mut cx), view, make);
     }
     if let Some(disabled) = &node.disabled {
         let (disabled, vm) = (resolve_owned(disabled), vm.clone());
@@ -7843,6 +7923,16 @@ fn lower_item_list(
         if *follow {
             rows = rows.anchor_end();
         }
+        // With `estimate`: told of its passes, rows out of view get heights.
+        let watch = rare
+            .as_ref()
+            .and_then(|rare| rare.estimate.clone())
+            .map(|rule| {
+                let (rows, items) = (rows.clone(), items.clone());
+                let now = Rc::new(move || items.with_untracked(Clone::clone));
+                Rc::new(crate::estimate::Estimator::new(rule, now, rows))
+                    as Rc<dyn zgx::compose::RowsWatch>
+            });
         let list = match key {
             // Heights by key, kept as rows move, each read here: no item is
             // made a table to give its key.
@@ -7855,7 +7945,12 @@ fn lower_item_list(
                     })
                 };
                 let estimate = |_: &[ListKey], _: usize| f32::NAN;
-                measured_rows(offset, rows, *overscan, keys, estimate, row)
+                match watch {
+                    Some(watch) => zgx::compose::measured_rows_watched(
+                        watch, offset, rows, *overscan, keys, estimate, row,
+                    ),
+                    None => measured_rows(offset, rows, *overscan, keys, estimate, row),
+                }
             }
             None => {
                 let r = rows.clone();
@@ -7870,7 +7965,12 @@ fn lower_item_list(
                 let mut kept = KeptKeys::default();
                 let keys = move || items.with(|l| item_keys(&vm, &key, l, &mut kept));
                 let estimate = |_: &[ListKey], _: usize| f32::NAN;
-                measured_rows(offset, rows, *overscan, keys, estimate, row)
+                match watch {
+                    Some(watch) => zgx::compose::measured_rows_watched(
+                        watch, offset, rows, *overscan, keys, estimate, row,
+                    ),
+                    None => measured_rows(offset, rows, *overscan, keys, estimate, row),
+                }
             }
         };
         return list.keyboard_navigation(keyboard).row_text(copy);

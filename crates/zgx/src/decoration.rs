@@ -99,15 +99,20 @@ pub struct FillShader {
     id: u64,
     source: Arc<str>,
     fps: Option<f32>,
+    /// Whether its source calls `zgx_backdrop` (a layer shader's read of
+    /// what lies behind it: `Scene::set_layer_shader`).
+    reads_backdrop: bool,
 }
 impl FillShader {
     /// `source`, its time advancing at most `fps` times a second (a dither
     /// drifting at 30 fps redraws at 30 fps): `None` for every frame.
     pub fn new(source: impl Into<Arc<str>>, fps: Option<f32>) -> Arc<Self> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let source: Arc<str> = source.into();
         Arc::new(Self {
             id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            source: source.into(),
+            reads_backdrop: source.contains("zgx_backdrop"),
+            source,
             fps: fps.filter(|fps| fps.is_finite() && *fps > 0.),
         })
     }
@@ -123,11 +128,46 @@ impl FillShader {
     pub fn fps(&self) -> Option<f32> {
         self.fps
     }
+    /// Whether, as a layer shader, it reads what lies behind it
+    /// (`zgx_backdrop`): its source names it.
+    pub fn reads_backdrop(&self) -> bool {
+        self.reads_backdrop
+    }
 }
 impl PartialEq for FillShader {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
+}
+static DECLARED_LAYERS: std::sync::Mutex<Vec<std::sync::Weak<FillShader>>> =
+    std::sync::Mutex::new(Vec::new());
+static LAYERS_DECLARED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Have every renderer start compiling layer shader `shader` ahead of its
+/// first draw: for what must show at once when it does (a one-shot), where it
+/// holds no layer until then.
+pub fn declare_layer_shader(shader: &Arc<FillShader>) {
+    let mut declared = DECLARED_LAYERS.lock().unwrap_or_else(|p| p.into_inner());
+    declared.retain(|shader| shader.strong_count() > 0);
+    declared.push(Arc::downgrade(shader));
+    LAYERS_DECLARED.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+/// How many layer shaders were declared (`declare_layer_shader`).
+#[inline]
+pub fn layer_shaders_declared() -> u64 {
+    LAYERS_DECLARED.load(std::sync::atomic::Ordering::Acquire)
+}
+/// Those declared, if any were since `seen` (updated).
+pub fn declared_layer_shaders(seen: &mut u64) -> Vec<Arc<FillShader>> {
+    let count = layer_shaders_declared();
+    if count == *seen {
+        return Vec::new();
+    }
+    *seen = count;
+    let declared = DECLARED_LAYERS.lock().unwrap_or_else(|p| p.into_inner());
+    declared
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .collect()
 }
 /// A shader fill's per-node uniforms (`Scene::set_shader_uniforms`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

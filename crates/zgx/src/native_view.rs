@@ -39,8 +39,10 @@ pub enum NativeContent {
     /// `Retained<NSView>` (see `zgx_desktop::native_view`).
     Platform(Rc<dyn Any>),
     /// The system's glass (see [`crate::glass`]).
+    Glass(crate::glass::GlassPane),
+    /// A group of iOS glass panes that merge (see [`crate::glass::glass_group`]).
     #[cfg(target_os = "ios")]
-    Glass(crate::glass::GlassContent),
+    GlassGroup(f32),
     /// The system's on and off control (see [`crate::native_control`]).
     #[cfg(target_os = "ios")]
     Toggle(Rc<crate::native_control::ToggleState>),
@@ -58,6 +60,7 @@ impl NativeContent {
     /// A short description for placeholders and diagnostics.
     pub fn label(&self) -> String {
         match self {
+            Self::Glass(_) => "Glass".into(),
             Self::Web(web) => {
                 let url = web.state().with_untracked(|state| state.url.clone());
                 if url.is_empty() {
@@ -76,7 +79,7 @@ impl NativeContent {
             }
             Self::Platform(_) => "Native view".into(),
             #[cfg(target_os = "ios")]
-            Self::Glass(_) => "Glass".into(),
+            Self::GlassGroup(_) => "Glass group".into(),
             #[cfg(target_os = "ios")]
             Self::Toggle(_) => "Switch".into(),
             #[cfg(target_os = "ios")]
@@ -100,6 +103,7 @@ struct Inner {
     next: Cell<u64>,
     revision: Cell<u64>,
     supported: Cell<bool>,
+    glass_supported: Cell<bool>,
     split: RefCell<Rc<PlaneSplit>>,
 }
 /// A window's mounted native views: provided to components by the desktop
@@ -131,6 +135,14 @@ impl NativeViews {
     /// No native views, and not supported until `set_supported`.
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Whether the host shows the system's glass (`crate::glass`).
+    pub fn set_glass_supported(&self, supported: bool) {
+        self.0.glass_supported.set(supported);
+    }
+    /// Whether the host shows the system's glass (`crate::glass`).
+    pub fn glass_supported(&self) -> bool {
+        self.0.glass_supported.get()
     }
     /// Whether this window composites native views itself. Without it (the
     /// software renderer, headless tests, platforms without a backend yet),

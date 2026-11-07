@@ -26,6 +26,8 @@ mod native_views;
 mod panic_recovery;
 #[path = "../reactive_dependencies.rs"]
 mod reactive_dependencies;
+#[path = "../shader_drive.rs"]
+mod shader_drive;
 #[path = "../widgets.rs"]
 mod widgets;
 

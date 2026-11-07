@@ -1075,9 +1075,9 @@ impl Focusable {
         match content {
             NativeContent::Web(web) => Some(Self::Web(web.clone())),
             NativeContent::Terminal(term) => Some(Self::Terminal(term.clone())),
-            NativeContent::Platform(_) => None,
+            NativeContent::Platform(_) | NativeContent::Glass(_) => None,
             #[cfg(target_os = "ios")]
-            NativeContent::Glass(_)
+            NativeContent::GlassGroup(_)
             | NativeContent::Toggle(_)
             | NativeContent::Tabs(_)
             | NativeContent::EdgeEffect(_)
@@ -1195,9 +1195,9 @@ fn placeholder(content: NativeContent) -> View {
                 }
             })
         }
-        NativeContent::Platform(_) => text(content.label()),
+        NativeContent::Platform(_) | NativeContent::Glass(_) => text(content.label()),
         #[cfg(target_os = "ios")]
-        NativeContent::Glass(_)
+        NativeContent::GlassGroup(_)
         | NativeContent::Toggle(_)
         | NativeContent::Tabs(_)
         | NativeContent::EdgeEffect(_)

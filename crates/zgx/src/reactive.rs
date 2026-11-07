@@ -707,6 +707,12 @@ impl Runtime {
         let _restore = Restore(&self.inner, self.inner.batch_depth.replace(0));
         self.flush();
     }
+    /// Whether a flush now would find nothing to run: no observer queued, and
+    /// no write waiting to queue one. `settle` then does nothing.
+    #[doc(hidden)]
+    pub fn nothing_due(&self) -> bool {
+        self.inner.queued.borrow().is_empty() && self.inner.pending.borrow().is_empty()
+    }
     /// Run queued observers. Reentrant writes join the current flush.
     pub fn flush(&self) {
         if self.inner.batch_depth.get() != 0 || self.inner.flushing.replace(true) {
@@ -1173,6 +1179,27 @@ mod tests {
     use super::*;
     /// Queued ids come out newest first, as a sort leaves them, whether
     /// they are close together (a bitmap orders them) or far apart.
+    /// `settle` skips its clocks on this: true only when it would run nothing.
+    #[test]
+    fn nothing_is_due_only_when_a_flush_would_run_nothing() {
+        let runtime = Runtime::new();
+        let value = runtime.signal(0);
+        let seen = Rc::new(Cell::new(0));
+        let (read, wrote) = (value.clone(), seen.clone());
+        let _effect = runtime.effect(move || wrote.set(read.get()));
+        runtime.flush();
+        assert!(runtime.nothing_due());
+        runtime.batch(|| {
+            value.set(1);
+            assert!(!runtime.nothing_due(), "a write waits in the batch");
+            assert_eq!(seen.get(), 0);
+            runtime.settle();
+            assert_eq!(seen.get(), 1, "settling runs it");
+            assert!(runtime.nothing_due());
+        });
+        assert!(runtime.nothing_due());
+    }
+
     #[test]
     fn queued_effects_are_ordered_newest_first() {
         let mut seed = 0x2545_f491_4f6c_dd1d_u64;

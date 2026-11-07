@@ -204,7 +204,7 @@ pub(crate) fn write_image(images: &Images, image: &zgx::image::ImageData) -> Res
         let mut png = Vec::new();
         image::write_buffer_with_format(
             &mut std::io::Cursor::new(&mut png),
-            image.pixels(),
+            &image.pixels_now(),
             image.width(),
             image.height(),
             image::ExtendedColorType::Rgba8,
@@ -213,10 +213,11 @@ pub(crate) fn write_image(images: &Images, image: &zgx::image::ImageData) -> Res
         return Ok(clipboard.store_image(png)?);
     }
     let _ = images;
+    let pixels = image.pixels_now();
     arboard::Clipboard::new()?.set_image(arboard::ImageData {
         width: image.width() as usize,
         height: image.height() as usize,
-        bytes: image.pixels().into(),
+        bytes: (&pixels[..]).into(),
     })?;
     Ok(())
 }

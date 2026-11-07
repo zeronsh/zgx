@@ -189,6 +189,11 @@ impl NativeHost {
         #[cfg(not(all(windows, feature = "webview2")))]
         let supported = cfg!(any(target_os = "macos", target_os = "ios"));
         natives.set_supported(supported);
+        #[cfg(target_os = "macos")]
+        natives.set_glass_supported(macos::glass_available());
+        // UIGlassEffect: iOS 26, the oldest this target runs on.
+        #[cfg(target_os = "ios")]
+        natives.set_glass_supported(true);
         Self {
             natives,
             diagnostics: Default::default(),

@@ -2355,7 +2355,17 @@ export type NodeProps = {
 	-- the box passes through its `layer` function.
 	layer_shader: LayerShader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
-	layer_params: { read [number]: Color | { number } }?,
+	layer_params: ({ read [number]: Color | { number } } | (() -> { read [number]: Color | { number } }))?,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: number?,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: number?,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: boolean?,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: boolean?,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Reactive<boolean>?,
 	-- Events.
 	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
@@ -2752,6 +2762,16 @@ export type Props = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -3043,7 +3063,12 @@ export type Props_mask = (Bitmap | MaskOptions)?
 export type Props_bg_shader = Shader?
 export type Props_shader_params = { read [number]: Color | { number } }?
 export type Props_layer_shader = LayerShader?
-export type Props_layer_params = { read [number]: Color | { number } }?
+export type Props_layer_params = ({ read [number]: Color | { number } } | (() -> { read [number]: Color | { number } }))?
+export type Props_layer_bleed = number?
+export type Props_layer_reach = number?
+export type Props_layer_clock = boolean?
+export type Props_shader_clock = boolean?
+export type Props_layer_on = Reactive<boolean>?
 export type Props_on_click = (ClickHandler | Handler | Action)?
 export type Props_on_press = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_release = (((e: PointerEvent) -> ...unknown) | Action)?
@@ -3386,6 +3411,16 @@ export type ContainerProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -3797,6 +3832,16 @@ export type ScrollProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -4224,6 +4269,16 @@ export type TextProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -4619,6 +4674,16 @@ export type MarkdownViewProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -5084,6 +5149,16 @@ export type RichProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -5473,6 +5548,16 @@ export type ImageProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -5879,6 +5964,16 @@ export type SvgProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -6373,6 +6468,16 @@ export type Scene3DProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -6785,6 +6890,16 @@ export type CanvasProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -7206,6 +7321,16 @@ export type CheckboxProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -7605,6 +7730,16 @@ export type InputProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -8105,6 +8240,16 @@ export type ProgressProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -8495,6 +8640,16 @@ export type SliderProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -8903,6 +9058,16 @@ export type SegmentedProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -9304,6 +9469,16 @@ export type StepperProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -9706,6 +9881,16 @@ export type DisclosureProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -10120,6 +10305,16 @@ export type AccordionProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -10507,6 +10702,16 @@ export type SectionProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -10920,6 +11125,16 @@ export type SeparatorProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -11315,6 +11530,16 @@ export type TabsProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -11732,6 +11957,16 @@ export type TreeProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -12145,6 +12380,16 @@ export type DataGridProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -12554,6 +12799,16 @@ export type CalendarProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -12956,6 +13211,16 @@ export type DatePickerProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -13356,6 +13621,16 @@ export type TimeFieldProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -13755,6 +14030,16 @@ export type ComboboxProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -14162,6 +14447,16 @@ export type CommandPaletteProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -14557,6 +14852,16 @@ export type SelectProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -14959,6 +15264,16 @@ export type SplitProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -15075,6 +15390,45 @@ export type SplitProps = {
 	max: number?,
 	-- The other pane's smallest size: the divider stops short of it.
 	min_rest: number?,
+}
+-- A text in a row, for `ListEstimate`.
+export type ListEstimateText = {
+	-- The field holding it.
+	field: string,
+	-- Its font's size (14), and a line's height (1.4 times that).
+	size: number?,
+	line: number?,
+	-- A narrow character's average width in ems (0.5); wide ones count an em.
+	char: number?,
+	-- An average word's length in characters (5): wrapping leaves about half of
+	-- one unused on each line.
+	word: number?,
+	-- Its column: `share` of (the list less `inset`, at most `most`, less `minus`).
+	inset: number?,
+	most: number?,
+	minus: number?,
+	share: number?,
+	-- Clamped to this many lines, and what shows beyond them then.
+	most_lines: number?,
+	beyond: number?,
+	-- It's Markdown: what each kind of source line adds to its wrapped lines.
+	markdown: { paragraph: number?, heading: number?, item: number?, code: number?, table: number? }?,
+}
+-- How a row's data makes its height (`ui.list`'s `estimate`), or a part of it.
+export type ListEstimate = {
+	-- Points it always adds.
+	height: number?,
+	-- Its text, or several.
+	text: ListEstimateText | { ListEstimateText }?,
+	-- A part for each item of a list field.
+	each: string?,
+	item: ListEstimate?,
+	-- A part by a field's value.
+	by: string?,
+	cases: { [string]: ListEstimate }?,
+	default: ListEstimate?,
+	-- A part for each field that holds anything.
+	has: { [string]: ListEstimate }?,
 }
 -- A virtualized list: only visible rows are built.
 export type ListProps = {
@@ -15379,6 +15733,16 @@ export type ListProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -15500,6 +15864,10 @@ export type ListProps = {
 	-- stay put as estimates are measured. With `key`, heights go with
 	-- their items.
 	measured: boolean?,
+	-- With `measured`, `data` and `key`: how a row's data makes its height, so
+	-- rows out of view stand at about what they will be and the scrollbar
+	-- tells the truth. Declared once; no script runs per row.
+	estimate: ListEstimate?,
 	-- Row `index`'s plain text: what copying a selection over rows the list
 	-- has not mounted takes. Without it, a row's text is what its row's
 	-- description shows (its texts, a row's side by side with tabs).
@@ -15859,6 +16227,16 @@ export type LayerProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -16269,6 +16647,16 @@ export type ModalProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -16697,6 +17085,16 @@ export type PopoverProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -17131,6 +17529,16 @@ export type MenuItemProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -17529,6 +17937,16 @@ export type SubmenuProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -17945,6 +18363,16 @@ export type WebViewProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -18360,6 +18788,16 @@ export type TerminalProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -18748,6 +19186,16 @@ export type GlassProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -18832,6 +19280,8 @@ export type GlassProps = {
 	[number]: Child,
 	-- `"regular"` (the default) or `"clear"`.
 	variant: (string | ReadOnlyState<string>)?,
+	-- The more see-through of the system's glasses: `variant = "clear"`.
+	clear: (boolean | ReadOnlyState<boolean>)?,
 	-- A colour the glass takes on.
 	tint: Props_bg,
 	-- Answers presses as the system's controls do.
@@ -19144,6 +19594,16 @@ export type GlassGroupProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -19531,6 +19991,16 @@ export type SymbolProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -19927,6 +20397,16 @@ export type NativeSwitchProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -20396,6 +20876,16 @@ export type NativeTabsProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -20790,6 +21280,16 @@ export type SlotProps = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -21231,6 +21731,16 @@ export type EachOptions = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -21636,6 +22146,16 @@ export type PresenceOptions = {
 	layer_shader: Props_layer_shader,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
 	-- Primary pointer down and up.
@@ -21886,7 +22406,7 @@ declare ui: {
 	-- page for `id`, made with `opts` the first time, kept across reloads.
 	web: ((opts: WebOptions?) -> Web) & ((id: string, opts: WebOptions?) -> Web),
 	terminal: (props: TerminalProps) -> Node,
-	-- The system's glass where it has one (iOS), a blur under a tint elsewhere.
+	-- A box of glass: the system's own where it has one (macOS 26, iOS), drawn elsewhere.
 	glass: (props: GlassProps) -> Node,
 	-- Glass inside merges within `spacing` points, as the system's does.
 	glass_group: (props: GlassGroupProps) -> Node,
@@ -22235,8 +22755,9 @@ declare ui: {
 	shader: (source: string, opts: { fps: number? }?) -> Shader,
 	-- A WGSL layer shader: `fn layer(input: LayerInput) -> vec4<f32>`, with
 	-- input.color (the layer's pixel, straight alpha), input.p, input.size,
-	-- input.time, input.scale and input.params; `zgx_sample(p)` reads the
-	-- layer at another point of the box.
+	-- input.time, input.scale, input.params and input.radii (the box's corners);
+	-- `zgx_sample(p)` reads the layer at another point, and `zgx_backdrop(p)`
+	-- what lies behind the node there.
 	layer_shader: (source: string, opts: { fps: number? }?) -> LayerShader,
 	-- Sorts `list` in place, stably, by a field of each item (`"price"`) or
 	-- a function of it (called once an item); returns it. Use it over

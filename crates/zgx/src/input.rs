@@ -337,6 +337,8 @@ pub struct EventContext {
     prevented: bool,
     focus: Option<NodeId>,
     capture: Option<Option<NodeId>>,
+    /// The ancestors a press's capture covers most of (`capture_filling`).
+    capture_fills: Vec<NodeId>,
     pointer_modifiers: Modifiers,
     click_count: u8,
     drag_threshold: f32,
@@ -366,6 +368,7 @@ impl EventContext {
             prevented: false,
             focus: None,
             capture: None,
+            capture_fills: Vec::new(),
             pointer_modifiers: Modifiers::default(),
             click_count: 0,
             drag_threshold: DRAG_THRESHOLD,
@@ -483,6 +486,20 @@ impl EventContext {
     /// Focus this node once the event is delivered.
     pub fn focus(&mut self) {
         self.focus = Some(self.current_target);
+    }
+    /// `capture_pointer` for a press a node only shows or activates, naming
+    /// the ancestors it covers most of: a drag on one is still its to start
+    /// (`keeps_press_from_drag`), as nothing else of that ancestor is there to grab.
+    pub(crate) fn capture_filling(&mut self, fills: Vec<NodeId>) {
+        self.capture_pointer();
+        self.capture_fills = fills;
+    }
+    /// Whether what captured this press keeps it from a drag on the listener
+    /// running: a control inside it does, as a tab's close button keeps its
+    /// press from the tab; one covering most of it doesn't, as a row that's
+    /// all button is still dragged by that button.
+    pub(crate) fn keeps_press_from_drag(&self) -> bool {
+        self.capture.is_some() && !self.capture_fills.contains(&self.current_target)
     }
     /// Whether a listener so far asked to capture or release the pointer.
     pub(crate) fn capture_requested(&self) -> bool {

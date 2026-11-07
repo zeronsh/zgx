@@ -39,6 +39,19 @@ impl VariableHeights {
         self.end.set(true);
         self
     }
+    /// Update many heights, passing once.
+    pub fn set_heights(&self, rows: &[(usize, f32)]) {
+        let mut changed = false;
+        {
+            let mut index = self.index.borrow_mut();
+            for (row, height) in rows {
+                changed |= index.set_height(*row, *height).unwrap_or(false);
+            }
+        }
+        if changed {
+            self.changed();
+        }
+    }
     fn changed(&self) {
         self.revision
             .update(|revision| *revision = revision.wrapping_add(1));
@@ -123,7 +136,7 @@ pub fn variable_virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     key: impl FnMut(usize) -> K + 'static,
     build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
 ) -> View {
-    variable_list(offset, heights, overscan, key, build, false)
+    variable_list(NoWatch, offset, heights, overscan, key, build, false)
 }
 
 /// Virtualize naturally sized rows, updating a positional height estimate cache.
@@ -143,7 +156,7 @@ pub fn measured_virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     key: impl FnMut(usize) -> K + 'static,
     build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
 ) -> View {
-    variable_list(offset, heights, overscan, key, build, true)
+    variable_list(NoWatch, offset, heights, overscan, key, build, true)
 }
 /// Virtualize keyed rows of natural height, keeping each row's height by key.
 ///
@@ -156,6 +169,37 @@ pub fn measured_virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
 /// insertion and removal by key. Configure end anchoring and the default
 /// height on `heights`; mounted rows follow the `measured_virtual_list` rules.
 pub fn measured_rows<K: Eq + std::hash::Hash + Clone + 'static>(
+    offset: Signal<f32>,
+    heights: VariableHeights,
+    overscan: usize,
+    rows: impl FnMut() -> Vec<K> + 'static,
+    estimate: impl FnMut(&[K], usize) -> f32 + 'static,
+    build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
+) -> View {
+    rows_of(NoWatch, offset, heights, overscan, rows, estimate, build)
+}
+/// `measured_rows`, with `watch` told of each pass of the list.
+pub fn measured_rows_watched<K: Eq + std::hash::Hash + Clone + 'static>(
+    watch: Rc<dyn RowsWatch>,
+    offset: Signal<f32>,
+    heights: VariableHeights,
+    overscan: usize,
+    rows: impl FnMut() -> Vec<K> + 'static,
+    estimate: impl FnMut(&[K], usize) -> f32 + 'static,
+    build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
+) -> View {
+    rows_of(
+        Watched(watch),
+        offset,
+        heights,
+        overscan,
+        rows,
+        estimate,
+        build,
+    )
+}
+fn rows_of<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
+    watch: W,
     offset: Signal<f32>,
     heights: VariableHeights,
     overscan: usize,
@@ -282,9 +326,15 @@ pub fn measured_rows<K: Eq + std::hash::Hash + Clone + 'static>(
             cx.retain(effect);
         }
         let key = move |index: usize| described.borrow()[index].clone();
-        measured_virtual_list(offset, heights, overscan, key, move |index, key, cx| {
-            build(index, key, cx)
-        })
+        variable_list(
+            watch,
+            offset,
+            heights,
+            overscan,
+            key,
+            move |index, key, cx| build(index, key, cx),
+            true,
+        )
     })
 }
 struct Entry {
@@ -312,7 +362,34 @@ fn row_style(width: f32, height: f32, measured: bool) -> crate::scene::Style {
         }
     }
 }
-fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
+/// Told of each pass of a measured list: its width, and which rows are
+/// mounted. It may give rows out of view heights (`VariableHeights::set_heights`).
+pub trait RowsWatch {
+    /// A pass of the list at `width`.
+    fn pass(&self, width: f32, mounted: &mut dyn Iterator<Item = usize>);
+}
+/// A list's watch, as a type: one with none has none of this in its code.
+trait WatchKind: 'static {
+    const ON: bool;
+    fn pass<K>(&self, width: f32, entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>);
+}
+struct NoWatch;
+impl WatchKind for NoWatch {
+    const ON: bool = false;
+    fn pass<K>(&self, _: f32, _: &HashMap<K, Entry, rustc_hash::FxBuildHasher>) {}
+}
+struct Watched(Rc<dyn RowsWatch>);
+impl WatchKind for Watched {
+    const ON: bool = true;
+    fn pass<K>(&self, width: f32, entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>) {
+        let mut mounted = entries
+            .values()
+            .map(|entry| entry.index.with_untracked(|i| *i));
+        self.0.pass(width, &mut mounted);
+    }
+}
+fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
+    watch: W,
     offset: Signal<f32>,
     heights: VariableHeights,
     overscan: usize,
@@ -479,7 +556,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     // batched layout publication produces one measurement pass.
                     let mut updates = Vec::new();
                     for (entry_key, entry) in &entries {
-                        let index = entry.index.get();
+                        // (This pass alone writes it, and goes round again when
+                        // it does: `reindexed`.)
+                        let index = entry.index.with_untracked(|index| *index);
                         let (observed_width, observed_height) =
                             entry.measurement.as_ref().unwrap().get();
                         if observed_width != width || width <= 0. || !observed_height.is_finite() {
@@ -505,6 +584,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     if measurement_changed {
                         heights.changed();
                     }
+                }
+                if W::ON {
+                    runtime.untracked(|| watch.pass(width, &entries));
                 }
                 let revision = heights.revision.get();
                 // Rows added or removed above the anchor row: it is as many
@@ -826,8 +908,16 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             false
                         }
                     });
+                    let mut reindexed = false;
                     for (key, index, ..) in &keys {
-                        entries[key].index.set(*index);
+                        let entry = &entries[key];
+                        if entry.index.with_untracked(|was| was != index) {
+                            entry.index.set(*index);
+                            reindexed = true;
+                        }
+                    }
+                    if reindexed && measured {
+                        mounted_revision.update(|value| *value = value.wrapping_add(1));
                     }
                     {
                         let mut scene = ui.scene.borrow_mut();

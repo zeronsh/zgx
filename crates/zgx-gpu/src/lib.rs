@@ -3,7 +3,7 @@
 //! GPU glyph atlas; stable text never reshapes on paint or compositor updates.
 #![warn(missing_docs)]
 use cosmic_text::{Buffer, CacheKey, FontSystem, Metrics, SwashCache, SwashContent};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
 use zgx::scene::{Color, NodeId, NodeKind, Rect, Scene};
 
@@ -160,6 +160,8 @@ pub struct GpuStats {
     pub damaged_pixels: u64,
     /// Cached layers repainted.
     pub layer_repaints: usize,
+    /// Copies of the target taken for blended and backdrop-reading layers.
+    pub backdrop_copies: usize,
     /// Of those, the ones repainted only where the window's damage reaches
     /// them (`prepare_layer`'s `shown`).
     pub layer_partial_repaints: usize,
@@ -194,6 +196,8 @@ pub struct DebugCacheStats {
     pub image_textures: usize,
     /// Their bytes.
     pub image_bytes: usize,
+    /// Image textures held softer than drawn, for the budget.
+    pub images_softer: usize,
     /// Bytes of rasterized canvases and decorations.
     pub canvas_raster_bytes: usize,
     /// Bytes of rasterized SVGs.
@@ -205,6 +209,8 @@ pub struct DebugCacheStats {
     pub vertex_buffers: usize,
     /// Cached layer textures.
     pub layer_textures: usize,
+    /// Layers that went coarser for their budget, and are still layers.
+    pub layers_coarser: usize,
     /// Their bytes.
     pub layer_bytes: usize,
 }
@@ -226,8 +232,9 @@ const IMAGES_GONE_COUNT: usize = 256;
 type ImageTexture = (wgpu::BindGroup, usize, Option<wgpu::Texture>, (u32, u32));
 /// A kept file's pixels aren't decoded yet (`ImageData::pixels_at`).
 const IMAGE_PENDING: &str = "an image's pixels are decoding";
-const IMAGE_COARSER: &str =
-    "images past the budget of image textures are drawn at a lower resolution";
+/// The longest side a texture is cut to past the budget (`upload_image_at`):
+/// however full it is, a picture shows, and this little goes over it.
+const IMAGE_LEAST_SIDE: u32 = 64;
 /// The size a texture of a `width` by `height` image holds when drawn at
 /// `drawn` device pixels (`None`: all of it): scaled down, its shape kept,
 /// to the least that is at least that large on both axes; never up.
@@ -242,10 +249,14 @@ fn fitted_size(width: u32, height: u32, drawn: Option<(f32, f32)>) -> (u32, u32)
     let side = |v: u32| ((v as f32 * scale).ceil() as u32).clamp(1, v.max(1));
     (side(width), side(height))
 }
+/// `size` by `scale`, its shape kept, at most `image`'s own size.
+fn scaled_size(size: (u32, u32), image: &zgx::image::ImageData, scale: f32) -> (u32, u32) {
+    let side = |v: u32, full: u32| ((v as f32 * scale).ceil() as u32).clamp(1, full.max(1));
+    (side(size.0, image.width()), side(size.1, image.height()))
+}
 use zgx::image::resample::{halve, shrink};
 /// Why an image can have no texture: a frame goes on without it.
-const IMAGE_MISSES: [&str; 3] = [
-    "the images one frame draws exceed the 64 MiB budget of image textures",
+const IMAGE_MISSES: [&str; 2] = [
     "visible images exceed the budget of 16,384",
     "image exceeds GPU texture dimensions",
 ];
@@ -298,6 +309,23 @@ impl Region {
             fade: [0.; 4],
             color: [[0.; 4]; 3],
             tint: [0.; 4],
+        }
+    }
+    /// A layer shader's: its uniforms, and in lanes a fill's doesn't read,
+    /// the box's corner `radii`, how far it paints and reads past the box
+    /// (`LayerShader::bleed`), where the layer's pixels lie from the box's
+    /// top-left, and what it can read of the backdrop from there.
+    fn layer_uniforms(
+        layer: &zgx::scene::LayerShader,
+        radii: [f32; 4],
+        painted: [f32; 4],
+        readable: [f32; 4],
+    ) -> Self {
+        Self {
+            fade: radii,
+            color: [painted, readable, [0.; 4]],
+            tint: [layer.bleed, 0., 0., 0.],
+            ..Self::uniforms(layer.uniforms)
         }
     }
     /// Whether it leaves every pixel of `bounds` as it is (`interior`).
@@ -1031,6 +1059,23 @@ fn glyphs_of<'a>(
         None => styled_glyphs(glyphs, runs, scale, |_, _| 0),
     }
 }
+/// The scale below which text is drawn for a low-density screen: glyphs on
+/// whole device pixels (`styled_glyphs`) and their coverage firmed
+/// (`FIRM_COVERAGE`). At 2x and over, where a pixel is too small to see,
+/// glyphs keep their subpixel places and outlines' plain coverage.
+const SHARP_TEXT_BELOW: f32 = 2.;
+/// A glyph quad's `options.y` below `SHARP_TEXT_BELOW`: a mask whose coverage
+/// `draw.wgsl` firms by its colour (`firm`).
+const FIRM_GLYPH: f32 = 1.25;
+/// A glyph's `options.y`: straight alpha, firmed below `SHARP_TEXT_BELOW` if a
+/// mask (a colour glyph's own colours stay as they are).
+fn glyph_texture(color: bool, scale: f32) -> f32 {
+    if !color && scale < SHARP_TEXT_BELOW {
+        FIRM_GLYPH
+    } else {
+        1.
+    }
+}
 /// `glyphs_of`, each glyph's run from `style` (given its line).
 fn styled_glyphs<'a>(
     mut glyphs: Vec<Glyph>,
@@ -1041,8 +1086,25 @@ fn styled_glyphs<'a>(
     for run in runs {
         // Most texts are one line: one allocation at its size.
         glyphs.reserve(run.glyphs.len());
+        // Below 2x, the line's start on a whole pixel, and each glyph on one
+        // counted from there: a line that only moves keeps its spacing.
+        let sharp = scale < SHARP_TEXT_BELOW;
+        let line_start = match run.glyphs.first() {
+            Some(glyph) if sharp => (glyph.x + glyph.font_size * glyph.x_offset) * scale,
+            _ => 0.,
+        };
         for glyph in run.glyphs {
-            let p = glyph.physical((0., 0.), scale);
+            // Below 2x, each glyph on the nearest whole device pixel (its
+            // subpixel bin zero), as Windows' own text is: a stem a quarter
+            // pixel off lands on two columns at part strength, which reads
+            // as blur on a ~96 dpi screen. Its line keeps its layout.
+            let p = if sharp {
+                let exact = (glyph.x + glyph.font_size * glyph.x_offset) * scale;
+                let placed = line_start.round() + (exact - line_start).round();
+                glyph.physical((placed - exact, 0.), scale)
+            } else {
+                glyph.physical((0., 0.), scale)
+            };
             let run_index = style(run.line_i, glyph);
             glyphs.push(Glyph {
                 key: p.cache_key,
@@ -1542,6 +1604,7 @@ fn add_layer_stats(stats: &mut GpuStats, result: &GpuStats) {
     stats.draw_calls += result.draw_calls;
     stats.render_passes += result.render_passes;
     stats.blur_passes += result.blur_passes;
+    stats.backdrop_copies += result.backdrop_copies;
     stats.effect_passes += result.effect_passes;
     stats.instances += result.instances;
     stats.shaped_nodes += result.shaped_nodes;
@@ -1565,9 +1628,10 @@ const LAYER_BUDGET: usize = 64 * 1024 * 1024;
 /// retry passes what is left).
 const LAYER_ROOM: usize = usize::MAX;
 const MB: f32 = 1024. * 1024.;
-/// Raster scales a layer renders at, in √2 steps from the device's: half
-/// to four times. Beyond, a texture grows faster than detail shows.
-const RASTER_STEPS: std::ops::RangeInclusive<i32> = -2..=4;
+/// Raster scales a layer renders at, in √2 steps from the device's: a
+/// sixteenth to four times. Above, a texture grows faster than detail shows;
+/// below, what's scaled down that far is a sliver of what it was laid out as.
+const RASTER_STEPS: std::ops::RangeInclusive<i32> = -8..=4;
 /// The raster step for content magnified `magnification` times: the
 /// nearest √2 step, kept while within three quarters of a step of
 /// `current`, so a scale animation re-renders a layer once per step it
@@ -2148,7 +2212,12 @@ impl GpuStats {
     }
 }
 /// A backdrop filter's bounds, effects and corner radii (`Draw::blur`).
-type Backdrop = (Rect, zgx::scene::Effects, [f32; 4]);
+type Backdrop = (
+    Rect,
+    zgx::scene::Effects,
+    [f32; 4],
+    [Option<zgx::scene::RoundRect>; 2],
+);
 /// What a draw's quads sample: the glyph atlas, an image (or the effect
 /// atlas) by id, or a cached layer. One of them, never two.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2223,6 +2292,10 @@ struct BlurRecord {
     area: [f32; 4],
     shape: [f32; 4],
     slots: [u32; 4],
+    round0: [f32; 4],
+    radii0: [f32; 4],
+    round1: [f32; 4],
+    radii1: [f32; 4],
 }
 /// A slot of the blur atlas (`Slot` in `blur.wgsl`).
 #[repr(C)]
@@ -2250,6 +2323,8 @@ struct Filter {
     outputs: Vec<Rect>,
     effects: zgx::scene::Effects,
     corners: [f32; 4],
+    /// The rounded clips around it.
+    rounded: [Option<zgx::scene::RoundRect>; 2],
 }
 /// Backdrop blur pipelines (blur.wgsl): average each area down into its
 /// atlas slots, blur them across and down at that size, then draw them back
@@ -3353,6 +3428,9 @@ impl GpuContext {
         let noop = d3d11.is_some();
         #[cfg(not(d3d11))]
         let noop = false;
+        // `ZGX_GPU_NOOP`: the renderer's CPU work with no driver or JIT, for
+        // the instruction gate (fx_bench).
+        let noop = noop || std::env::var_os("ZGX_GPU_NOOP").is_some();
         let attempts: &[wgpu::Backends] = if noop {
             &[wgpu::Backends::NOOP]
         } else if cfg!(all(windows, feature = "vulkan")) {
@@ -3390,10 +3468,7 @@ impl GpuContext {
             descriptor.backend_options.dx12.presentation_system =
                 wgpu::Dx12SwapchainKind::DxgiFromVisual;
             descriptor.backend_options.dx12.shader_compiler = compiler.clone();
-            #[cfg(d3d11)]
-            {
-                descriptor.backend_options.noop.enable = noop;
-            }
+            descriptor.backend_options.noop.enable = noop;
             descriptor.flags = instance_flags(descriptor.flags, !cfg!(debug_assertions));
             // Which compiler an app's shaders meet on Direct3D 12, and its
             // flags (`app_fragment`).
@@ -3957,6 +4032,18 @@ pub struct GpuRenderer {
     images_gone: rustc_hash::FxHashSet<u64>,
     /// Frames drawn, for `image_drawn`.
     image_frame: u64,
+    /// The bytes of textures this frame asked for, their pixels decoding:
+    /// each decodes to its share of the budget, not all of it.
+    images_decoding: usize,
+    /// Images and layers that went softer for their budgets: no issue, the
+    /// budget doing its job, but `zgx inspect memory` shows them. Written only
+    /// as that happens, and read only as asked (`debug_cache_stats`).
+    images_softer: FxHashMap<u64, usize>,
+    /// What one image's texture may take while images drawn together don't
+    /// all fit: the large ones share what the small ones leave, evenly
+    /// (`share_images`).
+    image_share: usize,
+    layers_coarser: FxHashSet<NodeId>,
     /// GPU views' textures, by view (`viewport`): none until one shows.
     views: Option<Box<viewport::Views>>,
     /// Wakes the host when a GPU view's plane has a drawable for a frame it
@@ -4061,17 +4148,20 @@ pub struct GpuRenderer {
     /// (`prepare_fill`); a window's never does. (Tests of a window's frames
     /// turn it off.)
     offscreen_waits: bool,
+    debug_waits_for_shaders: bool,
+    fill_shaders_declared: u64,
+    layers_declared: u64,
     /// The image effects' pipeline (image_effects.wgsl), made when an image
     /// first draws with one.
     image_effect_pipeline: std::cell::OnceCell<wgpu::RenderPipeline>,
     fill_shaders: FxHashMap<u64, Arc<zgx::decoration::FillShader>>,
     /// Layer shaders' pipelines by shader id (`None`: it failed to compile).
-    filter_pipelines: FxHashMap<u64, Option<wgpu::RenderPipeline>>,
+    filter_pipelines: FxHashMap<u64, compile::Compiled<wgpu::RenderPipeline>>,
     /// Their shaders, to tell when no scene holds one any more (`trim`).
     filter_shaders: FxHashMap<u64, Arc<zgx::decoration::FillShader>>,
     /// Blended layers' pipelines (blend.wgsl): `BLEND_PLAIN`'s, and each
     /// layer shader's by its id (`None`: it failed to compile).
-    blend_pipelines: FxHashMap<u64, Option<wgpu::RenderPipeline>>,
+    blend_pipelines: FxHashMap<u64, compile::Compiled<wgpu::RenderPipeline>>,
     /// Their group 2 (the backdrop) and layout, made with the first.
     blend_layouts: std::cell::OnceCell<(wgpu::BindGroupLayout, wgpu::PipelineLayout)>,
     /// Copies of the target under blended layers, one per target size
@@ -4613,6 +4703,10 @@ impl GpuRenderer {
             image_drawn: FxHashMap::default(),
             images_gone: Default::default(),
             image_frame: 0,
+            images_decoding: 0,
+            images_softer: FxHashMap::default(),
+            image_share: usize::MAX,
+            layers_coarser: FxHashSet::default(),
             views: None,
             #[cfg(target_os = "macos")]
             plane_wake: None,
@@ -4644,6 +4738,9 @@ impl GpuRenderer {
             fill_pipelines: FxHashMap::default(),
             fills_declared: 0,
             offscreen_waits: true,
+            debug_waits_for_shaders: false,
+            fill_shaders_declared: 0,
+            layers_declared: 0,
             filter_pipelines: FxHashMap::default(),
             blend_pipelines: FxHashMap::default(),
             blend_layouts: std::cell::OnceCell::new(),
@@ -4706,6 +4803,12 @@ impl GpuRenderer {
         );
         report.add(
             "gpu",
+            "images softer for the budget",
+            Some(stats.images_softer),
+            None,
+        );
+        report.add(
+            "gpu",
             "layers",
             Some(stats.layer_textures),
             Some(stats.layer_bytes),
@@ -4723,10 +4826,14 @@ impl GpuRenderer {
                 (false, true) => ", transformed",
                 (false, false) => "",
             };
+            let coarser = match self.layers_coarser.contains(id) {
+                true => ", coarser for its budget",
+                false => "",
+            };
             report.add(
                 "gpu layer",
                 format!(
-                    "@{} {}x{} px at {:.2}x, {:.1} MiB live{state}",
+                    "@{} {}x{} px at {:.2}x, {:.1} MiB live{state}{coarser}",
                     id.number(),
                     (w * layer.uv[0]).round(),
                     (h * layer.uv[1]).round(),
@@ -4787,11 +4894,17 @@ impl GpuRenderer {
             swash_outlines: self.swash.outline_command_cache.len(),
             image_textures: self.images.len(),
             image_bytes: self.images.values().map(|i| i.1).sum(),
+            images_softer: (self.images_softer.keys())
+                .filter(|id| self.images.contains_key(id))
+                .count(),
             canvas_raster_bytes: self.canvases.bytes(),
             svg_raster_bytes: self.svgs.bytes(),
             vertex_buffer_bytes: self.vertex_capacity,
             vertex_buffers,
             layer_textures: self.layers.len(),
+            layers_coarser: (self.layers_coarser.iter())
+                .filter(|id| self.layers.contains_key(id))
+                .count(),
             layer_bytes: self.layers.values().map(|l| l.bytes).sum(),
         }
     }
@@ -5079,10 +5192,14 @@ impl GpuRenderer {
             }
         }
         let presented = std::mem::take(&mut self.present_stats);
-        if compile::declared() != self.fills_declared {
+        if compile::declared() + zgx::decoration::layer_shaders_declared() != self.fills_declared {
             self.start_declared_fills();
         }
         self.image_frame += 1;
+        self.images_decoding = 0;
+        if !self.images_softer.is_empty() {
+            self.share_images();
+        }
         if self.image_frame == LAUNCH_FRAMES {
             // An app that never goes idle checks its font cache here, once.
             font_cache_check();
@@ -5142,6 +5259,14 @@ impl GpuRenderer {
         }
         awaited
     }
+    /// The size of `image`'s texture, if it has one. For tests and devtools.
+    #[doc(hidden)]
+    pub fn debug_image_size(&self, image: &zgx::image::ImageData) -> Option<(u32, u32)> {
+        self.images.get(&image.id()).map(|entry| match entry.3 {
+            (0, 0) => (image.width(), image.height()),
+            held => held,
+        })
+    }
     /// Whether a kept file's pixels were uploaded since the last call: their
     /// decoded copy may go (`zgx::image::release_decoded`).
     pub fn take_images_uploaded(&mut self) -> bool {
@@ -5153,15 +5278,13 @@ impl GpuRenderer {
     pub fn take_issues(&mut self) -> Vec<String> {
         std::mem::take(&mut self.issues)
     }
-    /// `warn` for what is said once per `key` (a layer's number), whatever
-    /// numbers its message gives as they change.
+    /// A layer went coarser for its budget: `zgx inspect memory` shows it.
     #[cold]
-    fn warn_keyed(&mut self, key: (&str, u32), issue: String) {
-        let key = format!("{}@{}", key.0, key.1);
-        if !self.warned.contains(&key) {
-            self.warned.push(key);
-            self.issues.push(issue);
-        }
+    fn note_layer_coarser(&mut self, id: NodeId) {
+        let layers = &self.layers;
+        self.layers_coarser
+            .retain(|other| *other == id || layers.contains_key(other));
+        self.layers_coarser.insert(id);
     }
     /// The bytes isolated layers' textures may take together: four of the
     /// window's frames, and at least `LAYER_BUDGET`. A layer as large as the
@@ -5464,6 +5587,7 @@ impl GpuRenderer {
         stats.damaged_pixels += layer_stats.damaged_pixels;
         stats.draw_calls += layer_stats.draw_calls;
         stats.render_passes += layer_stats.render_passes;
+        stats.backdrop_copies += layer_stats.backdrop_copies;
         stats.blur_passes += layer_stats.blur_passes;
         stats.effect_passes += layer_stats.effect_passes;
         stats.instances += layer_stats.instances;
@@ -5693,23 +5817,7 @@ impl GpuRenderer {
             }
         }
         if coarser {
-            let pixels = pixels(1.) * 4.;
-            self.warn_keyed(
-                ("layer coarser", id.number()),
-                format!(
-                    "isolated layer @{} ({:.1} MiB at the device's scale) is past {}: it \
-                     rasterizes coarser",
-                    id.number(),
-                    pixels / MB,
-                    match pixels as usize > budget {
-                        true => format!(
-                            "the budget of isolated layers ({:.0} MiB)",
-                            budget as f32 / MB
-                        ),
-                        false => "the GPU's texture size".to_string(),
-                    },
-                ),
-            );
+            self.note_layer_coarser(id);
         }
         let device_scale = self.scale;
         let scale = device_scale * factor;
@@ -5853,33 +5961,10 @@ impl GpuRenderer {
             existing = self.layers.get(&id).map_or(0, |l| l.bytes);
             used = self.layers.values().map(|l| l.bytes).sum();
         }
-        if !self.layers.contains_key(&id) && self.layers.len() >= 1024 {
-            self.warn("past 1024 isolated layers: they go on, each as coarse as the budget needs");
-        }
         // Past the budget or the texture limits: again, in the room left,
         // coarser. Once: a texture of one texel still takes its 64 by 64.
         if (used - existing + bytes > budget || width > limit || height > limit) && room == budget {
-            let others = self.layers.len() - usize::from(existing > 0);
-            let live: usize = (self.layers.iter())
-                .filter(|(other, _)| **other != id)
-                .map(|(_, layer)| layer.live_bytes())
-                .sum();
-            self.warn_keyed(
-                ("layer past the budget", id.number()),
-                format!(
-                    "isolated layer @{} ({}x{} px, {:.1} MiB) is past the budget of isolated \
-                     layers ({:.0} MiB): {} others hold {:.1} MiB allocated, {:.1} MiB of it \
-                     live; it rasterizes coarser",
-                    id.number(),
-                    width,
-                    height,
-                    bytes as f32 / MB,
-                    budget as f32 / MB,
-                    others,
-                    (used - existing) as f32 / MB,
-                    live as f32 / MB,
-                ),
-            );
+            self.note_layer_coarser(id);
             let room = budget.saturating_sub(used - existing).min(budget - 1);
             return self.prepare_layer(scene, id, magnified, exact_around, shown, stats, room);
         }
@@ -6046,9 +6131,9 @@ impl GpuRenderer {
     fn fill_pipeline(&self, shading: Shading) -> Option<&wgpu::RenderPipeline> {
         match shading {
             Shading::Fill(id) => self.fill_pipelines.get(&id)?.get(),
-            Shading::Filter(id) => self.filter_pipelines.get(&id)?.as_ref(),
-            Shading::Blend => self.blend_pipelines.get(&BLEND_PLAIN)?.as_ref(),
-            Shading::FilterBlend(id) => self.blend_pipelines.get(&id)?.as_ref(),
+            Shading::Filter(id) => self.filter_pipelines.get(&id)?.get(),
+            Shading::Blend => self.blend_pipelines.get(&BLEND_PLAIN)?.get(),
+            Shading::FilterBlend(id) => self.blend_pipelines.get(&id)?.get(),
             Shading::ImageEffect => self.image_effect_pipeline.get(),
             _ => None,
         }
@@ -6167,12 +6252,23 @@ impl GpuRenderer {
             })
         }))
     }
+    /// Whether frames wait for a shader still compiling: an offscreen
+    /// renderer's have no deadline and nothing to wake.
+    fn waits_for_shaders(&self) -> bool {
+        self.debug_waits_for_shaders || self.offscreen_waits && !self.presents()
+    }
+    /// Have this renderer's frames wait for shaders compiling, though it
+    /// presents: a test comparing its pixels with an offscreen one's.
+    #[doc(hidden)]
+    pub fn debug_wait_for_shaders(&mut self) {
+        self.debug_waits_for_shaders = true;
+    }
     /// Whether `shader`'s fill can draw: its pipeline compiled, else started
     /// compiling if new (`start_fill`). A window's frame goes on without
     /// one still compiling, drawing the box's colour, and draws again once
     /// it is (`images_awaited`); an offscreen renderer waits for it.
     fn prepare_fill(&mut self, shader: &Arc<zgx::decoration::FillShader>) -> bool {
-        let wait = self.offscreen_waits && !self.presents();
+        let wait = self.waits_for_shaders();
         if let Some(compiled) = self.fill_pipelines.get_mut(&shader.id()) {
             return match compiled.ready(wait) {
                 Some(ready) => ready,
@@ -6225,43 +6321,65 @@ impl GpuRenderer {
     /// (`warm_fill_shader`), before anything draws them.
     #[cold]
     fn start_declared_fills(&mut self) {
-        if let Some(declared) = compile::declared_since(&mut self.fills_declared) {
+        if let Some(declared) = compile::declared_since(&mut self.fill_shaders_declared) {
             for shader in &declared {
                 self.start_fill(shader);
             }
         }
-    }
-    /// Compile layer shader `shader`'s pipeline if new; whether it can draw.
-    fn prepare_filter(&mut self, shader: &Arc<zgx::decoration::FillShader>) -> bool {
-        if let Some(compiled) = self.filter_pipelines.get(&shader.id()) {
-            return compiled.is_some();
+        // Layer shaders that will first draw in a hurry: a one-shot's.
+        for shader in zgx::decoration::declared_layer_shaders(&mut self.layers_declared) {
+            self.prepare_filter(&shader);
         }
-        let source = filter_source(shader.source());
+        self.fills_declared = compile::declared() + zgx::decoration::layer_shaders_declared();
+    }
+    /// Whether layer shader `shader` can draw: its pipeline compiled, else
+    /// started compiling if new, off the frame as a fill's (`prepare_fill`):
+    /// until then its layer composites as painted. zgx's own colour filter
+    /// waits, as it's a matter of what the view looks like, not an effect
+    /// joining it.
+    fn prepare_filter(&mut self, shader: &Arc<zgx::decoration::FillShader>) -> bool {
+        if shader.reads_backdrop() {
+            // Only ever drawn reading the backdrop's group.
+            self.filter_shaders.insert(shader.id(), shader.clone());
+            return self.prepare_blend(Some(shader));
+        }
         let apps = shader.source() != zgx::decoration::color_filter_shader().source();
-        let pipeline = fill_validates(&source)
-            .then(|| {
-                Self::app_built(
-                    &self.device,
-                    self.info.backend,
-                    apps,
-                    &source,
-                    "zgx_filter",
-                    AppLayout::Quads,
-                    |vertex, fragment| {
-                        fill_pipeline(
-                            &self.device,
-                            vertex,
-                            fragment,
-                            &self.context.inner.quad_layout,
+        if !self.filter_pipelines.contains_key(&shader.id()) {
+            let (device, layout) = (self.device.clone(), self.context.inner.quad_layout.clone());
+            let source = filter_source(shader.source());
+            let backend = self.info.backend;
+            let slot = compile::spawn(move || {
+                fill_validates(&source)
+                    .then(|| {
+                        Self::app_built(
+                            &device,
+                            backend,
+                            apps,
+                            &source,
                             "zgx_filter",
+                            AppLayout::Quads,
+                            |vertex, fragment| {
+                                fill_pipeline(&device, vertex, fragment, &layout, "zgx_filter")
+                            },
                         )
-                    },
-                )
-            })
-            .flatten();
-        self.filter_shaders.insert(shader.id(), shader.clone());
-        self.filter_pipelines.insert(shader.id(), pipeline);
-        self.filter_pipelines[&shader.id()].is_some()
+                    })
+                    .flatten()
+            });
+            self.filter_shaders.insert(shader.id(), shader.clone());
+            (self.filter_pipelines).insert(shader.id(), compile::Compiled::Pending(slot));
+        }
+        let wait = !apps || self.waits_for_shaders();
+        let ready = self
+            .filter_pipelines
+            .get_mut(&shader.id())
+            .and_then(|compiled| compiled.ready(wait));
+        match ready {
+            Some(ready) => ready,
+            None => {
+                self.images_awaited = true;
+                false
+            }
+        }
     }
     /// The blended layers' group 2 (the backdrop) and pipeline layout.
     fn blend_layouts(&self) -> &(wgpu::BindGroupLayout, wgpu::PipelineLayout) {
@@ -6295,39 +6413,56 @@ impl GpuRenderer {
             (backdrop, layout)
         })
     }
-    /// Compile the blended layers' pipeline, plain or through layer shader
-    /// `shader`, if new; whether it can draw.
+    /// Whether blended layers can draw, plainly or through layer shader
+    /// `shader`: compiled, else started compiling if new. Blending plainly or
+    /// through zgx's colour filter waits for it, as a frame always has; an
+    /// app's shader goes off the frame (`prepare_filter`).
     fn prepare_blend(&mut self, shader: Option<&zgx::decoration::FillShader>) -> bool {
         let key = shader.map_or(BLEND_PLAIN, |shader| shader.id());
-        if let Some(compiled) = self.blend_pipelines.get(&key) {
-            return compiled.is_some();
-        }
-        let (source, entry) = match shader {
-            Some(shader) => (filter_source(shader.source()), "zgx_filter_blended"),
-            None => (blend_source(), "zgx_blended"),
-        };
         // An app's layer shader, blended: not zgx's own blend or colour filter.
         let apps = shader.is_some_and(|shader| {
             shader.source() != zgx::decoration::color_filter_shader().source()
         });
-        let pipeline = fill_validates(&source)
-            .then(|| {
-                Self::app_built(
-                    &self.device,
-                    self.info.backend,
-                    apps,
-                    &source,
-                    entry,
-                    AppLayout::Blend,
-                    |vertex, fragment| {
-                        let (_, layout) = self.blend_layouts();
-                        blend_pipeline(&self.device, vertex, fragment, layout, entry)
-                    },
-                )
-            })
-            .flatten();
-        self.blend_pipelines.insert(key, pipeline);
-        self.blend_pipelines[&key].is_some()
+        if !self.blend_pipelines.contains_key(&key) {
+            let (source, entry) = match shader {
+                Some(shader) => (filter_source(shader.source()), "zgx_filter_blended"),
+                None => (blend_source(), "zgx_blended"),
+            };
+            let layout = self.blend_layouts().1.clone();
+            let device = self.device.clone();
+            let backend = self.info.backend;
+            let slot = compile::spawn(move || {
+                fill_validates(&source)
+                    .then(|| {
+                        Self::app_built(
+                            &device,
+                            backend,
+                            apps,
+                            &source,
+                            entry,
+                            AppLayout::Blend,
+                            |vertex, fragment| {
+                                blend_pipeline(&device, vertex, fragment, &layout, entry)
+                            },
+                        )
+                    })
+                    .flatten()
+            });
+            self.blend_pipelines
+                .insert(key, compile::Compiled::Pending(slot));
+        }
+        let wait = !apps || self.waits_for_shaders();
+        let ready = self
+            .blend_pipelines
+            .get_mut(&key)
+            .and_then(|compiled| compiled.ready(wait));
+        match ready {
+            Some(ready) => ready,
+            None => {
+                self.images_awaited = true;
+                false
+            }
+        }
     }
     /// The backdrop for the current target (`target`'s size): made once
     /// per size, its bind group with it. Making one for a new size drops
@@ -7275,6 +7410,30 @@ impl GpuRenderer {
         merged: Option<Vec<Rect>>,
         record: bool,
     ) -> Result<GpuStats, GpuError> {
+        // The effect slots this frame takes to draw: a frame that fails
+        // (a layer's glyphs past the atlas) draws none of them, and they
+        // draw again with the next, or they'd composite what their slots
+        // held before, for good.
+        let planned: Vec<(NodeId, effects::Purpose)> = match MODE {
+            PATCH => Vec::new(),
+            _ => (self.effect_jobs.iter())
+                .map(|job| (job.node, job.purpose))
+                .collect(),
+        };
+        let result = self.render_flat_taking::<MODE>(scene, items, damage, merged, record);
+        if result.is_err() {
+            self.forget_slots(&planned);
+        }
+        result
+    }
+    fn render_flat_taking<const MODE: u8>(
+        &mut self,
+        scene: &Scene,
+        items: Vec<zgx::scene::PaintItem<'_>>,
+        damage: &[Rect],
+        merged: Option<Vec<Rect>>,
+        record: bool,
+    ) -> Result<GpuStats, GpuError> {
         let mut stats = GpuStats::default();
         // Made already (a kept frame, patched, or one made to keep): drawn
         // as it is (it holds its background).
@@ -7318,15 +7477,24 @@ impl GpuRenderer {
         let has_blur = items
             .iter()
             .any(|item| item.effects.opacity > 0. && item.effects.blur_radius > 0.);
+        // Layer shaders reading what's behind them depend on it as a filter does.
+        let readers = scene.has_backdrop_readers();
         // Reconstruct every sampled backdrop pixel before replaying filters. A
         // dependency can reach another filter, so expand to a fixed point.
         let damage = if self.fresh {
             vec![viewport]
-        } else if MODE != PATCH && has_blur {
+        } else if MODE != PATCH && (has_blur || readers) {
             // (Patching draws nothing: its damage is the window's.)
             let dependencies: Vec<_> = items
                 .iter()
                 .filter_map(|item| {
+                    if readers
+                        && item.isolated
+                        && item.effects.opacity > 0.
+                        && let Some((area, _)) = self.backdrop_read(scene, item, viewport)
+                    {
+                        return Some((area, 0.));
+                    }
                     if item.effects.opacity <= 0. || item.effects.blur_radius <= 0. {
                         return None;
                     }
@@ -7397,6 +7565,8 @@ impl GpuRenderer {
             points.clear();
         }
         let mut draws = std::mem::take(&mut self.frame_draws);
+        // What backdrop-reading layers read, by draw (`backdrop_read`).
+        let mut reads: Vec<(usize, Rect)> = Vec::new();
         // The clip regions quads lie in (`Quad::mask`): a kept frame's, to
         // patch it, or those of a frame made already.
         self.region_interiors.clear();
@@ -7498,19 +7668,32 @@ impl GpuRenderer {
                     .isolated
                     .then(|| scene.layer_shader(item.id))
                     .flatten()
-                    .and_then(|layer| Some((layer.shader.clone()?, layer.uniforms)))
+                    .and_then(|layer| Some((layer.shader.clone()?, layer)))
                     .filter(|(shader, _)| self.prepare_filter(shader));
-                // And blended with its backdrop, once that compiles.
+                // And blended with its backdrop, once that compiles (or
+                // reading it, plainly over it).
                 let blend = item
                     .isolated
                     .then(|| scene.blend(item.id))
-                    .filter(|mode| *mode != zgx::scene::BlendMode::Normal)
+                    .filter(|mode| {
+                        *mode != zgx::scene::BlendMode::Normal
+                            || filter
+                                .as_ref()
+                                .is_some_and(|(shader, _)| shader.reads_backdrop())
+                    })
                     .filter(|_| self.prepare_blend(filter.as_ref().map(|(shader, _)| &**shader)));
+                // How far past its box a layer shader paints.
+                let bleed = filter.as_ref().map_or(0., |(_, layer)| layer.bleed);
                 // Blurred or masked: composited from its effect slot.
-                let effect = (item.isolated
-                    && (item.effects.filter_blur > 0. || scene.mask(item.id).is_some()))
-                .then(|| self.effect_slot(item.id, effects::Purpose::Content))
-                .flatten();
+                let effected = item.isolated
+                    && (item.effects.filter_blur > 0. || scene.mask(item.id).is_some());
+                let effect = effected
+                    .then(|| self.effect_slot(item.id, effects::Purpose::Content))
+                    .flatten();
+                // Its mask decoding: nothing yet, rather than all of it.
+                if effected && effect.is_none() && scene.mask(item.id).is_some() {
+                    continue;
+                }
                 // And its drop shadow, from its own slot.
                 let shadow = match item.isolated && scene.has_drop_shadows() {
                     true => scene
@@ -7529,6 +7712,10 @@ impl GpuRenderer {
                                 b.width,
                                 b.height,
                             );
+                            let b = match bleed > 0. {
+                                true => b.union(item.bounds.expand(bleed)),
+                                false => b,
+                            };
                             let b = effect.map_or(b, |slot| b.expand(slot.spread));
                             let b = shadow.map_or(b, |(shadow, slot)| {
                                 let o = shadow.offset;
@@ -7565,6 +7752,24 @@ impl GpuRenderer {
                         (Some(slot), Some(atlas)) => slot.composite(bounds, atlas.size()),
                         _ => (bounds, [0., 0., layer.uv[0], layer.uv[1]]),
                     };
+                    // Where the layer's pixels lie from the box's top-left,
+                    // for a layer shader; and its quad reaching over its
+                    // bleed, its uv going on past them.
+                    let painted = [
+                        bounds.x - item.bounds.x,
+                        bounds.y - item.bounds.y,
+                        bounds.x + bounds.width - item.bounds.x,
+                        bounds.y + bounds.height - item.bounds.y,
+                    ];
+                    let (bounds, uv) = match bleed > 0. {
+                        true => bled_quad(bounds, uv, item.bounds.expand(bleed)),
+                        false => (bounds, uv),
+                    };
+                    // What it reads of what's behind it, copied for it.
+                    let reading = filter
+                        .as_ref()
+                        .filter(|(shader, _)| shader.reads_backdrop())
+                        .and_then(|_| self.backdrop_read(scene, &item, viewport));
                     // Transformed: the quad's corners move in the vertex shader,
                     // as an affine image's; edge fades stay in its own frame. In
                     // perspective (`options.z` 2), divided by `w` there too.
@@ -7608,8 +7813,11 @@ impl GpuRenderer {
                         },
                         mask: [
                             item_region(&mut clips, &item),
-                            filter.as_ref().map_or(0., |(_, uniforms)| {
-                                region_index(&mut clips, Some(Region::uniforms(*uniforms)))
+                            filter.as_ref().map_or(0., |(_, layer)| {
+                                let radii = blur_corners(item.kind, item.bounds);
+                                let read = reading.map_or([0.; 4], |(_, from_box)| from_box);
+                                let region = Region::layer_uniforms(layer, radii, painted, read);
+                                region_index(&mut clips, Some(region))
                             }),
                             blend.map_or(0., |mode| mode as u8 as f32),
                             0.,
@@ -7650,6 +7858,9 @@ impl GpuRenderer {
                         }
                         _ => start,
                     };
+                    if let Some((read, _)) = reading {
+                        reads.push((draws.len(), read));
+                    }
                     draws.push(Draw {
                         shading: match (&filter, blend) {
                             (Some((shader, _)), Some(_)) => Shading::FilterBlend(shader.id()),
@@ -7671,6 +7882,7 @@ impl GpuRenderer {
                                 item.bounds,
                                 item.effects,
                                 blur_corners(item.kind, item.bounds),
+                                item.rounded(),
                             ))
                         }),
                     });
@@ -8761,7 +8973,7 @@ impl GpuRenderer {
                                             }),
                                             paint: [
                                                 0.,
-                                                1.,
+                                                glyph_texture(a.color, self.scale),
                                                 if a.color { COLOR_GLYPH } else { 0. },
                                                 0.,
                                             ],
@@ -8926,7 +9138,12 @@ impl GpuRenderer {
                     let draw = Draw {
                         shading: fill_shading.unwrap_or(Shading::Full),
                         blur: (item.effects.blur_radius > 0.).then(|| {
-                            Box::new((bounds, item.effects, blur_corners(item.kind, item.bounds)))
+                            Box::new((
+                                bounds,
+                                item.effects,
+                                blur_corners(item.kind, item.bounds),
+                                item.rounded(),
+                            ))
                         }),
                         start,
                         end: quads.len() as u32,
@@ -9044,7 +9261,7 @@ impl GpuRenderer {
         // must not force every unrelated quad into its own render pass.
         let has_damaged_blur = has_blur
             && draws.iter().any(|draw| {
-                draw.blur.as_deref().is_some_and(|&(bounds, _, _)| {
+                draw.blur.as_deref().is_some_and(|&(bounds, _, _, _)| {
                     damage.iter().any(|region| {
                         region
                             .intersection(draw.clip)
@@ -9056,7 +9273,7 @@ impl GpuRenderer {
             });
         // The part of a filter's output inside `region`, if it reaches it.
         let filtered = |draw: &Draw, region: &Rect| {
-            let &(bounds, _, _) = draw.blur.as_deref()?;
+            let &(bounds, _, _, _) = draw.blur.as_deref()?;
             region.intersection(draw.clip)?.intersection(bounds)
         };
         // A filter samples everything painted before it, so the filters a
@@ -9078,7 +9295,7 @@ impl GpuRenderer {
                 let blur = draw
                     .blur
                     .as_deref()
-                    .and_then(|(bounds, _, _)| bounds.intersection(draw.clip));
+                    .and_then(|(bounds, _, _, _)| bounds.intersection(draw.clip));
                 [draw.bounds.intersection(draw.clip), blur]
                     .into_iter()
                     .flatten()
@@ -9092,7 +9309,7 @@ impl GpuRenderer {
                 {
                     continue;
                 }
-                let Some(&(bounds, effects, _)) = draw.blur.as_deref() else {
+                let Some(&(bounds, effects, _, _)) = draw.blur.as_deref() else {
                     continue;
                 };
                 let area = bounds.intersection(draw.clip);
@@ -9106,9 +9323,12 @@ impl GpuRenderer {
                             !reaches(before, area)
                                 || filters.contains(&k)
                                     && quads.is_none_or(|quads| quads.intersection(area).is_none())
-                                    && before.blur.as_deref().is_some_and(|&(under, beneath, _)| {
-                                        2. * peak_blur(under, &beneath, area) <= effects.blur_radius
-                                    })
+                                    && before.blur.as_deref().is_some_and(
+                                        |&(under, beneath, _, _)| {
+                                            2. * peak_blur(under, &beneath, area)
+                                                <= effects.blur_radius
+                                        },
+                                    )
                         })
                     });
                 match batches.last_mut() {
@@ -9409,6 +9629,15 @@ impl GpuRenderer {
                     }),
             )
             .collect();
+        // Backdrop-reading layers that needn't see each other share a copy
+        // and a pass: those later in the frame with nothing drawn since the
+        // first that touches what they read or paint.
+        let sharing = share_backdrops(&draws, &reads);
+        if !sharing.is_empty() {
+            cuts.retain(|(draw, batch)| {
+                batch.is_some() || !sharing.iter().any(|(_, shared)| shared.contains(draw))
+            });
+        }
         // A filter's blur before a blend at the same draw.
         cuts.sort_by_key(|&(draw, batch)| (draw, batch.is_none()));
         let splits: Vec<usize> = cuts.iter().map(|(draw, _)| *draw).collect();
@@ -9475,7 +9704,9 @@ impl GpuRenderer {
                 });
                 break;
             }
-            if segment == 0 || end > from {
+            // (A blur's second pass goes in a pass of its own before a copy
+            // at the same draw: what reads the backdrop reads it blurred.)
+            if segment == 0 || end > from || vertical.is_some() {
                 stats.render_passes += 1;
                 let label = ["damage 0", "damage 1", "damage 2", "damage 3"][segment.min(3)];
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -9529,6 +9760,17 @@ impl GpuRenderer {
                         && let Some(draw) = rest.first()
                     {
                         self.encode_blended(&mut pass, *region, draw, bind, &mut stats);
+                        // Those sharing its copy.
+                        for (first, shared) in &sharing {
+                            if *first == *at {
+                                for other in shared {
+                                    let other = &draws[*other];
+                                    self.encode_blended(
+                                        &mut pass, *region, other, bind, &mut stats,
+                                    );
+                                }
+                            }
+                        }
                         if let Some(points) = &points_bind {
                             pass.set_bind_group(2, points, &[]);
                         }
@@ -9561,7 +9803,20 @@ impl GpuRenderer {
                             });
                 }
                 (at, None) => {
-                    backdrop = Some((at, self.copy_backdrop(&mut encoder, &draws[at], &regions)));
+                    let read = (reads.iter())
+                        .filter(|(draw, _)| {
+                            *draw == at
+                                || sharing
+                                    .iter()
+                                    .any(|(first, shared)| *first == at && shared.contains(draw))
+                        })
+                        .map(|(_, read)| *read)
+                        .reduce(Rect::union);
+                    stats.backdrop_copies += 1;
+                    backdrop = Some((
+                        at,
+                        self.copy_backdrop(&mut encoder, &draws[at], read, &regions),
+                    ));
                 }
             }
             // The first filtered draw's own quads open the next pass.
@@ -10618,15 +10873,65 @@ impl GpuRenderer {
     /// texture and clip become one instanced call; their quads are contiguous,
     /// so paint order holds. A draw entirely outside the region may be folded
     /// into a batch: the scissor discards its quads.
+    /// Everything `item`'s layer shader can read of what's behind it, in this
+    /// target's space, if it reads it and shows: all of this frame's repaint
+    /// if any of it does (`blur_damage`), so no pixel it reads holds its own
+    /// last frame. And the same from the box's top-left, as it asks for it.
+    fn backdrop_read(
+        &self,
+        scene: &Scene,
+        item: &zgx::scene::PaintItem<'_>,
+        viewport: Rect,
+    ) -> Option<(Rect, [f32; 4])> {
+        let layer = scene.layer_shader(item.id)?;
+        if !layer.reads_backdrop() {
+            return None;
+        }
+        let output = item.bounds.expand(layer.bleed);
+        let clip = item.clip.unwrap_or(viewport);
+        // A read at the edge of what it can read filters with the pixel past
+        // it: that's copied too.
+        let margin = 1. / self.scale;
+        let from_box = |read: Rect| {
+            [
+                read.x - item.bounds.x,
+                read.y - item.bounds.y,
+                read.x + read.width - item.bounds.x,
+                read.y + read.height - item.bounds.y,
+            ]
+        };
+        let Some(matrix) = item.projective() else {
+            // What's clipped away is never asked for, however large the box.
+            let read = output
+                .intersection(clip)?
+                .expand(layer.reach)
+                .intersection(viewport)?;
+            return Some((read.expand(margin), from_box(read)));
+        };
+        use zgx::affine::{Affine, Projective};
+        let (x, y) = self.layer_origin;
+        let matrix = Projective::from(Affine::translation(x, y))
+            .then(matrix)
+            .then(Projective::from(Affine::translation(-x, -y)));
+        matrix.bounds(output).intersection(clip)?;
+        let whole = output.expand(layer.reach);
+        let read = matrix.bounds(whole).intersection(viewport)?;
+        Some((read.expand(margin), from_box(whole)))
+    }
     /// Copy what the target holds under blended `draw`, within `regions`,
-    /// into the backdrop for its size; the backdrop's bind group.
+    /// into the backdrop for its size (and reading the backdrop, `read`
+    /// around it); the backdrop's bind group.
     fn copy_backdrop(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         draw: &Draw,
+        read: Option<Rect>,
         regions: &[(Rect, Scissor)],
     ) -> wgpu::BindGroup {
-        let under = draw.bounds.intersection(draw.clip);
+        let under = match read {
+            Some(read) => Some(read),
+            None => draw.bounds.intersection(draw.clip),
+        };
         let area = regions
             .iter()
             .filter_map(|(region, _)| region.intersection(under?))
@@ -10726,7 +11031,14 @@ impl GpuRenderer {
             let shading = match draw.shading {
                 Shading::Opaque if !unblended => Shading::Basic,
                 // Drawn alone, after their backdrop's copy (`encode_blended`).
-                Shading::Blend | Shading::FilterBlend(_) => continue,
+                // What comes after them starts anew: joined to what's before,
+                // one call would span their quads too.
+                Shading::Blend | Shading::FilterBlend(_) => {
+                    if let Some(done) = batch.take() {
+                        emit(done);
+                    }
+                    continue;
+                }
                 shading => shading,
             };
             if !KEPT && (!region.intersects(draw.bounds) || draw.end <= draw.start.max(first)) {
@@ -10978,6 +11290,10 @@ impl GpuRenderer {
                 area,
                 shape: filter.corners.map(|radius| radius * scale),
                 slots: [first, levels.len() as u32, original, 0],
+                round0: round_box(filter.rounded[0], scale).0,
+                radii0: round_box(filter.rounded[0], scale).1,
+                round1: round_box(filter.rounded[1], scale).0,
+                radii1: round_box(filter.rounded[1], scale).1,
             });
         }
         if blurs.is_empty() {
@@ -11400,6 +11716,27 @@ impl GpuRenderer {
             }
             return Ok(true);
         }
+        // Held smaller than drawn, the budget's doing: uploaded again only
+        // if there's now room for more, not on every frame.
+        if let Some(entry) = self.images.get(&image.id()) {
+            let held = entry.3;
+            let others = (self.images.iter())
+                .filter(|(id, _)| **id != image.id())
+                .filter(|(id, _)| {
+                    self.image_drawn
+                        .get(id)
+                        .is_none_or(|drawn| *drawn >= self.image_frame)
+                })
+                .map(|(_, entry)| entry.1)
+                .sum::<usize>();
+            let fits = self.image_size_within(image, size, others);
+            if fits.0 <= held.0 && fits.1 <= held.1 {
+                if let Some(drawn) = self.image_drawn.get_mut(&image.id()) {
+                    *drawn = self.image_frame;
+                }
+                return Ok(true);
+            }
+        }
         match self.upload_image_at(image, size) {
             Ok(()) => {}
             // Its pixels decoding: drawn once they are.
@@ -11422,6 +11759,86 @@ impl GpuRenderer {
     fn image_budget(&self) -> usize {
         (self.width as usize * self.height as usize * 4 * 4).max(IMAGE_TEXTURES)
     }
+    /// What images drawn last frame leave of the budget, shared: each takes
+    /// what it wants up to an even share of what the smaller leave. They come
+    /// to this over a frame or two, as they upload again, and only while some
+    /// are held softer: otherwise no image pays for it.
+    #[cold]
+    fn share_images(&mut self) {
+        let images = &self.images;
+        self.images_softer.retain(|id, _| images.contains_key(id));
+        // (The last frame that drew them: one kept draws none anew.)
+        let last = self.image_drawn.values().copied().max().unwrap_or(0);
+        let mut wants: Vec<usize> = (self.images.iter())
+            .filter(|(id, _)| self.image_drawn.get(id).is_some_and(|drawn| *drawn == last))
+            .map(|(id, entry)| self.images_softer.get(id).copied().unwrap_or(entry.1))
+            .collect();
+        wants.sort_unstable();
+        let mut left = self.image_budget();
+        let mut share = usize::MAX;
+        for (at, want) in wants.iter().enumerate() {
+            let even = left / (wants.len() - at);
+            if *want > even {
+                // (A little under, as sizes round up.)
+                share = even / 100 * 97;
+                break;
+            }
+            left -= want;
+        }
+        let was = self.image_share;
+        let moved = match (was, share) {
+            (usize::MAX, usize::MAX) => false,
+            (usize::MAX, _) | (_, usize::MAX) => true,
+            _ => was.abs_diff(share) > was / 20,
+        };
+        if !moved {
+            return;
+        }
+        self.image_share = share;
+        // Those over it upload again as they're drawn, as all may take more.
+        self.images
+            .retain(|_, entry| entry.1 <= share.saturating_add(share / 20));
+        let images = &self.images;
+        self.image_drawn.retain(|id, _| images.contains_key(id));
+        self.repaint_all();
+    }
+    /// `wanted` under the texture limit, its shape kept.
+    fn image_size_limited(&self, image: &zgx::image::ImageData, wanted: (u32, u32)) -> (u32, u32) {
+        let limit = self.device.limits().max_texture_dimension_2d;
+        let mut scale = 1f32;
+        loop {
+            let (w, h) = scaled_size(wanted, image, scale);
+            if (w <= limit && h <= limit) || (w, h) == (1, 1) {
+                return (w, h);
+            }
+            scale *= 0.75;
+        }
+    }
+    /// The size `image`'s texture takes, wanted at `wanted`, with `held` bytes
+    /// of others staying: smaller, its shape kept, while past the texture
+    /// limit, its share or the budget; never left out (`IMAGE_LEAST_SIDE`).
+    fn image_size_within(
+        &self,
+        image: &zgx::image::ImageData,
+        wanted: (u32, u32),
+        held: usize,
+    ) -> (u32, u32) {
+        let budget = self.image_budget();
+        let mut size = self.image_size_limited(image, wanted);
+        let bytes = |(w, h): (u32, u32)| w as usize * h as usize * 4;
+        if bytes(size) > self.image_share {
+            let scale = (self.image_share as f32 / bytes(size) as f32).sqrt();
+            size = scaled_size(size, image, scale.min(1.));
+        }
+        let mut scale = 1f32;
+        loop {
+            let at = scaled_size(size, image, scale);
+            if bytes(at) + held <= budget || at.0.max(at.1) <= IMAGE_LEAST_SIDE {
+                return at;
+            }
+            scale *= 0.75;
+        }
+    }
     /// `upload_image` at `size` (`fitted_size`), or smaller where the budget
     /// or the texture limit says: drawn softer rather than left out.
     fn upload_image_at(
@@ -11432,39 +11849,17 @@ impl GpuRenderer {
         if let Some(frame) = image.gpu_frame() {
             return self.render_view(image, frame);
         }
-        // A kept file's pixels at the size it is drawn, decoded off this
-        // thread: until they are, it isn't drawn, and the host draws again
-        // once they are (`take_images_awaited`).
-        let source = match image.keeps_file() {
-            true => match image.pixels_at(wanted) {
-                Some(source) => Some(source),
-                None => {
-                    self.images_awaited = true;
-                    return Err(GpuError(IMAGE_PENDING.into()));
-                }
-            },
-            false => None,
-        };
         let budget = self.image_budget();
         let limit = self.device.limits().max_texture_dimension_2d;
         let (full_w, full_h) = (image.width().max(1), image.height().max(1));
-        // Smaller by `scale` from `wanted`, its shape kept.
-        let at = |scale: f32| {
-            let side = |v: u32, full: u32| ((v as f32 * scale).ceil() as u32).clamp(1, full);
-            (side(wanted.0, full_w), side(wanted.1, full_h))
-        };
         let bytes = |(w, h): (u32, u32)| w as usize * h as usize * 4;
-        let mut scale = 1f32;
-        while {
-            let (w, h) = at(scale);
-            (w > limit || h > limit) && (w, h) != (1, 1)
-        } {
-            scale *= 0.75;
-        }
         // An image it replaces at another size gives its bytes back.
         let replaced = self.images.get(&image.id()).map_or(0, |entry| entry.1);
-        let mut held = self.images.values().map(|entry| entry.1).sum::<usize>() - replaced;
-        if bytes(at(scale)) + held > budget {
+        let mut held = self.images.values().map(|entry| entry.1).sum::<usize>() - replaced
+            + self.images_decoding;
+        let whole = self.image_size_limited(image, wanted);
+        let most = self.image_size_within(image, wanted, 0);
+        if bytes(most) + held > budget {
             // Images not drawn this frame give their textures back, least
             // recently drawn first (a long page scrolled through): drawn
             // again, they upload again.
@@ -11476,7 +11871,7 @@ impl GpuRenderer {
                 .collect();
             idle.sort_unstable();
             for (_, id) in idle {
-                if bytes(at(scale)) + held <= budget {
+                if bytes(most) + held <= budget {
                     break;
                 }
                 if id == image.id() {
@@ -11489,24 +11884,45 @@ impl GpuRenderer {
             }
         }
         // Still past it: drawn smaller rather than left out.
-        let unshrunk = at(scale);
-        while bytes(at(scale)) + held > budget && at(scale) != (1, 1) {
-            scale *= 0.75;
-        }
-        let (width, height) = at(scale);
-        if bytes((width, height)) + held > budget {
-            return Err(GpuError(IMAGE_MISSES[0].into()));
-        }
-        if (width, height) != unshrunk {
-            self.warn(IMAGE_COARSER);
+        let (width, height) = self.image_size_within(image, wanted, held);
+        if (width, height) != whole {
+            let images = &self.images;
+            self.images_softer.retain(|id, _| images.contains_key(id));
+            self.images_softer.insert(image.id(), bytes(whole));
+        } else if !self.images_softer.is_empty() {
+            self.images_softer.remove(&image.id());
         }
         let bytes = bytes((width, height));
         if self.images.len() >= MAX_IMAGES && !self.images.contains_key(&image.id()) {
-            return Err(GpuError(IMAGE_MISSES[1].into()));
+            // Images not drawn this frame give way, the longest gone first;
+            // only as many as this drawn at once leave one out.
+            let oldest = (self.image_drawn.iter())
+                .filter(|(_, drawn)| **drawn < self.image_frame)
+                .min_by_key(|(_, drawn)| **drawn)
+                .map(|(id, _)| *id);
+            let Some(oldest) = oldest else {
+                return Err(GpuError(IMAGE_MISSES[0].into()));
+            };
+            self.image_drawn.remove(&oldest);
+            self.images.remove(&oldest);
         }
         if width > limit || height > limit {
-            return Err(GpuError(IMAGE_MISSES[2].into()));
+            return Err(GpuError(IMAGE_MISSES[1].into()));
         }
+        // A kept file's pixels at the size it takes, decoded off this thread:
+        // until they are, it isn't drawn, and the host draws again once they
+        // are (`take_images_awaited`). No larger than its texture will be.
+        let source = match image.keeps_file() {
+            true => match image.pixels_at((width, height)) {
+                Some(source) => Some(source),
+                None => {
+                    self.images_awaited = true;
+                    self.images_decoding += bytes;
+                    return Err(GpuError(IMAGE_PENDING.into()));
+                }
+            },
+            false => None,
+        };
         let texture = sampled_texture(&self.device, self.unified, width, height, "image");
         let (mut pixels, (mut w, mut h)) = match &source {
             // Premultiplied already, at least its size.
@@ -13817,7 +14233,8 @@ fn batch_filters(draws: &[Draw], regions: &[(Rect, Scissor)], members: &[usize])
         .iter()
         .map(|&i| {
             let draw = &draws[i];
-            let &(bounds, effects, corners) = draw.blur.as_deref().expect("batched filter");
+            let &(bounds, effects, corners, rounded) =
+                draw.blur.as_deref().expect("batched filter");
             Filter {
                 bounds,
                 clip: draw.clip,
@@ -13827,6 +14244,7 @@ fn batch_filters(draws: &[Draw], regions: &[(Rect, Scissor)], members: &[usize])
                     .collect(),
                 effects,
                 corners,
+                rounded,
             }
         })
         .collect()
@@ -14008,7 +14426,12 @@ fn glyph_quad(
             a.height as f32 / atlas_size as f32,
         ],
         color,
-        paint: [0., 1., if a.color { COLOR_GLYPH } else { 0. }, 0.],
+        paint: [
+            0.,
+            glyph_texture(a.color, scale),
+            if a.color { COLOR_GLYPH } else { 0. },
+            0.,
+        ],
     }
 }
 /// `image` in its box `fade` (x, y, width, height) as nine pieces
@@ -14111,14 +14534,28 @@ pub(crate) fn fill_source(user: &str) -> String {
 /// node's box and `point` its untransformed position, so `p` is the node's.
 pub(crate) fn filter_source(user: &str) -> String {
     format!(
-        "{}\n{}\nstruct LayerInput {{ color:vec4<f32>, p:vec2<f32>, size:vec2<f32>, time:f32, scale:f32, params:array<vec4<f32>,4> }}\n{}\n{user}\n{}",
+        "{}\n{}\nstruct LayerInput {{ color:vec4<f32>, p:vec2<f32>, size:vec2<f32>, time:f32, scale:f32, params:array<vec4<f32>,4>, radii:vec4<f32> }}\n{}\n{user}\n{}",
         include_str!("draw.wgsl"),
         include_str!("blend.wgsl"),
         "var<private> zgx_frame:vec4<f32>;
+// Where the layer's pixels lie, from the node's top-left (its transparent
+// border at the edge): past them a sample is clear.
+var<private> zgx_painted:vec4<f32>;
+// What the backdrop's copy holds, from the node's top-left; and the target's
+// pixel at the node's top-left and its pixels per logical point.
+var<private> zgx_readable:vec4<f32>;
+var<private> zgx_origin:vec2<f32>;
+var<private> zgx_pixels:mat2x2<f32>;
 // The layer's straight-alpha pixel at logical `p` from the node's top-left.
 fn zgx_sample(p:vec2<f32>)->vec4<f32> {
- let uv=zgx_frame.xy+p*zgx_frame.zw;
+ let uv=zgx_frame.xy+clamp(p,zgx_painted.xy,zgx_painted.zw)*zgx_frame.zw;
  let t=textureSampleLevel(atlas,tex_sampler,uv,0.);
+ return select(vec4(0.),vec4(t.rgb/t.a,t.a),t.a>0.);
+}
+// What lies behind the node at logical `p` from its top-left, straight alpha.
+fn zgx_backdrop(p:vec2<f32>)->vec4<f32> {
+ let pixel=zgx_origin+zgx_pixels*clamp(p,zgx_readable.xy,zgx_readable.zw);
+ let t=textureSampleLevel(zgx_behind,tex_sampler,pixel/vec2<f32>(textureDimensions(zgx_behind)),0.);
  return select(vec4(0.),vec4(t.rgb/t.a,t.a),t.a>0.);
 }",
         "fn zgx_filtered(input:Out)->vec4<f32> {
@@ -14134,17 +14571,99 @@ fn zgx_sample(p:vec2<f32>)->vec4<f32> {
  if v.mask.y<.5 {return shade(v);}
  let u=regions[u32(v.mask.y)-1u];
  let p=point-v.fade.xy;
- // The shader runs over the node's box; the layer's margin past it (its
- // resampling edge, overflow) composites as painted.
- if any(p<vec2(0.))||any(p>=v.fade.zw) {return shade(v);}
+ // The shader runs over the node's box and bleed; the layer's margin past
+ // them (its resampling edge, overflow) composites as painted.
+ let bleed=u.tint.x;
+ if any(p<vec2(-bleed))||any(p>=v.fade.zw+vec2(bleed)) {return shade(v);}
  zgx_frame=vec4(v.uv-vec2(k[0].x,k[1].y)*p,k[0].x,k[1].y);
- let c=clamp(layer(LayerInput(zgx_sample(p),p,v.fade.zw,u.round0.x,viewport.z,array<vec4<f32>,4>(u.radii0,u.round1,u.radii1,u.fade_box))),vec4(0.),vec4(1.));
+ zgx_painted=u.color0;
+ zgx_readable=u.color1;
+ zgx_pixels=inverse;
+ zgx_origin=v.position.xy-inverse*p;
+ let c=clamp(layer(LayerInput(zgx_sample(p),p,v.fade.zw,u.round0.x,viewport.z,array<vec4<f32>,4>(u.radii0,u.round1,u.radii1,u.fade_box),u.fade)),vec4(0.),vec4(1.));
  return shade_texel(v,vec4(c.rgb*c.a,c.a),true);
 }
 @fragment fn zgx_filter(input:Out)->@location(0) vec4<f32> { return zgx_filtered(input); }
 @fragment fn zgx_filter_blended(input:Out)->@location(0) vec4<f32> {
- return zgx_blend(zgx_filtered(input),zgx_beneath(input.position),u32(input.mask.z));
+ let beneath=zgx_beneath(input.position);
+ let source=zgx_filtered(input);
+ let mode=u32(input.mask.z);
+ // Plainly over what's behind it (it reads it): source-over, exact.
+ if mode==0u {return source+(1.-source.a)*beneath;}
+ return zgx_blend(source,beneath,mode);
 }"
+    )
+}
+/// For each backdrop-reading layer drawn first in a pass, those after it that
+/// can share its copy of the target: no draw before them since then (the
+/// others sharing it included) paints anywhere they read or paint, so they
+/// read and draw as they would in order. Most frames have none.
+fn share_backdrops(draws: &[Draw], reads: &[(usize, Rect)]) -> Vec<(usize, Vec<usize>)> {
+    /// How far apart readers share, in draws: a screenful, not a long scan.
+    const WITHIN: usize = 512;
+    let mut sharing: Vec<(usize, Vec<usize>)> = Vec::new();
+    let mut taken = rustc_hash::FxHashSet::default();
+    for (index, &(first, _)) in reads.iter().enumerate() {
+        if taken.contains(&first) {
+            continue;
+        }
+        let mut shared = Vec::new();
+        for &(next, read) in &reads[index + 1..] {
+            if next > first + WITHIN {
+                break;
+            }
+            // (Those blurring too run their blur first: a copy of their own.)
+            if draws[first].blur.is_some() || draws[next].blur.is_some() {
+                continue;
+            }
+            let area = read.union(draws[next].bounds);
+            let clear = draws[first..next].iter().all(|draw| {
+                draw.bounds
+                    .intersection(draw.clip)
+                    .is_none_or(|painted| !painted.intersects(area))
+            });
+            if clear {
+                shared.push(next);
+                taken.insert(next);
+            }
+        }
+        if !shared.is_empty() {
+            sharing.push((first, shared));
+        }
+    }
+    sharing
+}
+/// A rounded clip in a blur's record, in px: its box and radii, or none's.
+fn round_box(clip: Option<zgx::scene::RoundRect>, scale: f32) -> ([f32; 4], [f32; 4]) {
+    match clip {
+        Some(clip) => (
+            [
+                clip.rect.x * scale,
+                clip.rect.y * scale,
+                clip.rect.width * scale,
+                clip.rect.height * scale,
+            ],
+            clip.radii.map(|radius| radius * scale),
+        ),
+        None => ([0., 0., -1., -1.], [0.; 4]),
+    }
+}
+/// A layer's quad grown to hold `reach` too (its layer shader's bleed): its
+/// uv (origin and size) goes on past the layer's at the same rate.
+fn bled_quad(bounds: Rect, uv: [f32; 4], reach: Rect) -> (Rect, [f32; 4]) {
+    let grown = bounds.union(reach);
+    let (du, dv) = (
+        uv[2] / bounds.width.max(1e-6),
+        uv[3] / bounds.height.max(1e-6),
+    );
+    (
+        grown,
+        [
+            uv[0] + (grown.x - bounds.x) * du,
+            uv[1] + (grown.y - bounds.y) * dv,
+            grown.width * du,
+            grown.height * dv,
+        ],
     )
 }
 /// The key of the blended layers' plain pipeline in `blend_pipelines`
@@ -15454,7 +15973,7 @@ pub fn shader_modules() -> Vec<(&'static str, String)> {
             include_str!("blit.wgsl")
         )
     };
-    vec![
+    [
         ("draw", include_str!("draw.wgsl").to_owned()),
         ("polyline", polyline_source(false)),
         ("polyline with areas", polyline_source(true)),
@@ -15469,6 +15988,12 @@ pub fn shader_modules() -> Vec<(&'static str, String)> {
         (
             "layer shader",
             filter_source("fn layer(input:LayerInput)->vec4<f32> { return input.color; }"),
+        ),
+        (
+            "layer shader reading the backdrop",
+            filter_source(
+                "fn layer(input:LayerInput)->vec4<f32> { return zgx_backdrop(input.p+vec2(4.,0.)); }",
+            ),
         ),
         ("blur", include_str!("blur.wgsl").to_owned()),
         (
@@ -15492,6 +16017,13 @@ pub fn shader_modules() -> Vec<(&'static str, String)> {
         ("present", present(false, false)),
         ("present, sRGB, alpha after", present(true, true)),
     ]
+    .into_iter()
+    // The glass material: an app's shader to FXC, as any of theirs.
+    .chain([(
+        "glass material",
+        filter_source(zgx::glass::GlassStyle::material_source()),
+    )])
+    .collect()
 }
 /// The polyline strokes' module: the quad shader (draw.wgsl), whose vertex
 /// stage and clip regions they share, polyline.wgsl, and its filled areas

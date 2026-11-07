@@ -1043,6 +1043,14 @@ impl Application {
         // take AppKit's Services menu meanwhile.
         #[cfg(target_os = "macos")]
         winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut event_loop, false);
+        // A probe's window beside someone's work: shown, not taken to the front.
+        #[cfg(target_os = "macos")]
+        if zgx::env::var_os("ZGX_NO_ACTIVATE").is_some() {
+            winit::platform::macos::EventLoopBuilderExtMacOS::with_activate_ignoring_other_apps(
+                &mut event_loop,
+                false,
+            );
+        }
         let event_loop = event_loop.build()?;
         zgx::profile::mark("event loop");
         zgx::memory::set_hosted();
@@ -1136,7 +1144,7 @@ impl Application {
             carrying: None,
             #[cfg(target_os = "linux")]
             last_focused: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             pending_move: HeldMove::default(),
             factory,
             active: false,
@@ -1276,6 +1284,71 @@ const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(500)
 /// release spring or a hover fade that follows input keeps its frames too.
 #[cfg(any(target_os = "macos", windows))]
 const INPUT_FULL_RATE: std::time::Duration = std::time::Duration::from_millis(250);
+/// When a scroll's frames start at a slow refresh (`scroll_resample::SLOW_REFRESH`).
+/// Started as a refresh begins, what a frame shows is a whole refresh old by the
+/// next, 16.7 ms at 60 Hz, however fast the app. Started as late as it still
+/// makes that refresh, as a system scroll view's does, it's the frame's work
+/// and a few milliseconds old. One that runs long shows on the refresh after,
+/// no older than a frame started as the refresh began would be by then, and
+/// the frames after it start earlier.
+#[cfg(target_os = "macos")]
+struct LateSample {
+    /// How long frames lately took from starting to handed over (the most,
+    /// forgotten over seconds).
+    work: std::time::Duration,
+    started: Option<std::time::Instant>,
+}
+#[cfg(target_os = "macos")]
+impl Default for LateSample {
+    fn default() -> Self {
+        Self {
+            work: Self::FIRST,
+            started: None,
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+impl LateSample {
+    /// What the first frame is taken to need.
+    const FIRST: std::time::Duration = std::time::Duration::from_millis(8);
+    /// Room left for a frame longer than any lately, and a timer waking late.
+    /// Modeled at 60 Hz, frames of 5 ms (9 at p95): 14.5 ms from sampled to
+    /// shown against 16.4, 1.1% of gaps long against 0.2; of 1.5 ms: 7.9 ms.
+    const MARGIN: std::time::Duration = std::time::Duration::from_millis(3);
+    /// How long into a refresh a frame starts.
+    fn wait(&self, period: std::time::Duration) -> std::time::Duration {
+        if period < crate::scroll_resample::SLOW_REFRESH {
+            return std::time::Duration::ZERO;
+        }
+        period.saturating_sub(Latch::LEAD + Self::MARGIN + self.work)
+    }
+    /// When the next frame starts, `next` being the first refresh after `now`:
+    /// in the refresh under way if that's still to come, else the next.
+    fn deadline(
+        &self,
+        now: std::time::Instant,
+        next: std::time::Instant,
+        period: std::time::Duration,
+    ) -> std::time::Instant {
+        let wait = self.wait(period);
+        match (next + wait).checked_sub(period) {
+            Some(this) if this > now => this,
+            _ => next + wait,
+        }
+    }
+    /// A frame started at `at`.
+    fn start(&mut self, at: std::time::Instant) {
+        self.started = Some(at);
+    }
+    /// The frame was handed over at `at`.
+    fn handed_over(&mut self, at: std::time::Instant) {
+        if let Some(started) = self.started.take() {
+            self.work = at
+                .saturating_duration_since(started)
+                .max(self.work.mul_f64(0.99));
+        }
+    }
+}
 /// The refresh point steady frames present at (see `Host::refresh_grid`),
 /// and when they render before it.
 #[cfg(target_os = "macos")]
@@ -1653,6 +1726,8 @@ struct Host {
     reported_size: Option<PhysicalSize<u32>>,
     #[cfg(target_os = "macos")]
     latch: Latch,
+    #[cfg(target_os = "macos")]
+    late_sample: LateSample,
     frame_timer: crate::frame_source::FrameTimer,
     frame_interval: std::time::Duration,
     /// The display the window shows on and its rate (`refresh_frame_interval`).
@@ -1764,6 +1839,10 @@ struct Host {
     /// Where the trackpad's scroll gesture is: what its phases report
     /// (`InputEvent::ScrollGesture`, for elastic scrolling).
     trackpad: Trackpad,
+    /// A trackpad scroll's momentum, made here as AppKit's scroll views make
+    /// it: the system's momentum events go unused (`coast`).
+    #[cfg(target_os = "macos")]
+    coast: crate::coast::Coast,
     /// Devtools' wheel recordings, and what they play back (`Ui::wheel_tape`).
     wheel_tape: std::rc::Rc<std::cell::RefCell<crate::wheel_tape::Tape>>,
     /// Native views (web pages) over and under this window's zgx content.
@@ -2019,7 +2098,11 @@ impl Host {
             title_press: None,
             cursor: (0., 0.),
             window_cursor: WindowCursor::default(),
-            scroll: Default::default(),
+            scroll: {
+                let mut scroll = crate::scroll_resample::ScrollResampler::default();
+                scroll.set_wheel_eases(cfg!(not(target_os = "macos")));
+                scroll
+            },
             touch: Default::default(),
             #[cfg(target_os = "ios")]
             native_scroll: None,
@@ -2041,6 +2124,8 @@ impl Host {
             #[cfg(windows)]
             tsf_tried: false,
             trackpad: Trackpad::Idle,
+            #[cfg(target_os = "macos")]
+            coast: Default::default(),
             wheel_tape,
             pending_file_drops: Default::default(),
             hovered_files: Vec::new(),
@@ -2101,6 +2186,8 @@ impl Host {
             reported_size: None,
             #[cfg(target_os = "macos")]
             latch: Latch::default(),
+            #[cfg(target_os = "macos")]
+            late_sample: LateSample::default(),
             frame_arrived: false,
             #[cfg(target_os = "macos")]
             refresh_frame: false,
@@ -3084,6 +3171,7 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 {
                     self.presented_at = Some(std::time::Instant::now());
+                    self.late_sample.handed_over(std::time::Instant::now());
                     // What it shows now, for `Ui::snapshot` (the last frame's
                     // surface is the renderer's to reuse again).
                     *self.shown.borrow_mut() = renderer
@@ -3277,6 +3365,9 @@ impl Host {
             crate::native_host::set_cursor(window, cursor);
             #[cfg(not(target_os = "macos"))]
             window.set_cursor(cursor);
+            // (And over its popups, which Windows asks apart.)
+            #[cfg(windows)]
+            self.popups.set_cursor(cursor);
             self.native_cursor = Some(cursor);
         }
     }
@@ -5085,6 +5176,26 @@ impl Host {
                 } else {
                     None
                 };
+                // The system's momentum goes unused on macOS: the fingers'
+                // speed as they lifted made one already (`coast`), as an
+                // `NSScrollView` ignores the system's.
+                #[cfg(target_os = "macos")]
+                if matches!(delta, MouseScrollDelta::PixelDelta(_))
+                    && (self.trackpad == Trackpad::Momentum
+                        || gesture == Some(zgx::input::ScrollGesture::MomentumEnded))
+                {
+                    return Ok(());
+                }
+                #[cfg(target_os = "macos")]
+                if gesture == Some(zgx::input::ScrollGesture::Began) {
+                    self.stop_coast()?;
+                    self.coast.touched(std::time::Instant::now());
+                    crate::coast::fingers_down(true);
+                }
+                #[cfg(target_os = "macos")]
+                if gesture == Some(zgx::input::ScrollGesture::Ended) {
+                    crate::coast::fingers_down(false);
+                }
                 if let Some(
                     gesture @ (zgx::input::ScrollGesture::Began
                     | zgx::input::ScrollGesture::MomentumBegan),
@@ -5100,6 +5211,18 @@ impl Host {
                     self.context.viewport.with_untracked(|viewport| *viewport),
                 );
                 let (dx, dy) = wheel_delta(delta, self.scale_factor, step);
+                #[cfg(target_os = "macos")]
+                if self.trackpad == Trackpad::Fingers {
+                    self.coast.scrolled((dx, dy), crate::coast::event_time());
+                }
+                // Receipt, application and presentation share the log's host
+                // clock. This is host receipt, not the native event timestamp.
+                zgx_gpu::present_log::log(|| {
+                    format!(
+                        "scroll-received window={:?} dx={dx:.3} dy={dy:.3} phase={phase:?}",
+                        self.window.as_ref().map(|window| window.id())
+                    )
+                });
                 // A touchpad's scroll coasts on after the fingers lift
                 // (Wayland says when: libinput's axis stop).
                 #[cfg(target_os = "linux")]
@@ -5149,6 +5272,9 @@ impl Host {
                         MouseScrollDelta::LineDelta(..) => self.scroll.push_wheel(now, (dx, dy)),
                     }
                 } else {
+                    zgx_gpu::present_log::log(|| {
+                        format!("scroll-applied source=direct dx={dx:.3} dy={dy:.3}")
+                    });
                     self.dispatch(InputEvent::Scroll {
                         x: self.cursor.0,
                         y: self.cursor.1,
@@ -5164,6 +5290,9 @@ impl Host {
                 {
                     // What the refreshes have not applied yet, first.
                     if let Some((delta_x, delta_y)) = self.scroll.flush() {
+                        zgx_gpu::present_log::log(|| {
+                            format!("scroll-applied source=end dx={delta_x:.3} dy={delta_y:.3}")
+                        });
                         let (x, y) = self.scroll.position;
                         self.dispatch(InputEvent::Scroll {
                             x,
@@ -5173,6 +5302,16 @@ impl Host {
                         })?;
                     }
                     self.dispatch(InputEvent::ScrollGesture(gesture))?;
+                    // Lifted: the coast starts from the fingers' speed.
+                    #[cfg(target_os = "macos")]
+                    if gesture == zgx::input::ScrollGesture::Ended
+                        && self.coast.lifted(std::time::Instant::now())
+                    {
+                        self.dispatch(InputEvent::ScrollGesture(
+                            zgx::input::ScrollGesture::MomentumBegan,
+                        ))?;
+                        self.sync_frames();
+                    }
                 }
             }
             WindowEvent::Focused(false) => {
@@ -5817,6 +5956,17 @@ impl Host {
         }
         zgx::memory::answer(report);
     }
+    /// A coast cut short (the fingers back down): its momentum ends there.
+    #[cfg(target_os = "macos")]
+    fn stop_coast(&mut self) -> Result<(), Box<dyn Error>> {
+        if self.coast.active() {
+            self.coast.stop();
+            self.dispatch(InputEvent::ScrollGesture(
+                zgx::input::ScrollGesture::MomentumEnded,
+            ))?;
+        }
+        Ok(())
+    }
     fn update(&mut self) -> Result<bool, Box<dyn Error>> {
         // Native views' reports (navigation, script replies), and keyboard
         // focus they took or gave back, at this safe point.
@@ -5925,11 +6075,24 @@ impl Host {
                 });
                 self.scroll.flush()
             } else if self.frame_arrived {
-                self.scroll.sample(std::time::Instant::now())
+                self.scroll
+                    .sample(std::time::Instant::now(), self.frame_interval)
             } else {
                 None
             };
             if let Some((delta_x, delta_y)) = delta {
+                zgx_gpu::present_log::log(|| {
+                    format!(
+                        "scroll-applied source={} dx={delta_x:.3} dy={delta_y:.3} delay_ms={:.3} refresh_ms={:.3}",
+                        if self.frames_presented() {
+                            "refresh"
+                        } else {
+                            "hidden"
+                        },
+                        self.scroll.sampling_delay().as_secs_f64() * 1000.,
+                        self.frame_interval.as_secs_f64() * 1000.
+                    )
+                });
                 let (x, y) = self.scroll.position;
                 self.dispatch(InputEvent::Scroll {
                     x,
@@ -6051,6 +6214,35 @@ impl Host {
             // A link or button under the finger gives the press up now, so
             // lifting there selects rather than clicks.
             self.dispatch(InputEvent::PointerMove { x, y })?;
+        }
+        // A trackpad's coast moves to where it is when this refresh shows;
+        // with no refreshes coming, to its end at once.
+        #[cfg(target_os = "macos")]
+        if self.coast.active() && (self.frame_arrived || !self.frames_presented()) {
+            let shows = match self.frames_presented() {
+                true => std::time::Instant::now() + self.frame_interval,
+                false => self.coast.ends().unwrap_or_else(std::time::Instant::now),
+            };
+            if let Some(((delta_x, delta_y), done)) = self.coast.sample(shows) {
+                if delta_x != 0. || delta_y != 0. {
+                    zgx_gpu::present_log::log(|| {
+                        format!("scroll-applied source=coast dx={delta_x:.3} dy={delta_y:.3}")
+                    });
+                    let (x, y) = self.scroll.position;
+                    self.dispatch(InputEvent::Scroll {
+                        x,
+                        y,
+                        delta_x,
+                        delta_y,
+                    })?;
+                    self.after_scroll();
+                }
+                if done {
+                    self.dispatch(InputEvent::ScrollGesture(
+                        zgx::input::ScrollGesture::MomentumEnded,
+                    ))?;
+                }
+            }
         }
         // A fling coasts a step each refresh, and stops at the end of what
         // it scrolls.
@@ -6267,6 +6459,8 @@ impl Host {
     }
     fn poll_frame_deadline(&mut self, now: std::time::Instant) {
         if self.frame_deadline.is_some_and(|deadline| now >= deadline) {
+            #[cfg(target_os = "macos")]
+            self.late_sample.start(now);
             let frame = self.frame_timer.frame(now, self.frame_interval);
             self.deliver_frame(frame);
         }
@@ -6303,6 +6497,12 @@ impl Host {
             self.latch = Latch::default();
             return None;
         }
+        // A scroll at a slow refresh starts each frame so late it makes the
+        // refresh it's for, with nothing to wait for (`LateSample`).
+        if self.frame_interval >= crate::scroll_resample::SLOW_REFRESH && self.scroll.active(now) {
+            self.latch = Latch::default();
+            return None;
+        }
         let steady = self
             .presented_at
             .is_some_and(|at| now.duration_since(at) < STEADY_GAP);
@@ -6321,6 +6521,8 @@ impl Host {
     fn sync_frames(&mut self) {
         let now = std::time::Instant::now();
         let scrolling = self.scroll.active(now) || self.touch.flinging();
+        #[cfg(target_os = "macos")]
+        let scrolling = scrolling || self.coast.active();
         let wanted = (self.frames.wants_frame() || scrolling) && self.frames_presented();
         if !wanted {
             self.frame_heartbeat = None;
@@ -6407,11 +6609,14 @@ impl Host {
                         // (whole refreshes apart, on the same ones), so the
                         // cadence holds as the link and the timer take turns.
                         let every = rate.map_or(1, |rate| zgx::frame::divisor(refresh, rate));
-                        self.frame_deadline = Some(self.frame_timer.next_deadline_every(
-                            now,
-                            self.frame_interval,
-                            every,
-                        ));
+                        let next =
+                            self.frame_timer
+                                .next_deadline_every(now, self.frame_interval, every);
+                        self.frame_deadline = Some(if scrolling && every == 1 {
+                            self.late_sample.deadline(now, next, self.frame_interval)
+                        } else {
+                            next
+                        });
                     }
                 } else {
                     link.set_preferred_rate(rate);
@@ -6644,9 +6849,9 @@ struct WindowManager {
     /// The window last focused: the one another launch raises (Linux).
     #[cfg(target_os = "linux")]
     last_focused: Option<u64>,
-    /// The last pointer move heard and not yet handled (Linux): see
-    /// `ApplicationHandler::window_event`.
-    #[cfg(target_os = "linux")]
+    /// The last pointer move heard and not yet handled (Linux, Windows):
+    /// see `ApplicationHandler::window_event`.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pending_move: HeldMove<WindowId, WindowEvent>,
     factory: WindowFactory,
     active: bool,
@@ -6669,23 +6874,23 @@ impl WindowManager {
         }));
     }
     /// The pointer move held back (`pending_move`), handled now.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn flush_move(&mut self, event_loop: &ActiveEventLoop) {
         if let Some((id, event)) = self.pending_move.take() {
             self.window_event_now(event_loop, id, event);
         }
     }
 }
-/// The pointer moves of one turn of the event loop, as one (Linux): the
-/// last move heard, for window `W`, not yet handled.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// The pointer moves of one turn of the event loop, as one (Linux,
+/// Windows): the last move heard, for window `W`, not yet handled.
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 struct HeldMove<W, E>(Option<(W, E)>);
 impl<W, E> Default for HeldMove<W, E> {
     fn default() -> Self {
         Self(None)
     }
 }
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 impl<W: PartialEq, E> HeldMove<W, E> {
     /// A move for window `id`, held in place of the one before; that one is
     /// handed back to handle now if it was another window's (each window
@@ -7962,7 +8167,7 @@ impl ApplicationHandler<Event> for WindowManager {
         self.contain(event_loop, None, |this| this.suspended_turn());
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         self.flush_move(event_loop);
         self.contain(event_loop, None, |this| {
             this.user_event_turn(event_loop, event)
@@ -7972,11 +8177,15 @@ impl ApplicationHandler<Event> for WindowManager {
         // Pointer moves come as often as the mouse reports them (Wayland
         // and X11 pass each on, up to 1000 a second), and each is handled
         // on laid-out content: a move that changes layout (a pane's edge
-        // dragged) lays the window out again for every one. AppKit and
-        // Windows hand an app one move per turn; here the moves of one turn
-        // of the loop come as one, the last, handled before any other event
-        // (keeping their order) and before the loop waits.
-        #[cfg(target_os = "linux")]
+        // dragged) lays the window out again for every one. Windows folds
+        // only the moves not yet read: a move that takes longer to handle
+        // than the mouse takes to report the next finds another waiting,
+        // so a turn handles one after another (11 in one frame, a 1000 Hz
+        // mouse dragging a pane's edge) and paints wait for the pointer to
+        // stop. AppKit hands an app one move per turn; here the moves of
+        // one turn of the loop come as one, the last, handled before any
+        // other event (keeping their order) and before the loop waits.
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             if matches!(event, WindowEvent::CursorMoved { .. }) {
                 if let Some((other, moved)) = self.pending_move.moved(id, event) {
@@ -7989,7 +8198,7 @@ impl ApplicationHandler<Event> for WindowManager {
         self.window_event_now(event_loop, id, event);
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         self.flush_move(event_loop);
         self.contain(event_loop, None, |this| this.about_to_wait_turn(event_loop));
     }
@@ -9289,7 +9498,7 @@ mod tests {
             carrying: None,
             #[cfg(target_os = "linux")]
             last_focused: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             pending_move: HeldMove::default(),
             factory,
             active: false,
@@ -9748,6 +9957,88 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    mod late_sample {
+        use super::super::LateSample;
+        use std::time::{Duration, Instant};
+        const SIXTY: Duration = Duration::from_micros(16_667);
+        fn ms(ms: u64) -> Duration {
+            Duration::from_millis(ms)
+        }
+        /// Frames of `work`, each started when `deadline` says, on refreshes of
+        /// `period`: how long each is from starting to showing, the refreshes
+        /// shown on, and each frame handed over before its point (2 ms ahead).
+        fn run(period: Duration, works: &[Duration]) -> (Vec<Duration>, Vec<u32>) {
+            let start = Instant::now();
+            let mut late = LateSample::default();
+            let mut now = start;
+            let (mut ages, mut shown) = (Vec::new(), Vec::new());
+            for &work in works {
+                let refreshes = (now - start).as_secs_f64() / period.as_secs_f64();
+                let next = start + period.mul_f64(refreshes.floor() + 1.);
+                let at = late.deadline(now, next, period);
+                assert!(at > now, "a frame starts after the one before");
+                late.start(at);
+                now = at + work;
+                late.handed_over(now);
+                let by = (now + ms(2) - start).as_secs_f64() / period.as_secs_f64();
+                let on = by.ceil() as u32;
+                shown.push(on);
+                ages.push(start + period * on - at);
+            }
+            (ages, shown)
+        }
+        #[test]
+        fn a_faster_refresh_starts_as_it_begins() {
+            let late = LateSample::default();
+            assert_eq!(late.wait(Duration::from_micros(8_333)), Duration::ZERO);
+            let (ages, _) = run(Duration::from_micros(8_333), &[ms(2); 30]);
+            assert!(ages[20] >= Duration::from_millis(8), "{:?}", ages[20]);
+        }
+        #[test]
+        fn at_a_slow_refresh_a_frame_is_its_work_and_a_few_ms_old() {
+            let (ages, shown) = run(SIXTY, &[ms(2); 600]);
+            // Once the first frames' estimate has been forgotten.
+            let age = ages[500];
+            assert!(age < ms(9), "{age:?}");
+            let last = &shown[500..];
+            assert!(
+                last.windows(2).all(|w| w[1] == w[0] + 1),
+                "a frame every refresh: {last:?}"
+            );
+        }
+        #[test]
+        fn a_frame_that_runs_long_costs_no_more_than_a_refresh_and_frames_start_earlier() {
+            let mut works = vec![ms(2); 600];
+            works[500] = ms(9);
+            let (ages, shown) = run(SIXTY, &works);
+            let missed = shown[500] - shown[499];
+            assert_eq!(missed, 2, "the refresh after");
+            assert!(
+                ages[500] < SIXTY * 2,
+                "no older than a refresh more: {:?}",
+                ages[500]
+            );
+            // The next may make that refresh too, newer; none goes without one.
+            assert!(
+                shown[500..].windows(2).all(|w| w[1] <= w[0] + 1),
+                "{:?}",
+                &shown[500..510]
+            );
+            assert!(
+                ages[501] > ages[499] + ms(5),
+                "started earlier: {:?}",
+                ages[501]
+            );
+        }
+        #[test]
+        fn work_too_long_for_a_late_start_starts_as_the_refresh_begins() {
+            let (ages, shown) = run(SIXTY, &[ms(13); 100]);
+            assert!(ages[50] >= SIXTY - ms(1), "{:?}", ages[50]);
+            let last = &shown[50..];
+            assert!(last.windows(2).all(|w| w[1] == w[0] + 1), "{last:?}");
+        }
+    }
+    #[cfg(target_os = "macos")]
     #[test]
     fn an_added_bool_method_states_bools_own_encoding() {
         use objc2::{encode::Encode, runtime::Bool};
@@ -9755,6 +10046,106 @@ mod tests {
             super::BOOL_GETTER.to_str().unwrap(),
             format!("{}@:", Bool::ENCODING)
         );
+    }
+
+    /// On Windows a turn's pointer moves come as one too: a burst the window
+    /// manager hears is held as its last, and a press after it hands that
+    /// move on first, as do the app's own events and the loop's wait.
+    /// (Windows folds only moves not yet read; one handled slower than the
+    /// mouse reports finds the next already waiting.)
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_turns_pointer_moves_come_as_its_last_on_windows() {
+        use winit::platform::windows::EventLoopBuilderExtWindows;
+        struct Probe {
+            manager: WindowManager,
+            held: Option<f64>,
+            held_after_press: bool,
+            held_after_user_event: bool,
+            held_after_wait: bool,
+        }
+        impl ApplicationHandler<Event> for Probe {
+            fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+                let device_id = winit::event::DeviceId::dummy();
+                let id = WindowId::dummy();
+                for x in 0..1000 {
+                    let moved = WindowEvent::CursorMoved {
+                        device_id,
+                        position: (f64::from(x), 10.).into(),
+                    };
+                    ApplicationHandler::window_event(&mut self.manager, event_loop, id, moved);
+                }
+                self.held = match &self.manager.pending_move.0 {
+                    Some((_, WindowEvent::CursorMoved { position, .. })) => Some(position.x),
+                    _ => None,
+                };
+                let press = WindowEvent::MouseInput {
+                    device_id,
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                };
+                ApplicationHandler::window_event(&mut self.manager, event_loop, id, press);
+                self.held_after_press = self.manager.pending_move.0.is_some();
+                let moved = |x: f64| WindowEvent::CursorMoved {
+                    device_id,
+                    position: (x, 10.).into(),
+                };
+                ApplicationHandler::window_event(&mut self.manager, event_loop, id, moved(1.));
+                ApplicationHandler::user_event(&mut self.manager, event_loop, Event::ImagesDecoded);
+                self.held_after_user_event = self.manager.pending_move.0.is_some();
+                ApplicationHandler::window_event(&mut self.manager, event_loop, id, moved(2.));
+                ApplicationHandler::about_to_wait(&mut self.manager, event_loop);
+                self.held_after_wait = self.manager.pending_move.0.is_some();
+                event_loop.exit();
+            }
+            fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+        }
+        let event_loop = EventLoop::<Event>::with_user_event()
+            .with_any_thread(true)
+            .build()
+            .unwrap();
+        let factory = WindowFactory {
+            fonts: Default::default(),
+            text_language: Default::default(),
+            menus: Rc::new(RefCell::new(Vec::new())),
+            menus_left_out: Rc::default(),
+            reserved: Rc::default(),
+            pending: Rc::new(RefCell::new(VecDeque::new())),
+            next: Rc::new(Cell::new(1)),
+            alive: Rc::new(Cell::new(true)),
+            clipboard: Rc::new(RefCell::new(None)),
+            gpu_contexts: Rc::new(RefCell::new(Vec::new())),
+            early_gpu: Rc::default(),
+            proxy: event_loop.create_proxy(),
+            runtime: zgx::reactive::Runtime::new(),
+        };
+        let manager = WindowManager {
+            _native_events: None,
+            application_event: None,
+            quit_on_last_window_close: true,
+            hosts: HashMap::new(),
+            panics: Vec::new(),
+            native: HashMap::new(),
+            drag_over: Cell::new(None),
+            carrying: None,
+            pending_move: HeldMove::default(),
+            factory,
+            active: false,
+            error: None,
+            timers: zgx::timer::host(|| {}),
+        };
+        let mut probe = Probe {
+            manager,
+            held: None,
+            held_after_press: true,
+            held_after_user_event: true,
+            held_after_wait: true,
+        };
+        event_loop.run_app(&mut probe).unwrap();
+        assert_eq!(probe.held, Some(999.));
+        assert!(!probe.held_after_press, "a press hands the move on first");
+        assert!(!probe.held_after_user_event, "so does the app's own event");
+        assert!(!probe.held_after_wait, "and the loop's wait");
     }
 
     #[test]

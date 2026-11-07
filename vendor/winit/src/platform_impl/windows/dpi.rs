@@ -4,7 +4,8 @@ use std::sync::Once;
 
 use windows_sys::Win32::Foundation::{HWND, S_OK};
 use windows_sys::Win32::Graphics::Gdi::{
-    GetDC, GetDeviceCaps, MonitorFromWindow, HMONITOR, LOGPIXELSX, MONITOR_DEFAULTTONEAREST,
+    GetDC, GetDeviceCaps, MonitorFromWindow, ReleaseDC, HMONITOR, LOGPIXELSX,
+    MONITOR_DEFAULTTONEAREST,
 };
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -72,10 +73,10 @@ pub fn dpi_to_scale_factor(dpi: u32) -> f64 {
 }
 
 pub unsafe fn hwnd_dpi(hwnd: HWND) -> u32 {
-    let hdc = unsafe { GetDC(hwnd) };
-    if hdc == 0 {
-        panic!("[winit] `GetDC` returned null!");
-    }
+    // zgx patch: the window's DC is taken only where it is read, and given
+    // back. winit took one on every call and never released it, and the
+    // occlusion check calls this twice a second while a window draws: GDI's
+    // 10,000 handles a process ran out within hours, and `GetDC`'s null panicked.
     if let Some(GetDpiForWindow) = *GET_DPI_FOR_WINDOW {
         // We are on Windows 10 Anniversary Update (1607) or later.
         match unsafe { GetDpiForWindow(hwnd) } {
@@ -101,12 +102,44 @@ pub unsafe fn hwnd_dpi(hwnd: HWND) -> u32 {
         if unsafe { IsProcessDPIAware() } != false.into() {
             // If the process is DPI aware, then scaling must be handled by the application using
             // this DPI value.
-            unsafe { GetDeviceCaps(hdc, LOGPIXELSX as i32) as u32 }
+            let hdc = unsafe { GetDC(hwnd) };
+            if hdc == 0 {
+                return BASE_DPI;
+            }
+            let dpi = unsafe { GetDeviceCaps(hdc, LOGPIXELSX as i32) as u32 };
+            unsafe { ReleaseDC(hwnd, hdc) };
+            dpi
         } else {
             // If the process is DPI unaware, then scaling is performed by the OS; we thus return
             // 96 (scale factor 1.0) to prevent the window from being re-scaled by both the
             // application and the WM.
             BASE_DPI
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetGuiResources, GR_GDIOBJECTS,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+
+    use super::*;
+
+    #[test]
+    fn hwnd_dpi_keeps_no_gdi_handles() {
+        let gdi_objects = || unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
+        let window = unsafe { GetDesktopWindow() };
+        unsafe { hwnd_dpi(window) };
+        let before = gdi_objects();
+        for _ in 0..1000 {
+            assert!(unsafe { hwnd_dpi(window) } >= BASE_DPI / 2);
+        }
+        assert!(
+            gdi_objects() <= before + 10,
+            "{before} GDI handles became {}",
+            gdi_objects()
+        );
     }
 }

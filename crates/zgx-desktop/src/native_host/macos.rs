@@ -1150,6 +1150,7 @@ impl Surfaces {
                     NativeContent::Platform(view) => {
                         (view.downcast_ref::<Retained<NSView>>().cloned(), None)
                     }
+                    NativeContent::Glass(pane) => (glass_view(pane, self.mtm), None),
                 };
             let inner: Retained<NSView> =
                 Retained::into_super(clip.cuts.last().unwrap().view.clone());
@@ -1871,4 +1872,69 @@ impl NativeDiagnostics {
         })
         .unwrap_or_default()
     }
+}
+
+/// Whether this macOS has the system's glass (`NSGlassEffectView`, macOS 26).
+pub(crate) fn glass_available() -> bool {
+    objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some()
+}
+
+/// A glass pane's `NSGlassEffectView`, made the first time and styled as it
+/// now asks. Hidden from assistive technology: its node is what speaks.
+fn glass_view(
+    pane: &zgx::glass::GlassPane,
+    mtm: objc2::MainThreadMarker,
+) -> Option<Retained<NSView>> {
+    use zgx::glass::{GlassStyle, GlassVariant};
+    let style = pane.style();
+    let view = match pane.view() {
+        Some(view) => view
+            .downcast_ref::<(Retained<NSView>, std::cell::Cell<Option<GlassStyle>>)>()?
+            .0
+            .clone(),
+        None => {
+            let class = objc2::runtime::AnyClass::get(c"NSGlassEffectView")?;
+            let _ = mtm;
+            // SAFETY: `new` on an NSView subclass, on the main thread (`mtm`).
+            let view: Retained<NSView> = unsafe { msg_send![class, new] };
+            objc2_app_kit::NSAccessibility::setAccessibilityElement(&*view, false);
+            pane.set_view(Rc::new((
+                view.clone(),
+                std::cell::Cell::new(None::<GlassStyle>),
+            )));
+            view
+        }
+    };
+    let held = pane.view()?;
+    let (_, shown) =
+        held.downcast_ref::<(Retained<NSView>, std::cell::Cell<Option<GlassStyle>>)>()?;
+    if shown.get() != Some(style) {
+        shown.set(Some(style));
+        let variant: isize = match style.variant {
+            GlassVariant::Regular => 0,
+            GlassVariant::Clear => 1,
+        };
+        // A capsule's radius: half a box as large as any.
+        let radius = if style.radius.is_finite() {
+            f64::from(style.radius)
+        } else {
+            1e4
+        };
+        // SAFETY: NSGlassEffectView's setters, on the main thread; a tint is
+        // a fresh NSColor, kept by the view.
+        unsafe {
+            let _: () = msg_send![&*view, setStyle: variant];
+            let _: () = msg_send![&*view, setCornerRadius: radius];
+            let tint: Option<Retained<objc2_app_kit::NSColor>> = style.tint.map(|tint| {
+                objc2_app_kit::NSColor::colorWithSRGBRed_green_blue_alpha(
+                    f64::from(tint.0) / 255.,
+                    f64::from(tint.1) / 255.,
+                    f64::from(tint.2) / 255.,
+                    f64::from(tint.3) / 255.,
+                )
+            });
+            let _: () = msg_send![&*view, setTintColor: tint.as_deref()];
+        }
+    }
+    Some(view)
 }
