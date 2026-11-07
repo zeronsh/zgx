@@ -115,6 +115,19 @@ On an Apple M-series Mac shared with other work, the showcase with 4-sample moti
 
 `zgx video studio <dir>` opens the compositions in a window. The window itself is a zgx app (`crates/zgx-video/studio/app.luau`) with a composition list, the preview, a timeline of the sequences shown so far with a playhead to drag, playback at real speed (Space; ← and → step a frame), a props panel that redraws as props change, a render button with progress, and reloading as the script is saved. Its frames come from a thread with a virtual clock of its own, through the same code a render uses, so the preview shows what a render writes. While it isn't playing, that thread waits for a message and does no work. `--screenshot out.png --frames N` draws the studio headless.
 
+## A player in any app
+
+`zgx_video::Player` plays a composition live inside any zgx app, as the studio's preview does. Its frames are made on a thread of its own, on that thread's virtual clock, through the code a render uses. While it's neither playing nor asked for a frame, that thread waits and does no work.
+
+```rust
+let player = zgx_video::Player::new(&cx.ui.runtime, "videos/intro".as_ref(), 1.)?;
+player.open("Intro", serde_json::json!({ "name": "Ada" }), 0);
+player.play(true);
+cx.render(div().size(640., 360.).child(player.view().size(640., 360.)));
+```
+
+`open(id, props, frame)`, `seek`, `play`, `looping` and `reload` drive it. `frame`, `playing`, `composition`, `tracks`, `error` and `image` are its state, as signals. For a Luau app, `player.expose(&host, "clip")` gives the script `ui.image { src = "host:clip" }` to show it, `ui.call("clip.listen")` to follow it, `ui.invoke("clip.open" | "clip.seek" | "clip.play" | "clip.loop", …)` to drive it, and `ui.shared("clip")` for its frame, whether it plays, its composition and its error.
+
 ## In Rust
 
 `zgx_video::compose` has the same pieces for views: `Clock` (`get`, `map`, `spring`, `progress`), `sequence(from, duration, |clock| view)`, `interpolate`, `spring`, and `render_view(&RustComposition { … }, &RenderOptions { … }, |clock| view, progress)`. `zgx_video::Stage` is the base: any view, mounted on a virtual clock with an offscreen renderer, stepped and drawn a frame at a time. `zgx_video::render` renders a script, and `ScriptStage` plays one frame by frame.
