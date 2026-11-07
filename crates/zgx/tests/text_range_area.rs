@@ -107,3 +107,19 @@ fn a_scrolled_fields_range_is_where_it_shows() {
     let caret = ui.scene.borrow().transformed_bounds(editor.caret);
     assert!((editor.text_area(n..n).unwrap().x - caret.x).abs() < 2.);
 }
+
+/// An input method can ask after the editor it was told of is gone (Windows
+/// asks from inside its own message handling, before zgx tells it focus
+/// moved): no area, and no panic, which in that COM call would end the app.
+#[test]
+fn a_removed_editor_has_no_area() {
+    for multiline in [false, true] {
+        let (mut ui, editor) = editor("abc\ndef", 300., multiline, 1.);
+        assert!(editor.text_area(0..3).is_some());
+        ui.remove(editor.node);
+        ui.prepare_frame();
+        assert_eq!(editor.text_area(0..3), None);
+        assert_eq!(editor.text_area(2..2), None);
+        assert_eq!(editor.input_method_area(), Default::default());
+    }
+}
