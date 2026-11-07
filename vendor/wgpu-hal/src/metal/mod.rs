@@ -593,7 +593,7 @@ unsafe impl Send for SurfaceTexture {}
 unsafe impl Sync for SurfaceTexture {}
 
 /// zgx patch: presents in a transaction wait for their work to finish.
-pub static PRESENT_WAITS_FOR_GPU: AtomicBool = AtomicBool::new(false);
+pub static PRESENT_WAITS_FOR_GPU: atomic::AtomicBool = atomic::AtomicBool::new(false);
 /// zgx patch: nanoseconds iOS's command buffers ran, and how many ran.
 #[cfg(target_os = "ios")]
 static GPU_NANOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -748,7 +748,7 @@ impl crate::Queue for Queue {
             if texture.present_with_transaction {
                 // zgx patch: a frame other layers change with must be finished,
                 // not only scheduled, or a slow one misses the commit it is in.
-                if PRESENT_WAITS_FOR_GPU.load(core::sync::atomic::Ordering::Relaxed) {
+                if PRESENT_WAITS_FOR_GPU.load(atomic::Ordering::Relaxed) {
                     command_buffer.waitUntilCompleted();
                 } else {
                     command_buffer.waitUntilScheduled();
