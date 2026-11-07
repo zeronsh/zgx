@@ -326,13 +326,28 @@ fn retell_scope(shared: &Rc<RefCell<Shared>>) {
     }
 }
 
+/// A lock the store has granted: given back as this drops, a panic under
+/// it included (`guard` fails the call then), so the next request isn't
+/// told the store is busy for good.
+struct Held<'a>(&'a RefCell<Shared>);
+impl<'a> Held<'a> {
+    fn take(shared: &'a RefCell<Shared>, flags: u32) -> Self {
+        shared.borrow_mut().lock = flags & TS_LF_READWRITE.0;
+        Self(shared)
+    }
+}
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut shared) = self.0.try_borrow_mut() {
+            shared.lock = 0;
+        }
+    }
+}
+
 /// Grant lock `flags` now: hold it while the sink reads or edits.
 fn grant(shared: &Rc<RefCell<Shared>>, flags: u32) -> HRESULT {
-    let sink = {
-        let mut s = shared.borrow_mut();
-        s.lock = flags & TS_LF_READWRITE.0;
-        s.sink.clone()
-    };
+    let held = Held::take(shared, flags);
+    let sink = shared.borrow().sink.clone();
     // SAFETY: the sink is alive while advised.
     let result = sink.map_or(HRESULT(0), |sink| unsafe {
         sink.OnLockGranted(TEXT_STORE_LOCK_FLAGS(flags & TS_LF_READWRITE.0))
@@ -340,9 +355,11 @@ fn grant(shared: &Rc<RefCell<Shared>>, flags: u32) -> HRESULT {
     });
     // What the input method edited under the lock it knows of: the
     // document's length from here.
-    let mut s = shared.borrow_mut();
-    s.lock = 0;
-    s.told_len = s.store.len();
+    {
+        let mut s = shared.borrow_mut();
+        s.told_len = s.store.len();
+    }
+    drop(held);
     result
 }
 
@@ -396,21 +413,23 @@ impl ITextStoreACP2_Impl for Store_Impl {
         Ok(())
     }
     fn RequestLock(&self, flags: u32) -> Result<HRESULT> {
-        let busy = {
-            let shared = self.0.borrow();
-            shared.lock != 0
-        };
-        if busy {
-            if flags & TS_LF_SYNC != 0 {
-                return Ok(TS_E_SYNCHRONOUS);
+        guard(|| {
+            let busy = {
+                let shared = self.0.borrow();
+                shared.lock != 0
+            };
+            if busy {
+                if flags & TS_LF_SYNC != 0 {
+                    return Ok(TS_E_SYNCHRONOUS);
+                }
+                let mut shared = self.0.borrow_mut();
+                // A write asked for wins over a read.
+                let wanted = shared.pending.unwrap_or(0) | (flags & TS_LF_READWRITE.0);
+                shared.pending = Some(wanted);
+                return Ok(TS_S_ASYNC);
             }
-            let mut shared = self.0.borrow_mut();
-            // A write asked for wins over a read.
-            let wanted = shared.pending.unwrap_or(0) | (flags & TS_LF_READWRITE.0);
-            shared.pending = Some(wanted);
-            return Ok(TS_S_ASYNC);
-        }
-        Ok(grant(&self.0, flags))
+            Ok(grant(&self.0, flags))
+        })
     }
     fn GetStatus(&self) -> Result<TS_STATUS> {
         Ok(TS_STATUS {
@@ -1167,5 +1186,31 @@ mod tests {
         let failed = guard::<()>(|| panic!("a bug"));
         assert_eq!(failed.unwrap_err().code(), E_UNEXPECTED);
         assert_eq!(guard(|| Ok(7)).unwrap(), 7);
+    }
+
+    /// A panic under a granted lock gives the lock back, so the store isn't
+    /// busy for good after a call `guard` failed.
+    #[test]
+    fn a_panic_under_a_lock_gives_it_back() {
+        let shared = RefCell::new(Shared {
+            store: TextStore::new(),
+            sink: None,
+            lock: 0,
+            pending: None,
+            hwnd: HWND::default(),
+            scale: 1.,
+            told_len: 0,
+            layout_changed: false,
+            attributes: None,
+            scope_asked: false,
+            told_scope: 0,
+        });
+        let failed = guard::<()>(|| {
+            let _held = Held::take(&shared, TS_LF_READWRITE.0);
+            assert_ne!(shared.borrow().lock, 0, "held");
+            panic!("a bug under the lock");
+        });
+        assert!(failed.is_err());
+        assert_eq!(shared.borrow().lock, 0, "given back");
     }
 }
