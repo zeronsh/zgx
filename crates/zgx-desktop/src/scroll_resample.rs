@@ -78,6 +78,9 @@ pub(crate) struct ScrollResampler {
     wheel_rate: (f32, f32),
     wheel_notch: Option<Instant>,
     wheel_gap: Option<Duration>,
+    /// Wheel notches move whole on the next refresh, not eased over several:
+    /// an `NSScrollView`'s do (`set_wheel_eases`).
+    whole_notches: bool,
     /// When the latest input arrived.
     last_input: Option<Instant>,
     /// Pointer position of the latest input; motion is delivered there.
@@ -85,6 +88,14 @@ pub(crate) struct ScrollResampler {
 }
 
 impl ScrollResampler {
+    /// Whether wheel notches ease in over the next refreshes, as a browser's
+    /// do (the default), or each moves whole on the next refresh, as an
+    /// `NSScrollView`'s do: measured with real wheel events into a scroll
+    /// view, a table and a text view, every notch moved its whole step on
+    /// the refresh after it, and notches within one refresh together.
+    pub fn set_wheel_eases(&mut self, eases: bool) {
+        self.whole_notches = !eases;
+    }
     pub fn pending(&self) -> bool {
         self.received != self.applied || self.wheel != (0., 0.)
     }
@@ -228,6 +239,12 @@ impl ScrollResampler {
         let horizon = now.checked_sub(delay).unwrap_or(now);
         while self.points.len() > 1 && self.points[1].0 <= horizon {
             self.points.pop_front();
+        }
+        if self.whole_notches && self.wheel != (0., 0.) {
+            delta.0 += std::mem::take(&mut self.wheel.0);
+            delta.1 += std::mem::take(&mut self.wheel.1);
+            self.wheel_at = None;
+            self.wheel_held = (0., 0.);
         }
         if let Some(at) = self.wheel_at.replace(now) {
             let elapsed = now.duration_since(at).as_secs_f32();
@@ -613,6 +630,26 @@ mod tests {
             .unwrap_or_default()
             .1;
         assert!((first + rest - 20.).abs() < 1e-3);
+        assert!(!resampler.pending());
+    }
+
+    #[test]
+    fn notches_that_dont_ease_move_whole_on_the_next_refresh() {
+        let start = Instant::now();
+        let refresh = Duration::from_micros(8333);
+        let mut resampler = ScrollResampler::default();
+        resampler.set_wheel_eases(false);
+        resampler.push_wheel(start, (0., 30.));
+        assert_eq!(resampler.sample(start + refresh, refresh), Some((0., 30.)));
+        assert_eq!(resampler.sample(start + refresh * 2, refresh), None);
+        assert!(!resampler.pending());
+        // Two within one refresh move together, on the one after.
+        resampler.push_wheel(start + refresh * 3, (0., 30.));
+        resampler.push_wheel(start + refresh * 3 + Duration::from_millis(4), (0., 30.));
+        assert_eq!(
+            resampler.sample(start + refresh * 4, refresh),
+            Some((0., 60.))
+        );
         assert!(!resampler.pending());
     }
 
