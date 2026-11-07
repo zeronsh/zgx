@@ -44,7 +44,7 @@ struct Region {
     metal::float4 color2_;
     metal::float4 tint;
 };
-typedef Region type_4[1];
+typedef Region type_6[1];
 struct Both {
     metal::float4 retained;
     metal::float4 drawable;
@@ -55,8 +55,33 @@ struct Basic {
     char _pad2[8];
     metal::float4 color;
     float texture;
-    char _pad4[12];
+    float firmness;
+    char _pad5[8];
 };
+
+float firmness(
+    float options_y,
+    metal::float3 text
+) {
+    bool local = {};
+    if (!((options_y < 1.1))) {
+        local = options_y > 1.5;
+    } else {
+        local = true;
+    }
+    bool _e10 = local;
+    if (_e10) {
+        return 0.0;
+    }
+    return metal::clamp(metal::dot(text, metal::float3(0.2126, 0.7152, 0.0722)) * 2.0, 0.0, 1.0);
+}
+
+float firm(
+    float a,
+    float k
+) {
+    return a + (((k * 0.67) * a) * (1.0 - a));
+}
 
 float rounded(
     metal::float4 b,
@@ -88,20 +113,20 @@ uint naga_f2u32(float value) {
 metal::float4 tinted(
     float index,
     metal::float4 premultiplied,
-    device type_4 const& regions,
+    device type_6 const& regions,
     constant _mslBufferSizes& _buffer_sizes
 ) {
-    bool local = {};
+    bool local_1 = {};
     if (index < 0.5) {
         return premultiplied;
     }
     Region g = regions[naga_f2u32(index) - 1u];
     if (!((g.tint.x < 0.5))) {
-        local = premultiplied.w <= 0.0;
+        local_1 = premultiplied.w <= 0.0;
     } else {
-        local = true;
+        local_1 = true;
     }
-    bool _e21 = local;
+    bool _e21 = local_1;
     if (_e21) {
         return premultiplied;
     }
@@ -115,28 +140,28 @@ float faded(
     metal::float4 f,
     metal::float2 p_1
 ) {
-    float k = 1.0;
+    float k_1 = 1.0;
     if (f.x > 0.0) {
         float t_1 = metal::clamp((p_1.y - b_1.y) / f.x, 0.0, 1.0);
-        float _e16 = k;
-        k = _e16 * ((t_1 * t_1) * (3.0 - (2.0 * t_1)));
+        float _e16 = k_1;
+        k_1 = _e16 * ((t_1 * t_1) * (3.0 - (2.0 * t_1)));
     }
     if (f.y > 0.0) {
         float t_2 = metal::clamp((b_1.z - p_1.x) / f.y, 0.0, 1.0);
-        float _e35 = k;
-        k = _e35 * ((t_2 * t_2) * (3.0 - (2.0 * t_2)));
+        float _e35 = k_1;
+        k_1 = _e35 * ((t_2 * t_2) * (3.0 - (2.0 * t_2)));
     }
     if (f.z > 0.0) {
         float t_3 = metal::clamp((b_1.w - p_1.y) / f.z, 0.0, 1.0);
-        float _e54 = k;
-        k = _e54 * ((t_3 * t_3) * (3.0 - (2.0 * t_3)));
+        float _e54 = k_1;
+        k_1 = _e54 * ((t_3 * t_3) * (3.0 - (2.0 * t_3)));
     }
     if (f.w > 0.0) {
         float t_4 = metal::clamp((p_1.x - b_1.x) / f.w, 0.0, 1.0);
-        float _e73 = k;
-        k = _e73 * ((t_4 * t_4) * (3.0 - (2.0 * t_4)));
+        float _e73 = k_1;
+        k_1 = _e73 * ((t_4 * t_4) * (3.0 - (2.0 * t_4)));
     }
-    float _e81 = k;
+    float _e81 = k_1;
     return _e81;
 }
 
@@ -144,26 +169,26 @@ float region(
     float index_1,
     metal::float2 position_1,
     constant metal::float4& viewport,
-    device type_4 const& regions,
+    device type_6 const& regions,
     constant _mslBufferSizes& _buffer_sizes
 ) {
-    float k_1 = {};
+    float k_2 = {};
     Region g_1 = regions[naga_f2u32(index_1) - 1u];
     float _e10 = viewport.z;
     metal::float2 p_2 = position_1 / metal::float2(_e10);
     float _e17 = rounded(g_1.round0_, g_1.radii0_, g_1.tint.y, p_2, viewport);
     float _e22 = rounded(g_1.round1_, g_1.radii1_, g_1.tint.z, p_2, viewport);
-    k_1 = _e17 * _e22;
-    float _e25 = k_1;
+    k_2 = _e17 * _e22;
+    float _e25 = k_2;
     float _e28 = faded(g_1.fade_box, g_1.fade, p_2);
-    k_1 = _e25 * _e28;
+    k_2 = _e25 * _e28;
     if (g_1.tint.w > 0.5) {
         Region o_2 = regions[naga_f2u32(g_1.tint.w) - 1u];
-        float _e42 = k_1;
+        float _e42 = k_2;
         float _e45 = faded(o_2.fade_box, o_2.fade, p_2);
-        k_1 = _e42 * _e45;
+        k_2 = _e42 * _e45;
     }
-    float _e47 = k_1;
+    float _e47 = k_2;
     return _e47;
 }
 
@@ -184,16 +209,16 @@ metal::float4 shade_texel(
     bool has_texel,
     constant metal::float4& viewport,
     metal::texture2d<float, metal::access::sample> atlas,
-    device type_4 const& regions,
+    device type_6 const& regions,
     metal::sampler tex_sampler,
     constant _mslBufferSizes& _buffer_sizes
 ) {
     Out v_5 = {};
     metal::float4 color_1 = {};
-    bool local_1 = {};
     bool local_2 = {};
-    float corner = {};
     bool local_3 = {};
+    float corner = {};
+    bool local_4 = {};
     bool premultiplied_1 = false;
     metal::float3 rgb = metal::float3(0.0);
     float scale = 1.0;
@@ -212,16 +237,16 @@ metal::float4 shade_texel(
         float _e30 = v_5.shape.w;
         if (!((_e30 > 0.5))) {
             float _e38 = v_5.shape.z;
-            local_2 = _e38 > 0.0;
+            local_3 = _e38 > 0.0;
         } else {
-            local_2 = true;
+            local_3 = true;
         }
-        bool _e42 = local_2;
-        local_1 = _e42;
+        bool _e42 = local_3;
+        local_2 = _e42;
     } else {
-        local_1 = false;
+        local_2 = false;
     }
-    bool _e44 = local_1;
+    bool _e44 = local_2;
     if (_e44) {
         float _e47 = v_5.shape.x;
         corner = _e47;
@@ -259,10 +284,10 @@ metal::float4 shade_texel(
         float _e160 = v_5.shape.y;
         if (_e160 < 0.0) {
             float _e165 = v_5.shape.x;
-            uint a = naga_f2u32(_e165);
+            uint a_1 = naga_f2u32(_e165);
             float _e169 = v_5.shape.z;
             uint b_2 = naga_f2u32(_e169);
-            metal::float4 sides = metal::float4(static_cast<float>(a & 4095u), static_cast<float>(a >> 12u), static_cast<float>(b_2 & 4095u), static_cast<float>(b_2 >> 12u)) / metal::float4(16.0);
+            metal::float4 sides = metal::float4(static_cast<float>(a_1 & 4095u), static_cast<float>(a_1 >> 12u), static_cast<float>(b_2 & 4095u), static_cast<float>(b_2 >> 12u)) / metal::float4(16.0);
             float _e189 = v_5.point.x;
             float _e192 = v_5.fade.x;
             float _e195 = v_5.fade.z;
@@ -283,11 +308,11 @@ metal::float4 shade_texel(
             float inside = (metal::length(metal::max(iq, metal::float2(0.0))) + metal::min(metal::max(iq.x, iq.y), 0.0)) - inner_radius;
             float aa = metal::max(slope.x + slope.y, 0.5);
             if (box_1.z > 0.0) {
-                local_3 = box_1.w > 0.0;
+                local_4 = box_1.w > 0.0;
             } else {
-                local_3 = false;
+                local_4 = false;
             }
-            bool _e287 = local_3;
+            bool _e287 = local_4;
             float hollow = _e287 ? metal::clamp(0.5 - (inside / aa), 0.0, 1.0) : 0.0;
             float _e291 = color_1.w;
             color_1.w = _e291 * metal::max(metal::clamp(0.5 - (distance / aa), 0.0, 1.0) - hollow, 0.0);
@@ -342,51 +367,55 @@ metal::float4 shade_texel(
             metal::float4 _e439 = tex;
             float _e443 = color_1.w;
             float _e445 = tex.w;
-            color_1 = metal::float4(_e437.xyz * _e439.xyz, _e443 * _e445);
+            float _e448 = v_5.options.y;
+            metal::float4 _e449 = color_1;
+            float _e451 = firmness(_e448, _e449.xyz);
+            float _e452 = firm(_e445, _e451);
+            color_1 = metal::float4(_e437.xyz * _e439.xyz, _e443 * _e452);
         }
     }
-    float _e450 = v_5.options.x;
-    if (_e450 > 0.0) {
-        metal::float2 _e454 = v_5.point;
-        metal::float4 _e456 = v_5.fade;
-        metal::float4 _e460 = v_5.fade;
+    float _e457 = v_5.options.x;
+    if (_e457 > 0.0) {
+        metal::float2 _e461 = v_5.point;
         metal::float4 _e463 = v_5.fade;
-        metal::float2 _e467 = v_5.point;
-        metal::float2 distance_1 = metal::min(_e454 - _e456.xy, (_e460.xy + _e463.zw) - _e467);
-        float _e475 = v_5.options.x;
-        float f_1 = metal::clamp(metal::min(distance_1.x, distance_1.y) / _e475, 0.0, 1.0);
-        float _e481 = color_1.w;
-        color_1.w = _e481 * f_1;
-        float _e483 = scale;
-        scale = _e483 * f_1;
+        metal::float4 _e467 = v_5.fade;
+        metal::float4 _e470 = v_5.fade;
+        metal::float2 _e474 = v_5.point;
+        metal::float2 distance_1 = metal::min(_e461 - _e463.xy, (_e467.xy + _e470.zw) - _e474);
+        float _e482 = v_5.options.x;
+        float f_1 = metal::clamp(metal::min(distance_1.x, distance_1.y) / _e482, 0.0, 1.0);
+        float _e488 = color_1.w;
+        color_1.w = _e488 * f_1;
+        float _e490 = scale;
+        scale = _e490 * f_1;
     }
-    float _e487 = v_5.mask.x;
-    if (_e487 > 0.5) {
-        float _e492 = v_5.mask.x;
-        metal::float4 _e494 = v_5.position;
-        float _e496 = region(_e492, _e494.xy, viewport, regions, _buffer_sizes);
-        float _e498 = color_1.w;
-        color_1.w = _e498 * _e496;
-        float _e500 = scale;
-        scale = _e500 * _e496;
+    float _e494 = v_5.mask.x;
+    if (_e494 > 0.5) {
+        float _e499 = v_5.mask.x;
+        metal::float4 _e501 = v_5.position;
+        float _e503 = region(_e499, _e501.xy, viewport, regions, _buffer_sizes);
+        float _e505 = color_1.w;
+        color_1.w = _e505 * _e503;
+        float _e507 = scale;
+        scale = _e507 * _e503;
     }
-    float _e504 = v_5.mask.x;
-    metal::float4 _e505 = color_1;
-    float _e508 = color_1.w;
-    float _e511 = color_1.w;
-    metal::float3 _e513 = rgb;
-    float _e514 = scale;
-    float _e517 = color_1.w;
-    bool _e519 = premultiplied_1;
-    metal::float4 _e521 = tinted(_e504, _e519 ? metal::float4(_e513 * _e514, _e517) : metal::float4(_e505.xyz * _e508, _e511), regions, _buffer_sizes);
-    return _e521;
+    float _e511 = v_5.mask.x;
+    metal::float4 _e512 = color_1;
+    float _e515 = color_1.w;
+    float _e518 = color_1.w;
+    metal::float3 _e520 = rgb;
+    float _e521 = scale;
+    float _e524 = color_1.w;
+    bool _e526 = premultiplied_1;
+    metal::float4 _e528 = tinted(_e511, _e526 ? metal::float4(_e520 * _e521, _e524) : metal::float4(_e512.xyz * _e515, _e518), regions, _buffer_sizes);
+    return _e528;
 }
 
 metal::float4 shade(
     Out input_1,
     constant metal::float4& viewport,
     metal::texture2d<float, metal::access::sample> atlas,
-    device type_4 const& regions,
+    device type_6 const& regions,
     metal::sampler tex_sampler,
     constant _mslBufferSizes& _buffer_sizes
 ) {
@@ -401,8 +430,9 @@ metal::float4 basic(
 ) {
     if (v_6.texture > 0.5) {
         metal::float4 tex_1 = atlas.sample(tex_sampler, v_6.uv);
-        float a_1 = v_6.color.w * tex_1.w;
-        return metal::float4((v_6.color.xyz * tex_1.xyz) * ((v_6.texture > 1.5) ? v_6.color.w : a_1), a_1);
+        float _e12 = firm(tex_1.w, v_6.firmness);
+        float a_2 = v_6.color.w * _e12;
+        return metal::float4((v_6.color.xyz * tex_1.xyz) * ((v_6.texture > 1.5) ? v_6.color.w : a_2), a_2);
     }
     return metal::float4(v_6.color.xyz * v_6.color.w, v_6.color.w);
 }
@@ -486,7 +516,7 @@ fragment fsOutput fs(
 , metal::float4 position_2 [[position]]
 , constant metal::float4& viewport [[buffer(0)]]
 , metal::texture2d<float, metal::access::sample> atlas [[texture(0)]]
-, device type_4 const& regions [[buffer(2)]]
+, device type_6 const& regions [[buffer(2)]]
 , constant _mslBufferSizes& _buffer_sizes [[buffer(3)]]
 ) {
     constexpr metal::sampler tex_sampler(
@@ -522,7 +552,7 @@ fragment fs_bothOutput fs_both(
 , metal::float4 position_3 [[position]]
 , constant metal::float4& viewport [[buffer(0)]]
 , metal::texture2d<float, metal::access::sample> atlas [[texture(0)]]
-, device type_4 const& regions [[buffer(2)]]
+, device type_6 const& regions [[buffer(2)]]
 , constant _mslBufferSizes& _buffer_sizes [[buffer(3)]]
 ) {
     constexpr metal::sampler tex_sampler(
@@ -551,6 +581,7 @@ struct vs_basicOutput {
     metal::float2 uv [[user(loc0), center_perspective]];
     metal::float4 color [[user(loc1), flat]];
     float texture [[user(loc2), flat]];
+    float firmness [[user(loc3), flat]];
 };
 vertex vs_basicOutput vs_basic(
   vs_basicInput varyings_3 [[stage_in]]
@@ -570,9 +601,11 @@ vertex vs_basicOutput vs_basic(
     o_1.uv = uv.xy + (corner_2 * uv.zw);
     o_1.color = color;
     o_1.texture = options.y;
-    Basic _e47 = o_1;
-    const auto _tmp = _e47;
-    return vs_basicOutput { _tmp.position, _tmp.uv, _tmp.color, _tmp.texture };
+    float _e50 = firmness(options.y, color.xyz);
+    o_1.firmness = _e50;
+    Basic _e51 = o_1;
+    const auto _tmp = _e51;
+    return vs_basicOutput { _tmp.position, _tmp.uv, _tmp.color, _tmp.texture, _tmp.firmness };
 }
 
 
@@ -580,6 +613,7 @@ struct fs_basicInput {
     metal::float2 uv [[user(loc0), center_perspective]];
     metal::float4 color [[user(loc1), flat]];
     float texture [[user(loc2), flat]];
+    float firmness [[user(loc3), flat]];
 };
 struct fs_basicOutput {
     metal::float4 member_4 [[color(0)]];
@@ -597,7 +631,7 @@ fragment fs_basicOutput fs_basic(
         metal::min_filter::linear,
         metal::coord::normalized
     );
-    const Basic v_3 = { position_4, varyings_4.uv, {}, varyings_4.color, varyings_4.texture };
+    const Basic v_3 = { position_4, varyings_4.uv, {}, varyings_4.color, varyings_4.texture, varyings_4.firmness };
     metal::float4 _e1 = basic(v_3, atlas, tex_sampler);
     return fs_basicOutput { _e1 };
 }
@@ -607,6 +641,7 @@ struct fs_basic_bothInput {
     metal::float2 uv [[user(loc0), center_perspective]];
     metal::float4 color [[user(loc1), flat]];
     float texture [[user(loc2), flat]];
+    float firmness [[user(loc3), flat]];
 };
 struct fs_basic_bothOutput {
     metal::float4 retained [[color(0)]];
@@ -625,7 +660,7 @@ fragment fs_basic_bothOutput fs_basic_both(
         metal::min_filter::linear,
         metal::coord::normalized
     );
-    const Basic v_4 = { position_5, varyings_5.uv, {}, varyings_5.color, varyings_5.texture };
+    const Basic v_4 = { position_5, varyings_5.uv, {}, varyings_5.color, varyings_5.texture, varyings_5.firmness };
     metal::float4 _e1 = basic(v_4, atlas, tex_sampler);
     const auto _tmp = Both {_e1, _e1};
     return fs_basic_bothOutput { _tmp.retained, _tmp.drawable };
