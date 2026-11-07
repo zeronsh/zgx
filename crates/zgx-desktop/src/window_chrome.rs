@@ -218,7 +218,7 @@ pub(crate) fn titlebar_area(
 }
 
 #[cfg(windows)]
-pub(crate) use win::{CaptionHost, fit_work_area, menu_theme};
+pub(crate) use win::{CaptionHost, blur_behind, fit_work_area, menu_theme, popup_blur_behind};
 
 #[cfg(windows)]
 mod win {
@@ -553,30 +553,40 @@ mod win {
     type Composition =
         unsafe extern "system" fn(HWND, *mut CompositionAttribute) -> windows::core::BOOL;
 
-    /// user32's `SetWindowCompositionAttribute`: from Windows 10 1809
-    /// (17763), whose accent has the acrylic blur; `None` before.
-    fn composition() -> Option<Composition> {
+    /// Windows' build number (17763 is Windows 10 1809, 22000 Windows 11),
+    /// 0 before Windows 10 or unread.
+    fn build() -> u32 {
         use std::sync::OnceLock;
         use windows::{
             Wdk::System::SystemServices::RtlGetVersion,
-            Win32::System::{
-                LibraryLoader::{GetModuleHandleW, GetProcAddress},
-                SystemInformation::OSVERSIONINFOW,
-            },
-            core::{s, w},
+            Win32::System::SystemInformation::OSVERSIONINFOW,
         };
-        type Proc = unsafe extern "system" fn() -> isize;
-        static SET: OnceLock<Option<Composition>> = OnceLock::new();
-        *SET.get_or_init(|| {
+        static BUILD: OnceLock<u32> = OnceLock::new();
+        *BUILD.get_or_init(|| {
             let mut version = OSVERSIONINFOW {
                 dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
                 ..Default::default()
             };
             // SAFETY: fills `version`, whose size it is given.
-            if unsafe { RtlGetVersion(&mut version) }.is_err()
-                || version.dwMajorVersion < 10
-                || version.dwBuildNumber < 17763
-            {
+            if unsafe { RtlGetVersion(&mut version) }.is_err() || version.dwMajorVersion < 10 {
+                return 0;
+            }
+            version.dwBuildNumber
+        })
+    }
+
+    /// user32's `SetWindowCompositionAttribute`: from Windows 10 1809
+    /// (17763), whose accent has the acrylic blur; `None` before.
+    fn composition() -> Option<Composition> {
+        use std::sync::OnceLock;
+        use windows::{
+            Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress},
+            core::{s, w},
+        };
+        type Proc = unsafe extern "system" fn() -> isize;
+        static SET: OnceLock<Option<Composition>> = OnceLock::new();
+        *SET.get_or_init(|| {
+            if build() < 17763 {
                 return None;
             }
             // SAFETY: user32 stays loaded in a process with windows.
@@ -596,7 +606,7 @@ mod win {
     /// the client the frame is extended over. Before 1809, nothing. Whether
     /// Windows took it: it has no getter for an accent to read it back by
     /// (`GetWindowCompositionAttribute` refuses `WCA_ACCENT_POLICY`).
-    fn blur_behind(hwnd: HWND, on: bool) -> bool {
+    pub(crate) fn blur_behind(hwnd: HWND, on: bool) -> bool {
         let Some(set) = composition() else {
             return false;
         };
@@ -617,6 +627,15 @@ mod win {
         // SAFETY: our own window; the accent outlives the call, and is given
         // its size.
         unsafe { set(hwnd, &mut attribute) }.as_bool()
+    }
+
+    /// Whether a popup's window can have the accent's blur behind its panel
+    /// (`popup_window/win32.rs`): Windows 11, whose DWM rounds a popup's
+    /// corners, and its blur with them. Windows 10's square blur would show
+    /// past a rounded panel's corners. The accent, unlike a system backdrop,
+    /// blurs behind a window never activated, as a popup's is.
+    pub(crate) fn popup_blur_behind() -> bool {
+        build() >= 22000 && composition().is_some()
     }
 
     /// The executable's own icon (its first icon group, the one Explorer
