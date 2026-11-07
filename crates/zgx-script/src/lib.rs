@@ -436,6 +436,8 @@ pub(crate) struct Vm {
     pub(crate) warnings: SharedWarnings,
     /// Makes a pointer event's table (`point_table`), compiled once.
     pub(crate) point: std::cell::OnceCell<mlua::Function>,
+    /// Makes a move's table, with its `dx`, `dy` (`point_table`).
+    pub(crate) moved: std::cell::OnceCell<mlua::Function>,
 }
 impl Vm {
     /// A pointer event's table for a handler: `x`, `y`, `local_x`,
@@ -450,29 +452,40 @@ impl Vm {
         (shift, ctrl, alt, meta, cmd): (bool, bool, bool, bool, bool),
         motion: Option<(f32, f32, bool)>,
     ) -> mlua::Result<mlua::Table> {
-        let make = match self.point.get() {
+        // A move's own maker: its `dx`, `dy`, and `locked` only while it
+        // is (an ordinary move has no such field).
+        let (cell, source) = match motion {
+            None => (
+                &self.point,
+                "local x, y, local_x, local_y, shift, ctrl, alt, meta, cmd = ...\n\
+                 return { x = x, y = y, local_x = local_x, local_y = local_y, shift = shift, \
+                 ctrl = ctrl, alt = alt, meta = meta, cmd = cmd }",
+            ),
+            Some(_) => (
+                &self.moved,
+                "local x, y, local_x, local_y, shift, ctrl, alt, meta, cmd, dx, dy, locked = ...\n\
+                 return { x = x, y = y, local_x = local_x, local_y = local_y, shift = shift, \
+                 ctrl = ctrl, alt = alt, meta = meta, cmd = cmd, dx = dx, dy = dy, \
+                 locked = locked or nil }",
+            ),
+        };
+        let make = match cell.get() {
             Some(make) => make,
             None => {
                 let made = self
                     .lua
-                    .load(
-                        "local x, y, local_x, local_y, shift, ctrl, alt, meta, cmd, dx, dy, locked = ...\n\
-                         return { x = x, y = y, local_x = local_x, local_y = local_y, shift = shift, \
-                         ctrl = ctrl, alt = alt, meta = meta, cmd = cmd, dx = dx, dy = dy, \
-                         locked = locked }",
-                    )
+                    .load(source)
                     .set_name("=zgx pointer event")
                     .into_function()?;
-                self.point.get_or_init(|| made)
+                cell.get_or_init(|| made)
             }
         };
-        let (dx, dy, locked) = match motion {
-            Some((dx, dy, locked)) => (Some(dx), Some(dy), locked.then_some(true)),
-            None => (None, None, None),
-        };
-        make.call((
-            x, y, local_x, local_y, shift, ctrl, alt, meta, cmd, dx, dy, locked,
-        ))
+        match motion {
+            None => make.call((x, y, local_x, local_y, shift, ctrl, alt, meta, cmd)),
+            Some((dx, dy, locked)) => make.call((
+                x, y, local_x, local_y, shift, ctrl, alt, meta, cmd, dx, dy, locked,
+            )),
+        }
     }
     /// Runs `f` with its own budget. A nested call (a component built
     /// while a handler runs) stops the outer call's clock meanwhile.
@@ -4091,6 +4104,7 @@ impl ScriptHost {
             locate: self.0.locate.clone(),
             warnings: self.0.warnings.clone(),
             point: Default::default(),
+            moved: Default::default(),
         });
         let store = self
             .0
@@ -4533,6 +4547,7 @@ mod tests {
             locate: Rc::default(),
             warnings: Rc::default(),
             point: Default::default(),
+            moved: Default::default(),
         };
         let host = vm
             .lua

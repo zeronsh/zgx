@@ -1790,6 +1790,11 @@ impl InputDispatcher {
             self.route(scene, old, InputEvent::PointerLockChange(false));
         }
     }
+    /// Whether a node has locked the pointer, gone from the scene or not:
+    /// a host's quick look before `pointer_lock`.
+    pub fn pointer_locked(&self) -> bool {
+        self.state.borrow().pointer_lock.is_some()
+    }
     /// The node the pointer is locked to: what a host hides and holds the
     /// pointer for, and sends `PointerMotion` while it is. None once that
     /// node has left the scene or is disabled (the host then calls

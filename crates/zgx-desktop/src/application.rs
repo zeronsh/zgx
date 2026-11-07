@@ -3218,6 +3218,10 @@ impl Host {
     /// it go.
     fn sync_pointer_lock(&mut self) {
         let ui = &self.context.ui;
+        // No lock asked for or held, as nearly always: nothing to look at.
+        if self.pointer_lock.is_none() && !ui.input.pointer_locked() {
+            return;
+        }
         let mut want = ui.input.pointer_lock(&ui.scene.borrow());
         // A window without the keyboard doesn't take the pointer (a lock
         // asked for as its focus went); one losing it lets go (`Focused`).
@@ -6627,6 +6631,10 @@ impl WindowManager {
     /// The locked pointer's motion heard so far, to its window
     /// (`Host::flush_motion`).
     fn flush_motion(&mut self, event_loop: &ActiveEventLoop) {
+        // Motion is heard only while a pointer is locked.
+        if !self.device_events {
+            return;
+        }
         let mut failed = None;
         for host in self.hosts.values_mut() {
             if host.pending_motion != (0., 0.)
