@@ -3,6 +3,18 @@ struct Vertex { @location(0) rect:vec4<f32>, @location(1) uv:vec4<f32>, @locatio
 // Flat, they cost nothing per pixel (a software rasterizer interpolates every
 // smooth varying for every pixel it shades).
 struct Out { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>, @location(1) @interpolate(flat) color:vec4<f32>, @location(2) point:vec2<f32>, @location(3) @interpolate(flat) fade:vec4<f32>, @location(4) @interpolate(flat) options:vec4<f32>, @location(5) @interpolate(flat) shape:vec4<f32>, @location(6) @interpolate(flat) border:vec4<f32>, @location(7) @interpolate(flat) mask:vec4<f32> }
+// How much a glyph mask's coverage firms below 2x (`FIRM_GLYPH`), as
+// DirectWrite's enhanced contrast has it, by how light the text is: a one-pixel
+// edge blends to a faint grey on a dark ground, thin beside the system's text,
+// where near-black text on white reads as it is. Worked out once a quad.
+fn firmness(options_y:f32, text:vec3<f32>)->f32 {
+ if options_y<1.1||options_y>1.5 {return 0.;}
+ return clamp(dot(text,vec3(.2126,.7152,.0722))*2.,0.,1.);
+}
+// Its curve: `a*(k+1)/(a*k+1)` to within 0.03 of coverage, the same on average,
+// with no division: a software rasterizer runs this for every glyph's every
+// pixel.
+fn firm(a:f32, k:f32)->f32 {return a+k*.67*a*(1.-a);}
 // Group 1: one immutable buffer per viewport size, so layers never rewrite it.
 @group(1) @binding(0) var<uniform> viewport:vec4<f32>;
 @group(0) @binding(1) var atlas:texture_2d<f32>;
@@ -151,7 +163,7 @@ fn shade_texel(input:Out, given:vec4<f32>, has_texel:bool)->vec4<f32> {
  if v.options.y>0.5 {
    var tex=given; if !has_texel {tex=textureSample(atlas,tex_sampler,v.uv);}
    if v.options.y>1.5 {premultiplied=true; rgb=color.rgb*tex.rgb*color.a; color.a=color.a*tex.a;}
-   else {color=vec4(color.rgb*tex.rgb,color.a*tex.a);}
+   else {color=vec4(color.rgb*tex.rgb,color.a*firm(tex.a,firmness(v.options.y,color.rgb)));}
  }
  if v.options.x>0. {let distance=min(v.point-v.fade.xy,v.fade.xy+v.fade.zw-v.point); let f=clamp(min(distance.x,distance.y)/v.options.x,0.,1.); color.a*=f; scale*=f;}
  // Rounded clips and `fade_edges` around it (see `Region`).
@@ -168,16 +180,16 @@ struct Both { @location(0) retained:vec4<f32>, @location(1) drawable:vec4<f32> }
 // this one where drawing is split (see `push_draw`). Same results as `shade`.
 // `texture`: 0 for a flat colour, 1 for straight-alpha samples (glyphs), 2
 // for premultiplied ones (icons, images), as `options.y`.
-struct Basic { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>, @location(1) @interpolate(flat) color:vec4<f32>, @location(2) @interpolate(flat) texture:f32 }
+struct Basic { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>, @location(1) @interpolate(flat) color:vec4<f32>, @location(2) @interpolate(flat) texture:f32, @location(3) @interpolate(flat) firmness:f32 }
 @vertex fn vs_basic(@location(0) rect:vec4<f32>,@location(1) uv:vec4<f32>,@location(2) color:vec4<f32>,@location(4) options:vec4<f32>,@builtin(vertex_index) i:u32)->Basic {
  let corner=vec2(f32(i&1u),f32(i>>1u));
  let p=rect.xy+corner*rect.zw;
- var o:Basic; o.position=vec4(p.x/viewport.x*2.-1.,1.-p.y/viewport.y*2.,0.,1.);o.uv=uv.xy+corner*uv.zw;o.color=color;o.texture=options.y;return o;
+ var o:Basic; o.position=vec4(p.x/viewport.x*2.-1.,1.-p.y/viewport.y*2.,0.,1.);o.uv=uv.xy+corner*uv.zw;o.color=color;o.texture=options.y;o.firmness=firmness(options.y,color.rgb);return o;
 }
 // Straight samples: colour.rgb * tex.rgb * (colour.a * tex.a). Premultiplied
 // ones already carry tex.a in tex.rgb: colour.rgb * tex.rgb * colour.a.
 fn basic(v:Basic)->vec4<f32> {
- if v.texture>0.5 {let tex=textureSample(atlas,tex_sampler,v.uv); let a=v.color.a*tex.a; return vec4(v.color.rgb*tex.rgb*select(a,v.color.a,v.texture>1.5),a);}
+ if v.texture>0.5 {let tex=textureSample(atlas,tex_sampler,v.uv); let a=v.color.a*firm(tex.a,v.firmness); return vec4(v.color.rgb*tex.rgb*select(a,v.color.a,v.texture>1.5),a);}
  return vec4(v.color.rgb*v.color.a,v.color.a);
 }
 @fragment fn fs_basic(v:Basic)->@location(0) vec4<f32> { return basic(v); }

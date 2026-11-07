@@ -100,3 +100,61 @@ fn a_line_that_only_moves_keeps_its_spacing_below_2x() {
     }
     assert!(lines.iter().all(|line| *line == lines[0]));
 }
+
+/// Below 2x a mask's edges firm by how light its text is, as Windows' own text
+/// does: white on black gains weight, near-black on white keeps its own. At 2x
+/// neither changes.
+#[test]
+fn only_light_text_is_firmed_below_2x() {
+    fn ink(scale: f32, ground: Color, text: Color) -> f32 {
+        let (width, height) = ((400. * scale) as u32, (40. * scale) as u32);
+        let mut gpu = GpuRenderer::new(width, height).expect("a GPU adapter");
+        gpu.set_scale_factor(scale);
+        FontData::new(GEIST.to_vec())
+            .unwrap()
+            .install(&mut gpu.text_system().borrow_mut());
+        let mut scene = Scene::new(400., 40.);
+        gpu.install_text(&mut scene);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let box_ = Style {
+            width: Some(400.),
+            height: Some(40.),
+            ..Default::default()
+        };
+        scene.append(scene.root(), NodeKind::Rect(ground), box_.clone());
+        let node = scene.append(
+            scene.root(),
+            NodeKind::Text {
+                text: "minimum illicit filling".into(),
+                font_size: 13.,
+                color: text,
+            },
+            box_,
+        );
+        scene.set_font(
+            node,
+            zgx::text_layout::FontStyle {
+                family: "Geist".into(),
+                ..Default::default()
+            },
+        );
+        let damage = scene.flush().damage;
+        gpu.render(&scene, &damage).unwrap();
+        let span = text.0 as f32 - ground.0 as f32;
+        gpu.readback()
+            .unwrap()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| (px[0] as f32 - ground.0 as f32) / span)
+            .sum()
+    }
+    let (black, white) = (Color(0, 0, 0, 255), Color(255, 255, 255, 255));
+    let (light, dark) = (ink(1., black, white), ink(1., white, black));
+    assert!(light > dark * 1.1, "{light} on black, {dark} on white");
+    let (light, dark) = (ink(2., black, white), ink(2., white, black));
+    assert!(
+        (light - dark).abs() < dark * 0.002,
+        "{light} and {dark} at 2x"
+    );
+}

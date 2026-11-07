@@ -1033,19 +1033,18 @@ fn glyphs_of<'a>(
 /// (`FIRM_COVERAGE`). At 2x and over, where a pixel is too small to see,
 /// glyphs keep their subpixel places and outlines' plain coverage.
 const SHARP_TEXT_BELOW: f32 = 2.;
-/// A glyph mask's coverage below `SHARP_TEXT_BELOW`, as DirectWrite's
-/// enhanced contrast (1.0) firms it: `a * 2 / (a + 1)`. Edges a pixel wide
-/// otherwise blend to a faint grey, thin and soft beside Windows' own text.
-const FIRM_COVERAGE: [u8; 256] = {
-    let mut table = [0; 256];
-    let mut i = 0;
-    while i < 256 {
-        let a = i as f32 / 255.;
-        table[i] = (a * 2. / (a + 1.) * 255. + 0.5) as u8;
-        i += 1;
+/// A glyph quad's `options.y` below `SHARP_TEXT_BELOW`: a mask whose coverage
+/// `draw.wgsl` firms by its colour (`firm`).
+const FIRM_GLYPH: f32 = 1.25;
+/// A glyph's `options.y`: straight alpha, firmed below `SHARP_TEXT_BELOW` if a
+/// mask (a colour glyph's own colours stay as they are).
+fn glyph_texture(color: bool, scale: f32) -> f32 {
+    if !color && scale < SHARP_TEXT_BELOW {
+        FIRM_GLYPH
+    } else {
+        1.
     }
-    table
-};
+}
 /// `glyphs_of`, each glyph's run from `style` (given its line).
 fn styled_glyphs<'a>(
     mut glyphs: Vec<Glyph>,
@@ -8786,7 +8785,7 @@ impl GpuRenderer {
                                             }),
                                             paint: [
                                                 0.,
-                                                1.,
+                                                glyph_texture(a.color, self.scale),
                                                 if a.color { COLOR_GLYPH } else { 0. },
                                                 0.,
                                             ],
@@ -12031,16 +12030,6 @@ impl GpuRenderer {
         }
         let cell_width = p.width + 2;
         let atlas_full = self.atlas_size >= MAX_ATLAS;
-        // The atlas is recycled when the scale changes (`set_scale_factor`):
-        // no mask outlives the scale it was firmed for.
-        let firm = self.scale < SHARP_TEXT_BELOW;
-        let coverage = |alpha: u8| {
-            if firm {
-                FIRM_COVERAGE[alpha as usize]
-            } else {
-                alpha
-            }
-        };
         let cell = self.atlas_cell(p.width, p.height, |rgba| {
             let row_start = |row: u32| ((row + 1) * cell_width + 1) as usize * 4;
             match image.content {
@@ -12050,7 +12039,7 @@ impl GpuRenderer {
                         for (texel, alpha) in
                             rgba[start..].as_chunks_mut::<4>().0.iter_mut().zip(alphas)
                         {
-                            texel.copy_from_slice(&[255, 255, 255, coverage(*alpha)]);
+                            texel.copy_from_slice(&[255, 255, 255, *alpha]);
                         }
                     }
                 }
@@ -12075,7 +12064,7 @@ impl GpuRenderer {
                                 255,
                                 255,
                                 255,
-                                coverage(pixel[0].max(pixel[1]).max(pixel[2])),
+                                pixel[0].max(pixel[1]).max(pixel[2]),
                             ]);
                         }
                     }
@@ -14138,7 +14127,12 @@ fn glyph_quad(
             a.height as f32 / atlas_size as f32,
         ],
         color,
-        paint: [0., 1., if a.color { COLOR_GLYPH } else { 0. }, 0.],
+        paint: [
+            0.,
+            glyph_texture(a.color, scale),
+            if a.color { COLOR_GLYPH } else { 0. },
+            0.,
+        ],
     }
 }
 /// `image` in its box `fade` (x, y, width, height) as nine pieces
@@ -17847,22 +17841,5 @@ mod thread_safety_tests {
         send_sync::<crate::canvas::HeadlessCanvases>();
         send_sync::<crate::svg::SvgCache>();
         send_sync::<crate::viewport::ViewportFrame<'static>>();
-    }
-}
-
-#[cfg(test)]
-mod firm_coverage_tests {
-    use super::FIRM_COVERAGE;
-
-    /// Firming keeps a glyph's empty and solid pixels as they are and only
-    /// raises its edges, in order: no edge pixel overtakes a fuller one.
-    #[test]
-    fn firming_raises_edges_and_keeps_empty_and_solid() {
-        assert_eq!((FIRM_COVERAGE[0], FIRM_COVERAGE[255]), (0, 255));
-        assert_eq!(FIRM_COVERAGE[128], 170, "half covered reads two thirds");
-        for alpha in 1..255 {
-            assert!(FIRM_COVERAGE[alpha] >= alpha as u8, "{alpha} lowered");
-            assert!(FIRM_COVERAGE[alpha] >= FIRM_COVERAGE[alpha - 1]);
-        }
     }
 }
