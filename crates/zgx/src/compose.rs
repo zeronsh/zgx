@@ -3080,6 +3080,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 size.clone(),
                 extent.clone(),
             );
+            let end_room = stretch.end_room.clone();
             let navigation = keyboard_navigation.then(|| {
                 crate::compose_virtual_keyboard::Navigation::new(
                     ui,
@@ -3172,7 +3173,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 let requested = offset.get();
                 // As a scroll view takes it: past the end (`math.huge`) is
                 // the end; NaN, the top.
-                let limit = (model.content_height() - height).max(0.0);
+                let limit = (model.content_height() + end_room.get() - height).max(0.0);
                 let mut position = if requested.is_nan() {
                     0.0
                 } else {
@@ -6007,6 +6008,11 @@ pub(crate) struct ListStretch {
     content: NodeId,
     placed: Rc<Cell<f32>>,
     shown: Signal<f32>,
+    /// Room past its end, while a keyboard covers that much of it.
+    pub(crate) end_room: Rc<Cell<f32>>,
+    /// Where it is drawn instead while something else moves it on screen
+    /// (`ScrollDriver::hold`): its offset and rows go on.
+    held: Signal<Option<f32>>,
 }
 impl ListStretch {
     /// `root`'s list, its rows in `content`, scrolled to `offset` within
@@ -6029,14 +6035,27 @@ impl ListStretch {
                 }
             });
         }
-        let shown = crate::elastic::register(ui, root, false, size, extents, offset);
+        let end_room: Rc<Cell<f32>> = Rc::default();
+        let held = ui.signal(None::<f32>);
+        let shown = crate::elastic::register(
+            ui,
+            root,
+            false,
+            size,
+            extents,
+            offset,
+            end_room.clone(),
+            Some(held.clone()),
+        );
         let placed = Rc::new(Cell::new(0_f32));
         {
             let (placed, shown, scene) = (placed.clone(), shown.clone(), ui.scene.clone());
+            let held = held.clone();
             let pixel_scale = ui.pixel_scale();
             let mut first = true;
             ui.bind(root, move || {
                 let stretch = shown.get();
+                let held = held.get();
                 // Placed again from where it was asked to be at a new scale.
                 let _ = pixel_scale.get();
                 // The list places its content as it mounts (`place`).
@@ -6049,7 +6068,7 @@ impl ListStretch {
                         content,
                         crate::scene::Transform {
                             x: 0.,
-                            y: -(placed.get() + stretch),
+                            y: -held.unwrap_or(placed.get() + stretch),
                         },
                     );
                 }
@@ -6059,17 +6078,20 @@ impl ListStretch {
             content,
             placed,
             shown,
+            end_room,
+            held,
         }
     }
     /// The list scrolled its content to `position`.
     pub(crate) fn place(&self, scene: &mut crate::scene::Scene, position: f32) {
         self.placed.set(position);
         let stretch = self.shown.with_untracked(|s| *s);
+        let held = self.held.with_untracked(|held| *held);
         scene.set_transform(
             self.content,
             crate::scene::Transform {
                 x: 0.,
-                y: -(position + stretch),
+                y: -held.unwrap_or(position + stretch),
             },
         );
     }
@@ -6294,6 +6316,8 @@ fn mount_scroll(
     let extent = ui.observe_content_size(content);
     // What a trackpad stretches it by past an edge (`elastic`): zero unless
     // the host scrolls elastically.
+    let end_room: Rc<Cell<f32>> = Rc::default();
+    let held = ui.signal(None::<f32>);
     let stretch = crate::elastic::register(
         ui,
         root,
@@ -6301,6 +6325,8 @@ fn mount_scroll(
         size.clone(),
         extent.clone(),
         offset.clone(),
+        end_room.clone(),
+        Some(held.clone()),
     );
     if scrollbar {
         let main_extent = ui.signal(main_size(extent.get()));
@@ -6414,7 +6440,7 @@ fn mount_scroll(
         // Placed again from where it was asked to be at a new scale.
         let _ = pixel_scale.get();
         let (width, height) = size.get();
-        let limit = (main_size(extent.get()) - main_size((width, height))).max(0.);
+        let limit = (main_size(extent.get()) + end_room.get() - main_size((width, height))).max(0.);
         let requested = offset.get();
         let position = if requested.is_nan() {
             0.
@@ -6467,7 +6493,8 @@ fn mount_scroll(
         // shows no stretch: whatever a gesture left goes as it ends
         // (`elastic`).
         let stretch = if limit > 0. { stretch.get() } else { 0. };
-        scene.set_transform(content, translation(position + stretch, rtl));
+        let drawn = held.get().unwrap_or(position + stretch);
+        scene.set_transform(content, translation(drawn, rtl));
     });
 }
 #[cfg(target_os = "macos")]
