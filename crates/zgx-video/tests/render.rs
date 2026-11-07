@@ -550,3 +550,89 @@ fn every_nth_frame_in_chunks_is_every_nth_frame() {
         "chunks kept other frames than one render"
     );
 }
+
+#[test]
+fn a_webm_keeps_its_alpha() {
+    if zgx_video::encode::ffmpeg().is_none() {
+        eprintln!("no ffmpeg here: skipped");
+        return;
+    }
+    let dir = app("webm");
+    let mut clear = options(&dir, "out.webm");
+    clear.transparent = true;
+    render(&clear, |_| true).unwrap();
+    let out = dir.join("out.webm");
+    let said = probe(&out, "codec_name,color_primaries", "v").unwrap();
+    assert_eq!(said, "vp9,bt709");
+    // VP9's alpha rides as a side stream, which its own decoder reads back.
+    let ffmpeg = zgx_video::encode::ffmpeg().unwrap();
+    let decoded = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-c:v", "libvpx-vp9", "-i"])
+        .arg(&out)
+        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .output()
+        .unwrap();
+    let pixels = decoded.stdout;
+    assert_eq!(pixels.len(), 64 * 48 * 4);
+    assert!(pixel(&pixels, 64, 60, 40)[3] < 10, "nothing there is clear");
+    assert!(pixel(&pixels, 64, 10, 10)[3] > 245, "the box is solid");
+}
+
+#[test]
+fn an_av1_has_every_frame() {
+    let Some(ffmpeg) = zgx_video::encode::ffmpeg() else {
+        eprintln!("no ffmpeg here: skipped");
+        return;
+    };
+    let encoders = std::process::Command::new(ffmpeg)
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .unwrap();
+    if !String::from_utf8_lossy(&encoders.stdout).contains("av1") {
+        eprintln!("no AV1 encoder here: skipped");
+        return;
+    }
+    let dir = app("av1");
+    let mut av1 = options(&dir, "out.mp4");
+    av1.format = Some(Format::Av1);
+    render(&av1, |_| true).unwrap();
+    assert_eq!(
+        probe(&dir.join("out.mp4"), "codec_name,nb_frames", "v").unwrap(),
+        "av1,20"
+    );
+}
+
+#[test]
+fn a_chunked_webm_keeps_its_alpha_and_its_sound() {
+    if zgx_video::encode::ffmpeg().is_none() {
+        eprintln!("no ffmpeg here: skipped");
+        return;
+    }
+    let dir = temp_dir("chunked-webm");
+    let tone: Vec<f32> = (0..48000 * 2)
+        .map(|i| (i as f32 * 0.03).sin() * 0.5)
+        .collect();
+    zgx_video::audio::write_wav(&dir.join("tone.wav"), &tone).unwrap();
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "W", w = 32, h = 32, fps = 30, duration = 30,
+            render = function()
+                return ui.div { w_full = true, h_full = true,
+                    ui.div { w = 16, h = 16, bg = "#ff0000" },
+                    video.audio { src = "tone.wav" } }
+            end,
+        } }
+        "##,
+    )
+    .unwrap();
+    let mut chunked = options(&dir, "out.webm");
+    chunked.transparent = true;
+    chunked.concurrency = 3;
+    render(&chunked, |_| true).unwrap();
+    let out = dir.join("out.webm");
+    assert_eq!(probe(&out, "codec_name", "v").unwrap(), "vp9");
+    assert_eq!(probe(&out, "codec_name,channels", "a").unwrap(), "opus,2");
+}

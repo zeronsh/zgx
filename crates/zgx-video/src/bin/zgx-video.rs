@@ -12,11 +12,12 @@ const USAGE: &str = "usage: zgx video render <dir> [composition] <out> [options]
        zgx video studio <dir> [--preview-scale S]
 
 <dir> holds a script returning video.compositions { … } (video.luau or app.luau).
-<out>'s extension says the format: .mp4 is H.264, .mov ProRes 4444, .gif a GIF,
-and a directory or a path holding %04d is a PNG for each frame. H.264, HEVC and
-ProRes need ffmpeg on the PATH.
+<out>'s extension says the format: .mp4 is H.264, .mov ProRes 4444, .webm VP9
+(alpha kept), .gif a GIF,
+and a directory or a path holding %04d is a PNG for each frame. H.264, HEVC,
+ProRes, VP9 and AV1 need ffmpeg on the PATH.
 
-  --codec h264|hevc|prores|png|gif   the format, over the extension
+  --codec h264|hevc|prores|vp9|av1|png|gif   the format, over the extension
   --fps N             frames per second of the file (the composition plays at
                       its own speed, with more or fewer frames)
   --scale S           pixels per point (1)
