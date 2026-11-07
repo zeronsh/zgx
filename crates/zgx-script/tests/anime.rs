@@ -1783,6 +1783,40 @@ fn spring_to_path(options: &str) -> Vec<f32> {
 }
 
 #[test]
+fn a_spring_over_a_small_range_runs_to_the_end() {
+    // An opacity, 0 to 1 on a 0.415 s spring: it eases all the way, not
+    // jumping to 1 once within half a unit (a point's tolerance).
+    let mut h = Harness::inline(
+        r##"local shown = ui.state("shown", 0)
+        return ui.column {
+            ui.div { id = "box", w = 20, h = 20, x = function() return shown:get() * 100 end },
+            ui.button { "Go", id = "go", on_click = function()
+                ui.spring_to(shown, 1, { stiffness = 229.2, damping = 30.28 })
+            end },
+        }"##,
+    );
+    h.frames(2);
+    h.click("go");
+    let path: Vec<f32> = (0..40)
+        .map(|_| {
+            h.run_ms(17.);
+            h.x("box")
+        })
+        .collect();
+    // Critically damped at 15.14 a second: about 72% of the way at 170 ms.
+    let at = path[9];
+    assert!(
+        (55. ..85.).contains(&at),
+        "part way at 170 ms: {at} ({path:?})"
+    );
+    assert!(
+        path.windows(2).all(|pair| pair[1] - pair[0] < 20.),
+        "no jump: {path:?}"
+    );
+    assert_eq!(*path.last().unwrap(), 100.);
+}
+
+#[test]
 fn a_state_runs_to_its_target_on_a_spring_with_no_script_each_frame() {
     let stiffness = 600f64;
     let path = spring_to_path("stiffness = 600, damping = 48.99, most = 1200");

@@ -6518,6 +6518,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 // where it is until the spring has passed it.
                 let from = opts.get::<Option<f64>>("from")?.unwrap_or(shown_from);
                 let delay = f64::from(params.delay_ms) / 1000.;
+                // At rest within a thousandth of the way it goes (half a point at
+                // most): an opacity's 0 to 1 runs to the end, not to 0.5 of it.
+                let span = (from - target).abs().max(speed_from.abs() * 0.1);
+                let rest = (span * 1e-3).clamp(1e-6, 0.5);
                 env.engine.tick_with(Rc::new(move |dt_ms| {
                     if stopped.get() {
                         return false;
@@ -6543,7 +6547,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         target + left
                     };
                     running.set(speed);
-                    let settled = left.abs() < 0.5 && speed.abs() < 5. || elapsed_cell.get() > most;
+                    let settled =
+                        left.abs() < rest && speed.abs() < rest * 10. || elapsed_cell.get() > most;
                     state.set(Value::from(if settled { target } else { at }));
                     if settled {
                         running.set(0.);
