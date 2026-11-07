@@ -460,6 +460,8 @@ function ios.composer(props)
 				mb = 9,
 				h = eased(height),
 				overflow = "hidden",
+				-- What it holds lies in it, not in the glass (which is `relative`).
+				relative = true,
 				-- The lines' height comes from their text, laid out unseen beneath
 				-- the editor, which fills what that makes and scrolls past the limit.
 				ui.text {
@@ -574,11 +576,16 @@ function ios.search(props)
 			placeholder = props.placeholder or "Search",
 			inputmode = "search",
 			grow = 1,
+			-- Growing with Dynamic Type as the text does: iOS's editors' own
+			-- height, said here so a preview off the phone grows too.
+			h = "$control.height",
 			ml = 6,
 			bg = "#00000000",
 			border = 0,
 			focus = {},
 			text_size = "$font.size.md",
+			-- The body's line, which its height is made from, not 1.4 times its size.
+			line_height = "$font.line.md",
 		},
 	}
 end
