@@ -775,7 +775,8 @@ struct State {
     key_code: Option<Rc<str>>,
     /// The scroll view a wheel gesture is latched to, the axis it moves
     /// along (horizontal or not) and when it last scrolled: the rest of the
-    /// gesture along that axis goes to it alone.
+    /// gesture along that axis goes to it alone, until a pause, the next
+    /// gesture or a press (`scroll_gesture`).
     scroll_latch: Option<(NodeId, bool, Instant)>,
     /// The modifier keys last known held (from the platform's pointer and
     /// key events): what an activation (a click) was made with.
@@ -932,6 +933,16 @@ impl InputDispatcher {
     }
     /// Whether `target` or a view around it takes navigation
     /// (`take_navigation`). Reads only.
+    /// A trackpad gesture's phase: a new gesture, or the end of the last
+    /// one's momentum, lets go of the scroll view that one latched to, so
+    /// the next scroll goes to the view under the pointer, as AppKit's does,
+    /// whatever the last one's coast or a pause left. (The fingers lifting
+    /// keeps it: the momentum that follows is theirs.)
+    pub(crate) fn scroll_gesture(&self, phase: ScrollGesture) {
+        if matches!(phase, ScrollGesture::Began | ScrollGesture::MomentumEnded) {
+            self.state.borrow_mut().scroll_latch = None;
+        }
+    }
     pub(crate) fn navigates(&self, scene: &Scene, target: NodeId) -> bool {
         let state = self.state.borrow();
         !state.navigators.is_empty()
@@ -3025,10 +3036,16 @@ impl InputDispatcher {
         if capture.is_none() {
             self.set_capture(None, &event);
         }
+        // A press never leaves scrolling pinned: what scrolls next is what's
+        // under the pointer then.
+        if matches!(event, InputEvent::PointerDown { .. }) {
+            self.state.borrow_mut().scroll_latch = None;
+        }
         // The rest of a wheel gesture goes to the scroll view it latched
         // to, alone, as macOS latches one: it neither chains to the views
         // around it at an edge nor moves to one that slides under the
-        // pointer. A pause ends the gesture.
+        // pointer. A pause ends the gesture, as does a trackpad's next one
+        // (`scroll_gesture`).
         if let InputEvent::Scroll {
             delta_x, delta_y, ..
         } = &event

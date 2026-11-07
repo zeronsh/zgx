@@ -4352,6 +4352,7 @@ impl Ui {
         let elastic = self.storage.elastic.borrow().enabled;
         let event = match event {
             InputEvent::ScrollGesture(phase) => {
+                self.input.scroll_gesture(phase);
                 if elastic {
                     crate::elastic::gesture(self, phase);
                 }
