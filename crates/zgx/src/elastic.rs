@@ -29,8 +29,12 @@ const REBOUND: f32 = 12.5;
 const AMPLITUDE: f32 = 0.31;
 /// The fastest a bounce starts, in points a second.
 const MOST_SPEED: f32 = 20_000.;
-/// A bounce is under way this long at least, however small it starts.
-const LEAST_BOUNCE: f32 = 0.024;
+/// How much a new speed counts against the speed so far, measuring the
+/// fingers' speed (`Speed`), and the shortest and longest time between two
+/// of their scrolls it counts: as AppKit's scroll views measure it.
+const SPEED_WEIGHT: f32 = 0.8;
+const SPEED_SOONEST: f32 = 0.002;
+const SPEED_LATEST: f32 = 0.2;
 
 /// One scroll view's stretch.
 pub(crate) struct Elastic {
@@ -69,12 +73,18 @@ impl Elastic {
         self.pushed.set(pushed);
         self.shown.set(pushed / PULL);
     }
-    fn release(&self, now: Instant) {
+    /// Let go of at `speed`, the fingers' along its axis: a stretch still
+    /// growing goes on a moment before it comes back, as on an `NSScrollView`
+    /// (at 1500 points a second of push, 2 points further for 15 ms).
+    fn release(&self, now: Instant, speed: f32) {
         if self.shown.with_untracked(|s| *s) == 0. {
             return;
         }
-        self.spring
-            .set(Some((self.shown.with_untracked(|s| *s), 0., now)));
+        self.spring.set(Some((
+            self.shown.with_untracked(|s| *s),
+            speed.clamp(-MOST_SPEED, MOST_SPEED),
+            now,
+        )));
         self.next.set(Some(now));
     }
     fn stretched(&self) -> bool {
@@ -113,6 +123,9 @@ pub(crate) struct State {
     bounced: bool,
     /// The view the gesture stretches.
     active: Option<Weak<Elastic>>,
+    /// The fingers' speed along either axis (horizontal, vertical): what a
+    /// stretch they let go of starts back at.
+    speed: [Speed; 2],
     /// Every view stretched or springing back (`active` among them): each
     /// springs back on its own, whichever the next gesture takes. Empty
     /// unless something is stretched.
@@ -207,12 +220,13 @@ fn active(ui: &Ui) -> Option<Rc<Elastic>> {
 /// A trackpad gesture's phase: what lifting the fingers or the momentum's
 /// end lets spring back.
 pub(crate) fn gesture(ui: &Ui, phase: ScrollGesture) {
-    let now = Instant::now();
+    let now = crate::clock::now();
     let release = {
         let mut state = ui.elastic_state().borrow_mut();
         match phase {
             ScrollGesture::Began => {
                 state.fingers = true;
+                state.speed = [Speed::starting(now); 2];
                 state.momentum = false;
                 state.bounced = false;
                 state.first = true;
@@ -240,11 +254,22 @@ pub(crate) fn gesture(ui: &Ui, phase: ScrollGesture) {
     };
     if release && !ui.elastic_state().borrow().moving.is_empty() {
         // Every stretched view, not the active one alone: one a gesture
-        // left as another took over springs back too.
+        // left as another took over springs back too, from rest. The one the
+        // fingers held goes at their speed; a momentum's end lets go at none.
+        let lifted = (phase == ScrollGesture::Ended)
+            .then(|| active(ui))
+            .flatten();
+        let speed = ui.elastic_state().borrow().speed;
         for view in moving(ui) {
+            let speed = match &lifted {
+                Some(lifted) if Rc::ptr_eq(lifted, &view) => {
+                    speed[usize::from(!view.horizontal)].at(now)
+                }
+                _ => 0.,
+            };
             match view.fits() {
                 true => view.snap(),
-                false => view.release(now),
+                false => view.release(now, speed),
             }
         }
     }
@@ -265,6 +290,14 @@ pub(crate) fn before_scroll(ui: &Ui, event: InputEvent) -> Option<InputEvent> {
     // A swipe between pages' gesture scrolls nothing.
     if ui.elastic_state().borrow().swiping {
         return None;
+    }
+    {
+        let mut state = ui.elastic_state().borrow_mut();
+        if state.fingers {
+            let now = Instant::now();
+            state.speed[0].scrolled(delta_x, now);
+            state.speed[1].scrolled(delta_y, now);
+        }
     }
     let Some(view) = active(ui).filter(|view| view.stretched() && view.spring.get().is_none())
     else {
@@ -326,7 +359,7 @@ pub(crate) fn after_scroll(ui: &Ui, event: &InputEvent, result: &DispatchResult)
     if first && fingers && horizontal && swipe(ui, result.target) {
         return;
     }
-    let now = Instant::now();
+    let now = crate::clock::now();
     let view = active(ui)
         .filter(|view| view.horizontal == horizontal && view.stretched())
         .or_else(|| {
@@ -391,7 +424,7 @@ pub(crate) fn after_scroll(ui: &Ui, event: &InputEvent, result: &DispatchResult)
         && !Rc::ptr_eq(&previous, &view)
         && previous.spring.get().is_none()
     {
-        previous.release(now);
+        previous.release(now, 0.);
     }
 }
 
@@ -465,7 +498,13 @@ fn step(ui: &Ui, view: &Rc<Elastic>, now: Instant) -> bool {
     };
     let t = now.saturating_duration_since(since).as_secs_f32();
     let shown = (from + AMPLITUDE * speed * t) * (-REBOUND * t).exp();
-    if shown.abs() < 0.5 && (from != 0. || t > LEAST_BOUNCE) {
+    // A bounce from the edge is done once under half a point past its
+    // furthest, at 1 / REBOUND, or at once if it never gets half a point out
+    // (`NSScrollView` ends it so: measured at 83-85 ms, 0.0086-0.0091 of the
+    // speed at the edge, against 80 ms and 0.0091 here).
+    let peak = AMPLITUDE * speed.abs() / REBOUND * (-1_f32).exp();
+    let past = from != 0. || t > 1. / REBOUND || peak < 0.5;
+    if shown.abs() < 0.5 && past {
         view.snap();
     } else {
         view.shown.set(shown);
@@ -473,4 +512,63 @@ fn step(ui: &Ui, view: &Rc<Elastic>, now: Instant) -> bool {
         view.next.set(Some(now + ui.refresh_interval()));
     }
     true
+}
+
+/// The fingers' speed along one axis, as AppKit's scroll views measure it:
+/// each scroll's speed weighed against the speed so far. One sooner than
+/// `SPEED_SOONEST` after the last waits for the next (its distance with it);
+/// one later than `SPEED_LATEST`, or the other way, starts over.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Speed {
+    speed: f32,
+    /// When the last scroll counted, the distance since, and whether a speed
+    /// has been measured yet.
+    at: Option<Instant>,
+    pending: f32,
+    measured: bool,
+}
+impl Speed {
+    fn starting(now: Instant) -> Self {
+        Self {
+            at: Some(now),
+            ..Self::default()
+        }
+    }
+    fn scrolled(&mut self, delta: f32, now: Instant) {
+        if delta == 0. || !delta.is_finite() {
+            return;
+        }
+        let Some(at) = self.at else {
+            *self = Self::starting(now);
+            return;
+        };
+        let dt = now.saturating_duration_since(at).as_secs_f32();
+        if dt < SPEED_SOONEST {
+            self.pending += delta;
+            return;
+        }
+        let delta = delta + std::mem::take(&mut self.pending);
+        let speed = delta / dt;
+        self.speed = if !self.measured || dt > SPEED_LATEST || speed * self.speed < 0. {
+            speed
+        } else {
+            SPEED_WEIGHT * speed + (1. - SPEED_WEIGHT) * self.speed
+        };
+        self.measured = true;
+        self.at = Some(now);
+    }
+    /// The speed the fingers lift at, at `now`: none once they've rested
+    /// `SPEED_LATEST` (on an `NSScrollView`, a push held 150 ms before lifting
+    /// still went on, one held 300 ms didn't).
+    fn at(&self, now: Instant) -> f32 {
+        match self.at {
+            Some(at)
+                if self.measured
+                    && now.saturating_duration_since(at).as_secs_f32() <= SPEED_LATEST =>
+            {
+                self.speed
+            }
+            _ => 0.,
+        }
+    }
 }

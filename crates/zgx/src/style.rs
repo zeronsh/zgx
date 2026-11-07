@@ -727,6 +727,8 @@ pub(crate) struct ColdStyles {
     pub(crate) shader_uniforms: Option<crate::decoration::ShaderUniforms>,
     /// `Styled::layer_uniforms`.
     pub(crate) layer_uniforms: Option<crate::decoration::ShaderUniforms>,
+    /// `Styled::layer_bleed` and `layer_reach`: how far past the box.
+    pub(crate) layer_extent: Option<(f32, f32)>,
     /// `Styled::grid_template_columns` and `grid_template_rows`.
     pub(crate) grid_template: Option<std::sync::Arc<crate::grid_tracks::GridTemplate>>,
     /// `Styled::grid_area`, `grid_column` and `grid_row`.
@@ -2672,6 +2674,22 @@ pub trait Styled: Sized {
             .cold
             .get_or_insert_default()
             .layer_uniforms = Some(uniforms);
+        self
+    }
+    /// How many points past its box its `layer_shader` runs, so it can paint
+    /// there (a glow, a ripple). The clips around the view cut it, and its
+    /// own doesn't; it damages and repaints what it reaches. It takes no
+    /// layout. See `crate::scene::Scene::set_layer_extent`.
+    fn layer_bleed(mut self, points: f32) -> Self {
+        let cold = self.styles_mut().rare_mut().cold.get_or_insert_default();
+        cold.layer_extent = Some((points, cold.layer_extent.map_or(0., |(_, reach)| reach)));
+        self
+    }
+    /// How many points past its box and bleed its `layer_shader`'s
+    /// `zgx_backdrop` reads (a heat haze's or a lens's displacement).
+    fn layer_reach(mut self, points: f32) -> Self {
+        let cold = self.styles_mut().rare_mut().cold.get_or_insert_default();
+        cold.layer_extent = Some((cold.layer_extent.map_or(0., |(bleed, _)| bleed), points));
         self
     }
     /// CSS `filter: hue-rotate()`: colours turned `degrees` round the hue

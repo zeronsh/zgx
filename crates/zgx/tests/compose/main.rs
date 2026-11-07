@@ -14,6 +14,8 @@ mod composition_slider;
 mod composition_split;
 #[path = "../deferred_mount_failure.rs"]
 mod deferred_mount_failure;
+#[path = "../glass.rs"]
+mod glass;
 #[path = "../lazy_removal.rs"]
 mod lazy_removal;
 #[path = "../lifecycle_resources.rs"]
@@ -24,6 +26,8 @@ mod native_views;
 mod panic_recovery;
 #[path = "../reactive_dependencies.rs"]
 mod reactive_dependencies;
+#[path = "../shader_drive.rs"]
+mod shader_drive;
 #[path = "../widgets.rs"]
 mod widgets;
 

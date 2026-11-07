@@ -139,7 +139,7 @@ impl Blink {
         }
         if let (Some(caret), Some(color)) = (self.caret.get(), self.color.get()) {
             self.show(ui, caret, color);
-            self.restart(caret, color, Instant::now(), self.bare.get());
+            self.restart(caret, color, crate::clock::now(), self.bare.get());
         }
     }
     /// Whether the host draws the caret now: the editor paints its own
@@ -289,7 +289,7 @@ pub(crate) fn settle(ui: &Ui) {
         // Given back, still shown (it moved under something, a selection
         // began): solid, blinking from a phase on, as when it is drawn.
         blink.hidden.set(false);
-        let now = Instant::now();
+        let now = crate::clock::now();
         blink.next.set(blink.settings.get().map(|s| now + s.on));
     } else {
         // The editor's own, painted as the editor set it.

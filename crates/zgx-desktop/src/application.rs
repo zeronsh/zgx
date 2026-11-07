@@ -1038,6 +1038,14 @@ impl Application {
         // take AppKit's Services menu meanwhile.
         #[cfg(target_os = "macos")]
         winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut event_loop, false);
+        // A probe's window beside someone's work: shown, not taken to the front.
+        #[cfg(target_os = "macos")]
+        if zgx::env::var_os("ZGX_NO_ACTIVATE").is_some() {
+            winit::platform::macos::EventLoopBuilderExtMacOS::with_activate_ignoring_other_apps(
+                &mut event_loop,
+                false,
+            );
+        }
         let event_loop = event_loop.build()?;
         zgx::profile::mark("event loop");
         zgx::memory::set_hosted();
@@ -1131,7 +1139,7 @@ impl Application {
             carrying: None,
             #[cfg(target_os = "linux")]
             last_focused: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             pending_move: HeldMove::default(),
             factory,
             active: false,
@@ -1811,6 +1819,10 @@ struct Host {
     /// Where the trackpad's scroll gesture is: what its phases report
     /// (`InputEvent::ScrollGesture`, for elastic scrolling).
     trackpad: Trackpad,
+    /// A trackpad scroll's momentum, made here as AppKit's scroll views make
+    /// it: the system's momentum events go unused (`coast`).
+    #[cfg(target_os = "macos")]
+    coast: crate::coast::Coast,
     /// Devtools' wheel recordings, and what they play back (`Ui::wheel_tape`).
     wheel_tape: std::rc::Rc<std::cell::RefCell<crate::wheel_tape::Tape>>,
     /// Native views (web pages) over and under this window's zgx content.
@@ -2066,7 +2078,11 @@ impl Host {
             title_press: None,
             cursor: (0., 0.),
             window_cursor: WindowCursor::default(),
-            scroll: Default::default(),
+            scroll: {
+                let mut scroll = crate::scroll_resample::ScrollResampler::default();
+                scroll.set_wheel_eases(cfg!(not(target_os = "macos")));
+                scroll
+            },
             touch: Default::default(),
             touch_focus: None,
             #[cfg(windows)]
@@ -2078,6 +2094,8 @@ impl Host {
             #[cfg(windows)]
             tsf_tried: false,
             trackpad: Trackpad::Idle,
+            #[cfg(target_os = "macos")]
+            coast: Default::default(),
             wheel_tape,
             pending_file_drops: Default::default(),
             hovered_files: Vec::new(),
@@ -4843,6 +4861,26 @@ impl Host {
                 } else {
                     None
                 };
+                // The system's momentum goes unused on macOS: the fingers'
+                // speed as they lifted made one already (`coast`), as an
+                // `NSScrollView` ignores the system's.
+                #[cfg(target_os = "macos")]
+                if matches!(delta, MouseScrollDelta::PixelDelta(_))
+                    && (self.trackpad == Trackpad::Momentum
+                        || gesture == Some(zgx::input::ScrollGesture::MomentumEnded))
+                {
+                    return Ok(());
+                }
+                #[cfg(target_os = "macos")]
+                if gesture == Some(zgx::input::ScrollGesture::Began) {
+                    self.stop_coast()?;
+                    self.coast.touched(std::time::Instant::now());
+                    crate::coast::fingers_down(true);
+                }
+                #[cfg(target_os = "macos")]
+                if gesture == Some(zgx::input::ScrollGesture::Ended) {
+                    crate::coast::fingers_down(false);
+                }
                 if let Some(
                     gesture @ (zgx::input::ScrollGesture::Began
                     | zgx::input::ScrollGesture::MomentumBegan),
@@ -4857,7 +4895,21 @@ impl Host {
                 let step = crate::scrollers::wheel_step(
                     self.context.viewport.with_untracked(|viewport| *viewport),
                 );
+                // A list's line is its row (`Ui::wheel_line_at`), as a table's
+                // is an `NSTableView`'s: measured, 3 lines of 24-point rows
+                // scrolled 72 points where a scroll view's moved 30.
+                #[cfg(target_os = "macos")]
+                let step = match self.context.ui.wheel_line_at(self.cursor.0, self.cursor.1) {
+                    Some(line) if matches!(delta, MouseScrollDelta::LineDelta(..)) => {
+                        (step.0, line)
+                    }
+                    _ => step,
+                };
                 let (dx, dy) = wheel_delta(delta, self.scale_factor, step);
+                #[cfg(target_os = "macos")]
+                if self.trackpad == Trackpad::Fingers {
+                    self.coast.scrolled((dx, dy), crate::coast::event_time());
+                }
                 // Receipt, application and presentation share the log's host
                 // clock. This is host receipt, not the native event timestamp.
                 zgx_gpu::present_log::log(|| {
@@ -4945,6 +4997,16 @@ impl Host {
                         })?;
                     }
                     self.dispatch(InputEvent::ScrollGesture(gesture))?;
+                    // Lifted: the coast starts from the fingers' speed.
+                    #[cfg(target_os = "macos")]
+                    if gesture == zgx::input::ScrollGesture::Ended
+                        && self.coast.lifted(std::time::Instant::now())
+                    {
+                        self.dispatch(InputEvent::ScrollGesture(
+                            zgx::input::ScrollGesture::MomentumBegan,
+                        ))?;
+                        self.sync_frames();
+                    }
                 }
             }
             WindowEvent::Focused(false) => {
@@ -5589,6 +5651,17 @@ impl Host {
         }
         zgx::memory::answer(report);
     }
+    /// A coast cut short (the fingers back down): its momentum ends there.
+    #[cfg(target_os = "macos")]
+    fn stop_coast(&mut self) -> Result<(), Box<dyn Error>> {
+        if self.coast.active() {
+            self.coast.stop();
+            self.dispatch(InputEvent::ScrollGesture(
+                zgx::input::ScrollGesture::MomentumEnded,
+            ))?;
+        }
+        Ok(())
+    }
     fn update(&mut self) -> Result<bool, Box<dyn Error>> {
         // Native views' reports (navigation, script replies), and keyboard
         // focus they took or gave back, at this safe point.
@@ -5733,6 +5806,35 @@ impl Host {
             // A link or button under the finger gives the press up now, so
             // lifting there selects rather than clicks.
             self.dispatch(InputEvent::PointerMove { x, y })?;
+        }
+        // A trackpad's coast moves to where it is when this refresh shows;
+        // with no refreshes coming, to its end at once.
+        #[cfg(target_os = "macos")]
+        if self.coast.active() && (self.frame_arrived || !self.frames_presented()) {
+            let shows = match self.frames_presented() {
+                true => std::time::Instant::now() + self.frame_interval,
+                false => self.coast.ends().unwrap_or_else(std::time::Instant::now),
+            };
+            if let Some(((delta_x, delta_y), done)) = self.coast.sample(shows) {
+                if delta_x != 0. || delta_y != 0. {
+                    zgx_gpu::present_log::log(|| {
+                        format!("scroll-applied source=coast dx={delta_x:.3} dy={delta_y:.3}")
+                    });
+                    let (x, y) = self.scroll.position;
+                    self.dispatch(InputEvent::Scroll {
+                        x,
+                        y,
+                        delta_x,
+                        delta_y,
+                    })?;
+                    self.after_scroll();
+                }
+                if done {
+                    self.dispatch(InputEvent::ScrollGesture(
+                        zgx::input::ScrollGesture::MomentumEnded,
+                    ))?;
+                }
+            }
         }
         // A fling coasts a step each refresh, and stops at the end of what
         // it scrolls.
@@ -6011,6 +6113,8 @@ impl Host {
     fn sync_frames(&mut self) {
         let now = std::time::Instant::now();
         let scrolling = self.scroll.active(now) || self.touch.flinging();
+        #[cfg(target_os = "macos")]
+        let scrolling = scrolling || self.coast.active();
         let wanted = (self.frames.wants_frame() || scrolling) && self.frames_presented();
         if !wanted {
             self.frame_heartbeat = None;
@@ -6337,9 +6441,9 @@ struct WindowManager {
     /// The window last focused: the one another launch raises (Linux).
     #[cfg(target_os = "linux")]
     last_focused: Option<u64>,
-    /// The last pointer move heard and not yet handled (Linux): see
-    /// `ApplicationHandler::window_event`.
-    #[cfg(target_os = "linux")]
+    /// The last pointer move heard and not yet handled (Linux, Windows):
+    /// see `ApplicationHandler::window_event`.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pending_move: HeldMove<WindowId, WindowEvent>,
     factory: WindowFactory,
     active: bool,
@@ -6362,23 +6466,23 @@ impl WindowManager {
         }));
     }
     /// The pointer move held back (`pending_move`), handled now.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn flush_move(&mut self, event_loop: &ActiveEventLoop) {
         if let Some((id, event)) = self.pending_move.take() {
             self.window_event_now(event_loop, id, event);
         }
     }
 }
-/// The pointer moves of one turn of the event loop, as one (Linux): the
-/// last move heard, for window `W`, not yet handled.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// The pointer moves of one turn of the event loop, as one (Linux,
+/// Windows): the last move heard, for window `W`, not yet handled.
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 struct HeldMove<W, E>(Option<(W, E)>);
 impl<W, E> Default for HeldMove<W, E> {
     fn default() -> Self {
         Self(None)
     }
 }
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 impl<W: PartialEq, E> HeldMove<W, E> {
     /// A move for window `id`, held in place of the one before; that one is
     /// handed back to handle now if it was another window's (each window
@@ -7633,7 +7737,7 @@ impl ApplicationHandler<Event> for WindowManager {
         self.contain(event_loop, None, |this| this.suspended_turn());
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         self.flush_move(event_loop);
         self.contain(event_loop, None, |this| {
             this.user_event_turn(event_loop, event)
@@ -7643,11 +7747,15 @@ impl ApplicationHandler<Event> for WindowManager {
         // Pointer moves come as often as the mouse reports them (Wayland
         // and X11 pass each on, up to 1000 a second), and each is handled
         // on laid-out content: a move that changes layout (a pane's edge
-        // dragged) lays the window out again for every one. AppKit and
-        // Windows hand an app one move per turn; here the moves of one turn
-        // of the loop come as one, the last, handled before any other event
-        // (keeping their order) and before the loop waits.
-        #[cfg(target_os = "linux")]
+        // dragged) lays the window out again for every one. Windows folds
+        // only the moves not yet read: a move that takes longer to handle
+        // than the mouse takes to report the next finds another waiting,
+        // so a turn handles one after another (11 in one frame, a 1000 Hz
+        // mouse dragging a pane's edge) and paints wait for the pointer to
+        // stop. AppKit hands an app one move per turn; here the moves of
+        // one turn of the loop come as one, the last, handled before any
+        // other event (keeping their order) and before the loop waits.
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             if matches!(event, WindowEvent::CursorMoved { .. }) {
                 if let Some((other, moved)) = self.pending_move.moved(id, event) {
@@ -7660,7 +7768,7 @@ impl ApplicationHandler<Event> for WindowManager {
         self.window_event_now(event_loop, id, event);
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         self.flush_move(event_loop);
         self.contain(event_loop, None, |this| this.about_to_wait_turn(event_loop));
     }
@@ -8960,7 +9068,7 @@ mod tests {
             carrying: None,
             #[cfg(target_os = "linux")]
             last_focused: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             pending_move: HeldMove::default(),
             factory,
             active: false,
@@ -9508,6 +9616,106 @@ mod tests {
             super::BOOL_GETTER.to_str().unwrap(),
             format!("{}@:", Bool::ENCODING)
         );
+    }
+
+    /// On Windows a turn's pointer moves come as one too: a burst the window
+    /// manager hears is held as its last, and a press after it hands that
+    /// move on first, as do the app's own events and the loop's wait.
+    /// (Windows folds only moves not yet read; one handled slower than the
+    /// mouse reports finds the next already waiting.)
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_turns_pointer_moves_come_as_its_last_on_windows() {
+        use winit::platform::windows::EventLoopBuilderExtWindows;
+        struct Probe {
+            manager: WindowManager,
+            held: Option<f64>,
+            held_after_press: bool,
+            held_after_user_event: bool,
+            held_after_wait: bool,
+        }
+        impl ApplicationHandler<Event> for Probe {
+            fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+                let device_id = winit::event::DeviceId::dummy();
+                let id = WindowId::dummy();
+                for x in 0..1000 {
+                    let moved = WindowEvent::CursorMoved {
+                        device_id,
+                        position: (f64::from(x), 10.).into(),
+                    };
+                    ApplicationHandler::window_event(&mut self.manager, event_loop, id, moved);
+                }
+                self.held = match &self.manager.pending_move.0 {
+                    Some((_, WindowEvent::CursorMoved { position, .. })) => Some(position.x),
+                    _ => None,
+                };
+                let press = WindowEvent::MouseInput {
+                    device_id,
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                };
+                ApplicationHandler::window_event(&mut self.manager, event_loop, id, press);
+                self.held_after_press = self.manager.pending_move.0.is_some();
+                let moved = |x: f64| WindowEvent::CursorMoved {
+                    device_id,
+                    position: (x, 10.).into(),
+                };
+                ApplicationHandler::window_event(&mut self.manager, event_loop, id, moved(1.));
+                ApplicationHandler::user_event(&mut self.manager, event_loop, Event::ImagesDecoded);
+                self.held_after_user_event = self.manager.pending_move.0.is_some();
+                ApplicationHandler::window_event(&mut self.manager, event_loop, id, moved(2.));
+                ApplicationHandler::about_to_wait(&mut self.manager, event_loop);
+                self.held_after_wait = self.manager.pending_move.0.is_some();
+                event_loop.exit();
+            }
+            fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+        }
+        let event_loop = EventLoop::<Event>::with_user_event()
+            .with_any_thread(true)
+            .build()
+            .unwrap();
+        let factory = WindowFactory {
+            fonts: Default::default(),
+            text_language: Default::default(),
+            menus: Rc::new(RefCell::new(Vec::new())),
+            menus_left_out: Rc::default(),
+            reserved: Rc::default(),
+            pending: Rc::new(RefCell::new(VecDeque::new())),
+            next: Rc::new(Cell::new(1)),
+            alive: Rc::new(Cell::new(true)),
+            clipboard: Rc::new(RefCell::new(None)),
+            gpu_contexts: Rc::new(RefCell::new(Vec::new())),
+            early_gpu: Rc::default(),
+            proxy: event_loop.create_proxy(),
+            runtime: zgx::reactive::Runtime::new(),
+        };
+        let manager = WindowManager {
+            _native_events: None,
+            application_event: None,
+            quit_on_last_window_close: true,
+            hosts: HashMap::new(),
+            panics: Vec::new(),
+            native: HashMap::new(),
+            drag_over: Cell::new(None),
+            carrying: None,
+            pending_move: HeldMove::default(),
+            factory,
+            active: false,
+            error: None,
+            timers: zgx::timer::host(|| {}),
+        };
+        let mut probe = Probe {
+            manager,
+            held: None,
+            held_after_press: true,
+            held_after_user_event: true,
+            held_after_wait: true,
+        };
+        event_loop.run_app(&mut probe).unwrap();
+        assert_eq!(probe.held, Some(999.));
+        assert!(!probe.held_after_press, "a press hands the move on first");
+        assert!(!probe.held_after_user_event, "so does the app's own event");
+        assert!(!probe.held_after_wait, "and the loop's wait");
     }
 
     #[test]

@@ -1,0 +1,35 @@
+[package]
+name = "zgx-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+description = "Programmatic video for zgx: an interface played on a virtual clock, rendered frame by frame to a video file, with a studio to preview it. Optional: an app that doesn't depend on it pays nothing."
+keywords = ["gui", "video", "animation", "motion-graphics", "luau"]
+categories = ["multimedia::video", "rendering"]
+
+[features]
+default = ["window"]
+# `zgx video studio` in a window. Without it, the studio has only its headless
+# picture, and the crate doesn't link the desktop.
+window = ["dep:zgx-run"]
+
+[dependencies]
+zgx-run = { path = "../zgx-run", version = "0.1.10", optional = true, default-features = false, features = ["fetch"] }
+zgx = { path = "../zgx", version = "0.1.10", default-features = false }
+zgx-gpu = { path = "../zgx-gpu", version = "0.1.10" }
+zgx-script = { path = "../zgx-script", version = "0.1.10" }
+serde_json = "1"
+png = "0.18"
+gif = { version = "=0.14.2", default-features = false, features = ["std", "color_quant"] }
+
+[dev-dependencies]
+# The instruction gate's `video` cell draws with wgpu's no-op backend
+# (`ZGX_GPU_NOOP`): the gate builds zgx-video's bench apart from the others.
+wgpu = { version = "29.0.4", default-features = false, features = ["noop"] }
+
+[[bin]]
+name = "zgx-video"
+path = "src/bin/zgx-video.rs"

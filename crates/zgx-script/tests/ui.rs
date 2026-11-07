@@ -5230,3 +5230,133 @@ fn a_theme_tables_font_families_reach_its_text() {
     assert_eq!(family(&mut h, "plain"), plain);
     assert_eq!(family(&mut h, "mono"), mono);
 }
+
+#[test]
+fn ui_glass_is_a_box_that_holds_children_drawn_with_no_system_glass() {
+    let mut h = Harness::inline(
+        r##"return ui.glass { id = "pane", w = 200, h = 100, clear = false, radius = 16,
+            ui.text { id = "inside", "Over it" } }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.host.error().get(), None);
+    assert!(h.find("inside").is_some());
+    let pane = h.find("pane").unwrap();
+    let scene = h.ui.scene.borrow();
+    // Its material drawn: a layer shader reading what's behind it, under its children.
+    let backing = scene.children(pane)[0];
+    assert!(
+        scene
+            .layer_shader(backing)
+            .is_some_and(|l| l.reads_backdrop())
+    );
+}
+
+#[test]
+fn the_engine_keeps_a_layer_shader_up_with_no_script_per_frame() {
+    let mut h = Harness::inline(
+        r##"local on = ui.state("on", false)
+        local level = ui.state("level", 0.25)
+        local shader = ui.layer_shader("fn layer(input: LayerInput) -> vec4<f32> { return input.color; }")
+        return ui.column {
+            ui.button { id = "switch", w = 40, h = 20, on_click = function() on:set(true) end, "On" },
+            ui.button { id = "raise", w = 40, h = 20, on_click = function() level:set(0.75) end, "Up" },
+            ui.div { id = "pane", w = 40, h = 20, bg = "#222222", layer_shader = shader,
+                layer_bleed = 8, layer_clock = true, layer_on = on,
+                layer_params = function() return { { level:get(), 0, 0, 0 } } end },
+        }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.host.error().get(), None);
+    let pane = h.find("pane").unwrap();
+    assert!(!h.ui.scene.borrow().is_layer(pane), "off, no layer");
+    h.click("switch");
+    h.frames(2);
+    {
+        let scene = h.ui.scene.borrow();
+        let layer = scene.layer_shader(pane).expect("its shader");
+        assert!(layer.shader.is_some());
+        assert_eq!(layer.bleed, 8.);
+        assert_eq!(layer.uniforms.params[0][0], 0.25);
+    }
+    h.click("raise");
+    h.frames(2);
+    let scene = h.ui.scene.borrow();
+    assert_eq!(
+        scene.layer_shader(pane).unwrap().uniforms.params[0][0],
+        0.75
+    );
+}
+
+/// A pointer event's table has every field a handler reads, as Lua
+/// values of their kinds, a table of its own for each event, and the
+/// extras a press, a wheel and a pinch add: however it's built.
+#[test]
+fn a_pointer_event_says_where_and_the_keys_held() {
+    use zgx::input::{InputEvent, PointerButton};
+    let script = r##"
+    local said = ui.state("said", "")
+    local last = nil
+    local function note(name)
+        return function(e)
+            local fresh = e ~= last
+            last = e
+            e.mine = true
+            local fields = {}
+            for k, v in e do
+                table.insert(fields, `{k}={typeof(v)}`)
+            end
+            table.sort(fields)
+            said:set(said:peek() .. string.format("%s %.1f %.1f %.1f %.1f %s %s %s %s %s %s [%s];", name,
+                e.x, e.y, e.local_x, e.local_y, tostring(e.shift), tostring(e.ctrl), tostring(e.alt),
+                tostring(e.meta), tostring(e.cmd), tostring(fresh), table.concat(fields, ",")))
+            return false
+        end
+    end
+    return ui.column {
+        ui.text { id = "said", said },
+        ui.div { id = "box", w = 100, h = 80, bg = "#334",
+            on_pointer_move = note("move"), on_press = note("press"), on_wheel = note("wheel") } }"##;
+    let mut h = Harness::inline(script);
+    h.frames(2);
+    let laid = h.bounds("box");
+    let (x, y) = (laid.x + 30., laid.y + 20.);
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::PointerMove { x: x + 1., y });
+    h.ui.dispatch(InputEvent::PointerDown {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    h.ui.dispatch(InputEvent::PointerUp {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    h.ui.dispatch(InputEvent::Scroll {
+        x,
+        y,
+        delta_x: 0.,
+        delta_y: 3.,
+    });
+    h.frames(2);
+    let said = h.text("said");
+    let common = "alt=boolean,cmd=boolean,ctrl=boolean,local_x=number,local_y=number,meta=boolean,mine=boolean,shift=boolean,x=number,y=number";
+    let at = format!(
+        "{:.1} {:.1} 30.0 20.0 false false false false false true",
+        x, y
+    );
+    assert!(said.contains(&format!("move {at} [{common}];")), "{said}");
+    assert!(
+        said.contains(&format!(
+            "move {:.1} {:.1} 31.0 20.0 false false false false false true [{common}];",
+            x + 1.,
+            y
+        )),
+        "{said}"
+    );
+    assert!(said.contains(&format!("press {at} [alt=boolean,clicks=number,cmd=boolean,ctrl=boolean,local_x=number,local_y=number,meta=boolean,mine=boolean,shift=boolean,x=number,y=number];")), "{said}");
+    assert!(
+        said.contains("wheel ") && said.contains("dx=number,dy=number"),
+        "{said}"
+    );
+}

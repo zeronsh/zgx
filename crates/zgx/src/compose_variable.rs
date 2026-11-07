@@ -531,6 +531,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                 ui,
                 root,
                 std::rc::Rc::new(move |y: f32| rows.index.borrow().row_at(y + 0.5)),
+                // Rows of their own heights: a line is the one rows are
+                // taken to have until measured.
+                heights.index.borrow().estimate(),
             );
             let mut handled_reveal = 0;
             // A destination followed through measurement: the row, where it
@@ -555,7 +558,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     // batched layout publication produces one measurement pass.
                     let mut updates = Vec::new();
                     for (entry_key, entry) in &entries {
-                        let index = entry.index.get();
+                        // (This pass alone writes it, and goes round again when
+                        // it does: `reindexed`.)
+                        let index = entry.index.with_untracked(|index| *index);
                         let (observed_width, observed_height) =
                             entry.measurement.as_ref().unwrap().get();
                         if observed_width != width || width <= 0. || !observed_height.is_finite() {
@@ -905,8 +910,16 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             false
                         }
                     });
+                    let mut reindexed = false;
                     for (key, index, ..) in &keys {
-                        entries[key].index.set(*index);
+                        let entry = &entries[key];
+                        if entry.index.with_untracked(|was| was != index) {
+                            entry.index.set(*index);
+                            reindexed = true;
+                        }
+                    }
+                    if reindexed && measured {
+                        mounted_revision.update(|value| *value = value.wrapping_add(1));
                     }
                     {
                         let mut scene = ui.scene.borrow_mut();

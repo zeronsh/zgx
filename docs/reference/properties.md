@@ -334,7 +334,11 @@ return ui.div {
 | `shader_params` | `{ Color \| { number } }` | zeros | up to four vec4s: colors (0 to 1) or lists of numbers; animate `shaderTime`, `shaderParam0` to `shaderParam15` |
 | `blend` | `"multiply" \| "screen" \| "overlay" \| "darken" \| "lighten" \| "color-dodge" \| "color-burn" \| "hard-light" \| "soft-light" \| "difference" \| "exclusion" \| "hue" \| "saturation" \| "color" \| "luminosity"` | `"normal"` | CSS `mix-blend-mode`: the node and its children paint into a cached layer that mixes with what lies beneath it (the window, or the layer it sits in) by the mode's formula, as it composites |
 | `layer_shader` | `LayerShader` | | `ui.layer_shader(wgsl, { fps })`: the subtree, cached as a layer, composites through it, pixel by pixel over the box (see [Images and canvas](media.md)) |
-| `layer_params` | `{ Color \| { number } }` | zeros | its four vec4s, as `shader_params`; animate `layerTime`, `layerParam0` to `layerParam15`, which composite again without repainting |
+| `layer_params` | `{ Color \| { number } }`, or a function returning them | zeros | its four vec4s, as `shader_params`, a function followed; animate `layerTime`, `layerParam0` to `layerParam15`, which composite again without repainting |
+| `layer_clock`, `shader_clock` | `boolean` | `false` | the engine steps the layer shader's or `bg_shader`'s time on the frame clock, with no script per step, while the node shows and motion isn't reduced |
+| `layer_on` | `Reactive<boolean>` | `true` | while false, no layer shader, no layer and no clock |
+| `layer_bleed` | `number` | `0` | how many points past the box the layer shader runs and paints (a glow, a ripple): cut by the clips around the node, not its own, and taking no layout |
+| `layer_reach` | `number` | `0` | how many points past the box and bleed its `zgx_backdrop(p)` reads (a haze's or a lens's displacement); a read past that holds at its edge |
 | `clip_inset` | `Sides` | | paints only inside the box shrunk by `{ top, right, bottom, left }` (CSS `clip-path: inset()`); animate `clipTop`, `clipRight`, `clipBottom`, `clipLeft` |
 | `clip_feather` | `number` | `0` | where it clips (`overflow = "hidden"`), its content fades out over this many points inside its rounded edge rather than being cut there, in the fragment shader quads already run (no layer, no mask). Its corners follow its clip inset, held to half the inset box: with `rounded = 9999` and the clip inset animated from the middle out, a soft circle opens, compositing alone |
 

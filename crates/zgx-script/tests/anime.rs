@@ -1676,3 +1676,74 @@ fn a_tween_on_a_node_runs_none_of_its_functions_as_it_moves() {
     h.run_ms(1000.);
     assert_eq!(width(&mut h), 200.);
 }
+
+/// A box bound to a spring of a keyboard's stiffness, from 0 to 100 on "go".
+fn keyboard_spring() -> Harness {
+    let mut h = Harness::inline(
+        r##"local open = ui.state("open", false)
+        return ui.column {
+            ui.div { id = "box", w = 20, h = 20, x = ui.spring(open, { from = 0, to = 100, stiffness = 555.0265, damping = 47.118 }) },
+            ui.button { "Go", id = "go", on_click = function() open:set(true) end },
+        }"##,
+    );
+    h.frames(2);
+    h.click("go");
+    h
+}
+
+#[test]
+fn a_bound_spring_keeps_time_when_the_display_says_a_shorter_interval() {
+    // iOS can report a refresh shorter than the time between its frames: a spring
+    // stepping by that interval ran a third as fast as the keyboard it followed.
+    let mut h = keyboard_spring();
+    h.report_interval(std::time::Duration::from_secs_f64(1. / 240.));
+    // 190 ms on: a critically damped spring of this stiffness has some 6% left.
+    h.frames(12);
+    let x = h.x("box");
+    assert!(x > 85., "only at {x} after 190 ms");
+}
+
+#[test]
+fn a_late_frame_doesnt_slow_a_bound_spring() {
+    let mut steady = keyboard_spring();
+    steady.frames(12);
+    let mut late = keyboard_spring();
+    late.frames(4);
+    late.skip_frames(3);
+    late.frames(5);
+    let (a, b) = (steady.x("box"), late.x("box"));
+    assert!((a - b).abs() < 3., "{b} with a late frame, {a} without");
+}
+
+#[test]
+fn a_slow_display_keeps_a_bound_springs_time() {
+    // 20 Hz: a frame every 50 ms, longer than a step may be.
+    let mut steady = keyboard_spring();
+    steady.frames(12);
+    let mut slow = keyboard_spring();
+    slow.report_interval(std::time::Duration::from_millis(50));
+    for _ in 0..4 {
+        slow.skip_frames(2);
+        slow.frames(1);
+    }
+    let (a, b) = (steady.x("box"), slow.x("box"));
+    assert!((a - b).abs() < 3., "{b} at 20 Hz, {a} at 60 Hz");
+}
+
+#[test]
+fn a_window_back_after_a_while_takes_no_huge_step() {
+    // Hidden two seconds mid-way, its next frame steps at most a thirtieth of a
+    // second, and it goes on to land.
+    let mut h = keyboard_spring();
+    h.frames(3);
+    let before = h.x("box");
+    h.skip_frames(120);
+    h.frames(1);
+    let after = h.x("box");
+    assert!(
+        after.is_finite() && after >= before && after <= 101.,
+        "{before} then {after}"
+    );
+    h.frames(60);
+    assert!((h.x("box") - 100.).abs() < 0.5);
+}

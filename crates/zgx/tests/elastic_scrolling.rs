@@ -185,6 +185,50 @@ fn a_stretch_and_a_bounce_come_back_on_the_systems_curve() {
     assert_eq!(ui.next_interaction_deadline(), None);
 }
 
+/// Fingers that lift while still pushing: on an `NSScrollView` the stretch goes
+/// on a moment at their speed before it comes back (`(x + 0.31 v t) e^(-12.5 t)`
+/// with v theirs); rested 200 ms first, it comes straight back.
+#[test]
+fn a_stretch_let_go_while_pushing_goes_on_a_moment_first() {
+    let pushed = |rest: Duration| {
+        let mut ui = Ui::new(300., 200.);
+        ui.set_elastic_scrolling(true);
+        ui.set_refresh_interval(Duration::from_millis(8));
+        let (offset, content) = mount(&mut ui);
+        phase(&mut ui, ScrollGesture::Began);
+        // 12 points every 8 ms: 1500 points a second, briefly. A short push
+        // leaves a small stretch against the speed: still growing needs only
+        // about 140 points a second, so sleeps that overrun on a loaded
+        // machine (a CI runner measured a third of it) still pass.
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(8));
+            scroll_by(&mut ui, -12.);
+        }
+        std::thread::sleep(rest);
+        let at_lift = shift(&ui, content, &offset);
+        phase(&mut ui, ScrollGesture::Ended);
+        let start = ui.next_interaction_deadline().expect("it springs back");
+        ui.advance_interactions(start + Duration::from_millis(16))
+            .unwrap();
+        let soon = shift(&ui, content, &offset);
+        ui.advance_interactions(start + Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(shift(&ui, content, &offset), 0., "back in the end");
+        (at_lift, soon)
+    };
+    let (at_lift, soon) = pushed(Duration::ZERO);
+    assert_eq!(at_lift, 3.);
+    assert!(
+        soon > at_lift,
+        "still going 16 ms after: {soon} from {at_lift}"
+    );
+    let (at_lift, soon) = pushed(Duration::from_millis(250));
+    assert!(
+        soon < at_lift,
+        "rested first, straight back: {soon} from {at_lift}"
+    );
+}
+
 #[test]
 fn a_nested_view_at_its_edge_lets_the_outer_one_stretch() {
     let mut ui = Ui::new(300., 300.);

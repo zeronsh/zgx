@@ -16,10 +16,13 @@
 // changes there never make it re-blur. `shape`: corner radii (top-left,
 // top-right, bottom-right, bottom-left); a rounded panel blurs only inside
 // its curve, antialiased over one pixel.
+// `round0`, `radii0`, `round1`, `radii1`: the rounded clips around it, as a
+// box (x, y, width, height; negative width, none) and its radii, in px: they cut
+// it along their curves, as they cut what's painted.
 // `effect`: opacity, fade, sigma (px), and the last level's sigma. `slots`:
 // the first level's slot, the number of levels, and the slot holding the
 // area's original pixels (where mixed over a copy).
-struct Blur { bounds:vec4<f32>, effect:vec4<f32>, area:vec4<f32>, shape:vec4<f32>, slots:vec4<u32> }
+struct Blur { bounds:vec4<f32>, effect:vec4<f32>, area:vec4<f32>, shape:vec4<f32>, slots:vec4<u32>, round0:vec4<f32>, radii0:vec4<f32>, round1:vec4<f32>, radii1:vec4<f32> }
 // `atlas`: the slot's texels (x, y, width, height); `region`: the target
 // pixel its first texel starts at, its factor, and its sigma in texels;
 // `owner.x`: its filter.
@@ -102,7 +105,15 @@ fn coverage(b:Blur, p:vec2<f32>)->f32{
  return clamp(.5-sdf,0.,1.);
 }
 // How much of the blur replaces the original at `p`.
-fn amount(b:Blur, p:vec2<f32>)->f32{return b.effect.x*coverage(b,p);}
+// How much of pixel `p` a rounded clip (x, y, width, height, and radii) keeps.
+fn kept(box:vec4<f32>, radii:vec4<f32>, p:vec2<f32>)->f32{
+ if box.z<0.{return 1.;}
+ let half_size=box.zw*.5;let q=p-box.xy-half_size;
+ let radius=select(select(radii.w,radii.z,q.x>0.),select(radii.x,radii.y,q.x>0.),q.y<0.);
+ let d=abs(q)-half_size+vec2(radius);
+ return clamp(.5-(length(max(d,vec2(0.)))+min(max(d.x,d.y),0.)-radius),0.,1.);
+}
+fn amount(b:Blur, p:vec2<f32>)->f32{return b.effect.x*coverage(b,p)*kept(b.round0,b.radii0,p)*kept(b.round1,b.radii1,p);}
 // Level `k` at `p`, sampled up bilinearly inside its slot.
 fn level(b:Blur, k:u32, p:vec2<f32>)->vec4<f32>{
  let s=slots[b.slots.x+k];

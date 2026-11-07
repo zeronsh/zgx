@@ -247,6 +247,7 @@ pub(crate) fn mount_style(
         None,
         None,
         None,
+        false,
     )
 }
 
@@ -741,23 +742,27 @@ pub(crate) fn mount_style_with_intrinsic(
     layout_target: Option<Signal<Option<NodeId>>>,
     object_fit: Option<Signal<crate::style::ImagePlacement>>,
     theme: Option<std::rc::Rc<crate::theme::ThemeScope>>,
+    leaf: bool,
 ) -> Signal<Typography> {
     let mut base = base;
     let mut reactive = variants.reactive;
     // A node setting no typography (nor through a variant or a dynamic
     // style) shows its parent's: it passes that signal on, not a copy.
     // Interaction styles that change might set it.
-    let own = dynamic.is_some()
-        || reactive.is_some()
-        || base.sets_typography()
-        || [
-            &variants.hover,
-            &variants.active,
-            &variants.focus,
-            &variants.disabled,
-        ]
-        .into_iter()
-        .any(|variant| variant.as_deref().is_some_and(Styles::sets_typography));
+    // Nor does one with nothing below it to read a copy: a text's own size
+    // and colour go to it directly.
+    let own = !leaf
+        && (dynamic.is_some()
+            || reactive.is_some()
+            || base.sets_typography()
+            || [
+                &variants.hover,
+                &variants.active,
+                &variants.focus,
+                &variants.disabled,
+            ]
+            .into_iter()
+            .any(|variant| variant.as_deref().is_some_and(Styles::sets_typography)));
     let defaults = variants.defaults;
     debug_assert!(
         defaults
@@ -1958,6 +1963,9 @@ fn apply_resolved(
         if let Some(uniforms) = cold.and_then(|cold| cold.layer_uniforms.as_ref()) {
             scene.set_layer_uniforms(node, *uniforms);
         }
+        if let Some((bleed, reach)) = cold.and_then(|cold| cold.layer_extent) {
+            scene.set_layer_extent(node, bleed, reach);
+        }
         if let Some(mode) = rare.blend {
             scene.set_blend(node, mode);
         }
@@ -2163,6 +2171,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A text passes no copy of its typography on, as nothing below it can
+    /// read one, and shows its own all the same, in place of its parent's and
+    /// leaving its siblings' alone.
+    #[test]
+    fn a_text_shows_its_own_typography_and_its_siblings_their_parents() {
+        use crate::compose::prelude::*;
+        let mut ui = Ui::new(400., 300.);
+        let _handle = ui.mount(
+            column()
+                .text_size(30.)
+                .child(text("own").text_size(20.))
+                .child(text("inherits")),
+        );
+        ui.prepare_frame();
+        let scene = ui.scene.borrow();
+        let size_of = |wanted: &str| {
+            let mut found = None;
+            let mut stack = vec![scene.root()];
+            while let Some(id) = stack.pop() {
+                if let NodeKind::Text {
+                    text, font_size, ..
+                } = scene.kind(id)
+                    && &**text == wanted
+                {
+                    found = Some(*font_size);
+                }
+                stack.extend(scene.children(id).iter().copied());
+            }
+            found
+        };
+        assert_eq!(size_of("own"), Some(20.));
+        assert_eq!(size_of("inherits"), Some(30.));
     }
 
     fn color(value: u8) -> Styles {

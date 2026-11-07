@@ -130,6 +130,8 @@ impl NativeHost {
         #[cfg(not(all(windows, feature = "webview2")))]
         let supported = cfg!(target_os = "macos");
         natives.set_supported(supported);
+        #[cfg(target_os = "macos")]
+        natives.set_glass_supported(macos::glass_available());
         Self {
             natives,
             diagnostics: Default::default(),

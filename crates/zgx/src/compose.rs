@@ -56,7 +56,7 @@ impl TaskToken {
 }
 /// Provider bridging components to a native or headless executor.
 #[derive(Clone)]
-pub struct TaskRunner(Rc<dyn Fn(LocalFuture) -> TaskToken>);
+pub struct TaskRunner(pub(crate) Rc<dyn Fn(LocalFuture) -> TaskToken>);
 impl TaskRunner {
     /// Runs each future with `spawn`, which returns the token that cancels it.
     pub fn new(spawn: impl Fn(LocalFuture) -> TaskToken + 'static) -> Self {
@@ -1459,6 +1459,17 @@ impl View {
                 ui.on_document_event(handle.node, listener);
             }
         })
+    }
+    /// Keep this view's shader as `make` says, read again when what it reads
+    /// changes, its time stepped by the engine while it runs: see
+    /// `crate::shader_drive`. A shader with none of that wants only
+    /// `Styled::layer_shader`. Last in its chain: what it returns wraps the
+    /// view, already styled.
+    pub fn shader_drive(
+        self,
+        make: impl FnMut() -> crate::shader_drive::ShaderDrive + 'static,
+    ) -> View {
+        component(move |cx| crate::shader_drive::attach(cx, self, make))
     }
     /// Run `f` with the mounted node once the view has mounted.
     pub fn on_mount(mut self, f: impl FnOnce(NodeHandle) + 'static) -> Self {
@@ -2976,14 +2987,18 @@ pub(crate) type RowReveal = (u64, usize, RowAlign);
 /// on the signal this returns, while it is mounted.
 /// `row_index`: a mounted row's index from its place down the list's
 /// content (find in page tells its rows apart by it).
+/// `line`: how far a wheel's line scrolls it, a row's height
+/// (`Ui::wheel_line_at`).
 pub(crate) fn list_reveal(
     ui: &mut Ui,
     root: NodeId,
     row_index: crate::find::RowIndex,
+    line: f32,
 ) -> Signal<RowReveal> {
     let reveal = ui.signal((0_u64, 0_usize, RowAlign::Nearest));
     ui.list_reveals().borrow_mut().insert(root, reveal.clone());
     ui.storage.list_rows.borrow_mut().insert(root, row_index);
+    ui.storage.wheel_lines.borrow_mut().insert(root, line);
     struct Forget(WeakUi, NodeId);
     impl Drop for Forget {
         fn drop(&mut self) {
@@ -2993,6 +3008,9 @@ pub(crate) fn list_reveal(
                 }
                 if let Ok(mut rows) = ui.storage.list_rows.try_borrow_mut() {
                     rows.remove(&self.1);
+                }
+                if let Ok(mut lines) = ui.storage.wheel_lines.try_borrow_mut() {
+                    lines.remove(&self.1);
                 }
             }
         }
@@ -3144,6 +3162,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 ui,
                 root,
                 Rc::new(move |y: f32| Some((y / row_height).round().max(0.) as usize)),
+                row_height,
             );
             let mut handled_reveal = 0;
             ui.bind(root, move || {
@@ -4757,6 +4776,8 @@ fn open_element(
     scrollbar: bool,
     follow_end: bool,
 ) -> Opened {
+    // A text holds no views (above): no one reads what it passes on.
+    let leaf = matches!(kind, Kind::Text(_) | Kind::BoundText(_));
     let is_scroll = matches!(kind, Kind::Scroll { .. });
     let mut scroll_offset = None;
     let is_image = matches!(kind, Kind::Image { .. });
@@ -5382,6 +5403,7 @@ fn open_element(
         layout_target,
         image_fit.clone(),
         Some(environment.theme.clone()),
+        leaf,
     );
     if let Some(compute) = rich_compute {
         mount_rich(
@@ -6826,11 +6848,12 @@ fn mount_progress(
             if sweeping.borrow().is_none()
                 && let Some(runner) = &runner
             {
-                let (phase, start) = (phase.clone(), std::time::Instant::now());
+                let (phase, start) = (phase.clone(), crate::clock::now());
                 *sweeping.borrow_mut() = Some(runner.spawn(Box::pin(async move {
                     loop {
                         crate::timer::sleep(std::time::Duration::from_millis(16)).await;
-                        let t = (start.elapsed().as_secs_f32() / SWEEP.as_secs_f32()).fract();
+                        let t = (crate::clock::since(start).as_secs_f32() / SWEEP.as_secs_f32())
+                            .fract();
                         phase.set(t);
                     }
                 })));

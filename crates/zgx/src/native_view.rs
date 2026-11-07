@@ -38,11 +38,14 @@ pub enum NativeContent {
     /// A platform view the host knows how to mount: on macOS a
     /// `Retained<NSView>` (see `zgx_desktop::native_view`).
     Platform(Rc<dyn Any>),
+    /// The system's glass (see [`crate::glass`]).
+    Glass(crate::glass::GlassPane),
 }
 impl NativeContent {
     /// A short description for placeholders and diagnostics.
     pub fn label(&self) -> String {
         match self {
+            Self::Glass(_) => "Glass".into(),
             Self::Web(web) => {
                 let url = web.state().with_untracked(|state| state.url.clone());
                 if url.is_empty() {
@@ -75,6 +78,7 @@ struct Inner {
     next: Cell<u64>,
     revision: Cell<u64>,
     supported: Cell<bool>,
+    glass_supported: Cell<bool>,
     split: RefCell<Rc<PlaneSplit>>,
 }
 /// A window's mounted native views: provided to components by the desktop
@@ -106,6 +110,14 @@ impl NativeViews {
     /// No native views, and not supported until `set_supported`.
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Whether the host shows the system's glass (`crate::glass`).
+    pub fn set_glass_supported(&self, supported: bool) {
+        self.0.glass_supported.set(supported);
+    }
+    /// Whether the host shows the system's glass (`crate::glass`).
+    pub fn glass_supported(&self) -> bool {
+        self.0.glass_supported.get()
     }
     /// Whether this window composites native views itself. Without it (the
     /// software renderer, headless tests, platforms without a backend yet),

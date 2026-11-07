@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 type Wake = Arc<dyn Fn() + Send + Sync>;
-struct Driver {
+pub(crate) struct Driver {
     waiters: Mutex<BTreeMap<(Instant, u64), Waker>>,
     changed: Condvar,
     next: AtomicU64,
@@ -27,6 +27,10 @@ struct Host {
     wake: Option<Wake>,
     /// The scheduler thread is running.
     thread: bool,
+}
+/// Where a sleep waits: this thread's virtual clock's timers, if it has one.
+fn driver_here() -> Arc<Driver> {
+    crate::clock::virtual_timers().unwrap_or_else(|| driver().clone())
 }
 fn driver() -> &'static Arc<Driver> {
     static DRIVER: OnceLock<Arc<Driver>> = OnceLock::new();
@@ -40,6 +44,30 @@ fn driver() -> &'static Arc<Driver> {
     })
 }
 impl Driver {
+    /// Timers a virtual clock fires as it moves: no thread, nothing to wake.
+    pub(crate) fn hosted_by_clock() -> Arc<Self> {
+        Arc::new(Self {
+            waiters: Mutex::new(BTreeMap::new()),
+            changed: Condvar::new(),
+            next: AtomicU64::new(1),
+            host: Mutex::new(Host {
+                wake: Some(Arc::new(|| {})),
+                thread: false,
+            }),
+        })
+    }
+    /// The earliest deadline waiting.
+    pub(crate) fn earliest(&self) -> Option<Instant> {
+        let waiters = self.waiters.lock().unwrap();
+        waiters.first_key_value().map(|(&(at, _), _)| at)
+    }
+    /// Wake every sleep due by `now`.
+    pub(crate) fn fire(&self, now: Instant) {
+        let ready = due(&mut self.waiters.lock().unwrap(), now);
+        for waker in ready {
+            waker.wake();
+        }
+    }
     /// The earliest deadline changed: wake whoever fires timers.
     fn notify(self: &Arc<Self>) {
         let (wake, spawn) = {
@@ -174,7 +202,7 @@ pub const MAX_SLEEP: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// A future that resolves `duration` from now, or [`MAX_SLEEP`] from now
 /// if that is sooner.
 pub fn sleep(duration: Duration) -> Sleep {
-    sleep_until(Instant::now() + duration.min(MAX_SLEEP))
+    sleep_until(crate::clock::now() + duration.min(MAX_SLEEP))
 }
 /// A future that resolves at `deadline` (at once if it has passed).
 pub fn sleep_until(deadline: Instant) -> Sleep {
@@ -186,7 +214,7 @@ pub fn sleep_until(deadline: Instant) -> Sleep {
 impl Future for Sleep {
     type Output = ();
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if Instant::now() >= self.deadline {
+        if crate::clock::now() >= self.deadline {
             if let Some((d, id)) = self.registration.take() {
                 let removed = d.waiters.lock().unwrap().remove(&(self.deadline, id));
                 drop(removed);
@@ -194,7 +222,7 @@ impl Future for Sleep {
             return Poll::Ready(());
         }
         if self.registration.is_none() {
-            let d = driver().clone();
+            let d = driver_here();
             let id = d.next.fetch_add(1, Ordering::Relaxed);
             self.registration = Some((d, id));
         }

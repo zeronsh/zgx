@@ -11,7 +11,7 @@ struct Playback {
 }
 impl Playback {
     fn elapsed(&self) -> Duration {
-        self.elapsed + self.started.map_or(Duration::ZERO, |start| start.elapsed())
+        self.elapsed + self.started.map_or(Duration::ZERO, crate::clock::since)
     }
     fn pause(&mut self) {
         self.elapsed = self.elapsed();
@@ -64,7 +64,7 @@ pub(crate) fn mount(
         if !active {
             return;
         }
-        playback.borrow_mut().started = Some(Instant::now());
+        playback.borrow_mut().started = Some(crate::clock::now());
         let data = animation.animation.clone();
         let playback = playback.clone();
         let source = source.clone();
@@ -193,7 +193,7 @@ fn mount_followed(
         let Some(data) = animation.filter(|_| active) else {
             return;
         };
-        playback.borrow_mut().started = Some(Instant::now());
+        playback.borrow_mut().started = Some(crate::clock::now());
         let playback = playback.clone();
         let source = source.clone();
         let future = async move {

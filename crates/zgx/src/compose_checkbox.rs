@@ -10,11 +10,7 @@ use crate::{
     style::{Styled, Styles},
     theme::{ThemeScope, tok},
 };
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 /// The box's side, in points.
 pub(crate) const SIZE: f32 = 16.;
@@ -111,12 +107,12 @@ pub(crate) fn indicator(
                             // Turned on with a clock: drawn on.
                             (Some(false), true, Some(runner)) => {
                                 shown.set(0.);
-                                let (shown, start) = (shown.clone(), Instant::now());
+                                let (shown, start) = (shown.clone(), crate::clock::now());
                                 *animating.borrow_mut() =
                                     Some(runner.spawn(Box::pin(async move {
                                         loop {
                                             crate::timer::sleep(Duration::from_millis(8)).await;
-                                            let t = (start.elapsed().as_secs_f32()
+                                            let t = (crate::clock::since(start).as_secs_f32()
                                                 / DRAW.as_secs_f32())
                                             .min(1.);
                                             shown.set(1. - (1. - t).powi(3));

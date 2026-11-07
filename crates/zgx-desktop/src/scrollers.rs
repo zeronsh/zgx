@@ -73,13 +73,17 @@ fn read_wheel() {
 }
 
 /// How far a wheel's step scrolls one way, in logical pixels, given the
-/// view's `page` that way: a browser's line, 40 (Chromium's and WebKit's
-/// line step, and Chromium's per Cocoa tick). Windows reports notches, not
+/// view's `page` that way: a line, an `NSScrollView`'s on macOS, elsewhere a
+/// browser's, 40 (Chromium's and WebKit's line step). Windows reports notches, not
 /// lines: a notch is the user's lines (3 by default) at a third of 100 each,
 /// as Chromium scrolls, and "one screen at a time" a page less an eighth,
 /// as Chromium pages.
 fn step(lines: Option<u32>, page: f32) -> f32 {
     match lines {
+        // A line of an `NSScrollView` (its `verticalLineScroll`, 10 unless a
+        // view sets its own), against which macOS reports a notch's lines:
+        // 3 lines, 30 points, measured, where a browser's 40 moved 120.
+        None if cfg!(target_os = "macos") => 10.,
         None => 40.,
         Some(u32::MAX) => page * 0.875,
         Some(lines) => lines as f32 * 100. / 3.,
@@ -159,7 +163,9 @@ mod tests {
 
     #[test]
     fn a_wheel_step_is_a_browsers_line_or_the_users_lines_or_a_page() {
-        assert_eq!(step(None, 600.), 40.);
+        // macOS: an `NSScrollView`'s line; elsewhere a browser's.
+        let line = if cfg!(target_os = "macos") { 10. } else { 40. };
+        assert_eq!(step(None, 600.), line);
         // Windows: three lines a notch, the default, scroll 100.
         assert_eq!(step(Some(3), 600.), 100.);
         assert_eq!(step(Some(6), 600.), 200.);

@@ -38,6 +38,7 @@ pub mod switches;
 pub mod trace;
 
 pub mod caret_blink;
+pub mod clock;
 pub(crate) mod editor_autocorrect;
 pub(crate) mod editor_lines;
 pub(crate) mod editor_menu;
@@ -97,6 +98,8 @@ pub mod image_cache;
 pub mod memory;
 
 pub mod decoration;
+pub mod glass;
+pub mod shader_drive;
 
 pub mod svg;
 
