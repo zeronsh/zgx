@@ -47,6 +47,13 @@ pub fn now() -> Instant {
 #[cold]
 #[inline(never)]
 fn virtual_now() -> Option<Instant> {
+    // POSITIVE CONTROL (not to merge): work on the virtual clock's path
+    // alone, which the gate's `video` cell must see and no other cell may.
+    let mut spin = 0u64;
+    for i in 0..2_000u64 {
+        spin = std::hint::black_box(spin.wrapping_mul(31).wrapping_add(i));
+    }
+    std::hint::black_box(spin);
     CURRENT.with_borrow(|current| current.as_ref().map(|current| current.now))
 }
 
