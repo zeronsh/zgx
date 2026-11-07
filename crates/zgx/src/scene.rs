@@ -4108,14 +4108,16 @@ impl Scene {
         }
         let was_shaded = old.is_some_and(|old| old.shader.is_some());
         let was_reading = old.is_some_and(LayerShader::reads_backdrop);
-        let had_inputs = old.is_some_and(LayerShader::has_inputs);
         let shaded = layer.shader.is_some();
         let reading = layer.reads_backdrop();
-        let inputs = layer.has_inputs();
+        let new_shader = old.is_none_or(|old| old.shader != layer.shader);
+        // Whether it has inputs, before and after: only as its shader
+        // changes (a frame's new uniforms leave it as it was).
+        let inputs =
+            new_shader.then(|| (old.is_some_and(LayerShader::has_inputs), layer.has_inputs()));
         // Its parameters alone: it paints where it did.
-        let moved = old.is_none_or(|old| {
-            (old.bleed, old.reach) != (layer.bleed, layer.reach) || old.shader != layer.shader
-        });
+        let moved = new_shader
+            || old.is_some_and(|old| (old.bleed, old.reach) != (layer.bleed, layer.reach));
         // Its box, grown by its bleed, under the old shader: what it paints
         // (`set_effects`: damaged under the old, then the new).
         if was_shaded || shaded {
@@ -4144,15 +4146,10 @@ impl Scene {
                 }
             }
         }
-        if inputs != had_inputs {
-            match inputs {
-                true => self.cold.get_or_insert_default().layer_inputs.push(id),
-                false => {
-                    if let Some(cold) = &mut self.cold {
-                        cold.layer_inputs.retain(|entry| *entry != id);
-                    }
-                }
-            }
+        if let Some((had, has)) = inputs
+            && had != has
+        {
+            self.track_layer_inputs(id, has);
         }
         let extra = self.text_gradient(id).is_some() || self.drop_shadow(id).is_some();
         let node = self.node_mut(id);
@@ -4264,6 +4261,19 @@ impl Scene {
                 .map(|id| (*id, self.world_bounds(*id)))
                 .collect()
         })
+    }
+    /// Note that `id`'s layer shader now has inputs, or no longer has.
+    #[cold]
+    #[inline(never)]
+    fn track_layer_inputs(&mut self, id: NodeId, has: bool) {
+        match has {
+            true => self.cold.get_or_insert_default().layer_inputs.push(id),
+            false => {
+                if let Some(cold) = &mut self.cold {
+                    cold.layer_inputs.retain(|entry| *entry != id);
+                }
+            }
+        }
     }
     /// Whether any layer shader has inputs (passes, pictures, boxes).
     pub fn has_layer_inputs(&self) -> bool {
