@@ -342,3 +342,194 @@ fn a_drag_starts_from_what_only_shows_inside_it() {
     let code = app(r#"source(ui.div { id = "press", w = 200, h = 40, ui.text { "Row" } }, 200)"#);
     assert_eq!(drag_src(&code), "drag;");
 }
+
+const KEYED_DROP_APP: &str = r##"
+local rows = ui.state("rows", { "a", "b", "c" })
+local log = ui.state("log", "")
+local function row(id)
+    local count = ui.use_state(0)
+    return ui.div {
+        w = 200, h = 40,
+        on_drag = function() return { id = id } end,
+        PREVIEW
+        on_drop = function(p)
+            local order = {}
+            for _, r in rows:peek() do
+                if r ~= p.id then table.insert(order, r) end
+            end
+            table.insert(order, (table.find(order, id) or #order) + 1, p.id)
+            rows:set(order)
+            log:set(table.concat(order, ","))
+        end,
+        ui.div {
+            id = "press-" .. id, w = 200, h = 40,
+            on_click = function() count:set(count:peek() + 1) end,
+            ui.text { id = "count-" .. id, function() return tostring(count:get()) end },
+        },
+    }
+end
+return ui.column { w_full = true, h_full = true,
+    ui.text { id = "log", "{log}" },
+    LIST,
+}
+"##;
+
+/// `from`'s middle pressed, moved to `to`'s in steps, let go there; what
+/// `from` was found as while held.
+fn drag_onto(h: &mut Harness, from: &str, to: &str) -> Option<zgx::scene::NodeId> {
+    let centre = |h: &mut Harness, id: &str| {
+        let node = h.find(id).unwrap();
+        let b = h.ui.scene.borrow().bounds(node);
+        (b.x + b.width / 2., b.y + b.height / 2.)
+    };
+    let ((x, y), (tx, ty)) = (centre(h, from), centre(h, to));
+    let button = zgx::input::PointerButton::Primary;
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    h.frames(1);
+    for step in 1..=8 {
+        let t = step as f32 / 8.;
+        h.ui.dispatch(InputEvent::PointerMove {
+            x: x + (tx - x) * t,
+            y: y + (ty - y) * t,
+        });
+        h.frames(1);
+    }
+    let held = h.find(from);
+    h.ui.dispatch(InputEvent::PointerUp {
+        x: tx,
+        y: ty,
+        button,
+    });
+    h.frames(2);
+    held
+}
+
+/// A row dragged and dropped in a keyed list is the same row after: its
+/// node, and the state it holds.
+#[test]
+fn a_dropped_row_keeps_its_node_and_state() {
+    let preview = r#"drag_preview = function(p) return ui.div { w = 200, h = 40, ui.text { "moving" } } end,"#;
+    for (list, preview) in [
+        (r#"ui.each(rows, function(id) return row(id) end)"#, ""),
+        (
+            r#"ui.list { w_full = true, h = 200, data = rows, height = 40,
+            key = function(id) return id end, row = function(id) return row(id) end }"#,
+            "",
+        ),
+        (r#"ui.each(rows, function(id) return row(id) end)"#, preview),
+        (
+            r#"ui.list { w_full = true, h = 200, data = rows, height = 40,
+            key = function(id) return id end, row = function(id) return row(id) end }"#,
+            preview,
+        ),
+    ] {
+        let code = KEYED_DROP_APP
+            .replace("LIST", list)
+            .replace("PREVIEW", preview);
+        let mut h = Harness::inline(&code);
+        h.ui.scene.borrow_mut().resize(400., 300.);
+        h.frames(3);
+        assert_eq!(h.error(), None);
+        h.click("press-a");
+        h.click("press-a");
+        h.frames(1);
+        assert_eq!(h.text("count-a"), "2", "{list}");
+        let node = h.find("press-a");
+        let held = drag_onto(&mut h, "press-a", "press-c");
+        assert_eq!(h.error(), None);
+        assert_eq!(held, node, "{list} {preview}: the same node while held");
+        assert_eq!(h.text("log"), "b,c,a", "{list}: dropped after c");
+        assert_eq!(h.find("press-a"), node, "{list} {preview}: the same node");
+        assert_eq!(h.text("count-a"), "2", "{list} {preview}: its state kept");
+    }
+}
+
+/// As a virtualized list with its rows' heights given, the held row easing to
+/// no height and back once dropped: still the same row, with its state.
+#[test]
+fn a_held_row_at_no_height_keeps_its_node_and_state() {
+    let code = r##"
+local rows = ui.state("rows", { "a", "b", "c" })
+local held = ui.state("held", "")
+local log = ui.state("log", "")
+local function row(id)
+    local count = ui.use_state(0)
+    return ui.div {
+        w = 200, h_full = true,
+        on_drag = function() held:set(id); return { id = id } end,
+        on_drag_end = function() held:set("") end,
+        on_drop = function(p)
+            local order = {}
+            for _, r in rows:peek() do
+                if r ~= p.id then table.insert(order, r) end
+            end
+            table.insert(order, (table.find(order, id) or #order) + 1, p.id)
+            rows:set(order)
+            held:set("")
+            log:set(table.concat(order, ","))
+        end,
+        ui.div {
+            id = "press-" .. id, w = 200, h = 40,
+            on_click = function() count:set(count:peek() + 1) end,
+            ui.text { id = "count-" .. id, function() return tostring(count:get()) end },
+        },
+    }
+end
+return ui.column { w_full = true, h_full = true,
+    ui.text { id = "log", "{log}" },
+    ui.list { w_full = true, h = 200, data = rows,
+        heights = function()
+            local hs = {}
+            for i, r in rows:get() do hs[i] = if r == held:get() then 0 else 40 end
+            return hs
+        end,
+        key = function(id) return id end, row = function(id) return row(id) end },
+}
+"##;
+    let mut h = Harness::inline(code);
+    h.ui.scene.borrow_mut().resize(400., 300.);
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    h.click("press-a");
+    h.click("press-a");
+    h.frames(1);
+    assert_eq!(h.text("count-a"), "2");
+    let node = h.find("press-a");
+    // Pressed on a, dragged down past the threshold: a goes to no height.
+    let (x, y) = {
+        let b = h.ui.scene.borrow().bounds(node.unwrap());
+        (b.x + b.width / 2., b.y + b.height / 2.)
+    };
+    let button = zgx::input::PointerButton::Primary;
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    h.frames(1);
+    for step in 1..=4 {
+        h.ui.dispatch(InputEvent::PointerMove {
+            x,
+            y: y + step as f32 * 5.,
+        });
+        h.frames(1);
+    }
+    assert_eq!(h.text("log"), "");
+    let held = h.find("press-a");
+    assert_eq!(held, node, "the same node while held at no height");
+    // Over c (now in a's place and below), let go.
+    let c = h.find("press-c").unwrap();
+    let cb = h.ui.scene.borrow().bounds(c);
+    let (cx, cy) = (cb.x + cb.width / 2., cb.y + cb.height / 2.);
+    h.ui.dispatch(InputEvent::PointerMove { x: cx, y: cy });
+    h.frames(1);
+    h.ui.dispatch(InputEvent::PointerUp {
+        x: cx,
+        y: cy,
+        button,
+    });
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    assert_eq!(h.text("log"), "b,c,a", "dropped after c");
+    assert_eq!(held, node, "the same node while held at no height");
+    assert_eq!(h.find("press-a"), node, "the same node after");
+    assert_eq!(h.text("count-a"), "2", "its state kept");
+}

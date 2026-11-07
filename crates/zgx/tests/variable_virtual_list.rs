@@ -669,3 +669,32 @@ fn an_end_anchored_list_follows_its_first_rows_after_being_empty() {
     assert_eq!(grown(1, false, true, true), 140.);
     assert_eq!(grown(0, false, false, false), 0.);
 }
+
+/// Rows thin from the start, folded away, are never built: a thousand under
+/// a hundredth of a point build none, only the rows that show.
+#[test]
+fn rows_folded_to_nothing_are_never_built() {
+    let mut ui = Ui::new(240., 160.);
+    let heights = VariableHeights::new(&ui.runtime, 1000, 20.);
+    heights
+        .replace((0..1000).map(|i| if i < 3 { 20. } else { 0.001 }))
+        .unwrap();
+    let builds = Rc::new(Cell::new(0));
+    let created = builds.clone();
+    let view = ui.mount(
+        variable_virtual_list(
+            ui.signal(0.),
+            heights.clone(),
+            0,
+            |index| index,
+            move |_, index, _| {
+                created.set(created.get() + 1);
+                text(index.to_string())
+            },
+        )
+        .size(200., 120.),
+    );
+    ui.prepare_frame();
+    assert_eq!(builds.get(), 3, "folded away, never built");
+    view.unmount();
+}
