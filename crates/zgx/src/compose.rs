@@ -673,7 +673,7 @@ impl Rare {
         }
         if let Some(outer) = self.accessibility {
             match &mut inner.accessibility {
-                Some(own) => outer.merge_into(own),
+                Some(own) => (*outer).merge_into(own),
                 None => inner.accessibility = Some(outer),
             }
         }
@@ -7232,8 +7232,8 @@ pub(crate) struct Accessibility {
 impl Accessibility {
     /// `Rare::merge_into`'s part for assistive technology: what the outer
     /// view set, over the inner's.
-    fn merge_into(self: Box<Self>, inner: &mut Accessibility) {
-        let outer = *self;
+    fn merge_into(self, inner: &mut Accessibility) {
+        let outer = self;
         if outer.role.is_some() {
             inner.role = outer.role;
         }
