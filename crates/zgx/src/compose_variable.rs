@@ -198,6 +198,28 @@ pub fn measured_rows_watched<K: Eq + std::hash::Hash + Clone + 'static>(
         build,
     )
 }
+/// The keys of `entries`' rows that hold the node a drag under way (or
+/// starting) started from.
+fn dragged_rows<K: Clone>(
+    ui: &Ui,
+    entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
+) -> Vec<K> {
+    let Some(source) = ui.input.drag_source() else {
+        return Vec::new();
+    };
+    let scene = ui.scene.borrow();
+    if !scene.contains(source) {
+        return Vec::new();
+    }
+    entries
+        .iter()
+        .filter(|(_, entry)| {
+            entry.node == source || scene.ancestors(source).any(|a| a == entry.node)
+        })
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
 fn rows_of<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
     watch: W,
     offset: Signal<f32>,
@@ -668,7 +690,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     .map(|(index, align, _, _, keys)| (index, align, keys));
                 let asked = (serial != handled_reveal).then_some((row, align, false));
                 handled_reveal = serial;
-                let (length, total, position, target, geometry, next_anchor) = {
+                let (length, total, position, target, geometry, dragged, next_anchor) = {
                     let model = heights.index.borrow();
                     let length = model.count();
                     let total = model.content_height();
@@ -793,7 +815,21 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     // it, one too thin to show isn't: rows folded away would
                     // otherwise all fit in the view, and all be built.
                     let mut geometry: Vec<_> = model.rows(range).collect();
-                    if !measured && model.may_have_thin_rows() {
+                    // (During a drag, the thin rows wait for their keys,
+                    // below: the dragged row's is kept.)
+                    let thin = !measured && model.may_have_thin_rows();
+                    // A row a drag started from stays built, thin or not: a
+                    // list's dragged row often folds its place away while
+                    // held, and dropped, it is the same node (its focus, hover
+                    // and accessible element with it). Only where a row can be
+                    // too thin to build: a list with none pays nothing for it.
+                    let dragged = if thin {
+                        weak.upgrade()
+                            .map_or_else(Vec::new, |ui| dragged_rows(&ui, &entries))
+                    } else {
+                        Vec::new()
+                    };
+                    if thin && dragged.is_empty() {
                         geometry.retain(|(_, _, row_height)| *row_height >= THINNEST_ROW);
                     }
                     // An empty list keeps whether it is at its end (it is):
@@ -817,13 +853,26 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         }),
                         None => None,
                     };
-                    (length, total, position, target, geometry, next_anchor)
+                    (
+                        length,
+                        total,
+                        position,
+                        target,
+                        geometry,
+                        dragged,
+                        next_anchor,
+                    )
                 };
                 // Release the index borrow before application key/build callbacks.
-                let keys: Vec<_> = geometry
+                let mut keys: Vec<_> = geometry
                     .into_iter()
                     .map(|(index, top, row_height)| (key(index), index, top, row_height))
                     .collect();
+                if !dragged.is_empty() {
+                    keys.retain(|(key, _, _, row_height)| {
+                        *row_height >= THINNEST_ROW || dragged.contains(key)
+                    });
+                }
                 // Rows kept are stamped with this run: one shown twice is a
                 // key repeated, and those left unstamped go below.
                 run += 1;
