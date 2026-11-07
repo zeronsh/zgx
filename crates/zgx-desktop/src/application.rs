@@ -1285,6 +1285,31 @@ enum FastStart {
     At(f64),
     Late,
 }
+/// Diagnostic: how late the frame timer's deadlines are met, cumulative, a line
+/// each 240, under `ZGX_FAST_START` alone: count, total and worst in µs, then how
+/// many under 0.5, 1 and 2 ms.
+#[cfg(target_os = "macos")]
+fn wake_late(late: std::time::Duration) {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static AT: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+    if !*ON.get_or_init(|| std::env::var_os("ZGX_FAST_START").is_some()) {
+        return;
+    }
+    let us = late.as_micros() as u64;
+    AT[1].fetch_add(us, Relaxed);
+    AT[2].fetch_max(us, Relaxed);
+    for (i, under) in [(3, 500), (4, 1000), (5, 2000)] {
+        if us < under {
+            AT[i].fetch_add(1, Relaxed);
+        }
+    }
+    let n = AT[0].fetch_add(1, Relaxed) + 1;
+    if n % 240 == 0 {
+        let v = |i: usize| AT[i].load(Relaxed);
+        eprintln!("zgx-wake {n} total_us {} max_us {} under_500 {} under_1000 {} under_2000 {}", v(1), v(2), v(3), v(4), v(5));
+    }
+}
 /// Diagnostic: `ZGX_FAST_START`: unset, today's grid; `link`, frames on the
 /// link; `late`, as late as they make the next point; else ms after the tick.
 #[cfg(target_os = "macos")]
@@ -5989,6 +6014,12 @@ impl Host {
         }
     }
     fn poll_frame_deadline(&mut self, now: std::time::Instant) {
+        #[cfg(target_os = "macos")]
+        if let Some(deadline) = self.frame_deadline
+            && now >= deadline
+        {
+            wake_late(now.duration_since(deadline));
+        }
         if self.frame_deadline.is_some_and(|deadline| now >= deadline) {
             #[cfg(target_os = "macos")]
             self.late_sample.start(now);
