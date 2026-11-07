@@ -13770,6 +13770,14 @@ impl GpuRenderer {
         #[cfg(target_os = "macos")]
         self.renew_queue();
     }
+    /// Metal's queue made again after `rest_queue`, ahead of the next frame.
+    pub fn ready_queue(&mut self) {
+        #[cfg(target_os = "macos")]
+        // SAFETY: only the queue's handle is made; nothing else is touched.
+        if let Some(queue) = unsafe { self.queue.as_hal::<wgpu::hal::api::Metal>() } {
+            queue.ready();
+        }
+    }
     /// Metal's queue let go of, the driver's memory for it given back
     /// (`Queue::renew`), with all this renderer gave it finished and let go of
     /// (a command buffer holds its queue).

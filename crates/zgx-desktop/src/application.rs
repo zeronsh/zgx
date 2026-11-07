@@ -1180,6 +1180,8 @@ struct Rest {
     at: std::time::Instant,
     atlas: bool,
     queue: bool,
+    /// The queue let go of, a new one to make (`QUEUE_READY_DELAY`).
+    ready: bool,
 }
 impl Rest {
     fn none() -> Self {
@@ -1187,6 +1189,7 @@ impl Rest {
             at: std::time::Instant::now(),
             atlas: false,
             queue: false,
+            ready: false,
         }
     }
     /// When the next of what's owed is due, if anything is.
@@ -1194,6 +1197,7 @@ impl Rest {
         [
             self.atlas.then_some(ATLAS_TRIM_DELAY),
             self.queue.then_some(QUEUE_REST_DELAY),
+            self.ready.then_some(QUEUE_REST_DELAY + QUEUE_READY_DELAY),
         ]
         .into_iter()
         .flatten()
@@ -1208,6 +1212,11 @@ const TRIM_DELAY: std::time::Duration = std::time::Duration::from_millis(1500);
 /// (`GpuRenderer::rest_queue`): idle that long, a queue starts as slowly as a
 /// new one, so the next frame pays no more for it than it would anyway.
 const QUEUE_REST_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
+/// After the queue goes, this long until a new one is made, ahead of the next
+/// frame (which made it, 0.7 ms more, on an M1 after 40 s at rest): once the
+/// run loop has turned, so what it autoreleased has let the old one go (a
+/// queue that exists as the old one goes inherits its memory).
+const QUEUE_READY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 /// A window idle this long past that gives back a glyph atlas it grew: what
 /// it costs is a slow first frame, for someone who has been away a while.
 const ATLAS_TRIM_DELAY: std::time::Duration = std::time::Duration::from_secs(6);
@@ -5949,6 +5958,7 @@ impl Host {
                     at: std::time::Instant::now(),
                     atlas: self.renderer.as_ref().is_some_and(|r| r.atlas_grown()),
                     queue: self.renderer.is_some() && cfg!(target_os = "macos"),
+                    ready: false,
                 };
                 self.trim_stage = TrimStage::Rest;
                 self.native.trim();
@@ -5967,6 +5977,13 @@ impl Host {
                     self.rest.queue = false;
                     if let Some(renderer) = &mut self.renderer {
                         renderer.rest_queue();
+                    }
+                    self.rest.ready = true;
+                }
+                if self.rest.ready && now >= self.rest.at + QUEUE_REST_DELAY + QUEUE_READY_DELAY {
+                    self.rest.ready = false;
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.ready_queue();
                     }
                 }
             }

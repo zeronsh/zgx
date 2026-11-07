@@ -522,6 +522,12 @@ impl Queue {
         });
         true
     }
+
+    /// zgx patch: the queue `renew` let go of made again now, before a command
+    /// buffer is wanted: so the frame that wants one doesn't make it.
+    pub fn ready(&self) {
+        let _ = self.shared.raw();
+    }
 }
 
 #[derive(Debug)]
