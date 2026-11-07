@@ -5996,6 +5996,9 @@ pub(crate) struct ListStretch {
     shown: Signal<f32>,
     /// Room past its end, while a keyboard covers that much of it.
     pub(crate) end_room: Rc<Cell<f32>>,
+    /// Where it is drawn instead while something else moves it on screen
+    /// (`ScrollDriver::hold`): its offset and rows go on.
+    held: Signal<Option<f32>>,
 }
 impl ListStretch {
     /// `root`'s list, its rows in `content`, scrolled to `offset` within
@@ -6019,6 +6022,7 @@ impl ListStretch {
             });
         }
         let end_room: Rc<Cell<f32>> = Rc::default();
+        let held = ui.signal(None::<f32>);
         let shown = crate::elastic::register(
             ui,
             root,
@@ -6027,15 +6031,17 @@ impl ListStretch {
             extents,
             offset,
             end_room.clone(),
-            None,
+            Some(held.clone()),
         );
         let placed = Rc::new(Cell::new(0_f32));
         {
             let (placed, shown, scene) = (placed.clone(), shown.clone(), ui.scene.clone());
+            let held = held.clone();
             let pixel_scale = ui.pixel_scale();
             let mut first = true;
             ui.bind(root, move || {
                 let stretch = shown.get();
+                let held = held.get();
                 // Placed again from where it was asked to be at a new scale.
                 let _ = pixel_scale.get();
                 // The list places its content as it mounts (`place`).
@@ -6048,7 +6054,7 @@ impl ListStretch {
                         content,
                         crate::scene::Transform {
                             x: 0.,
-                            y: -(placed.get() + stretch),
+                            y: -held.unwrap_or(placed.get() + stretch),
                         },
                     );
                 }
@@ -6059,17 +6065,19 @@ impl ListStretch {
             placed,
             shown,
             end_room,
+            held,
         }
     }
     /// The list scrolled its content to `position`.
     pub(crate) fn place(&self, scene: &mut crate::scene::Scene, position: f32) {
         self.placed.set(position);
         let stretch = self.shown.with_untracked(|s| *s);
+        let held = self.held.with_untracked(|held| *held);
         scene.set_transform(
             self.content,
             crate::scene::Transform {
                 x: 0.,
-                y: -(position + stretch),
+                y: -held.unwrap_or(position + stretch),
             },
         );
     }

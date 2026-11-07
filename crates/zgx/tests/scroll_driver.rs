@@ -2,6 +2,8 @@
 //! headless here): it finds what is under a finger, its positions move the
 //! view, and past either end the offset an app reads stays in range while the
 //! rest shows as stretch.
+use std::{cell::Cell, rc::Rc};
+
 use zgx::{compose::prelude::*, widgets::Ui};
 
 fn window(content_height: f32) -> Ui {
@@ -88,6 +90,60 @@ fn a_held_view_stays_drawn_where_it_is_as_its_offset_goes_on() {
     driver.hold(None);
     ui.prepare_frame();
     assert_eq!(content(&ui), -300.);
+}
+
+#[test]
+fn a_held_list_stays_drawn_where_it_is_as_its_offset_and_rows_go_on() {
+    let mut ui = Ui::new(100., 100.);
+    let offset = ui.signal(0.);
+    let built = Rc::new(Cell::new(0));
+    let counted = built.clone();
+    ui.mount(
+        virtual_list(
+            offset.clone(),
+            30.,
+            0,
+            || 100,
+            |index| index,
+            move |_, index, _| {
+                counted.set(counted.get().max(index));
+                div().h(30.)
+            },
+        )
+        .w(100.)
+        .h(100.),
+    );
+    ui.prepare_frame();
+    let driver = ui.scroll_driver_at(50., 50.).expect("a list with room");
+    driver.drive(100.);
+    ui.prepare_frame();
+    // The list, its viewport, its content: not as far as a row's own place.
+    let content = |ui: &Ui| {
+        let scene = ui.scene.borrow();
+        let mut node = scene.root();
+        let mut y = 0.;
+        for _ in 0..3 {
+            let Some(child) = scene.children(node).first().copied() else {
+                break;
+            };
+            y += scene.transform(child).y;
+            node = child;
+        }
+        y
+    };
+    assert_eq!(content(&ui), -100.);
+
+    assert!(driver.hold(Some(100.)));
+    driver.drive(600.);
+    ui.prepare_frame();
+    assert_eq!(driver.metrics().unwrap().offset, 600., "readers follow");
+    assert_eq!(offset.get(), 600.);
+    assert_eq!(content(&ui), -100., "nothing of it moves");
+    assert!(built.get() >= 20, "the rows of its offset are there");
+
+    driver.hold(None);
+    ui.prepare_frame();
+    assert_eq!(content(&ui), -600.);
 }
 
 #[test]
