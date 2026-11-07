@@ -1591,8 +1591,17 @@ struct Converted {
     next_recent: std::cell::Cell<usize>,
     /// The last few large tables a script read, as `recent`: read again and
     /// again and held by none between, each is converted once all the same.
-    recent_large: std::cell::RefCell<Vec<(usize, Value, Table)>>,
+    /// Long lists apart from the rest, which a list's rows would crowd out, and
+    /// each a whole conversion to read again.
+    recent_large: [Recent; 2],
 }
+/// Tables kept from their last conversions, oldest first.
+#[derive(Default)]
+struct Recent {
+    tables: std::cell::RefCell<Vec<(usize, Value, Table)>>,
+}
+/// What counts as a long list, in `Converted::recent_large`.
+const LONG_LIST: usize = 64;
 /// Sweeps wait until the cache holds this much (`weight`) at least.
 const SWEPT_FROM: usize = 1 << 12;
 /// The values a cached value's table holds, its small parts counted all the
@@ -1646,18 +1655,27 @@ pub(crate) fn shared_lua(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> 
     if CONVERTED.get() == made {
         return Ok(converted);
     }
-    if let (mlua::Value::Table(table), Some(cache)) = (&converted, lua.app_data_ref::<Converted>())
-    {
-        let id = identity(value);
-        let mut recent = cache.recent_large.borrow_mut();
-        if !recent.iter().any(|(at, ..)| *at == id) {
-            // Held with its value, so its address is not another's meanwhile.
-            // Oldest first: the newest goes last, what goes for room from the front.
-            recent.push((id, value.clone(), table.clone()));
-            let_go_of_old(&mut recent);
-        }
+    if let mlua::Value::Table(table) = &converted {
+        keep_large(lua, value, table);
     }
     Ok(converted)
+}
+/// `table`, `value`'s, among the large tables kept for the reads to come
+/// (`Converted::recent_large`).
+fn keep_large(lua: &Lua, value: &Value, table: &Table) {
+    let Some(cache) = lua.app_data_ref::<Converted>() else {
+        return;
+    };
+    let id = identity(value);
+    let kept = &cache.recent_large[usize::from(value.list().len() >= LONG_LIST)];
+    let mut recent = kept.tables.borrow_mut();
+    if recent.iter().any(|(at, ..)| *at == id) {
+        return;
+    }
+    // Held with its value, so its address is not another's meanwhile. Oldest
+    // first: the newest goes last, and what goes for room goes from the front.
+    recent.push((id, value.clone(), table.clone()));
+    let_go_of_old(&mut recent);
 }
 /// Of `recent`, what nothing else holds any more (a list a state replaced) is
 /// kept only so far: the newest `LET_GO_NEWEST` of those, whose tables the
@@ -2029,7 +2047,14 @@ pub(crate) fn sweep_idle(lua: &Lua) {
     let Some(cache) = lua.app_data_ref::<Converted>() else {
         return;
     };
-    cache.recent_large.borrow_mut().clear();
+    let [others, lists] = &cache.recent_large;
+    others.tables.borrow_mut().clear();
+    // (A list a state still has stays, its table read at each wake: those let go
+    // are held here and by `held` alone.)
+    lists
+        .tables
+        .borrow_mut()
+        .retain(|(_, value, _)| matches!(value, Value::List(items) if Rc::strong_count(items) > 2));
     cache.bases.borrow_mut().clear();
     drop(cache);
     let _ = sweep_when(lua, true);
@@ -2204,7 +2229,9 @@ pub(crate) fn remember(lua: &Lua, table: &Table, value: &Value) -> mlua::Result<
     };
     let copy: Table = clone.call(table)?;
     copy.set_readonly(true);
-    file(lua, value, &copy)
+    file(lua, value, &copy)?;
+    keep_large(lua, value, &copy);
+    Ok(())
 }
 /// How many values a VM's conversion cache holds.
 pub(crate) fn converted_len(lua: &Lua) -> usize {
