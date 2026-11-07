@@ -3518,6 +3518,8 @@ export type ContainerProps = {
 	min: number?,
 	max: number?,
 	step: number?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
 	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
@@ -3953,6 +3955,8 @@ export type ScrollProps = {
 	min: number?,
 	max: number?,
 	step: number?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
 	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
@@ -10016,6 +10020,8 @@ export type DisclosureProps = {
 	min: number?,
 	max: number?,
 	step: number?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
 	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
@@ -10839,6 +10845,8 @@ export type SectionProps = {
 	min: number?,
 	max: number?,
 	step: number?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
 	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
@@ -15410,6 +15418,8 @@ export type SplitProps = {
 	-- focusable.
 	value: (number | State<number> | () -> number)?,
 	step: number?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
 	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
@@ -16373,6 +16383,8 @@ export type LayerProps = {
 	min: number?,
 	max: number?,
 	step: number?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
 	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
@@ -16794,6 +16806,8 @@ export type ModalProps = {
 	min: number?,
 	max: number?,
 	step: number?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
 	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
@@ -17233,6 +17247,8 @@ export type PopoverProps = {
 	min: number?,
 	max: number?,
 	step: number?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
 	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
@@ -18087,6 +18103,8 @@ export type SubmenuProps = {
 	min: number?,
 	max: number?,
 	step: number?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
 	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
