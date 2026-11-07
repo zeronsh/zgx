@@ -237,6 +237,12 @@ impl fmt::Display for AppMenuError {
     }
 }
 impl std::error::Error for AppMenuError {}
+/// The menu whose items are the app's own in the application menu (macOS's
+/// first menu, titled with the app's name): About, Check for Updates…,
+/// Settings…. They come first in it, over Services, Hide and Quit, and no
+/// menu of this name shows in the bar. Elsewhere, where there is no
+/// application menu, it is a menu like any other.
+pub const APPLICATION_MENU: &str = "Application";
 /// macOS exposes the application menu in the system menu bar. Linux windows use
 /// [`app_menu_bar`], as winit has no GTK menubar host or universal Wayland app menu.
 pub fn has_native_app_menu() -> bool {
@@ -722,7 +728,14 @@ fn binds_zoom_keys(menus: &[AppMenu]) -> bool {
 #[cfg(target_os = "macos")]
 fn native_submenu(model: &AppMenu) -> Result<muda::Submenu, AppMenuError> {
     let menu = muda::Submenu::new(&model.label, true);
-    for entry in &model.entries {
+    append_entries(&menu, &model.entries)?;
+    Ok(menu)
+}
+
+/// `entries` added to `menu`, in order.
+#[cfg(target_os = "macos")]
+fn append_entries(menu: &muda::Submenu, entries: &[AppMenuEntry]) -> Result<(), AppMenuError> {
+    for entry in entries {
         let result = match entry {
             AppMenuEntry::Item {
                 label,
@@ -770,7 +783,7 @@ fn native_submenu(model: &AppMenu) -> Result<muda::Submenu, AppMenuError> {
         };
         result.map_err(|e| AppMenuError(e.to_string()))?;
     }
-    Ok(menu)
+    Ok(())
 }
 
 /// Shows `entries` as a native pop-up menu at `(x, y)`, in points from the
@@ -922,6 +935,17 @@ impl NativeMenu {
         // its title with the process name. Keep user menus in subsequent slots,
         // including after dynamic model replacement.
         let application = muda::Submenu::new("Application", true);
+        // The app's own items first (`APPLICATION_MENU`), as AppKit apps
+        // have About and Settings… over Services.
+        if let Some(own) = menus
+            .iter()
+            .find(|m| m.label == APPLICATION_MENU && !m.entries.is_empty())
+        {
+            append_entries(&application, &own.entries)?;
+            application
+                .append(&muda::PredefinedMenuItem::separator())
+                .map_err(|e| AppMenuError(e.to_string()))?;
+        }
         application
             .append_items(&[
                 // AppKit fills the menu it was told is the Services menu
@@ -942,6 +966,9 @@ impl NativeMenu {
         let find = !binds_find_keys(menus);
         let zoom = !binds_zoom_keys(menus);
         for model in menus {
+            if model.label == APPLICATION_MENU {
+                continue;
+            }
             let submenu = native_submenu(model)?;
             // Find in page in the Edit menu, as AppKit apps have it.
             if model.label == "Edit" && find {

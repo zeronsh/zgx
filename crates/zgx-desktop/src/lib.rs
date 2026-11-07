@@ -127,8 +127,8 @@ mod x11_visual;
 #[cfg(target_os = "linux")]
 mod x11_work_area;
 pub use app_menu::{
-    AppMenu, AppMenuEntry, AppMenuError, MenuAccelerator, MenuAction, StandardItem, app_menu_bar,
-    has_native_app_menu,
+    APPLICATION_MENU, AppMenu, AppMenuEntry, AppMenuError, MenuAccelerator, MenuAction,
+    StandardItem, app_menu_bar, has_native_app_menu,
 };
 pub use composition::{CompositionLayer, WindowComposition};
 pub use file_dialog::{
