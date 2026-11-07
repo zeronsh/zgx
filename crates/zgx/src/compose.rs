@@ -508,6 +508,9 @@ pub(crate) struct Rare {
     pointer_events: Option<Box<dyn FnMut() -> bool>>,
     scrollbar: Option<bool>,
     follow_end: Option<bool>,
+    /// `View::keyboard_ride`: how it moves a field clear of a keyboard (iOS).
+    #[cfg(any(target_os = "ios", test))]
+    keyboard_ride: Option<crate::elastic::KeyboardRide>,
     /// `View::overscroll_contain`: a wheel over it stays with it.
     overscroll_contain: bool,
     animation: Option<animation::Animated>,
@@ -613,6 +616,10 @@ impl Rare {
         }
         if self.follow_end.is_some() {
             inner.follow_end = self.follow_end;
+        }
+        #[cfg(any(target_os = "ios", test))]
+        if self.keyboard_ride.is_some() {
+            inner.keyboard_ride = self.keyboard_ride;
         }
         if self.overscroll_contain {
             inner.overscroll_contain = true;
@@ -919,6 +926,20 @@ impl View {
     /// goes on to them.
     pub fn overscroll_contain(mut self) -> Self {
         self.rare_mut().overscroll_contain = true;
+        self
+    }
+    /// How this scroll view or virtual list moves a focused field in it
+    /// clear of a software keyboard (iOS): UIKit's own way by default
+    /// (`KeyboardRide::Native`), or the field riding the keyboard's edge
+    /// (`KeyboardRide::Attached`).
+    /// Elsewhere, where no software keyboard covers a view, it's kept nowhere.
+    pub fn keyboard_ride(mut self, ride: crate::elastic::KeyboardRide) -> Self {
+        #[cfg(any(target_os = "ios", test))]
+        {
+            self.rare_mut().keyboard_ride = Some(ride);
+        }
+        #[cfg(not(any(target_os = "ios", test)))]
+        let _ = (&mut self, ride);
         self
     }
     /// Keep a scroll viewport at its end while its content grows, as long as
@@ -3237,6 +3258,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 size.clone(),
                 extent.clone(),
             );
+            let driven = stretch.driven.clone();
             let navigation = keyboard_navigation.then(|| {
                 crate::compose_virtual_keyboard::Navigation::new(
                     ui,
@@ -3329,7 +3351,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 let requested = offset.get();
                 // As a scroll view takes it: past the end (`math.huge`) is
                 // the end; NaN, the top.
-                let limit = (model.content_height() - height).max(0.0);
+                let limit = (model.content_height() + driven.end_room() - height).max(0.0);
                 let mut position = if requested.is_nan() {
                     0.0
                 } else {
@@ -4920,6 +4942,8 @@ fn mount_element(
     );
     let scrollbar = rare.as_ref().and_then(|r| r.scrollbar).unwrap_or(false);
     let follow_end = rare.as_ref().and_then(|r| r.follow_end).unwrap_or(false);
+    #[cfg(any(target_os = "ios", test))]
+    let keyboard_ride = rare.as_ref().and_then(|r| r.keyboard_ride);
     let mut opened = open_element(
         ui,
         parent,
@@ -4935,7 +4959,12 @@ fn mount_element(
     for child in std::mem::take(&mut opened.children) {
         mount(ui, opened.child_parent, child, opened.environment.clone());
     }
-    close_element(ui, opened)
+    let root = close_element(ui, opened);
+    #[cfg(any(target_os = "ios", test))]
+    if let Some(ride) = keyboard_ride {
+        crate::elastic::set_keyboard_ride(ui, root, ride);
+    }
+    root
 }
 /// An element mounted up to its children: what the rest of its mounting
 /// needs once they are in (`mount_element`).
@@ -5773,6 +5802,13 @@ fn open_element(
         }
         if let Some(mode) = rare.as_deref().and_then(|r| r.input_mode) {
             editor.set_input_mode(mode);
+            // Marked for iOS's VoiceOver (a search field's trait).
+            #[cfg(target_os = "ios")]
+            if mode == crate::text_edit::InputMode::Search {
+                ui.semantics
+                    .borrow_mut()
+                    .update(editor.node, |node| node.search = true);
+            }
         }
         if let Some(check) = rare.as_deref_mut().and_then(|r| r.spellcheck.take())
             && rare.as_deref().and_then(|r| r.secure) != Some(true)
@@ -6217,6 +6253,10 @@ pub(crate) struct ListStretch {
     content: NodeId,
     placed: Rc<Cell<f32>>,
     shown: Signal<f32>,
+    /// What iOS's scroller adds: room past its end while a keyboard covers
+    /// it, and where it's drawn instead while the system moves it (its
+    /// offset and rows go on). Empty elsewhere.
+    pub(crate) driven: crate::elastic::Driven,
 }
 impl ListStretch {
     /// `root`'s list, its rows in `content`, scrolled to `offset` within
@@ -6239,14 +6279,18 @@ impl ListStretch {
                 }
             });
         }
-        let shown = crate::elastic::register(ui, root, false, size, extents, offset);
+        let driven = crate::elastic::Driven::new(ui);
+        let shown =
+            crate::elastic::register(ui, root, false, size, extents, offset, driven.clone());
         let placed = Rc::new(Cell::new(0_f32));
         {
             let (placed, shown, scene) = (placed.clone(), shown.clone(), ui.scene.clone());
+            let driven = driven.clone();
             let pixel_scale = ui.pixel_scale();
             let mut first = true;
             ui.bind(root, move || {
                 let stretch = shown.get();
+                let held = driven.held();
                 // Placed again from where it was asked to be at a new scale.
                 let _ = pixel_scale.get();
                 // The list places its content as it mounts (`place`).
@@ -6259,7 +6303,7 @@ impl ListStretch {
                         content,
                         crate::scene::Transform {
                             x: 0.,
-                            y: -(placed.get() + stretch),
+                            y: -held.unwrap_or(placed.get() + stretch),
                         },
                     );
                 }
@@ -6269,17 +6313,19 @@ impl ListStretch {
             content,
             placed,
             shown,
+            driven,
         }
     }
     /// The list scrolled its content to `position`.
     pub(crate) fn place(&self, scene: &mut crate::scene::Scene, position: f32) {
         self.placed.set(position);
         let stretch = self.shown.with_untracked(|s| *s);
+        let held = self.driven.held_untracked();
         scene.set_transform(
             self.content,
             crate::scene::Transform {
                 x: 0.,
-                y: -(position + stretch),
+                y: -held.unwrap_or(position + stretch),
             },
         );
     }
@@ -6504,6 +6550,7 @@ fn mount_scroll(
     let extent = ui.observe_content_size(content);
     // What a trackpad stretches it by past an edge (`elastic`): zero unless
     // the host scrolls elastically.
+    let driven = crate::elastic::Driven::new(ui);
     let stretch = crate::elastic::register(
         ui,
         root,
@@ -6511,6 +6558,7 @@ fn mount_scroll(
         size.clone(),
         extent.clone(),
         offset.clone(),
+        driven.clone(),
     );
     if scrollbar {
         let main_extent = ui.signal(main_size(extent.get()));
@@ -6624,7 +6672,8 @@ fn mount_scroll(
         // Placed again from where it was asked to be at a new scale.
         let _ = pixel_scale.get();
         let (width, height) = size.get();
-        let limit = (main_size(extent.get()) - main_size((width, height))).max(0.);
+        let limit =
+            (main_size(extent.get()) + driven.end_room() - main_size((width, height))).max(0.);
         let requested = offset.get();
         let position = if requested.is_nan() {
             0.
@@ -6677,7 +6726,8 @@ fn mount_scroll(
         // shows no stretch: whatever a gesture left goes as it ends
         // (`elastic`).
         let stretch = if limit > 0. { stretch.get() } else { 0. };
-        scene.set_transform(content, translation(position + stretch, rtl));
+        let drawn = driven.held().unwrap_or(position + stretch);
+        scene.set_transform(content, translation(drawn, rtl));
     });
 }
 #[cfg(target_os = "macos")]
@@ -7754,7 +7804,8 @@ fn name_content(ui: &Ui, scene: &crate::scene::Scene, id: NodeId) {
         pending.extend(scene.children(child).iter().rev().copied());
     }
     drop(semantics);
-    let label = parts.join(" ");
+    // iOS's cells join their parts with a comma, which VoiceOver pauses at.
+    let label = parts.join(if cfg!(target_os = "ios") { ", " } else { " " });
     ui.semantics.borrow_mut().set_label(id, &label);
 }
 /// A mounted node, from `View::on_mount`. Weak: it keeps neither the UI

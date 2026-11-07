@@ -18,6 +18,9 @@ struct Fake {
     /// What the open dialog picks, and where the save dialog saves.
     opens: PathBuf,
     saves: PathBuf,
+    /// The files written, as the platform heard (`file_written`), with what
+    /// each held then.
+    written: RefCell<Vec<(PathBuf, String)>>,
 }
 impl Platform for Fake {
     fn clipboard_text(&self) -> Option<String> {
@@ -44,6 +47,10 @@ impl Platform for Fake {
     fn save_file(&self, _: FilePicker) -> Pending<Result<Option<PathBuf>, String>> {
         let path = self.saves.clone();
         Box::pin(async move { Ok(Some(path)) })
+    }
+    fn file_written(&self, path: &std::path::Path) {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        self.written.borrow_mut().push((path.to_path_buf(), text));
     }
 }
 
@@ -91,13 +98,22 @@ fn dir(name: &str) -> PathBuf {
     dir
 }
 fn app(dir: &std::path::Path, code: &'static str, plugin: Option<&'static str>) -> Harness {
+    app_with(dir, code, plugin).0
+}
+fn app_with(
+    dir: &std::path::Path,
+    code: &'static str,
+    plugin: Option<&'static str>,
+) -> (Harness, Rc<Fake>) {
     let fake = Rc::new(Fake {
         clipboard: RefCell::new(String::new()),
         image: RefCell::new(None),
         opens: dir.join("in.txt"),
         saves: dir.join("out.txt"),
+        written: RefCell::default(),
     });
-    Harness::wrapped(
+    let kept = fake.clone();
+    let harness = Harness::wrapped(
         move |runtime| {
             let host = ScriptHost::inline(runtime, "app", code);
             match plugin {
@@ -106,7 +122,8 @@ fn app(dir: &std::path::Path, code: &'static str, plugin: Option<&'static str>) 
             }
         },
         move |view| zgx::compose::provide(PlatformService(fake), view),
-    )
+    );
+    (harness, kept)
 }
 fn wait_for(h: &mut Harness, text: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -260,6 +277,22 @@ fn a_task_cancelled_at_a_dialog_drops_the_dialog() {
     assert!(dropped.get(), "the dialog the task awaited dropped with it");
     assert_eq!(h.text("label"), "cancelled", "the task never went on");
     assert_eq!(h.error(), None);
+}
+
+#[test]
+fn the_platform_hears_a_saved_file_once_it_is_written_whole() {
+    // iOS saves in two steps: a file of the app's own, then the system's
+    // export picker with it, once it holds what the app wrote.
+    let dir = dir("written");
+    let (mut h, fake) = app_with(&dir, APP, None);
+    h.click("save");
+    wait_for(&mut h, "wrote out.txt");
+    assert_eq!(
+        fake.written.borrow().clone(),
+        vec![(dir.join("out.txt"), "saved text".to_string())],
+        "told once, with all of it written"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

@@ -32,6 +32,7 @@ That builds as it is: zgx's own forks (of cosmic-text, taffy and mlua) come with
 wgpu-hal = { git = "https://github.com/zeronsh/zgx" }
 winit = { git = "https://github.com/zeronsh/zgx" }
 accesskit_macos = { git = "https://github.com/zeronsh/zgx" }
+accesskit_ios = { git = "https://github.com/zeronsh/zgx" }
 accesskit_windows = { git = "https://github.com/zeronsh/zgx" }
 accesskit_unix = { git = "https://github.com/zeronsh/zgx" }
 accesskit_atspi_common = { git = "https://github.com/zeronsh/zgx" }

@@ -312,6 +312,12 @@ pub struct SystemPreferences {
     /// Translucent surfaces should be opaque (macOS's Reduce transparency):
     /// a backdrop blur paints its background opaque, without the blur.
     pub reduced_transparency: bool,
+    /// Meaning shouldn't rest on colour alone (iOS's Differentiate Without Color,
+    /// macOS's too): a shape, a word or a pattern goes with it.
+    pub differentiate_without_color: bool,
+    /// The system inverts the display's colours (iOS's Smart and Classic Invert):
+    /// a photo drawn by the app comes out as its negative.
+    pub inverted_colors: bool,
 }
 
 /// Token values for a subtree. The root scope is the runtime's theme;

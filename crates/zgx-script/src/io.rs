@@ -478,14 +478,34 @@ pub(crate) fn install(
             }
             let path = chosen(&picked, &file, "ui.write_file")?;
             crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
-            off_thread(lua, format!("write {}", path.display()), move || {
+            let (tell, mut heard) = zgx::task::latest::<Result<(), String>>();
+            let promise = pending(lua, format!("write {}", path.display()))?;
+            let target = path.clone();
+            std::thread::spawn(move || {
                 // Beside it, then over it: never half a file.
-                let temp = path.with_extension("zgx-write");
-                std::fs::write(&temp, text)
-                    .and_then(|()| std::fs::rename(&temp, &path))
-                    .map(|()| None)
-                    .map_err(|e| format!("{}: {e}", path.display()))
-            })
+                let temp = target.with_extension("zgx-write");
+                tell.send(
+                    std::fs::write(&temp, text)
+                        .and_then(|()| std::fs::rename(&temp, &target))
+                        .map_err(|e| format!("{}: {e}", target.display())),
+                );
+            });
+            let shared = shared.clone();
+            settle_with(lua, &promise, crate::errors::Kind::Io, async move {
+                match heard.recv().await {
+                    Some(Ok(())) => {
+                        // Written whole: the platform finishes a save in two
+                        // steps (iOS's export picker), on this thread.
+                        if let Ok(platform) = later(&shared, "ui.write_file") {
+                            platform.0.file_written(&path);
+                        }
+                        Ok(Value::Nil)
+                    }
+                    Some(Err(error)) => Err(error),
+                    None => Err("the file thread stopped".into()),
+                }
+            })?;
+            Ok(PromiseUd(promise))
         })?,
     )?;
     Ok(())

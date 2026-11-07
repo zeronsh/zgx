@@ -66,7 +66,6 @@ winit = "0.30.13"
 softbuffer = "0.4.8"
 fontdue = "0.9.3"
 cosmic-text = { package = "zgx-cosmic-text", version = "0.19.12", path = "../../vendor/cosmic-text" }
-arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
 accesskit = "0.24.1"
 # The adapters' (through accesskit_winit), named for its `links` metadata:
 # with the repository's (vendor/accesskit_consumer) a field's error message
@@ -76,8 +75,24 @@ accesskit_consumer = "0.38.0"
 unicode-segmentation = "1.12"
 rustc-hash = "2.1"
 accesskit_winit = "0.33.2"
-rfd = "=0.17.2"
 open = "=5.4.4"
+
+# Native dialogs: iOS has no file panel or message box rfd drives, and its
+# `FileDialog` does not build there.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+rfd = "=0.17.2"
+# The clipboard; iOS's is UIPasteboard (src/ios_pasteboard.rs).
+arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
+
+# The system's glass between the planes (src/native_host/ios.rs).
+[target.'cfg(target_os = "ios")'.dependencies]
+accesskit_ios = "0.1.2"
+# System notifications (src/notify.rs), as macOS's.
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSObject", "NSString", "NSError", "NSUUID", "NSBundle"] }
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotification", "UNNotificationResponse", "UNNotificationSettings"] }
+objc2 = "=0.6.4"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+block2 = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Clipboard images on Wayland, as PNG (clipboard.rs); arboard's version,

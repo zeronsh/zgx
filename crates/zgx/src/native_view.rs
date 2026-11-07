@@ -40,6 +40,9 @@ pub enum NativeContent {
     Platform(Rc<dyn Any>),
     /// The system's glass (see [`crate::glass`]).
     Glass(crate::glass::GlassPane),
+    /// A group of iOS glass panes that merge (see [`crate::glass::glass_group`]).
+    #[cfg(target_os = "ios")]
+    GlassGroup(f32),
     /// The system's on and off control (see [`crate::native_control`]).
     #[cfg(target_os = "ios")]
     Toggle(Rc<crate::native_control::ToggleState>),
@@ -75,6 +78,8 @@ impl NativeContent {
                 }
             }
             Self::Platform(_) => "Native view".into(),
+            #[cfg(target_os = "ios")]
+            Self::GlassGroup(_) => "Glass group".into(),
             #[cfg(target_os = "ios")]
             Self::Toggle(_) => "Switch".into(),
             #[cfg(target_os = "ios")]

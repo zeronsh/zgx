@@ -59,7 +59,13 @@ pub enum Event {
 
 /// How many bytes of drawn frames the thread keeps, for scrubbing back without
 /// playing the composition from its start.
+#[cfg(not(target_os = "ios"))]
 const CACHE_BYTES: usize = 512 << 20;
+/// On iOS, a phone's share: the whole desktop budget filled in six seconds
+/// of a 360×640 composition at 2×, and an app's memory is what the system
+/// ends it by.
+#[cfg(target_os = "ios")]
+const CACHE_BYTES: usize = 64 << 20;
 
 /// Frames drawn for this script, as they were.
 #[derive(Default)]

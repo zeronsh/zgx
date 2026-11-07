@@ -34,6 +34,7 @@ use zgx::input::DragItem;
 /// (top-down from the primary screen's top, in points; on Windows, the
 /// screen's pixels, as `content_origin` gives: `popup_window::global_scale`).
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(target_os = "ios", allow(dead_code))]
 pub(crate) enum NativeDrag {
     Moved {
         x: f64,

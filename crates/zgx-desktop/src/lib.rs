@@ -71,6 +71,24 @@ mod clipboard;
 mod composition;
 mod contain;
 pub mod file_dialog;
+#[cfg(target_os = "ios")]
+mod ios_gestures;
+#[cfg(target_os = "ios")]
+mod ios_menu;
+#[cfg(target_os = "ios")]
+mod ios_metrics;
+#[cfg(target_os = "ios")]
+mod ios_pasteboard;
+#[cfg(target_os = "ios")]
+mod ios_picker;
+#[cfg(target_os = "ios")]
+mod ios_refresh;
+#[cfg(target_os = "ios")]
+mod ios_scroll;
+#[cfg(target_os = "ios")]
+mod ios_system;
+#[cfg(target_os = "ios")]
+mod ios_text;
 #[cfg(target_os = "linux")]
 mod linux_dbus;
 #[cfg(target_os = "linux")]
@@ -172,7 +190,7 @@ mod native_ime;
 pub mod presentation;
 pub mod raster;
 pub mod terminal_process;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "ios", test))]
 mod text_store;
 #[cfg(windows)]
 mod tsf;
