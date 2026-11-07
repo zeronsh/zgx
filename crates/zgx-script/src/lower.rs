@@ -2621,6 +2621,42 @@ fn build_scoped_seeing(
 
 /// A web view: its page from `src` (followed) or `html`, its handlers
 /// subscribed for as long as the view is mounted.
+/// A `ui.symbol`, its look read again when state it reads changes.
+fn symbol_of(spec: &crate::node::SymbolSpec, vm: &Rc<Vm>) -> View {
+    let spec = spec.clone();
+    let vm = vm.clone();
+    zgx::compose::component(move |cx| symbol_view(&spec, &vm, cx.theme()))
+}
+fn symbol_view(
+    spec: &crate::node::SymbolSpec,
+    vm: &Rc<Vm>,
+    theme: Rc<zgx::theme::ThemeScope>,
+) -> View {
+    use zgx::symbol::{SymbolStyle, symbol};
+    let own = |source: &Option<Source>| source.as_ref().map(resolve_owned);
+    let (size, weight, color) = (own(&spec.size), own(&spec.weight), own(&spec.color));
+    let vm = vm.clone();
+    symbol(spec.name.clone(), move || {
+        let read = |source: &Option<Owned>, ty| {
+            source
+                .as_ref()
+                .and_then(|source| resolve(source, ty, None, &vm))
+        };
+        let mut style = SymbolStyle::default();
+        if let Some(Lit::Num(size)) = read(&size, Ty::Num) {
+            style.size = size;
+        }
+        if let Some(Lit::Num(weight)) = read(&weight, Ty::Num) {
+            style.weight = weight as u16;
+        }
+        style.color = match read(&color, Ty::Color) {
+            Some(Lit::Color(color)) => color,
+            Some(Lit::Token(color)) => theme.get(color).color().unwrap_or(style.color),
+            _ => theme.color(zgx::theme::tok::TEXT_PRIMARY),
+        };
+        style
+    })
+}
 /// A `ui.glass`, its look read again when state it reads changes.
 fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
     use zgx::glass::{GlassStyle, GlassVariant, glass};
@@ -2969,6 +3005,7 @@ fn kind_view(
         #[cfg(feature = "scene3d")]
         Kind::Scene3d(spec) => crate::scene3d::lower(spec, vm, &low.assets, need(&mut cx)),
         Kind::Glass(spec) => glass_of(spec, vm),
+        Kind::Symbol(spec) => symbol_of(spec, vm),
         Kind::Canvas(draw, options) => {
             let (draw, vm) = (draw.clone(), vm.clone());
             let theme = match cx.as_deref().map(Context::theme) {
