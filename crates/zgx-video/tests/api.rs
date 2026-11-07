@@ -309,3 +309,84 @@ fn a_script_error_while_it_plays_stops_the_render_and_says_where() {
     let error = stage.step_to(5).unwrap_err();
     assert!(error.contains("boom"), "{error}");
 }
+
+#[test]
+fn a_loop_starts_its_time_again_each_pass_and_mounts_again() {
+    let dir = app(
+        "loop",
+        r##"
+        local video = require("@video")
+        local Grow = ui.component(function()
+            local box = ui.ref()
+            ui.on_mount(function()
+                anime.animate(box:get(), { w = { 1, 101 }, duration = 300, ease = "linear" })
+            end)
+            return ui.div { ref = box, h = 10, w = 1, bg = "#00ff00" }
+        end)
+        return video.compositions { video.composition {
+            id = "L", w = 300, h = 30, fps = 30, duration = 100,
+            render = function()
+                return ui.overlay { w = 300, h = 30,
+                    video.loop { duration = 20, times = 3, function(t)
+                        return ui.column {
+                            ui.div { h = 10, w = function() return 1 + t:get() * 5 end, bg = "#ff0000" },
+                            Grow {},
+                            -- A sequence inside it follows the pass's time.
+                            video.sequence { from = 10, layout = "none",
+                                ui.div { h = 1, w = 300, bg = "#0000ff" } },
+                        }
+                    end },
+                }
+            end,
+        } }
+        "##,
+    );
+    let mut stage = script_stage(&dir, json!({}));
+    let mut pixels = Vec::new();
+    let mut at = |frame: u64| {
+        stage.step_to(frame).unwrap();
+        stage.draw(&mut pixels).unwrap();
+        let red = (0..300u32)
+            .filter(|x| pixel(&pixels, 300, *x, 5)[0] > 128)
+            .count();
+        let green = (0..300u32)
+            .filter(|x| pixel(&pixels, 300, *x, 15)[1] > 128)
+            .count();
+        let blue = (0..300u32).any(|x| pixel(&pixels, 300, x, 20)[2] > 128);
+        (red, green, blue)
+    };
+    assert_eq!(at(5).0, 26);
+    assert!(!at(5).2, "its sequence not yet");
+    let (red, green, blue) = at(25);
+    assert_eq!(red, 26, "its time from 0 again in the second pass");
+    // Five frames of its 300 ms: about half grown, where it would be whole
+    // had it not started again.
+    assert!(
+        (30..70).contains(&green),
+        "and what started as it mounted, started again: {green}"
+    );
+    assert!(!blue);
+    assert!(at(32).2, "its sequence, ten frames into the pass");
+    assert_eq!(at(65).0, 0, "three passes and done");
+}
+
+#[test]
+fn a_freeze_holds_its_frame() {
+    let dir = app(
+        "freeze2",
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "F", w = 300, h = 20, fps = 30, duration = 100,
+            render = function()
+                return ui.overlay { w = 300, h = 20,
+                    video.freeze { frame = 12, function(t)
+                        return ui.div { h = 20, w = t:map({ 0, 100 }, { 0, 300 }), bg = "#ff0000" }
+                    end } }
+            end,
+        } }
+        "##,
+    );
+    assert_eq!(width_at(&dir, 0), 36);
+    assert_eq!(width_at(&dir, 80), 36);
+}
