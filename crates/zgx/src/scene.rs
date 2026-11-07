@@ -11263,11 +11263,18 @@ impl Scene {
         // just their subtrees, outermost first.
         let mut roots = std::mem::take(&mut self.layout_roots);
         roots.retain(|id| self.contains(*id));
-        // Each root's depth worked out once, not at every comparison.
-        roots.sort_by_cached_key(|id| (self.depth(*id), id.index, id.generation));
-        roots.dedup();
+        // Outermost first, each once, sorted by one number: its depth worked
+        // out once, then its index (two roots held at one index are one
+        // node, as only one is in the scene). A mount's text inputs drawn
+        // together leave one root each.
+        let mut keyed: Vec<(u64, NodeId)> = roots
+            .iter()
+            .map(|id| ((self.depth(*id) as u64) << 32 | u64::from(id.index), *id))
+            .collect();
+        keyed.sort_unstable_by_key(|(key, _)| *key);
+        keyed.dedup_by_key(|(key, _)| *key);
         let mut relayout_all = false;
-        for id in roots {
+        for (_, id) in keyed {
             if !self.contains(id) || self.node(id).dirty & LAYOUT == 0 {
                 continue;
             }

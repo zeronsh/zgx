@@ -5094,7 +5094,7 @@ impl Ui {
             if !s.contains(root) {
                 return;
             }
-            if !draw_hint.laid_out.take() {
+            if !draw_hint.laid_out.take() && !DRAWS_LAID_OUT.get() {
                 s.prepare_layout();
             }
             let bounds = s.bounds(root);
@@ -7727,10 +7727,19 @@ pub(crate) fn finish_input_draws(scene: &Rc<RefCell<Scene>>) {
     let runtime = storage.runtime.clone();
     // Batched: an observer of a signal a shaper writes (unsupported) runs
     // after the draws, not inside an editor's borrow.
+    // Laid out once for all of them: each draw reads its editor's box from
+    // that layout, not a pass of its own (`DRAWS_LAID_OUT`), and the box it
+    // read is kept, so that one another's draw moves (a field growing with
+    // its text) is drawn again below.
     runtime.batch(|| {
+        scene.borrow_mut().prepare_layout();
+        DRAWS_LAID_OUT.set(true);
         for (_, effect, draw) in draws.waiting {
+            scene.borrow().read_geometry_for(Some(effect));
             runtime.run_as(effect, &*draw);
         }
+        scene.borrow().read_geometry_for(None);
+        DRAWS_LAID_OUT.set(false);
         scene.borrow_mut().prepare_layout();
     });
     let watch = |effect: u64, starts: bool| {
@@ -7753,6 +7762,12 @@ pub(crate) fn finish_input_draws(scene: &Rc<RefCell<Scene>>) {
         runtime.rerun_watched(&moved, watch);
         scene.borrow_mut().prepare_layout();
     }
+}
+thread_local! {
+    /// Whether the scene was laid out for the input draws running now, at
+    /// a mount's end (`finish_input_draws`): a draw then reads its box as
+    /// that layout left it rather than laying out again.
+    static DRAWS_LAID_OUT: Cell<bool> = const { Cell::new(false) };
 }
 /// Whether the mount deferring input draws has bound an input: without one
 /// its observers run as any batch's.
@@ -8770,5 +8785,65 @@ mod layout_drag_tests {
         eprintln!("drag: {passes:.2} passes, {measures:.0} measures a frame, {nodes} nodes");
         assert!(passes <= 3.2, "{passes:.2} passes a frame");
         assert!(measures <= 2200., "{measures:.0} measures a frame");
+    }
+}
+
+#[cfg(test)]
+mod input_draw_pass_tests {
+    use super::Ui;
+    use crate::compose::prelude::*;
+
+    /// Layout passes a mount of `n` rows, each a button and a text input,
+    /// takes, as `widget_bench` mounts them.
+    fn passes_to_mount(n: usize) -> u64 {
+        let mut ui = Ui::new(1200., 800.);
+        let values: Vec<_> = (0..n).map(|_| ui.signal(String::new())).collect();
+        let before = ui.scene.borrow().layout_passes();
+        let _handle = ui.mount(column().children(values.into_iter().map(|value| {
+            row()
+                .gap(8.)
+                .child(button().child(text("Button")))
+                .child(text_input("Name", value).w(160.))
+        })));
+        ui.scene.borrow_mut().flush();
+        ui.scene.borrow().layout_passes() - before
+    }
+
+    /// A mount draws its text inputs from one layout, not one each: as many
+    /// passes for 200 inputs as for 2. Each draw reading its box from a pass
+    /// of its own laid out the scene once per input.
+    #[test]
+    fn a_mounts_text_inputs_share_one_layout() {
+        let (few, many) = (passes_to_mount(2), passes_to_mount(200));
+        assert_eq!(few, many, "{few} passes for 2 inputs, {many} for 200");
+        assert!(many <= 3, "{many} passes");
+    }
+
+    /// Fields drawn from the one layout are drawn where it placed them: the
+    /// text of each inside its own box.
+    #[test]
+    fn a_mounts_text_inputs_draw_in_their_own_boxes() {
+        let mut ui = Ui::new(600., 800.);
+        let long = ui.signal("line\\n".repeat(12));
+        let below = ui.signal(String::from("below"));
+        let mounted = ui.mount(
+            column()
+                .child(text_area("Notes", long).id("notes").w(300.))
+                .child(text_input("Name", below).id("below").w(300.)),
+        );
+        ui.scene.borrow_mut().flush();
+        let notes = mounted.find("notes").unwrap();
+        let field = mounted.find("below").unwrap();
+        for node in [notes, field] {
+            let editor = ui.editor(node).unwrap();
+            let line = editor.text_area(0..1).unwrap();
+            let bounds = ui.scene.borrow().bounds(node);
+            assert!(
+                line.x >= bounds.x
+                    && line.y >= bounds.y
+                    && line.y + line.height <= bounds.y + bounds.height,
+                "{line:?} in {bounds:?}"
+            );
+        }
     }
 }
