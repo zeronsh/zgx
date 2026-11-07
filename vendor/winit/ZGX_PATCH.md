@@ -368,7 +368,8 @@ that is a kernel call a move for nothing: 9,938 in 10 s of a bare window
 under one deadline on WING-PC, none with this. (Its CPU time is below what
 Windows' 15.6 ms accounting can tell apart; a zgx window waiting with no
 deadline, as one idle under the pointer does, never arms it.) The timer now keeps the deadline it is armed for and is armed only
-for a new one; a wait the timer itself ends (consuming its signal), or a
-failed wait, leaves it unarmed (`event_loop.rs`, `HighResolutionTimer`,
+for a new one; a wait that reaches its deadline (the timer's signal, which
+the wait consumes, or the wait's own timeout, which can beat the timer by a
+tick), or a failed wait, leaves it unarmed (`event_loop.rs`, `HighResolutionTimer`,
 tested by `a_deadline_already_armed_isnt_armed_again`).
 
