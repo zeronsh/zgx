@@ -541,6 +541,107 @@ fn cleared(
         .renderCommandEncoderWithDescriptor(&pass)
         .expect("a render encoder")
 }
+// Diagnostic, `ZGX_PASS_TIMES=1`: each frame's passes, from the GPU's own stage
+// boundary counters. Not for main.
+pub(crate) mod pass_times {
+    use objc2::{rc::Retained, runtime::ProtocolObject};
+    use objc2_metal::{
+        MTLCommonCounterSetTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor,
+        MTLCounterSamplingPoint, MTLCounterSet, MTLDevice, MTLRenderPassDescriptor, MTLResource,
+        MTLStorageMode, MTLTexture,
+    };
+    use objc2_foundation::NSRange;
+    use std::cell::RefCell;
+    pub(crate) struct Times {
+        buffer: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
+        labels: Vec<(&'static str, u32, u32, usize)>,
+    }
+    thread_local! {
+        static TIMES: RefCell<Option<Times>> = const { RefCell::new(None) };
+        static NEXT: std::cell::Cell<&'static str> = const { std::cell::Cell::new("target") };
+    }
+    pub(crate) fn on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("ZGX_PASS_TIMES").is_some())
+    }
+    pub(crate) fn label(name: &'static str) {
+        NEXT.set(name);
+    }
+    pub(crate) fn attach(pass: &MTLRenderPassDescriptor, target: &ProtocolObject<dyn MTLTexture>) {
+        if !on() {
+            return;
+        }
+        TIMES.with(|times| {
+            let mut times = times.borrow_mut();
+            if times.is_none() {
+                let device = target.device();
+                if !device.supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary) {
+                    eprintln!("PASS no stage boundary counters");
+                    return;
+                }
+                let sets = device.counterSets();
+                let Some(set) = sets.as_ref().and_then(|sets| {
+                    sets.iter().find(|set: &Retained<ProtocolObject<dyn MTLCounterSet>>| {
+                        set.name().to_string() == unsafe { MTLCommonCounterSetTimestamp }.to_string()
+                    })
+                }) else {
+                    eprintln!("PASS no timestamp set");
+                    return;
+                };
+                let d = MTLCounterSampleBufferDescriptor::new();
+                d.setCounterSet(Some(&set));
+                d.setStorageMode(MTLStorageMode::Shared);
+                unsafe { d.setSampleCount(256) };
+                let Ok(buffer) = device.newCounterSampleBufferWithDescriptor_error(&d) else {
+                    eprintln!("PASS no sample buffer");
+                    return;
+                };
+                *times = Some(Times { buffer, labels: Vec::new() });
+            }
+            let Some(times) = times.as_mut() else { return };
+            let n = times.labels.len();
+            if n * 4 + 4 > 256 {
+                return;
+            }
+            let a = unsafe { pass.sampleBufferAttachments().objectAtIndexedSubscript(0) };
+            a.setSampleBuffer(Some(&times.buffer));
+            unsafe {
+                a.setStartOfVertexSampleIndex(n * 4);
+                a.setEndOfVertexSampleIndex(n * 4 + 1);
+                a.setStartOfFragmentSampleIndex(n * 4 + 2);
+                a.setEndOfFragmentSampleIndex(n * 4 + 3);
+            }
+            times.labels.push((NEXT.get(), target.width() as u32, target.height() as u32, n));
+            NEXT.set("target");
+        });
+    }
+    /// Once the frame is done: what each pass took.
+    pub(crate) fn dump() {
+        if !on() {
+            return;
+        }
+        TIMES.with(|times| {
+            let mut times = times.borrow_mut();
+            let Some(times) = times.as_mut() else { return };
+            if times.labels.is_empty() {
+                return;
+            }
+            let n = times.labels.len();
+            let Some(data) = (unsafe { times.buffer.resolveCounterRange(NSRange::new(0, n * 4)) }) else {
+                return;
+            };
+            let bytes = unsafe { data.as_bytes_unchecked() };
+            let t: Vec<u64> = bytes.chunks_exact(8).map(|c| u64::from_ne_bytes(c.try_into().unwrap())).collect();
+            let mut line = String::from("PASSES");
+            for (label, w, h, i) in &times.labels {
+                let i = *i * 4;
+                line += &format!(" {label}:{w}x{h}:{}:{}:{}:{}", t[i], t[i + 1], t[i + 2], t[i + 3]);
+            }
+            eprintln!("{line}");
+            times.labels.clear();
+        });
+    }
+}
 /// A render pass of `buffer` into `target`, stored.
 fn pass(
     buffer: &ProtocolObject<dyn MTLCommandBuffer>,
@@ -553,6 +654,7 @@ fn pass(
     color.setTexture(Some(target));
     color.setLoadAction(load);
     color.setStoreAction(MTLStoreAction::Store);
+    pass_times::attach(&pass, target);
     buffer
         .renderCommandEncoderWithDescriptor(&pass)
         .expect("a render encoder")
@@ -678,11 +780,12 @@ impl Frame {
     ) {
         let blur = frame.blur().expect("checked by `blurs`");
         let passes = [
-            (&blur.reduce, target, atlas[0]),
-            (&blur.across, atlas[0], atlas[1]),
-            (&blur.down, atlas[1], atlas[0]),
+            (&blur.reduce, target, atlas[0], "reduce"),
+            (&blur.across, atlas[0], atlas[1], "across"),
+            (&blur.down, atlas[1], atlas[0], "down"),
         ];
-        for (pipeline, source, into) in passes {
+        for (pipeline, source, into, label) in passes {
+            pass_times::label(label);
             self.encoder.endEncoding();
             self.encoder = pass(&self.buffer, into, MTLLoadAction::Clear);
             self.encoder.setRenderPipelineState(pipeline);
@@ -723,6 +826,7 @@ impl Frame {
     }
     /// Open the next pass into `target` after a batch's blur passes.
     pub(crate) fn resume(&mut self, target: &ProtocolObject<dyn MTLTexture>) {
+        pass_times::label("resume");
         self.encoder.endEncoding();
         self.encoder = pass(&self.buffer, target, MTLLoadAction::Load);
         self.current = None;

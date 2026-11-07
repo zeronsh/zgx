@@ -10084,6 +10084,7 @@ impl GpuRenderer {
             return false;
         };
         buffer.waitUntilCompleted();
+        metal_frame::pass_times::dump();
         let ran = buffer.GPUEndTime() - buffer.GPUStartTime();
         self.gpu_time
             .set((ran > 0.).then(|| std::time::Duration::from_secs_f64(ran)));
