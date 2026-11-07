@@ -429,6 +429,15 @@ impl Runtime {
     /// large closure moves into its allocation once.
     #[track_caller]
     pub(crate) fn effect_callback(&self, mount_pure: bool, callback: Callback) -> Effect {
+        self.effect_callback_at(mount_pure, callback, std::panic::Location::caller())
+    }
+    /// TEMPORARY (effect sites): `effect_callback`, made at `site`.
+    pub(crate) fn effect_callback_at(
+        &self,
+        mount_pure: bool,
+        callback: Callback,
+        site: &'static std::panic::Location<'static>,
+    ) -> Effect {
         let born = self.inner.next.get();
         self.inner.next.set(born + 1);
         let id = self.inner.effects.borrow_mut().insert(
@@ -441,7 +450,7 @@ impl Runtime {
                 stopped: false,
                 mount_pure,
                 owns: false,
-                site: std::panic::Location::caller(),
+                site,
             },
         );
         self.inner.queue(id);

@@ -2134,8 +2134,9 @@ impl Ui {
             f();
             guard.completed = true;
         }));
+        let site = std::panic::Location::caller();
         self.runtime.clone().batch(|| {
-            let effect = self.runtime.effect_callback(mount_pure, callback);
+            let effect = self.runtime.effect_callback_at(mount_pure, callback, site);
             #[cfg(feature = "trace")]
             if crate::trace::enabled() {
                 crate::trace::name(effect.number(), format!("@{} binding", owner.number()));
