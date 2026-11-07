@@ -1077,7 +1077,11 @@ impl Focusable {
             NativeContent::Terminal(term) => Some(Self::Terminal(term.clone())),
             NativeContent::Platform(_) | NativeContent::Glass(_) => None,
             #[cfg(target_os = "ios")]
-            NativeContent::Toggle(_)
+            NativeContent::GlassGroup(_)
+            | NativeContent::Toggle(_)
+            | NativeContent::Slider(_)
+            | NativeContent::Segmented(_)
+            | NativeContent::Stepper(_)
             | NativeContent::Tabs(_)
             | NativeContent::EdgeEffect(_)
             | NativeContent::KeyboardBar => None,
@@ -1196,7 +1200,11 @@ fn placeholder(content: NativeContent) -> View {
         }
         NativeContent::Platform(_) | NativeContent::Glass(_) => text(content.label()),
         #[cfg(target_os = "ios")]
-        NativeContent::Toggle(_)
+        NativeContent::GlassGroup(_)
+        | NativeContent::Toggle(_)
+        | NativeContent::Slider(_)
+        | NativeContent::Segmented(_)
+        | NativeContent::Stepper(_)
         | NativeContent::Tabs(_)
         | NativeContent::EdgeEffect(_)
         | NativeContent::KeyboardBar => text(content.label()),

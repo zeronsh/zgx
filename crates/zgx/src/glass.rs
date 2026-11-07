@@ -1,8 +1,9 @@
 //! Glass: the system's own material where the platform has one, the same box
 //! drawn elsewhere.
 //!
-//! On macOS 26 a [`glass`] box is backed by an `NSGlassEffectView`, which the
-//! window server draws from what lies under it. It's a native view between the
+//! On macOS 26 a [`glass`] box is backed by an `NSGlassEffectView`, and on iOS
+//! by a `UIGlassEffect` view, which the system's compositor draws from what
+//! lies under it. It's a native view between the
 //! window's planes ([`crate::native_view`]), so a window with no glass keeps
 //! one plane and pays nothing. Its children are ordinary nodes on the plane
 //! above it, and it's one node for input and assistive technology: the system's
@@ -35,6 +36,8 @@ pub struct GlassStyle {
     pub variant: GlassVariant,
     /// A colour it takes on.
     pub tint: Option<Color>,
+    /// It answers presses as the system's controls do (iOS).
+    pub interactive: bool,
     /// Its corners' radius in points; `f32::INFINITY` for a capsule.
     pub radius: f32,
     /// Each corner's own radius, over `radius`: a sheet rounder on top than
@@ -47,6 +50,7 @@ impl Default for GlassStyle {
         Self {
             variant: GlassVariant::Regular,
             tint: None,
+            interactive: false,
             radius: 24.,
             corners: None,
         }
@@ -111,6 +115,54 @@ impl GlassPane {
     /// Keep the view its host made.
     pub fn set_view(&self, view: Rc<dyn Any>) {
         self.0.borrow_mut().view = Some(view);
+    }
+}
+
+/// What an iOS glass node's system view is.
+#[cfg(target_os = "ios")]
+#[derive(Clone)]
+pub enum GlassContent {
+    /// A pane of glass.
+    Pane(GlassPane),
+    /// A group whose panes merge within `spacing` points of each other.
+    Group(f32),
+}
+
+/// A group whose [`glass`] descendants merge and separate as they come within
+/// `spacing` points of each other, as the system's do. Where the system has no
+/// such group (all but iOS), an ordinary box.
+pub fn glass_group(spacing: f32) -> View {
+    #[cfg(target_os = "ios")]
+    {
+        let backing = component(move |cx| {
+            let natives = cx.try_service::<NativeViews>();
+            div()
+                .absolute()
+                .left(0.)
+                .top(0.)
+                .w_full()
+                .h_full()
+                .on_mount(move |handle| {
+                    let Some(natives) = natives.filter(|n| n.supported() && n.glass_supported())
+                    else {
+                        return;
+                    };
+                    if let Some(scene) = handle.scene()
+                        && let Ok(mut scene) = scene.try_borrow_mut()
+                    {
+                        scene.set_platform_painted(handle.node(), true);
+                    }
+                    handle.retain(
+                        natives.register(handle.node(), NativeContent::GlassGroup(spacing)),
+                    );
+                })
+        });
+        div().relative().child(backing)
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = spacing;
+        div()
     }
 }
 

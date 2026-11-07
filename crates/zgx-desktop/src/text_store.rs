@@ -83,6 +83,7 @@ impl TextStore {
     }
     /// The focused editor's input scope (`input_scope`), the default with
     /// none.
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     pub(crate) fn input_scope(&self) -> i32 {
         input_scope(
             self.editor
@@ -92,6 +93,11 @@ impl TextStore {
     }
     pub(crate) fn is_composing(&self) -> bool {
         self.composition.is_some()
+    }
+    /// The open composition's range in the document (iOS's marked text).
+    #[cfg(target_os = "ios")]
+    pub(crate) fn composition_range(&self) -> Option<Range<usize>> {
+        self.composition.clone()
     }
     /// The document's pieces: the committed text before the selection (its
     /// UTF-16 length and byte end), the preedit if any (in place of the
@@ -188,6 +194,34 @@ impl TextStore {
         let start = start.min(end);
         let (a, b) = (shown_byte(editor, start), shown_byte(editor, end));
         editor.text_area(a..b)
+    }
+    /// The document's offset nearest the window's point `(x, y)`.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn offset_at(&self, x: f32, y: f32) -> Option<usize> {
+        let editor = self.editor.as_ref()?;
+        let byte = editor.offset_at(x, y)?;
+        Some(editor.editor.borrow_mut().byte_to_utf16(byte))
+    }
+    /// Where `start..end` shows, a box for each line it runs on.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn line_areas(&self, start: usize, end: usize) -> Vec<zgx::scene::Rect> {
+        /// Past this it is one box: a phone's selection of a long document.
+        const CHARACTERS: usize = 4096;
+        let mut lines: Vec<zgx::scene::Rect> = Vec::new();
+        if end.saturating_sub(start) > CHARACTERS {
+            lines.extend(self.area(start, end));
+            return lines;
+        }
+        for at in start..end {
+            let Some(area) = self.area(at, at + 1) else {
+                continue;
+            };
+            match lines.last_mut() {
+                Some(line) if (line.y - area.y).abs() < 1. => *line = line.union(area),
+                _ => lines.push(area),
+            }
+        }
+        lines
     }
     /// The selection (`GetSelection`): the caret or selection in the
     /// composition while there is one, else the editor's; its start, its end,
@@ -366,6 +400,7 @@ impl TextStore {
     /// The input method marked its composition's clauses (its display
     /// attributes, read after each of its edits): document ranges and how
     /// each is marked. Ranges outside the composition are left out.
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     pub(crate) fn mark_clauses(&mut self, clauses: &[(Range<usize>, ClauseStyle)]) {
         let (Some(editor), Some(composition)) = (self.editor.clone(), self.composition.clone())
         else {
@@ -456,6 +491,7 @@ impl TextStore {
 /// editor's `InputMode`: which touch keyboard Windows shows, what its input
 /// methods offer. `None`'s keyboard isn't shown at all (the host's part);
 /// its scope is the default.
+#[cfg_attr(target_os = "ios", allow(dead_code))]
 pub(crate) fn input_scope(mode: InputMode) -> i32 {
     match mode {
         InputMode::Text | InputMode::None => 0, // IS_DEFAULT
@@ -540,8 +576,44 @@ fn seen(editor: &EditorHandle) -> Seen {
     }
 }
 
+/// The word to select at `caret` (UTF-16, as the store counts): the word
+/// holding it, or the one just before it; none where only spaces are around.
+/// `select:`, as a caret's Select in the edit menu takes (iOS).
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn word_at(units: &[u16], caret: usize) -> Option<(usize, usize)> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = String::from_utf16_lossy(units);
+    let mut found = None;
+    let mut at = 0;
+    for piece in text.split_word_bounds() {
+        let len = piece.encode_utf16().count();
+        let word = piece.chars().any(char::is_alphanumeric);
+        if word && at <= caret && caret <= at + len {
+            found = Some((at, at + len));
+            // A word starting here is the caret's rather than one ending here.
+            if caret < at + len {
+                break;
+            }
+        }
+        at += len;
+    }
+    found
+}
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn select_takes_the_word_at_the_caret() {
+        let units: Vec<u16> = "Hello world 😀 x".encode_utf16().collect();
+        assert_eq!(super::word_at(&units, 2), Some((0, 5)));
+        // At a word's end, that word; at the next's start, the next.
+        assert_eq!(super::word_at(&units, 5), Some((0, 5)));
+        assert_eq!(super::word_at(&units, 6), Some((6, 11)));
+        assert_eq!(super::word_at(&units, 11), Some((6, 11)));
+        // Around no word, nothing; after an emoji, by UTF-16 units.
+        assert_eq!(super::word_at(&units, 12), None);
+        assert_eq!(super::word_at(&units, units.len()), Some((15, 16)));
+        assert_eq!(super::word_at(&[], 0), None);
+    }
     use super::{Change, TextStore};
     use zgx::{
         compose::prelude::*,

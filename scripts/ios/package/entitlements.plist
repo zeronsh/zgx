@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- What the app asks of iOS, for whoever signs the archive (Xcode's Organizer,
+     or `codesign --entitlements`): package.py signs nothing. The team and
+     bundle id come from the provisioning profile at signing. Background audio
+     and the microphone are Info.plist keys, not entitlements; add here what a
+     capability needs (`aps-environment` for notifications, app groups). -->
+<plist version="1.0">
+<dict>
+	<key>get-task-allow</key>
+	<false/>
+</dict>
+</plist>

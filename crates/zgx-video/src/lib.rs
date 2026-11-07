@@ -6,6 +6,8 @@ pub mod audio;
 mod blend;
 pub mod captions;
 pub mod clip;
+#[cfg(any(target_os = "ios", all(test, target_os = "macos")))]
+mod clip_avf;
 pub mod compose;
 pub mod encode;
 pub mod film;

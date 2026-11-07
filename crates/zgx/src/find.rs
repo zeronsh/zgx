@@ -581,7 +581,7 @@ impl Ui {
     }
     /// Scroll the scroll views around `node` (innermost first) so `rect`
     /// (window points) shows, with a little room.
-    fn scroll_rect_into_view(&mut self, node: NodeId, rect: Rect) {
+    pub fn scroll_rect_into_view(&mut self, node: NodeId, rect: Rect) {
         self.scroll_rect_into_view_with(node, rect, true);
     }
     /// `scroll_rect_into_view` from within a frame's layout (an

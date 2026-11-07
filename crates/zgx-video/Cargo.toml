@@ -25,6 +25,18 @@ serde_json = "1"
 png = "0.18"
 gif = { version = "=0.14.2", default-features = false, features = ["std", "color_quant"] }
 
+# A clip's frames by AVFoundation on iOS (`clip_avf`), tested on macOS
+# against ffmpeg's.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+
 [dev-dependencies]
 # The instruction gate's `video` cell draws with wgpu's no-op backend
 # (`ZGX_GPU_NOOP`): the gate builds zgx-video's bench apart from the others.

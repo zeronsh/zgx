@@ -1,11 +1,14 @@
 //! Video files shown in a video (`video.clip`): each is decoded by ffmpeg at
-//! the composition's rate and scaled to its box, and each frame of the video
-//! shows exactly the frame of the file its time says, decoded before the
-//! frame is drawn. Played on, a decoder streams; asked for a frame behind
-//! it, it starts again from there.
+//! the composition's rate and scaled to its box (by AVFoundation on iOS,
+//! which runs no ffmpeg: `clip_avf`), and each frame of the video shows
+//! exactly the frame of the file its time says, decoded before the frame is
+//! drawn. Played on, a decoder streams; asked for a frame behind it, it
+//! starts again from there.
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+#[cfg(not(target_os = "ios"))]
+use std::process::{Command, Stdio};
 
 /// A clip a script has placed.
 #[derive(Clone, Debug, PartialEq)]
@@ -30,7 +33,7 @@ pub struct Clip {
 pub(crate) struct Decoder {
     clip: Clip,
     fps: f64,
-    child: Option<Child>,
+    child: Option<Stream>,
     /// The frame the pipe gives next.
     next: u64,
     /// The file has no more frames: its last is held.
@@ -75,10 +78,8 @@ impl Decoder {
             .unwrap_or_default();
         pixels.resize(width as usize * height as usize * 4, 0);
         while self.next <= frame {
-            let out = self.child.as_mut().and_then(|child| child.stdout.as_mut());
-            let read = out.map(|out| out.read_exact(&mut pixels));
-            match read {
-                Some(Ok(())) => self.next += 1,
+            match self.child.as_mut().map(|stream| stream.read(&mut pixels)) {
+                Some(true) => self.next += 1,
                 _ => {
                     // Past its end: the file has `next` frames.
                     self.child = None;
@@ -93,6 +94,16 @@ impl Decoder {
         self.last = Some((frame, pixels));
         Ok(&self.last.as_ref().expect("set").1)
     }
+    #[cfg(target_os = "ios")]
+    fn start(&mut self, frame: u64) -> Result<(), String> {
+        self.stop();
+        let at = frame as f64 / self.fps;
+        let reader = crate::clip_avf::Reader::new(&self.clip.src, at, self.fps, self.clip.size)?;
+        self.child = Some(Stream::Avf(Box::new(reader)));
+        self.next = frame;
+        Ok(())
+    }
+    #[cfg(not(target_os = "ios"))]
     fn start(&mut self, frame: u64) -> Result<(), String> {
         self.stop();
         let ffmpeg = crate::encode::ffmpeg().ok_or_else(|| {
@@ -130,14 +141,35 @@ impl Decoder {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| format!("couldn't run ffmpeg: {error}"))?;
-        self.child = Some(child);
+        self.child = Some(Stream::Ffmpeg(child));
         self.next = frame;
         Ok(())
     }
     fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
+        if let Some(Stream::Ffmpeg(mut child)) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+    }
+}
+
+/// Where a decoder's frames come from: ffmpeg's pipe, or AVFoundation's reader.
+enum Stream {
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
+    Ffmpeg(Child),
+    #[cfg(target_os = "ios")]
+    Avf(Box<crate::clip_avf::Reader>),
+}
+impl Stream {
+    /// The next frame into `pixels`, or false at the file's end.
+    fn read(&mut self, pixels: &mut [u8]) -> bool {
+        match self {
+            Self::Ffmpeg(child) => child
+                .stdout
+                .as_mut()
+                .is_some_and(|out| out.read_exact(pixels).is_ok()),
+            #[cfg(target_os = "ios")]
+            Self::Avf(reader) => reader.read(pixels),
         }
     }
 }
@@ -147,7 +179,19 @@ impl Drop for Decoder {
     }
 }
 
+/// A video file's size in pixels, as shown (by AVFoundation on iOS).
+#[cfg(target_os = "ios")]
+pub(crate) fn size_of(src: &Path) -> Option<(u32, u32)> {
+    crate::clip_avf::size_of(src)
+}
+/// Whether a file has a sound to mix.
+#[cfg(target_os = "ios")]
+pub(crate) fn has_audio(src: &Path) -> bool {
+    crate::clip_avf::has_audio(src)
+}
+
 /// A video file's size in pixels, by ffprobe beside ffmpeg.
+#[cfg(not(target_os = "ios"))]
 pub(crate) fn size_of(src: &Path) -> Option<(u32, u32)> {
     let ffprobe =
         crate::encode::ffmpeg()?.with_file_name(format!("ffprobe{}", std::env::consts::EXE_SUFFIX));
@@ -163,6 +207,7 @@ pub(crate) fn size_of(src: &Path) -> Option<(u32, u32)> {
 }
 
 /// Whether a file has a sound to mix.
+#[cfg(not(target_os = "ios"))]
 pub(crate) fn has_audio(src: &Path) -> bool {
     let Some(ffprobe) = crate::encode::ffmpeg()
         .map(|ffmpeg| ffmpeg.with_file_name(format!("ffprobe{}", std::env::consts::EXE_SUFFIX)))

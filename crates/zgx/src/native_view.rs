@@ -40,9 +40,21 @@ pub enum NativeContent {
     Platform(Rc<dyn Any>),
     /// The system's glass (see [`crate::glass`]).
     Glass(crate::glass::GlassPane),
+    /// A group of iOS glass panes that merge (see [`crate::glass::glass_group`]).
+    #[cfg(target_os = "ios")]
+    GlassGroup(f32),
     /// The system's on and off control (see [`crate::native_control`]).
     #[cfg(target_os = "ios")]
     Toggle(Rc<crate::native_control::ToggleState>),
+    /// The system's slider (see [`crate::native_control::native_slider`]).
+    #[cfg(target_os = "ios")]
+    Slider(Rc<crate::native_control::SliderState>),
+    /// The system's segmented control (see [`crate::native_control::native_segmented`]).
+    #[cfg(target_os = "ios")]
+    Segmented(Rc<crate::native_control::SegmentedState>),
+    /// The system's stepper (see [`crate::native_control::native_stepper`]).
+    #[cfg(target_os = "ios")]
+    Stepper(Rc<crate::native_control::StepperState>),
     /// The system's tab bar (see [`crate::native_control`]).
     #[cfg(target_os = "ios")]
     Tabs(Rc<crate::native_control::TabsState>),
@@ -76,7 +88,15 @@ impl NativeContent {
             }
             Self::Platform(_) => "Native view".into(),
             #[cfg(target_os = "ios")]
+            Self::GlassGroup(_) => "Glass group".into(),
+            #[cfg(target_os = "ios")]
             Self::Toggle(_) => "Switch".into(),
+            #[cfg(target_os = "ios")]
+            Self::Slider(_) => "Slider".into(),
+            #[cfg(target_os = "ios")]
+            Self::Segmented(_) => "Segmented control".into(),
+            #[cfg(target_os = "ios")]
+            Self::Stepper(_) => "Stepper".into(),
             #[cfg(target_os = "ios")]
             Self::Tabs(_) => "Tabs".into(),
             #[cfg(target_os = "ios")]

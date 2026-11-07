@@ -150,6 +150,9 @@ impl Key {
         range.hash(hasher);
         size.to_bits().hash(hasher);
         padding.to_bits().hash(hasher);
+        #[cfg(target_os = "ios")]
+        crate::text::shown_weight(font.weight).hash(hasher);
+        #[cfg(not(target_os = "ios"))]
         font.weight.hash(hasher);
         font.italic.hash(hasher);
     }
@@ -1726,7 +1729,10 @@ impl TextCache {
                             end: at,
                             font: &run.font,
                             size: run.font_size,
-                            span: Some((run.font.line_height.resolve(size), index)),
+                            span: Some((
+                                run.font.line_height.resolve_in(&run.font.family, size),
+                                index,
+                            )),
                         });
                         index = end;
                     }
@@ -1797,7 +1803,7 @@ impl TextCache {
         extended: &[u64],
     ) -> u64 {
         let size = plain.font_size;
-        let metrics = Metrics::new(size, font.line_height.resolve(size));
+        let metrics = Metrics::new(size, font.line_height.resolve_in(&font.family, size));
         if known {
             let entry = self.entries.get_mut(&hash).expect("cached");
             entry.words = Some(plain);

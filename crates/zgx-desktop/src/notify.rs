@@ -5,6 +5,11 @@
 //!   takes an app run from a bundle (an `Info.plist` with a
 //!   `CFBundleIdentifier`) and asks the person once whether it may; its
 //!   delegate hears a click. The badge is the Dock tile's.
+//! - iOS: the same center. It asks the person only when an app first posts
+//!   and its settings say nobody has decided (`ZGX_NOTIFY_NO_ASK=1` makes
+//!   that a refusal instead: automated runs never raise the system's prompt).
+//!   The delegate is set at launch (`install`), so a tap that launched the
+//!   app is heard. The badge is a count on the icon, a number only.
 //! - Windows: a toast (`ToastNotificationManager`) for the app's identity
 //!   (`Application::application_id`): set as the process's AppUserModelID
 //!   and registered under `HKCU\Software\Classes\AppUserModelId\<id>`
@@ -41,7 +46,7 @@ static IDENTITY: OnceLock<Identity> = OnceLock::new();
 pub(crate) fn set_identity(identity: Identity) {
     let _ = IDENTITY.set(identity);
 }
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(dead_code))]
 fn identity() -> Identity {
     IDENTITY.get().cloned().unwrap_or_default()
 }
@@ -318,12 +323,14 @@ mod imp {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod imp {
     use super::*;
     use block2::RcBlock;
+    #[cfg(target_os = "macos")]
+    use objc2::MainThreadMarker;
     use objc2::{
-        AllocAnyThread, MainThreadMarker, define_class, msg_send,
+        AllocAnyThread, define_class, msg_send,
         rc::Retained,
         runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject},
     };
@@ -364,7 +371,8 @@ mod imp {
                 done: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
             ) {
                 done.call((UNNotificationPresentationOptions::Banner
-                    | UNNotificationPresentationOptions::List,));
+                    | UNNotificationPresentationOptions::List
+                    | UNNotificationPresentationOptions::Sound,));
             }
         }
     );
@@ -385,6 +393,32 @@ mod imp {
             center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
             std::mem::forget(delegate);
         });
+    }
+
+    /// The delegate, set as the app launches (iOS): a tap on a notification
+    /// that launched the app reaches it only if it is there by then.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub(crate) fn install() {
+        if NSBundle::mainBundle().bundleIdentifier().is_some() {
+            delegate(&UNUserNotificationCenter::currentNotificationCenter());
+        }
+    }
+
+    /// `request` added to the center, its answer told to `tell`.
+    #[cfg(target_os = "ios")]
+    fn add(
+        request: Retained<UNNotificationRequest>,
+        tell: zgx::task::LatestSender<Result<(), NotifyError>>,
+    ) {
+        let added = RcBlock::new(move |error: *mut NSError| {
+            // SAFETY: the system passes an NSError or null.
+            tell.send(match unsafe { error.as_ref() } {
+                Some(e) => Err(NotifyError::Failed(e.localizedDescription().to_string())),
+                None => Ok(()),
+            });
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .addNotificationRequest_withCompletionHandler(&request, Some(&added));
     }
 
     pub(crate) fn notify_now(notification: Notification) -> Pending<Result<(), NotifyError>> {
@@ -414,35 +448,84 @@ mod imp {
             &content,
             None,
         );
-        // Asked first: the system asks the person the first time, and
-        // answers at once after.
-        let asked = RcBlock::new(move |granted: Bool, error: *mut NSError| {
-            if !granted.as_bool() {
-                // SAFETY: the system passes an NSError or null.
-                let why = unsafe { error.as_ref() }
-                    .map(|e| e.localizedDescription().to_string())
-                    .unwrap_or_else(|| {
-                        "notifications are off for this app (System Settings › Notifications)"
-                            .into()
+        #[cfg(target_os = "macos")]
+        {
+            // Asked first: the system asks the person the first time, and
+            // answers at once after.
+            let asked = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+                if !granted.as_bool() {
+                    // SAFETY: the system passes an NSError or null.
+                    let why = unsafe { error.as_ref() }
+                        .map(|e| e.localizedDescription().to_string())
+                        .unwrap_or_else(|| {
+                            "notifications are off for this app (System Settings › Notifications)"
+                                .into()
+                        });
+                    tell.send(Err(NotifyError::Denied(why)));
+                    return;
+                }
+                let tell = tell.clone();
+                let added = RcBlock::new(move |error: *mut NSError| {
+                    // SAFETY: as above.
+                    tell.send(match unsafe { error.as_ref() } {
+                        Some(e) => Err(NotifyError::Failed(e.localizedDescription().to_string())),
+                        None => Ok(()),
                     });
-                tell.send(Err(NotifyError::Denied(why)));
-                return;
-            }
-            let tell = tell.clone();
-            let added = RcBlock::new(move |error: *mut NSError| {
-                // SAFETY: as above.
-                tell.send(match unsafe { error.as_ref() } {
-                    Some(e) => Err(NotifyError::Failed(e.localizedDescription().to_string())),
-                    None => Ok(()),
                 });
+                UNUserNotificationCenter::currentNotificationCenter()
+                    .addNotificationRequest_withCompletionHandler(&request, Some(&added));
             });
-            UNUserNotificationCenter::currentNotificationCenter()
-                .addNotificationRequest_withCompletionHandler(&request, Some(&added));
-        });
-        center.requestAuthorizationWithOptions_completionHandler(
-            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
-            &asked,
-        );
+            center.requestAuthorizationWithOptions_completionHandler(
+                UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+                &asked,
+            );
+        }
+        // iOS: what the person decided, read first; asked only if nobody has,
+        // and never where `ZGX_NOTIFY_NO_ASK` says so (an automated run).
+        #[cfg(target_os = "ios")]
+        {
+            use objc2_user_notifications::{UNAuthorizationStatus, UNNotificationSettings};
+            let no_ask = zgx::env::var_os("ZGX_NOTIFY_NO_ASK").is_some();
+            let read = RcBlock::new(move |settings: std::ptr::NonNull<UNNotificationSettings>| {
+                // SAFETY: the system passes the settings it read.
+                let status = unsafe { settings.as_ref() }.authorizationStatus();
+                let (tell, request) = (tell.clone(), request.clone());
+                if status == UNAuthorizationStatus::Authorized
+                    || status == UNAuthorizationStatus::Provisional
+                    || status == UNAuthorizationStatus::Ephemeral
+                {
+                    add(request, tell);
+                } else if status == UNAuthorizationStatus::Denied {
+                    tell.send(Err(NotifyError::Denied(
+                        "notifications are off for this app (Settings › Notifications)".into(),
+                    )));
+                } else if no_ask {
+                    tell.send(Err(NotifyError::Denied(
+                        "not asked: ZGX_NOTIFY_NO_ASK is set, and the person hasn't decided".into(),
+                    )));
+                } else {
+                    let asked = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+                        if granted.as_bool() {
+                            add(request.clone(), tell.clone());
+                        } else {
+                            // SAFETY: the system passes an NSError or null.
+                            let why = unsafe { error.as_ref() }
+                                .map(|e| e.localizedDescription().to_string())
+                                .unwrap_or_else(|| "the person didn't allow notifications".into());
+                            tell.send(Err(NotifyError::Denied(why)));
+                        }
+                    });
+                    UNUserNotificationCenter::currentNotificationCenter()
+                        .requestAuthorizationWithOptions_completionHandler(
+                            UNAuthorizationOptions::Alert
+                                | UNAuthorizationOptions::Sound
+                                | UNAuthorizationOptions::Badge,
+                            &asked,
+                        );
+                }
+            });
+            center.getNotificationSettingsWithCompletionHandler(&read);
+        }
         Box::pin(async move {
             heard
                 .recv()
@@ -451,6 +534,19 @@ mod imp {
         })
     }
 
+    /// iOS: a count on the icon, a number only (`ios_badge_count`), which
+    /// the system shows once the person allowed badges.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn set_badge(badge: Option<&str>, _window: Option<&winit::window::Window>) -> bool {
+        let Some(count) = super::ios_badge_count(badge) else {
+            return false;
+        };
+        UNUserNotificationCenter::currentNotificationCenter()
+            .setBadgeCount_withCompletionHandler(count as isize, None);
+        true
+    }
+
+    #[cfg(target_os = "macos")]
     pub(crate) fn set_badge(badge: Option<&str>, _window: Option<&winit::window::Window>) -> bool {
         let Some(main) = MainThreadMarker::new() else {
             return false;
@@ -789,7 +885,7 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios", windows)))]
 mod imp {
     use super::*;
 
@@ -808,4 +904,29 @@ mod imp {
     }
 }
 
+#[cfg(target_os = "ios")]
+pub(crate) use imp::install;
 pub(crate) use imp::{notify_now as notify, set_badge};
+
+/// What an iOS icon shows of `badge`: a count, `0` taking it off; `None` for
+/// what isn't one (iOS draws no text there).
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+fn ios_badge_count(badge: Option<&str>) -> Option<u32> {
+    match badge {
+        None => Some(0),
+        Some(text) => text.trim().parse().ok(),
+    }
+}
+
+#[cfg(test)]
+mod ios_badge_tests {
+    #[test]
+    fn an_ios_badge_is_a_count_or_nothing() {
+        use super::ios_badge_count as count;
+        assert_eq!(count(None), Some(0), "none takes it off");
+        assert_eq!(count(Some("3")), Some(3));
+        assert_eq!(count(Some("0")), Some(0));
+        assert_eq!(count(Some("new")), None, "text isn't shown on iOS");
+        assert_eq!(count(Some("-1")), None);
+    }
+}
