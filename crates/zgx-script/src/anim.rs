@@ -99,6 +99,10 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
             // In f64: a spring between ±1e36 accelerates past f32's range.
             let mut velocity = 0_f64;
             let mut start: Option<(Instant, f32, f32)> = None;
+            // When it last stepped: a spring steps by the time that passed, not by
+            // a refresh interval a display reports (iOS's can be shorter than its
+            // frames, and a frame can be late).
+            let mut stepped: Option<Instant> = None;
             loop {
                 let goal = target.get();
                 let current = value.with_untracked(|v| *v);
@@ -124,13 +128,28 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
                         });
                     }
                     Curve::Spring { stiffness, damping } => {
-                        let dt = frame.interval.as_secs_f64().min(1. / 30.);
+                        // The time since its last frame, at most a quarter second (a
+                        // window back after a while catches up that much, not all of
+                        // it at once), in steps no longer than a 120 Hz frame's: the
+                        // same curve at 24 Hz as at 120, and stable whatever the gap.
+                        let elapsed = stepped
+                            .map_or(frame.interval, |last| {
+                                frame.time.saturating_duration_since(last)
+                            })
+                            .as_secs_f64()
+                            .min(0.25);
+                        stepped = Some(frame.time);
                         let goal = target.get();
-                        let (x, to) = (f64::from(value.with_untracked(|v| *v)), f64::from(goal));
-                        velocity += (-f64::from(*stiffness) * (x - to)
-                            - f64::from(*damping) * velocity)
-                            * dt;
-                        let x = x + velocity * dt;
+                        let (mut x, to) =
+                            (f64::from(value.with_untracked(|v| *v)), f64::from(goal));
+                        let steps = (elapsed * 120.).ceil().max(1.);
+                        let dt = elapsed / steps;
+                        for _ in 0..steps as usize {
+                            velocity += (-f64::from(*stiffness) * (x - to)
+                                - f64::from(*damping) * velocity)
+                                * dt;
+                            x += velocity * dt;
+                        }
                         let settle = 1e-3 * to.abs().max(1.);
                         // A value past f32's range (or none) lands on its
                         // goal: it can't be shown, and would never settle.
