@@ -204,6 +204,16 @@ keeps its code. zgx-gpu's `first_font` test shapes texts in turn under
 changing families, weights, sizes and scripts, with characters only another
 font has, to the same glyphs from the same fonts as each alone.
 
+A family with no face of its own is kept too. Its search goes on to its
+fallbacks, by the run's scripts, and looks at no word's characters, so what it
+finds is kept for runs of the same scripts, with where it stopped, in a list
+of its own (`first_fallback`): a family with a face pays nothing for it. A plain
+`SansSerif` on macOS comes here: each new word walked all 819 font matches
+comparing family names, a quarter of mounting a 40 KB document.
+`check/`'s `kept` mode covers the default family too: 11,307 layouts are
+identical on macOS, kept against nothing kept, with mixed scripts and languages
+changing as it goes.
+
 Monospace is kept too. With a face of its own, its search gives that face
 first whatever the word, but as it does it weighs every fixed-width face
 against the word's characters, for the faces it gives next. That cost was

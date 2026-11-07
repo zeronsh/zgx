@@ -247,6 +247,8 @@ fn main() {
     let (mut mono, mut fresh) = (monospaced(), monospaced());
     std::panic::set_hook(Box::new(|_| {}));
     let (mut identical, mut rich, mut kept, mut zero_upem, mut both_panicked) = (0, 0, 0, 0, 0);
+    let (mut sans, mut sans_fresh) = (patched::FontSystem::new(), patched::FontSystem::new());
+    let mut kept_sans = 0;
     for (i, text) in texts.iter().enumerate() {
         for &(width, wrap) in plain {
             let a = catch_unwind(AssertUnwindSafe(|| layout!(upstream, &mut up, text, width, wrap)));
@@ -329,13 +331,48 @@ fn main() {
                 }
             }
         }
+        // The default family, kept against nothing kept: with no face of its
+        // own (a plain SansSerif on macOS) what its search found is kept by
+        // the run's scripts. Also under a language, whose lists it goes by.
+        for (width, wrap) in [(1e6, 0), (120., 1), (240., 3)] {
+            if i % 16 == 15 {
+                let language = ["ja", "zh-TW", "en"][(i / 16) % 3];
+                sans.set_language(Some(language));
+                sans_fresh.set_language(Some(language));
+            }
+            let a = catch_unwind(AssertUnwindSafe(|| {
+                sans_fresh.db_mut();
+                sans_fresh.shape_run_cache = Default::default();
+                (layout!(patched, &mut sans_fresh, text, width, wrap, SansSerif), layout_rich!(patched, &mut sans_fresh, text, &cuts, width, wrap))
+            }));
+            let b = catch_unwind(AssertUnwindSafe(|| {
+                (layout!(patched, &mut sans, text, width, wrap, SansSerif), layout_rich!(patched, &mut sans, text, &cuts, width, wrap))
+            }));
+            match (a, b) {
+                (Ok(a), Ok(b)) if a == b => kept_sans += 1,
+                (Err(_), Err(_)) => {
+                    both_panicked += 1;
+                    sans_fresh = patched::FontSystem::new();
+                    sans = patched::FontSystem::new();
+                }
+                (a, b) => {
+                    let _ = std::panic::take_hook();
+                    let first = match (&a, &b) {
+                        (Ok(a), Ok(b)) => a.0.iter().chain(&a.1).zip(b.0.iter().chain(&b.1)).find(|(x, y)| x != y).map(|(x, y)| format!("{x}\n  {y}")),
+                        _ => None,
+                    };
+                    panic!("default family text {i} {text:?} cut {cuts:?} (wrap {wrap}) differs as kept: {:?}", first.unwrap_or_else(|| "one panicked".into()));
+                }
+            }
+        }
         if i % 4 == 3 {
             pa.shape_run_cache.trim(1);
             mono.shape_run_cache.trim(1);
+            sans.shape_run_cache.trim(1);
         }
     }
     println!(
-        "{identical} identical layouts, {rich} of rich text, {kept} monospaced as with nothing kept; \
+        "{identical} identical layouts, {rich} of rich text, {kept} monospaced and {kept_sans} in the default family as with nothing kept; \
          {zero_upem} upstream divided by zero units per em; both panicked on {both_panicked}"
     );
 }
