@@ -536,9 +536,14 @@ impl Surfaces {
         scale: f32,
     ) -> Result<zgx_gpu::GpuRenderer, zgx_gpu::GpuError> {
         let plane = &self.planes[usize::from(level) - 1].0;
-        // SAFETY: a UIView's setter, on the main thread.
+        // SAFETY: UIView's and CALayer's setters, on the main thread.
         unsafe {
             let _: () = msg_send![&**plane, setContentScaleFactor: scale as f64];
+            // What it holds is never scaled up to a new size, whatever else goes
+            // wrong: a small plane's frame would show enormous.
+            let layer: Retained<AnyObject> = msg_send![&**plane, layer];
+            let top_left = crate::ios_system::objc2_foundation_string("topLeft");
+            let _: () = msg_send![&*layer, setContentsGravity: &*top_left];
         }
         let view = NonNull::from(&**plane).cast();
         // SAFETY: the view lives as long as these surfaces, and they drop
@@ -609,6 +614,9 @@ impl Surfaces {
     pub fn set_zoom(&mut self, zoom: f32) {
         self.zoom = zoom;
     }
+    pub fn level_would_change(&self, level: u8, shown: Option<Rect>) -> bool {
+        self.planes[usize::from(level) - 1].1 != Some(shown)
+    }
     /// Show the overlay's view at `rect`, or hide it.
     pub fn show_overlay(&mut self, shown: Option<Rect>) {
         self.show_level(1, shown);
@@ -619,9 +627,17 @@ impl Surfaces {
         if *was == Some(shown) {
             return;
         }
+        crate::ios_gestures::log_plane(level, shown);
         *was = Some(shown);
         // SAFETY: UIView's setters, on the main thread.
         unsafe {
+            // `ZGX_IOS_PLANE_DEBUG`: each level tinted, so its box and reuse show.
+            if zgx::env::var_os("ZGX_IOS_PLANE_DEBUG").is_some() {
+                let hue = f64::from(level) * 0.27;
+                let tint: Retained<AnyObject> = msg_send![class!(UIColor),
+                    colorWithHue: hue, saturation: 1f64, brightness: 1f64, alpha: 0.18f64];
+                let _: () = msg_send![&**view, setBackgroundColor: &*tint];
+            }
             let _: () = msg_send![&**view, setHidden: shown.is_none()];
             if let Some(shown) = shown {
                 let _: () = msg_send![&**view, setFrame: rect(shown)];

@@ -117,6 +117,9 @@ pub(crate) struct NativeHost {
     /// The system's edge effects asked for (`native_control`), kept registered.
     #[cfg(target_os = "ios")]
     edge_effects: Vec<(zgx::scene::NodeId, zgx::native_view::NativeRegistration)>,
+    /// A plane's present found no drawable: another frame is owed.
+    #[cfg(target_os = "ios")]
+    plane_retry: bool,
     /// Bars going with the keyboard (`ui.keyboard_bar`), held as those are.
     #[cfg(target_os = "ios")]
     keyboard_bars: Vec<(
@@ -216,6 +219,8 @@ impl NativeHost {
             edge_effects: Vec::new(),
             #[cfg(target_os = "ios")]
             keyboard_bars: Vec::new(),
+            #[cfg(target_os = "ios")]
+            plane_retry: false,
             #[cfg(any(
                 target_os = "macos",
                 target_os = "ios",
@@ -565,7 +570,12 @@ impl NativeHost {
                     live: false,
                 });
             }
+            // In the transaction always: a surface made again starts without.
+            if let Some(overlay) = &mut self.overlay {
+                overlay.present_with_native_views(true);
+            }
             for (index, above) in self.above.iter_mut().enumerate() {
+                above.renderer.present_with_native_views(true);
                 let level = index as u8 + 2;
                 let plane = zgx::native_view::Plane::Above(level);
                 above.renderer.set_plane(split.clone(), plane);
@@ -625,6 +635,33 @@ impl NativeHost {
             .filter(|_| self.active() || self.pending)
             .map(|composition| dcomp::Transaction::begin(composition.clone()));
     }
+    /// Whether this frame shows, hides or moves a plane.
+    #[cfg(target_os = "ios")]
+    pub fn planes_changing(&self) -> bool {
+        let Some(surfaces) = &self.surfaces else {
+            return false;
+        };
+        let overlay = self.overlay.as_ref().and_then(|overlay| {
+            self.split
+                .has_overlay()
+                .then(|| overlay.plane_rect())
+                .flatten()
+        });
+        surfaces.level_would_change(1, overlay)
+            || self.above.iter().enumerate().any(|(index, above)| {
+                let level = index as u8 + 2;
+                let shown = self
+                    .split
+                    .bounds_at(level)
+                    .and_then(|_| above.renderer.plane_rect());
+                surfaces.level_would_change(level, shown)
+            })
+    }
+    /// Whether a plane's frame is owed a new try: its present found no drawable.
+    #[cfg(target_os = "ios")]
+    pub fn take_plane_retry(&mut self) -> bool {
+        std::mem::take(&mut self.plane_retry)
+    }
     /// Within `begin`'s transaction: show the overlay plane's frame (before
     /// the base plane's, which waits for its refresh point).
     pub fn present_overlay(&mut self) -> Result<(), zgx_gpu::GpuError> {
@@ -635,10 +672,17 @@ impl NativeHost {
         if live != self.overlay_live {
             zgx_gpu::present_log::log(|| format!("overlay live={live}"));
         }
+        #[cfg(target_os = "ios")]
+        let mut overlay_shown = false;
         if let Some(overlay) = &mut self.overlay
             && live
             && self.overlay_drawn
         {
+            #[cfg(target_os = "ios")]
+            {
+                overlay_shown = plane_presented(overlay, 1, &mut self.plane_retry)?;
+            }
+            #[cfg(not(target_os = "ios"))]
             overlay.present()?;
         }
         if let Some(overlay) = &self.overlay {
@@ -648,9 +692,25 @@ impl NativeHost {
             });
             // In the window's points: the zoom's times the plane's.
             let zoom = self.zoom;
-            surfaces.show_overlay(
-                rect.map(|r| Rect::new(r.x * zoom, r.y * zoom, r.width * zoom, r.height * zoom)),
-            );
+            let shown =
+                rect.map(|r| Rect::new(r.x * zoom, r.y * zoom, r.width * zoom, r.height * zoom));
+            // Not in a new place, or back in view, without its frame: it would show
+            // an old one, stretched to the new size.
+            #[cfg(target_os = "ios")]
+            let held = shown.is_some() && !overlay_shown && surfaces.level_would_change(1, shown);
+            #[cfg(not(target_os = "ios"))]
+            let held = false;
+            if held {
+                #[cfg(target_os = "ios")]
+                {
+                    self.plane_retry = true;
+                    if let Some(overlay) = &mut self.overlay {
+                        overlay.repaint_all();
+                    }
+                }
+            } else {
+                surfaces.show_overlay(shown);
+            }
         }
         if self.overlay_live
             && !live
@@ -665,10 +725,17 @@ impl NativeHost {
         for (index, above) in self.above.iter_mut().enumerate() {
             let level = index as u8 + 2;
             let live = self.split.bounds_at(level).is_some();
-            if live && above.drawn {
-                above.renderer.present()?;
+            let presented = live
+                && above.drawn
+                && plane_presented(&mut above.renderer, level, &mut self.plane_retry)?;
+            let shown = live.then(|| above.renderer.plane_rect()).flatten();
+            // As the overlay's, above.
+            if shown.is_some() && !presented && surfaces.level_would_change(level, shown) {
+                self.plane_retry = true;
+                above.renderer.repaint_all();
+            } else {
+                surfaces.show_level(level, shown);
             }
-            surfaces.show_level(level, live.then(|| above.renderer.plane_rect()).flatten());
             if above.live && !live {
                 above.renderer.trim();
             }
@@ -772,6 +839,24 @@ fn plane_rect(current: Option<Rect>, needed: Rect, viewport: Rect) -> Rect {
         .expand(margin)
         .intersection(viewport)
         .unwrap_or(needed)
+}
+
+/// Present a plane's frame: whether it went out. If no drawable came, it says so
+/// in the gesture log, and it is drawn whole again next time.
+#[cfg(target_os = "ios")]
+fn plane_presented(
+    plane: &mut zgx_gpu::GpuRenderer,
+    level: u8,
+    retry: &mut bool,
+) -> Result<bool, zgx_gpu::GpuError> {
+    let status = plane.present_with_status()?;
+    let presented = status == zgx_gpu::PresentationStatus::Presented;
+    if !presented {
+        crate::ios_gestures::log(&format!("plane {level} not presented: {status:?}"));
+        plane.repaint_all();
+        *retry = true;
+    }
+    Ok(presented)
 }
 
 #[cfg(any(

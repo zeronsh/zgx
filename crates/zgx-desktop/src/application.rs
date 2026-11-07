@@ -2669,10 +2669,7 @@ impl Host {
         let began = std::time::Instant::now();
         let drawn = self.draw_frame();
         #[cfg(target_os = "ios")]
-        {
-            crate::ios_scroll::frame_done();
-            crate::ios_refresh::note_draw(began);
-        }
+        crate::ios_refresh::note_draw(began);
         match drawn {
             Err(error)
                 if error
@@ -2977,7 +2974,18 @@ impl Host {
                 // With native views, both planes and the views' geometry
                 // change in one transaction (committed when it drops).
                 let transaction = self.native.begin();
+                // Before the base's on the desktops, whose base waits for its
+                // refresh point. On iOS after it: nothing else changes in a
+                // frame whose base didn't go out, or the page shows torn.
+                #[cfg(not(target_os = "ios"))]
                 self.native.present_overlay()?;
+                // A frame that changes more than the base (a plane shown or
+                // gone, the page landing from its animation) is finished before
+                // it commits: late, a phone shows the rest without it.
+                #[cfg(target_os = "ios")]
+                zgx_gpu::present_waits_for_gpu(
+                    self.native.planes_changing() || crate::ios_scroll::frame_awaited(),
+                );
                 // Checked above; `self` is borrowed in between, so no `if let`.
                 #[allow(clippy::unnecessary_unwrap)]
                 let renderer = self.renderer.as_mut().expect("checked above");
@@ -3035,6 +3043,23 @@ impl Host {
                     &mut self.caret_applied,
                     self.scale_factor,
                 );
+                #[cfg(target_os = "ios")]
+                if status == zgx_gpu::PresentationStatus::Presented {
+                    self.native.present_overlay()?;
+                    self.native.apply();
+                    crate::ios_scroll::frame_done();
+                } else {
+                    crate::ios_gestures::log(&format!("base plane not presented: {status:?}"));
+                    window.request_redraw();
+                }
+                #[cfg(target_os = "ios")]
+                {
+                    zgx_gpu::present_waits_for_gpu(false);
+                    if self.native.take_plane_retry() {
+                        window.request_redraw();
+                    }
+                }
+                #[cfg(not(target_os = "ios"))]
                 self.native.apply();
                 FIRST_PRESENT.call_once(|| {
                     let mark = first_present_mark();

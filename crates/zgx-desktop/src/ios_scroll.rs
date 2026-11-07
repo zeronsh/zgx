@@ -510,6 +510,15 @@ fn glue_to_keyboard(state: &State) {
     }
 }
 
+/// Whether something waits for the next frame shown, to change with it.
+pub(crate) fn frame_awaited() -> bool {
+    CURRENT.with(|current| {
+        current.borrow().as_ref().is_some_and(|state| {
+            state.after_frame.borrow().is_some() || state.bar_after_frame.borrow().is_some()
+        })
+    })
+}
+
 /// The frame just presented shows in this transaction: what waited for it, too.
 pub(crate) fn frame_done() {
     let Some(state) = CURRENT.with(|current| current.borrow().clone()) else {

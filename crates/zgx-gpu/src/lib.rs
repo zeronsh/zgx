@@ -19,6 +19,12 @@ mod core_text_glyphs;
 pub fn metal_gpu_time() -> (u64, u64) {
     wgpu::hal::metal::gpu_time()
 }
+/// Whether presents in a Core Animation transaction wait for their frame's GPU
+/// work to finish, not only to be scheduled: for a frame other layers change with.
+#[cfg(target_os = "ios")]
+pub fn present_waits_for_gpu(wait: bool) {
+    wgpu::hal::metal::PRESENT_WAITS_FOR_GPU.store(wait, std::sync::atomic::Ordering::Relaxed);
+}
 #[cfg(d3d11)]
 mod d3d11_frame;
 #[cfg(windows)]

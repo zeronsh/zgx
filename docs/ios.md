@@ -41,6 +41,10 @@ There is one tree of elements, zgx's, through AccessKit's iOS adapter (`vendor/a
 
 Which veil the effect shows over the same content depends on how the scroll got there: Apple's own bar, ending at one offset from three different starts, shows three different veils, and repeats exactly from a fresh launch. Don't compare zgx with a native bar at one offset and call a different veil a bug; compare one that chose the same (soft in light matches to 1/255).
 
+## A frame is one change
+
+A frame's base plane, overlay planes, native views and any animation it ends change in one Core Animation transaction, or none of them do. The base presents first: if it finds no drawable, nothing else changes and the frame is tried again. A plane shows or moves only with a frame presented for it, and what it holds never scales up to a new size. A frame that changes a plane or lands an animation waits for its GPU work to finish before it commits, since a phone otherwise shows the rest without it, for one refresh, which a simulator's GPU is fast enough to hide. `ZGX_IOS_PLANE_DEBUG=1` tints each plane and logs each change; `Documents/zgx-gesture.log` says when a present found no drawable.
+
 ## The keyboard
 
 A field low on a page and a `ui.keyboard_bar` move with the keyboard in the render server, nothing drawn: `ios_scroll` reads the keyboard's spring from the layout guide's animation, in its transaction, and builds a keyframe animation that holds the gap once the keyboard reaches them. The keyboard is near its fastest (about 2800 pt/s on a phone-sized simulator) when it reaches a field, so the field starts as the keyboard does and its speed blends up to the keyboard's, riding it exactly from about 0.1 s (`keyboard_rise`). The page's offset or the bar's lift changes in one transaction with the animation's removal. The page moves only as the view under the edge effect, so it needs an edge effect: without one, and for a finger's drag or a keyboard whose animation isn't one spring, it follows by frames, a frame or two behind.
