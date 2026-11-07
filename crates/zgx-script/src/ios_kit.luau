@@ -25,6 +25,12 @@ local NAV_BUTTON_SPEED = 8.75
 -- When it starts after the call, measured beside UIKit on an iPhone at 120 Hz (ms).
 local NAV_PUSH_START = 53
 local NAV_POP_START = 40
+-- The back button's chevron fades in and out on its own critically damped
+-- spring of 0.415 s, read off the glass's content view in UIKit (response
+-- 0.414 s on a push, 50 ms after the page starts, rms 0.001; 0.418 s on a pop,
+-- with the page); its glass shows at once and goes when the pop is done.
+local BACK_FADE = uikit_spring(1, 0.415)
+local BACK_FADE_LAG = 50
 local NAV_TRACKING = uikit_spring(0.85, 0.08)
 local NAV_RELEASE = uikit_spring(0.85, 0.3)
 -- A swipe's release, as UIKit's interactive pop (`_UINavigationInteractiveTransitionBase`)
@@ -698,12 +704,6 @@ ios.stack = ui.component(function(props)
 	-- A spring each: one taking over from the other would leave that one's page
 	-- stopped where it was, with nothing to move it on.
 	local running_drag, running_enter
-	-- `log_motion`: each position in the gesture log, to compare with UIKit's.
-	if props.log_motion then
-		ui.effect(function()
-			ui.gesture_log(string.format("POS %.1f drag %.2f enter %.2f", ui.now(), drag:get(), entering:get()))
-		end)
-	end
 	-- A button's starts at a navigation controller's speed; a change of mind keeps
 	-- the speed it had.
 	local function from_button(direction, carried)
@@ -778,6 +778,31 @@ ios.stack = ui.component(function(props)
 			end
 		end)
 	end
+	-- The back button's chevron, 0 to 1.
+	local chevron = ui.use_state(0)
+	local running_chevron
+	local function fade_chevron(to, delay)
+		if running_chevron then
+			running_chevron()
+		end
+		running_chevron = settle(chevron, to, function()
+			running_chevron = nil
+		end, nil, { stiffness = BACK_FADE.stiffness, damping = BACK_FADE.damping, delay = delay })
+	end
+	-- `log_motion`: each position in the gesture log, to compare with UIKit's.
+	if props.log_motion then
+		ui.effect(function()
+			ui.gesture_log(
+				string.format(
+					"POS %.1f drag %.2f enter %.2f chevron %.3f",
+					ui.now(),
+					drag:get(),
+					entering:get(),
+					chevron:get()
+				)
+			)
+		end)
+	end
 	function nav.push(build)
 		next_id += 1
 		builders[next_id] = build
@@ -786,6 +811,10 @@ ios.stack = ui.component(function(props)
 		entering:set(width)
 		pages:set(list)
 		run_enter()
+		if #list == 2 then
+			chevron:set(0)
+			fade_chevron(1, NAV_PUSH_START + BACK_FADE_LAG)
+		end
 		check_soon()
 	end
 	local function finish_pop(spring)
@@ -801,6 +830,9 @@ ios.stack = ui.component(function(props)
 			return
 		end
 		finish_pop()
+		if #pages:get() == 2 then
+			fade_chevron(0, NAV_POP_START)
+		end
 		check_soon()
 	end
 	-- iOS recognizes the swipe, and tells every ending; the page only follows.
@@ -829,24 +861,43 @@ ios.stack = ui.component(function(props)
 				start = drag:get()
 				stats = swipe_statistics()
 				sample(e)
+				if running_chevron then
+					running_chevron()
+					running_chevron = nil
+				end
 			elseif e.phase == "changed" then
 				sample(e)
-				follow(clamp(start + e.x, 0, width))
+				local at = clamp(start + e.x, 0, width)
+				follow(at)
+				-- Not yet read from UIKit: under a finger, the chevron goes as the page.
+				if #pages:get() == 2 then
+					chevron:set(1 - at / width)
+				end
 			elseif e.phase == "ended" then
 				holding = false
 				check_soon()
 				sample(e)
 				local at = clamp(start + e.x, 0, width)
 				local speed = stats.release_speed(width)
+				local last = #pages:get() == 2
 				if stats.goes_back(at / width, width) then
 					finish_pop(released(speed))
+					if last then
+						fade_chevron(0)
+					end
 				else
 					run_drag(0, nil, released(speed))
+					if last then
+						fade_chevron(1)
+					end
 				end
 			else
 				holding = false
 				check_soon()
 				run_drag(0, nil, released(0))
+				if #pages:get() == 2 then
+					fade_chevron(1)
+				end
 			end
 		end,
 	}
@@ -945,8 +996,8 @@ ios.stack = ui.component(function(props)
 				},
 			}
 		end, { display = "contents" }),
-		-- One back button over the pages, as a navigation controller's: it stays
-		-- where it is and fades as a first page comes and goes.
+		-- One back button over the pages, as a navigation controller's: its glass
+		-- shows from a push and goes when the pop is done; its chevron fades.
 		ui.glass {
 			absolute = true,
 			left = 16,
@@ -960,15 +1011,6 @@ ios.stack = ui.component(function(props)
 			hidden = function()
 				return #pages:get() < 2
 			end,
-			opacity = function()
-				if #pages:get() > 2 then
-					return 1
-				end
-				local moved = (drag:get() + entering:get()) / width
-				-- Never quite 0: in the tree from the call, as UIKit's is, so its glass
-				-- is made then and not on a frame of the motion.
-				return clamp((0.88 - moved) / 0.78, 0.001, 1)
-			end,
 			ui.button {
 				w = 44,
 				h = 44,
@@ -980,6 +1022,7 @@ ios.stack = ui.component(function(props)
 				label = "Back",
 				items = "center",
 				justify = "center",
+				opacity = chevron,
 				on_click = function()
 					nav.pop()
 				end,
