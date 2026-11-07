@@ -99,6 +99,11 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
             // In f64: a spring between ±1e36 accelerates past f32's range.
             let mut velocity = 0_f64;
             let mut start: Option<(Instant, f32, f32)> = None;
+            // What a spring is making for now, and since when its next goal counts.
+            let mut chasing = value.with_untracked(|v| *v);
+            let mut seen = chasing;
+            let mut due: Option<Instant> = None;
+            let mut params = None;
             loop {
                 let goal = target.get();
                 let current = value.with_untracked(|v| *v);
@@ -123,20 +128,47 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
                             at as f32
                         });
                     }
-                    Curve::Spring { stiffness, damping } => {
+                    Curve::Spring { both, up, down } => {
                         let dt = frame.interval.as_secs_f64().min(1. / 30.);
                         let goal = target.get();
-                        let (x, to) = (f64::from(value.with_untracked(|v| *v)), f64::from(goal));
-                        velocity += (-f64::from(*stiffness) * (x - to)
-                            - f64::from(*damping) * velocity)
+                        // A new goal picks its spring by the way it lies from the last,
+                        // not by where the value is: past its goal in an overshoot, it
+                        // keeps the spring it came with.
+                        if goal != seen || params.is_none() {
+                            let side = if goal > seen { up } else { down };
+                            let chosen = side.unwrap_or(*both);
+                            params = Some(chosen);
+                            seen = goal;
+                            due = Some(
+                                frame.time
+                                    + std::time::Duration::from_secs_f32(
+                                        chosen.delay_ms.max(0.) / 1000.,
+                                    ),
+                            );
+                        }
+                        if due.is_none_or(|due| frame.time >= due) {
+                            chasing = goal;
+                        }
+                        let chosen = params.unwrap_or(*both);
+                        let (x, to) = (f64::from(value.with_untracked(|v| *v)), f64::from(chasing));
+                        velocity += (-f64::from(chosen.stiffness) * (x - to)
+                            - f64::from(chosen.damping) * velocity)
                             * dt;
                         let x = x + velocity * dt;
                         let settle = 1e-3 * to.abs().max(1.);
                         // A value past f32's range (or none) lands on its
                         // goal: it can't be shown, and would never settle.
-                        let settled = !((x as f32).is_finite() && velocity.is_finite())
-                            || (x - to).abs() < settle && velocity.abs() < settle * 10.;
-                        value.set(if settled { goal } else { x as f32 });
+                        let lost = !((x as f32).is_finite() && velocity.is_finite());
+                        let settled =
+                            lost || (x - to).abs() < settle && velocity.abs() < settle * 10.;
+                        let reached = settled && chasing == goal;
+                        value.set(if lost || reached {
+                            goal
+                        } else if settled {
+                            chasing
+                        } else {
+                            x as f32
+                        });
                         if settled {
                             velocity = 0.;
                         }

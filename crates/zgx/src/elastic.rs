@@ -145,6 +145,7 @@ pub(crate) struct State {
 }
 
 /// `root`'s scroll view stretches: its translation adds `shown`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn register(
     ui: &mut Ui,
     root: NodeId,

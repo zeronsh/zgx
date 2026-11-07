@@ -21861,7 +21861,28 @@ export type CaseKey = string | number | boolean
 -- Durations are milliseconds, as in `anime`.
 export type TweenEnd = number | string | { number }
 export type TweenOptions = { duration: number?, ease: Easing?, from: TweenEnd?, to: TweenEnd?, [number]: never }
-export type SpringOptions = { stiffness: number?, damping: number?, from: TweenEnd?, to: TweenEnd?, [number]: never }
+-- One spring: `response` (ms) and `bounce` (0 none, about 0.15 a little, 0.3 a lot), as
+-- SwiftUI's; or `stiffness` and `damping`. `delay` (ms) holds it back after a change.
+export type SpringParams = {
+	response: number?,
+	bounce: number?,
+	stiffness: number?,
+	damping: number?,
+	delay: number?,
+}
+-- `up` and `down`: another spring toward a higher value, or a lower.
+export type SpringOptions = {
+	response: number?,
+	bounce: number?,
+	stiffness: number?,
+	damping: number?,
+	delay: number?,
+	up: SpringParams?,
+	down: SpringParams?,
+	from: TweenEnd?,
+	to: TweenEnd?,
+	[number]: never,
+}
 export type LoopOptions = {
 	duration: number?,
 	ease: Easing?,
@@ -22311,6 +22332,8 @@ declare ui: {
 	add: (state: State<number>, by: number?) -> Action,
 	-- The state's truthiness (or number) drives a 0-to-1 scalar, or
 	-- `from` to `to`. Durations are milliseconds, as in `anime`.
+	-- Springs by name: `ui.spring(state, ui.springs.snappy)`.
+	springs: { smooth: SpringParams, snappy: SpringParams, bouncy: SpringParams },
 	tween: (state: State<any>, opts: TweenOptions?) -> Binding,
 	spring: (state: State<any>, opts: SpringOptions?) -> Binding,
 	loop: (opts: LoopOptions?) -> Binding,

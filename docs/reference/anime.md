@@ -19,6 +19,8 @@ ui.spring(state: State<any>, opts: SpringOptions?) -> Binding
 ui.loop(opts: LoopOptions?) -> Binding
 ```
 
+`ui.spring`'s options say a spring as SwiftUI does, `{ response = 400, bounce = 0.15 }` (`response` in ms, `bounce` from 0, no overshoot, up to about 0.3, a lot), or as `stiffness` and `damping`; `ui.springs.smooth`, `.snappy` and `.bouncy` are named ones. `up` and `down` give another spring toward a higher value or a lower, for an opening and a closing that differ, and `delay` (ms) holds a spring back when its goal changes. A goal that changes on the way keeps the speed it had: `ui.spring(height, { up = { response = 420, bounce = 0.15, delay = 35 }, down = { response = 280 } })`.
+
 ## Targets
 
 `ElementTargets` are selectors (`"#id"`, `".class"`, a kind such as `"button"`, compounds such as `"button.primary"`, comma lists, `"*"`), elements (from `on_mount`, a ref's `get`), refs, or lists of them. A selector matches nodes with that `id`, `class` or kind; a node only becomes a target with an `id`, `class`, `ref`, `on_mount` or `on_resize`. Matches are in document order, the order staggers count in. An animation resolves its targets the first time it plays, so a script may create animations before the elements they target mount. A state (its number, or a table's number fields) or a plain Luau table animates too: `anime.animate(scroll_state, { … })`.

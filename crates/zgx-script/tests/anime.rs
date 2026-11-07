@@ -1677,3 +1677,82 @@ fn a_tween_on_a_node_runs_none_of_its_functions_as_it_moves() {
     h.run_ms(1000.);
     assert_eq!(width(&mut h), 200.);
 }
+
+/// `x` as it goes to `to` on a click of `go`, sampled every 17 ms for `samples`.
+fn spring_path(options: &str, samples: usize) -> Vec<f32> {
+    let mut h = Harness::inline(&format!(
+        r##"local at = ui.state("at", 0)
+        return ui.column {{
+            ui.div {{ id = "box", w = 20, h = 20, x = ui.spring(at, {options}) }},
+            ui.button {{ "Go", id = "go", on_click = function() at:set(100) end }},
+        }}"##
+    ));
+    h.frames(2);
+    h.click("go");
+    (0..samples)
+        .map(|_| {
+            h.run_ms(17.);
+            h.x("box")
+        })
+        .collect()
+}
+
+#[test]
+fn a_springs_bounce_decides_whether_it_overshoots() {
+    let still = spring_path("{ response = 300, bounce = 0 }", 120);
+    let top = still.iter().copied().fold(f32::MIN, f32::max);
+    assert!(top <= 100.01, "no bounce, no overshoot: {top}");
+    assert_eq!(*still.last().unwrap(), 100.);
+    let lively = spring_path("{ response = 300, bounce = 0.3 }", 120);
+    let top = lively.iter().copied().fold(f32::MIN, f32::max);
+    assert!((101. ..125.).contains(&top), "a little past: {top}");
+    assert_eq!(*lively.last().unwrap(), 100., "and it settles");
+}
+
+#[test]
+fn a_spring_named_is_the_same_spring_and_a_shorter_response_is_quicker() {
+    let named = spring_path("ui.springs.snappy", 40);
+    let said = spring_path("{ response = 350, bounce = 0.15 }", 40);
+    for (named, said) in named.iter().zip(&said) {
+        assert!((named - said).abs() < 1., "{named} {said}");
+    }
+    let slow = spring_path("{ response = 600 }", 10);
+    let quick = spring_path("{ response = 150 }", 10);
+    assert!(quick[9] > slow[9] * 1.5, "{} {}", quick[9], slow[9]);
+}
+
+#[test]
+fn a_spring_takes_the_side_it_goes_toward_and_waits_its_delay() {
+    let up = spring_path("{ response = 600, up = { response = 150 } }", 10);
+    let down = spring_path("{ response = 600, down = { response = 150 } }", 10);
+    assert!(up[9] > down[9] * 1.5, "{} {}", up[9], down[9]);
+    let held = spring_path("{ response = 150, delay = 60 }", 20);
+    assert!(held[1] == 0., "not yet: {}", held[1]);
+    assert!(held[19] > 10., "then it goes: {}", held[19]);
+}
+
+#[test]
+fn a_spring_turned_back_midway_carries_its_speed() {
+    let mut h = Harness::inline(
+        r##"local at = ui.state("at", 0)
+        return ui.column {
+            ui.div { id = "box", w = 20, h = 20, x = ui.spring(at, { response = 400 }) },
+            ui.button { "Go", id = "go", on_click = function() at:set(100) end },
+            ui.button { "Back", id = "back", on_click = function() at:set(0) end },
+        }"##,
+    );
+    h.frames(2);
+    h.click("go");
+    h.run_ms(100.);
+    let at = h.x("box");
+    h.run_ms(17.);
+    let moved = h.x("box") - at;
+    assert!(moved > 0.);
+    h.click("back");
+    let before = h.x("box");
+    h.run_ms(17.);
+    // A spring that forgot its speed would start back at once, at a rate its pull
+    // alone gives; this one is still carrying what it had.
+    let turned = h.x("box") - before;
+    assert!(turned.abs() < moved, "no jump: {moved} then {turned}");
+}

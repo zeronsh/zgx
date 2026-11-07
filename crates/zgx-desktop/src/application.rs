@@ -2770,6 +2770,8 @@ impl Host {
             .ui
             .advance_interactions(std::time::Instant::now())?;
         self.context.ui.try_prepare_frame()?;
+        #[cfg(target_os = "ios")]
+        crate::ios_refresh::draw_mark(0);
         // What preparing it held back from the window (`Ui::contain_layout_feedback`).
         for message in crate::contain::take_reported() {
             self.show_error(&message);
@@ -2973,6 +2975,8 @@ impl Host {
                     });
                 // With native views, both planes and the views' geometry
                 // change in one transaction (committed when it drops).
+                #[cfg(target_os = "ios")]
+                crate::ios_refresh::draw_mark(1);
                 let transaction = self.native.begin();
                 // Before the base's on the desktops, whose base waits for its
                 // refresh point. On iOS after it: nothing else changes in a
@@ -3043,6 +3047,8 @@ impl Host {
                     &mut self.caret_applied,
                     self.scale_factor,
                 );
+                #[cfg(target_os = "ios")]
+                crate::ios_refresh::draw_mark(2);
                 #[cfg(target_os = "ios")]
                 if status == zgx_gpu::PresentationStatus::Presented {
                     self.native.present_overlay()?;

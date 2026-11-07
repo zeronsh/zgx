@@ -273,36 +273,76 @@ function ios.keyboard_bar(props)
 end
 
 -- A chat's composer on a keyboard bar: a small pill at rest that opens into a wider
--- rounded box as it takes focus, with the keyboard's rise, and closes again. It
--- grows with its lines, to `max_lines`, then scrolls inside. `value` (a state),
--- `placeholder`, `on_send` (the text; a send button shows when there is any),
--- `on_plus`, `bottom`.
+-- rounded box as it takes focus and closes again, on springs that carry their speed
+-- if it changes its mind: width first, height a beat after, corners last, the
+-- content settling inside them. It grows with its lines, to `max_lines`, then
+-- scrolls inside. `value` (a state), `placeholder`, `on_send` (the text; a send
+-- button comes when there is any), `on_plus`, `bottom`.
 function ios.composer(props)
 	local value = props.value
 	local focused = ui.use_state(false)
-	local LINE = 22
+	local pressed = ui.use_state(false)
+	local still = ui.prefers.reduced_motion:get()
 	local max_lines = props.max_lines or 6
-	local open = function(rest, wide)
-		return ui.spring(
-			ui.computed(function()
-				return if focused:get() then wide else rest
-			end),
-			{ stiffness = 320, damping = 30 }
-		)
+	-- Opening has some life in it; closing is quicker and doesn't bounce.
+	local OPEN = { response = 420, bounce = 0.15 }
+	local CLOSE = { response = 280, bounce = 0 }
+	local function delayed(spring, delay)
+		return { response = spring.response, bounce = spring.bounce, delay = delay }
 	end
+	-- A number that is `rest` closed and `wide` open, on `opening`'s spring. Reduced
+	-- motion: at once, and the crossfade below shows the change.
+	local function channel(read, rest, wide, opening, closing)
+		local goal = ui.computed(function()
+			return if read:get() then wide else rest
+		end)
+		if still then
+			return ui.tween(goal, { duration = 1 })
+		end
+		local closes = closing or CLOSE
+		if wide > rest then
+			return ui.spring(goal, { up = opening, down = closes })
+		end
+		return ui.spring(goal, { down = opening, up = closes })
+	end
+	local has_text = ui.computed(function()
+		return value:get() ~= ""
+	end)
+	-- The send button pops in, and is gone quicker than it came.
+	local POP = { response = 300, bounce = 0.35 }
+	local GONE = { response = 160, bounce = 0 }
+	-- One line's height and the lines' now, measured from the text under the editor.
+	local line = ui.use_state(22)
+	local measured = ui.use_state(22)
+	local height = ui.computed(function()
+		return math.min(measured:get(), line:get() * max_lines)
+	end)
+	local fade = ui.use_state(1)
 	return ios.keyboard_bar {
 		absolute = true,
-		left = open(36, 8),
-		right = open(36, 8),
+		left = channel(focused, 36, 8, OPEN),
+		right = channel(focused, 36, 8, OPEN),
 		bottom = props.bottom or 100,
 		ui.glass {
-			radius = open(22, 20),
+			radius = channel(focused, 22, 18, delayed({ response = 480, bounce = 0 }, 70)),
 			interactive = true,
 			direction = "row",
 			items = "end",
-			min_h = open(44, 56),
+			min_h = channel(focused, 44, 56, delayed(OPEN, 35)),
 			px = 6,
-			py = open(0, 6),
+			py = channel(focused, 0, 6, delayed(OPEN, 35)),
+			opacity = if still then ui.tween(fade, { duration = 120 }) else nil,
+			-- Alive at first contact, before focus lands.
+			scale = channel(pressed, 1, 0.975, { response = 150, bounce = 0 }, {
+				response = 320,
+				bounce = 0.2,
+			}),
+			on_press = function()
+				pressed:set(true)
+			end,
+			on_release = function()
+				pressed:set(false)
+			end,
 			ui.button {
 				w = 32,
 				h = 44,
@@ -314,6 +354,8 @@ function ios.composer(props)
 				items = "center",
 				justify = "center",
 				on_click = props.on_plus,
+				x = channel(focused, 0, 2, delayed(OPEN, 40)),
+				scale = channel(focused, 0.88, 1, delayed({ response = 360, bounce = 0.3 }, 40)),
 				ui.symbol { name = "plus", size = 18, weight = 500, color = "$text.secondary" },
 			},
 			-- The lines' height comes from their text, laid out unseen beneath the
@@ -321,20 +363,32 @@ function ios.composer(props)
 			ui.div {
 				grow = 1,
 				min_w = 0,
-				ml = 2,
+				ml = channel(focused, 2, 6, delayed(OPEN, 70)),
 				mr = 4,
 				my = 11,
-				max_h = LINE * max_lines,
+				h = if still
+					then ui.tween(height, { duration = 1 })
+					else ui.spring(height, { response = 320, bounce = 0.08 }),
 				overflow = "hidden",
 				ui.text {
 					function()
 						local text = value:get()
 						return if text == "" then " " else text .. " "
 					end,
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = 0,
 					wrap = true,
 					opacity = 0,
 					aria_hidden = true,
 					pointer_events = false,
+					on_resize = function(size)
+						if value:get() == "" then
+							line:set(size.h)
+						end
+						measured:set(size.h)
+					end,
 				},
 				ui.textarea {
 					absolute = true,
@@ -352,17 +406,27 @@ function ios.composer(props)
 					focus = {},
 					on_focus = function()
 						focused:set(true)
+						pressed:set(false)
+						if still then
+							fade:set(0.6)
+							ui.after(120, function()
+								fade:set(1)
+							end)
+						end
 					end,
 					on_blur = function()
 						focused:set(false)
+						if still then
+							fade:set(0.6)
+							ui.after(120, function()
+								fade:set(1)
+							end)
+						end
 					end,
 				},
 			},
 			ui.button {
-				hidden = function()
-					return value:get() == ""
-				end,
-				w = 36,
+				w = channel(has_text, 0, 36, POP, GONE),
 				h = 44,
 				p = 0,
 				bg = "#00000000",
@@ -371,6 +435,15 @@ function ios.composer(props)
 				label = "Send",
 				items = "center",
 				justify = "center",
+				overflow = "hidden",
+				opacity = channel(has_text, 0, 1, { response = 180, bounce = 0 }, GONE),
+				scale = channel(has_text, 0.6, 1, POP, GONE),
+				pointer_events = function()
+					return has_text:get()
+				end,
+				aria_hidden = function()
+					return not has_text:get()
+				end,
 				on_click = function()
 					if props.on_send then
 						props.on_send(value:get())

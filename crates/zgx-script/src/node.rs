@@ -1487,6 +1487,45 @@ pub(crate) struct Anim {
     pub from: Option<Value>,
     pub to: Option<Value>,
 }
+/// One spring: a unit mass on a stiffness and a damping, starting `delay_ms` after
+/// its goal changes.
+#[derive(Clone, Copy)]
+pub(crate) struct SpringParams {
+    pub stiffness: f32,
+    pub damping: f32,
+    pub delay_ms: f32,
+}
+impl SpringParams {
+    /// From a table: `response` (ms, the time of one undamped swing) and `bounce`
+    /// (0 settles without overshoot, higher overshoots more) as SwiftUI's springs
+    /// say it, or `stiffness` and `damping`; and `delay`. What it leaves out is
+    /// `base`'s.
+    fn read(table: &Table, base: Self) -> mlua::Result<Self> {
+        let mut params = base;
+        if let Some(response) = table.get::<Option<f32>>("response")? {
+            let bounce = table.get::<Option<f32>>("bounce")?.unwrap_or(0.);
+            let rate = std::f32::consts::TAU / (response.max(1.) / 1000.);
+            let fraction = if bounce >= 0. {
+                1. - bounce
+            } else {
+                1. / (1. + bounce)
+            };
+            params.stiffness = rate * rate;
+            params.damping = 2. * fraction * rate;
+        }
+        if let Some(stiffness) = table.get::<Option<f32>>("stiffness")? {
+            params.stiffness = stiffness;
+        }
+        if let Some(damping) = table.get::<Option<f32>>("damping")? {
+            params.damping = damping;
+        }
+        if let Some(delay) = table.get::<Option<f32>>("delay")? {
+            params.delay_ms = delay;
+        }
+        Ok(params)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum Curve {
     /// `ms`: the duration in milliseconds, as everywhere in scripts.
@@ -1495,8 +1534,11 @@ pub(crate) enum Curve {
         ease: crate::anime::ease::Ease,
     },
     Spring {
-        stiffness: f32,
-        damping: f32,
+        /// As it moves unless `up` or `down` says otherwise.
+        both: SpringParams,
+        /// Toward a higher value and a lower: an opening and a closing differ.
+        up: Option<SpringParams>,
+        down: Option<SpringParams>,
     },
     /// `fps` caps the frames a decorative loop asks for.
     Loop {
@@ -6225,10 +6267,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 ms: duration.unwrap_or(ms),
                 ease: ease.unwrap_or(e),
             },
-            Curve::Spring { stiffness, damping } => Curve::Spring {
-                stiffness: opts.get::<Option<f32>>("stiffness")?.unwrap_or(stiffness),
-                damping: opts.get::<Option<f32>>("damping")?.unwrap_or(damping),
-            },
+            Curve::Spring { both, .. } => {
+                let both = SpringParams::read(&opts, both)?;
+                let side = |name: &str| -> mlua::Result<Option<SpringParams>> {
+                    opts.get::<Option<Table>>(name)?
+                        .map(|table| SpringParams::read(&table, both))
+                        .transpose()
+                };
+                Curve::Spring {
+                    both,
+                    up: side("up")?,
+                    down: side("down")?,
+                }
+            }
             Curve::Loop {
                 ms,
                 ease: e,
@@ -6280,8 +6331,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "spring",
         lua.create_function(move |lua, (state, opts): (mlua::Value, Option<Table>)| {
             let curve = Curve::Spring {
-                stiffness: 260.,
-                damping: 24.,
+                both: SpringParams {
+                    stiffness: 260.,
+                    damping: 24.,
+                    delay_ms: 0.,
+                },
+                up: None,
+                down: None,
             };
             anim(
                 lua,
@@ -6291,6 +6347,21 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             )
         })?,
     )?;
+    // Springs by name, for `ui.spring(state, ui.springs.snappy)`.
+    let springs = lua.create_table()?;
+    for (name, response, bounce) in [
+        ("smooth", 500., 0.),
+        ("snappy", 350., 0.15),
+        ("bouncy", 450., 0.3),
+    ] {
+        let spring = lua.create_table()?;
+        spring.set("response", response)?;
+        spring.set("bounce", bounce)?;
+        spring.set_readonly(true);
+        springs.set(name, spring)?;
+    }
+    springs.set_readonly(true);
+    ui.set("springs", springs)?;
     ui.set(
         "loop",
         lua.create_function(move |lua, opts: Option<Table>| {
