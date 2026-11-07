@@ -40,10 +40,12 @@ fn plane_pixels(rect: Rect, scale: f32) -> (f32, f32, f32, f32) {
     (left, top, right, bottom)
 }
 
-/// Whether a frame of `size` pixels was drawn for a plane in `rect`.
+/// Whether a frame of `size` pixels was drawn for a plane in `rect`: a box that
+/// moved can round a pixel either way, which a frame shown unscaled doesn't mind.
 #[cfg(any(test, target_os = "ios"))]
 fn plane_frame_fits(size: (u32, u32), rect: Rect, scale: f32) -> bool {
-    size == plane_size(rect, scale)
+    let (width, height) = plane_size(rect, scale);
+    size.0.abs_diff(width) <= 1 && size.1.abs_diff(height) <= 1
 }
 
 /// The pixels a plane in `rect` draws into, at `scale` pixels a point
@@ -456,11 +458,9 @@ mod tests {
         let frame = plane_size(back_button, 3.);
         assert!(plane_frame_fits(frame, back_button, 3.));
         assert!(!plane_frame_fits(frame, page, 3.));
-        // Where its edges fall on pixels counts: moved, the same box can be a pixel wider.
-        let moved = Rect::new(97.333336, 53.333332, 62.333332, 67.333336);
-        assert_eq!(
-            plane_frame_fits(frame, moved, 3.),
-            plane_size(moved, 3.) == frame
-        );
+        // Moved, its edges round to a pixel more, or fewer: the same frame (the
+        // phone's: 186 pixels, for a box of 62 points at 220.67).
+        let moved = Rect::new(220.66667, 59.333332, 62., 67.333336);
+        assert!(plane_frame_fits(frame, moved, 3.));
     }
 }

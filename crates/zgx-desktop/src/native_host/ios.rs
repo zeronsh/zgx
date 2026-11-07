@@ -620,6 +620,18 @@ impl Surfaces {
     pub fn level_would_change(&self, level: u8, shown: Option<Rect>) -> bool {
         self.planes[usize::from(level) - 1].1 != Some(shown)
     }
+    /// Whether showing the plane at `level` at `shown` asks a frame to be finished
+    /// first: shown, hidden or another size. A box that only moves keeps its pixels,
+    /// so it costs no wait.
+    pub fn level_needs_frame(&self, level: u8, shown: Option<Rect>) -> bool {
+        match (self.planes[usize::from(level) - 1].1, shown) {
+            (Some(Some(was)), Some(now)) => {
+                (was.width - now.width).abs() > 1. || (was.height - now.height).abs() > 1.
+            }
+            (Some(None) | None, None) => false,
+            _ => true,
+        }
+    }
     /// Show the overlay's view at `rect`, or hide it.
     pub fn show_overlay(&mut self, shown: Option<Rect>) {
         self.show_level(1, shown);

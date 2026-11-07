@@ -3052,7 +3052,9 @@ impl Host {
                 #[cfg(target_os = "ios")]
                 if status == zgx_gpu::PresentationStatus::Presented {
                     self.native.present_overlay()?;
+                    crate::ios_refresh::draw_mark(3);
                     self.native.apply();
+                    crate::ios_refresh::draw_mark(4);
                     crate::ios_scroll::frame_done();
                 } else {
                     crate::ios_gestures::log(&format!("base plane not presented: {status:?}"));

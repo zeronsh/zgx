@@ -66,7 +66,8 @@ thread_local! {
     static LAST: Cell<Instant> = Cell::new(Instant::now());
     static RUNNING: Cell<bool> = const { Cell::new(false) };
     static DRAWS: Cell<Option<(Instant, Duration)>> = const { Cell::new(None) };
-    static MARKS: Cell<[Option<Instant>; 3]> = const { Cell::new([None; 3]) };
+    static MARKS: Cell<[Option<Instant>; 5]> = const { Cell::new([None; 5]) };
+    static BURST: Cell<Option<Burst>> = const { Cell::new(None) };
     /// The gaps between drawn frames, while `record_gaps` asked for them.
     static GAPS: RefCell<Option<Vec<f32>>> = const { RefCell::new(None) };
 }
@@ -105,6 +106,66 @@ const LONG_GAP: Duration = Duration::from_millis(20);
 /// A pass this long is logged by its parts, whatever the gap.
 const LONG_DRAW: Duration = Duration::from_millis(10);
 
+/// Frames drawn one after another, for the record when they stop: how many, and
+/// how many came late, whatever a phone in someone's hand was doing.
+#[derive(Clone, Copy)]
+struct Burst {
+    began: Instant,
+    last: Instant,
+    frames: u32,
+    over_9: u32,
+    over_17: u32,
+    over_25: u32,
+    worst: f32,
+    worst_draw: f32,
+}
+
+/// A rest this long ends a burst.
+const BURST_REST: Duration = Duration::from_millis(100);
+/// Fewer frames than this is a tap's redraw, not motion.
+const BURST_LEAST: u32 = 8;
+
+fn note_burst(began: Instant, took: Duration) {
+    let took = took.as_secs_f32() * 1000.;
+    let mut burst = BURST.with(Cell::take);
+    if let Some(now) = &burst
+        && began.duration_since(now.last) >= BURST_REST
+    {
+        if now.frames >= BURST_LEAST {
+            crate::ios_gestures::log(&format!(
+                "burst {:.0} ms, {} frames: over 9 ms {}, 17 ms {}, 25 ms {}, worst {:.1}, worst draw {:.1}",
+                now.last.duration_since(now.began).as_secs_f64() * 1000.,
+                now.frames,
+                now.over_9,
+                now.over_17,
+                now.over_25,
+                now.worst,
+                now.worst_draw,
+            ));
+        }
+        burst = None;
+    }
+    let mut now = burst.unwrap_or(Burst {
+        began,
+        last: began,
+        frames: 0,
+        over_9: 0,
+        over_17: 0,
+        over_25: 0,
+        worst: 0.,
+        worst_draw: 0.,
+    });
+    let gap = began.duration_since(now.last).as_secs_f32() * 1000.;
+    now.last = began;
+    now.frames += 1;
+    now.over_9 += u32::from(gap > 9.);
+    now.over_17 += u32::from(gap > 17.);
+    now.over_25 += u32::from(gap > 25.);
+    now.worst = now.worst.max(gap);
+    now.worst_draw = now.worst_draw.max(took);
+    BURST.with(|burst| burst.set(Some(now)));
+}
+
 /// A point in the pass of drawing under way, for `note_draw`.
 pub(crate) fn draw_mark(part: usize) {
     MARKS.with(|marks| {
@@ -117,7 +178,9 @@ pub(crate) fn draw_mark(part: usize) {
 /// A pass of drawing that began at `began` is over.
 pub(crate) fn note_draw(began: Instant) {
     let took = began.elapsed();
-    let [prepared, rendered, presented] = MARKS.with(|marks| marks.replace([None; 3]));
+    let [prepared, rendered, presented, planes, applied] =
+        MARKS.with(|marks| marks.replace([None; 5]));
+    note_burst(began, took);
     if took >= LONG_DRAW {
         let ms = |from: Option<Instant>, to: Option<Instant>| {
             from.zip(to).map_or(-1., |(from, to)| {
@@ -126,12 +189,14 @@ pub(crate) fn note_draw(began: Instant) {
         };
         let end = Some(began + took);
         crate::ios_gestures::log(&format!(
-            "long draw {:.1} ms: prepare {:.1}, render {:.1}, present {:.1}, after {:.1}",
+            "long draw {:.1} ms: prepare {:.1}, render {:.1}, present {:.1}, planes {:.1}, apply {:.1}, after {:.1}",
             took.as_secs_f64() * 1000.,
             ms(Some(began), prepared),
             ms(prepared, rendered),
             ms(rendered, presented),
-            ms(presented, end),
+            ms(presented, planes),
+            ms(planes, applied),
+            ms(applied.or(presented), end),
         ));
     }
     let (last_began, last_took) = DRAWS

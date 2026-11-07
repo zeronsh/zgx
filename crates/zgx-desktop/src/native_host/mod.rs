@@ -649,14 +649,14 @@ impl NativeHost {
                 .then(|| overlay.plane_rect())
                 .flatten()
         });
-        surfaces.level_would_change(1, overlay)
+        surfaces.level_needs_frame(1, overlay)
             || self.above.iter().enumerate().any(|(index, above)| {
                 let level = index as u8 + 2;
                 let shown = self
                     .split
                     .bounds_at(level)
                     .and_then(|_| above.renderer.plane_rect());
-                surfaces.level_would_change(level, shown)
+                surfaces.level_needs_frame(level, shown)
             })
     }
     /// Whether a plane's frame is owed a new try: its present found no drawable.
