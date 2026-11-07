@@ -1372,6 +1372,9 @@ fn within_control(scene: &Scene, semantics: &Semantics, id: NodeId) -> bool {
     false
 }
 fn semantic_role(semantic: &zgx::semantics::SemanticNode) -> accesskit::Role {
+    if semantic.search && semantic.role == Role::TextInput {
+        return accesskit::Role::SearchInput;
+    }
     if semantic.role == Role::MenuItem && semantic.checked.is_some() && semantic.radio {
         accesskit::Role::MenuItemRadio
     } else if semantic.role == Role::MenuItem && semantic.checked.is_some() {

@@ -318,14 +318,25 @@ declare_class!(
         #[method(accessibilityActivate)]
         fn activate(&self) -> bool {
             self.resolve_with_context(|node, tree, context| {
-                if !node.is_clickable(&filter) {
+                // A text field's activation is its focus: the keyboard, without
+                // leaving it to a tap at its centre.
+                let action = if node.is_clickable(&filter) {
+                    Action::Click
+                } else if node.is_focusable(&filter)
+                    && matches!(
+                        node.role(),
+                        Role::TextInput | Role::MultilineTextInput | Role::SearchInput
+                    )
+                {
+                    Action::Focus
+                } else {
                     return false;
-                }
+                };
                 let Some((target_node, target_tree)) = tree.state().locate_node(node.id()) else {
                     return false;
                 };
                 context.do_action(ActionRequest {
-                    action: Action::Click,
+                    action,
                     target_tree,
                     target_node,
                     data: None,
@@ -333,6 +344,24 @@ declare_class!(
                 true
             })
             .unwrap_or(false)
+        }
+
+        // What Voice Control answers to: "Wi-Fi, Home" is a row called Wi-Fi with a
+        // value beside it, and "Tap Wi-Fi" is what someone says.
+        #[method_id(accessibilityUserInputLabels)]
+        fn user_input_labels(&self) -> Option<Retained<NSArray<NSString>>> {
+            let label = self
+                .resolve(|node| NodeWrapper(node).label())
+                .flatten();
+            label.map(|label| {
+                let labels: Vec<Retained<NSString>> = match label.split_once(", ") {
+                    Some((short, _)) if !short.is_empty() => {
+                        vec![NSString::from_str(short), NSString::from_str(&label)]
+                    }
+                    _ => vec![NSString::from_str(&label)],
+                };
+                NSArray::from_vec(labels)
+            })
         }
 
         #[method(accessibilityIncrement)]

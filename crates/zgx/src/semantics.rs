@@ -219,6 +219,8 @@ pub struct SemanticNode {
     /// Left out of the accessibility tree with its subtree (`aria-hidden`):
     /// decoration, or a copy of what is said elsewhere.
     pub hidden: bool,
+    /// A text field for searching: marked so for assistive technology.
+    pub search: bool,
     /// A checkable menu item that is one of a group: a radio item.
     pub radio: bool,
     /// The keys that do what it does, as its menu shows them ("⌘C").
@@ -235,6 +237,7 @@ impl SemanticNode {
         Self {
             role,
             label: label.into(),
+            search: false,
             named: false,
             value: None,
             text_selection: None,

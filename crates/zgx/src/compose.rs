@@ -5544,6 +5544,11 @@ fn open_element(
         }
         if let Some(mode) = rare.as_deref().and_then(|r| r.input_mode) {
             editor.set_input_mode(mode);
+            if mode == crate::text_edit::InputMode::Search {
+                ui.semantics
+                    .borrow_mut()
+                    .update(editor.node, |node| node.search = true);
+            }
         }
         if let Some(check) = rare.as_deref_mut().and_then(|r| r.spellcheck.take())
             && rare.as_deref().and_then(|r| r.secure) != Some(true)

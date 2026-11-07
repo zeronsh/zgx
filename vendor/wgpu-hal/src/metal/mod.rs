@@ -593,8 +593,7 @@ unsafe impl Send for SurfaceTexture {}
 unsafe impl Sync for SurfaceTexture {}
 
 /// zgx patch: presents in a transaction wait for their work to finish.
-pub static PRESENT_WAITS_FOR_GPU: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+pub static PRESENT_WAITS_FOR_GPU: AtomicBool = AtomicBool::new(false);
 /// zgx patch: nanoseconds iOS's command buffers ran, and how many ran.
 #[cfg(target_os = "ios")]
 static GPU_NANOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
