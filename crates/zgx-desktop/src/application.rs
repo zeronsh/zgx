@@ -3224,8 +3224,10 @@ impl Host {
         }
         let mut want = ui.input.pointer_lock(&ui.scene.borrow());
         // A window without the keyboard doesn't take the pointer (a lock
-        // asked for as its focus went); one losing it lets go (`Focused`).
+        // asked for as its focus went, or a seat with no keyboard); one
+        // losing it lets go (`Focused`).
         if want.is_some() && !self.native_focused {
+            ui.input.refuse_pointer_lock(&ui.scene);
             want = None;
         }
         if want.is_none() {

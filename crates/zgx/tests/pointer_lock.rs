@@ -192,6 +192,18 @@ fn a_press_before_the_window_lost_focus_locks_nothing() {
 }
 
 #[test]
+fn a_lock_the_window_cant_hold_isnt_taken_straight_back() {
+    let (ui, g, _, game, _) = locked();
+    // The host's refusal: the window doesn't have the keyboard.
+    ui.input.refuse_pointer_lock(&ui.scene);
+    assert_eq!(*game.borrow(), ["locked false"]);
+    assert!(
+        !ui.input.lock_pointer(&ui.scene, g),
+        "the gesture is spent: no lock again each turn"
+    );
+}
+
+#[test]
 fn the_window_losing_focus_ends_the_lock() {
     let (mut ui, _, _, game, _) = locked();
     ui.dispatch(InputEvent::PointerCancel);

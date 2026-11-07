@@ -1790,6 +1790,14 @@ impl InputDispatcher {
             self.route(scene, old, InputEvent::PointerLockChange(false));
         }
     }
+    /// End the pointer's lock because the window can't hold it (it doesn't
+    /// have the keyboard), and spend the gesture that allowed it: the node
+    /// hears `PointerLockChange(false)` and can't take the pointer straight
+    /// back, every turn, until a press or key in the focused window.
+    pub fn refuse_pointer_lock(&self, scene: &Rc<RefCell<Scene>>) {
+        self.state.borrow_mut().activation = None;
+        self.unlock_pointer(scene);
+    }
     /// Whether a node has locked the pointer, gone from the scene or not:
     /// a host's quick look before `pointer_lock`.
     pub fn pointer_locked(&self) -> bool {
