@@ -148,6 +148,9 @@ SCENES = [
     ('3d-textured', 'zgx-3d', 'world_bench', {'SCENE': 'textured', 'MESHES': '2000', 'FRAMES': '30'}),
     ('3d-mixed', 'zgx-3d', 'world_bench', {'SCENE': 'mixed', 'MESHES': '2000', 'FRAMES': '30'}),
     ('widgets', 'zgx', 'widget_bench', {}),
+    # A split between six panes dragged, a width a frame: nested panes of
+    # wrapping text, text areas and measured lists laid out again, undrawn.
+    ('layout-drag', 'zgx', 'layout_drag_bench', {}),
     # Effects' CPU work through the whole renderer, drawn by wgpu's no-op
     # backend: a scene of boxes as they are, then the same with an animated
     # layer shader painting past its box, and with one reading what's behind
