@@ -2976,14 +2976,18 @@ pub(crate) type RowReveal = (u64, usize, RowAlign);
 /// on the signal this returns, while it is mounted.
 /// `row_index`: a mounted row's index from its place down the list's
 /// content (find in page tells its rows apart by it).
+/// `line`: how far a wheel's line scrolls it, a row's height
+/// (`Ui::wheel_line_at`).
 pub(crate) fn list_reveal(
     ui: &mut Ui,
     root: NodeId,
     row_index: crate::find::RowIndex,
+    line: f32,
 ) -> Signal<RowReveal> {
     let reveal = ui.signal((0_u64, 0_usize, RowAlign::Nearest));
     ui.list_reveals().borrow_mut().insert(root, reveal.clone());
     ui.storage.list_rows.borrow_mut().insert(root, row_index);
+    ui.storage.wheel_lines.borrow_mut().insert(root, line);
     struct Forget(WeakUi, NodeId);
     impl Drop for Forget {
         fn drop(&mut self) {
@@ -2993,6 +2997,9 @@ pub(crate) fn list_reveal(
                 }
                 if let Ok(mut rows) = ui.storage.list_rows.try_borrow_mut() {
                     rows.remove(&self.1);
+                }
+                if let Ok(mut lines) = ui.storage.wheel_lines.try_borrow_mut() {
+                    lines.remove(&self.1);
                 }
             }
         }
@@ -3144,6 +3151,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 ui,
                 root,
                 Rc::new(move |y: f32| Some((y / row_height).round().max(0.) as usize)),
+                row_height,
             );
             let mut handled_reveal = 0;
             ui.bind(root, move || {
