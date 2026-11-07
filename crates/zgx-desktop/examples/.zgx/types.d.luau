@@ -1341,6 +1341,15 @@ declare extern type Element with
 	function snapshot(self, max_width: number?): string?
 	-- Clear keyboard focus if it is on the element or inside it.
 	function blur(self): ()
+	-- Lock the pointer to the element, as the DOM's `requestPointerLock`
+	-- (a game's look about, a 3D view's orbit): hidden and held, every
+	-- press and wheel goes to it, and its `on_pointer_move` hears the
+	-- mouse's motion as `dx`, `dy`. Only in a press's, a release's or a
+	-- key's handler (or within a second of one); whether it holds it.
+	-- Escape always lets it go, as does the window losing focus.
+	function lock_pointer(self): boolean
+	-- Let the pointer go, if the element holds its lock.
+	function unlock_pointer(self): ()
 end
 
 -- `ref = r` on a node. Reading it in an effect or computed follows it: the
@@ -1800,6 +1809,9 @@ export type Child = Node | string | (() -> TextValue) | Message | { read [number
 export type Handler = () -> ...unknown
 -- `clicks` (on_press): the press's count, 2 for a double click's second, 3
 -- for a triple's, and on past it.
+-- `dx`, `dy` (on_pointer_move): how far it moved since the last move, in
+-- the window's points; while the pointer is locked (`locked`), the
+-- mouse's own motion, `x` and `y` staying where it locked.
 -- `shift`, `ctrl`, `alt`, `meta`: the keys held; `cmd`: the platform's
 -- command key (Command on macOS, Ctrl elsewhere), as `cmd` in keys.
 export type PointerEvent = {
@@ -1808,6 +1820,9 @@ export type PointerEvent = {
 	local_x: number,
 	local_y: number,
 	clicks: number?,
+	dx: number?,
+	dy: number?,
+	locked: boolean?,
 	shift: boolean,
 	ctrl: boolean,
 	alt: boolean,
@@ -1842,6 +1857,7 @@ export type WheelEvent = {
 	local_x: number,
 	local_y: number,
 	clicks: number?,
+	locked: boolean?,
 	shift: boolean,
 	ctrl: boolean,
 	alt: boolean,
@@ -1858,6 +1874,9 @@ export type AuxClickEvent = {
 	local_x: number,
 	local_y: number,
 	clicks: number?,
+	dx: number?,
+	dy: number?,
+	locked: boolean?,
 	shift: boolean,
 	ctrl: boolean,
 	alt: boolean,
@@ -1873,6 +1892,9 @@ export type PinchEvent = {
 	local_x: number,
 	local_y: number,
 	clicks: number?,
+	dx: number?,
+	dy: number?,
+	locked: boolean?,
 	shift: boolean,
 	ctrl: boolean,
 	alt: boolean,
@@ -2538,6 +2560,9 @@ export type NodeProps = {
 	on_file_hover: ((over: boolean) -> ...unknown)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: ((locked: boolean) -> ...unknown)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -2954,6 +2979,9 @@ export type Props = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -3243,6 +3271,7 @@ export type Props_on_file_drop = ((files: { File }, e: PointerEvent) -> ...unkno
 export type Props_on_file_hover = ((over: boolean) -> ...unknown)?
 export type Props_on_hover = (((inside: boolean) -> ...unknown) | Action)?
 export type Props_on_pointer_move = (((e: PointerEvent) -> ...unknown) | Action)?
+export type Props_on_pointer_lock = ((locked: boolean) -> ...unknown)?
 export type Props_on_key = (((e: KeyEvent) -> ...boolean?) | Action)?
 export type Props_on_key_up = (((key: string) -> ...unknown) | Action)?
 export type Props_on_focus = (Handler | Action)?
@@ -3616,6 +3645,9 @@ export type ContainerProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -4059,6 +4091,9 @@ export type ScrollProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -4505,6 +4540,9 @@ export type TextProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -4920,6 +4958,9 @@ export type MarkdownViewProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -5405,6 +5446,9 @@ export type RichProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -5814,6 +5858,9 @@ export type ImageProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -6240,6 +6287,9 @@ export type SvgProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -6754,6 +6804,9 @@ export type Scene3DProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -7186,6 +7239,9 @@ export type CanvasProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -7627,6 +7683,9 @@ export type CheckboxProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -8046,6 +8105,9 @@ export type InputProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -8566,6 +8628,9 @@ export type ProgressProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -8973,6 +9038,9 @@ export type SliderProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -9401,6 +9469,9 @@ export type SegmentedProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -9822,6 +9893,9 @@ export type StepperProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -10244,6 +10318,9 @@ export type DisclosureProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -10677,6 +10754,9 @@ export type AccordionProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -11084,6 +11164,9 @@ export type SectionProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -11516,6 +11599,9 @@ export type SeparatorProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -11931,6 +12017,9 @@ export type TabsProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -12368,6 +12457,9 @@ export type TreeProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -12801,6 +12893,9 @@ export type DataGridProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -13230,6 +13325,9 @@ export type CalendarProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -13652,6 +13750,9 @@ export type DatePickerProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -14072,6 +14173,9 @@ export type TimeFieldProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -14491,6 +14595,9 @@ export type ComboboxProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -14918,6 +15025,9 @@ export type CommandPaletteProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -15333,6 +15443,9 @@ export type SelectProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -15755,6 +15868,9 @@ export type SplitProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -16233,6 +16349,9 @@ export type ListProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -16737,6 +16856,9 @@ export type LayerProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -17166,6 +17288,9 @@ export type ModalProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -17613,6 +17738,9 @@ export type PopoverProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -18066,6 +18194,9 @@ export type MenuItemProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -18484,6 +18615,9 @@ export type SubmenuProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -18916,6 +19050,9 @@ export type WebViewProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -19354,6 +19491,9 @@ export type TerminalProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -19764,6 +19904,9 @@ export type SlotProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -20225,6 +20368,9 @@ export type EachOptions = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -20650,6 +20796,9 @@ export type PresenceOptions = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,

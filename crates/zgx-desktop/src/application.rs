@@ -1147,6 +1147,7 @@ impl Application {
             pending_move: HeldMove::default(),
             factory,
             active: false,
+            device_events: false,
             error: None,
             timers,
         };
@@ -1590,6 +1591,26 @@ fn appearance_of(theme: winit::window::Theme) -> zgx::theme::Appearance {
         winit::window::Theme::Dark => zgx::theme::Appearance::Dark,
     }
 }
+/// The pointer held for a node that locked it (`Host::sync_pointer_lock`).
+#[derive(Clone, Copy)]
+struct LockedPointer {
+    node: zgx::scene::NodeId,
+    /// Where it was as it locked, in the window's points: where it goes
+    /// back to as the lock ends.
+    at: (f32, f32),
+}
+/// Shows the pointer over `window` or hides it. On macOS zgx sets cursors
+/// through AppKit with the window's cursor rects off, where winit's hiding
+/// (an invisible cursor in a rect) would do nothing.
+fn show_pointer(window: &Window, shown: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window;
+        crate::native_host::show_cursor(shown);
+    }
+    #[cfg(not(target_os = "macos"))]
+    window.set_cursor_visible(shown);
+}
 struct Host {
     #[cfg(target_os = "linux")]
     file_surface: Option<u32>,
@@ -1792,6 +1813,12 @@ struct Host {
     #[cfg(target_os = "linux")]
     primary_revision: u64,
     native_cursor: Option<CursorIcon>,
+    /// The pointer held for a node that locked it (`sync_pointer_lock`):
+    /// grabbed and hidden, put back where it locked as it ends.
+    pointer_lock: Option<LockedPointer>,
+    /// The mouse's motion heard since it was last dispatched, while the
+    /// pointer is locked (`WindowManager::flush_motion`).
+    pending_motion: (f64, f64),
     /// A page's image cursor the window shows (`sync_cursor`).
     #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
     page_cursor: Option<crate::native_host::webkitgtk::WindowCursor>,
@@ -2202,6 +2229,8 @@ impl Host {
             #[cfg(target_os = "linux")]
             primary_revision: 0,
             native_cursor: None,
+            pointer_lock: None,
+            pending_motion: (0., 0.),
             #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
             page_cursor: None,
             #[cfg(target_os = "macos")]
@@ -2280,6 +2309,17 @@ impl Host {
         {
             self.input_arrived = true;
         }
+        // A person's press, release or key: what a pointer lock may come
+        // just after (`InputDispatcher::note_gesture`).
+        if matches!(
+            event,
+            InputEvent::PointerDown { .. }
+                | InputEvent::PointerUp { .. }
+                | InputEvent::KeyDown { repeat: false, .. }
+                | InputEvent::KeyUp { .. }
+        ) {
+            self.context.ui.input.note_gesture();
+        }
         // macOS: typing draws at once even mid-animation (see `process`);
         // pointer motion and scrolling keep the refresh's pace.
         #[cfg(target_os = "macos")]
@@ -2299,6 +2339,7 @@ impl Host {
         if result.focus_changed {
             self.ime_active = false;
         }
+        self.sync_pointer_lock();
         #[cfg(target_os = "linux")]
         self.publish_primary();
         Ok(result.default_prevented)
@@ -3177,6 +3218,85 @@ impl Host {
             self.popups.set_cursor(cursor);
             self.native_cursor = Some(cursor);
         }
+    }
+    /// Hold the pointer for the node that locked it (`lock_pointer`), or
+    /// let it go: grabbed (locked in place where the platform can: macOS,
+    /// Windows, Wayland; kept in the window on X11, whose raw motion still
+    /// comes at its edges) and hidden, its moves no longer the content's
+    /// while its motion comes as `PointerMotion`; shown again where it
+    /// locked as it ends. After every input event and every turn of the
+    /// loop, so a lock a script ends from a timer, or a node gone, lets
+    /// it go.
+    #[inline]
+    fn sync_pointer_lock(&mut self) {
+        // No lock asked for or held, as nearly always: nothing to look at
+        // (inlined where every event calls it).
+        if self.pointer_lock.is_some() || self.context.ui.input.pointer_locked() {
+            self.sync_held_pointer_lock();
+        }
+    }
+    #[inline(never)]
+    fn sync_held_pointer_lock(&mut self) {
+        let ui = &self.context.ui;
+        let mut want = ui.input.pointer_lock(&ui.scene.borrow());
+        // A window without the keyboard doesn't take the pointer (a lock
+        // asked for as its focus went, or a seat with no keyboard); one
+        // losing it lets go (`Focused`).
+        if want.is_some() && !self.native_focused {
+            ui.input.refuse_pointer_lock(&ui.scene);
+            want = None;
+        }
+        if want.is_none() {
+            // Its node left or was disabled: the lock ends, heard if it can be.
+            ui.input.unlock_pointer(&ui.scene);
+        }
+        if want == self.pointer_lock.map(|held| held.node) {
+            return;
+        }
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        use winit::window::CursorGrabMode;
+        match (want, self.pointer_lock) {
+            (Some(node), Some(held)) => self.pointer_lock = Some(LockedPointer { node, ..held }),
+            (Some(node), None) => {
+                if window.set_cursor_grab(CursorGrabMode::Locked).is_err() {
+                    let _ = window.set_cursor_grab(CursorGrabMode::Confined);
+                }
+                show_pointer(&window, false);
+                self.pending_motion = (0., 0.);
+                self.pointer_lock = Some(LockedPointer {
+                    node,
+                    at: self.cursor,
+                });
+            }
+            (None, Some(held)) => {
+                // Put back before it's let go: Wayland moves a pointer only
+                // while it's locked (a hint to the compositor).
+                let (x, y) = held.at;
+                let _ =
+                    window.set_cursor_position(LogicalPosition::new(f64::from(x), f64::from(y)));
+                let _ = window.set_cursor_grab(CursorGrabMode::None);
+                show_pointer(&window, true);
+                self.pending_motion = (0., 0.);
+                // Shown again, it takes zgx's cursor afresh.
+                self.native_cursor = None;
+                self.pointer_lock = None;
+            }
+            (None, None) => {}
+        }
+    }
+    /// The mouse's motion heard while the pointer is locked, as one
+    /// `PointerMotion` (a turn of the loop can bring dozens).
+    fn flush_motion(&mut self) -> Result<(), zgx::widgets::LayoutFeedbackError> {
+        let (dx, dy) = std::mem::take(&mut self.pending_motion);
+        if self.pointer_lock.is_none() || (dx == 0. && dy == 0.) {
+            return Ok(());
+        }
+        self.dispatch(InputEvent::PointerMotion {
+            dx: dx as f32,
+            dy: dy as f32,
+        })
     }
     /// A page's cursor changed, maybe with no frame to come (WebKit sets it
     /// after its web process placed the pointer): its image, if it is one,
@@ -4696,6 +4816,10 @@ impl Host {
                     zgx::input::set_held_modifiers(&self.context.ui.runtime, self.modifiers);
                 }
             }
+            // Locked, the pointer stays where it was for the content: its
+            // motion comes raw (`flush_motion`), its moves go nowhere.
+            WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. }
+                if self.pointer_lock.is_some() => {}
             WindowEvent::CursorMoved { position, .. } => {
                 let p = position.to_logical::<f32>(self.scale_factor);
                 self.cursor = (p.x, p.y);
@@ -5058,6 +5182,9 @@ impl Host {
             }
             WindowEvent::Focused(false) => {
                 zgx_gpu::present_log::log(|| "window-focus false".into());
+                // The pointer is the system's again, the lock heard ending.
+                self.context.ui.input.unlock_pointer(&self.context.ui.scene);
+                self.sync_pointer_lock();
                 #[cfg(target_os = "linux")]
                 if let Some(caption) = &mut self.caption {
                     caption.sync(&mut self.context.ui);
@@ -6385,6 +6512,14 @@ impl Drop for Host {
         if std::mem::take(&mut self.password) {
             crate::native_ime::secure_input(false);
         }
+        // A pointer it held goes back to the system: macOS's grab and its
+        // hiding are the whole app's, not the window's.
+        if self.pointer_lock.take().is_some()
+            && let Some(window) = &self.window
+        {
+            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+            show_pointer(window, true);
+        }
         // Closed before its last move settled: saved now.
         if self.frame_save_at.take().is_some() {
             self.save_frame();
@@ -6490,6 +6625,9 @@ struct WindowManager {
     pending_move: HeldMove<WindowId, WindowEvent>,
     factory: WindowFactory,
     active: bool,
+    /// Raw device events are listened for: only while a window holds a
+    /// locked pointer (`about_to_wait_turn`), for its motion.
+    device_events: bool,
     error: Option<String>,
     timers: zgx::timer::Hosted,
 }
@@ -6507,6 +6645,30 @@ impl WindowManager {
             let ui = &host.context.ui;
             ui.input.captures_keys(&ui.scene.borrow())
         }));
+    }
+    /// The locked pointer's motion heard so far, to its window
+    /// (`Host::flush_motion`).
+    #[inline]
+    fn flush_motion(&mut self, event_loop: &ActiveEventLoop) {
+        // Motion is heard only while a pointer is locked (inlined where
+        // every window event calls it).
+        if self.device_events {
+            self.flush_locked_motion(event_loop);
+        }
+    }
+    #[inline(never)]
+    fn flush_locked_motion(&mut self, event_loop: &ActiveEventLoop) {
+        let mut failed = None;
+        for host in self.hosts.values_mut() {
+            if host.pending_motion != (0., 0.)
+                && let Err(e) = host.flush_motion()
+            {
+                failed = Some(e);
+            }
+        }
+        if let Some(e) = failed {
+            self.fail(event_loop, e);
+        }
     }
     /// The pointer move held back (`pending_move`), handled now.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -7678,11 +7840,35 @@ impl WindowManager {
             event_loop.exit();
             return;
         }
+        // The motion heard while a pointer is locked, then each lock held
+        // or let go. Raw motion is listened for only while one is: asked
+        // for always, X11 sends each move twice and Windows a message for
+        // each move and key.
+        self.flush_motion(event_loop);
+        let mut locked = false;
+        for host in self.hosts.values_mut() {
+            host.sync_pointer_lock();
+            locked |= host.pointer_lock.is_some();
+        }
+        // `Always` rather than `WhenFocused`: X11 applies that at the next
+        // change of focus, and a lock is taken in a focused window (and
+        // ends as it loses focus).
+        if locked != self.device_events {
+            self.device_events = locked;
+            event_loop.listen_device_events(if locked {
+                winit::event_loop::DeviceEvents::Always
+            } else {
+                winit::event_loop::DeviceEvents::Never
+            });
+        }
         let mut ready = false;
         for host in self.hosts.values_mut() {
             // A renderer lost with its GPU device, due another try; or a
             // plane's frame left for a tick.
             let now = std::time::Instant::now();
+            // The turn's presses and keys, at this time: what a pointer
+            // lock may come within a second of (`settle_gestures`).
+            host.context.ui.input.settle_gestures(now);
             #[cfg(target_os = "macos")]
             let plane_room = host.plane_retry.is_some()
                 && host
@@ -7787,7 +7973,28 @@ impl ApplicationHandler<Event> for WindowManager {
             this.user_event_turn(event_loop, event)
         });
     }
+    /// The mouse's raw motion, while a window holds a locked pointer (the
+    /// only time zgx listens for it): summed for that window until its
+    /// next event or the turn's end (`flush_motion`).
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event
+            && let Some(host) = self
+                .hosts
+                .values_mut()
+                .find(|host| host.pointer_lock.is_some() && host.native_focused)
+        {
+            host.pending_motion.0 += delta.0;
+            host.pending_motion.1 += delta.1;
+        }
+    }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // Motion before the press or key that came after it.
+        self.flush_motion(event_loop);
         // Pointer moves come as often as the mouse reports them (Wayland
         // and X11 pass each on, up to 1000 a second), and each is handled
         // on laid-out content: a move that changes layout (a pane's edge
@@ -9152,6 +9359,7 @@ mod tests {
             pending_move: HeldMove::default(),
             factory,
             active: false,
+            device_events: false,
             error: None,
             timers: zgx::timer::host(|| {}),
         };
@@ -9565,6 +9773,7 @@ mod tests {
             pending_move: HeldMove::default(),
             factory,
             active: false,
+            device_events: false,
             error: None,
             timers: zgx::timer::host(|| {}),
         };
@@ -9820,6 +10029,7 @@ mod tests {
             pending_move: HeldMove::default(),
             factory,
             active: false,
+            device_events: false,
             error: None,
             timers: zgx::timer::host(|| {}),
         };

@@ -5480,15 +5480,16 @@ fn a_pointer_event_says_where_and_the_keys_held() {
     });
     h.frames(2);
     let said = h.text("said");
-    let common = "alt=boolean,cmd=boolean,ctrl=boolean,local_x=number,local_y=number,meta=boolean,mine=boolean,shift=boolean,x=number,y=number";
+    // A move says how far it went (`dx`, `dy`) too, in its one table.
+    let moved = "alt=boolean,cmd=boolean,ctrl=boolean,dx=number,dy=number,local_x=number,local_y=number,meta=boolean,mine=boolean,shift=boolean,x=number,y=number";
     let at = format!(
         "{:.1} {:.1} 30.0 20.0 false false false false false true",
         x, y
     );
-    assert!(said.contains(&format!("move {at} [{common}];")), "{said}");
+    assert!(said.contains(&format!("move {at} [{moved}];")), "{said}");
     assert!(
         said.contains(&format!(
-            "move {:.1} {:.1} 31.0 20.0 false false false false false true [{common}];",
+            "move {:.1} {:.1} 31.0 20.0 false false false false false true [{moved}];",
             x + 1.,
             y
         )),

@@ -935,6 +935,10 @@ pub(crate) struct RareEvents {
     /// on one spot, as the DOM's `dblclick`, heard as the second is let go;
     /// the innermost node with one takes it.
     pub double_click: Option<Handler>,
+    /// `fn(locked)`: the node took the pointer's lock (`el:lock_pointer()`,
+    /// `true`) or lost it (`false`): let go, Escape, the window losing
+    /// focus, the node leaving or another taking it.
+    pub pointer_lock: Option<Handler>,
     /// `capture_keys = true`: while focus is in it, every key goes to what
     /// is focused, no shortcut or menu taking one (a shortcut recorder).
     pub capture_keys: bool,
@@ -3750,6 +3754,7 @@ fn set_handler(
         "on_release" => &mut events.release,
         "on_aux_click" => &mut events.rare.get_or_insert_default().aux_click,
         "on_double_click" => &mut events.rare.get_or_insert_default().double_click,
+        "on_pointer_lock" => &mut events.rare.get_or_insert_default().pointer_lock,
         "on_navigate" => &mut events.rare.get_or_insert_default().navigate,
         "on_file_drop" => &mut events.rare.get_or_insert_default().file_drop,
         "on_file_hover" => &mut events.rare.get_or_insert_default().file_hover,

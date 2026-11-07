@@ -79,6 +79,8 @@ mod list_thin_rows;
 mod markdown_lazy;
 #[path = "../mentions.rs"]
 mod mentions;
+#[path = "../pointer_lock.rs"]
+mod pointer_lock;
 #[path = "../pointer_through.rs"]
 mod pointer_through;
 #[path = "../regions.rs"]
