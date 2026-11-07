@@ -276,7 +276,7 @@ end
 -- and closes again, on the keyboard's own spring so it finishes as the keyboard
 -- does. It grows with its lines, to `max_lines`, then scrolls inside. `value` (a
 -- state), `placeholder`, `on_send` (the text; a send button comes when there is
--- any), `on_plus`, `bottom`.
+-- any), `on_plus`, `bottom`, `ref` (its editor's).
 function ios.composer(props)
 	local value = props.value
 	local focused = ui.use_state(false)
@@ -389,6 +389,7 @@ function ios.composer(props)
 					value = value,
 					label = props.placeholder or "Message",
 					placeholder = props.placeholder or "Message",
+					ref = props.ref,
 					wrap = true,
 					p = 0,
 					bg = "#00000000",

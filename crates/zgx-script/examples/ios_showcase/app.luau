@@ -206,9 +206,37 @@ local function SettingsPage(nav: any)
 	}
 end
 
+-- `composer_loop` (`ZGX_APP_ARGS`): the composer opens and closes ten times on its
+-- own, each frame logged, to compare with the keyboard on a phone.
+local composer_editor = ui.ref()
+if ui.args[1] == "composer_loop" then
+	tab:set(2)
+	ui.effect(function()
+		for i = 0, 9 do
+			ui.after(2000 + i * 1600, function()
+				local el = composer_editor:peek()
+				if el then
+					el:focus()
+				end
+			end)
+			ui.after(2800 + i * 1600, function()
+				local el = composer_editor:peek()
+				if el then
+					el:blur()
+				end
+			end)
+		end
+	end)
+end
+
 local function Composer()
 	local message = ui.use_state("")
-	return ios.composer { value = message, placeholder = "Message", log_motion = true }
+	return ios.composer {
+		value = message,
+		placeholder = "Message",
+		log_motion = true,
+		ref = composer_editor,
+	}
 end
 
 local function TextPage(nav: any)

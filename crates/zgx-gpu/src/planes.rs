@@ -343,13 +343,15 @@ impl GpuRenderer {
         }
         self.plane_contents_set = true;
     }
-    /// Whether the frame last presented is this plane's size: never shown in a
-    /// box it wasn't drawn for.
+    /// Whether the frame last presented is this plane's size, or there is no box
+    /// to show it in: never shown in a box it wasn't drawn for.
     #[cfg(target_os = "ios")]
     pub fn presented_fits_plane(&self) -> bool {
         match (self.plane_rect(), self.presented_size) {
             (Some(rect), Some(size)) => plane_frame_fits(size, rect, self.scale),
-            _ => false,
+            // No box yet, or nothing shown: nothing to show stretched, and asking
+            // again would draw every frame for nothing.
+            _ => true,
         }
     }
     /// The frame last presented's size in pixels, for the record.
