@@ -27,7 +27,7 @@ return ui.column {
 const OVER: (f32, f32) = (100., 50.);
 
 fn app() -> Harness {
-    let mut h = Harness::inline(APP);
+    let h = Harness::inline(APP);
     h.frames(2);
     h
 }
