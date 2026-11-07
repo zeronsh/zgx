@@ -121,6 +121,23 @@ impl Effects {
     fn len(&self) -> usize {
         self.live
     }
+    /// The slots past the last effect in use go, with the room above what
+    /// is left, and what is made next takes the lowest. (A slot's id never
+    /// comes back, so that one gone and made again names no stale effect.)
+    fn rest(&mut self) {
+        while self
+            .slots
+            .last()
+            .is_some_and(|(_, record)| record.is_none())
+        {
+            self.slots.pop();
+        }
+        let left = self.slots.len() as u32;
+        self.free.retain(|slot| *slot < left);
+        self.free.sort_unstable_by(|a, b| b.cmp(a));
+        self.slots.shrink_to_fit();
+        self.free.shrink_to_fit();
+    }
 }
 /// A signal's subscribers, in no order: a flush orders what runs. A set
 /// most nodes' effects join (the inherited typography) is removed from
@@ -415,6 +432,11 @@ impl Runtime {
     }
     /// [`Runtime::effect_marked`] with its callback already allocated: a
     /// large closure moves into its allocation once.
+    /// A host at rest (`idle::trim`): what its effects' table holds beyond
+    /// the effects there are.
+    pub(crate) fn rest(&self) {
+        self.inner.effects.borrow_mut().rest();
+    }
     pub(crate) fn effect_callback(&self, mount_pure: bool, callback: Callback) -> Effect {
         let born = self.inner.next.get();
         self.inner.next.set(born + 1);

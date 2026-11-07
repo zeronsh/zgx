@@ -4848,6 +4848,8 @@ impl GpuRenderer {
         self.kept = None;
         self.reset_atlas(INITIAL_ATLAS);
         self.atlas_recycled_at = self.frame;
+        // No frame comes to let the old one go: the device, polled, does.
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
     }
     /// What its caches hold now.
     pub fn debug_cache_stats(&self) -> DebugCacheStats {
@@ -13733,6 +13735,10 @@ impl GpuRenderer {
         // Word shapes kept for the next frame, and the table they peaked in
         // (streaming fills it): the next frame shapes what it needs again.
         self.fonts.borrow_mut().shape_run_cache = Default::default();
+        self.text_cache
+            .borrow_mut()
+            .rest(self.shapes.values().filter_map(|shaped| shaped.prepared));
+        self.svgs.rest();
         #[cfg(target_os = "macos")]
         {
             self.narrow_drawables();

@@ -2957,6 +2957,8 @@ pub struct Scene {
     free: Vec<u32>,
     /// Slots of nodes removed and not yet freed (`kill`).
     dead: usize,
+    /// What a slot made next starts its generations from (`rest`).
+    new_slot_generation: u32,
     /// Flushes since `slots` last grew (`trim_slots`).
     slots_settled: u8,
     root: NodeId,
@@ -3209,6 +3211,7 @@ impl Scene {
             }],
             free: Vec::new(),
             dead: 0,
+            new_slot_generation: 0,
             slots_settled: 0,
             root,
             dirty: vec![root],
@@ -6455,13 +6458,13 @@ impl Scene {
             let index = self.slots.len() as u32;
             self.slots_settled = 0;
             self.slots.push(Slot {
-                generation: 0,
+                generation: self.new_slot_generation,
                 dead: false,
                 node: Some(node),
             });
             NodeId {
                 index,
-                generation: 0,
+                generation: self.new_slot_generation,
             }
         };
         self.node_mut(parent).children.get_mut().push(id);
@@ -11449,6 +11452,28 @@ impl Scene {
             self.slots.shrink_to(len + len / 4 + 64);
         }
     }
+    /// A window at rest: slots past the last node in use go, most of a
+    /// kilobyte each, and the room above what is left. A slot made again
+    /// starts above every generation that went (`new_slot_generation`), so
+    /// that a stale id never names it.
+    pub fn rest(&mut self) {
+        let mut keep = self.slots.len();
+        while keep > 1 && self.slots[keep - 1].node.is_none() {
+            keep -= 1;
+            self.new_slot_generation = self
+                .new_slot_generation
+                .max(self.slots[keep].generation.wrapping_add(1));
+        }
+        if keep < self.slots.len() {
+            self.free.retain(|index| (*index as usize) < keep);
+            self.slots.truncate(keep);
+        }
+        self.slots.shrink_to_fit();
+        // The lowest taken first from now on: what mounts next leaves the
+        // slots above it free to go at the next rest.
+        self.free.sort_unstable_by(|a, b| b.cmp(a));
+        self.free.shrink_to_fit();
+    }
     /// Mark `id` as scroll content: translating it reports a `ScrollMove`
     /// instead of damaging everything it paints, and it moves by whole
     /// device pixels (`set_pixel_scale`).
@@ -13344,6 +13369,27 @@ mod tests {
         let reused = scene.append(scene.root(), text("reused"), Style::default());
         assert!(ids.iter().any(|id| id.index == reused.index));
         assert!(ids.iter().all(|id| !scene.contains(*id)));
+        scene.flush();
+    }
+    #[test]
+    fn slots_given_back_at_rest_leave_no_stale_id_alive() {
+        let mut scene = Scene::new(100.0, 100.0);
+        let kept = scene.append(scene.root(), text("kept"), Style::default());
+        let gone: Vec<_> = (0..64)
+            .map(|_| scene.append(scene.root(), text("gone"), Style::default()))
+            .collect();
+        for &id in &gone {
+            scene.remove(id);
+        }
+        scene.flush();
+        scene.rest();
+        assert!(scene.slots.len() < 8, "{} slots left", scene.slots.len());
+        assert!(scene.contains(kept));
+        let again: Vec<_> = (0..64)
+            .map(|_| scene.append(scene.root(), text("again"), Style::default()))
+            .collect();
+        assert!(gone.iter().all(|id| !scene.contains(*id)));
+        assert!(again.iter().all(|id| scene.contains(*id)));
         scene.flush();
     }
     #[test]
