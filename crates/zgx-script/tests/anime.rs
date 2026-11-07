@@ -1756,3 +1756,83 @@ fn a_spring_turned_back_midway_carries_its_speed() {
     let turned = h.x("box") - before;
     assert!(turned.abs() < moved, "no jump: {moved} then {turned}");
 }
+
+/// What a state does run to 100 from 0, sampled each frame, and how long it went on.
+fn spring_to_path(options: &str) -> Vec<f32> {
+    let mut h = Harness::inline(&format!(
+        r##"local at = ui.state("at", 0)
+        local shown = ui.state("shown", "going")
+        return ui.column {{
+            ui.div {{ id = "box", w = 20, h = 20, x = at }},
+            ui.text {{ "{{shown}}", id = "said" }},
+            ui.button {{ "Go", id = "go", on_click = function()
+                ui.spring_to(at, 100, {{ {options}, done = function() shown:set("arrived") end }})
+            end }},
+        }}"##
+    ));
+    h.frames(2);
+    h.click("go");
+    let path = (0..90)
+        .map(|_| {
+            h.run_ms(17.);
+            h.x("box")
+        })
+        .collect();
+    assert_eq!(h.text("said"), "arrived");
+    path
+}
+
+#[test]
+fn a_state_runs_to_its_target_on_a_spring_with_no_script_each_frame() {
+    let stiffness = 600f64;
+    let path = spring_to_path("stiffness = 600, damping = 48.99, most = 1200");
+    assert_eq!(*path.last().unwrap(), 100.);
+    assert!(
+        path.windows(2).all(|pair| pair[0] <= pair[1]),
+        "critically damped: no way back"
+    );
+    // The closed form of a critically damped spring, at some step.
+    let rate = stiffness.sqrt();
+    let at = |ms: f64| {
+        let t = ms / 1000.;
+        100. * (1. - (1. + rate * t) * (-rate * t).exp())
+    };
+    let i = 9;
+    let (ms, found) = ((i + 1) as f64 * 17., f64::from(path[i]));
+    assert!(
+        (found - at(ms)).abs() < 15.,
+        "{found} at {ms} ms, against {}",
+        at(ms)
+    );
+}
+
+#[test]
+fn a_state_given_a_speed_starts_with_it_and_stopping_says_it() {
+    let moving = spring_to_path("stiffness = 600, damping = 48.99, velocity = 2000");
+    let still = spring_to_path("stiffness = 600, damping = 48.99");
+    assert!(
+        moving[1] > still[1] * 1.5,
+        "{} against {}",
+        moving[1],
+        still[1]
+    );
+    let mut h = Harness::inline(
+        r##"local at = ui.state("at", 0)
+        local said = ui.state("said", "none")
+        local stop
+        return ui.column {
+            ui.div { id = "box", w = 20, h = 20, x = at },
+            ui.text { "{said}", id = "said" },
+            ui.button { "Go", id = "go", on_click = function() stop = ui.spring_to(at, 100, { stiffness = 600, damping = 48.99 }) end },
+            ui.button { "Stop", id = "stop", on_click = function() said:set(if stop() > 100 then "fast" else "slow") end },
+        }"##,
+    );
+    h.frames(2);
+    h.click("go");
+    h.run_ms(40.);
+    h.click("stop");
+    assert_eq!(h.text("said"), "fast");
+    let at = h.x("box");
+    h.run_ms(100.);
+    assert_eq!(h.x("box"), at, "and it stays where it was stopped");
+}

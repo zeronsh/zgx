@@ -254,6 +254,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "raw",
     "tween",
     "spring",
+    "spring_to",
     "native_keyboard_bar",
     "native_edge",
     "native_pan",

@@ -6347,6 +6347,92 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             )
         })?,
     )?;
+    // A state run to a value now, by Rust: for what a gesture hands over to a spring,
+    // whose starting speed and ending the binding of `ui.spring` can't say.
+    ui.set(
+        "spring_to",
+        lua.create_function(
+            |lua, (state, target, opts): (mlua::Value, f64, Option<Table>)| {
+                let env = env(lua)?;
+                let state = expect_state(&state, "ui.spring_to's state")?;
+                let opts = match opts {
+                    Some(opts) => opts,
+                    None => lua.create_table()?,
+                };
+                let params = SpringParams::read(
+                    &opts,
+                    SpringParams {
+                        stiffness: 260.,
+                        damping: 24.,
+                        delay_ms: 0.,
+                    },
+                )?;
+                let velocity = Rc::new(std::cell::Cell::new(
+                    opts.get::<Option<f64>>("velocity")?.unwrap_or(0.),
+                ));
+                let most = opts.get::<Option<f64>>("most")?.unwrap_or(5000.) / 1000.;
+                let done = opts.get::<Option<Function>>("done")?;
+                let stopped = Rc::new(std::cell::Cell::new(false));
+                let (running, stop) = (velocity.clone(), stopped.clone());
+                let vm = env.vm.clone();
+                let done = std::cell::RefCell::new(done);
+                let elapsed_cell = std::cell::Cell::new(0f64);
+                let began = std::cell::Cell::new(Some(std::time::Instant::now()));
+                env.engine.tick_with(Rc::new(move |dt_ms| {
+                    if stopped.get() {
+                        return false;
+                    }
+                    // The first step counts from the call, not one frame: a page's
+                    // mount can take a while, and the motion keeps its time through it.
+                    let waited = began.take().map(|began| began.elapsed().as_secs_f64());
+                    let dt = (dt_ms / 1000.).max(waited.unwrap_or(0.)).min(0.05);
+                    elapsed_cell.set(elapsed_cell.get() + dt);
+                    let (mut at, mut speed) = (
+                        state
+                            .with_untracked(|value| value.as_f64())
+                            .unwrap_or(target),
+                        running.get(),
+                    );
+                    let (stiffness, damping) =
+                        (f64::from(params.stiffness), f64::from(params.damping));
+                    let mut advance = |step: f64| {
+                        speed += (stiffness * (target - at) - damping * speed) * step;
+                        at += speed * step;
+                    };
+                    // The first step is one, of about a frame, and the rest no
+                    // longer than a fast display's: the same curve on any display and
+                    // through a late frame, and the same start, which is most of the feel.
+                    let first = if waited.is_some() { dt.min(0.015) } else { 0. };
+                    if first > 0. {
+                        advance(first);
+                    }
+                    let rest = dt - first;
+                    let steps = (rest / 0.0095).ceil();
+                    for _ in 0..steps as usize {
+                        advance(rest / steps);
+                    }
+                    running.set(speed);
+                    let settled =
+                        (at - target).abs() < 0.5 && speed.abs() < 5. || elapsed_cell.get() > most;
+                    state.set(Value::from(if settled { target } else { at }));
+                    if settled {
+                        running.set(0.);
+                        if let (Some(done), Some(vm)) = (done.borrow_mut().take(), vm.upgrade())
+                            && let Err(error) = vm.call::<()>(&done, ())
+                        {
+                            vm.report(error);
+                        }
+                    }
+                    !settled
+                }));
+                // Stops it, and says how fast it was going.
+                lua.create_function(move |_, ()| {
+                    stop.set(true);
+                    Ok(velocity.get())
+                })
+            },
+        )?,
+    )?;
     // Springs by name, for `ui.spring(state, ui.springs.snappy)`.
     let springs = lua.create_table()?;
     for (name, response, bounce) in [

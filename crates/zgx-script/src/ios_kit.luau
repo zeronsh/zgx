@@ -20,8 +20,8 @@ local FLING = 300
 -- A refresh that never says it's done ends after this long (milliseconds).
 local REFRESH_MOST = 15000
 
--- Runs `state` to `target` as a critically damped spring from where it is, a
--- frame at a time, then `done`. Only while something moves.
+-- Runs `state` to `target` as a critically damped spring from where it is, in
+-- Rust, then `done`. What it returns stops it and says how fast it was going.
 local function settle(state, target, done, speed)
 	-- Reduce Motion: there at once.
 	if ui.prefers.reduced_motion:get() then
@@ -31,37 +31,18 @@ local function settle(state, target, done, speed)
 		end
 		return function() end
 	end
-	local velocity = speed or 0
-	local stop
-	local spring = STIFFNESS
-	local damping = 2 * math.sqrt(spring)
-	local began = ui.now()
-	local last = began
-	-- As often as an iPhone draws.
-	stop = ui.every(8, function()
-		local at = state:get()
-		-- By the time that passed: a tick can come late.
-		local now = ui.now()
-		local step = math.min((now - last) / 1000, 0.05)
-		last = now
-		local force = spring * (target - at) - damping * velocity
-		velocity += force * step
-		at += velocity * step
-		-- Whatever the timers did, it gets there.
-		if (math.abs(at - target) < 0.5 and math.abs(velocity) < 5) or now - began > SETTLE_MOST then
-			state:set(target)
-			if stop then
-				stop()
-			end
+	return ui.spring_to(state, target, {
+		stiffness = STIFFNESS,
+		damping = 2 * math.sqrt(STIFFNESS),
+		velocity = speed or 0,
+		most = SETTLE_MOST,
+		done = function()
 			ui.gesture_log("settled at " .. target)
 			if done then
 				done()
 			end
-		else
-			state:set(at)
-		end
-	end)
-	return stop
+		end,
+	})
 end
 ios.settle = settle
 
@@ -658,23 +639,20 @@ ios.stack = ui.component(function(props)
 	-- stopped where it was, with nothing to move it on.
 	local running_drag, running_enter
 	local function run_drag(target, done, speed)
-		if running_drag then
-			running_drag()
-		end
+		-- A change of mind keeps the speed it had; a finger's gives its own.
+		local carried = if running_drag then running_drag() else 0
 		running_drag = settle(drag, target, function()
 			running_drag = nil
 			if done then
 				done()
 			end
-		end, speed)
+		end, speed or carried)
 	end
 	local function run_enter()
-		if running_enter then
-			running_enter()
-		end
+		local carried = if running_enter then running_enter() else 0
 		running_enter = settle(entering, 0, function()
 			running_enter = nil
-		end)
+		end, carried)
 	end
 	-- Nothing may rest part way: whatever got here, a page out of place with no
 	-- spring on it goes home, and says so in the record.
@@ -876,10 +854,8 @@ ios.sheet = ui.component(function(props)
 	end
 	local running
 	local function run(state, to, done, speed)
-		if running then
-			running()
-		end
-		running = settle(state, to, done, speed)
+		local carried = if running then running() else 0
+		running = settle(state, to, done, speed or carried)
 	end
 	local function dismiss(speed)
 		run(rise, 0, function()
