@@ -10909,9 +10909,12 @@ impl GpuRenderer {
         read: Option<Rect>,
         regions: &[(Rect, Scissor)],
     ) -> wgpu::BindGroup {
-        let under = match read {
-            Some(read) => Some(read),
-            None => draw.bounds.intersection(draw.clip),
+        // All the draw replaces, whatever its shader reads: a layer reaches
+        // past its box with a shadow, and composites over what's copied there.
+        let drawn = draw.bounds.intersection(draw.clip);
+        let under = match (read, drawn) {
+            (Some(read), Some(drawn)) => Some(read.union(drawn)),
+            (read, drawn) => read.or(drawn),
         };
         let area = regions
             .iter()

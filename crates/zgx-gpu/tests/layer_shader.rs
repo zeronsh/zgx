@@ -696,3 +696,93 @@ fn draws_around_a_reader_sharing_a_copy_do_not_draw_over_it() {
         }
     }
 }
+
+#[test]
+fn a_backdrop_reader_keeps_what_lies_under_its_shadow() {
+    let _gpu_fixture = gpu_fixture();
+    for (direct, mut gpu) in renderers() {
+        let mut scene = scene();
+        let root = scene.root();
+        behind(&mut scene, root);
+        let id = reader(&mut scene, root);
+        // A shadow reaching far past the box and what it reads: its layer
+        // composites over all of it.
+        scene.set_kind(
+            id,
+            NodeKind::Quad(QuadStyle {
+                shadow: Some(BoxShadow {
+                    color: Color(0, 0, 0, 30),
+                    offset: Transform { x: 0., y: 8. },
+                    blur_radius: 20.,
+                    spread: 0.,
+                }),
+                ..Default::default()
+            }),
+        );
+        let (_, p) = render(&mut gpu, &mut scene);
+        for (x, y, color) in [
+            (4, 4, RED),
+            (196, 4, GREEN),
+            (4, 196, RED),
+            (196, 196, GREEN),
+        ] {
+            let Color(r, g, b, a) = color;
+            let got = pixel(&p, x, y);
+            assert!(
+                near(got, [r, g, b, a]),
+                "direct {direct}, at {:?}: {got:?}",
+                (x, y)
+            );
+        }
+    }
+}
+
+#[test]
+fn drawn_glass_shows_what_the_systems_does_over_black_and_white() {
+    use zgx::glass::{GlassStyle, GlassVariant};
+    let _gpu_fixture = gpu_fixture();
+    // The system's glass in a key window, read back over a black half and a
+    // white half (sRGB levels, the same at either scale): its regular glass
+    // casts a shadow it doesn't show itself.
+    for (variant, dark, over_black, over_white) in [
+        (GlassVariant::Regular, false, 180, 247),
+        (GlassVariant::Regular, true, 26, 91),
+        (GlassVariant::Clear, false, 19, 255),
+        (GlassVariant::Clear, true, 19, 255),
+    ] {
+        let mut gpu = GpuRenderer::new(SIZE, SIZE).unwrap();
+        let mut scene = scene();
+        let root = scene.root();
+        scene.append(root, NodeKind::Rect(Color(0, 0, 0, 255)), fixed(100., 200.));
+        let white = scene.append(
+            root,
+            NodeKind::Rect(Color(255, 255, 255, 255)),
+            fixed(100., 200.),
+        );
+        scene.set_transform(white, Transform { x: 100., y: 0. });
+        let style = GlassStyle {
+            variant,
+            ..Default::default()
+        };
+        let pane = scene.append(
+            root,
+            NodeKind::Quad(QuadStyle {
+                radius: 16.,
+                shadow: style.drawn_shadow(dark),
+                ..Default::default()
+            }),
+            fixed(180., 120.),
+        );
+        scene.set_transform(pane, Transform { x: 10., y: 40. });
+        style.drawn(dark).apply(&mut scene, pane, 0.);
+        let (_, p) = render(&mut gpu, &mut scene);
+        let name = format!("{variant:?}, dark {dark}");
+        for (x, level) in [(30, over_black), (170, over_white)] {
+            let got = pixel(&p, x, 100);
+            assert!(
+                got[..3].iter().all(|v| v.abs_diff(level) <= 4),
+                "{name} at {x}: {got:?}, not {level}"
+            );
+        }
+    }
+}
