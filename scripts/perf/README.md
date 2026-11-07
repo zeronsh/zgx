@@ -25,6 +25,12 @@ than either side's spread. `suite.py dirs A B` compares two directories of
 examples built otherwise from the same source (other `RUSTFLAGS`, a
 profile, an allocator). `suite.py clean` removes the worktrees.
 
+A scripted cell that moves on unrelated pull requests, by the same exact
+function deltas each time, is a cache hit that depends on when Luau's
+collector ran (a weak table deciding it), not their work: find the cache, as
+`converted_with_collection` (zgx-script's `state` tests) guards the
+converted-table one.
+
 ## Where a frame's work goes: `ZGX_PROFILE=1`
 
 Any zgx app or bench run with `ZGX_PROFILE=1` prints, every 120 frames,
