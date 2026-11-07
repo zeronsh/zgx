@@ -1,0 +1,19 @@
+[package]
+name = "zgx-fx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+description = "Ready-made visual effects for zgx: glows, ripples, lenses, fills and more, made only with zgx's public API. Optional: an app that doesn't depend on it pays nothing."
+keywords = ["gui", "ui", "effects", "shaders", "wgsl"]
+categories = ["gui", "rendering"]
+
+[dependencies]
+zgx = { path = "../zgx", version = "0.1.10", default-features = false }
+
+[dev-dependencies]
+zgx-gpu = { path = "../zgx-gpu" }
+zgx-script = { path = "../zgx-script" }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
