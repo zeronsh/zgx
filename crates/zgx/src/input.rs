@@ -2747,8 +2747,7 @@ impl InputDispatcher {
             let latched = self.state.borrow().scroll_latch.filter(|latch| {
                 !axis_turned(latch.axis, delta_x, delta_y)
                     && now.saturating_duration_since(latch.at) < SCROLL_LATCH
-                    && !(wheel
-                        && (x - latch.pointer.0).hypot(y - latch.pointer.1) > WHEEL_MOVED)
+                    && !(wheel && (x - latch.pointer.0).hypot(y - latch.pointer.1) > WHEEL_MOVED)
                     && scene.borrow().contains(latch.node)
                     && self.enabled(&scene.borrow(), latch.node)
             });
