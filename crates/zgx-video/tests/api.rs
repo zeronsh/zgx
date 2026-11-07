@@ -519,3 +519,41 @@ fn a_freeze_holds_its_frame() {
     assert_eq!(width_at(&dir, 0), 36);
     assert_eq!(width_at(&dir, 80), 36);
 }
+
+#[test]
+fn captions_in_a_loop_come_again_each_pass() {
+    let dir = temp_dir("loop-captions");
+    std::fs::write(
+        dir.join("subs.srt"),
+        "1\n00:00:00,000 --> 00:00:00,500\nMMMM\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "L", w = 200, h = 40, fps = 30, duration = 90,
+            render = function()
+                return ui.column { w = 200, h = 40, bg = "#000000",
+                    video.loop { duration = 30, layout = "none",
+                        video.captions { src = "subs.srt", text_size = 30, color = "#ff0000" } } }
+            end,
+        } }
+        "##,
+    )
+    .unwrap();
+    let mut stage = script_stage(&dir, json!({}));
+    let mut pixels = Vec::new();
+    let mut red = |frame: u64| {
+        stage.step_to(frame).unwrap();
+        stage.draw(&mut pixels).unwrap();
+        (0..40u32)
+            .flat_map(|y| (0..200u32).map(move |x| (x, y)))
+            .filter(|(x, y)| pixel(&pixels, 200, *x, *y)[0] > 128)
+            .count()
+    };
+    assert!(red(5) > 30, "its cue in the first pass");
+    assert_eq!(red(20), 0, "gone after half a second");
+    assert!(red(35) > 30, "and back in the second pass");
+}

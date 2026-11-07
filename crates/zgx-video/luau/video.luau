@@ -835,7 +835,7 @@ function video.audio_data(src: string): AudioData
 	local time = time_here()
 	local data: any = { seconds = audio_ask(src, "length", {}) }
 	local function seconds_of(o: any): number
-		local frame = if o and o.frame ~= nil then o.frame else (frame_state:get() - time.offset)
+		local frame = if o and o.frame ~= nil then o.frame else local_frame(time)
 		return (frame - (if o and o.from then o.from else 0)) / time.fps
 	end
 	function data.bars(_self: any, o: any?): { number }
@@ -887,6 +887,7 @@ end
 -- and those to come in `upcoming_color` (or hidden, with `reveal = true`).
 -- Its other properties style the text.
 local CAPTION_KEYS = {
+	children = true,
 	src = true,
 	cues = true,
 	offset = true,
@@ -896,12 +897,12 @@ local CAPTION_KEYS = {
 	reveal = true,
 	color = true,
 }
-function video.captions(opts: any): any
+local CaptionsElement = ui.component(function(opts: any): any
 	local time = time_here()
 	local cues: { Cue } = opts.cues or video.captions_of(opts.src)
 	local offset = opts.offset or 0
 	local function now(): (Cue?, number)
-		return video.caption_at(cues, (frame_state:get() - time.offset) / time.fps - offset)
+		return video.caption_at(cues, local_frame(time) / time.fps - offset)
 	end
 	local style: any = {}
 	for key, value in opts do
@@ -970,6 +971,10 @@ function video.captions(opts: any): any
 		return ui.text(t)
 	end)
 	return ui.div(row)
+end)
+function video.captions(opts: any): any
+	-- A component: it reads the time of the sequence or loop it mounts in.
+	return CaptionsElement(opts)
 end
 
 -- Hold the render until the function this returns is called: for what loads in
