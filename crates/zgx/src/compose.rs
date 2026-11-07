@@ -4755,6 +4755,8 @@ fn open_element(
     scrollbar: bool,
     follow_end: bool,
 ) -> Opened {
+    // A text holds no views (above): no one reads what it passes on.
+    let leaf = matches!(kind, Kind::Text(_) | Kind::BoundText(_));
     let is_scroll = matches!(kind, Kind::Scroll { .. });
     let mut scroll_offset = None;
     let is_image = matches!(kind, Kind::Image { .. });
@@ -5386,6 +5388,7 @@ fn open_element(
         layout_target,
         image_fit.clone(),
         Some(environment.theme.clone()),
+        leaf,
     );
     if let Some(compute) = rich_compute {
         mount_rich(
