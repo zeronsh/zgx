@@ -27,7 +27,7 @@ const MIN_DELAY: Duration = Duration::from_millis(4);
 const MAX_DELAY: Duration = Duration::from_millis(40);
 /// Refreshes this long or longer stand `SLOW_REFRESH_DELAY` behind what has
 /// come, not an event interval, while events come within `SLOW_EVENTS` of them.
-const SLOW_REFRESH: Duration = Duration::from_millis(12);
+pub(crate) const SLOW_REFRESH: Duration = Duration::from_millis(12);
 /// Real trackpad events at 60 Hz, position behind the read that carried it (p50)
 /// and gaps of 25 ms or more between frames that moved, in a window: an interval
 /// behind, 19 ms and 1.7%; this, 13 ms and 4.6%; none, 5 ms and 12%, a frame in
