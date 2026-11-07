@@ -648,8 +648,10 @@ pub(crate) fn mount_links(
         /// Restyled under the pointer: no ring for hover.
         styled: Rc<Cell<bool>>,
     }
-    let bounds = ui.observe_bounds(paragraph);
-    let owner_bounds = ui.observe_bounds(owner);
+    // Its box and its owner's, watched once it has a link to place: most
+    // paragraphs never do, and each box watched is published at every
+    // layout that moves it.
+    let mut observed: Option<(crate::reactive::Signal<Rect>, crate::reactive::Signal<Rect>)> = None;
     let engine = ui.observe_text_geometry_revision();
     let theme = ui.theme_scope();
     let weak = ui.downgrade();
@@ -668,9 +670,6 @@ pub(crate) fn mount_links(
     ui.retain(owner, guard);
     ui.bind(owner, move || {
         let data = content.get();
-        let bounds = bounds.get();
-        let owner_bounds = owner_bounds.get();
-        let engine = engine.get();
         let Some(mut ui) = weak.upgrade() else {
             return;
         };
@@ -686,6 +685,16 @@ pub(crate) fn mount_links(
             crate::selection::set_links(&ui, paragraph, now.clone());
             targets = now;
         }
+        // No link, and none placed: nothing here reads where it is.
+        if data.links.is_empty() && mounted.is_empty() {
+            return;
+        }
+        let (bounds, owner_bounds) = observed
+            .get_or_insert_with(|| (ui.observe_bounds(paragraph), ui.observe_bounds(owner)))
+            .clone();
+        let bounds = bounds.get();
+        let owner_bounds = owner_bounds.get();
+        let engine = engine.get();
         let key = (
             data.rich.clone(),
             bounds.width.to_bits(),
@@ -991,8 +1000,11 @@ pub(crate) fn mount_icons(
     content: crate::reactive::Signal<Content>,
 ) {
     use crate::scene::{NodeId, NodeKind, Style};
-    let bounds = ui.observe_bounds(paragraph);
-    let owner_bounds = ui.observe_bounds(owner);
+    // Watched once it has an icon, as links' boxes are (`mount_links`).
+    let mut observed: Option<(
+        crate::reactive::Signal<crate::scene::Rect>,
+        crate::reactive::Signal<crate::scene::Rect>,
+    )> = None;
     let engine = ui.observe_text_geometry_revision();
     let weak = ui.downgrade();
     let mut mounted: Vec<NodeId> = Vec::new();
@@ -1002,9 +1014,6 @@ pub(crate) fn mount_icons(
     let mut rects: Vec<Option<crate::scene::Rect>> = Vec::new();
     ui.bind(owner, move || {
         let data = content.get();
-        let bounds = bounds.get();
-        let owner_bounds = owner_bounds.get();
-        let engine = engine.get();
         let Some(mut ui) = weak.upgrade() else {
             return;
         };
@@ -1017,6 +1026,12 @@ pub(crate) fn mount_icons(
         if data.icons.is_empty() {
             return;
         }
+        let (bounds, owner_bounds) = observed
+            .get_or_insert_with(|| (ui.observe_bounds(paragraph), ui.observe_bounds(owner)))
+            .clone();
+        let bounds = bounds.get();
+        let owner_bounds = owner_bounds.get();
+        let engine = engine.get();
         let key = (data.rich.clone(), bounds.width.to_bits(), engine);
         if geometry_key.as_ref() != Some(&key) {
             let scene = ui.scene.borrow();
