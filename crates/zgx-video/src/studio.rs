@@ -43,10 +43,27 @@ fn write_app() -> std::io::Result<PathBuf> {
     Ok(file)
 }
 
-/// A render going on behind the app.
-struct Rendering {
+/// A render asked for: waiting its turn, running, or over.
+struct Job {
+    /// Its number, from 1, as the app names it.
+    number: u64,
+    options: RenderOptions,
+    state: &'static str,
+    done: u64,
+    total: u64,
+    said: String,
     cancel: Arc<AtomicBool>,
 }
+/// The renders asked for, run one after another.
+#[derive(Default)]
+struct Queue {
+    jobs: Vec<Job>,
+    next: u64,
+    /// A job is running: a new one waits for it.
+    working: bool,
+}
+/// How many finished renders the app is shown.
+const KEPT_JOBS: usize = 12;
 
 /// The app's host: what its script asks and is told.
 pub struct Studio {
@@ -54,7 +71,7 @@ pub struct Studio {
     state: Shared,
     host: ScriptHost,
     path: PathBuf,
-    rendering: RefCell<Option<Rendering>>,
+    queue: RefCell<Queue>,
     shown: RefCell<Option<Arc<[u8]>>>,
 }
 
@@ -73,7 +90,7 @@ pub fn attach(host: &ScriptHost, path: &Path, scale: f32) -> Result<Rc<Studio>, 
         state,
         host: host.clone(),
         path,
-        rendering: RefCell::new(None),
+        queue: RefCell::default(),
         shown: RefCell::new(None),
     });
     // What the player tells comes through on the main loop, when the app's
@@ -141,15 +158,15 @@ pub fn attach(host: &ScriptHost, path: &Path, scale: f32) -> Result<Rc<Studio>, 
     host.async_action("studio.render", move |arg| {
         let (studio, arg) = (this.clone(), json_of(&arg));
         async move {
-            studio.start_render(arg).await;
-            Ok(Value::Nil)
+            let number = studio.enqueue(arg);
+            studio.work().await;
+            Ok(Value::Num(number as f64))
         }
     });
     let this = studio.clone();
-    host.action("studio.cancel", move |_| {
-        if let Some(rendering) = &*this.rendering.borrow() {
-            rendering.cancel.store(true, Ordering::Relaxed);
-        }
+    host.action("studio.cancel", move |arg| {
+        let number = json_of(&arg).as_u64();
+        this.cancel(number);
     });
     Ok(studio)
 }
@@ -229,65 +246,153 @@ impl Studio {
             }
         }
     }
-    async fn start_render(self: Rc<Self>, arg: Json) {
-        if self.rendering.borrow().is_some() {
-            return;
-        }
-        let output = arg["output"].as_str().unwrap_or("out.mp4").to_owned();
+    /// Queue a render of `arg`'s composition (`id`, `props`, `output`,
+    /// `scale`); its number.
+    fn enqueue(&self, arg: Json) -> u64 {
         let options = RenderOptions {
             script: self.path.clone(),
             composition: arg["id"].as_str().map(str::to_owned),
-            output: output.clone().into(),
+            output: arg["output"].as_str().unwrap_or("out.mp4").into(),
             props: arg.get("props").cloned().unwrap_or(json!({})),
             scale: arg["scale"].as_f64().unwrap_or(1.) as f32,
             ..Default::default()
         };
-        let cancel = Arc::new(AtomicBool::new(false));
-        *self.rendering.borrow_mut() = Some(Rendering {
-            cancel: cancel.clone(),
-        });
-        self.merge(
-            json!({ "render": { "state": "running", "done": 0, "total": 0, "output": output } }),
-        );
-        let (tell, mut heard) = zgx::task::latest::<Result<Progress, Result<String, String>>>();
-        std::thread::spawn(move || {
-            let result = render(&options, |progress| {
-                tell.send(Ok(progress));
-                !cancel.load(Ordering::Relaxed)
+        let number = {
+            let mut queue = self.queue.borrow_mut();
+            queue.next += 1;
+            let number = queue.next;
+            queue.jobs.push(Job {
+                number,
+                options,
+                state: "queued",
+                done: 0,
+                total: 0,
+                said: String::new(),
+                cancel: Arc::default(),
             });
-            tell.send(Err(match result {
-                Ok(report) => Ok(format!(
-                    "{} frames in {:.1} s, {:.0} a second",
-                    report.frames,
-                    report.elapsed.as_secs_f64(),
-                    report.rate
-                )),
-                Err(error) => Err(error),
-            }));
-        });
-        loop {
-            match heard.recv().await {
-                Some(Ok(progress)) => {
-                    self.merge(json!({ "render": {
-                        "state": "running", "done": progress.done, "total": progress.total, "output": output,
-                    } }));
-                }
-                Some(Err(done)) => {
-                    let (state, said) = match done {
-                        Ok(said) => ("done", said),
-                        Err(error) if error == "stopped" => ("stopped", String::new()),
-                        Err(error) => ("failed", error),
-                    };
-                    self.merge(
-                        json!({ "render": { "state": state, "said": said, "output": output } }),
-                    );
-                    break;
-                }
-                None => break,
+            // What's over goes, past the latest few.
+            let over = queue.jobs.iter().filter(|job| is_over(job.state)).count();
+            let mut drop = over.saturating_sub(KEPT_JOBS);
+            queue.jobs.retain(|job| {
+                let goes = drop > 0 && is_over(job.state);
+                drop -= usize::from(goes);
+                !goes
+            });
+            number
+        };
+        self.publish();
+        number
+    }
+    /// Stop render `number` (the running one, if `None`): a queued one never
+    /// starts, a running one stops at its next frame.
+    fn cancel(&self, number: Option<u64>) {
+        let mut queue = self.queue.borrow_mut();
+        for job in &mut queue.jobs {
+            let chosen = number.map_or(job.state == "running", |number| job.number == number);
+            if !chosen {
+                continue;
+            }
+            match job.state {
+                "queued" => job.state = "stopped",
+                "running" => job.cancel.store(true, Ordering::Relaxed),
+                _ => {}
             }
         }
-        *self.rendering.borrow_mut() = None;
+        drop(queue);
+        self.publish();
     }
+    fn publish(&self) {
+        let jobs: Vec<Json> = self
+            .queue
+            .borrow()
+            .jobs
+            .iter()
+            .map(|job| {
+                json!({
+                    "number": job.number,
+                    "id": job.options.composition,
+                    "output": job.options.output,
+                    "state": job.state,
+                    "done": job.done,
+                    "total": job.total,
+                    "said": job.said,
+                })
+            })
+            .collect();
+        self.merge(json!({ "renders": jobs }));
+    }
+    /// Run what's queued, one render after another, unless a worker already
+    /// is: the first caller works until the queue is empty.
+    async fn work(self: Rc<Self>) {
+        {
+            let mut queue = self.queue.borrow_mut();
+            if queue.working {
+                return;
+            }
+            queue.working = true;
+        }
+        loop {
+            let next = {
+                let mut queue = self.queue.borrow_mut();
+                let job = queue.jobs.iter_mut().find(|job| job.state == "queued");
+                job.map(|job| {
+                    job.state = "running";
+                    (job.number, job.options.clone(), job.cancel.clone())
+                })
+            };
+            let Some((number, options, cancel)) = next else {
+                break;
+            };
+            self.publish();
+            let (tell, mut heard) = zgx::task::latest::<Result<Progress, Result<String, String>>>();
+            std::thread::spawn(move || {
+                let result = render(&options, |progress| {
+                    tell.send(Ok(progress));
+                    !cancel.load(Ordering::Relaxed)
+                });
+                tell.send(Err(match result {
+                    Ok(report) => Ok(format!(
+                        "{} frames in {:.1} s, {:.0} a second",
+                        report.frames,
+                        report.elapsed.as_secs_f64(),
+                        report.rate
+                    )),
+                    Err(error) => Err(error),
+                }));
+            });
+            loop {
+                let heard = heard.recv().await;
+                let mut queue = self.queue.borrow_mut();
+                let Some(job) = queue.jobs.iter_mut().find(|job| job.number == number) else {
+                    break;
+                };
+                match heard {
+                    Some(Ok(progress)) => {
+                        (job.done, job.total) = (progress.done, progress.total);
+                    }
+                    Some(Err(over)) => {
+                        (job.state, job.said) = match over {
+                            Ok(said) => ("done", said),
+                            Err(error) if error == "stopped" => ("stopped", String::new()),
+                            Err(error) => ("failed", error),
+                        };
+                    }
+                    None => job.state = "failed",
+                }
+                let over = is_over(job.state);
+                drop(queue);
+                self.publish();
+                if over {
+                    break;
+                }
+            }
+        }
+        self.queue.borrow_mut().working = false;
+    }
+}
+
+fn is_over(state: &str) -> bool {
+    matches!(state, "done" | "failed" | "stopped")
 }
 
 fn composition_json(comp: &Composition) -> Json {
