@@ -2065,7 +2065,11 @@ impl Host {
             title_press: None,
             cursor: (0., 0.),
             window_cursor: WindowCursor::default(),
-            scroll: Default::default(),
+            scroll: {
+                let mut scroll = crate::scroll_resample::ScrollResampler::default();
+                scroll.set_wheel_eases(cfg!(not(target_os = "macos")));
+                scroll
+            },
             touch: Default::default(),
             touch_focus: None,
             #[cfg(windows)]
