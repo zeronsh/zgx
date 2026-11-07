@@ -6496,7 +6496,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "now",
         lua.create_function(|_, ()| {
-            Ok(std::time::SystemTime::now()
+            Ok(zgx::clock::system_now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0., |d| d.as_secs_f64() * 1000.))
         })?,

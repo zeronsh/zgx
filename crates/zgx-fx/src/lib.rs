@@ -248,7 +248,10 @@ fn mounted(cx: &mut Context, view: View, mut make: impl FnMut() -> Fx + 'static)
         if let Some(shots) = &fx.shots {
             shots.hook(&hooked, stepper.clone(), handle.clone(), fx.clone());
         }
-        fx.drive(themes.system_preferences().reduced_motion, Instant::now())
+        fx.drive(
+            themes.system_preferences().reduced_motion,
+            zgx::clock::now(),
+        )
     });
     view.on_mount(move |mounted| *held.borrow_mut() = Some(mounted))
 }
@@ -316,7 +319,7 @@ impl Shots {
             });
         } else {
             pool.next = Some((x, y));
-            let now = Instant::now();
+            let now = zgx::clock::now();
             if let Some(oldest) = pool.live.front_mut() {
                 oldest.leaving.get_or_insert(now);
             }

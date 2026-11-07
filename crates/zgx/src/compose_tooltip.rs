@@ -122,7 +122,7 @@ fn hide(open: &crate::reactive::Signal<bool>, shown: &Cell<bool>) {
     let left = TOOLTIPS.with(|t| {
         let (count, _) = t.get();
         let left = count.saturating_sub(1);
-        t.set((left, Some(Instant::now())));
+        t.set((left, Some(crate::clock::now())));
         left
     });
     if left == 0 {
@@ -200,12 +200,12 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
                     }
                     return;
                 };
-                let start = Instant::now();
+                let start = crate::clock::now();
                 let fade = fade.clone();
                 *fading.borrow_mut() = Some(runner.spawn(Box::pin(async move {
                     loop {
                         crate::timer::sleep(Duration::from_millis(8)).await;
-                        let t = (start.elapsed().as_secs_f32() * 1000. / ms).min(1.);
+                        let t = (crate::clock::since(start).as_secs_f32() * 1000. / ms).min(1.);
                         fade.set(from + (to - from) * (1. - (1. - t).powi(3)));
                         if t >= 1. {
                             break;
@@ -320,8 +320,9 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
                                 || TOOLTIPS.with(|t| {
                                     let (count, last) = t.get();
                                     count > 0
-                                        || last
-                                            .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+                                        || last.is_some_and(|at| {
+                                            crate::clock::since(at) < Duration::from_secs(1)
+                                        })
                                 });
                             if now || runner.is_none() {
                                 // Taking over from another (or back while it

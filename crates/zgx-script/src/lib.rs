@@ -388,6 +388,33 @@ fn thread_cpu() -> Duration {
     START.with(|s| s.elapsed())
 }
 
+/// What a script reads of time and chance, on a virtual clock: Luau's own
+/// clocks are the wall's, and its random numbers seeded from it.
+#[cold]
+fn on_virtual_clock(lua: &Lua) -> mlua::Result<()> {
+    let start = zgx::clock::now();
+    let os: mlua::Table = lua.globals().get("os")?;
+    os.set(
+        "clock",
+        lua.create_function(move |_, ()| Ok((zgx::clock::now() - start).as_secs_f64()))?,
+    )?;
+    let time: mlua::Function = os.get("time")?;
+    os.set(
+        "time",
+        lua.create_function(move |_, date: Option<mlua::Value>| match date {
+            Some(date) => time.call::<mlua::Value>(date),
+            None => Ok(mlua::Value::Number(
+                zgx::clock::system_now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0., |date| date.as_secs() as f64),
+            )),
+        })?,
+    )?;
+    let math: mlua::Table = lua.globals().get("math")?;
+    math.get::<mlua::Function>("randomseed")?.call::<()>(1)?;
+    Ok(())
+}
+
 pub(crate) struct Vm {
     name: String,
     /// The time budget and memory watch (see `interrupt`).
@@ -4185,6 +4212,9 @@ impl ScriptHost {
         .map_err(fail)?;
         lazy::attach(&lua, &ui, lazy).map_err(fail)?;
         ui.set_readonly(true);
+        if zgx::clock::is_virtual() {
+            on_virtual_clock(&lua).map_err(fail)?;
+        }
         lua.sandbox(true).map_err(fail)?;
         let (root, contributions, hooks) = self.evaluate(&vm, script, files, &code)?;
         Ok((vm, root, contributions, hooks))

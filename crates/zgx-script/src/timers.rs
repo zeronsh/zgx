@@ -93,6 +93,9 @@ impl Timers {
             loop {
                 match &test {
                     Some(test) => test.sleep(period).await,
+                    // A window's next-frame timer is a millisecond's; a virtual
+                    // clock's frame hasn't ended, so `ui.after(0)` runs now.
+                    None if zgx::clock::is_virtual() => zgx::timer::sleep(period).await,
                     None => zgx::timer::sleep(period.max(Duration::from_millis(1))).await,
                 }
                 if !running.get() || !fire() || !repeat {

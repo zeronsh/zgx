@@ -5483,7 +5483,7 @@ impl Ui {
             if caret_shown {
                 // A bare insertion point: no composition, no selection.
                 let bare = e.preedit().is_none() && selection.range().is_empty();
-                draw_blink.restart(caret, caret_color, Instant::now(), bare);
+                draw_blink.restart(caret, caret_color, crate::clock::now(), bare);
             } else {
                 draw_blink.release(caret);
             }
@@ -6315,7 +6315,7 @@ impl Ui {
                 {
                     return;
                 }
-                let now = Instant::now();
+                let now = crate::clock::now();
                 let old = storage
                     .interaction
                     .borrow_mut()

@@ -6840,11 +6840,12 @@ fn mount_progress(
             if sweeping.borrow().is_none()
                 && let Some(runner) = &runner
             {
-                let (phase, start) = (phase.clone(), std::time::Instant::now());
+                let (phase, start) = (phase.clone(), crate::clock::now());
                 *sweeping.borrow_mut() = Some(runner.spawn(Box::pin(async move {
                     loop {
                         crate::timer::sleep(std::time::Duration::from_millis(16)).await;
-                        let t = (start.elapsed().as_secs_f32() / SWEEP.as_secs_f32()).fract();
+                        let t = (crate::clock::since(start).as_secs_f32() / SWEEP.as_secs_f32())
+                            .fract();
                         phase.set(t);
                     }
                 })));
