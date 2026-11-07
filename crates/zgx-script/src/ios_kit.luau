@@ -396,7 +396,7 @@ function ios.composer(props)
 					left = 0,
 					right = 0,
 					top = 0,
-					bottom = 0,
+					h = "100%",
 					value = value,
 					label = props.placeholder or "Message",
 					placeholder = props.placeholder or "Message",

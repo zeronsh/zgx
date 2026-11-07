@@ -150,7 +150,7 @@ impl Key {
         range.hash(hasher);
         size.to_bits().hash(hasher);
         padding.to_bits().hash(hasher);
-        font.weight.hash(hasher);
+        crate::text::shown_weight(font.weight).hash(hasher);
         font.italic.hash(hasher);
     }
     /// Plain text's key: one run over all of it, as `Key::of` makes for

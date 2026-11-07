@@ -54,6 +54,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Drawing planes stacked between native views: each a pane, and a sheet of
     // paint over the whole window above it.
     let levels = number("COST_LEVELS", 0);
+    // How often the scroll moves: less than a refresh, or some refreshes get nothing
+    // new, and the gaps measured are this timer's.
+    let tick_ms = number("COST_TICK_MS", 8) as u64;
     Application::new()
         .window(WindowOptions::default())
         .run(move |cx| {
@@ -67,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
                 loop {
-                    zgx::timer::sleep(Duration::from_millis(8)).await;
+                    zgx::timer::sleep(Duration::from_millis(tick_ms)).await;
                     let t = start.elapsed().as_secs_f32();
                     driver.set(((t * 1.2).sin() + 1.) * 2000.);
                     tick.set(tick.get().wrapping_add(1));

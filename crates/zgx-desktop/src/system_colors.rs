@@ -539,6 +539,10 @@ pub(crate) fn sync(ui: &zgx::widgets::Ui) {
     tokens.extend(transparency_tokens(preferences));
     ui.theme().set_system_tokens(tokens);
     ui.theme().set_system_preferences(preferences);
+    #[cfg(target_os = "ios")]
+    if zgx_gpu::text::set_bold_text(crate::ios_system::bold_text()) {
+        ui.scene.borrow_mut().fonts_replaced();
+    }
     if let Some(interval) = double_click_time() {
         ui.input.set_double_click_time(interval);
     }

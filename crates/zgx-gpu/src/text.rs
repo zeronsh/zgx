@@ -23,6 +23,28 @@ pub(crate) fn glyph_image(
 use std::{ops::Range, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 use zgx::scene::Rect;
+
+/// iOS's Bold Text: all text a step or two heavier, as the system's is.
+static BOLD_TEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether text is shown heavier; whether that changed, so text shapes again.
+pub fn set_bold_text(on: bool) -> bool {
+    BOLD_TEXT.swap(on, std::sync::atomic::Ordering::Relaxed) != on
+}
+/// The weight text of `weight` shows at.
+pub fn shown_weight(weight: u16) -> u16 {
+    if !BOLD_TEXT.load(std::sync::atomic::Ordering::Relaxed) {
+        return weight;
+    }
+    bolder(weight)
+}
+fn bolder(weight: u16) -> u16 {
+    match weight {
+        0..=400 => 600,
+        401..=600 => 700,
+        heavier => (heavier + 100).min(900),
+    }
+}
+
 /// The width text wraps at: the box's, and a thousandth of a point more.
 /// A box sized to its text gets that width back through layout arithmetic
 /// (a bubble's padding added, then taken off), where a float's last bit
@@ -172,7 +194,9 @@ pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> 
         // titles get their display cut, tighter and narrower.
         .optical(size.round().clamp(1., 1000.) as u16)
         .masked(font.masked)
-        .weight(cosmic_text::Weight(font.weight.clamp(1, 1000)))
+        .weight(cosmic_text::Weight(
+            shown_weight(font.weight).clamp(1, 1000),
+        ))
         .style(if font.italic {
             cosmic_text::Style::Italic
         } else {
@@ -233,14 +257,14 @@ fn fallback_spans<'a>(
         .map(|f| {
             let id = fonts.query_face(
                 family(f),
-                cosmic_text::Weight(font.weight),
+                cosmic_text::Weight(shown_weight(font.weight)),
                 if font.italic {
                     cosmic_text::Style::Italic
                 } else {
                     cosmic_text::Style::Normal
                 },
             );
-            id.and_then(|id| fonts.get_font(id, cosmic_text::Weight(font.weight)))
+            id.and_then(|id| fonts.get_font(id, cosmic_text::Weight(shown_weight(font.weight))))
         })
         .collect();
     let mut ranges: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
@@ -2704,6 +2728,15 @@ mod monospace_fallback_tests {
 
 #[cfg(test)]
 mod wash_tests {
+    #[test]
+    fn bold_text_makes_every_weight_heavier_and_keeps_their_order() {
+        let shown: Vec<u16> = [100, 400, 500, 600, 700, 800, 900]
+            .map(super::bolder)
+            .to_vec();
+        assert_eq!(shown, [600, 600, 700, 700, 800, 900, 900]);
+        assert!(shown.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
     use super::*;
     use zgx::{
         rich_text::{RichText, TextRun},

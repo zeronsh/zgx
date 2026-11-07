@@ -46,6 +46,12 @@ pub(crate) fn preferences() -> SystemPreferences {
     }
 }
 
+/// Whether the system's Bold Text is on.
+pub(crate) fn bold_text() -> bool {
+    // SAFETY: UIKit's plain getter.
+    unsafe { UIAccessibilityIsBoldTextEnabled() }
+}
+
 /// `UIColor`'s class method `name`, as the current traits resolve it.
 fn system_color(name: objc2::runtime::Sel) -> Option<Color> {
     // SAFETY: a UIColor class method named below, returning a UIColor, and
@@ -379,7 +385,7 @@ pub(crate) fn symbol(
         fn UIGraphicsPopContext();
     }
     // UIImageSymbolWeight: ultraLight 1 … black 9, as CSS's hundreds.
-    let weight = (style.weight.clamp(100, 900) / 100) as isize;
+    let weight = (zgx_gpu::text::shown_weight(style.weight).clamp(100, 900) / 100) as isize;
     // SAFETY: UIKit's constructors and getters, on the main thread where
     // views lower; a bitmap context over `pixels`, which outlives it, with
     // the premultiplied RGBA layout its info names.
