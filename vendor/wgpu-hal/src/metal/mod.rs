@@ -592,6 +592,22 @@ impl core::borrow::Borrow<dyn crate::DynTexture> for SurfaceTexture {
 unsafe impl Send for SurfaceTexture {}
 unsafe impl Sync for SurfaceTexture {}
 
+/// zgx patch: presents in a transaction wait for their work to finish.
+pub static PRESENT_WAITS_FOR_GPU: atomic::AtomicBool = atomic::AtomicBool::new(false);
+/// zgx patch: nanoseconds iOS's command buffers ran, and how many ran.
+#[cfg(target_os = "ios")]
+static GPU_NANOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(target_os = "ios")]
+static GPU_BUFFERS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// zgx patch: the GPU time the app's command buffers took, and how many.
+#[cfg(target_os = "ios")]
+pub fn gpu_time() -> (u64, u64) {
+    (
+        GPU_NANOS.load(core::sync::atomic::Ordering::Relaxed),
+        GPU_BUFFERS.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 impl crate::Queue for Queue {
     type A = Api;
 
@@ -604,7 +620,23 @@ impl crate::Queue for Queue {
         autoreleasepool(|_| {
             let extra_command_buffer = {
                 let completed_value = Arc::clone(&signal_fence.completed_value);
-                let block = block2::RcBlock::new(move |_cmd_buf| {
+                let block = block2::RcBlock::new(move |_cmd_buf: core::ptr::NonNull<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>| {
+                    // zgx patch: what iOS's `ZGX_IOS_METRICS` reports.
+                    #[cfg(target_os = "ios")]
+                    {
+                        let buffer = unsafe { _cmd_buf.as_ref() };
+                        let (end, start): (f64, f64) = unsafe {
+                            (
+                                objc2::msg_send![buffer, GPUEndTime],
+                                objc2::msg_send![buffer, GPUStartTime],
+                            )
+                        };
+                        let ran = end - start;
+                        if ran > 0. {
+                            GPU_NANOS.fetch_add((ran * 1e9) as u64, core::sync::atomic::Ordering::Relaxed);
+                        }
+                        GPU_BUFFERS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    }
                     completed_value.store(signal_value, atomic::Ordering::Release);
                 });
 
@@ -714,7 +746,13 @@ impl crate::Queue for Queue {
             command_buffer.commit();
 
             if texture.present_with_transaction {
-                command_buffer.waitUntilScheduled();
+                // zgx patch: a frame other layers change with must be finished,
+                // not only scheduled, or a slow one misses the commit it is in.
+                if PRESENT_WAITS_FOR_GPU.load(atomic::Ordering::Relaxed) {
+                    command_buffer.waitUntilCompleted();
+                } else {
+                    command_buffer.waitUntilScheduled();
+                }
                 texture.drawable.present();
             }
         });

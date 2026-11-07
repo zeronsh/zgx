@@ -83,6 +83,7 @@ impl TextStore {
     }
     /// The focused editor's input scope (`input_scope`), the default with
     /// none.
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     pub(crate) fn input_scope(&self) -> i32 {
         input_scope(
             self.editor
@@ -92,6 +93,11 @@ impl TextStore {
     }
     pub(crate) fn is_composing(&self) -> bool {
         self.composition.is_some()
+    }
+    /// The open composition's range in the document (iOS's marked text).
+    #[cfg(target_os = "ios")]
+    pub(crate) fn composition_range(&self) -> Option<Range<usize>> {
+        self.composition.clone()
     }
     /// The document's pieces: the committed text before the selection (its
     /// UTF-16 length and byte end), the preedit if any (in place of the
@@ -188,6 +194,34 @@ impl TextStore {
         let start = start.min(end);
         let (a, b) = (shown_byte(editor, start), shown_byte(editor, end));
         editor.text_area(a..b)
+    }
+    /// The document's offset nearest the window's point `(x, y)`.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn offset_at(&self, x: f32, y: f32) -> Option<usize> {
+        let editor = self.editor.as_ref()?;
+        let byte = editor.offset_at(x, y)?;
+        Some(editor.editor.borrow_mut().byte_to_utf16(byte))
+    }
+    /// Where `start..end` shows, a box for each line it runs on.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn line_areas(&self, start: usize, end: usize) -> Vec<zgx::scene::Rect> {
+        /// Past this it is one box: a phone's selection of a long document.
+        const CHARACTERS: usize = 4096;
+        let mut lines: Vec<zgx::scene::Rect> = Vec::new();
+        if end.saturating_sub(start) > CHARACTERS {
+            lines.extend(self.area(start, end));
+            return lines;
+        }
+        for at in start..end {
+            let Some(area) = self.area(at, at + 1) else {
+                continue;
+            };
+            match lines.last_mut() {
+                Some(line) if (line.y - area.y).abs() < 1. => *line = line.union(area),
+                _ => lines.push(area),
+            }
+        }
+        lines
     }
     /// The selection (`GetSelection`): the caret or selection in the
     /// composition while there is one, else the editor's; its start, its end,
@@ -366,6 +400,7 @@ impl TextStore {
     /// The input method marked its composition's clauses (its display
     /// attributes, read after each of its edits): document ranges and how
     /// each is marked. Ranges outside the composition are left out.
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     pub(crate) fn mark_clauses(&mut self, clauses: &[(Range<usize>, ClauseStyle)]) {
         let (Some(editor), Some(composition)) = (self.editor.clone(), self.composition.clone())
         else {
@@ -456,6 +491,7 @@ impl TextStore {
 /// editor's `InputMode`: which touch keyboard Windows shows, what its input
 /// methods offer. `None`'s keyboard isn't shown at all (the host's part);
 /// its scope is the default.
+#[cfg_attr(target_os = "ios", allow(dead_code))]
 pub(crate) fn input_scope(mode: InputMode) -> i32 {
     match mode {
         InputMode::Text | InputMode::None => 0, // IS_DEFAULT

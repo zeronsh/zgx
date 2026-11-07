@@ -276,6 +276,9 @@ struct EditorHint {
     /// The caret's colour and width, if not the text's and the app's
     /// (`EditorHandle::set_caret_style`).
     caret: Cell<(Option<Color>, Option<f32>)>,
+    /// The platform shows the selection and caret over it, with its handles
+    /// (`EditorHandle::set_platform_selection`).
+    platform_selection: Cell<bool>,
     select_on_focus: Cell<bool>,
     /// A text area: once its text holds a line break, it is laid out a line
     /// at a time at any length (`editor_lines`), so an edit shapes the line
@@ -500,6 +503,7 @@ impl EditorHint {
         Self {
             value,
             placeholder: RefCell::default(),
+            platform_selection: Cell::new(false),
             caret: Cell::default(),
             select_on_focus: Cell::default(),
             lines,
@@ -930,6 +934,13 @@ impl EditorHandle {
     pub fn set_caret_style(&self, color: Option<Color>, width: Option<f32>) {
         let width = width.filter(|w| w.is_finite() && *w >= 0.);
         if self.hint.caret.replace((color, width)) != (color, width) {
+            self.refresh();
+        }
+    }
+    /// Whether the platform draws the selection and caret, with its own
+    /// handles and loupe (iOS's `UITextInteraction`), and the editor none.
+    pub fn set_platform_selection(&self, platform: bool) {
+        if self.hint.platform_selection.replace(platform) != platform {
             self.refresh();
         }
     }
@@ -2986,6 +2997,35 @@ impl Ui {
     /// behind look alike on screen; these tell them apart.
     pub fn scroll_report(&self, id: NodeId) -> Option<(f32, f32, f32)> {
         crate::elastic::report(self, id)
+    }
+    /// The innermost scroll view at (`x`, `y`) with room to scroll, for a
+    /// platform's own scroller to drive.
+    pub fn scroll_driver_at(&self, x: f32, y: f32) -> Option<crate::elastic::ScrollDriver> {
+        crate::elastic::driver_at(self, x, y)
+    }
+    /// What finds the innermost scroll view with room to scroll at a point,
+    /// for a platform's own scroller to drive.
+    pub fn scroll_driver_finder(
+        &self,
+    ) -> impl Fn(f32, f32) -> Option<crate::elastic::ScrollDriver> + use<> {
+        let storage = Rc::downgrade(&self.storage);
+        let scene = Rc::downgrade(&self.scene);
+        move |x, y| {
+            let (storage, scene) = (storage.upgrade()?, scene.upgrade()?);
+            let scene = scene.try_borrow().ok()?;
+            let state = storage.elastic.try_borrow().ok()?;
+            crate::elastic::driver_in(&scene, &state, x, y)
+        }
+    }
+    /// What finds the tallest scroll view with room to scroll, for a
+    /// platform's own scroller to drive (a tap on iOS's status bar).
+    pub fn main_scroll_driver(&self) -> impl Fn() -> Option<crate::elastic::ScrollDriver> + use<> {
+        let storage = Rc::downgrade(&self.storage);
+        move || {
+            let storage = storage.upgrade()?;
+            let state = storage.elastic.borrow();
+            crate::elastic::main_driver(&state)
+        }
     }
     /// Take a trackpad's swipe between pages as navigation, as Safari does:
     /// a gesture that starts across where nothing under it scrolls that way
@@ -5255,7 +5295,10 @@ impl Ui {
             );
             let font = editor_font(&s, root, &font).into_owned();
             s.set_font(text, font.clone());
-            let caret_color = draw_hint.caret.get().0.unwrap_or(color);
+            let caret_color = match draw_hint.platform_selection.get() {
+                true => Color(0, 0, 0, 0),
+                false => draw_hint.caret.get().0.unwrap_or(color),
+            };
             s.set_kind(caret, NodeKind::Rect(caret_color));
             let wrap_width = draw_wrap.get().then_some(inner_width.max(1.));
             // The committed text's revision tells its layout it is the same
@@ -5757,6 +5800,7 @@ impl Ui {
                     }),
                     rects: rects
                         .into_iter()
+                        .filter(|_| !draw_hint.platform_selection.get())
                         .map(|(x, y, w, h)| Rect::new(x, y, w, h))
                         .collect(),
                     text_color: None,

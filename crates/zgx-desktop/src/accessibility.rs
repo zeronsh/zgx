@@ -179,7 +179,10 @@ impl AccessibilityTree {
     fn id(&mut self, node: NodeId) -> AccessibleId {
         *self.ids.entry(node).or_insert_with(|| {
             self.next += 1;
-            AccessibleId(self.next)
+            let id = AccessibleId(self.next);
+            #[cfg(target_os = "ios")]
+            NODES_OF_IDS.with(|nodes| nodes.borrow_mut().insert(id.0, node));
+            id
         })
     }
     /// The scene node an accessible ID stands for, if it is still mounted.
@@ -1452,6 +1455,9 @@ fn within_control(scene: &Scene, semantics: &Semantics, id: NodeId) -> bool {
     false
 }
 fn semantic_role(semantic: &zgx::semantics::SemanticNode) -> accesskit::Role {
+    if semantic.search && semantic.role == Role::TextInput {
+        return accesskit::Role::SearchInput;
+    }
     if semantic.role == Role::MenuItem && semantic.checked.is_some() && semantic.radio {
         accesskit::Role::MenuItemRadio
     } else if semantic.role == Role::MenuItem && semantic.checked.is_some() {
@@ -4057,4 +4063,16 @@ mod language_tests {
         ui.prepare_frame();
         assert_eq!(sent(&mut adapter, &ui), [some("zh-HK"), None, None]);
     }
+}
+
+#[cfg(target_os = "ios")]
+thread_local! {
+    /// Which scene node each accessible ID stands for, for what VoiceOver asks of
+    /// one without the tree at hand.
+    static NODES_OF_IDS: std::cell::RefCell<HashMap<u64, NodeId>> = std::cell::RefCell::default();
+}
+/// The scene node accessible ID `id` stands for.
+#[cfg(target_os = "ios")]
+pub(crate) fn scene_node_of(id: u64) -> Option<NodeId> {
+    NODES_OF_IDS.with(|nodes| nodes.borrow().get(&id).copied())
 }

@@ -209,7 +209,7 @@ impl Font {
         // Text (`platform_outlines`). Asked once a face, as it loads.
         let drawable = has_drawable_outlines(&font_ref);
         let platform_outlines = !drawable
-            && cfg!(target_os = "macos")
+            && cfg!(any(target_os = "macos", target_os = "ios"))
             && font_ref.table_data(Tag::new(b"hvgl")).is_some();
         if !drawable && !platform_outlines {
             log::debug!("{}: no outlines to draw", info.post_script_name);

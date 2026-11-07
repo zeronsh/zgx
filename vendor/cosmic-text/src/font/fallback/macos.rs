@@ -29,7 +29,10 @@ impl Fallback for PlatformFallback {
 // Fallbacks to use after any script specific fallbacks
 fn common_fallback() -> &'static [&'static str] {
     &[
+        #[cfg(target_os = "macos")]
         ".SF NS",
+        #[cfg(target_os = "ios")]
+        "System Font",
         "Menlo",
         "Apple Color Emoji",
         "Geneva",

@@ -50,8 +50,6 @@ dependencies = [
 [[package]]
 name = "accesskit_ios"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "750c4e9f6ce888dfe8a10c0f1b5ceb646a7854fd46579d74919219d1bb314083"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -5154,6 +5152,7 @@ dependencies = [
  "accesskit",
  "accesskit_atspi_common",
  "accesskit_consumer",
+ "accesskit_ios",
  "accesskit_winit",
  "arboard",
  "block2 0.6.2",

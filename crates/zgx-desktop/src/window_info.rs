@@ -216,6 +216,15 @@ pub struct WindowInfo {
     /// buttons at the top right, macOS's traffic lights at the top left),
     /// or `None` where there are none.
     pub controls: Signal<Option<zgx::scene::Rect>>,
+    /// What the screen's edges and the system's bars leave of the window, in
+    /// points: top, right, bottom, left. iOS's safe area; all 0 elsewhere.
+    pub safe_area: Signal<[f32; 4]>,
+    /// How much of the window's bottom the on-screen keyboard covers, in
+    /// points (iOS; 0 elsewhere).
+    pub keyboard: Signal<f32>,
+    /// How far past an end the scroll view being moved shows, in points:
+    /// negative past its start (iOS, for a pull to refresh; 0 elsewhere).
+    pub overscroll: Signal<f32>,
 }
 impl WindowInfo {
     pub(crate) fn new(ui: &Ui, width: f64, height: f64) -> Self {
@@ -233,6 +242,9 @@ impl WindowInfo {
             corner_radius: ui.signal(0.),
             titlebar_area: ui.signal(None),
             controls: ui.signal(None),
+            safe_area: ui.signal([0.; 4]),
+            keyboard: ui.signal(0.),
+            overscroll: ui.signal(0.),
         }
     }
     pub(crate) fn refresh(&self, window: &Window, titlebar: crate::Titlebar) {
@@ -495,6 +507,14 @@ pub(crate) fn attributes(
         attrs = attrs
             .with_inner_size(monitor.size())
             .with_position(monitor.position());
+    }
+    // A window on a phone is the screen: the sizes asked for are a desktop's.
+    #[cfg(target_os = "ios")]
+    {
+        attrs.inner_size = None;
+        attrs.min_inner_size = None;
+        attrs.max_inner_size = None;
+        attrs.position = None;
     }
     Ok(attrs)
 }

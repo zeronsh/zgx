@@ -211,6 +211,14 @@ pub trait Platform {
     fn open_files(&self, picker: FilePicker) -> Pending<Result<Vec<PathBuf>, String>>;
     /// Where the user chooses to save: none if they cancel.
     fn save_file(&self, picker: FilePicker) -> Pending<Result<Option<PathBuf>, String>>;
+    /// A file the app wrote (`ui.write_file`), as it is now on disk: a
+    /// platform that saves in two steps finishes a save the person chose
+    /// here (iOS gives `save_file` a file of the app's own, then hands it to
+    /// the system's export picker, the person choosing where it goes).
+    /// Nothing by default.
+    fn file_written(&self, path: &std::path::Path) {
+        let _ = path;
+    }
     /// Ask for a folder: the one the user picks, `None` if they cancel. A
     /// platform without a folder dialog refuses.
     fn open_folder(&self, picker: FilePicker) -> Pending<Result<Option<PathBuf>, String>> {
