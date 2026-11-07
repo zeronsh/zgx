@@ -4407,6 +4407,10 @@ fn collect_fully(lua: &mlua::Lua) {
 /// while the app is in use, so a page shown again is instant).
 fn trim_idle(inner: &Inner) {
     value::forget_streamed_edits();
+    let loaded = inner.current.borrow().clone();
+    for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
+        markdown::rest(&vm.lua);
+    }
     collect_garbage(inner);
     mlua::release_free_pages();
     inner.assets.trim();
