@@ -1587,10 +1587,18 @@ export type FullScreenTransition = { phase: "entering" | "leaving", duration: nu
 -- resizes, scale and fullscreen. `zoom` is the window's zoom, as a
 -- browser's page zoom (1 at 100%; Cmd/Ctrl +, - and 0 change it, and
 -- setting it zooms the window, within 0.25 to 5); `zoomable` false turns
--- the keys off.
+-- the keys off. `safe_area` is what the screen's edges and the system's bars
+-- leave of the window, `{ top, right, bottom, left }` in points: iOS's safe
+-- area, all 0 elsewhere. `keyboard` is how much of the bottom the on-screen
+-- keyboard covers, in points.
 -- An extern type: a function and a table can't intersect, so that would be
 -- `never`, and `ui`, holding one, would stop reporting its unknown members.
 declare extern type WindowApi with
+	safe_area: State<{ top: number, right: number, bottom: number, left: number }>
+	keyboard: State<number>
+	-- How far past an end the scroll view being moved shows: negative past its
+	-- start (iOS). A pull to refresh reads it.
+	overscroll: State<number>
 	titlebar_area: State<WindowRect?>
 	controls: State<WindowRect?>
 	zoom: State<number>
@@ -2453,19 +2461,6 @@ export type ContainerProps = Merge<Props, {
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 }>
--- `ui.glass`'s look, over a container's props (merged, as a scroll's are: an
--- intersection made a plain `h = 84` fail against the reactive forms).
-export type GlassProps = Merge<ContainerProps, {
-	-- The more see-through of the system's glasses.
-	clear: Reactive<boolean>?,
-	-- A colour it takes on.
-	tint: Reactive<Color>?,
-	-- Its corners' radius in points.
-	radius: Reactive<number>?,
-	-- Each corner's own, over `radius`: `{ tl, tr, br, bl }` or four numbers
-	-- (the drawn glass; macOS's system glass takes `radius`).
-	corners: Reactive<Corners>?,
-}>
 export type ScrollProps = Merge<ContainerProps, {
 	-- The scroll position in points, both ways.
 	offset: State<number>?,
@@ -2477,6 +2472,11 @@ export type ScrollProps = Merge<ContainerProps, {
 	-- edges (CSS's overscroll-behavior), the scroll views around it never
 	-- moving; "auto" (the default) hands what it can't scroll on to them.
 	overscroll: ("auto" | "contain")?,
+	-- How it moves a focused field clear of the software keyboard (iOS):
+	-- "native" (the default) as UIKit's scroll views, one scroll on an
+	-- ease-in-out over the keyboard's duration; "attached", the field riding
+	-- the keyboard's edge on its spring, the gap between them held.
+	keyboard_ride: ("native" | "attached")?,
 	-- What a focused control or a find keeps clear of scrolling into view
 	-- (CSS's scroll-padding): a composer or a bar floating over its edges.
 	-- Points: one number for every side, or { top, bottom, left, right };
@@ -3401,6 +3401,132 @@ export type WebViewProps = Merge<Props, Merge<WebOptions, {
 	on_download: ((d: Download) -> ...unknown)?,
 }>>
 export type TerminalProps = Merge<Props, { term: Term }>
+export type GlassProps = Merge<Props, {
+	[number]: Child,
+	-- `"regular"` (the default) or `"clear"`.
+	variant: (string | ReadOnlyState<string>)?,
+	-- The more see-through of the system's glasses: `variant = "clear"`.
+	clear: (boolean | ReadOnlyState<boolean>)?,
+	-- A colour the glass takes on.
+	tint: Props_bg,
+	-- Answers presses as the system's controls do.
+	interactive: (boolean | ReadOnlyState<boolean>)?,
+	-- Its corners' radius in points (default 24).
+	radius: (number | ReadOnlyState<number>)?,
+	-- Each corner's own, over `radius`: `{ tl, tr, br, bl }` or four numbers
+	-- (iOS and the drawn glass; macOS's takes `radius`).
+	corners: (Corners | ReadOnlyState<Corners>)?,
+}>
+export type GlassGroupProps = Merge<Props, {
+	[number]: Child,
+	-- How near panes come before they merge, in points (default 20).
+	spacing: number?,
+}>
+export type SymbolProps = Merge<Props, {
+	-- The SF Symbol's name.
+	name: string,
+	-- Its point size, as a font's (default 17).
+	size: (number | ReadOnlyState<number>)?,
+	-- A font weight, 100 to 900 (default 400).
+	weight: (number | ReadOnlyState<number>)?,
+	-- Its colour (default `$text.primary`).
+	color: Props_bg,
+}>
+export type NativeSwitchProps = Merge<Props, {
+	-- Whether it is on: a state it writes, or a function with `on_change`.
+	value: State<boolean> | (() -> boolean),
+	on_change: ((on: boolean) -> ())?,
+	-- What assistive technology calls it.
+	label: string?,
+}>
+export type ScrollEdgeOptions = {
+	edge: ("top" | "bottom" | "left" | "right")?,
+	-- "soft" fades past its box; "hard" is a veil cut at its end.
+	style: ("soft" | "hard")?,
+	-- The box's size across the edge, in points.
+	size: Reactive<number>?,
+	-- Whether it shows: a function of a scroll offset, say.
+	shown: Reactive<boolean>?,
+	-- Draw it rather than use the system's: for an edge inside the window.
+	drawn: boolean?,
+	[any]: any,
+}
+export type NativePanEvent = {
+	phase: "began" | "changed" | "ended" | "cancelled",
+	x: number,
+	y: number,
+	vx: number,
+	vy: number,
+}
+export type NativePanOptions = {
+	edge: "left"?,
+	element: Element?,
+	can_begin: (() -> boolean)?,
+	on_pan: (e: NativePanEvent) -> (),
+	[any]: any,
+}
+export type SystemMenuItem = {
+	title: string,
+	-- An SF Symbol's name.
+	symbol: string?,
+	style: ("destructive" | "default")?,
+	on_choose: (() -> ())?,
+	[number]: never,
+}
+export type AlertOptions = {
+	title: string?,
+	message: string?,
+	buttons: { { title: string, style: ("default" | "cancel" | "destructive")? } },
+	on_choose: ((button: number) -> ())?,
+}
+export type IosKit = {
+	settle: (state: State<number>, target: number, done: (() -> ())?) -> () -> (),
+	section: (props: { header: string?, footer: string?, [number]: Node }) -> Node,
+	tile: (symbol: string, tint: Color) -> Node,
+	row: (props: {
+		icon: string?,
+		tint: Color?,
+		title: string,
+		detail: string?,
+		toggle: State<boolean>?,
+		chevron: boolean?,
+		on_click: (() -> ())?,
+		last: boolean?,
+		color: Color?,
+	}) -> Node,
+	search: (props: { value: State<string>, placeholder: string?, mx: number? }) -> Node,
+	-- A chat's composer on a keyboard bar: a small pill that opens as it takes focus
+	-- and grows with its lines, to `max_lines`, then scrolls inside.
+	composer: (props: {
+		value: State<string>,
+		placeholder: string?,
+		max_lines: number?,
+		bottom: number?,
+		on_send: ((text: string) -> ())?,
+		on_plus: (() -> ())?,
+	}) -> Node,
+	page: (props: {
+		title: string,
+		nav: any?,
+		trailing: Node?,
+		on_refresh: ((done: () -> ()) -> ())?,
+		bg: Color?,
+		-- How a focused field rides a software keyboard (default "native").
+		keyboard_ride: ("native" | "attached")?,
+		[number]: any,
+	}) -> Node,
+	stack: (props: { root: (nav: any) -> Node }) -> Node,
+	-- `detents`: "medium" and "large" as UIKit resolves them, or heights in
+	-- points; smallest first (default both).
+	sheet: (props: { open: State<boolean>, detents: { "medium" | "large" | number }?, build: () -> Node }) -> Node,
+}
+export type NativeTabsProps = Merge<Props, {
+	-- The chosen tab, from 1.
+	value: State<number> | (() -> number),
+	on_change: ((tab: number) -> ())?,
+	-- Each tab's title and SF Symbol.
+	items: { { title: string, symbol: string } },
+}>
 -- `from`: only what that plugin (by name) contributes.
 export type SlotProps = Merge<Props, { context: unknown?, from: string? }>
 -- What a plugin targets: an element by its `id` (`"#save"`), declared hook
@@ -3485,7 +3611,16 @@ export type CaseKey = string | number | boolean
 -- Durations are milliseconds, as in `anime`.
 export type TweenEnd = number | string | { number }
 export type TweenOptions = { duration: number?, ease: Easing?, from: TweenEnd?, to: TweenEnd?, [number]: never }
-export type SpringOptions = { stiffness: number?, damping: number?, from: TweenEnd?, to: TweenEnd?, [number]: never }
+-- One spring: `response` (ms) and `bounce` (0 none, about 0.15 a little, 0.3 a lot), as
+-- SwiftUI's; or `stiffness` and `damping`. `delay` (ms) holds it back after a change.
+export type SpringParams = {
+	response: number?,
+	bounce: number?,
+	stiffness: number?,
+	damping: number?,
+	delay: number?,
+}
+-- `up` and `down`: another spring toward a higher value, or a lower.
 export type SpringToOptions = {
 	response: number?,
 	bounce: number?,
@@ -3502,6 +3637,19 @@ export type SpringToOptions = {
 	most: number?,
 	-- When it arrives.
 	done: (() -> ())?,
+}
+
+export type SpringOptions = {
+	response: number?,
+	bounce: number?,
+	stiffness: number?,
+	damping: number?,
+	delay: number?,
+	up: SpringParams?,
+	down: SpringParams?,
+	from: TweenEnd?,
+	to: TweenEnd?,
+	[number]: never,
 }
 export type LoopOptions = {
 	duration: number?,
@@ -3563,6 +3711,10 @@ declare ui: {
 		reduced_motion: ReadOnlyState<boolean>,
 		more_contrast: ReadOnlyState<boolean>,
 		reduced_transparency: ReadOnlyState<boolean>,
+		-- Meaning shouldn't rest on colour alone: show a shape or a word with it.
+		without_color: ReadOnlyState<boolean>,
+		-- The system inverts the display's colours: a photo becomes its negative.
+		inverted_colors: ReadOnlyState<boolean>,
 	},
 	-- The modifier keys held now, each `:get()` tracked: a modifier alone
 	-- too (`meta` is Command on macOS, Windows or Super elsewhere), as for
@@ -3614,6 +3766,45 @@ declare ui: {
 	-- page for `id`, made with `opts` the first time, kept across reloads.
 	web: ((opts: WebOptions?) -> Web) & ((id: string, opts: WebOptions?) -> Web),
 	terminal: (props: TerminalProps) -> Node,
+	-- A box of glass: the system's own where it has one (macOS 26, iOS), drawn elsewhere.
+	glass: (props: GlassProps) -> Node,
+	-- Glass inside merges within `spacing` points, as the system's does.
+	glass_group: (props: GlassGroupProps) -> Node,
+	-- A system symbol (`name = "wifi"`), drawn by iOS; an empty box of its size elsewhere.
+	symbol: (props: SymbolProps) -> Node,
+	-- The system's on and off control (iOS's UISwitch), drawn elsewhere.
+	native_switch: (props: NativeSwitchProps) -> Node,
+	-- The system's tab bar (iOS's UITabBar), a row of tabs elsewhere.
+	native_tabs: (props: NativeTabsProps) -> Node,
+	-- A tap felt in the hand (iOS): "light", "medium", "heavy", "soft", "rigid",
+	-- "success", "warning", "error" or "selection".
+	haptic: (kind: string) -> (),
+	-- A soft fade where content passes under an edge: on a window's edge on iOS,
+	-- the system's own; elsewhere drawn. Paint after it stays sharp above it.
+	scroll_edge: (opts: ScrollEdgeOptions) -> Node,
+	native_edge: (element: Element, edge: string, hard: boolean) -> (),
+	-- A bar that goes with the keyboard, its look in its children: a composer.
+	keyboard_bar: (props: ContainerProps?) -> Node,
+	native_keyboard_bar: (element: Element, lift: (up: number) -> ()) -> (),
+	-- The system's pull to refresh on a scroll view's element (iOS). `top` says
+	-- where its spinner hangs; `on_refresh` is given what ends it.
+	pull_refresh: (opts: { element: Element, top: () -> number, on_refresh: (done: () -> ()) -> () }) -> (),
+	-- A pan the system recognizes (iOS), which the script only draws: from the
+	-- leading edge, or on an element. `on_pan` always hears an ending.
+	native_pan: (opts: NativePanOptions) -> (),
+	-- A line in the record `Documents/zgx-gesture.log` of what gestures did (iOS).
+	gesture_log: (line: string) -> (),
+	-- The system's share sheet (iOS).
+	share: (opts: { text: string?, url: string?, files: { string }?, [number]: never }) -> (),
+	-- What VoiceOver's two-finger scrub does: answers whether it went back.
+	on_escape: (handler: () -> boolean) -> (),
+	-- A long press on the element shows these, the system's way (iOS).
+	system_menu: (element: Element, build: () -> { SystemMenuItem }) -> (),
+	-- The system's alert, or action sheet (iOS). `on_choose` hears which button, from 1.
+	alert: (opts: AlertOptions) -> (),
+	action_sheet: (opts: AlertOptions) -> (),
+	-- iOS's standard pieces, drawn from the system's colours, text and glass.
+	ios: IosKit,
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,
@@ -3909,6 +4100,8 @@ declare ui: {
 	add: (state: State<number>, by: number?) -> Action,
 	-- The state's truthiness (or number) drives a 0-to-1 scalar, or
 	-- `from` to `to`. Durations are milliseconds, as in `anime`.
+	-- Springs by name: `ui.spring(state, ui.springs.snappy)`.
+	springs: { smooth: SpringParams, snappy: SpringParams, bouncy: SpringParams },
 	tween: (state: State<any>, opts: TweenOptions?) -> Binding,
 	spring: (state: State<any>, opts: SpringOptions?) -> Binding,
 	loop: (opts: LoopOptions?) -> Binding,
@@ -3926,8 +4119,6 @@ declare ui: {
 	-- `zgx_sample(p)` reads the layer at another point, and `zgx_backdrop(p)`
 	-- what lies behind the node there.
 	layer_shader: (source: string, opts: LayerShaderOptions?) -> LayerShader,
-	-- A box of glass: macOS 26's own where it can be, drawn elsewhere.
-	glass: (opts: GlassProps) -> Node,
 	-- Sorts `list` in place, stably, by a field of each item (`"price"`) or
 	-- a function of it (called once an item); returns it. Use it over
 	-- `table.sort` with a comparator for long lists: that calls Luau some
