@@ -74,6 +74,8 @@ pub struct AudioClip {
     pub fade_out: u64,
     /// It repeats until its duration.
     pub looped: bool,
+    /// A video's sound: silence if it has none.
+    pub optional: bool,
 }
 
 /// The source of the Luau side, for `require("@video")`.
@@ -137,6 +139,8 @@ pub(crate) struct Told {
     tracks: Vec<Track>,
     audio: Vec<AudioClip>,
     holds: BTreeMap<String, String>,
+    /// Video files shown, by id.
+    clips: BTreeMap<String, crate::clip::Clip>,
     /// Told each time its script declares its compositions.
     listening: Option<Listener>,
 }
@@ -152,6 +156,7 @@ fn host(
     entry: &Path,
     selected: Option<&str>,
     input: &Json,
+    scale: f32,
 ) -> Result<Hosted, String> {
     let (video, fx) =
         packages().map_err(|error| format!("writing zgx-video's scripts: {error}"))?;
@@ -217,11 +222,54 @@ fn host(
             fade_in: frames("fade_in"),
             fade_out: frames("fade_out"),
             looped: clip["loop"].as_bool().unwrap_or(false),
+            optional: false,
         };
         let audio = &mut heard.borrow_mut().audio;
         if !audio.contains(&clip) {
             audio.push(clip);
         }
+    });
+    let heard = told.clone();
+    let base_dir = entry.parent().map(Path::to_owned).unwrap_or_default();
+    host.action("zgx.video.clip", move |clip| {
+        let clip = json_of(&clip);
+        let src = base_dir.join(clip["src"].as_str().unwrap_or_default());
+        let id = clip["id"].as_str().unwrap_or_default().to_owned();
+        let frames = |key: &str| clip[key].as_f64().filter(|frames| *frames >= 0.);
+        let scale = f64::from(scale);
+        let size = match (clip["w"].as_f64(), clip["h"].as_f64()) {
+            (Some(w), Some(h)) => ((w * scale).round() as u32, (h * scale).round() as u32),
+            _ => crate::clip::size_of(&src).unwrap_or((640, 360)),
+        };
+        let size = (size.0.max(2), size.1.max(2));
+        let placed = crate::clip::Clip {
+            id: id.clone(),
+            src: src.clone(),
+            from: frames("from").unwrap_or(0.),
+            duration: frames("duration"),
+            trim: frames("trim").unwrap_or(0.),
+            size,
+            looped: clip["loop"].as_bool().unwrap_or(false),
+        };
+        let volume = clip["volume"].as_f64().unwrap_or(1.);
+        let mut told = heard.borrow_mut();
+        if volume > 0. && !told.clips.contains_key(&id) {
+            let sound = AudioClip {
+                src,
+                from: placed.from.max(0.) as u64,
+                duration: placed.duration.map(|frames| frames as u64),
+                trim: placed.trim as u64,
+                volume,
+                fade_in: 0,
+                fade_out: 0,
+                looped: placed.looped,
+                optional: true,
+            };
+            if !told.audio.contains(&sound) {
+                told.audio.push(sound);
+            }
+        }
+        told.clips.insert(id, placed);
     });
     let heard = told.clone();
     host.action("zgx.video.hold", move |hold| {
@@ -254,7 +302,7 @@ pub fn compositions(
 ) -> Result<Vec<Composition>, String> {
     let entry = entry_of(path)?;
     let ui = zgx::widgets::Ui::new(1., 1.);
-    let hosted = host(&ui.runtime, &entry, selected, input)?;
+    let hosted = host(&ui.runtime, &entry, selected, input, 1.)?;
     hosted.host.reload().map_err(|error| error.to_string())?;
     let list = std::mem::take(&mut hosted.told.borrow_mut().compositions);
     if list.is_empty() {
@@ -283,7 +331,7 @@ impl ScriptWatch {
     ) -> Result<Self, String> {
         let entry = entry_of(path)?;
         let ui = zgx::widgets::Ui::new(1., 1.);
-        let Hosted { host, told, .. } = self::host(&ui.runtime, &entry, None, &json!({}))?;
+        let Hosted { host, told, .. } = self::host(&ui.runtime, &entry, None, &json!({}), 1.)?;
         told.borrow_mut().listening = Some(Rc::new(listed));
         host.on_error(failed);
         if let Err(error) = host.reload() {
@@ -368,7 +416,7 @@ impl ScriptStage {
         let mut hosted = None;
         let id = composition.id.clone();
         let stage = Stage::new(options, |setting: Setting<'_>| {
-            let made = host(setting.runtime, &entry, Some(&id), input)?;
+            let made = host(setting.runtime, &entry, Some(&id), input, scale)?;
             made.host.reload().map_err(|error| error.to_string())?;
             let view = made.host.view();
             hosted = Some(made);
@@ -386,6 +434,12 @@ impl ScriptStage {
             .unwrap_or(composition);
         let errors = host.error();
         let holding = told.clone();
+        let showing = told.clone();
+        let shown_host = host.clone();
+        let decoders: RefCell<BTreeMap<String, (crate::clip::Decoder, Option<u64>)>> =
+            RefCell::default();
+        let fps = composition.fps;
+        let frame_now = frame.clone();
         let film = Film::new(
             stage,
             ticks,
@@ -400,6 +454,43 @@ impl ScriptStage {
                     None => Ok(()),
                 }),
                 holds: Box::new(move || holding.borrow().holds.values().cloned().collect()),
+                after_step: Box::new(move || {
+                    let clips: Vec<crate::clip::Clip> =
+                        showing.borrow().clips.values().cloned().collect();
+                    if clips.is_empty() {
+                        return Ok(false);
+                    }
+                    let at = frame_now.with_untracked(|value| match value {
+                        Value::Num(at) => *at,
+                        _ => 0.,
+                    });
+                    let mut decoders = decoders.borrow_mut();
+                    let mut changed = false;
+                    for clip in clips {
+                        let local = at - clip.from;
+                        if local < 0. || clip.duration.is_some_and(|lasts| local >= lasts) {
+                            continue;
+                        }
+                        let entry = decoders.entry(clip.id.clone()).or_insert_with(|| {
+                            (crate::clip::Decoder::new(clip.clone(), fps), None)
+                        });
+                        if *entry.0.clip() != clip {
+                            *entry = (crate::clip::Decoder::new(clip.clone(), fps), None);
+                        }
+                        let wanted = (clip.trim + local).floor().max(0.) as u64;
+                        if entry.1 == Some(wanted) {
+                            continue;
+                        }
+                        let pixels = entry.0.frame(wanted)?;
+                        let image =
+                            zgx::image::ImageData::new(clip.size.0, clip.size.1, pixels.to_vec())
+                                .map_err(str::to_owned)?;
+                        shown_host.image(&clip.id, Some(std::sync::Arc::new(image)));
+                        entry.1 = Some(wanted);
+                        changed = true;
+                    }
+                    Ok(changed)
+                }),
             },
         )?;
         Ok(Self {

@@ -211,7 +211,12 @@ pub fn mixed_file(clips: &[AudioClip], fps: f64, frames: u64) -> Result<Option<P
     let mut sounds = std::collections::HashMap::new();
     for clip in clips {
         if !sounds.contains_key(&clip.src) {
-            sounds.insert(clip.src.clone(), std::rc::Rc::new(decode(&clip.src)?));
+            // A video's sound, if it has one; a sound file's, or why not.
+            let sound = match clip.optional {
+                true if !crate::clip::has_audio(&clip.src) => Sound::default(),
+                _ => decode(&clip.src)?,
+            };
+            sounds.insert(clip.src.clone(), std::rc::Rc::new(sound));
         }
     }
     let mixed = mix(clips, fps, frames, |path| sounds.get(path).cloned());

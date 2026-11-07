@@ -259,3 +259,150 @@ fn resident() -> u64 {
         .unwrap_or(0)
         * 1024
 }
+
+#[test]
+fn hevc_is_tagged_for_players() {
+    if zgx_video::encode::ffmpeg().is_none() {
+        eprintln!("no ffmpeg here: skipped");
+        return;
+    }
+    let dir = app("hevc");
+    let mut hevc = options(&dir, "out.mp4");
+    hevc.format = Some(Format::Hevc);
+    render(&hevc, |_| true).unwrap();
+    let said = probe(
+        &dir.join("out.mp4"),
+        "codec_name,codec_tag_string,color_primaries,nb_frames",
+        "v",
+    )
+    .unwrap();
+    assert_eq!(said, "hevc,hvc1,bt709,20");
+}
+
+#[test]
+fn a_dataset_makes_a_video_of_each_row() {
+    let dir = temp_dir("dataset");
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "D", w = 40, h = 20, fps = 10, duration = 2, props = { width = 1 },
+            render = function(props)
+                return ui.div { w_full = true, h_full = true, bg = "#000000",
+                    ui.div { h = 20, w = props.width, bg = "#ff0000" } }
+            end,
+        } }
+        "##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("rows.json"),
+        r#"[{ "title": "a b", "width": 10 }, { "title": "c", "width": 30 }]"#,
+    )
+    .unwrap();
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_zgx-video"))
+        .arg("render")
+        .arg(&dir)
+        .arg(dir.join("out-{title}"))
+        .args(["--dataset"])
+        .arg(dir.join("rows.json"))
+        .arg("--quiet")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let reach = |name: &str| {
+        let file = std::fs::File::open(dir.join(name).join("00000.png")).unwrap();
+        let mut reader = png::Decoder::new(std::io::BufReader::new(file))
+            .read_info()
+            .unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut pixels).unwrap();
+        (0..40u32)
+            .filter(|x| pixel(&pixels, 40, *x, 10)[0] > 128)
+            .count()
+    };
+    assert_eq!(reach("out-a-b"), 10);
+    assert_eq!(reach("out-c"), 30);
+}
+
+#[test]
+fn a_hold_never_released_stops_the_render_and_says_what() {
+    let dir = temp_dir("hold");
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "H", w = 20, h = 20, duration = 3,
+            render = function()
+                video.hold("the prices")
+                return ui.div {}
+            end,
+        } }
+        "##,
+    )
+    .unwrap();
+    let mut held = options(&dir, "frames");
+    held.hold_timeout = std::time::Duration::from_millis(50);
+    let error = render(&held, |_| true).unwrap_err();
+    assert!(error.contains("the prices"), "{error}");
+}
+
+#[test]
+fn a_rust_view_renders_as_a_script_does() {
+    use zgx::compose::prelude::*;
+    use zgx::scene::Color;
+    use zgx_video::compose::{RustComposition, Spring, render_view, sequence};
+    let dir = temp_dir("rust");
+    let composition = RustComposition {
+        width: 64.,
+        height: 20.,
+        fps: 30.,
+        duration: 30,
+    };
+    let out = RenderOptions {
+        output: dir.join("frames"),
+        ..Default::default()
+    };
+    let report = render_view(
+        &composition,
+        &out,
+        |_| {
+            div()
+                .w(64.)
+                .h(20.)
+                .bg(Color(0, 0, 0, 255))
+                .child(sequence(10., None, |clock| {
+                    div()
+                        .h(20.)
+                        .bg(Color(255, 0, 0, 255))
+                        .reactive_style(move || {
+                            let width = clock.spring(&Spring {
+                                to: 60.,
+                                stiffness: 200.,
+                                damping: 30.,
+                                ..Default::default()
+                            });
+                            Styles::new().w(width as f32)
+                        })
+                }))
+        },
+        |_| true,
+    )
+    .unwrap();
+    assert_eq!(report.frames, 30);
+    let frames = pngs(&dir.join("frames"));
+    let reach = |png_bytes: &[u8]| {
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes))
+            .read_info()
+            .unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut pixels).unwrap();
+        (0..64u32)
+            .filter(|x| pixel(&pixels, 64, *x, 10)[0] > 128)
+            .count()
+    };
+    assert_eq!(reach(&frames[9]), 0, "before its sequence");
+    assert!(reach(&frames[29]) >= 58, "settled by its end");
+}

@@ -302,6 +302,7 @@ pub fn film(
             }),
             check: Box::new(|| Ok(())),
             holds: Box::new(Vec::new),
+            after_step: Box::new(|| Ok(false)),
         },
     )
 }

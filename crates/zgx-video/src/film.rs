@@ -61,6 +61,9 @@ pub(crate) struct Player {
     pub check: Box<dyn Fn() -> Result<(), String>>,
     /// What it holds the render for.
     pub holds: Box<dyn Fn() -> Vec<String>>,
+    /// After a step: bring what Rust shows up to its frame (a clip's picture);
+    /// whether anything changed, to lay out again.
+    pub after_step: Box<dyn Fn() -> Result<bool, String>>,
 }
 
 /// A composition, standing on a stage, a frame of a file at a time.
@@ -95,7 +98,8 @@ impl Film {
             sum: Vec::new(),
             sample: Vec::new(),
         };
-        (film.player.check)()?;
+        let mut film = film;
+        film.caught_up()?;
         Ok(film)
     }
     /// How its frames become a file's.
@@ -119,6 +123,14 @@ impl Film {
             let next = self.stage.frame() + 1;
             (self.player.set_frame)(next as f64 * self.frames_per_tick);
             self.stage.step()?;
+            self.caught_up()?;
+        }
+        Ok(())
+    }
+    fn caught_up(&mut self) -> Result<(), String> {
+        (self.player.check)()?;
+        if (self.player.after_step)()? {
+            self.stage.lay_out_again()?;
             (self.player.check)()?;
         }
         Ok(())

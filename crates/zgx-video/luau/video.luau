@@ -653,6 +653,44 @@ function video.audio(opts: any): nil
 	return nil
 end
 
+-- A video file shown from frame `from` (of this sequence) for `duration`
+-- frames, `trim` frames of it skipped: each frame of the video shows the frame
+-- of the file its time says, decoded by ffmpeg at the video's rate. `w` and
+-- `h` size its box and the pictures decoded; its other properties are an
+-- image's (`fit` is "cover" unless given). `volume` (1) mixes its sound in,
+-- 0 leaves it out; `loop` plays it again from its start.
+local CLIP_KEYS = { src = true, from = true, duration = true, trim = true, volume = true, loop = true }
+function video.clip(opts: any): any
+	local time = time_here()
+	local from: number = opts.from or 0
+	local at = time.offset + from
+	local id = `zgx.clip:{opts.src}:{at}:{opts.trim or 0}:{opts.w or 0}x{opts.h or 0}`
+	tell("zgx.video.clip", {
+		id = id,
+		src = opts.src,
+		from = at,
+		duration = opts.duration or -1,
+		trim = opts.trim or 0,
+		w = opts.w,
+		h = opts.h,
+		volume = if opts.volume == nil then 1 else opts.volume,
+		loop = opts.loop or false,
+	})
+	local image: any = { src = "host:" .. id, fit = "cover" }
+	for key, value in opts do
+		if type(key) == "string" and not CLIP_KEYS[key] then
+			image[key] = value
+		end
+	end
+	return video.sequence {
+		from = from,
+		duration = opts.duration,
+		layout = "none",
+		track = false,
+		ui.image(image),
+	}
+end
+
 -- Hold the render until the function this returns is called: for what loads in
 -- real time (`ui.fetch`, a remote picture). `label` says what, should it take too long.
 function video.hold(label: string?): () -> ()

@@ -14,6 +14,7 @@ fn clip(from: u64) -> AudioClip {
         fade_in: 0,
         fade_out: 0,
         looped: false,
+        optional: false,
     }
 }
 fn constant(seconds: f64, value: f32) -> Rc<Sound> {
