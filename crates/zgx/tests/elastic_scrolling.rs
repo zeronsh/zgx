@@ -196,8 +196,11 @@ fn a_stretch_let_go_while_pushing_goes_on_a_moment_first() {
         ui.set_refresh_interval(Duration::from_millis(8));
         let (offset, content) = mount(&mut ui);
         phase(&mut ui, ScrollGesture::Began);
-        // 12 points every 8 ms: 1500 points a second.
-        for _ in 0..20 {
+        // 12 points every 8 ms: 1500 points a second, briefly. A short push
+        // leaves a small stretch against the speed: still growing needs only
+        // about 140 points a second, so sleeps that overrun on a loaded
+        // machine (a CI runner measured a third of it) still pass.
+        for _ in 0..5 {
             std::thread::sleep(Duration::from_millis(8));
             scroll_by(&mut ui, -12.);
         }
@@ -214,7 +217,7 @@ fn a_stretch_let_go_while_pushing_goes_on_a_moment_first() {
         (at_lift, soon)
     };
     let (at_lift, soon) = pushed(Duration::ZERO);
-    assert_eq!(at_lift, 12.);
+    assert_eq!(at_lift, 3.);
     assert!(
         soon > at_lift,
         "still going 16 ms after: {soon} from {at_lift}"
