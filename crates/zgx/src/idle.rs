@@ -47,6 +47,7 @@ pub fn trim(runtime: &Runtime) {
     for trim in live {
         trim();
     }
+    runtime.rest();
 }
 
 #[cfg(test)]
@@ -66,5 +67,30 @@ mod tests {
         drop(handle);
         trim(&runtime);
         assert_eq!(runs.get(), 2);
+    }
+    #[test]
+    fn effects_at_rest_give_back_slots_and_keep_what_is_live() {
+        let runtime = Runtime::new();
+        let value = runtime.signal(0);
+        let runs = Rc::new(Cell::new(0));
+        let counted = runs.clone();
+        let read = value.clone();
+        let kept = runtime.effect(move || {
+            read.get();
+            counted.set(counted.get() + 1);
+        });
+        let gone: Vec<_> = (0..256).map(|_| runtime.effect(|| {})).collect();
+        drop(gone);
+        trim(&runtime);
+        value.set(1);
+        runtime.flush();
+        assert_eq!(runs.get(), 2);
+        // A new effect in a slot that went runs as any other.
+        let again = Rc::new(Cell::new(0));
+        let counted = again.clone();
+        let _new = runtime.effect(move || counted.set(counted.get() + 1));
+        runtime.flush();
+        assert_eq!(again.get(), 1);
+        drop(kept);
     }
 }

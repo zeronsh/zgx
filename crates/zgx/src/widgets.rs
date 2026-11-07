@@ -711,10 +711,18 @@ impl EditorHandle {
         ))
     }
     /// Where an input method's candidates go, in the window's points: under
-    /// the clause it converts (`composition_area`), else at the caret.
+    /// the clause it converts (`composition_area`), else at the caret; an
+    /// empty rect once the editor is gone from the scene (Windows' input
+    /// method may still ask, before it hears focus moved).
     pub fn input_method_area(&self) -> Rect {
-        self.composition_area()
-            .unwrap_or_else(|| self.scene.borrow().transformed_bounds(self.caret))
+        self.composition_area().unwrap_or_else(|| {
+            let scene = self.scene.borrow();
+            if scene.contains(self.caret) {
+                scene.transformed_bounds(self.caret)
+            } else {
+                Rect::default()
+            }
+        })
     }
     /// Where bytes `range` of the text it shows (its committed text with
     /// any composition in place of the selection) are, in the window's
@@ -1606,6 +1614,9 @@ pub(crate) struct UiStorage {
     /// (`tab_into_next_row`).
     row_focus: Cell<Option<RowFocus>>,
     content_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
+    /// Bumped as any of those is published resized, once a measured list asks
+    /// for it (`Ui::content_size_revision`).
+    content_revision: RefCell<Option<Signal<u64>>>,
     /// Nodes' laid-out sizes (`observe_size`): read only when layout runs.
     observed_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
     observed_bounds: RefCell<crate::scene::NodeMap<Signal<Rect>>>,
@@ -1642,6 +1653,8 @@ pub(crate) struct UiStorage {
     pub(crate) find_off: Cell<bool>,
     /// Virtual lists' rows' indices from their places, by list.
     pub(crate) list_rows: RefCell<std::collections::HashMap<NodeId, crate::find::RowIndex>>,
+    /// How far a wheel's line scrolls each list, by its root: a row's height.
+    pub(crate) wheel_lines: RefCell<std::collections::HashMap<NodeId, f32>>,
     /// What the last primary press went to: the keyboard scrolls the scroll
     /// view around it (`scroll_keys`).
     last_pressed: Cell<Option<NodeId>>,
@@ -1878,6 +1891,7 @@ impl Ui {
             refocus_trail: RefCell::new(None),
             row_focus: Cell::new(None),
             content_sizes: RefCell::default(),
+            content_revision: RefCell::default(),
             observed_sizes: RefCell::default(),
             observed_bounds: RefCell::default(),
             observed_visibility: RefCell::default(),
@@ -1898,6 +1912,7 @@ impl Ui {
             find: RefCell::new(None),
             find_off: Cell::new(false),
             list_rows: Default::default(),
+            wheel_lines: Default::default(),
             last_pressed: Cell::new(None),
             elastic: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
@@ -2654,6 +2669,29 @@ impl Ui {
         self.storage.editor_layout_revision.set(None);
         signal
     }
+    /// `content_size_revision` bumped, if a measured list asked for it: out of
+    /// line, as most apps have none.
+    #[inline(never)]
+    fn content_sizes_published(&self) {
+        let revision = self.storage.content_revision.borrow().clone();
+        if let Some(revision) = revision {
+            revision.mutate(|serial| {
+                *serial = serial.wrapping_add(1);
+                true
+            });
+        }
+    }
+    /// A revision bumped after each publication of content sizes in which any
+    /// changed: what reads many nodes' sizes (a measured list's rows) reads
+    /// it, and theirs untracked, rather than tracking each one.
+    pub(crate) fn content_size_revision(&self) -> Signal<u64> {
+        if let Some(revision) = &*self.storage.content_revision.borrow() {
+            return revision.clone();
+        }
+        let revision = self.signal(0_u64);
+        *self.storage.content_revision.borrow_mut() = Some(revision.clone());
+        revision
+    }
     /// Observe the node's laid-out size (its border box), published after
     /// each layout that runs: unlike `observe_bounds`, nothing an ancestor
     /// does (scrolling, translating) costs it anything. The registration
@@ -2965,6 +3003,20 @@ impl Ui {
     /// (`set_navigation_swipes`), once: the host has the platform track it.
     pub fn take_navigation_swipe(&self) -> bool {
         std::mem::take(&mut self.storage.elastic.borrow_mut().asked)
+    }
+    /// How far a wheel's line scrolls what is under (`x`, `y`), if it says:
+    /// a list's row height (the innermost list there), as a table's rows set
+    /// an `NSTableView`'s line. None elsewhere: the platform's line.
+    pub fn wheel_line_at(&self, x: f32, y: f32) -> Option<f32> {
+        let lines = self.storage.wheel_lines.borrow();
+        if lines.is_empty() {
+            return None;
+        }
+        let scene = self.scene.borrow();
+        let hit = scene.hit_test(x, y)?;
+        std::iter::once(hit)
+            .chain(scene.ancestors(hit))
+            .find_map(|node| lines.get(&node).copied())
     }
     pub(crate) fn elastic_state(&self) -> &RefCell<crate::elastic::State> {
         &self.storage.elastic
@@ -4003,12 +4055,17 @@ impl Ui {
             // Publish outside every storage/scene borrow: geometry subscribers can
             // mount, dispose, translate, or reenter frame preparation.
             self.runtime.batch(|| {
+                let mut any = false;
                 for (node, signal, size) in sizes {
                     if self.scene.borrow().contains(node)
                         && signal.with_untracked(|told| resized(*told, size))
                     {
                         signal.set(size);
+                        any = true;
                     }
+                }
+                if any {
+                    self.content_sizes_published();
                 }
                 // Changed, as gathered above (what reads them runs after
                 // the batch): set without comparing again.
@@ -5483,7 +5540,7 @@ impl Ui {
             if caret_shown {
                 // A bare insertion point: no composition, no selection.
                 let bare = e.preedit().is_none() && selection.range().is_empty();
-                draw_blink.restart(caret, caret_color, Instant::now(), bare);
+                draw_blink.restart(caret, caret_color, crate::clock::now(), bare);
             } else {
                 draw_blink.release(caret);
             }
@@ -6315,7 +6372,7 @@ impl Ui {
                 {
                     return;
                 }
-                let now = Instant::now();
+                let now = crate::clock::now();
                 let old = storage
                     .interaction
                     .borrow_mut()

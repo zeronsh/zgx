@@ -568,6 +568,25 @@ pub(crate) struct Rare {
     /// Conditional children (`child_when`), mounted after the others.
     conditional: Vec<RegionBuilder>,
 }
+/// `Rare::merge_into`'s part for assistive technology (a control a row already
+/// stands for, hidden from outside it): each part the outer view set wins.
+#[cold]
+#[inline(never)]
+fn merge_accessibility(
+    label: Option<String>,
+    accessibility: Option<Box<Accessibility>>,
+    inner: &mut Rare,
+) {
+    if label.is_some() {
+        inner.accessible_label = label;
+    }
+    if let Some(outer) = accessibility {
+        match &mut inner.accessibility {
+            Some(own) => (*outer).merge_into(own),
+            None => inner.accessibility = Some(outer),
+        }
+    }
+}
 impl Rare {
     /// `View::refine`'s part: what an outer view sets over its inner one.
     fn merge_into(self, inner: &mut Rare) {
@@ -665,6 +684,11 @@ impl Rare {
         inner.keymap.extend(self.keymap);
         inner.mount_flags |= self.mount_flags;
         inner.conditional.extend(self.conditional);
+        // What it is to assistive technology, as set outside a component
+        // over what the component set: rare, so out of line.
+        if self.accessible_label.is_some() || self.accessibility.is_some() {
+            merge_accessibility(self.accessible_label, self.accessibility, inner);
+        }
     }
 }
 impl View {
@@ -1394,6 +1418,14 @@ impl View {
     /// count, a "Sent" note, a message arriving.
     pub fn live(mut self, live: Live) -> Self {
         self.accessibility_mut().live = Some(live);
+        self
+    }
+    /// Read after the name, as a hint (`aria-description`), followed: a
+    /// sheet grabber's "Double tap to expand" or "collapse" as the sheet
+    /// stands. Worked out only while assistive technology listens, as
+    /// `accessible_label_when`; empty says none.
+    pub fn description_when(mut self, description: impl FnMut() -> String + 'static) -> Self {
+        self.accessibility_mut().description_when = Some(Box::new(description));
         self
     }
     /// Read after the name, as a hint (`aria-description`).
@@ -2987,14 +3019,18 @@ pub(crate) type RowReveal = (u64, usize, RowAlign);
 /// on the signal this returns, while it is mounted.
 /// `row_index`: a mounted row's index from its place down the list's
 /// content (find in page tells its rows apart by it).
+/// `line`: how far a wheel's line scrolls it, a row's height
+/// (`Ui::wheel_line_at`).
 pub(crate) fn list_reveal(
     ui: &mut Ui,
     root: NodeId,
     row_index: crate::find::RowIndex,
+    line: f32,
 ) -> Signal<RowReveal> {
     let reveal = ui.signal((0_u64, 0_usize, RowAlign::Nearest));
     ui.list_reveals().borrow_mut().insert(root, reveal.clone());
     ui.storage.list_rows.borrow_mut().insert(root, row_index);
+    ui.storage.wheel_lines.borrow_mut().insert(root, line);
     struct Forget(WeakUi, NodeId);
     impl Drop for Forget {
         fn drop(&mut self) {
@@ -3004,6 +3040,9 @@ pub(crate) fn list_reveal(
                 }
                 if let Ok(mut rows) = ui.storage.list_rows.try_borrow_mut() {
                     rows.remove(&self.1);
+                }
+                if let Ok(mut lines) = ui.storage.wheel_lines.try_borrow_mut() {
+                    lines.remove(&self.1);
                 }
             }
         }
@@ -3155,6 +3194,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 ui,
                 root,
                 Rc::new(move |y: f32| Some((y / row_height).round().max(0.) as usize)),
+                row_height,
             );
             let mut handled_reveal = 0;
             ui.bind(root, move || {
@@ -3451,9 +3491,7 @@ pub(crate) fn mount(
 ) -> NodeId {
     let depth = ui.mount_depth();
     if crate::stack_low(depth) {
-        return stacker::grow(crate::STACK_SEGMENT, || {
-            mount(ui, parent, view, environment)
-        });
+        return crate::on_segment(|| mount(ui, parent, view, environment));
     }
     // Extract closures while retaining the root refinements on their wrapper.
     let kind = std::mem::replace(&mut view.kind, Kind::Container(Layout::Column));
@@ -6840,11 +6878,12 @@ fn mount_progress(
             if sweeping.borrow().is_none()
                 && let Some(runner) = &runner
             {
-                let (phase, start) = (phase.clone(), std::time::Instant::now());
+                let (phase, start) = (phase.clone(), crate::clock::now());
                 *sweeping.borrow_mut() = Some(runner.spawn(Box::pin(async move {
                     loop {
                         crate::timer::sleep(std::time::Duration::from_millis(16)).await;
-                        let t = (start.elapsed().as_secs_f32() / SWEEP.as_secs_f32()).fract();
+                        let t = (crate::clock::since(start).as_secs_f32() / SWEEP.as_secs_f32())
+                            .fract();
                         phase.set(t);
                     }
                 })));
@@ -7173,6 +7212,8 @@ pub(crate) struct Accessibility {
     numeric: Option<(f64, f64, NumericValue)>,
     live: Option<Live>,
     description: Option<String>,
+    /// `View::description_when`: a hint worked out from state.
+    description_when: Option<Box<dyn FnMut() -> String>>,
     error: Option<Box<dyn FnMut() -> Option<String>>>,
     hidden: bool,
     focus_group: Option<crate::input::FocusGroup>,
@@ -7180,6 +7221,54 @@ pub(crate) struct Accessibility {
     /// `View::adjustable`: what moves a custom slider (boxed: few views
     /// have one).
     adjust: Option<Box<Adjust>>,
+}
+impl Accessibility {
+    /// `Rare::merge_into`'s part for assistive technology: what the outer
+    /// view set, over the inner's.
+    fn merge_into(self, inner: &mut Accessibility) {
+        let outer = self;
+        if outer.role.is_some() {
+            inner.role = outer.role;
+        }
+        if outer.level.is_some() {
+            inner.level = outer.level;
+        }
+        if outer.selected.is_some() {
+            inner.selected = outer.selected;
+        }
+        if outer.checked.is_some() {
+            inner.checked = outer.checked;
+        }
+        inner.radio_item |= outer.radio_item;
+        if outer.expanded.is_some() {
+            inner.expanded = outer.expanded;
+        }
+        if outer.value.is_some() {
+            inner.value = outer.value;
+        }
+        if outer.numeric.is_some() {
+            inner.numeric = outer.numeric;
+        }
+        if outer.live.is_some() {
+            inner.live = outer.live;
+        }
+        if outer.description.is_some() {
+            inner.description = outer.description;
+        }
+        if outer.error.is_some() {
+            inner.error = outer.error;
+        }
+        inner.hidden |= outer.hidden;
+        if outer.focus_group.is_some() {
+            inner.focus_group = outer.focus_group;
+        }
+        if outer.label.is_some() {
+            inner.label = outer.label;
+        }
+        if outer.adjust.is_some() {
+            inner.adjust = outer.adjust;
+        }
+    }
 }
 /// What moves a custom slider or spin button (`View::adjustable`): its
 /// step, whether the keys do as well as assistive technology, and what
@@ -7223,6 +7312,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         numeric,
         live,
         description,
+        description_when,
         error,
         hidden,
         focus_group,
@@ -7296,6 +7386,19 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             }
             let label = label();
             tree.borrow_mut().update(root, |node| node.label = label);
+        });
+    }
+    if let Some(mut description) = description_when {
+        let tree = ui.semantics.clone();
+        let assistive = assistive.clone();
+        ui.bind(root, move || {
+            if !assistive.get() {
+                return;
+            }
+            let text = description();
+            tree.borrow_mut().update(root, |node| {
+                node.description = (!text.is_empty()).then_some(text)
+            });
         });
     }
     if let Some(mut checked) = checked {

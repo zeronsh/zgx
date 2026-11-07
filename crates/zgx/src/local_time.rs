@@ -18,7 +18,7 @@ pub fn offset() -> i32 {
 
 /// Seconds since 1 January 1970, local time: UTC's, moved by [`offset`].
 pub fn now_seconds() -> i64 {
-    let utc = std::time::SystemTime::now()
+    let utc = crate::clock::system_now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     utc + i64::from(offset())

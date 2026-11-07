@@ -2957,6 +2957,8 @@ pub struct Scene {
     free: Vec<u32>,
     /// Slots of nodes removed and not yet freed (`kill`).
     dead: usize,
+    /// What a slot made next starts its generations from (`rest`).
+    new_slot_generation: u32,
     /// Flushes since `slots` last grew (`trim_slots`).
     slots_settled: u8,
     root: NodeId,
@@ -3209,6 +3211,7 @@ impl Scene {
             }],
             free: Vec::new(),
             dead: 0,
+            new_slot_generation: 0,
             slots_settled: 0,
             root,
             dirty: vec![root],
@@ -5644,6 +5647,8 @@ impl Scene {
             .copy_from_slice(children);
         self.invalidate_layout(parent);
         self.children_changed(parent);
+        // In another order, another may be hit on top.
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
         true
     }
     /// Installs the native font engine for editor geometry and intrinsic measurement.
@@ -6080,11 +6085,16 @@ impl Scene {
     /// The box around bytes `range` of text node `id` as it shows them, in
     /// the window's points (through any transform or zoom): across every
     /// line the range runs on; for an empty range, its caret's place (no
-    /// width, the line's height). `None` for a node with no text, or one
-    /// masked (a password). Shapes the text: for an input method asking
-    /// where a range is (Windows' `GetTextExt`), not for every frame.
+    /// width, the line's height). `None` for a node with no text, one
+    /// masked (a password), or one no longer in the scene: an input method
+    /// may ask after the editor it was told of is gone. Shapes the text:
+    /// for an input method asking where a range is (Windows'
+    /// `GetTextExt`), not for every frame.
     pub fn text_range_area(&self, id: NodeId, range: std::ops::Range<usize>) -> Option<Rect> {
         use unicode_segmentation::UnicodeSegmentation;
+        if !self.contains(id) {
+            return None;
+        }
         let text = match self.kind(id) {
             NodeKind::Text { text, .. } => text.clone(),
             NodeKind::RichText { text } => text.text_arc(),
@@ -6455,13 +6465,13 @@ impl Scene {
             let index = self.slots.len() as u32;
             self.slots_settled = 0;
             self.slots.push(Slot {
-                generation: 0,
+                generation: self.new_slot_generation,
                 dead: false,
                 node: Some(node),
             });
             NodeId {
                 index,
-                generation: 0,
+                generation: self.new_slot_generation,
             }
         };
         self.node_mut(parent).children.get_mut().push(id);
@@ -7491,6 +7501,8 @@ impl Scene {
                     order
                 })
         };
+        // Painted, and hit, in another order (`interaction_revision`).
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
         let maps = self.cold.get_or_insert_default();
         let had = match order {
             Some(order) => maps.stacked.insert(parent, order).is_some(),
@@ -7949,6 +7961,9 @@ impl Scene {
         if paints {
             self.damage_subtree(id);
             self.invalidate(id, PAINT);
+            // Clipped otherwise, say: what is under the pointer may differ
+            // (`interaction_revision`).
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
         }
         match HELD {
             true => self.invalidate_layout_with::<true>(id, false, true, owner),
@@ -11449,6 +11464,28 @@ impl Scene {
             self.slots.shrink_to(len + len / 4 + 64);
         }
     }
+    /// A window at rest: slots past the last node in use go, most of a
+    /// kilobyte each, and the room above what is left. A slot made again
+    /// starts above every generation that went (`new_slot_generation`), so
+    /// that a stale id never names it.
+    pub fn rest(&mut self) {
+        let mut keep = self.slots.len();
+        while keep > 1 && self.slots[keep - 1].node.is_none() {
+            keep -= 1;
+            self.new_slot_generation = self
+                .new_slot_generation
+                .max(self.slots[keep].generation.wrapping_add(1));
+        }
+        if keep < self.slots.len() {
+            self.free.retain(|index| (*index as usize) < keep);
+            self.slots.truncate(keep);
+        }
+        self.slots.shrink_to_fit();
+        // The lowest taken first from now on: what mounts next leaves the
+        // slots above it free to go at the next rest.
+        self.free.sort_unstable_by(|a, b| b.cmp(a));
+        self.free.shrink_to_fit();
+    }
     /// Mark `id` as scroll content: translating it reports a `ScrollMove`
     /// instead of damaging everything it paints, and it moves by whole
     /// device pixels (`set_pixel_scale`).
@@ -12010,6 +12047,26 @@ impl Scene {
     /// output depends on pixels outside its own subtree.
     pub fn has_backdrop_blur(&self) -> bool {
         !self.blur_nodes.is_empty() || !self.backdrop_readers().is_empty()
+    }
+    /// Each backdrop filter that shows, as far as it can reach: its box in
+    /// the window (around its transformed corners under a transform), left
+    /// unclipped, and its blur radius. Whatever the paint walk finds of a
+    /// filter (its item's box within its clip) lies inside its box here, so
+    /// a renderer can grow a frame's damage through every filter it might
+    /// touch before it walks, and walk no further than that.
+    pub fn backdrop_filters(&self) -> Vec<(Rect, f32)> {
+        self.blur_nodes
+            .iter()
+            .filter_map(|id| {
+                let (bounds, effects, _) = self.world(*id);
+                let bounds = match self.transformed {
+                    0 => bounds,
+                    _ => self.transformed_world_bounds(*id),
+                };
+                (effects.opacity > 0.0 && effects.blur_radius > 0.0)
+                    .then_some((bounds, effects.blur_radius))
+            })
+            .collect()
     }
     /// The paint items in paint order: the window's with `None` (popups left
     /// out), or popup `root`'s alone.
@@ -12822,6 +12879,56 @@ mod tests {
             font_size: 16.0,
         }
     }
+    /// What is under a still pointer can change without anything moving: a
+    /// clip, children reordered, a paint order. `interaction_revision`, on
+    /// which a host keeps the cursor it last worked out, moves with each.
+    #[test]
+    fn what_is_hit_changing_moves_the_interaction_revision() {
+        let fixed = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let mut scene = Scene::new(200., 200.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let holder = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            fixed(100., 100.),
+        );
+        let a = scene.append(
+            holder,
+            NodeKind::Rect(Color(1, 1, 1, 255)),
+            fixed(100., 100.),
+        );
+        let b = scene.append(
+            holder,
+            NodeKind::Rect(Color(2, 2, 2, 255)),
+            fixed(100., 100.),
+        );
+        scene.flush();
+        let mut seen = scene.interaction_revision();
+        let mut moved = |scene: &Scene, what: &str| {
+            let now = scene.interaction_revision();
+            assert_ne!(now, seen, "{what}");
+            seen = now;
+        };
+        scene.set_style(
+            holder,
+            Style {
+                clip: true,
+                ..fixed(100., 100.)
+            },
+        );
+        moved(&scene, "clipped");
+        scene.set_style(holder, fixed(100., 100.));
+        moved(&scene, "unclipped");
+        assert!(scene.reorder_children(holder, &[b, a]));
+        moved(&scene, "reordered");
+        scene.set_z(b, 3);
+        moved(&scene, "raised");
+        assert_eq!(scene.hit_test_all(50., 50.).first().copied(), Some(b));
+    }
     /// A text's proof that it holds no right-to-left script goes with its
     /// text: changed to Hebrew, its ink is its whole box again.
     #[test]
@@ -13344,6 +13451,27 @@ mod tests {
         let reused = scene.append(scene.root(), text("reused"), Style::default());
         assert!(ids.iter().any(|id| id.index == reused.index));
         assert!(ids.iter().all(|id| !scene.contains(*id)));
+        scene.flush();
+    }
+    #[test]
+    fn slots_given_back_at_rest_leave_no_stale_id_alive() {
+        let mut scene = Scene::new(100.0, 100.0);
+        let kept = scene.append(scene.root(), text("kept"), Style::default());
+        let gone: Vec<_> = (0..64)
+            .map(|_| scene.append(scene.root(), text("gone"), Style::default()))
+            .collect();
+        for &id in &gone {
+            scene.remove(id);
+        }
+        scene.flush();
+        scene.rest();
+        assert!(scene.slots.len() < 8, "{} slots left", scene.slots.len());
+        assert!(scene.contains(kept));
+        let again: Vec<_> = (0..64)
+            .map(|_| scene.append(scene.root(), text("again"), Style::default()))
+            .collect();
+        assert!(gone.iter().all(|id| !scene.contains(*id)));
+        assert!(again.iter().all(|id| scene.contains(*id)));
         scene.flush();
     }
     #[test]

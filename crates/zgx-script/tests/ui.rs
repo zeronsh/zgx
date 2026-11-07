@@ -5252,6 +5252,35 @@ fn ui_glass_is_a_box_that_holds_children_drawn_with_no_system_glass() {
 }
 
 #[test]
+fn ui_glass_rounds_each_corner_it_is_given() {
+    let mut h = Harness::inline(
+        r##"return ui.glass { id = "pane", w = 200, h = 100,
+            corners = { tl = 56, tr = 56, br = 38, bl = 38 } }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.host.error().get(), None);
+    let pane = h.find("pane").unwrap();
+    let scene = h.ui.scene.borrow();
+    let backing = scene.children(pane)[0];
+    let corners = match scene.kind(backing) {
+        zgx::scene::NodeKind::Quad(quad) | zgx::scene::NodeKind::Panel { quad, .. } => {
+            quad.decoration.as_deref().and_then(|d| d.corners)
+        }
+        _ => None,
+    }
+    .expect("the backing's corners");
+    assert_eq!(
+        (
+            corners.top_left,
+            corners.top_right,
+            corners.bottom_right,
+            corners.bottom_left
+        ),
+        (56., 56., 38., 38.)
+    );
+}
+
+#[test]
 fn the_engine_keeps_a_layer_shader_up_with_no_script_per_frame() {
     let mut h = Harness::inline(
         r##"local on = ui.state("on", false)
@@ -5284,5 +5313,79 @@ fn the_engine_keeps_a_layer_shader_up_with_no_script_per_frame() {
     assert_eq!(
         scene.layer_shader(pane).unwrap().uniforms.params[0][0],
         0.75
+    );
+}
+
+/// A pointer event's table has every field a handler reads, as Lua
+/// values of their kinds, a table of its own for each event, and the
+/// extras a press, a wheel and a pinch add: however it's built.
+#[test]
+fn a_pointer_event_says_where_and_the_keys_held() {
+    use zgx::input::{InputEvent, PointerButton};
+    let script = r##"
+    local said = ui.state("said", "")
+    local last = nil
+    local function note(name)
+        return function(e)
+            local fresh = e ~= last
+            last = e
+            e.mine = true
+            local fields = {}
+            for k, v in e do
+                table.insert(fields, `{k}={typeof(v)}`)
+            end
+            table.sort(fields)
+            said:set(said:peek() .. string.format("%s %.1f %.1f %.1f %.1f %s %s %s %s %s %s [%s];", name,
+                e.x, e.y, e.local_x, e.local_y, tostring(e.shift), tostring(e.ctrl), tostring(e.alt),
+                tostring(e.meta), tostring(e.cmd), tostring(fresh), table.concat(fields, ",")))
+            return false
+        end
+    end
+    return ui.column {
+        ui.text { id = "said", said },
+        ui.div { id = "box", w = 100, h = 80, bg = "#334",
+            on_pointer_move = note("move"), on_press = note("press"), on_wheel = note("wheel") } }"##;
+    let mut h = Harness::inline(script);
+    h.frames(2);
+    let laid = h.bounds("box");
+    let (x, y) = (laid.x + 30., laid.y + 20.);
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::PointerMove { x: x + 1., y });
+    h.ui.dispatch(InputEvent::PointerDown {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    h.ui.dispatch(InputEvent::PointerUp {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    h.ui.dispatch(InputEvent::Scroll {
+        x,
+        y,
+        delta_x: 0.,
+        delta_y: 3.,
+    });
+    h.frames(2);
+    let said = h.text("said");
+    let common = "alt=boolean,cmd=boolean,ctrl=boolean,local_x=number,local_y=number,meta=boolean,mine=boolean,shift=boolean,x=number,y=number";
+    let at = format!(
+        "{:.1} {:.1} 30.0 20.0 false false false false false true",
+        x, y
+    );
+    assert!(said.contains(&format!("move {at} [{common}];")), "{said}");
+    assert!(
+        said.contains(&format!(
+            "move {:.1} {:.1} 31.0 20.0 false false false false false true [{common}];",
+            x + 1.,
+            y
+        )),
+        "{said}"
+    );
+    assert!(said.contains(&format!("press {at} [alt=boolean,clicks=number,cmd=boolean,ctrl=boolean,local_x=number,local_y=number,meta=boolean,mine=boolean,shift=boolean,x=number,y=number];")), "{said}");
+    assert!(
+        said.contains("wheel ") && said.contains("dx=number,dy=number"),
+        "{said}"
     );
 }

@@ -445,6 +445,8 @@ pub(crate) struct GlassSpec {
     pub clear: Option<Source>,
     pub tint: Option<Source>,
     pub radius: Option<Source>,
+    /// Each corner's own (`{ tl, tr, br, bl }` or four numbers).
+    pub corners: Option<Source>,
 }
 /// `ui.glass`, made the first time a script names it.
 pub(crate) fn install_glass(lua: &Lua, ui: &Table) -> mlua::Result<()> {
@@ -463,6 +465,7 @@ pub(crate) fn install_glass(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                 clear: take("clear", Ty::Bool)?,
                 tint: take("tint", Ty::Color)?,
                 radius: take("radius", Ty::Num)?,
+                corners: take("corners", Ty::Corners)?,
             };
             let node = fill(
                 lua,
@@ -3011,6 +3014,8 @@ pub(crate) struct A11y {
     pub expanded: Option<Source>,
     pub live: Option<zgx::semantics::Live>,
     pub description: Option<Rc<str>>,
+    /// A `description` given as a state or function.
+    pub description_of: Option<Source>,
     pub hidden: bool,
     pub focus_group: Option<zgx::input::FocusGroup>,
     /// A `label` given as a state or function.
@@ -4274,10 +4279,16 @@ fn fill_from(
             "error" => {
                 node.a11y.get_or_insert_default().error = Some(source(lua, Ty::Str, "error", value)?);
             }
-            "description" => {
-                node.a11y.get_or_insert_default().description =
-                    Some(lua.unpack::<String>(value)?.into());
-            }
+            "description" => match value {
+                mlua::Value::String(text) => {
+                    node.a11y.get_or_insert_default().description = Some(text.to_str()?.as_ref().into());
+                }
+                // Followed: a state or a function giving the hint as things stand.
+                value => {
+                    node.a11y.get_or_insert_default().description_of =
+                        Some(source(lua, Ty::Str, "description", value)?);
+                }
+            },
             "aria_hidden" => {
                 node.a11y.get_or_insert_default().hidden = lua.unpack(value)?;
             }
@@ -6496,7 +6507,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "now",
         lua.create_function(|_, ()| {
-            Ok(std::time::SystemTime::now()
+            Ok(zgx::clock::system_now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0., |d| d.as_secs_f64() * 1000.))
         })?,

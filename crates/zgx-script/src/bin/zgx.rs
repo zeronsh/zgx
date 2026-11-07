@@ -21,6 +21,9 @@
 //! `zgx test [<app-dir>] [<filter>]` runs the app's Luau tests
 //! (`*.test.luau`) against it mounted headless (`zgx_script::test_runner`).
 //!
+//! `zgx video <command>…` renders and previews videos by zgx-video (beside this
+//! binary, or on PATH): `zgx video help`.
+//!
 //! `zgx inspect <command>…` asks a running app serving devtools (`zgx-run
 //! --inspect`): its tree, nodes, states and errors, and clicks, typing and
 //! keys (`zgx_script::inspect`; `docs/agents/inspect.md`).
@@ -36,6 +39,7 @@ const USAGE: &str = "usage: zgx new <name> [--template basic|router|list|form|pl
        zgx test [<app-dir>] [<name filter>]
        zgx inspect [--app PID] [--json] <command> [args]   (zgx inspect help)
        zgx audit [--human] <app.luau-or-dir>
+       zgx video render|still|list|studio <dir> …   (zgx video help)
 
 new: writes a Luau app into the directory <name> (empty or new): app.luau,
 components/, a theme, tests/, zgx.json, a README and a CI workflow running
@@ -275,6 +279,28 @@ fn run(args: Vec<String>) -> ExitCode {
     ExitCode::from(2)
 }
 
+/// `zgx video …`: handed to zgx-video (beside this binary, or on PATH), which
+/// links the renderer this tool doesn't.
+fn video(args: Vec<String>) -> ExitCode {
+    let name = format!("zgx-video{}", std::env::consts::EXE_SUFFIX);
+    let video = std::env::current_exe()
+        .ok()
+        .map(|exe| exe.with_file_name(&name))
+        .filter(|video| video.is_file())
+        .unwrap_or_else(|| PathBuf::from(&name));
+    match std::process::Command::new(&video).args(&args).status() {
+        Ok(status) => ExitCode::from(status.code().unwrap_or(2).clamp(0, 255) as u8),
+        Err(error) => {
+            eprintln!(
+                "zgx video: couldn't run {} ({error}); install zgx-video beside zgx or on PATH \
+                 (cargo install zgx-video)",
+                video.display()
+            );
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
@@ -286,6 +312,7 @@ fn main() -> ExitCode {
         Some("inspect") => return inspect(args.collect()),
         Some("audit") => return audit(args.collect()),
         Some("run") => return run(args.collect()),
+        Some("video") => return video(args.collect()),
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;

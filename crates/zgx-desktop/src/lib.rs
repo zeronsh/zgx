@@ -126,9 +126,26 @@ mod x11_startup;
 mod x11_visual;
 #[cfg(target_os = "linux")]
 mod x11_work_area;
+/// What the calling thread's heap holds that has been freed goes back to the
+/// system. A thread that makes what another frees (a socket's reader) gets it
+/// back only as it next allocates: one gone quiet calls this. (Hosts do it for
+/// the main thread as a window goes idle.)
+pub fn release_thread_heap() {
+    #[cfg(feature = "mimalloc")]
+    {
+        unsafe extern "C" {
+            fn mi_collect(force: bool);
+        }
+        // SAFETY: mimalloc's collection only releases memory it has freed.
+        unsafe {
+            mi_collect(true);
+        }
+    }
+}
+
 pub use app_menu::{
-    AppMenu, AppMenuEntry, AppMenuError, MenuAccelerator, MenuAction, StandardItem, app_menu_bar,
-    has_native_app_menu,
+    APPLICATION_MENU, AppMenu, AppMenuEntry, AppMenuError, MenuAccelerator, MenuAction,
+    StandardItem, app_menu_bar, has_native_app_menu,
 };
 pub use composition::{CompositionLayer, WindowComposition};
 pub use file_dialog::{

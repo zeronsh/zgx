@@ -42,6 +42,16 @@ It opens windows for the whole run (a cycle a second); leave the machine to it. 
 
 `examples/failures.rs` fails twice while it animates, for `scripts/failures_smoke.py` (a Linux native smoke): a task panics, which the host contains and shows in a banner, then its GPU device is lost (`WindowHandle::debug_lose_gpu`), and it makes a new renderer and draws on. `crates/zgx-gpu/tests/device_loss.rs` checks the renderer's side; `crates/zgx-script/tests/failures.rs` a script's runtime error, a missing image and a missing font.
 
+### A window at rest on macOS
+
+A window left alone after a scroll sets no timer, runs no display link and wakes no thread of its own. Measured on an M5 Max, release build, with a plain scroll app: real system scroll events were posted (a flick and its coast), then the window was left for 60 s. The process's own counters (`proc_pid_rusage`) and a 20 s `sample` were read over that time. Two runs of each:
+
+- Scrolled, then 60 s at rest: 24.7–25.2 ms CPU and 20 interrupt wakeups, the same as a window never scrolled (23.0–25.4 ms, 19–20). A scroll leaves nothing running.
+- A bare AppKit window, active and key: 33.9–35.0 ms CPU and 6–7 wakeups over the same 60 s.
+- What wakes it: once the startup trim has run, 1.35 s after launch, every wait is untimed (`ControlFlow::Wait`). Every thread is parked. The main thread works 10 ms in 20 s, answering system messages on its run loop, mostly an accessibility client reading the focused element, and updates once after each.
+
+zgx's extra wakeups over a bare window are those messages; the run loop has no timer of zgx's in it. A richer accessibility tree may draw more queries from a client, and their number depends on the clients running.
+
 ### NVIDIA on Windows: devices made and released concurrently
 
 On an RTX 4090 with NVIDIA's driver 32.0.16.1742 (Windows 11), Direct3D 12 devices made and released on many threads at once can hang the process or crash it. This is the driver's, not zgx's:
@@ -1238,6 +1248,21 @@ Apple M5 Max (macOS 26.4); with the host's deactivation reset
 itself stays active: AppKit tells the window it lost key status the same way
 when another app takes it, but the application's own `resignActive` is not
 exercised.
+
+## macOS menu bar set to hide itself
+
+`scripts/macos_menu_bar_probe.py` (the `menu_bar_probe` example, launched with
+`-_HIHideMenuBar YES`, the process's own setting) posts 200 mouse moves to its
+own window and counts the views AppKit makes for the menu bar over them,
+through a hook on its private `_newMenuBarStackViewWithAppearance:` (the
+probe's, not the library's). An app that activated before its first main menu
+was in (zgx sets its bar after the first frame; the activation winit asks for
+at launch arrives at about the same time) had AppKit make the bar's windows
+again for every move: 400 views over 200 moves, about 0.3 ms of the app's CPU
+a move, in most launches of the mail example. With the host showing the bar
+as it already is once its first bar is in (`+[NSMenu setMenuBarVisible:]`),
+the probe's launches that activated first make none over their moves (Apple
+M5 Max, macOS 26.4); without it, the first such launch made 400.
 
 ## macOS cursors, Insert, held drags, file drops and title bars
 

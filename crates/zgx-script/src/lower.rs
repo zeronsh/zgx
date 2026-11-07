@@ -2626,6 +2626,7 @@ fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
     use zgx::glass::{GlassStyle, GlassVariant, glass};
     let own = |source: &Option<Source>| source.as_ref().map(resolve_owned);
     let (clear, tint, radius) = (own(&spec.clear), own(&spec.tint), own(&spec.radius));
+    let corners = own(&spec.corners);
     let vm = vm.clone();
     glass(move || {
         let read = |source: &Option<Owned>, ty| {
@@ -2642,6 +2643,9 @@ fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
         }
         if let Some(Lit::Num(radius)) = read(&radius, Ty::Num) {
             style.radius = radius;
+        }
+        if let Some(Lit::Corners(corners)) = read(&corners, Ty::Corners) {
+            style.corners = Some(corners);
         }
         style
     })
@@ -4351,6 +4355,13 @@ fn styled(
         if let Some(description) = &a11y.description {
             view = view.accessible_description(description.to_string());
         }
+        if let Some(description) = &a11y.description_of {
+            let (description, vm) = (resolve_owned(description), vm.clone());
+            view = view.description_when(move || match resolve(&description, Ty::Str, None, &vm) {
+                Some(Lit::Str(s)) => s.to_string(),
+                _ => String::new(),
+            });
+        }
         if a11y.hidden {
             view = view.accessible_hidden();
         }
@@ -5290,17 +5301,16 @@ fn with_events(
         let held = event.pointer_modifiers();
         let point = |x: f32, y: f32| -> mlua::Result<mlua::Table> {
             let (lx, ly) = local(x, y);
-            let t = lua.create_table()?;
-            t.set("x", x)?;
-            t.set("y", y)?;
-            t.set("local_x", lx)?;
-            t.set("local_y", ly)?;
-            t.set("shift", held.shift)?;
-            t.set("ctrl", held.control)?;
-            t.set("alt", held.alt)?;
-            t.set("meta", held.meta)?;
-            t.set("cmd", held.primary_shortcut())?;
-            Ok(t)
+            vm.point_table(
+                (x, y, lx, ly),
+                (
+                    held.shift,
+                    held.control,
+                    held.alt,
+                    held.meta,
+                    held.primary_shortcut(),
+                ),
+            )
         };
         if captures
             && event.phase == EventPhase::Target

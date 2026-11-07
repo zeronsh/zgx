@@ -584,6 +584,30 @@ pub(crate) fn install(lua: &mlua::Lua) {
     lua.set_app_data(Parsed::default());
 }
 
+/// A VM at rest: streams not asked for lately go. (The texts parsed stay: a
+/// chat opened again would parse them in its first frame.)
+pub(crate) fn rest(lua: &mlua::Lua) {
+    let Some(parsed) = lua.app_data_ref::<Parsed>() else {
+        return;
+    };
+    let mut streams = parsed.streams.borrow_mut();
+    let mut order = parsed.stream_order.borrow_mut();
+    let now = std::time::Instant::now();
+    while order
+        .front()
+        .is_some_and(|(_, used)| now.duration_since(*used) > STREAM_QUIET)
+    {
+        if let Some((old, _)) = order.pop_front() {
+            streams.remove(&old);
+        }
+    }
+    streams.shrink_to_fit();
+    order.shrink_to_fit();
+}
+
+/// A stream left this long has ended, or parses again if it goes on.
+const STREAM_QUIET: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// How many texts and streams a script's `ui.markdown` keeps.
 const KEPT: usize = 256;
 
@@ -598,17 +622,25 @@ struct Parsed {
     texts: std::cell::RefCell<Texts>,
     streams: std::cell::RefCell<Streams>,
     /// Streams by last use, oldest first.
-    stream_order: std::cell::RefCell<std::collections::VecDeque<String>>,
+    stream_order: std::cell::RefCell<std::collections::VecDeque<(String, std::time::Instant)>>,
 }
 /// `key` was just used: last in the order, and the oldest streams go past
 /// `KEPT`.
-fn touch(order: &mut std::collections::VecDeque<String>, key: String, streams: &mut Streams) {
-    if order.back() != Some(&key) {
-        order.retain(|k| *k != key);
-        order.push_back(key);
+fn touch(
+    order: &mut std::collections::VecDeque<(String, std::time::Instant)>,
+    key: String,
+    streams: &mut Streams,
+) {
+    let now = std::time::Instant::now();
+    match order.back_mut() {
+        Some((last, used)) if *last == key => *used = now,
+        _ => {
+            order.retain(|(k, _)| *k != key);
+            order.push_back((key, now));
+        }
     }
     while order.len() > KEPT {
-        if let Some(old) = order.pop_front() {
+        if let Some((old, _)) = order.pop_front() {
             streams.remove(&old);
         }
     }

@@ -397,6 +397,13 @@ impl Semantics {
         }
         crate::shrink_sparse(&mut self.nodes);
     }
+    /// A window at rest: the room its tables took for what has gone.
+    pub fn rest(&mut self) {
+        self.nodes.shrink_to_fit();
+        self.text_nodes.shrink_to_fit();
+        self.text_lines.shrink_to_fit();
+        self.labelled_by.shrink_to_fit();
+    }
     /// Set `id`'s information; equal information changes nothing.
     pub fn set(&mut self, id: NodeId, node: SemanticNode) {
         if self.buried(id) {

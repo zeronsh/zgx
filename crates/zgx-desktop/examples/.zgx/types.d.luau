@@ -2391,8 +2391,9 @@ export type NodeProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: ("polite" | "assertive" | "off")?,
-	-- Read after its name, as a hint (`aria-description`).
-	description: string?,
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
+	description: (string | ReadOnlyState<string> | (() -> string))?,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: (string | Readable<string?> | (() -> string?))?,
@@ -2797,7 +2798,8 @@ export type Props = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -3152,7 +3154,7 @@ export type Props_selected = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_checked = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_expanded = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_live = ("polite" | "assertive" | "off")?
-export type Props_description = string?
+export type Props_description = (string | ReadOnlyState<string> | (() -> string))?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
 export type Props_aria_hidden = boolean?
 export type Props_focus_group = ("vertical" | "horizontal" | "both")?
@@ -3446,7 +3448,8 @@ export type ContainerProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -3658,6 +3661,9 @@ export type GlassProps = ContainerProps & {
 	tint: Reactive<Color>?,
 	-- Its corners' radius in points.
 	radius: Reactive<number>?,
+	-- Each corner's own, over `radius`: `{ tl, tr, br, bl }` or four numbers
+	-- (the drawn glass; macOS's system glass takes `radius`).
+	corners: Reactive<Corners>?,
 }
 export type ScrollProps = {
 	-- Size and position.
@@ -3877,7 +3883,8 @@ export type ScrollProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -4314,7 +4321,8 @@ export type TextProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -4719,7 +4727,8 @@ export type MarkdownViewProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -5194,7 +5203,8 @@ export type RichProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -5593,7 +5603,8 @@ export type ImageProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -6009,7 +6020,8 @@ export type SvgProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -6513,7 +6525,8 @@ export type Scene3DProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -6935,7 +6948,8 @@ export type CanvasProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -7366,7 +7380,8 @@ export type CheckboxProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -7775,7 +7790,8 @@ export type InputProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -8285,7 +8301,8 @@ export type ProgressProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -8685,7 +8702,8 @@ export type SliderProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -9103,7 +9121,8 @@ export type SegmentedProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -9514,7 +9533,8 @@ export type StepperProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -9926,7 +9946,8 @@ export type DisclosureProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -10350,7 +10371,8 @@ export type AccordionProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -10747,7 +10769,8 @@ export type SectionProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -11170,7 +11193,8 @@ export type SeparatorProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -11575,7 +11599,8 @@ export type TabsProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -12002,7 +12027,8 @@ export type TreeProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -12425,7 +12451,8 @@ export type DataGridProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -12844,7 +12871,8 @@ export type CalendarProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -13256,7 +13284,8 @@ export type DatePickerProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -13666,7 +13695,8 @@ export type TimeFieldProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -14075,7 +14105,8 @@ export type ComboboxProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -14492,7 +14523,8 @@ export type CommandPaletteProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -14897,7 +14929,8 @@ export type SelectProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -15309,7 +15342,8 @@ export type SplitProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -15778,7 +15812,8 @@ export type ListProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -16272,7 +16307,8 @@ export type LayerProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -16692,7 +16728,8 @@ export type ModalProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -17130,7 +17167,8 @@ export type PopoverProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -17574,7 +17612,8 @@ export type MenuItemProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -17982,7 +18021,8 @@ export type SubmenuProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -18408,7 +18448,8 @@ export type WebViewProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -18833,7 +18874,8 @@ export type TerminalProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -19233,7 +19275,8 @@ export type SlotProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -19684,7 +19727,8 @@ export type EachOptions = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
@@ -20099,7 +20143,8 @@ export type PresenceOptions = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
-	-- Read after its name, as a hint (`aria-description`).
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
