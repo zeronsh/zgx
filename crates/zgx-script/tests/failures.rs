@@ -119,7 +119,14 @@ fn a_missing_image_names_the_line_that_asked_for_it() {
             ),
         ],
     );
-    assert!(error.contains("components/card.luau:2: "), "{error}");
+    // The module as its chunk is named, with the system's separator
+    // (`components\card.luau` on Windows).
+    assert!(
+        error
+            .replace('\\', "/")
+            .contains("components/card.luau:2: "),
+        "{error}"
+    );
     // Not a line of tools' files or declarations, which may name the
     // same text (and sort first).
     let error = warning_of(
