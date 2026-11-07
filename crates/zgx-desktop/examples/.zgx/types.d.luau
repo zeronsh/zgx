@@ -975,6 +975,22 @@ declare extern type Bitmap with
 end
 declare extern type Shader with
 end
+export type ShaderPass = {
+	name: string,
+	shader: string,
+	size: { number }?,
+	scale: number?,
+	format: ("rgba8" | "rgba16float")?,
+	feedback: boolean?,
+	steps: number?,
+	once: boolean?,
+}
+export type LayerShaderOptions = {
+	fps: number?,
+	passes: { ShaderPass }?,
+	images: { [string]: Bitmap }?,
+	geometry: string?,
+}
 declare extern type LayerShader with
 end
 declare extern type Brush with
@@ -2112,6 +2128,9 @@ export type Styles = {
 	underline_offset: Num?,
 	-- The language its text is in (HTML's `lang`): "ja", "zh-TW".
 	lang: string?,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: string?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: number?,
 	y: number?,
@@ -2299,6 +2318,9 @@ export type StyleProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Reactive<string>?,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: string?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -2745,6 +2767,9 @@ export type Props = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -3125,6 +3150,7 @@ export type Props_font_features = Reactive<string>?
 export type Props_underline = Reactive<boolean>?
 export type Props_underline_offset = Reactive<Num>?
 export type Props_lang = Reactive<string>?
+export type Props_geometry = string?
 export type Props_x = Reactive<number>?
 export type Props_y = Reactive<number>?
 export type Props_scale = Reactive<number>?
@@ -3394,6 +3420,9 @@ export type ContainerProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -3825,6 +3854,9 @@ export type ScrollProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -4262,6 +4294,9 @@ export type TextProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -4667,6 +4702,9 @@ export type MarkdownViewProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -5142,6 +5180,9 @@ export type RichProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -5541,6 +5582,9 @@ export type ImageProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -5957,6 +6001,9 @@ export type SvgProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -6461,6 +6508,9 @@ export type Scene3DProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -6883,6 +6933,9 @@ export type CanvasProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -7314,6 +7367,9 @@ export type CheckboxProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -7723,6 +7779,9 @@ export type InputProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -8233,6 +8292,9 @@ export type ProgressProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -8633,6 +8695,9 @@ export type SliderProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -9051,6 +9116,9 @@ export type SegmentedProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -9462,6 +9530,9 @@ export type StepperProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -9874,6 +9945,9 @@ export type DisclosureProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -10298,6 +10372,9 @@ export type AccordionProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -10697,6 +10774,9 @@ export type SectionProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -11118,6 +11198,9 @@ export type SeparatorProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -11523,6 +11606,9 @@ export type TabsProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -11950,6 +12036,9 @@ export type TreeProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -12373,6 +12462,9 @@ export type DataGridProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -12792,6 +12884,9 @@ export type CalendarProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -13204,6 +13299,9 @@ export type DatePickerProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -13614,6 +13712,9 @@ export type TimeFieldProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -14023,6 +14124,9 @@ export type ComboboxProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -14440,6 +14544,9 @@ export type CommandPaletteProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -14845,6 +14952,9 @@ export type SelectProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -15257,6 +15367,9 @@ export type SplitProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -15726,6 +15839,9 @@ export type ListProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -16220,6 +16336,9 @@ export type LayerProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -16640,6 +16759,9 @@ export type ModalProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -17078,6 +17200,9 @@ export type PopoverProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -17526,6 +17651,9 @@ export type MenuItemProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -17930,6 +18058,9 @@ export type SubmenuProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -18356,6 +18487,9 @@ export type WebViewProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -18781,6 +18915,9 @@ export type TerminalProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -19181,6 +19318,9 @@ export type SlotProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -19632,6 +19772,9 @@ export type EachOptions = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -20047,6 +20190,9 @@ export type PresenceOptions = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -20711,7 +20857,7 @@ declare ui: {
 	-- input.time, input.scale, input.params and input.radii (the box's corners);
 	-- `zgx_sample(p)` reads the layer at another point, and `zgx_backdrop(p)`
 	-- what lies behind the node there.
-	layer_shader: (source: string, opts: { fps: number? }?) -> LayerShader,
+	layer_shader: (source: string, opts: LayerShaderOptions?) -> LayerShader,
 	-- A box of glass: macOS 26's own where it can be, drawn elsewhere.
 	glass: (opts: GlassProps) -> Node,
 	-- Sorts `list` in place, stably, by a field of each item (`"price"`) or

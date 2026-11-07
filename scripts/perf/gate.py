@@ -146,6 +146,7 @@ SCENES = [
     ('fx-none', 'zgx-3d', 'fx_bench', {'SCENE': 'none', 'ZGX_GPU_NOOP': '1'}),
     ('fx-layer', 'zgx-3d', 'fx_bench', {'SCENE': 'layer', 'ZGX_GPU_NOOP': '1'}),
     ('fx-reader', 'zgx-3d', 'fx_bench', {'SCENE': 'reader', 'ZGX_GPU_NOOP': '1'}),
+    ('fx-passes', 'zgx-3d', 'passes_bench', {'ZGX_GPU_NOOP': '1'}),
     # A video's frames (zgx-video's `examples/bench`): its script, animations,
     # timers and shader clock stepped on a virtual clock (`zgx::clock`), each
     # frame drawn whole by wgpu's no-op backend. What making video costs;

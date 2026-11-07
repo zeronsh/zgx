@@ -1895,6 +1895,8 @@ struct ColdMaps {
     /// blur, what they show depends on that. (Here, cold: few scenes have
     /// any, and the scene's own layout is what every frame's walk reads.)
     backdrop_readers: Vec<NodeId>,
+    /// Nodes whose boxes layer shaders read by tag (`set_geometry_tag`).
+    geometry_nodes: Vec<(u64, NodeId)>,
 }
 /// A node painted outside its parent's fade (`Scene::set_outside_fade`).
 #[derive(Clone, Copy, Debug)]
@@ -4186,6 +4188,46 @@ impl Scene {
         match self.layer_shader(id).filter(|layer| layer.reads_backdrop()) {
             Some(layer) => bounds.expand(layer.bleed + layer.reach),
             None => bounds,
+        }
+    }
+    /// Have `id`'s box read as tag `tag`'s (`Styled::geometry_tag`). A node
+    /// has one tag.
+    pub fn set_geometry_tag(&mut self, id: NodeId, tag: u64) {
+        let nodes = &mut self.cold.get_or_insert_default().geometry_nodes;
+        match nodes.iter_mut().find(|(_, at)| *at == id) {
+            Some(entry) => entry.0 = tag,
+            None => nodes.push((tag, id)),
+        }
+    }
+    /// Each box tagged `tag`, where it is in the window, with its corner
+    /// radii, into `out`.
+    pub fn geometry_of(&self, tag: u64, out: &mut Vec<(Rect, [f32; 4])>) {
+        let live = |id: &NodeId| self.slots[id.index as usize].generation == id.generation;
+        let nodes = self
+            .cold
+            .as_deref()
+            .map_or(&[][..], |cold| &cold.geometry_nodes);
+        for (_, id) in (nodes.iter()).filter(|(of, id)| *of == tag && live(id)) {
+            let bounds = match self.transformed {
+                0 => self.world(*id).0,
+                _ => self.transformed_world_bounds(*id),
+            };
+            let radii = match &self.node(*id).kind {
+                NodeKind::Panel { quad, .. } | NodeKind::Quad(quad) => {
+                    let corners = (quad.decoration.as_ref())
+                        .and_then(|decoration| decoration.corners)
+                        .unwrap_or(crate::decoration::Corners::all(quad.radius));
+                    [
+                        corners.top_left,
+                        corners.top_right,
+                        corners.bottom_right,
+                        corners.bottom_left,
+                    ]
+                    .map(|radius| radius.min(bounds.width.min(bounds.height) / 2.))
+                }
+                _ => [0.; 4],
+            };
+            out.push((bounds, radii));
         }
     }
     /// Whether any layer shader reads the backdrop.
@@ -6603,6 +6645,7 @@ impl Scene {
         self.blur_nodes.retain(live);
         if let Some(cold) = &mut self.cold {
             cold.backdrop_readers.retain(live);
+            cold.geometry_nodes.retain(|(_, id)| live(id));
         }
         self.popups.retain(live);
         self.popups_promoted.retain(live);

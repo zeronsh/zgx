@@ -490,7 +490,7 @@ impl GpuRenderer {
     /// Have view `key.0`'s painter draw a frame of `size` into `target`, its
     /// work submitted before the frame showing it. Nothing if the view is
     /// gone.
-    fn paint(
+    pub(crate) fn paint(
         &self,
         key: (u64, u64),
         size: (u32, u32),
