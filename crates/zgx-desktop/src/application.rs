@@ -1290,6 +1290,12 @@ const INPUT_FULL_RATE: std::time::Duration = std::time::Duration::from_millis(25
 /// drawn, 6.5 ms before the refresh, each cost the window server 10-20% more
 /// (M1 Max at 60 Hz), the same frames held there the same as frames started
 /// as the refresh began.
+/// Whether a frame drawn now started late (`LateSample`): a scroll's, at a slow
+/// refresh. At a faster one (120 Hz) frames keep the grid's own timing.
+#[cfg(target_os = "macos")]
+fn starts_late(refresh: std::time::Duration, scrolling: bool) -> bool {
+    scrolling && refresh >= crate::scroll_resample::SLOW_REFRESH
+}
 #[cfg(target_os = "macos")]
 struct LateSample {
     /// How long frames lately took from starting to ready to hand over (the
@@ -2744,8 +2750,10 @@ impl Host {
                 // slow refresh started late already (`LateSample`), and render
                 // at once.
                 #[cfg(target_os = "macos")]
-                let started_late = self.frame_interval >= crate::scroll_resample::SLOW_REFRESH
-                    && self.scroll.active(std::time::Instant::now());
+                let started_late = starts_late(
+                    self.frame_interval,
+                    self.scroll.active(std::time::Instant::now()),
+                );
                 #[cfg(target_os = "macos")]
                 if let Some((origin, period)) = self.refresh_grid().filter(|_| !started_late) {
                     let at = self.latch.hold(std::time::Instant::now(), origin, period);
@@ -9612,6 +9620,16 @@ mod tests {
             };
             assert!(ages(false) < ms(9), "late: {:?}", ages(false));
             assert!(ages(true) > ms(14), "the wait counted: {:?}", ages(true));
+        }
+        #[test]
+        fn only_a_scroll_at_a_slow_refresh_starts_late() {
+            use super::super::starts_late;
+            assert!(starts_late(SIXTY, true), "a scroll at 60 Hz");
+            assert!(!starts_late(SIXTY, false), "no scroll");
+            assert!(
+                !starts_late(Duration::from_micros(8_333), true),
+                "a scroll at 120 Hz"
+            );
         }
         #[test]
         fn a_faster_refresh_starts_as_it_begins() {
