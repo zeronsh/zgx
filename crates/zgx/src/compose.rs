@@ -1396,6 +1396,14 @@ impl View {
         self.accessibility_mut().live = Some(live);
         self
     }
+    /// Read after the name, as a hint (`aria-description`), followed: a
+    /// sheet grabber's "Double tap to expand" or "collapse" as the sheet
+    /// stands. Worked out only while assistive technology listens, as
+    /// `accessible_label_when`; empty says none.
+    pub fn description_when(mut self, description: impl FnMut() -> String + 'static) -> Self {
+        self.accessibility_mut().description_when = Some(Box::new(description));
+        self
+    }
     /// Read after the name, as a hint (`aria-description`).
     pub fn accessible_description(mut self, description: impl Into<String>) -> Self {
         self.accessibility_mut().description = Some(description.into());
@@ -7182,6 +7190,8 @@ pub(crate) struct Accessibility {
     numeric: Option<(f64, f64, NumericValue)>,
     live: Option<Live>,
     description: Option<String>,
+    /// `View::description_when`: a hint worked out from state.
+    description_when: Option<Box<dyn FnMut() -> String>>,
     error: Option<Box<dyn FnMut() -> Option<String>>>,
     hidden: bool,
     focus_group: Option<crate::input::FocusGroup>,
@@ -7232,6 +7242,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         numeric,
         live,
         description,
+        description_when,
         error,
         hidden,
         focus_group,
@@ -7305,6 +7316,19 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             }
             let label = label();
             tree.borrow_mut().update(root, |node| node.label = label);
+        });
+    }
+    if let Some(mut description) = description_when {
+        let tree = ui.semantics.clone();
+        let assistive = assistive.clone();
+        ui.bind(root, move || {
+            if !assistive.get() {
+                return;
+            }
+            let text = description();
+            tree.borrow_mut().update(root, |node| {
+                node.description = (!text.is_empty()).then_some(text)
+            });
         });
     }
     if let Some(mut checked) = checked {
