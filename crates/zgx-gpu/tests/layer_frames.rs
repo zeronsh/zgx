@@ -1129,6 +1129,8 @@ fn main() {
         println!("layer_frames: full-rate frames through drawables match drawing whole");
         switches_between_tiles_and_drawables_match_drawing_whole();
         println!("layer_frames: switches between tiles and drawables match drawing whole");
+        a_scroll_under_glass_copies_beside_it_and_matches_drawing_whole();
+        println!("layer_frames: a scroll under glass copies beside it and matches drawing whole");
         faded_scrolls_copy_their_interior_and_match_drawing_whole();
         println!("layer_frames: faded scrolls copy their interior and match drawing whole");
         rounded_corners_scrolled_by_a_copy_match_drawing_whole();
@@ -1207,6 +1209,50 @@ fn rounded_corners_scrolled_by_a_copy_match_drawing_whole() {
     for scale in [1., 1.5] {
         let copies = scrolled_matches_drawing_whole_at(rounded_cards, &steps, scale);
         assert!(copies > 0, "scale {scale}: no copy");
+    }
+}
+/// A scroll view with a glass bar over its foot: what's clear of the bar's blur
+/// copies, and the rest repaints. Each frame as the scene drawn whole, the bar
+/// blurring what's now behind it.
+#[cfg(target_os = "macos")]
+fn under_glass(offset: Signal<f32>) -> View {
+    let mut rows = column().gap(4.).p(4.);
+    for i in 0..40 {
+        rows = rows.child(div().w(500.).h(34.).bg(if i % 3 == 0 {
+            Color(170, 60, 60, 255)
+        } else if i % 3 == 1 {
+            Color(60, 170, 60, 255)
+        } else {
+            Color(60, 60, 170, 255)
+        }));
+    }
+    overlay()
+        .size(SIZE.0, SIZE.1)
+        .bg(Color(17, 17, 17, 255))
+        .child(
+            scroll(offset)
+                .w(SIZE.0)
+                .h(SIZE.1)
+                .bg(Color(17, 17, 17, 255))
+                .child(rows),
+        )
+        .child(
+            div()
+                .w(300.)
+                .h(50.)
+                .left(40.)
+                .top(SIZE.1 - 70.)
+                .rounded(12.)
+                .bg(Color(255, 255, 255, 40))
+                .backdrop_blur(8.),
+        )
+}
+#[cfg(target_os = "macos")]
+fn a_scroll_under_glass_copies_beside_it_and_matches_drawing_whole() {
+    let steps = [0., 3., 7., 30., 31., 90., 89., 0.];
+    for scale in [2., 1., 1.5] {
+        let copies = scrolled_matches_drawing_whole_at(under_glass, &steps, scale);
+        assert!(copies > 0, "scale {scale}: no copy beside the glass");
     }
 }
 /// A faded scroll copies its interior and repaints its bands and what it

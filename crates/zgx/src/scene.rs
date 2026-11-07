@@ -11327,6 +11327,56 @@ impl Scene {
         }
         transform
     }
+    /// The largest band of `clip` a move can copy: clear of every backdrop blur
+    /// that shows, and of what such a bar paints around itself (a shadow, which
+    /// a copy would carry and `copy_blocker` refuses): three times its blur's sigma.
+    /// All of `clip` if none touches it; none if little's left.
+    fn clear_of_blurs(&self, clip: Rect) -> Option<Rect> {
+        let mut clear = clip;
+        let mut touched = false;
+        for blur in &self.blur_nodes {
+            let (bounds, effects, _) = self.world(*blur);
+            if effects.opacity <= 0. {
+                continue;
+            }
+            let reach = (effects.blur_radius * 3.).ceil();
+            let wide = Rect::new(
+                bounds.x - reach,
+                bounds.y - reach,
+                bounds.width + reach * 2.,
+                bounds.height + reach * 2.,
+            );
+            if !wide.intersects(clear) {
+                continue;
+            }
+            touched = true;
+            let bands = [
+                Rect::new(clear.x, clear.y, clear.width, wide.y - clear.y),
+                Rect::new(
+                    clear.x,
+                    wide.y + wide.height,
+                    clear.width,
+                    clear.y + clear.height - wide.y - wide.height,
+                ),
+                Rect::new(clear.x, clear.y, wide.x - clear.x, clear.height),
+                Rect::new(
+                    wide.x + wide.width,
+                    clear.y,
+                    clear.x + clear.width - wide.x - wide.width,
+                    clear.height,
+                ),
+            ];
+            clear = bands
+                .into_iter()
+                .filter(|band| band.width > 0. && band.height > 0.)
+                .max_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))?;
+        }
+        // A band too small for the copy to pay isn't one.
+        if touched && clear.width * clear.height < clip.width * clip.height * 0.25 {
+            return None;
+        }
+        Some(clear)
+    }
     /// Moves reported by the most recent flush.
     pub fn scroll_moves(&self) -> &[ScrollMove] {
         &self.moves
@@ -11531,18 +11581,19 @@ impl Scene {
             }
             let clip = self.world_clip(id);
             let isolated = layered;
-            let filtered = |scene: &Self, clip: Rect| {
-                scene.blur_nodes.iter().any(|blur| {
-                    let (bounds, effects, _) = scene.world(*blur);
-                    effects.opacity > 0. && bounds.intersects(clip)
-                })
-            };
-            let usable = clip.filter(|clip| {
-                !isolated
-                    && dx.abs() < clip.width
-                    && dy.abs() < clip.height
-                    && !filtered(self, *clip)
-            });
+            // Clear of what blurs what's behind it: a glass bar over the view takes
+            // only the view's band it reaches, and what's beside it still moves.
+            let clear = clip.and_then(|clip| self.clear_of_blurs(clip));
+            let usable = clear
+                .filter(|clear| !isolated && dx.abs() < clear.width && dy.abs() < clear.height);
+            // What of the view the band leaves repaints.
+            if let (Some(clip), Some(clear)) = (clip, usable)
+                && clear != clip
+            {
+                for rest in rect_minus(clip, clear) {
+                    self.add_damage(rest);
+                }
+            }
             match usable {
                 Some(clip) => moves.push(ScrollMove {
                     node: id,
@@ -16435,4 +16486,23 @@ mod text_lines_tests {
             assert!(pair[0].range.end <= pair[1].range.start, "{wrapped:?}");
         }
     }
+}
+
+/// What of `outer` lies outside `inner`, which it holds: up to four rectangles.
+fn rect_minus(outer: Rect, inner: Rect) -> impl Iterator<Item = Rect> {
+    let bottom = inner.y + inner.height;
+    let right = inner.x + inner.width;
+    [
+        Rect::new(outer.x, outer.y, outer.width, inner.y - outer.y),
+        Rect::new(
+            outer.x,
+            bottom,
+            outer.width,
+            outer.y + outer.height - bottom,
+        ),
+        Rect::new(outer.x, inner.y, inner.x - outer.x, inner.height),
+        Rect::new(right, inner.y, outer.x + outer.width - right, inner.height),
+    ]
+    .into_iter()
+    .filter(|rect| rect.width > 0. && rect.height > 0.)
 }
