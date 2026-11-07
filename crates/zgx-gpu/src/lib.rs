@@ -18396,12 +18396,24 @@ mod rest_tests {
         }
         scene
     }
+    /// Its caches at rest. Its shader pipelines count only those whose
+    /// shader the renderer alone holds: a fill another test declares
+    /// meanwhile (`compile::warm_fill_shader`, process-wide) every renderer
+    /// starts, and keeps while that test holds it.
     fn rest(gpu: &mut GpuRenderer) -> DebugCacheStats {
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         gpu.trim();
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         gpu.trim();
-        gpu.debug_cache_stats()
+        let held_elsewhere = gpu
+            .fill_shaders
+            .values()
+            .chain(gpu.filter_shaders.values())
+            .filter(|shader| Arc::strong_count(shader) > 1 && compile::is_declared(shader))
+            .count();
+        let mut stats = gpu.debug_cache_stats();
+        stats.shader_pipelines -= held_elsewhere;
+        stats
     }
 
     /// After one big page, a window back on a small one and at rest holds
@@ -18417,6 +18429,14 @@ mod rest_tests {
         draw(&mut gpu, &mut small);
         let baseline = rest(&mut gpu);
         let mut big = big_page(600);
+        // A fill declared elsewhere in the process meanwhile (a script's,
+        // or another test's): every renderer starts it, and keeps it while
+        // its declarer holds it, which isn't this renderer's to give back.
+        let declared = zgx::decoration::FillShader::new(
+            "fn fill(input: FillInput) -> vec4<f32> { return vec4<f32>(0.2, 0.4, 0.6, 1.0); }",
+            None,
+        );
+        compile::warm_fill_shader(&declared);
         draw(&mut gpu, &mut big);
         draw(&mut gpu, &mut big);
         let peak = gpu.debug_cache_stats();
