@@ -5711,6 +5711,18 @@ fn each_call_with_inputs_is_its_own_effect() {
     };
     assert_ne!(id(one), id(two));
 }
+
+#[test]
+fn ui_symbol_holds_its_size_where_nothing_draws_it() {
+    let mut h = Harness::inline(
+        r##"return ui.row { ui.symbol { id = "wifi", name = "wifi", size = 22, weight = 600 } }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.host.error().get(), None);
+    let b = h.bounds("wifi");
+    assert_eq!((b.width, b.height), (22., 22.));
+}
+
 #[test]
 fn the_engine_keeps_a_layer_shader_up_with_no_script_per_frame() {
     let mut h = Harness::inline(

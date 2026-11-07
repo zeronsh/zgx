@@ -450,6 +450,44 @@ pub(crate) struct GlassSpec {
     /// Each corner's own (`{ tl, tr, br, bl }` or four numbers).
     pub corners: Option<Source>,
 }
+/// How a `ui.symbol` looks: its props, each a value or state.
+#[derive(Clone)]
+pub(crate) struct SymbolSpec {
+    pub name: String,
+    pub size: Option<Source>,
+    pub weight: Option<Source>,
+    pub color: Option<Source>,
+}
+/// `ui.symbol`, made the first time a script names it.
+pub(crate) fn install_symbol(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+    ui.set(
+        "symbol",
+        lua.create_function(|lua, table: Table| {
+            let name: String = table.get("name")?;
+            table.raw_set("name", mlua::Value::Nil)?;
+            let take = |name: &str, ty: Ty| -> mlua::Result<Option<Source>> {
+                let value = table.get::<mlua::Value>(name)?;
+                table.raw_set(name, mlua::Value::Nil)?;
+                match value {
+                    mlua::Value::Nil => Ok(None),
+                    value => source(lua, ty, name, value).map(Some),
+                }
+            };
+            let spec = SymbolSpec {
+                name,
+                size: take("size", Ty::Num)?,
+                weight: take("weight", Ty::Num)?,
+                color: take("color", Ty::Color)?,
+            };
+            let node = fill(
+                lua,
+                Node::new(owner(lua)?, Kind::Symbol(Box::new(spec))),
+                Some(&table),
+            )?;
+            node_ud(lua, node)
+        })?,
+    )
+}
 /// `ui.glass`, made the first time a script names it.
 pub(crate) fn install_glass(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     ui.set(
@@ -796,6 +834,7 @@ impl Node {
             Kind::Svg { .. } => "svg",
             Kind::Canvas(..) => "canvas",
             Kind::Glass(_) => "glass",
+            Kind::Symbol(_) => "symbol",
             #[cfg(feature = "scene3d")]
             Kind::Scene3d(_) => "scene3d",
             Kind::WebView(_) => "webview",
@@ -1131,6 +1170,8 @@ pub(crate) enum Kind {
     Canvas(Option<Function>, Option<Box<CanvasOptions>>),
     /// `ui.glass { ... }`: the system's glass where it has one.
     Glass(Box<GlassSpec>),
+    /// `ui.symbol { name = "wifi", ... }`: a system symbol.
+    Symbol(Box<SymbolSpec>),
     /// `ui.webview { ... }`: a native web view laid out like a div.
     WebView(Box<WebSpec>),
     /// `ui.terminal { term = ui.term(id) }`: a terminal session, shown
