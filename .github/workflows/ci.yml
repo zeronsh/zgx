@@ -281,7 +281,9 @@ jobs:
   # against the commit before (no failure), which also keeps its cache.
   perf:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # With the base's binaries not cached, both sides build: the head's took
+    # 19 minutes and the base's was cut at 26 (Nov 7, as scenes grew).
+    timeout-minutes: 75
     permissions:
       contents: read
       pull-requests: write
