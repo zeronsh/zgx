@@ -2889,6 +2889,7 @@ impl Host {
                 {
                     self.latch_holding = hold.is_some();
                 }
+                let ready_at = std::cell::Cell::new(None);
                 let status = renderer.present_with_notify(|| {
                     window.pre_present_notify();
                     #[cfg(windows)]
@@ -2898,6 +2899,7 @@ impl Host {
                     }
                     #[cfg(target_os = "macos")]
                     if let Some((origin, period)) = grid {
+                        ready_at.set(Some(std::time::Instant::now()));
                         let at = latch.decide(std::time::Instant::now(), origin, period);
                         let _wait = zgx::profile::span(zgx::profile::Phase::Wait);
                         sleep_until(at);
@@ -2955,7 +2957,10 @@ impl Host {
                             left.as_micros()
                         );
                     }
-                    self.late_sample.handed_over(std::time::Instant::now());
+                    // Diagnostic: a frame held to the grid's point (`ZGX_LATE_HOLD`)
+                    // took only until it was ready, not its hold too.
+                    self.late_sample
+                        .handed_over(ready_at.get().unwrap_or_else(std::time::Instant::now));
                     // What it shows now, for `Ui::snapshot` (the last frame's
                     // surface is the renderer's to reuse again).
                     *self.shown.borrow_mut() = renderer
