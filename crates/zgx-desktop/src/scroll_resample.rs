@@ -25,6 +25,15 @@ const LINGER: Duration = Duration::from_millis(120);
 /// 9-12% near nothing at 20 ms, against 8-13% and 0.4%.
 const MIN_DELAY: Duration = Duration::from_millis(4);
 const MAX_DELAY: Duration = Duration::from_millis(40);
+/// The most an irregular stream stands behind: `MAX_DELAY` is for steady ones
+/// (`STEADY_EVENTS` in a row within `STEADY_SPREAD` of the interval), slow
+/// devices sending as evenly as a refresh. A hand's events wander (from the
+/// average interval by 25% at the median, 50-70% at p75), and 40 ms behind them
+/// took the slowest frames' lag from 24 to 32 ms on real recordings, where 20
+/// keeps it at 28 and the steady 30-a-second stream even.
+const STALL_BRIDGE: Duration = Duration::from_millis(20);
+const STEADY_SPREAD: f32 = 0.5;
+const STEADY_EVENTS: u8 = 4;
 /// Refreshes this long or longer stand `SLOW_REFRESH_DELAY` behind what has
 /// come, not an event interval, while events come within `SLOW_EVENTS` of them.
 pub(crate) const SLOW_REFRESH: Duration = Duration::from_millis(12);
@@ -68,6 +77,8 @@ pub(crate) struct ScrollResampler {
     /// The time between refreshes, as last sampled.
     refresh: Duration,
     stable_intervals: u8,
+    /// Events in a row within `STEADY_SPREAD` of the interval (`delay`).
+    steady: u8,
     sample_delay: Option<Duration>,
     /// Wheel distance not yet applied, and when it last advanced.
     wheel: (f32, f32),
@@ -112,6 +123,12 @@ impl ScrollResampler {
         match last {
             Some(last) if now.duration_since(last) < STALL => {
                 let gap = now.duration_since(last).max(Duration::from_micros(500));
+                self.steady = match self.interval {
+                    Some(interval) if gap.abs_diff(interval) <= interval.mul_f32(STEADY_SPREAD) => {
+                        self.steady.saturating_add(1)
+                    }
+                    _ => 0,
+                };
                 self.stable_intervals = match self.interval {
                     Some(interval)
                         if gap.abs_diff(interval)
@@ -133,6 +150,17 @@ impl ScrollResampler {
                 // before it, not the whole idle gap.
                 let delay = self.delay();
                 self.stable_intervals = 0;
+                // Events as far apart as a stall, but as far apart as ever:
+                // still a steady stream.
+                let gap = last.map(|last| now.saturating_duration_since(last));
+                self.steady = match (gap, self.interval) {
+                    (Some(gap), Some(interval))
+                        if gap.abs_diff(interval) <= interval.mul_f32(STEADY_SPREAD) =>
+                    {
+                        self.steady.saturating_add(1)
+                    }
+                    _ => 0,
+                };
                 self.sample_delay = None;
                 self.points.clear();
                 // A stalled frame may not have delivered the previous event
@@ -296,9 +324,13 @@ impl ScrollResampler {
         {
             return SLOW_REFRESH_DELAY;
         }
+        let most = match self.steady >= STEADY_EVENTS {
+            true => MAX_DELAY,
+            false => STALL_BRIDGE,
+        };
         self.interval
             .unwrap_or(Duration::from_millis(8))
-            .clamp(MIN_DELAY, MAX_DELAY)
+            .clamp(MIN_DELAY, most)
     }
     /// The margin chosen by the last refresh, for opt-in presentation logs.
     pub fn sampling_delay(&self) -> Duration {
@@ -553,6 +585,29 @@ mod tests {
 
     /// Events 30 a second, slower than any refresh: a frame between two of them
     /// doesn't run out and stop. Steps stay even, at 60 Hz and 120 Hz.
+    /// How far behind a stream of events `gaps` apart stands once it's going.
+    fn delay_after(gaps: &[u64]) -> Duration {
+        let start = Instant::now();
+        let mut resampler = ScrollResampler::default();
+        let mut at = start;
+        resampler.push_precise(at, (0., 10.));
+        for gap in gaps.iter().cycle().take(40) {
+            at += Duration::from_millis(*gap);
+            resampler.push_precise(at, (0., 10.));
+        }
+        resampler.sample(at, Duration::from_micros(8_333));
+        resampler.delay()
+    }
+
+    #[test]
+    fn only_a_steady_slow_stream_stands_far_behind() {
+        // Steady at 30 a second, and wandering by a fifth: bridged as a whole.
+        assert!(delay_after(&[33]) > Duration::from_millis(30));
+        assert!(delay_after(&[27, 39, 33, 36, 30]) > Duration::from_millis(30));
+        // A hand's: fast, then a long gap, then fast. No further than 20 ms.
+        assert!(delay_after(&[8, 8, 40, 9, 50, 8]) <= STALL_BRIDGE);
+    }
+
     #[test]
     fn events_thirty_a_second_move_every_frame_evenly() {
         for refresh in [Duration::from_micros(8_333), Duration::from_micros(16_667)] {
