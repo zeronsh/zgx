@@ -11,8 +11,20 @@ mod bands;
 mod compile;
 #[cfg(all(windows, feature = "composition"))]
 mod composition;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod core_text_glyphs;
+/// The app's GPU work so far (iOS, `ZGX_IOS_METRICS`): nanoseconds its
+/// command buffers ran, and how many.
+#[cfg(target_os = "ios")]
+pub fn metal_gpu_time() -> (u64, u64) {
+    wgpu::hal::metal::gpu_time()
+}
+/// Whether presents in a Core Animation transaction wait for their frame's GPU
+/// work to finish, not only to be scheduled: for a frame other layers change with.
+#[cfg(target_os = "ios")]
+pub fn present_waits_for_gpu(wait: bool) {
+    wgpu::hal::metal::PRESENT_WAITS_FOR_GPU.store(wait, std::sync::atomic::Ordering::Relaxed);
+}
 #[cfg(d3d11)]
 mod d3d11_frame;
 #[cfg(windows)]
@@ -29,7 +41,7 @@ mod fxc_child;
 #[doc(hidden)]
 pub mod iosurface;
 mod passes;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[doc(hidden)]
 pub use core_text_glyphs::core_text_glyph;
 #[cfg(target_os = "macos")]
@@ -3645,6 +3657,11 @@ impl GpuContext {
                 // with the textures as large as this one makes.
                 ..if info.backend == wgpu::Backend::Gl {
                     wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits())
+                } else if cfg!(target_os = "ios") {
+                    // wgpu's defaults ask more than iOS's Metal gives (15
+                    // inter-stage variables on the simulator, not 16); what
+                    // zgx's pipelines use fits.
+                    wgpu::Limits::default().or_worse_values_from(&adapter.limits())
                 } else {
                     Default::default()
                 }
@@ -4119,8 +4136,15 @@ pub struct GpuRenderer {
     #[cfg(target_os = "macos")]
     native_surfaces: Option<native_surface::SurfaceCache>,
     /// The next present joins the Core Animation transaction that resized the layer.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     transaction_present: bool,
+    /// Its layer never stretches what it holds (`keep_plane_contents_unscaled`):
+    /// a surface made again has a new layer.
+    #[cfg(target_os = "ios")]
+    plane_contents_set: bool,
+    /// The size of the drawable last presented.
+    #[cfg(target_os = "ios")]
+    presented_size: Option<(u32, u32)>,
     /// Until when the layer keeps a third drawable after a resize (see
     /// `widen_drawables`).
     #[cfg(target_os = "macos")]
@@ -4778,8 +4802,12 @@ impl GpuRenderer {
             zoom: 1.,
             #[cfg(target_os = "macos")]
             native_surfaces: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             transaction_present: false,
+            #[cfg(target_os = "ios")]
+            plane_contents_set: false,
+            #[cfg(target_os = "ios")]
+            presented_size: None,
             #[cfg(target_os = "macos")]
             wide_until: None,
             canvases: Default::default(),
@@ -13966,6 +13994,11 @@ impl GpuRenderer {
             mapped.get_mut().submitted();
         }
         before_present();
+        #[cfg(target_os = "ios")]
+        {
+            let size = frame.texture.size();
+            self.presented_size = Some((size.width, size.height));
+        }
         frame.present();
         #[cfg(windows)]
         if let Some(surface) = &self.surface {
@@ -14199,8 +14232,8 @@ impl GpuRenderer {
         // SAFETY: `maximumDrawableCount` is an NSUInteger property of CAMetalLayer.
         let _: () = unsafe { objc2::msg_send![&**layer, setMaximumDrawableCount: count] };
     }
-    #[cfg(target_os = "macos")]
-    fn set_transaction_present(&mut self, enabled: bool) {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub(crate) fn set_transaction_present(&mut self, enabled: bool) {
         if self.transaction_present == enabled {
             return;
         }
@@ -14354,7 +14387,7 @@ impl GpuRenderer {
     /// single-pass presentation runs without a window.
     pub fn debug_enable_single_pass(&mut self) {
         self.single_pass_format = Some(wgpu::TextureFormat::Bgra8Unorm);
-        self.present_unpremultiplies = !cfg!(target_os = "macos");
+        self.present_unpremultiplies = !cfg!(target_vendor = "apple");
     }
     /// Test hook: present into a fresh offscreen drawable configured like a
     /// window (`Bgra8UnormSrgb`, non-opaque) and return its
@@ -14396,7 +14429,7 @@ impl GpuRenderer {
             });
             self.present_single_pass(&mut encoder, &frame, &raw, wgpu::TextureFormat::Bgra8Unorm);
         } else {
-            let pipeline = blit_pipeline(&self.device, srgb, !cfg!(target_os = "macos"));
+            let pipeline = blit_pipeline(&self.device, srgb, !cfg!(target_vendor = "apple"));
             let bind = blit_group(&self.device, &pipeline, &self.view);
             let view = drawable.create_view(&Default::default());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -16565,7 +16598,7 @@ fn polyline_pipeline(
 /// opaque, but Core Animation composites `CAMetalLayer` contents as
 /// premultiplied (measured: straight 50% red over black shows twice as bright).
 fn unpremultiplies(config: &wgpu::SurfaceConfiguration) -> bool {
-    config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied && !cfg!(target_os = "macos")
+    config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied && !cfg!(target_vendor = "apple")
 }
 fn blit_pipeline(
     device: &wgpu::Device,
@@ -17184,9 +17217,13 @@ impl surface::SurfaceSource for GpuRenderer {
                 .create_surface(self.window.as_ref().unwrap().clone())
                 .map_err(|e| GpuError(e.to_string()))?,
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             self.transaction_present = false;
+        }
+        #[cfg(target_os = "ios")]
+        {
+            self.plane_contents_set = false;
         }
         Ok(())
     }
