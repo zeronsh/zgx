@@ -340,3 +340,29 @@ fn acrylic_tint_opacity_modifier(rgb: [f32; 3]) -> f32 {
     let suppression = (0.9 - lowest) * (1. - s * 2.).max(0.);
     0.9 - suppression * (v - 0.5).abs() / deviation
 }
+
+#[cfg(test)]
+mod acrylic_tests {
+    use super::*;
+
+    #[test]
+    fn a_tints_opacity_is_held_as_winuis_brush_holds_it() {
+        // 45% for white, 85% for black, 90% for mid grey; a saturated colour
+        // isn't held.
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert!(near(acrylic_tint_opacity_modifier([1., 1., 1.]), 0.45));
+        assert!(near(acrylic_tint_opacity_modifier([0., 0., 0.]), 0.85));
+        assert!(near(acrylic_tint_opacity_modifier([0.5, 0.5, 0.5]), 0.9));
+        assert!(near(acrylic_tint_opacity_modifier([1., 0., 0.]), 0.9));
+    }
+
+    #[test]
+    fn a_tints_luminosity_is_derived_as_winuis_brush_derives_it() {
+        // Brightness held under 0.965, opacity mapped onto 0.15 to 1.03.
+        let ([r, g, b], alpha) = acrylic_luminosity([1., 0., 0.], 0.5);
+        assert!((r - 0.965).abs() < 1e-4 && g.abs() < 1e-4 && b.abs() < 1e-4);
+        assert!((alpha - 0.59).abs() < 1e-4);
+        let ([r, ..], alpha) = acrylic_luminosity([0., 0., 0.], 1.);
+        assert!((r - 0.125).abs() < 1e-4 && (alpha - 1.).abs() < 1e-4);
+    }
+}
