@@ -1047,6 +1047,10 @@ impl Application {
             );
         }
         let event_loop = event_loop.build()?;
+        // zgx reads no device events (raw motion, keys and buttons beside a
+        // window's own): asked for, X11 sends each move twice, once raw
+        // (XInput2), and Windows posts a `WM_INPUT` for each move and key.
+        event_loop.listen_device_events(winit::event_loop::DeviceEvents::Never);
         zgx::profile::mark("event loop");
         zgx::memory::set_hosted();
         let proxy = event_loop.create_proxy();

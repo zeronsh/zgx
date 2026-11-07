@@ -651,6 +651,13 @@ impl ActiveEventLoop {
 
     pub fn listen_device_events(&self, allowed: DeviceEvents) {
         self.device_events.set(allowed);
+        // ZGX PATCH: applied now, where it waited for a window's focus to
+        // change: the loop selects raw events on the root as it starts, as
+        // if focused, and a window that never took focus heard every move
+        // on the screen. Only `WhenFocused` needs to know the focus.
+        if allowed != DeviceEvents::WhenFocused {
+            self.update_listen_device_events(false);
+        }
     }
 
     /// Update the device event based on window focus.

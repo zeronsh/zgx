@@ -358,3 +358,13 @@ zgx's caption glyphs, which read `theme()`, white: unseen. It now sets
 `preferred_theme` and `current_theme`, as making a window with a theme does
 (`platform_impl/windows/window.rs`). `scripts/windows_caption_smoke.py` (zgx)
 checks the window, with its buttons drawn.
+
+## X11: a choice of device events applies at once
+
+`EventLoop::listen_device_events` only stored the choice, which took effect
+at a window's next focus change. The loop selects XInput2's raw events on the
+root as it starts, as though focused, so until then (and for good, for a
+window that never took focus) the app heard every pointer move on the
+screen, in or out of its windows. A choice other than `WhenFocused`, which
+needs the focus, is now selected when it is made
+(`platform_impl/linux/x11/mod.rs`). zgx asks for none.
