@@ -1038,6 +1038,13 @@ impl Application {
         // take AppKit's Services menu meanwhile.
         #[cfg(target_os = "macos")]
         winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut event_loop, false);
+        #[cfg(target_os = "macos")]
+        if diag("ZGX_BACKGROUND") {
+            winit::platform::macos::EventLoopBuilderExtMacOS::with_activate_ignoring_other_apps(
+                &mut event_loop,
+                false,
+            );
+        }
         let event_loop = event_loop.build()?;
         zgx::profile::mark("event loop");
         zgx::memory::set_hosted();
@@ -1271,6 +1278,27 @@ const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(500)
 /// release spring or a hover fade that follows input keeps its frames too.
 #[cfg(any(target_os = "macos", windows))]
 const INPUT_FULL_RATE: std::time::Duration = std::time::Duration::from_millis(250);
+/// Diagnostic switches, read once.
+fn diag(name: &str) -> bool {
+    zgx::env::var_os(name).is_some_and(|v| v != "0")
+}
+fn scroll_steps() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| diag("ZGX_SCROLL_STEPS"))
+}
+fn late_off() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| diag("ZGX_LATE_OFF"))
+}
+/// `ZGX_MODEL_60=1`: treats a 120 Hz link's refreshes as every other one.
+fn modeled(interval: std::time::Duration) -> std::time::Duration {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| diag("ZGX_MODEL_60")) && interval < std::time::Duration::from_millis(12) {
+        interval * 2
+    } else {
+        interval
+    }
+}
 /// When a scroll's frames start at a slow refresh (`scroll_resample::SLOW_REFRESH`).
 /// Started as a refresh begins, what a frame shows is a whole refresh old by the
 /// next, 16.7 ms at 60 Hz, however fast the app. Started as late as it still
@@ -1304,7 +1332,7 @@ impl LateSample {
     const MARGIN: std::time::Duration = std::time::Duration::from_millis(3);
     /// How long into a refresh a frame starts.
     fn wait(&self, period: std::time::Duration) -> std::time::Duration {
-        if period < crate::scroll_resample::SLOW_REFRESH {
+        if period < crate::scroll_resample::SLOW_REFRESH || late_off() {
             return std::time::Duration::ZERO;
         }
         period.saturating_sub(Latch::LEAD + Self::MARGIN + self.work)
@@ -2918,6 +2946,19 @@ impl Host {
                 {
                     self.presented_at = Some(std::time::Instant::now());
                     self.late_sample.handed_over(std::time::Instant::now());
+                    if scroll_steps() {
+                        let at = std::time::Instant::now();
+                        let left = self
+                            .frame_timer
+                            .next_deadline(at, self.frame_interval)
+                            .saturating_duration_since(at);
+                        eprintln!(
+                            "zgx-scroll shown {} left {} work {}",
+                            zgx_gpu::present_log::now_ns(),
+                            left.as_micros(),
+                            self.late_sample.work.as_micros()
+                        );
+                    }
                     // What it shows now, for `Ui::snapshot` (the last frame's
                     // surface is the renderer's to reuse again).
                     *self.shown.borrow_mut() = renderer
@@ -4828,6 +4869,9 @@ impl Host {
                 })?;
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
+                if scroll_steps() {
+                    eprintln!("zgx-scroll event {} None {delta:?} {phase:?}", zgx_gpu::present_log::now_ns());
+                }
                 self.wheel_tape.borrow_mut().received(
                     std::time::Instant::now(),
                     delta,
@@ -5683,12 +5727,20 @@ impl Host {
                 });
                 self.scroll.flush()
             } else if self.frame_arrived {
-                self.scroll.set_refresh(self.frame_interval);
+                let drain_off = diag("ZGX_DRAIN_OFF");
+                self.scroll.set_refresh(if drain_off {
+                    std::time::Duration::ZERO
+                } else {
+                    self.frame_interval
+                });
                 self.scroll.sample(std::time::Instant::now())
             } else {
                 None
             };
             if let Some((delta_x, delta_y)) = delta {
+                if scroll_steps() {
+                    eprintln!("zgx-scroll step {} {delta_x} {delta_y}", zgx_gpu::present_log::now_ns());
+                }
                 let (x, y) = self.scroll.position;
                 self.dispatch(InputEvent::Scroll {
                     x,
@@ -5963,7 +6015,10 @@ impl Host {
         }
         // A scroll at a slow refresh starts each frame so late it makes the
         // refresh it's for, with nothing to wait for (`LateSample`).
-        if self.frame_interval >= crate::scroll_resample::SLOW_REFRESH && self.scroll.active(now) {
+        if !late_off()
+            && self.frame_interval >= crate::scroll_resample::SLOW_REFRESH
+            && self.scroll.active(now)
+        {
             self.latch = Latch::default();
             return None;
         }
@@ -7294,8 +7349,8 @@ impl WindowManager {
                     // The refresh after this one starts as this one shows.
                     host.frame_timer =
                         crate::frame_source::FrameTimer::aligned(frame.time, frame.index + 1);
-                    host.frame_interval = frame.interval;
-                    host.context.ui.set_refresh_interval(frame.interval);
+                    host.frame_interval = modeled(frame.interval);
+                    host.context.ui.set_refresh_interval(host.frame_interval);
                     host.vsync_synced = Some(std::time::Instant::now());
                     if host.vsync_paced {
                         // The timer paces: the link only reported the grid.
