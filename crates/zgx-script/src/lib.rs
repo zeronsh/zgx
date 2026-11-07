@@ -409,8 +409,37 @@ pub(crate) struct Vm {
     pub(crate) locate: Rc<Cell<bool>>,
     /// The host's live lint mode, warnings and script call count.
     pub(crate) warnings: SharedWarnings,
+    /// Makes a pointer event's table (`point_table`), compiled once.
+    pub(crate) point: std::cell::OnceCell<mlua::Function>,
 }
 impl Vm {
+    /// A pointer event's table for a handler: `x`, `y`, `local_x`,
+    /// `local_y` and the keys held. Built in one call into the state: field
+    /// by field from Rust, each `set` (and each key's string) was a
+    /// protected call of its own while a memory limit is set, and a pointer
+    /// move makes one of these for every handler on its way.
+    pub(crate) fn point_table(
+        &self,
+        (x, y, local_x, local_y): (f32, f32, f32, f32),
+        (shift, ctrl, alt, meta, cmd): (bool, bool, bool, bool, bool),
+    ) -> mlua::Result<mlua::Table> {
+        let make = match self.point.get() {
+            Some(make) => make,
+            None => {
+                let made = self
+                    .lua
+                    .load(
+                        "local x, y, local_x, local_y, shift, ctrl, alt, meta, cmd = ...\n\
+                         return { x = x, y = y, local_x = local_x, local_y = local_y, shift = shift, \
+                         ctrl = ctrl, alt = alt, meta = meta, cmd = cmd }",
+                    )
+                    .set_name("=zgx pointer event")
+                    .into_function()?;
+                self.point.get_or_init(|| made)
+            }
+        };
+        make.call((x, y, local_x, local_y, shift, ctrl, alt, meta, cmd))
+    }
     /// Runs `f` with its own budget. A nested call (a component built
     /// while a handler runs) stops the outer call's clock meanwhile.
     pub(crate) fn guard<R>(
@@ -4020,6 +4049,7 @@ impl ScriptHost {
             layout_ids: Default::default(),
             locate: self.0.locate.clone(),
             warnings: self.0.warnings.clone(),
+            point: Default::default(),
         });
         let store = self
             .0
@@ -4462,6 +4492,7 @@ mod tests {
             layout_ids: Default::default(),
             locate: Rc::default(),
             warnings: Rc::default(),
+            point: Default::default(),
         };
         let host = vm
             .lua

@@ -5230,3 +5230,51 @@ fn a_theme_tables_font_families_reach_its_text() {
     assert_eq!(family(&mut h, "plain"), plain);
     assert_eq!(family(&mut h, "mono"), mono);
 }
+
+/// A pointer event's table has every field a handler reads, as Lua
+/// values of their kinds, a table of its own for each event, and the
+/// extras a press, a wheel and a pinch add: however it's built.
+#[test]
+fn a_pointer_event_says_where_and_the_keys_held() {
+    use zgx::input::{InputEvent, PointerButton};
+    let script = r##"
+    local said = ui.state("said", "")
+    local last = nil
+    local function note(name)
+        return function(e)
+            local fresh = e ~= last
+            last = e
+            e.mine = true
+            local fields = {}
+            for k, v in e do
+                table.insert(fields, `{k}={typeof(v)}`)
+            end
+            table.sort(fields)
+            said:set(said:peek() .. string.format("%s %.1f %.1f %.1f %.1f %s %s %s %s %s %s [%s];", name,
+                e.x, e.y, e.local_x, e.local_y, tostring(e.shift), tostring(e.ctrl), tostring(e.alt),
+                tostring(e.meta), tostring(e.cmd), tostring(fresh), table.concat(fields, ",")))
+            return false
+        end
+    end
+    return ui.column {
+        ui.text { id = "said", said },
+        ui.div { id = "box", w = 100, h = 80, bg = "#334",
+            on_pointer_move = note("move"), on_press = note("press"), on_wheel = note("wheel") } }"##;
+    let mut h = Harness::inline(script);
+    h.frames(2);
+    let laid = h.bounds("box");
+    let (x, y) = (laid.x + 30., laid.y + 20.);
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::PointerMove { x: x + 1., y });
+    h.ui.dispatch(InputEvent::PointerDown { x, y, button: PointerButton::Primary });
+    h.ui.dispatch(InputEvent::PointerUp { x, y, button: PointerButton::Primary });
+    h.ui.dispatch(InputEvent::Scroll { x, y, delta_x: 0., delta_y: 3. });
+    h.frames(2);
+    let said = h.text("said");
+    let common = "alt=boolean,cmd=boolean,ctrl=boolean,local_x=number,local_y=number,meta=boolean,mine=boolean,shift=boolean,x=number,y=number";
+    let at = format!("{:.1} {:.1} 30.0 20.0 false false false false false true", x, y);
+    assert!(said.contains(&format!("move {at} [{common}];")), "{said}");
+    assert!(said.contains(&format!("move {:.1} {:.1} 31.0 20.0 false false false false false true [{common}];", x + 1., y)), "{said}");
+    assert!(said.contains(&format!("press {at} [alt=boolean,clicks=number,cmd=boolean,ctrl=boolean,local_x=number,local_y=number,meta=boolean,mine=boolean,shift=boolean,x=number,y=number];")), "{said}");
+    assert!(said.contains("wheel ") && said.contains("dx=number,dy=number"), "{said}");
+}
