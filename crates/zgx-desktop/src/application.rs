@@ -4895,7 +4895,11 @@ impl Host {
                 let step = crate::scrollers::wheel_step(
                     self.context.viewport.with_untracked(|viewport| *viewport),
                 );
-                let (dx, dy) = wheel_delta(delta, self.scale_factor, step);
+                let (dx, dy) = shift_wheel(
+                    delta,
+                    wheel_delta(delta, self.scale_factor, step),
+                    self.modifiers.shift && !self.modifiers.control,
+                );
                 #[cfg(target_os = "macos")]
                 if self.trackpad == Trackpad::Fingers {
                     self.coast.scrolled((dx, dy), crate::coast::event_time());
@@ -8101,6 +8105,20 @@ fn wheel_delta(delta: MouseScrollDelta, scale: f64, step: (f32, f32)) -> (f32, f
         }
     }
 }
+/// Shift with the wheel scrolls across, as in browsers: Windows and Linux
+/// report a vertical wheel with Shift held as vertical (AppKit turns it
+/// horizontal itself). Only lines swap: a touchpad's pixels carry both axes,
+/// and Control's zoom is not scrolling.
+fn shift_wheel(delta: MouseScrollDelta, (dx, dy): (f32, f32), shift: bool) -> (f32, f32) {
+    if cfg!(target_os = "macos")
+        || !shift
+        || dx != 0.
+        || !matches!(delta, MouseScrollDelta::LineDelta(..))
+    {
+        return (dx, dy);
+    }
+    (dy, 0.)
+}
 /// Whether wheel lines are continuous motion rather than notches. Windows
 /// reports a precision touchpad's (and a free-spinning wheel's) motion as
 /// wheel deltas of less than a notch (120); eased like notches, a swipe
@@ -8998,6 +9016,28 @@ mod tests {
             ),
             (-10., 20.)
         );
+    }
+    #[test]
+    fn shift_turns_a_vertical_wheel_across() {
+        let lines = MouseScrollDelta::LineDelta(0., -1.);
+        let pixels = MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0., -40.));
+        let swapped = if cfg!(target_os = "macos") {
+            (0., 30.)
+        } else {
+            (30., 0.)
+        };
+        assert_eq!(shift_wheel(lines, (0., 30.), true), swapped);
+        assert_eq!(shift_wheel(lines, (0., 30.), false), (0., 30.));
+        // Already across, or both ways: left as they are.
+        assert_eq!(
+            shift_wheel(MouseScrollDelta::LineDelta(1., 0.), (-30., 0.), true),
+            (-30., 0.)
+        );
+        assert_eq!(
+            shift_wheel(MouseScrollDelta::LineDelta(1., -1.), (-30., 30.), true),
+            (-30., 30.)
+        );
+        assert_eq!(shift_wheel(pixels, (0., 20.), true), (0., 20.));
     }
     #[cfg(target_os = "linux")]
     #[test]
