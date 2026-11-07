@@ -17,17 +17,45 @@ local function uikit_spring(ratio, response)
 	local turn = 2 * math.pi / response
 	return { stiffness = turn * turn, damping = 2 * ratio * turn }
 end
--- A navigation bar's, read from UIKit (iOS 26.5) as a table under it scrolls:
--- 54 points tall, 106 with its large title; the large title's top 57.7 below
--- the safe area at 34 points, the small one's 11.7 at 17. Once the large title
+-- A navigation bar's, read from UIKit (iOS 26.5) as a table under it scrolls
+-- and at every Dynamic Type size: 54 points tall, its small title centred 22
+-- down. With its large title, the title's baseline sits 90 down, or its top 54
+-- down where the title is too tall for that, and the bar ends 16 under the
+-- baseline: 106 up to the largest standard size, 127 at AX5. The iOS host
+-- gives the titles' sizes, lines and the large one's ascender (`ios.title.*`),
+-- as UIKit's own labels have them; the defaults are the default size's. Once the large title
 -- has scrolled under the bar, the large title fades out on a 0.2 s
 -- ease-in-out (its own CABasicAnimation) and the small one fades in rising 15
 -- points on a critically damped spring of 0.447 s (fit to UIKit's frames, rms
 -- 0.001: SwiftUI hosts it, so its spring isn't read yet). Both run by time,
 -- not with the scroll: the same at two drag speeds.
-local BAR, BAR_LARGE = 54, 106
-local LARGE_TITLE_TOP, LARGE_TITLE_HEIGHT = 57.7, 40.7
-local SMALL_TITLE_TOP, SMALL_TITLE_HEIGHT, SMALL_TITLE_RISE = 11.7, 20.7, 15
+local BAR = 54
+local LARGE_BASELINE, LARGE_BELOW = 90, 16
+local SMALL_TITLE_CENTER, SMALL_TITLE_RISE = 22, 15
+-- Declared on the first page, not as the kit loads (`ui.theme` is a module of
+-- its own, made when first used).
+local titles_declared = false
+local function declare_titles()
+	if titles_declared then
+		return
+	end
+	titles_declared = true
+	ui.theme.tokens {
+		ios = {
+			title = {
+				large = { size = 34, line = 40.667, ascender = 32.373 },
+				small = { size = 17, line = 20.667 },
+			},
+		},
+	}
+end
+-- The large title's top and the bar's height with it, as UIKit places them for
+-- the large title's font.
+local function large_title()
+	local ascender = ui.theme.get("ios.title.large.ascender")
+	local baseline = math.max(LARGE_BASELINE, BAR + ascender)
+	return baseline - ascender, baseline + LARGE_BELOW
+end
 local LARGE_TITLE_EASE = "cubicBezier(0.42, 0, 0.58, 1)"
 local TITLE_SPRING = uikit_spring(1, 0.447)
 -- A navigation controller's own, read from UIKit as it runs: a push or pop by a
@@ -597,6 +625,7 @@ end
 -- or "attached", riding its edge), and the body's children. `nav` comes from
 -- the stack, for the back button.
 function ios.page(props)
+	declare_titles()
 	local safe = ui.window.safe_area
 	local offset = ui.use_state(0)
 	local children = {}
@@ -605,7 +634,8 @@ function ios.page(props)
 	end
 	-- Collapsed once the large title has scrolled under the bar.
 	local collapsed = ui.computed(function()
-		return offset:get() >= BAR_LARGE - BAR
+		local _, bar = large_title()
+		return offset:get() >= bar - BAR
 	end)
 	return ui.div {
 		w = "100%",
@@ -658,12 +688,18 @@ function ios.page(props)
 					props.title,
 					heading = 1,
 					ml = 16,
-					mt = LARGE_TITLE_TOP - BAR,
-					mb = BAR_LARGE - LARGE_TITLE_TOP - LARGE_TITLE_HEIGHT,
-					text_size = 34,
-					-- UIKit's label is the font's own height; zgx's normal is 1.4 times
-					-- the size, which would sit the glyphs 3.5 points low.
-					line_height = LARGE_TITLE_HEIGHT,
+					mt = function()
+						local top = large_title()
+						return top - BAR
+					end,
+					mb = function()
+						local top, bar = large_title()
+						return bar - top - ui.theme.get("ios.title.large.line")
+					end,
+					-- Dynamic Type's large title, its label the font's own height (zgx's
+					-- normal, 1.4 times the size, would sit the glyphs low).
+					text_size = "$ios.title.large.size",
+					line_height = "$ios.title.large.line",
 					weight = 700,
 					color = "$text.primary",
 					opacity = ui.tween(collapsed, { duration = 200, ease = LARGE_TITLE_EASE, from = 1, to = 0 }),
@@ -685,10 +721,11 @@ function ios.page(props)
 			absolute = true,
 			left = 0,
 			right = 0,
+			-- From the bar's top, centred on its line whatever the text size.
 			top = function()
-				return safe:get().top + SMALL_TITLE_TOP
+				return safe:get().top
 			end,
-			h = SMALL_TITLE_HEIGHT,
+			h = 2 * SMALL_TITLE_CENTER,
 			pointer_events = false,
 			opacity = ui.spring(collapsed, { stiffness = TITLE_SPRING.stiffness, damping = TITLE_SPRING.damping }),
 			y = ui.spring(
@@ -699,8 +736,8 @@ function ios.page(props)
 			justify = "center",
 			ui.text {
 				props.title,
-				text_size = 17,
-				line_height = SMALL_TITLE_HEIGHT,
+				text_size = "$ios.title.small.size",
+				line_height = "$ios.title.small.line",
 				weight = 600,
 				color = "$text.primary",
 				aria_hidden = true,

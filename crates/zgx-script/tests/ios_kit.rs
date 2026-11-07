@@ -199,10 +199,8 @@ fn a_sheets_grabber_toggles_its_detents_and_says_so_as_uikits() {
 }
 
 /// UIKit's point sizes per text style at each content size category, extra
-/// small to AX5, as Apple publishes them (Human Interface Guidelines,
-/// Typography, "Dynamic Type sizes" for iOS). The runtime computes them in
-/// CoreText's code: no table of them lies in its binaries to read, so these
-/// are checked against `preferredFontForTextStyle:` on a device.
+/// small to AX5, as `preferredFontForTextStyle:compatibleWithTraitCollection:`
+/// gives them (iOS 26.5, read in Ref; Apple's published table agrees).
 const CATEGORIES: [&str; 12] = [
     "xS", "S", "M", "L", "xL", "xxL", "xxxL", "AX1", "AX2", "AX3", "AX4", "AX5",
 ];
@@ -248,6 +246,54 @@ const STYLES: [(&str, &str, f32, [f32; 12]); 6] = [
     ),
 ];
 
+/// A navigation bar's titles at each category, as UIKit's own labels have
+/// them (read in Ref, iOS 26.5, at 3x): the large title's size, ascender and
+/// label height, the small title's size and label height.
+const LARGE_TITLE: [(f32, f32, f32); 12] = [
+    (31., 29.517, 37.),
+    (32., 30.469, 38.333),
+    (33., 31.421, 39.667),
+    (34., 32.373, 40.667),
+    (36., 34.277, 43.),
+    (38., 36.182, 45.667),
+    (40., 38.086, 48.),
+    (44., 41.895, 52.667),
+    (48., 45.703, 57.333),
+    (52., 49.512, 62.333),
+    (56., 53.32, 67.),
+    (60., 57.129, 71.667),
+];
+const SMALL_TITLE: [(f32, f32); 12] = [
+    (17., 20.667),
+    (17., 20.667),
+    (17., 20.667),
+    (17., 20.667),
+    (19., 23.333),
+    (21., 25.333),
+    (21., 25.333),
+    (21., 25.333),
+    (21., 25.333),
+    (21., 25.333),
+    (21., 25.333),
+    (21., 25.333),
+];
+/// Where UIKit put the large title's label below the bar's top, and the bar's
+/// height with it, at each category (read in Ref with the window at each).
+const LARGE_TITLE_PLACED: [(f32, f32); 12] = [
+    (60.3, 106.),
+    (59.7, 106.),
+    (58.7, 106.),
+    (57.7, 106.),
+    (55.7, 106.),
+    (54., 106.3),
+    (54., 108.),
+    (54., 112.),
+    (54., 115.7),
+    (54., 119.7),
+    (54., 123.3),
+    (54., 127.),
+];
+
 /// The tokens the iOS host sets at content size category `index`
 /// (`ios_system::tokens`): each style's size and line, and the hit target
 /// growing with the body's line.
@@ -268,6 +314,17 @@ fn dynamic_type(index: usize) -> Vec<(zgx::theme::TokenId, zgx::theme::TokenInpu
         zgx::theme::token("control.height"),
         (body_line + 12.).max(44.).into(),
     ));
+    let (size, ascender, line) = LARGE_TITLE[index];
+    let (small, small_line) = SMALL_TITLE[index];
+    for (name, value) in [
+        ("ios.title.large.size", size),
+        ("ios.title.large.ascender", ascender),
+        ("ios.title.large.line", line),
+        ("ios.title.small.size", small),
+        ("ios.title.small.line", small_line),
+    ] {
+        tokens.push((zgx::theme::token(name), value.into()));
+    }
     tokens
 }
 
@@ -653,4 +710,71 @@ fn the_showcases_notes_page_switches_between_the_two_rides() {
     h.frames(2);
     assert_eq!(h.error(), None);
     assert_eq!(ride(&mut h), KeyboardRide::Attached);
+}
+
+#[test]
+fn a_pages_bar_and_titles_sit_where_uikits_do_at_each_dynamic_type_size() {
+    use zgx::scene::NodeKind;
+    let mut h = Harness::inline(
+        r#"local ios = ui.ios
+        local Screen = ui.component(function()
+            return ios.page {
+                title = "Settings",
+                ui.div { id = "first", h = 40 },
+            }
+        end)
+        return Screen {}"#,
+    );
+    h.ui.scene.borrow_mut().resize(402., 874.);
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    for (index, category) in CATEGORIES.iter().enumerate() {
+        h.ui.theme().set_system_tokens(dynamic_type(index));
+        h.frames(2);
+        assert_eq!(h.error(), None, "{category}");
+        let (large, small) = {
+            let scene = h.ui.scene.borrow();
+            let mut titles = Vec::new();
+            let mut pending = vec![scene.root()];
+            while let Some(id) = pending.pop() {
+                if let NodeKind::Text { text, .. } = scene.kind(id)
+                    && &**text == "Settings"
+                {
+                    let scrolled = scene.ancestors(id).any(|a| scene.is_scroll_content(a));
+                    titles.push((scrolled, scene.bounds(id)));
+                }
+                pending.extend(scene.children(id).iter().copied());
+            }
+            let large = titles.iter().find(|t| t.0).expect("the large title").1;
+            let small = titles.iter().find(|t| !t.0).expect("the small title").1;
+            (large, small)
+        };
+        let (top, bar) = LARGE_TITLE_PLACED[index];
+        // The safe area is none here: the bar's top is the window's.
+        assert!(
+            (large.y - top).abs() < 0.5,
+            "{category}: the large title's top {} where UIKit's is {top}",
+            large.y
+        );
+        assert!(
+            (large.height - LARGE_TITLE[index].2).abs() < 0.5,
+            "{category}: its label {} tall, UIKit's {}",
+            large.height,
+            LARGE_TITLE[index].2
+        );
+        // What the page holds starts under the bar, as a table's first section does.
+        let first = h.bounds("first");
+        assert!(
+            (first.y - bar).abs() < 0.5,
+            "{category}: the bar ends at {} where UIKit's does at {bar}",
+            first.y
+        );
+        // The small title centred 22 down the bar, as UIKit's is at every size
+        // (until the large one has gone under the bar, it waits 15 lower).
+        let centre = small.y + small.height / 2. - 15.;
+        assert!(
+            (centre - 22.).abs() < 0.5,
+            "{category}: the small title's centre {centre}"
+        );
+    }
 }

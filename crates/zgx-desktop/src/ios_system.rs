@@ -31,6 +31,10 @@ unsafe extern "C" {
     static UIFontTextStyleBody: *const AnyObject;
     static UIFontTextStyleSubheadline: *const AnyObject;
     static UIFontTextStyleFootnote: *const AnyObject;
+    static UIFontTextStyleHeadline: *const AnyObject;
+    static UIContentSizeCategoryLarge: *const AnyObject;
+    static UIContentSizeCategoryExtraExtraLarge: *const AnyObject;
+    fn UIContentSizeCategoryCompareToCategory(a: *const AnyObject, b: *const AnyObject) -> isize;
 }
 
 pub(crate) fn preferences() -> SystemPreferences {
@@ -81,6 +85,66 @@ fn text_style(style: *const AnyObject, line_ratio: f32) -> (f32, f32) {
         size as f32
     };
     (size, (size * line_ratio).round())
+}
+
+/// A navigation bar's titles as UIKit's own labels have them (read in Ref at
+/// every content size category, iOS 26.5): the large title the large-title
+/// style, the small one the headline style at the user's size kept between
+/// the default and xxL; each label its font's line, to the pixel. The kit
+/// places them from these (`ios.title.*`).
+fn title_tokens(tokens: &mut Vec<(TokenId, TokenInput)>) {
+    // SAFETY: UIKit's class methods and getters, with its own constants, on
+    // the main thread the host calls this from.
+    unsafe {
+        let traits: Retained<AnyObject> =
+            msg_send![class!(UITraitCollection), currentTraitCollection];
+        let scale: f64 = msg_send![&*traits, displayScale];
+        let scale = if scale > 0. { scale } else { 1. };
+        let pixel = |v: f64| ((v * scale - 1e-6).ceil() / scale) as f32;
+        let large: Retained<AnyObject> =
+            msg_send![class!(UIFont), preferredFontForTextStyle: UIFontTextStyleLargeTitle];
+        let size: f64 = msg_send![&*large, pointSize];
+        let ascender: f64 = msg_send![&*large, ascender];
+        let line: f64 = msg_send![&*large, lineHeight];
+        tokens.push((
+            zgx::theme::token("ios.title.large.size"),
+            (size as f32).into(),
+        ));
+        tokens.push((
+            zgx::theme::token("ios.title.large.ascender"),
+            (ascender as f32).into(),
+        ));
+        tokens.push((
+            zgx::theme::token("ios.title.large.line"),
+            pixel(line).into(),
+        ));
+        let app: Retained<AnyObject> = msg_send![class!(UIApplication), sharedApplication];
+        let mut category: *const AnyObject = msg_send![&*app, preferredContentSizeCategory];
+        if UIContentSizeCategoryCompareToCategory(category, UIContentSizeCategoryLarge) < 0 {
+            category = UIContentSizeCategoryLarge;
+        } else if UIContentSizeCategoryCompareToCategory(
+            category,
+            UIContentSizeCategoryExtraExtraLarge,
+        ) > 0
+        {
+            category = UIContentSizeCategoryExtraExtraLarge;
+        }
+        let kept: Retained<AnyObject> = msg_send![class!(UITraitCollection),
+            traitCollectionWithPreferredContentSizeCategory: category];
+        let small: Retained<AnyObject> = msg_send![class!(UIFont),
+            preferredFontForTextStyle: UIFontTextStyleHeadline,
+            compatibleWithTraitCollection: &*kept];
+        let size: f64 = msg_send![&*small, pointSize];
+        let line: f64 = msg_send![&*small, lineHeight];
+        tokens.push((
+            zgx::theme::token("ios.title.small.size"),
+            (size as f32).into(),
+        ));
+        tokens.push((
+            zgx::theme::token("ios.title.small.line"),
+            pixel(line).into(),
+        ));
+    }
 }
 
 /// The themes' tokens as UIKit has them: what makes a zgx app on iOS take the
@@ -190,6 +254,7 @@ pub(crate) fn tokens() -> Vec<(TokenId, TokenInput)> {
         tokens.push((size_token, size.into()));
         tokens.push((line_token, line.into()));
     }
+    title_tokens(&mut tokens);
     // SAFETY: UIKit's plain getter.
     if unsafe { UIAccessibilityIsBoldTextEnabled() } {
         tokens.push((tok::FONT_WEIGHT_REGULAR.0, 600f32.into()));
