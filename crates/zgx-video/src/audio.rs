@@ -161,6 +161,13 @@ pub fn mix(
                 at %= length;
             }
             let mut gain = clip.volume as f32;
+            if let Some(volumes) = clip.volumes.as_deref().filter(|v| !v.is_empty()) {
+                let at = i as f64 * fps / f64::from(SAMPLE_RATE);
+                let (whole, part) = (at.floor() as usize, at.fract() as f32);
+                let here = volumes[whole.min(volumes.len() - 1)];
+                let next = volumes[(whole + 1).min(volumes.len() - 1)];
+                gain *= here + (next - here) * part;
+            }
             if i < fade_in {
                 gain *= i as f32 / fade_in as f32;
             }

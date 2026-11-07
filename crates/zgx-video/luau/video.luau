@@ -293,38 +293,87 @@ export type Frame = {
 
 local Frame = {}
 Frame.__index = Frame
+-- A time's frame: its parent's, less where it starts in it; wrapped by a
+-- loop, held by a freeze. Read with `get`, it follows the video's frame.
+local function local_frame(t: any, peek: boolean?): number
+	-- No loop or freeze above it (nearly every time): the video's frame less
+	-- where it starts, read in one step as every property of a frame reads it.
+	if t.plain then
+		return (if peek then frame_state:peek() else frame_state:get()) - t.offset
+	end
+	if t.frozen ~= nil then
+		return t.frozen
+	end
+	local n
+	if t.parent then
+		n = local_frame(t.parent, peek) - t.from
+	else
+		n = (if peek then frame_state:peek() else frame_state:get()) - t.offset
+	end
+	if t.wrap then
+		n %= t.wrap
+	end
+	return n
+end
 -- The frame, from this sequence's start: read in a function, it follows.
 function Frame.get(self: any): number
-	return frame_state:get() - self.offset
+	if self.plain then
+		return frame_state:get() - self.offset
+	end
+	return local_frame(self)
 end
 function Frame.peek(self: any): number
-	return frame_state:peek() - self.offset
+	return local_frame(self, true)
 end
 function Frame.seconds(self: any): number
-	return (frame_state:get() - self.offset) / self.fps
+	return (if self.plain then frame_state:get() - self.offset else local_frame(self)) / self.fps
 end
 -- From 0 at its start to 1 at its end.
 function Frame.progress(self: any): number
-	return math.clamp((frame_state:get() - self.offset) / math.max(self.duration - 1, 1), 0, 1)
+	return math.clamp(local_frame(self) / math.max(self.duration - 1, 1), 0, 1)
 end
 -- A function of the frame to give a property: `opacity = f:map({ 0, 20 }, { 0, 1 })`.
 function Frame.map(self: any, input: { number }, output: { any }, opts: any?): () -> any
+	if self.plain then
+		local offset = self.offset
+		return function()
+			return video.interpolate(frame_state:get() - offset, input, output, opts)
+		end
+	end
 	return function()
-		return video.interpolate(frame_state:get() - self.offset, input, output, opts)
+		return video.interpolate(local_frame(self), input, output, opts)
 	end
 end
 -- A spring of the frame to give a property: `y = f:spring { from = 40, to = 0, delay = 5 }`.
 function Frame.spring(self: any, opts: any?): () -> any
 	local o = table.clone(opts or {})
 	o.fps = o.fps or self.fps
+	if self.plain then
+		local offset = self.offset
+		return function()
+			o.frame = frame_state:get() - offset
+			return video.spring(o)
+		end
+	end
 	return function()
-		o.frame = frame_state:get() - self.offset
+		o.frame = local_frame(self)
 		return video.spring(o)
 	end
 end
 
 local function new_time(offset: number, duration: number, fps: number): any
-	return setmetatable({ offset = offset, duration = duration, fps = fps }, Frame)
+	return setmetatable({ offset = offset, duration = duration, fps = fps, plain = true }, Frame)
+end
+-- A time within `parent`, starting `from` frames into it.
+local function child_time(parent: any, from: number, duration: number, extra: any?): any
+	local t: any = new_time(parent.offset + from, duration, parent.fps)
+	t.parent, t.from = parent, from
+	for key, value in extra or {} do
+		t[key] = value
+	end
+	-- Plain while nothing above it, or it, wraps or holds the frame.
+	t.plain = parent.plain and t.wrap == nil and t.frozen == nil
+	return t
 end
 
 -- What the function building now sees: its sequence's time. Components built
@@ -395,7 +444,7 @@ function video.sequence(opts: any): any
 	local from: number = opts.from or 0
 	local duration: number = opts.duration or math.huge
 	local offset = parent.offset + from
-	local time = new_time(offset, duration, parent.fps)
+	local time = child_time(parent, from, duration)
 	if opts.name or opts.track ~= false then
 		tell("zgx.video.sequence", {
 			name = opts.name or "Sequence",
@@ -419,9 +468,64 @@ function video.sequence(opts: any): any
 		return ui.div(box)
 	end)
 	return ui.show(function()
-		local n = frame_state:get() - offset
+		local n = local_frame(parent) - from
 		return n >= 0 and n < duration
 	end, Body {})
+end
+
+-- Plays its children over and over, `duration` frames a pass (`times` passes,
+-- for ever by default): their time starts again with each, and they mount
+-- again, so what starts as they mount starts again too. Fills its parent
+-- unless `layout = "none"`; other properties go on its box.
+local LOOP_KEYS = { duration = true, times = true, layout = true, name = true }
+function video.loop(opts: any): any
+	local parent = time_here()
+	local duration: number = opts.duration or error("video.loop: give it a `duration` in frames", 2)
+	local times: number = opts.times or math.huge
+	local time = child_time(parent, 0, duration, { wrap = duration })
+	local box: any = { provide = { ["zgx.video.time"] = time } }
+	if opts.layout ~= "none" then
+		box.absolute, box.top, box.left, box.right, box.bottom = true, 0, 0, 0, 0
+	end
+	for key, value in opts do
+		if type(key) == "string" and not LOOP_KEYS[key] then
+			box[key] = value
+		end
+	end
+	return ui.presence(function()
+		local n = local_frame(parent)
+		local pass = math.floor(n / duration)
+		return if n >= 0 and pass < times then pass else nil
+	end, function()
+		local inner = table.clone(box)
+		for i, child in children_of(opts, time) do
+			inner[i] = child
+		end
+		return ui.div(inner)
+	end, { absolute = box.absolute, top = box.top, left = box.left, right = box.right, bottom = box.bottom })
+end
+
+-- Holds its children at one frame of their time (`frame`, 0 by default):
+-- what reads the frame shows that frame for as long as it shows.
+function video.freeze(opts: any): any
+	local parent = time_here()
+	local time = child_time(parent, 0, parent.duration, { frozen = opts.frame or 0 })
+	local box: any = { provide = { ["zgx.video.time"] = time } }
+	if opts.layout ~= "none" then
+		box.absolute, box.top, box.left, box.right, box.bottom = true, 0, 0, 0, 0
+	end
+	for key, value in opts do
+		if type(key) == "string" and key ~= "frame" and key ~= "layout" then
+			box[key] = value
+		end
+	end
+	local Body = ui.component(function()
+		for i, child in children_of(opts, time) do
+			box[i] = child
+		end
+		return ui.div(box)
+	end)
+	return Body {}
 end
 
 ------------------------------------------------------------------------------
@@ -556,9 +660,9 @@ function video.series(opts: any): any
 	local nodes: any = { absolute = true, top = 0, left = 0, right = 0, bottom = 0 }
 	for _, entry in items do
 		local scene = entry.scene
-		local offset = parent.offset + entry.from
+		local offset = entry.from
 		local function how_far(transition: any, first: number): number
-			local n = frame_state:get() - first
+			local n = local_frame(parent) - first
 			return ease_of(transition.ease)(math.clamp((n + 1) / (transition.duration + 1), 0, 1))
 		end
 		local box: any = {}
@@ -575,7 +679,7 @@ function video.series(opts: any): any
 		local enter, exit = entry.enter, entry.exit
 		local function looks(): any
 			local out = {}
-			local n = frame_state:get()
+			local n = local_frame(parent)
 			if enter and enter.enter and n < offset + enter.duration then
 				for key, value in enter.enter(how_far(enter, offset)) do
 					out[key] = value
@@ -609,7 +713,7 @@ function video.series(opts: any): any
 				return enter.params(how_far(enter, offset))
 			end
 			box.layer_on = function()
-				return frame_state:get() < offset + enter.duration
+				return local_frame(parent) < offset + enter.duration
 			end
 		end
 		table.insert(nodes, video.sequence(box))
@@ -636,16 +740,29 @@ end
 
 -- A sound under the video: `src` (a file beside the script), `from` (its start,
 -- in frames, within this sequence), `duration`, `trim` (frames of it to skip),
--- `volume` (1), `fade_in` and `fade_out` (frames), `loop`. Goes anywhere among
+-- `volume` (1, or a function of the frame from its start: a fade or a duck), `fade_in` and `fade_out` (frames), `loop`. Goes anywhere among
 -- children; it adds no node.
 function video.audio(opts: any): nil
 	local time = time_here()
+	local volume = opts.volume or 1
+	local volumes: { number }? = nil
+	if type(volume) == "function" then
+		-- Its loudness at each frame, from its start: the mix goes between them.
+		local lasts = opts.duration
+			or math.max((composition and composition.duration or 0) - time.offset - (opts.from or 0), 1)
+		volumes = {}
+		for frame = 0, math.ceil(lasts) do
+			(volumes :: any)[frame + 1] = (volume :: any)(frame)
+		end
+		volume = 1
+	end
 	tell("zgx.video.audio", {
 		src = opts.src,
 		from = time.offset + (opts.from or 0),
 		duration = opts.duration or -1,
 		trim = opts.trim or 0,
-		volume = opts.volume or 1,
+		volume = volume,
+		volumes = volumes,
 		fade_in = opts.fade_in or 0,
 		fade_out = opts.fade_out or 0,
 		loop = opts.loop or false,
@@ -718,7 +835,7 @@ function video.audio_data(src: string): AudioData
 	local time = time_here()
 	local data: any = { seconds = audio_ask(src, "length", {}) }
 	local function seconds_of(o: any): number
-		local frame = if o and o.frame ~= nil then o.frame else (frame_state:get() - time.offset)
+		local frame = if o and o.frame ~= nil then o.frame else local_frame(time)
 		return (frame - (if o and o.from then o.from else 0)) / time.fps
 	end
 	function data.bars(_self: any, o: any?): { number }
@@ -770,6 +887,7 @@ end
 -- and those to come in `upcoming_color` (or hidden, with `reveal = true`).
 -- Its other properties style the text.
 local CAPTION_KEYS = {
+	children = true,
 	src = true,
 	cues = true,
 	offset = true,
@@ -779,12 +897,12 @@ local CAPTION_KEYS = {
 	reveal = true,
 	color = true,
 }
-function video.captions(opts: any): any
+local CaptionsElement = ui.component(function(opts: any): any
 	local time = time_here()
 	local cues: { Cue } = opts.cues or video.captions_of(opts.src)
 	local offset = opts.offset or 0
 	local function now(): (Cue?, number)
-		return video.caption_at(cues, (frame_state:get() - time.offset) / time.fps - offset)
+		return video.caption_at(cues, local_frame(time) / time.fps - offset)
 	end
 	local style: any = {}
 	for key, value in opts do
@@ -853,6 +971,10 @@ function video.captions(opts: any): any
 		return ui.text(t)
 	end)
 	return ui.div(row)
+end)
+function video.captions(opts: any): any
+	-- A component: it reads the time of the sequence or loop it mounts in.
+	return CaptionsElement(opts)
 end
 
 -- Hold the render until the function this returns is called: for what loads in
