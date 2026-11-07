@@ -5197,6 +5197,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zgx-fx"
+version = "0.1.10"
+dependencies = [
+ "image",
+ "zgx",
+ "zgx-gpu",
+ "zgx-script",
+]
+
+[[package]]
 name = "zgx-ghostty-sys"
 version = "0.1.10"
 

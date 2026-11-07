@@ -135,7 +135,7 @@ jobs:
       - run: cargo clippy -p zgx-script --no-default-features --all-targets --locked -- -D warnings
       # zgx-script's best-practice lint over every example script.
       - name: Script lint
-        run: cargo run -q -p zgx-script --bin zgx --locked -- lint crates/zgx-script/examples crates/zgx-desktop/examples
+        run: cargo run -q -p zgx-script --bin zgx --locked -- lint crates/zgx-script/examples crates/zgx-desktop/examples crates/zgx-fx/examples/gallery
       # Every example script type checks (luau-lsp, the shipped ui/anime
       # types); zgx-script's check tests run with it too.
       - name: Script type check
@@ -151,6 +151,8 @@ jobs:
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload -p zgx-script --all-targets --features zgx-script/scene3d --locked
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
+      # The optional effects package: every effect drawn, on each job's backend.
+      - run: cargo test -p zgx-fx --locked
       # zgx-script's tests with all its features, as an app built by zgx-run
       # has them (scene3d, i18n, gltf, inspect): ICU's plural rules change
       # what the i18n lint finds, and each feature may add lazy `ui`
@@ -408,6 +410,7 @@ jobs:
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload --all-targets --locked
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
+      - run: cargo test -p zgx-fx --locked
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # The soak (an app used for a while holds what it did), on Metal.
@@ -483,6 +486,7 @@ jobs:
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-script --lib --test components --test bundle --locked
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
+      - run: cargo test -p zgx-fx --locked
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # The swap chain's alpha (opaque windows aren't blended by DWM, #513)
