@@ -2599,6 +2599,15 @@ fn contents_style(mut own: Style, lead: &Style) -> Style {
     };
     own
 }
+/// Whether `style` and `constraints` may fix a box's size on both axes
+/// (`Scene::fixed_size` decides): a width and a height each from them.
+#[inline(always)]
+fn style_may_fix(style: &Style, constraints: &Constraints) -> bool {
+    (constraints.force_width.is_some() || style.width.is_some() || style.width_percent.is_some())
+        && (constraints.force_height.is_some()
+            || style.height.is_some()
+            || style.height_percent.is_some())
+}
 fn dimension(value: f32, min: Option<f32>, max: Option<f32>) -> f32 {
     value
         .max(0.0)
@@ -9834,14 +9843,40 @@ impl Scene {
         // Measuring recurses into the children: one level of the tree more.
         self.measure_depth += 1;
         let size = crate::deep(self.measure_depth, || {
-            self.measure_uncached(id, *constraints)
+            self.measure_uncached(id, *constraints, full)
         });
         self.measure_depth -= 1;
         size
     }
     /// `measured`, when nothing kept serves.
     /// A contents or zoomed node goes to `measure_special`.
-    fn measure_uncached(&mut self, id: NodeId, constraints: Constraints) -> (f32, f32) {
+    /// Whether a probe of `id`, a box with children its style and
+    /// `constraints` size, may find it at a size other than the one it was
+    /// last laid out at: the room it reads to size itself (forced sizes,
+    /// percentage bases) is not what it was.
+    #[inline(never)]
+    fn size_moves(&self, id: NodeId, constraints: Constraints) -> bool {
+        let node = self.tree_node(id);
+        !self.children_raw(node).is_empty()
+            && node.measurement.as_ref().is_none_or(|m| {
+                let (a, b) = (m.constraints, constraints);
+                a.force_width != b.force_width
+                    || a.force_height != b.force_height
+                    || a.percent_width != b.percent_width
+                    || a.percent_height != b.percent_height
+            })
+    }
+    /// A probe of a box taffy lays out, its style sizing it, at a size other
+    /// than the one it was last laid out at (`size_moves`), answered from
+    /// its style, laying out nothing in it (`fixed_size`).
+    #[inline(never)]
+    fn probe_fixed(&self, id: NodeId, constraints: Constraints) -> Option<(f32, f32)> {
+        if !self.size_moves(id, constraints) {
+            return None;
+        }
+        self.fixed_size(id, constraints)
+    }
+    fn measure_uncached(&mut self, id: NodeId, constraints: Constraints, full: bool) -> (f32, f32) {
         // Timed for devtools' layout attribution while they trace.
         let _traced = crate::profile::layout_span(id);
         // Checked by `measured`, its one caller.
@@ -9854,6 +9889,15 @@ impl Scene {
             return size;
         }
         if let Some(size) = self.measure_sized_box(id, constraints) {
+            return size;
+        }
+        // A probe of a box its style sizes, at a size it wasn't laid out at:
+        // answered from its style (`probe_fixed`), its children laid out
+        // only where `arrange` places it.
+        if !full
+            && style_may_fix(&self.tree_node(id).style, &constraints)
+            && let Some(size) = self.probe_fixed(id, constraints)
+        {
             return size;
         }
         let node = self.tree_node(id);

@@ -8759,8 +8759,9 @@ mod layout_drag_tests {
         )
     }
 
-    /// A frame of the drag takes no more passes and measures than it did when
-    /// `layout-drag` was added (3.13 and 2,170 over 630 nodes). Each pane
+    /// A frame of the drag takes no more passes and measures than it does now
+    /// (3.13 and 1,651 over 630 nodes; 2,170 when `layout-drag` was added,
+    /// before a probe of a box its style sizes was answered from it). Each pane
     /// asks its nodes under several constraints a pass, and its lists' and
     /// text areas' viewports resized ask for another: lower these as that
     /// work goes.
@@ -8769,6 +8770,6 @@ mod layout_drag_tests {
         let (passes, measures, nodes) = drag();
         eprintln!("drag: {passes:.2} passes, {measures:.0} measures a frame, {nodes} nodes");
         assert!(passes <= 3.2, "{passes:.2} passes a frame");
-        assert!(measures <= 2200., "{measures:.0} measures a frame");
+        assert!(measures <= 1700., "{measures:.0} measures a frame");
     }
 }
