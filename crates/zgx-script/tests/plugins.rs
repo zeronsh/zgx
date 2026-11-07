@@ -7,7 +7,11 @@ use std::path::PathBuf;
 use zgx_script::{Capability, Plugin, ScriptHost, Value};
 
 fn plugin(name: &str, code: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-plugins-{}-{name}", std::process::id()));
+    // A directory of each call's own: tests run in parallel in one process,
+    // and two writing one name's file would load each other's code.
+    static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("zgx-plugins-{}-{n}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("init.luau");
     std::fs::write(&entry, code).unwrap();
@@ -561,7 +565,7 @@ fn a_plugin_reads_the_window_size_and_nothing_else_of_the_window() {
     // A picture fitted to the window (a lightbox) needs its size; the
     // window's other states are the app's.
     let entry = plugin(
-        "pictures",
+        "lightbox",
         r#"
 ui.contribute("bar", ui.column {
     ui.text { id = "got", function()
@@ -577,7 +581,7 @@ ui.contribute("bar", ui.column {
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::inline(runtime, "app", APP);
         host.set_plugins(vec![Plugin {
-            name: "pictures".into(),
+            name: "lightbox".into(),
             entry,
             grants: vec![],
         }]);
