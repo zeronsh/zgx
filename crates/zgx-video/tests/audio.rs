@@ -15,6 +15,7 @@ fn clip(from: u64) -> AudioClip {
         fade_out: 0,
         looped: false,
         optional: false,
+        volumes: None,
     }
 }
 fn constant(seconds: f64, value: f32) -> Rc<Sound> {
@@ -81,4 +82,17 @@ fn a_wav_reads_back_as_it_was_written_and_comes_to_the_mix_rate() {
     assert_eq!(sound.0.len(), tone.len());
     assert!((sound.0[998] - tone[998]).abs() < 1e-4);
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_volume_of_the_frame_shapes_the_clip_between_frames() {
+    let mut ramp = clip(0);
+    ramp.volumes = Some(vec![0., 1., 1., 0.5]);
+    let rate = SAMPLE_RATE as usize;
+    let mixed = mix(&[ramp], 30., 30, |_| Some(constant(1., 0.8)));
+    let at = |frame: f64| mixed[((frame / 30. * rate as f64) as usize) * 2];
+    assert!(at(0.) < 0.01, "silent at its start");
+    assert!((at(0.5) - 0.4).abs() < 0.01, "half way up: {}", at(0.5));
+    assert!((at(2.) - 0.8).abs() < 0.01);
+    assert!((at(10.) - 0.4).abs() < 0.01, "its last held: {}", at(10.));
 }

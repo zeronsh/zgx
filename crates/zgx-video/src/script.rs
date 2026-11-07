@@ -76,6 +76,9 @@ pub struct AudioClip {
     pub looped: bool,
     /// A video's sound: silence if it has none.
     pub optional: bool,
+    /// Its volume at each frame from its start (`volume` given as a function),
+    /// gone between; `volume` scales it.
+    pub volumes: Option<Vec<f32>>,
 }
 
 /// The source of the Luau side, for `require("@video")`.
@@ -223,6 +226,12 @@ fn host(
             fade_out: frames("fade_out"),
             looped: clip["loop"].as_bool().unwrap_or(false),
             optional: false,
+            volumes: clip["volumes"].as_array().map(|volumes| {
+                volumes
+                    .iter()
+                    .map(|v| v.as_f64().unwrap_or(1.) as f32)
+                    .collect()
+            }),
         };
         let audio = &mut heard.borrow_mut().audio;
         if !audio.contains(&clip) {
@@ -280,6 +289,7 @@ fn host(
                 fade_out: 0,
                 looped: placed.looped,
                 optional: true,
+                volumes: None,
             };
             if !told.audio.contains(&sound) {
                 told.audio.push(sound);
