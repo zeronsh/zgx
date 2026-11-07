@@ -311,16 +311,18 @@ impl Region {
     /// A layer shader's: its uniforms, and in lanes a fill's doesn't read,
     /// the box's corner `radii`, how far it paints and reads past the box
     /// (`LayerShader::bleed`), where the layer's pixels lie from the box's
-    /// top-left, and what it can read of the backdrop from there.
+    /// top-left, what it can read of the backdrop from there, and its
+    /// texture's `frame` (`layer_frame`).
     fn layer_uniforms(
         layer: &zgx::scene::LayerShader,
         radii: [f32; 4],
         painted: [f32; 4],
         readable: [f32; 4],
+        frame: [f32; 4],
     ) -> Self {
         Self {
             fade: radii,
-            color: [painted, readable, [0.; 4]],
+            color: [painted, readable, frame],
             tint: [layer.bleed, 0., 0., 0.],
             ..Self::uniforms(layer.uniforms)
         }
@@ -8141,7 +8143,9 @@ impl GpuRenderer {
                             filter.as_ref().map_or(0., |(_, layer)| {
                                 let radii = blur_corners(item.kind, item.bounds);
                                 let read = reading.map_or([0.; 4], |(_, from_box)| from_box);
-                                let region = Region::layer_uniforms(layer, radii, painted, read);
+                                let frame = layer_frame((bounds, uv), item.bounds);
+                                let region =
+                                    Region::layer_uniforms(layer, radii, painted, read, frame);
                                 region_index(&mut clips, Some(region))
                             }),
                             blend.map_or(0., |mode| mode as u8 as f32),
@@ -15367,6 +15371,22 @@ pub(crate) fn fill_source(user: &str) -> String {
 }"
     )
 }
+/// Where a layer shader's `zgx_sample` reads: the texture coordinates at
+/// the top-left of `node` (its box) and per point from there, for the
+/// composite quad `(rect, uv)` drawing the layer's texture (its uv the
+/// texture coordinates at `rect`'s top-left and across it). Worked out here
+/// rather than from screen derivatives in the shader: those are differences
+/// of interpolated coordinates, a little off, and that error times a read
+/// a thousand points away lands in a texel beside the one meant.
+fn layer_frame((rect, uv): (Rect, [f32; 4]), node: Rect) -> [f32; 4] {
+    let per = [uv[2] / rect.width, uv[3] / rect.height];
+    [
+        uv[0] + (node.x - rect.x) * per[0],
+        uv[1] + (node.y - rect.y) * per[1],
+        per[0],
+        per[1],
+    ]
+}
 /// A layer shader's module (`zgx::scene::LayerShader`): the quad shader,
 /// the `LayerInput` its `layer` takes, `zgx_sample`, the user's source and
 /// the fragment entry `zgx_filter`, which passes the layer's texel under a
@@ -15378,7 +15398,9 @@ pub(crate) fn filter_source(user: &str) -> String {
         "{}\n{}\nstruct LayerInput {{ color:vec4<f32>, p:vec2<f32>, size:vec2<f32>, time:f32, scale:f32, params:array<vec4<f32>,4>, radii:vec4<f32> }}\n{}\n{user}\n{}{}",
         include_str!("draw.wgsl"),
         include_str!("blend.wgsl"),
-        "var<private> zgx_frame:vec4<f32>;
+        "// The layer texture's coordinates at the node's top-left, and per point
+// (`layer_frame`).
+var<private> zgx_frame:vec4<f32>;
 // Where the layer's pixels lie, from the node's top-left (its transparent
 // border at the edge): past them a sample is clear.
 var<private> zgx_painted:vec4<f32>;
@@ -15402,13 +15424,12 @@ fn zgx_backdrop(p:vec2<f32>)->vec4<f32> {
         "fn zgx_filtered(input:Out)->vec4<f32> {
  var v=input;
  let point=select(v.position.xy/viewport.z,v.point,v.options.z>0.5);
- // The texture's uv per logical point of the node (the quad maps one
- // linearly to the other), so `zgx_sample` reaches any p: from the
- // screen derivatives of both, taken before any branch.
- let du=mat2x2(dpdx(v.uv),dpdy(v.uv)); let dp=mat2x2(dpdx(point),dpdy(point));
+ // The target's pixels per logical point of the node, for
+ // `zgx_backdrop`: from the screen derivatives of the point, taken before
+ // any branch.
+ let dp=mat2x2(dpdx(point),dpdy(point));
  let det=dp[0].x*dp[1].y-dp[1].x*dp[0].y;
  let inverse=mat2x2(vec2(dp[1].y,-dp[0].y),vec2(-dp[1].x,dp[0].x))*(1./select(det,1e-6,abs(det)<1e-12));
- let k=du*inverse;
  if v.mask.y<.5 {return shade(v);}
  let u=regions[u32(v.mask.y)-1u];
  let p=point-v.fade.xy;
@@ -15416,7 +15437,7 @@ fn zgx_backdrop(p:vec2<f32>)->vec4<f32> {
  // them (its resampling edge, overflow) composites as painted.
  let bleed=u.tint.x;
  if any(p<vec2(-bleed))||any(p>=v.fade.zw+vec2(bleed)) {return shade(v);}
- zgx_frame=vec4(v.uv-vec2(k[0].x,k[1].y)*p,k[0].x,k[1].y);
+ zgx_frame=u.color2;
  zgx_painted=u.color0;
  zgx_readable=u.color1;
  zgx_pixels=inverse;
