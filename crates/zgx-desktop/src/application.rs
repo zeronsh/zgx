@@ -4861,6 +4861,16 @@ impl Host {
                 let step = crate::scrollers::wheel_step(
                     self.context.viewport.with_untracked(|viewport| *viewport),
                 );
+                // A list's line is its row (`Ui::wheel_line_at`), as a table's
+                // is an `NSTableView`'s: measured, 3 lines of 24-point rows
+                // scrolled 72 points where a scroll view's moved 30.
+                #[cfg(target_os = "macos")]
+                let step = match self.context.ui.wheel_line_at(self.cursor.0, self.cursor.1) {
+                    Some(line) if matches!(delta, MouseScrollDelta::LineDelta(..)) => {
+                        (step.0, line)
+                    }
+                    _ => step,
+                };
                 let (dx, dy) = wheel_delta(delta, self.scale_factor, step);
                 // Receipt, application and presentation share the log's host
                 // clock. This is host receipt, not the native event timestamp.
