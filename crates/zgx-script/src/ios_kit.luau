@@ -285,7 +285,8 @@ function ios.composer(props)
 	local still = ui.prefers.reduced_motion:get()
 	local max_lines = props.max_lines or 6
 	-- Opening has some life in it; closing is quicker and doesn't bounce.
-	local OPEN = { response = 420, bounce = 0.15 }
+	local OPEN = { response = 420, bounce = 0.25 }
+	local OPEN_TALL = { response = 420, bounce = 0.2 }
 	local CLOSE = { response = 280, bounce = 0 }
 	local function delayed(spring, delay)
 		return { response = spring.response, bounce = spring.bounce, delay = delay }
@@ -324,13 +325,13 @@ function ios.composer(props)
 		right = channel(focused, 36, 8, OPEN),
 		bottom = props.bottom or 100,
 		ui.glass {
-			radius = channel(focused, 22, 18, delayed({ response = 480, bounce = 0 }, 70)),
+			radius = channel(focused, 22, 18, delayed({ response = 480, bounce = 0.15 }, 70)),
 			interactive = true,
 			direction = "row",
 			items = "end",
-			min_h = channel(focused, 44, 56, delayed(OPEN, 35)),
+			min_h = channel(focused, 44, 56, delayed(OPEN_TALL, 35)),
 			px = 6,
-			py = channel(focused, 0, 6, delayed(OPEN, 35)),
+			py = channel(focused, 0, 6, delayed(OPEN_TALL, 35)),
 			opacity = if still then ui.tween(fade, { duration = 120 }) else nil,
 			-- Alive at first contact, before focus lands.
 			scale = channel(pressed, 1, 0.975, { response = 150, bounce = 0 }, {
