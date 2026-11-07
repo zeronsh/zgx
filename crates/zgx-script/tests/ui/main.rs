@@ -117,6 +117,8 @@ mod theme;
 mod ui;
 #[path = "../variants.rs"]
 mod variants;
+#[path = "../wheel_across.rs"]
+mod wheel_across;
 #[path = "../wheel_phase.rs"]
 mod wheel_phase;
 #[path = "../z_order.rs"]
