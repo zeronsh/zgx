@@ -1263,6 +1263,20 @@ fn align_wait(
 ) -> Option<std::time::Duration> {
     (period < ALIGN_PERIOD && left > ALIGN_EARLY && left < ALIGN_LATEST).then(|| left - ALIGN_AT)
 }
+fn scroll_steps() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| zgx::env::var_os("ZGX_SCROLL_STEPS").is_some_and(|v| v != "0"))
+}
+fn modeled(interval: std::time::Duration) -> std::time::Duration {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| zgx::env::var_os("ZGX_MODEL_60").is_some_and(|v| v != "0"))
+        && interval < std::time::Duration::from_millis(12)
+    {
+        interval * 2
+    } else {
+        interval
+    }
+}
 /// How long after a resize frames skip the refresh-point wait (the renderer
 /// presents on the plain layer for as long: `zgx_gpu`'s `RESIZE_SETTLE`).
 #[cfg(target_os = "macos")]
@@ -2924,6 +2938,11 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 {
                     self.presented_at = Some(std::time::Instant::now());
+                    if scroll_steps() {
+                        let at = std::time::Instant::now();
+                        let left = self.frame_timer.next_deadline(at, self.frame_interval).saturating_duration_since(at);
+                        eprintln!("zgx-scroll shown {} left {} work 0", zgx_gpu::present_log::now_ns(), left.as_micros());
+                    }
                     self.late_sample.handed_over(std::time::Instant::now());
                     // What it shows now, for `Ui::snapshot` (the last frame's
                     // surface is the renderer's to reuse again).
@@ -4835,6 +4854,9 @@ impl Host {
                 })?;
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
+                if scroll_steps() {
+                    eprintln!("zgx-scroll event {} None {delta:?} {phase:?}", zgx_gpu::present_log::now_ns());
+                }
                 self.wheel_tape.borrow_mut().received(
                     std::time::Instant::now(),
                     delta,
@@ -5722,6 +5744,9 @@ impl Host {
                         self.frame_interval.as_secs_f64() * 1000.
                     )
                 });
+                if scroll_steps() {
+                    eprintln!("zgx-scroll step {} {delta_x} {delta_y}", zgx_gpu::present_log::now_ns());
+                }
                 let (x, y) = self.scroll.position;
                 self.dispatch(InputEvent::Scroll {
                     x,
@@ -7330,8 +7355,8 @@ impl WindowManager {
                     // The refresh after this one starts as this one shows.
                     host.frame_timer =
                         crate::frame_source::FrameTimer::aligned(frame.time, frame.index + 1);
-                    host.frame_interval = frame.interval;
-                    host.context.ui.set_refresh_interval(frame.interval);
+                    host.frame_interval = modeled(frame.interval);
+                    host.context.ui.set_refresh_interval(host.frame_interval);
                     host.vsync_synced = Some(std::time::Instant::now());
                     if host.vsync_paced {
                         // The timer paces: the link only reported the grid.
