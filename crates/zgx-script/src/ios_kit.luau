@@ -271,105 +271,90 @@ function ios.keyboard_bar(props)
 	return ui.div(box)
 end
 
--- A chat's composer on a keyboard bar: a small pill at rest that opens into a wider
--- rounded box as it takes focus and closes again, on springs that carry their speed
--- if it changes its mind: width first, height a beat after, corners last, the
--- content settling inside them. It grows with its lines, to `max_lines`, then
--- scrolls inside. `value` (a state), `placeholder`, `on_send` (the text; a send
--- button comes when there is any), `on_plus`, `bottom`.
+-- A chat's composer on a keyboard bar: a thin one-line pill at rest that opens into
+-- a taller box as it takes focus, the text above and a row for its buttons below,
+-- and closes again, on the keyboard's own spring so it finishes as the keyboard
+-- does. It grows with its lines, to `max_lines`, then scrolls inside. `value` (a
+-- state), `placeholder`, `on_send` (the text; a send button comes when there is
+-- any), `on_plus`, `bottom`.
 function ios.composer(props)
 	local value = props.value
 	local focused = ui.use_state(false)
-	local pressed = ui.use_state(false)
 	local still = ui.prefers.reduced_motion:get()
 	local max_lines = props.max_lines or 6
-	-- Opening has some life in it; closing is quicker and doesn't bounce.
-	local OPEN = { response = 420, bounce = 0.25 }
-	local OPEN_TALL = { response = 420, bounce = 0.2 }
-	local CLOSE = { response = 280, bounce = 0 }
-	local function delayed(spring, delay)
-		return { response = spring.response, bounce = spring.bounce, delay = delay }
-	end
-	-- A number that is `rest` closed and `wide` open, on `opening`'s spring. Reduced
-	-- motion: at once, and the crossfade below shows the change.
-	local function channel(read, rest, wide, opening, closing)
-		local goal = ui.computed(function()
-			return if read:get() then wide else rest
-		end)
+	-- Everything moves on the keyboard's own spring, read from UIKit as it runs
+	-- (mass 1, stiffness 555, damping 47.1, the same up and down), all at once.
+	local KEYBOARD = { stiffness = 555.0265, damping = 47.118 }
+	local function eased(goal)
 		if still then
 			return ui.tween(goal, { duration = 1 })
 		end
-		local closes = closing or CLOSE
-		if wide > rest then
-			return ui.spring(goal, { up = opening, down = closes })
-		end
-		return ui.spring(goal, { down = opening, up = closes })
+		return ui.spring(goal, KEYBOARD)
+	end
+	-- A number that is `rest` closed and `open` open. Reduced motion: at once, and
+	-- the crossfade below shows the change.
+	local function channel(read, rest, open)
+		return eased(ui.computed(function()
+			return if read:get() then open else rest
+		end))
 	end
 	local has_text = ui.computed(function()
 		return value:get() ~= ""
 	end)
-	-- The send button pops in, and is gone quicker than it came.
-	local POP = { response = 300, bounce = 0.35 }
-	local GONE = { response = 160, bounce = 0 }
 	-- One line's height and the lines' now, measured from the text under the editor.
 	local line = ui.use_state(22)
 	local measured = ui.use_state(22)
+	-- Open, room for two lines at least.
 	local height = ui.computed(function()
-		return math.min(measured:get(), line:get() * max_lines)
+		local lines = math.min(measured:get(), line:get() * max_lines)
+		return if focused:get() then math.max(lines, line:get() * 2) else lines
 	end)
 	local fade = ui.use_state(1)
+	local ROW = 40
+	local function button(options)
+		return ui.button {
+			absolute = true,
+			bottom = 0,
+			left = options.left,
+			right = options.right,
+			w = options.w,
+			h = ROW,
+			p = 0,
+			bg = "#00000000",
+			hover = {},
+			active = {},
+			label = options.label,
+			items = "center",
+			justify = "center",
+			overflow = "hidden",
+			opacity = options.opacity,
+			scale = options.scale,
+			pointer_events = options.pointer_events,
+			aria_hidden = options.aria_hidden,
+			on_click = options.on_click,
+			options.symbol,
+		}
+	end
 	return ios.keyboard_bar {
 		absolute = true,
-		left = channel(focused, 36, 8, OPEN),
-		right = channel(focused, 36, 8, OPEN),
+		left = channel(focused, 36, 8),
+		right = channel(focused, 36, 8),
 		bottom = props.bottom or 100,
 		ui.glass {
-			radius = channel(focused, 22, 18, delayed({ response = 480, bounce = 0.15 }, 70)),
+			radius = channel(focused, 20, 24),
 			interactive = true,
-			direction = "row",
-			items = "end",
-			min_h = channel(focused, 44, 56, delayed(OPEN_TALL, 35)),
-			px = 6,
-			py = channel(focused, 0, 6, delayed(OPEN_TALL, 35)),
+			direction = "column",
 			opacity = if still then ui.tween(fade, { duration = 120 }) else nil,
-			-- Alive at first contact, before focus lands.
-			scale = channel(pressed, 1, 0.975, { response = 150, bounce = 0 }, {
-				response = 320,
-				bounce = 0.2,
-			}),
-			on_press = function()
-				pressed:set(true)
-			end,
-			on_release = function()
-				pressed:set(false)
-			end,
-			ui.button {
-				w = 32,
-				h = 44,
-				p = 0,
-				bg = "#00000000",
-				hover = {},
-				active = {},
-				label = "Add",
-				items = "center",
-				justify = "center",
-				on_click = props.on_plus,
-				x = channel(focused, 0, 2, delayed(OPEN, 40)),
-				scale = channel(focused, 0.88, 1, delayed({ response = 360, bounce = 0.3 }, 40)),
-				ui.symbol { name = "plus", size = 18, weight = 500, color = "$text.secondary" },
-			},
-			-- The lines' height comes from their text, laid out unseen beneath the
-			-- editor, which fills what that makes and scrolls past the limit.
+			-- The text: beside the buttons at rest, above them open.
 			ui.div {
-				grow = 1,
-				min_w = 0,
-				ml = channel(focused, 2, 6, delayed(OPEN, 70)),
-				mr = 4,
-				my = 11,
-				h = if still
-					then ui.tween(height, { duration = 1 })
-					else ui.spring(height, { response = 320, bounce = 0.08 }),
+				ml = channel(focused, 38, 14),
+				mr = channel(focused, 42, 14),
+				mt = channel(focused, 9, 12),
+				mb = 9,
+				h = eased(height),
 				overflow = "hidden",
+				-- The lines' height comes from their text, laid out unseen beneath
+				-- the editor, which fills what that makes and scrolls past the limit.
 				ui.text {
 					function()
 						local text = value:get()
@@ -406,7 +391,6 @@ function ios.composer(props)
 					focus = {},
 					on_focus = function()
 						focused:set(true)
-						pressed:set(false)
 						if still then
 							fade:set(0.6)
 							ui.after(120, function()
@@ -425,19 +409,21 @@ function ios.composer(props)
 					end,
 				},
 			},
-			ui.button {
-				w = channel(has_text, 0, 36, POP, GONE),
-				h = 44,
-				p = 0,
-				bg = "#00000000",
-				hover = {},
-				active = {},
+			-- The buttons' row: nothing at rest, where they sit beside the text.
+			ui.div { h = channel(focused, 0, ROW - 9) },
+			button {
+				left = 4,
+				w = 32,
+				label = "Add",
+				on_click = props.on_plus,
+				symbol = ui.symbol { name = "plus", size = 18, weight = 500, color = "$text.secondary" },
+			},
+			button {
+				right = 4,
+				w = 36,
 				label = "Send",
-				items = "center",
-				justify = "center",
-				overflow = "hidden",
-				opacity = channel(has_text, 0, 1, { response = 180, bounce = 0 }, GONE),
-				scale = channel(has_text, 0.6, 1, POP, GONE),
+				opacity = channel(has_text, 0, 1),
+				scale = channel(has_text, 0.6, 1),
 				pointer_events = function()
 					return has_text:get()
 				end,
@@ -450,7 +436,7 @@ function ios.composer(props)
 					end
 					value:set("")
 				end,
-				ui.symbol { name = "arrow.up.circle.fill", size = 30, color = "$ios.blue" },
+				symbol = ui.symbol { name = "arrow.up.circle.fill", size = 30, color = "$ios.blue" },
 			},
 		},
 	}
