@@ -415,6 +415,7 @@ pub fn screenshot(path: &Path, shot: &Path, size: (f32, f32), frame: u64) -> Res
             fps: 60.,
             scale: 2.,
             background: Color(14, 15, 20, 255),
+            ..Default::default()
         },
         |setting| {
             let host = ScriptHost::new(setting.runtime, &app);

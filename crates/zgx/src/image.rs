@@ -87,6 +87,18 @@ pub enum Decoding {
     /// Off the main thread, whatever its size.
     Async,
 }
+thread_local! {
+    static WHOLE_FRAMES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Whether frames drawn on this thread may go without a picture's pixels:
+/// with `true`, a kept file drawn here that would decode off the thread
+/// (`Decoding::Auto`, larger than `SYNC_PIXELS`) decodes as it is drawn, in
+/// that frame, as `Decoding::Sync` does. For a renderer whose frames are
+/// written out (a video), where a frame drawn without them is wrong, not
+/// late. `Decoding::Async` images still decode off the thread.
+pub fn set_whole_frames_on_this_thread(whole: bool) {
+    WHOLE_FRAMES.set(whole);
+}
 /// An image drawn in nine pieces (a nine-patch; CSS's `border-image` with
 /// `fill`, `Scene::set_image_slice`): `slice` cuts its pixels into corners,
 /// edges and a middle, insets from its top, right, bottom and left edges
@@ -539,7 +551,7 @@ impl ImageData {
         let now = match kept.decoding.load(Ordering::Relaxed) {
             d if d == Decoding::Sync as u8 => true,
             d if d == Decoding::Async as u8 => false,
-            _ => small,
+            _ => small || WHOLE_FRAMES.get(),
         };
         if now {
             return decode_at(&self.pixels, (self.width, self.height), size, false);

@@ -46,6 +46,8 @@ return video.compositions {
 }
 ```
 
+Fonts in a `fonts` folder beside the script (`.ttf`, `.otf`, `.ttc`) are its text's to name by family, `font = "Geist"`, beside the system's.
+
 `w`, `h`, `fps` and `duration` may be functions of the props, so a composition's length can follow its data. `seconds` can replace `duration`. `schema = { name = { min, max } }` bounds a numeric prop's slider in the studio.
 
 ## Time
@@ -65,7 +67,7 @@ return video.compositions {
 
 `video.random(seed)` is a number from 0 to 1 that the seed alone decides.
 
-**Everything else keeps the video's time as well.** While a stage renders, its thread runs on a virtual clock (`zgx::clock::VirtualClock`) that moves one frame at a time. These all follow it: `anime.animate`, `ui.tween`, `ui.spring`, `ui.loop`, layout animations, `ui.after`, `ui.every`, `layer_clock` and `shader_clock` shaders, GIFs, zgx-fx's effects, `ui.now`, `os.clock`, `os.time` (from 1 January 2000) and `math.random` (seeded). An animation started as a sequence mounts starts at that sequence's first frame, and a picture loaded from a file is decoded before the first frame that shows it. The same input gives the same frames, which is tested. Something real time has to answer (a `ui.fetch`, a remote picture) holds the frame: `local done = video.hold("prices")` returns a function to call when it has answered, and the render waits for it (up to `--hold-timeout`, 60 s).
+**Everything else keeps the video's time as well.** While a stage renders, its thread runs on a virtual clock (`zgx::clock::VirtualClock`) that moves one frame at a time. These all follow it: `anime.animate`, `ui.tween`, `ui.spring`, `ui.loop`, layout animations, `ui.after`, `ui.every`, `layer_clock` and `shader_clock` shaders, GIFs, zgx-fx's effects, `ui.now`, `os.clock`, `os.time` (from 1 January 2000) and `math.random` (seeded). An animation started as a sequence mounts starts at that sequence's first frame, and a picture loaded from a file is decoded before the first frame that shows it, a large one too (which a window decodes off its thread at the size it's drawn, drawing again once it has). The same input gives the same frames, which is tested. Something real time has to answer (a `ui.fetch`, a remote picture) holds the frame: `local done = video.hold("prices")` returns a function to call when it has answered, and the render waits for it (up to `--hold-timeout`, 60 s).
 
 ## Sequences, series and transitions
 
