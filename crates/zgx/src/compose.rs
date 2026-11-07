@@ -508,6 +508,8 @@ pub(crate) struct Rare {
     pointer_events: Option<Box<dyn FnMut() -> bool>>,
     scrollbar: Option<bool>,
     follow_end: Option<bool>,
+    /// `View::keyboard_ride`: how it moves a field clear of a keyboard.
+    keyboard_ride: Option<crate::elastic::KeyboardRide>,
     /// `View::overscroll_contain`: a wheel over it stays with it.
     overscroll_contain: bool,
     animation: Option<animation::Animated>,
@@ -594,6 +596,9 @@ impl Rare {
         }
         if self.follow_end.is_some() {
             inner.follow_end = self.follow_end;
+        }
+        if self.keyboard_ride.is_some() {
+            inner.keyboard_ride = self.keyboard_ride;
         }
         if self.overscroll_contain {
             inner.overscroll_contain = true;
@@ -907,6 +912,14 @@ impl View {
     /// goes on to them.
     pub fn overscroll_contain(mut self) -> Self {
         self.rare_mut().overscroll_contain = true;
+        self
+    }
+    /// How this scroll view or virtual list moves a focused field in it
+    /// clear of a software keyboard (iOS): UIKit's own way by default
+    /// (`KeyboardRide::Native`), or the field riding the keyboard's edge
+    /// (`KeyboardRide::Attached`).
+    pub fn keyboard_ride(mut self, ride: crate::elastic::KeyboardRide) -> Self {
+        self.rare_mut().keyboard_ride = Some(ride);
         self
     }
     /// Keep a scroll viewport at its end while its content grows, as long as
@@ -4734,6 +4747,7 @@ fn mount_element(
     );
     let scrollbar = rare.as_ref().and_then(|r| r.scrollbar).unwrap_or(false);
     let follow_end = rare.as_ref().and_then(|r| r.follow_end).unwrap_or(false);
+    let keyboard_ride = rare.as_ref().and_then(|r| r.keyboard_ride);
     let mut opened = open_element(
         ui,
         parent,
@@ -4749,7 +4763,11 @@ fn mount_element(
     for child in std::mem::take(&mut opened.children) {
         mount(ui, opened.child_parent, child, opened.environment.clone());
     }
-    close_element(ui, opened)
+    let root = close_element(ui, opened);
+    if let Some(ride) = keyboard_ride {
+        crate::elastic::set_keyboard_ride(ui, root, ride);
+    }
+    root
 }
 /// An element mounted up to its children: what the rest of its mounting
 /// needs once they are in (`mount_element`).

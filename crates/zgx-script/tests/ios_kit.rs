@@ -475,3 +475,182 @@ fn a_sheet_fits_its_rows_at_each_dynamic_type_size_to_ax5() {
         assert_fits(&mut h, W, category);
     }
 }
+
+/// A kit page of rows enough to scroll, its `keyboard_ride` as `ride` says.
+fn page_riding(ride: &str) -> Harness {
+    let h = Harness::inline(&format!(
+        r#"local ios = ui.ios
+        local Form = ui.component(function()
+            local rows = {{}}
+            for i = 1, 30 do
+                rows[i] = ios.row {{ title = "Row " .. i }}
+            end
+            return ios.page {{ title = "Form", {ride} ios.section {{ table.unpack(rows) }} }}
+        end)
+        return Form {{}}"#
+    ));
+    h.ui.scene.borrow_mut().resize(402., 874.);
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    h
+}
+
+#[test]
+fn a_page_rides_the_keyboard_as_uikits_by_default_or_attached_when_it_says() {
+    use zgx::elastic::KeyboardRide;
+    let ride = |h: &mut Harness| {
+        h.ui.scroll_driver_at(200., 400.)
+            .expect("the page's scroll view")
+            .keyboard_ride()
+    };
+    // UIKit's own unless the page says otherwise.
+    assert_eq!(ride(&mut page_riding("")), KeyboardRide::Native);
+    assert_eq!(
+        ride(&mut page_riding(r#"keyboard_ride = "native","#)),
+        KeyboardRide::Native
+    );
+    assert_eq!(
+        ride(&mut page_riding(r#"keyboard_ride = "attached","#)),
+        KeyboardRide::Attached
+    );
+    let wrong = zgx_script::testing::TestApp::try_new(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.scroll { keyboard_ride = "glued" }"#,
+        )
+    });
+    assert!(
+        wrong
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.contains("keyboard_ride")),
+        "{:?}",
+        wrong.err()
+    );
+}
+
+/// The keyboard as UIKit animates it (iOS 26.5, lab simulator): its own
+/// `CASpringAnimation`, mass 1, from 336 points below where it rests.
+const KEYBOARD_SPRING: (f64, f64, f64) = (1., 555.0265, 47.118);
+const KEYBOARD_DURATION: f64 = 0.3833;
+const KEYBOARD_TRAVEL: f64 = 336.;
+/// Samples a second, as the iOS host's.
+const RATE: f64 = 120.;
+/// The room UIKit leaves under a field it scrolls into view.
+const ROOM: f32 = 28.;
+
+/// Where the keyboard's edge is at each sample, rising to `end`.
+fn keyboard_edges(end: f64) -> Vec<f64> {
+    let (mass, stiffness, damping) = KEYBOARD_SPRING;
+    zgx::native_control::spring_remaining(mass, stiffness, damping, 0., KEYBOARD_DURATION, RATE)
+        .into_iter()
+        .map(|left| end + KEYBOARD_TRAVEL * left)
+        .collect()
+}
+
+#[test]
+fn the_native_ride_scrolls_once_on_uikits_ease_in_out_over_the_keyboards_time() {
+    use zgx::native_control::{ease_in_out, native_keyboard_scroll};
+    // kCAMediaTimingFunctionEaseInEaseOut: symmetric, half way at half time,
+    // slow at both ends.
+    assert!(ease_in_out(0.).abs() < 1e-9 && (ease_in_out(1.) - 1.).abs() < 1e-9);
+    assert!((ease_in_out(0.5) - 0.5).abs() < 1e-6);
+    for t in [0.1, 0.25, 0.4] {
+        assert!((ease_in_out(t) + ease_in_out(1. - t) - 1.).abs() < 1e-6);
+        assert!(ease_in_out(t) < t, "slow from rest at {t}");
+    }
+    // At a quarter of the time: the curve's value (solved from its control
+    // points by hand, 0.1291...).
+    assert!(
+        (ease_in_out(0.25) - 0.1291).abs() < 0.001,
+        "{}",
+        ease_in_out(0.25)
+    );
+    let path = native_keyboard_scroll(100., 300., KEYBOARD_DURATION, RATE);
+    assert_eq!(path.len(), (KEYBOARD_DURATION * RATE).ceil() as usize + 1);
+    assert_eq!(*path.first().unwrap(), 100.);
+    assert_eq!(*path.last().unwrap(), 300.);
+    assert!(
+        path.windows(2).all(|w| w[1] >= w[0]),
+        "one way, no overshoot"
+    );
+    // The field lands on its own curve: the gap to the keyboard's edge isn't
+    // held while they move, as UIKit's isn't.
+    let (bottom, end) = (700f32, 538f64);
+    let edges = keyboard_edges(end);
+    let path = native_keyboard_scroll(0., bottom + ROOM - end as f32, KEYBOARD_DURATION, RATE);
+    let gaps: Vec<f32> = edges
+        .iter()
+        .zip(&path)
+        .filter(|(edge, _)| (**edge as f32) < bottom + ROOM)
+        .map(|(edge, offset)| *edge as f32 - (bottom - offset))
+        .collect();
+    let (least, most) = gaps
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(l, m), g| (l.min(*g), m.max(*g)));
+    assert!(most - least > 5., "the gap changes: {least}..{most}");
+    assert!(
+        (gaps.last().unwrap() - ROOM).abs() < 0.5,
+        "and ends at the room"
+    );
+}
+
+#[test]
+fn the_attached_ride_holds_the_fields_gap_to_the_keyboards_edge() {
+    use zgx::native_control::keyboard_attached;
+    // A field whose bottom is at 700, the page at 0; the keyboard rises to 538.
+    let (offset, bottom, end) = (0f32, 700f32, 538f64);
+    let start = end + KEYBOARD_TRAVEL;
+    let plain = move |edge: f64| offset + (f64::from(bottom + ROOM) - edge).max(0.) as f32;
+    let page = keyboard_attached(plain, start, end);
+    let edges = keyboard_edges(end);
+    let path: Vec<f32> = edges.iter().map(|edge| page(*edge)).collect();
+    assert!((path.first().unwrap() - plain(start)).abs() < 0.01);
+    assert!((path.last().unwrap() - plain(end)).abs() < 0.5);
+    // Once the edge has come a blend's way past the field, the gap holds.
+    const BLEND: f32 = 120.;
+    for (edge, at) in edges.iter().zip(&path) {
+        let field = bottom - (at - offset);
+        if (*edge as f32) < bottom + ROOM - BLEND {
+            assert!(
+                (*edge as f32 - field - ROOM).abs() < 0.01,
+                "at edge {edge}: gap {}",
+                *edge as f32 - field
+            );
+        }
+        // Never under the keyboard.
+        assert!(field + ROOM <= *edge as f32 + 0.01 || *edge as f32 >= bottom + ROOM);
+    }
+}
+
+#[test]
+fn the_showcases_notes_page_switches_between_the_two_rides() {
+    use zgx::elastic::KeyboardRide;
+    let mut h = Harness::new(|runtime| {
+        zgx_script::ScriptHost::new(
+            runtime,
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/examples/ios_showcase/app.luau"
+            ),
+        )
+    });
+    h.ui.scene.borrow_mut().resize(402., 874.);
+    h.frames(2);
+    h.host.set_state("tab", zgx_script::Value::Num(2.)).unwrap();
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    let ride = |h: &mut Harness| {
+        h.ui.scroll_driver_at(200., 300.)
+            .expect("the Notes page's scroll view")
+            .keyboard_ride()
+    };
+    assert_eq!(ride(&mut h), KeyboardRide::Native, "UIKit's, at first");
+    h.host
+        .set_state("attached", zgx_script::Value::Bool(true))
+        .unwrap();
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    assert_eq!(ride(&mut h), KeyboardRide::Attached);
+}

@@ -9,6 +9,9 @@ local sheet_open = ui.state("sheet_open", false)
 local refreshed = ui.state("refreshed", 0)
 local note = ui.state("note", "")
 local lower = ui.state("lower", "")
+-- How the Notes page's fields clear the keyboard: UIKit's own scroll, or riding
+-- its edge. `ZGX_APP_ARGS="lowfield attached"` starts attached.
+local attached = ui.state("attached", ui.args[2] == "attached")
 
 local function Detail(nav: any, title: string)
 	local enabled = ui.use_state(true)
@@ -248,55 +251,70 @@ local function Composer()
 end
 
 local function TextPage(nav: any)
-	local page = ios.page {
-		title = "Notes",
-		nav = nav,
-		ios.section {
-			header = "A NOTE",
-			ui.div {
-				px = 16,
-				py = 12,
-				ui.textarea {
-					value = note,
-					label = "Note",
-					placeholder = "Write something",
-					h = 160,
-					bg = "#00000000",
-					border = 0,
-					focus = {},
+	local function page(ride: "native" | "attached")
+		return ios.page {
+			title = "Notes",
+			nav = nav,
+			keyboard_ride = ride,
+			ios.section {
+				header = "KEYBOARD",
+				footer = "Off: the page scrolls once, as UIKit's do. On: a field rides the keyboard's edge.",
+				ios.row { title = "Field rides the keyboard", toggle = attached, last = true },
+			},
+			ios.section {
+				header = "A NOTE",
+				ui.div {
+					px = 16,
+					py = 12,
+					ui.textarea {
+						value = note,
+						label = "Note",
+						placeholder = "Write something",
+						h = 160,
+						bg = "#00000000",
+						border = 0,
+						focus = {},
+					},
 				},
 			},
-		},
-		ui.text { "Refreshed {refreshed} times", wrap = true, mx = 36, mb = 160, color = "$text.secondary" },
-		ios.section {
-			header = "LOW ON THE PAGE",
-			footer = "The page scrolls this field above the keyboard.",
-			ui.div {
-				px = 16,
-				py = 12,
-				ui.input {
-					-- `ZGX_APP_ARGS=lowfield`: focused by itself, to test on a phone.
-					on_mount = if ui.args[1] == "lowfield"
-						then function(element: any)
-							ui.after(1500, function()
-								tab:set(2)
-							end)
-							ui.after(2200, function()
-								element:focus()
-							end)
-						end
-						else nil,
-					value = lower,
-					label = "A field low on the page",
-					placeholder = "Tap to type",
-					bg = "#00000000",
-					border = 0,
-					focus = {},
+			ui.text { "Refreshed {refreshed} times", wrap = true, mx = 36, mb = 160, color = "$text.secondary" },
+			ios.section {
+				header = "LOW ON THE PAGE",
+				footer = "The page scrolls this field above the keyboard.",
+				ui.div {
+					px = 16,
+					py = 12,
+					ui.input {
+						-- `ZGX_APP_ARGS=lowfield`: focused by itself, to test on a phone.
+						on_mount = if ui.args[1] == "lowfield"
+							then function(element: any)
+								ui.after(1500, function()
+									tab:set(2)
+								end)
+								ui.after(2200, function()
+									element:focus()
+								end)
+							end
+							else nil,
+						value = lower,
+						label = "A field low on the page",
+						placeholder = "Tap to type",
+						bg = "#00000000",
+						border = 0,
+						focus = {},
+					},
 				},
 			},
-		},
+		}
+	end
+	return ui.div {
+		w = "100%",
+		h = "100%",
+		ui.switch(function()
+			return if attached:get() then "attached" else "native"
+		end, { native = page("native"), attached = page("attached") }),
+		Composer(),
 	}
-	return ui.div { w = "100%", h = "100%", page, Composer() }
 end
 
 local function GlassPage(_nav: any)

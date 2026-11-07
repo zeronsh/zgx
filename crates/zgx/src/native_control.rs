@@ -264,6 +264,80 @@ pub fn keyboard_rise(travel: f64, contact: f64, total: f64) -> f64 {
         (past + ease) * (past + ease) / (4. * ease)
     }
 }
+/// UIKit's ease-in-out (`kCAMediaTimingFunctionEaseInEaseOut`, the cubic
+/// Bézier through 0.42, 0 and 0.58, 1): the share of the way done at `t` of
+/// the time. What a `UITableView` scrolls a field above the keyboard on.
+pub fn ease_in_out(t: f64) -> f64 {
+    const X1: f64 = 0.42;
+    const X2: f64 = 0.58;
+    let t = t.clamp(0., 1.);
+    let bezier = |u: f64, a: f64, b: f64| {
+        let v = 1. - u;
+        3. * v * v * u * a + 3. * v * u * u * b + u * u * u
+    };
+    // The curve's parameter where its x is `t`, by halving: x rises with it.
+    let (mut low, mut high) = (0f64, 1f64);
+    for _ in 0..40 {
+        let mid = (low + high) / 2.;
+        if bezier(mid, X1, X2) < t {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    bezier((low + high) / 2., 0., 1.)
+}
+/// A page's offset every `1 / rate` of a second as it scrolls a field clear of
+/// the keyboard as UIKit's scroll views do (`KeyboardRide::Native`): from
+/// `first` to `last` on `ease_in_out` over `duration`, the keyboard's, both
+/// ends included. It doesn't follow the keyboard's edge: the field lands on
+/// its own curve.
+pub fn native_keyboard_scroll(first: f32, last: f32, duration: f64, rate: f64) -> Vec<f32> {
+    let steps = (duration * rate).ceil().max(1.) as usize;
+    (0..=steps)
+        .map(|step| {
+            let done = ease_in_out(step as f64 / steps as f64);
+            first + (last - first) * done as f32
+        })
+        .collect()
+}
+/// A spring's share of its starting distance still to go every `1 / rate` of
+/// a second over `duration`, both ends included: the keyboard's, from its own
+/// `CASpringAnimation` (mass, stiffness, damping, initial velocity).
+pub fn spring_remaining(
+    mass: f64,
+    stiffness: f64,
+    damping: f64,
+    velocity: f64,
+    duration: f64,
+    rate: f64,
+) -> Vec<f64> {
+    const SUBSTEPS: usize = 16;
+    let steps = (duration * rate).ceil().max(1.) as usize;
+    let dt = duration / steps as f64 / SUBSTEPS as f64;
+    let (mut x, mut v) = (1f64, -velocity);
+    let mut out = Vec::with_capacity(steps + 1);
+    out.push(x);
+    for _ in 0..steps {
+        for _ in 0..SUBSTEPS {
+            v += (-damping * v - stiffness * x) / mass * dt;
+            x += v * dt;
+        }
+        out.push(x);
+    }
+    out
+}
+/// `plain`, a page's place for each place of the keyboard's edge, with the
+/// start of its rise eased (`keyboard_rise`), for a keyboard going between
+/// edges `start` and `end` (`KeyboardRide::Attached`): once the edge reaches
+/// the field, the field goes with it.
+pub fn keyboard_attached(plain: impl Fn(f64) -> f32, start: f64, end: f64) -> impl Fn(f64) -> f32 {
+    let (top, bottom) = (start.min(end), start.max(end));
+    let rest = plain(bottom);
+    let total = bottom - top;
+    let contact = total - f64::from(plain(top) - rest);
+    move |edge| rest + keyboard_rise(bottom - edge, contact, total) as f32
+}
 /// A bar that goes with the keyboard (`ui.keyboard_bar`).
 #[derive(Clone)]
 pub struct KeyboardBar {

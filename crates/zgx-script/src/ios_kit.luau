@@ -592,8 +592,10 @@ end
 
 -- A page of a stack: a scrolling body under a bar whose large title gives way to
 -- a small one as it scrolls, as a navigation bar's does. `title`, `trailing` (a
--- node), `on_refresh` (pull to refresh: a function given `done`), and the
--- body's children. `nav` comes from the stack, for the back button.
+-- node), `on_refresh` (pull to refresh: a function given `done`), `keyboard_ride`
+-- (how a focused field clears the keyboard: "native", UIKit's own, by default,
+-- or "attached", riding its edge), and the body's children. `nav` comes from
+-- the stack, for the back button.
 function ios.page(props)
 	local safe = ui.window.safe_area
 	local offset = ui.use_state(0)
@@ -613,6 +615,7 @@ function ios.page(props)
 			w = "100%",
 			h = "100%",
 			offset = offset,
+			keyboard_ride = props.keyboard_ride,
 			-- The system's own: its spinner, its threshold, and it holds the page
 			-- down until `done`, which a page that forgets still gets in time.
 			on_mount = function(element)

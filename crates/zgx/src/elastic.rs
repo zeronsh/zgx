@@ -57,6 +57,8 @@ pub(crate) struct Elastic {
     end_room: Rc<Cell<f32>>,
     /// Drawn here whatever its offset says (`ScrollDriver::hold`); a list's has none.
     held: Option<Signal<Option<f32>>>,
+    /// How it moves a field clear of a keyboard (`View::keyboard_ride`).
+    keyboard: Cell<KeyboardRide>,
 }
 impl Elastic {
     fn main(&self, size: (f32, f32)) -> f32 {
@@ -115,6 +117,34 @@ impl Elastic {
     }
 }
 
+/// How a scroll view moves a focused field clear of a software keyboard
+/// (iOS), the field's scroll view's choice (`View::keyboard_ride`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeyboardRide {
+    /// As UIKit's own scroll views: the page scrolls once, on an ease-in-out
+    /// over the keyboard's duration, started with the keyboard, and the field
+    /// lands on that curve, not the keyboard's spring.
+    #[default]
+    Native,
+    /// The field goes with the keyboard's edge from when the edge reaches
+    /// it, on the keyboard's own spring: the gap between them holds.
+    Attached,
+}
+
+/// Scroll view `root`'s keyboard ride, once it is registered.
+pub(crate) fn set_keyboard_ride(ui: &Ui, root: NodeId, ride: KeyboardRide) {
+    let state = ui.elastic_state().borrow();
+    if let Some(view) = state
+        .views
+        .iter()
+        .rev()
+        .find(|(id, _)| *id == root)
+        .and_then(|(_, view)| view.upgrade())
+    {
+        view.keyboard.set(ride);
+    }
+}
+
 /// The document's elastic state.
 #[derive(Default)]
 pub(crate) struct State {
@@ -170,6 +200,7 @@ pub(crate) fn register(
         next: Cell::new(None),
         end_room,
         held,
+        keyboard: Cell::new(KeyboardRide::default()),
     });
     {
         let mut state = ui.elastic_state().borrow_mut();
@@ -595,6 +626,12 @@ impl ScrollDriver {
         if view.shown.with_untracked(|s| *s) != stretch {
             view.shown.set(stretch);
         }
+    }
+    /// How it moves a focused field clear of a keyboard.
+    pub fn keyboard_ride(&self) -> KeyboardRide {
+        self.0
+            .upgrade()
+            .map_or(KeyboardRide::default(), |view| view.keyboard.get())
     }
     /// Whether this is the same scroll view as `other`.
     pub fn same(&self, other: &Self) -> bool {

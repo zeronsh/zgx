@@ -14,7 +14,7 @@ use objc2::{
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use zgx::elastic::ScrollDriver;
+use zgx::elastic::{KeyboardRide, ScrollDriver};
 
 thread_local! {
     /// The window's scroller (iOS's one window), for its class's methods.
@@ -49,6 +49,9 @@ struct State {
     lock: RefCell<Option<KeyboardLock>>,
     /// The page moving with the keyboard in the render server, no redraws.
     glue: RefCell<Option<Glue>>,
+    /// The page scrolling as UIKit's do, by frames where the render server
+    /// can't move it (`KeyboardRide::Native`).
+    native_move: RefCell<Option<NativeMove>>,
     /// What waits for the frame being drawn, to change in its transaction.
     after_frame: RefCell<Option<AfterFrame>>,
     /// The bar going with the keyboard, if the app has one.
@@ -94,6 +97,36 @@ enum KeyboardLock {
         top: f64,
         end: f64,
     },
+}
+
+/// A page's one scroll for the keyboard, on Core Animation's clock.
+struct NativeMove {
+    driver: ScrollDriver,
+    began: f64,
+    duration: f64,
+    from: f32,
+    to: f32,
+}
+impl NativeMove {
+    /// Where it is now, and whether it has arrived.
+    fn now(&self) -> (f32, bool) {
+        let done = if self.duration > 0. {
+            ((media_time() - self.began) / self.duration).clamp(0., 1.)
+        } else {
+            1.
+        };
+        let eased = zgx::native_control::ease_in_out(done) as f32;
+        (self.from + (self.to - self.from) * eased, done >= 1.)
+    }
+}
+
+/// Core Animation's clock, in seconds.
+fn media_time() -> f64 {
+    unsafe extern "C" {
+        fn CACurrentMediaTime() -> f64;
+    }
+    // SAFETY: a plain clock read.
+    unsafe { CACurrentMediaTime() }
 }
 
 /// A field's distance above the keyboard, as UIKit's own leaves about.
@@ -189,8 +222,9 @@ impl Bar {
 enum AfterFrame {
     /// The animation goes: the frame shows what it showed.
     Remove,
-    /// The animation starts: the frame was drawn for it.
-    Start(Vec<f64>),
+    /// The animation starts: the frame was drawn for it. Its values, over
+    /// this long.
+    Start(Vec<f64>, f64),
 }
 const GLUE_KEY: &str = "zgxKeyboard";
 /// Steps of the sampled spring, per second: the display's fastest.
@@ -241,20 +275,14 @@ struct KeyboardSpring {
 impl KeyboardSpring {
     /// The share of `from` left, every `1 / GLUE_RATE` of a second to its end.
     fn remaining(&self) -> Vec<f64> {
-        const SUBSTEPS: usize = 16;
-        let steps = (self.duration * GLUE_RATE).ceil().max(1.) as usize;
-        let dt = self.duration / steps as f64 / SUBSTEPS as f64;
-        let (mut x, mut v) = (1f64, -self.velocity);
-        let mut out = Vec::with_capacity(steps + 1);
-        out.push(x);
-        for _ in 0..steps {
-            for _ in 0..SUBSTEPS {
-                v += (-self.damping * v - self.stiffness * x) / self.mass * dt;
-                x += v * dt;
-            }
-            out.push(x);
-        }
-        out
+        zgx::native_control::spring_remaining(
+            self.mass,
+            self.stiffness,
+            self.damping,
+            self.velocity,
+            self.duration,
+            GLUE_RATE,
+        )
     }
 }
 
@@ -279,15 +307,7 @@ unsafe fn keyboard_began(state: &State) -> f64 {
     }
 }
 
-/// `plain`, the place for each place of the keyboard's edge, with its start eased
-/// (`keyboard_rise`), for a keyboard going between `start` and `end`.
-fn eased(plain: impl Fn(f64) -> f32, start: f64, end: f64) -> impl Fn(f64) -> f32 {
-    let (top, bottom) = (start.min(end), start.max(end));
-    let rest = plain(bottom);
-    let total = bottom - top;
-    let contact = total - f64::from(plain(top) - rest);
-    move |edge| rest + zgx::native_control::keyboard_rise(bottom - edge, contact, total) as f32
-}
+use zgx::native_control::keyboard_attached as eased;
 
 fn page_views() -> Vec<Retained<AnyObject>> {
     crate::native_host::ios::held_view().into_iter().collect()
@@ -395,7 +415,7 @@ fn glue_bar(state: &State, spring: KeyboardSpring, end: f64) {
         start_glue(&crate::native_host::ios::bar_views(), &values, duration, 0.);
     } else {
         bar.draw_at(drawn);
-        *state.bar_after_frame.borrow_mut() = Some(AfterFrame::Start(values));
+        *state.bar_after_frame.borrow_mut() = Some(AfterFrame::Start(values, duration));
         state.window.request_redraw();
     }
 }
@@ -403,6 +423,8 @@ fn glue_bar(state: &State, spring: KeyboardSpring, end: f64) {
 /// The page where it shows now, the animation stopped: a finger took it, or the
 /// keyboard changed its mind.
 fn unglue(state: &State) {
+    // A scroll by frames stops where it is, as the render server's does.
+    state.native_move.borrow_mut().take();
     let Some(glue) = state.glue.borrow_mut().take() else {
         return;
     };
@@ -440,9 +462,6 @@ fn glue_to_keyboard(state: &State) {
         return;
     };
     glue_bar(state, spring, end);
-    if crate::native_host::ios::held_view().is_none() {
-        return;
-    }
     let start = end + spring.from;
     let lock = state.lock.borrow();
     // Where the page belongs for each place of the keyboard's edge.
@@ -475,19 +494,50 @@ fn glue_to_keyboard(state: &State) {
     if (first - last).abs() < 0.5 {
         return;
     }
+    if crate::native_host::ios::held_view().is_none() {
+        // All the app is one layer: by frames, the native ride on its clock.
+        if driver.keyboard_ride() == KeyboardRide::Native {
+            *state.native_move.borrow_mut() = Some(NativeMove {
+                driver: driver.clone(),
+                began: media_time(),
+                duration: spring.duration,
+                from: first,
+                to: last,
+            });
+        }
+        return;
+    }
     // Drawn with the page the lower of the two: what the move uncovers is then
     // below the content drawn, behind the keyboard.
     let drawn = first.min(last);
-    let page = eased(page, start, end);
-    let values: Vec<f64> = spring
-        .remaining()
-        .into_iter()
-        .map(|left| f64::from(drawn - page(end + spring.from * left)))
-        .chain(std::iter::once(f64::from(drawn - last)))
-        .collect();
-    let duration = spring.duration * (values.len() as f64 - 1.) / (values.len() as f64 - 2.);
+    let ride = driver.keyboard_ride();
+    let (values, duration): (Vec<f64>, f64) = match ride {
+        KeyboardRide::Attached => {
+            let page = eased(page, start, end);
+            let values: Vec<f64> = spring
+                .remaining()
+                .into_iter()
+                .map(|left| f64::from(drawn - page(end + spring.from * left)))
+                .chain(std::iter::once(f64::from(drawn - last)))
+                .collect();
+            let duration =
+                spring.duration * (values.len() as f64 - 1.) / (values.len() as f64 - 2.);
+            (values, duration)
+        }
+        KeyboardRide::Native => {
+            // A table's scroll takes the keyboard animation's own duration
+            // (0.3833 s read in UIKit, the keyboard's spring's too).
+            let duration = spring.duration;
+            let values =
+                zgx::native_control::native_keyboard_scroll(first, last, duration, GLUE_RATE)
+                    .into_iter()
+                    .map(|offset| f64::from(drawn - offset))
+                    .collect();
+            (values, duration)
+        }
+    };
     crate::ios_gestures::log(&format!(
-        "keyboard glue {first:.0} to {last:.0}, drawn {drawn:.0}, spring {:.0} over {:.3}s",
+        "keyboard glue {ride:?} {first:.0} to {last:.0}, drawn {drawn:.0}, spring {:.0} over {:.3}s, page over {duration:.3}s",
         spring.from, spring.duration
     ));
     let held = driver.hold(Some(drawn));
@@ -504,7 +554,7 @@ fn glue_to_keyboard(state: &State) {
         if !held {
             driver.drive(drawn);
         }
-        *state.after_frame.borrow_mut() = Some(AfterFrame::Start(values));
+        *state.after_frame.borrow_mut() = Some(AfterFrame::Start(values, duration));
         state.window.request_redraw();
     }
 }
@@ -532,29 +582,12 @@ pub(crate) fn frame_done() {
 fn run_after_frame(state: &State, waiting: Option<AfterFrame>, views: &[Retained<AnyObject>]) {
     match waiting {
         Some(AfterFrame::Remove) => remove_glue(views),
-        Some(AfterFrame::Start(values)) => {
+        Some(AfterFrame::Start(values, duration)) => {
             // Its begin time once committed; not yet, then this joins its commit
             // and takes the same one.
             // SAFETY: Core Animation's getters, on the main thread.
             let begin = unsafe { keyboard_began(state) };
-            let duration = state
-                .tracker
-                .borrow()
-                .as_ref()
-                .and_then(|tracker| {
-                    // SAFETY: as above.
-                    unsafe {
-                        let layer: Retained<AnyObject> = msg_send![&**tracker, layer];
-                        keyboard_spring(&layer)
-                    }
-                })
-                .map_or(0.4, |spring| spring.duration);
-            start_glue(
-                views,
-                &values,
-                duration * (values.len() as f64 - 1.) / (values.len() as f64 - 2.),
-                begin,
-            );
+            start_glue(views, &values, duration, begin);
         }
         None => {}
     }
@@ -658,10 +691,22 @@ fn keyboard_frame(state: &State, link: &AnyObject) {
             state.window.request_redraw();
         }
     }
+    let native = state.native_move.borrow().as_ref().map(|ride| {
+        let (at, arrived) = ride.now();
+        ride.driver.drive(at);
+        arrived
+    });
+    if native == Some(true) {
+        state.native_move.borrow_mut().take();
+    }
     let lock = state.lock.borrow();
     match &*lock {
-        // The render server has it, until it lands.
-        _ if glued => {}
+        // The render server has it, until it lands; or it scrolls on its clock.
+        _ if glued || native.is_some() => {
+            if native.is_some() {
+                state.window.request_redraw();
+            }
+        }
         Some(KeyboardLock::Show {
             driver,
             offset,
@@ -720,6 +765,10 @@ fn finish_keyboard_move(state: &State, edge: f64) {
             *state.after_frame.borrow_mut() = Some(AfterFrame::Remove);
             state.window.request_redraw();
         }
+    }
+    if let Some(ride) = state.native_move.borrow_mut().take() {
+        ride.driver.drive(ride.to);
+        state.window.request_redraw();
     }
     if let Some(link) = state.keyboard_link.borrow_mut().take() {
         // SAFETY: CADisplayLink's method, on the main thread.
@@ -1238,6 +1287,7 @@ impl NativeScroller {
             field: RefCell::default(),
             edge_seen: std::cell::Cell::new((0., 0., 0)),
             glue: RefCell::new(None),
+            native_move: RefCell::new(None),
             after_frame: RefCell::new(None),
             bar: RefCell::new(None),
             bar_glue: RefCell::new(None),
