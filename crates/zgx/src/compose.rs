@@ -4630,6 +4630,7 @@ fn mount_element(
     mut view: View,
     environment: Environment,
 ) -> NodeId {
+    let _span = crate::profile::nested(crate::profile::Phase::Mount);
     let _theme = ui.enter_theme(&environment.theme);
     // Decorated/padded text gets an actual layout box. Plain text stays a single
     // node, keeping common reactive labels small. Dynamic/state styles may add

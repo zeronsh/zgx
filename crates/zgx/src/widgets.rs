@@ -4532,6 +4532,7 @@ impl Ui {
     /// Free what removed nodes held, a chunk at least and for at most
     /// `budget` past it: whether some is left for the next call.
     pub fn reclaim(&self, budget: std::time::Duration) -> bool {
+        let _span = crate::profile::nested(crate::profile::Phase::Teardown);
         // Most frames free nothing: no look at the clock for them.
         if !self.reclaiming() {
             self.shrink_storage();
@@ -4682,6 +4683,7 @@ impl Ui {
     }
     #[inline(never)]
     fn remove_as(&mut self, node: NodeId, index: usize) {
+        let _span = crate::profile::nested(crate::profile::Phase::Teardown);
         if !self.scene.borrow().contains(node) {
             return;
         }
@@ -4748,6 +4750,7 @@ impl Ui {
     /// the next frames. Its effects stop now and its components' resources
     /// (tasks, timers, cleanups) drop now, as a small subtree's do.
     fn remove_large(&mut self, node: NodeId) {
+        let _span = crate::profile::nested(crate::profile::Phase::Teardown);
         let (cached_layout, refocus) = self.before_removal(node);
         // No id names its nodes from here: the scene no longer has them.
         let ids = self.scene.borrow_mut().kill(node);

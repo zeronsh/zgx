@@ -739,6 +739,7 @@ pub(crate) fn mount_style_with_intrinsic(
     theme: Option<std::rc::Rc<crate::theme::ThemeScope>>,
     leaf: bool,
 ) -> Signal<Typography> {
+    let _span = crate::profile::nested(crate::profile::Phase::Style);
     let mut base = base;
     let mut reactive = variants.reactive;
     // A node setting no typography (nor through a variant or a dynamic
