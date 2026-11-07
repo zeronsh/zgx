@@ -696,6 +696,18 @@ extern "C-unwind" fn autocapitalization(_: &AnyObject, _: Sel) -> isize {
         _ => 2,
     }
 }
+/// `UITextAutocorrectionType` and `UITextSpellCheckingType`: an address or a
+/// number isn't words, and left to the default the keyboard corrects it.
+extern "C-unwind" fn literal_text(_: &AnyObject, _: Sel) -> isize {
+    match input_mode() {
+        InputMode::Email
+        | InputMode::Url
+        | InputMode::Numeric
+        | InputMode::Decimal
+        | InputMode::Tel => 1,
+        _ => 0,
+    }
+}
 extern "C-unwind" fn is_secure(_: &AnyObject, _: Sel) -> Bool {
     Bool::new(state().is_some_and(|state| {
         state
@@ -876,6 +888,14 @@ fn input_class() -> &'static AnyClass {
             b.add_method(
                 sel!(isSecureTextEntry),
                 is_secure as extern "C-unwind" fn(_, _) -> _,
+            );
+            b.add_method(
+                sel!(autocorrectionType),
+                literal_text as extern "C-unwind" fn(_, _) -> _,
+            );
+            b.add_method(
+                sel!(spellCheckingType),
+                literal_text as extern "C-unwind" fn(_, _) -> _,
             );
             b.add_method(sel!(copy:), edit_copy as extern "C-unwind" fn(_, _, _));
             b.add_method(sel!(cut:), edit_cut as extern "C-unwind" fn(_, _, _));

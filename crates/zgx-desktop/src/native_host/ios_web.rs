@@ -1,8 +1,8 @@
 //! Web views on iOS: a `WKWebView` standing in a native node's box.
 use objc2::{
-    DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
+    DefinedClass, MainThreadMarker, MainThreadOnly, Message, class, define_class, msg_send,
     rc::Retained,
-    runtime::{AnyObject, NSObject, NSObjectProtocol},
+    runtime::{AnyObject, Bool, NSObject, NSObjectProtocol},
 };
 use std::{any::Any, cell::RefCell, rc::Rc};
 use zgx::web_view::{ScriptResult, WebView, WebViewBackend, WebViewCommand, WebViewEvent};
@@ -93,8 +93,161 @@ define_class!(
         fn failed_early(&self, view: &AnyObject, _navigation: *mut AnyObject, error: &AnyObject) {
             self.fail(view, error);
         }
+        // A title a script sets, as well as a page's own.
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+        fn observed(
+            &self,
+            _path: *mut AnyObject,
+            view: &AnyObject,
+            _change: *mut AnyObject,
+            _context: *mut std::ffi::c_void,
+        ) {
+            let web = self.ivars();
+            report(web, view, false);
+            web.emit(WebViewEvent::TitleChanged { title: page_title(view) });
+        }
+        // A page's `alert`, `confirm` and `prompt`: without these WebKit answers
+        // for the person, and a page's question is never seen.
+        #[unsafe(method(webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:))]
+        fn page_alert(
+            &self,
+            _view: &AnyObject,
+            message: &AnyObject,
+            _frame: &AnyObject,
+            done: &block2::DynBlock<dyn Fn()>,
+        ) {
+            let done = done.copy();
+            page_panel(message, None, false, move |_| done.call(()));
+        }
+        #[unsafe(method(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:))]
+        fn page_confirm(
+            &self,
+            _view: &AnyObject,
+            message: &AnyObject,
+            _frame: &AnyObject,
+            done: &block2::DynBlock<dyn Fn(Bool)>,
+        ) {
+            let done = done.copy();
+            page_panel(message, None, true, move |answer| {
+                done.call((Bool::new(answer.is_some()),));
+            });
+        }
+        #[unsafe(method(webView:runJavaScriptTextInputPanelWithPrompt:defaultText:initiatedByFrame:completionHandler:))]
+        fn page_prompt(
+            &self,
+            _view: &AnyObject,
+            prompt: &AnyObject,
+            text: Option<&AnyObject>,
+            _frame: &AnyObject,
+            done: &block2::DynBlock<dyn Fn(*mut AnyObject)>,
+        ) {
+            let done = done.copy();
+            let text = text.map_or_else(|| Some(String::new()), |text| Some(string_of(Some(text.retain()))));
+            page_panel(prompt, text, true, move |answer| {
+                let answer = answer.map(|answer| crate::ios_system::ns_string(&answer));
+                let raw = answer
+                    .as_deref()
+                    .map_or(std::ptr::null_mut(), |answer| {
+                        std::ptr::from_ref(answer).cast_mut()
+                    });
+                done.call((raw,));
+            });
+        }
     }
 );
+
+/// A page's panel as a system alert. `done` gets `Some` for OK, with the text if
+/// `field` gave one, and `None` for Cancel; always, as WebKit requires.
+fn page_panel(
+    message: &AnyObject,
+    field: Option<String>,
+    cancels: bool,
+    done: impl FnOnce(Option<String>) + 'static,
+) {
+    let done = Rc::new(std::cell::RefCell::new(Some(done)));
+    let Some(root) = crate::ios_system::root_controller() else {
+        if let Some(done) = done.borrow_mut().take() {
+            done(None);
+        }
+        return;
+    };
+    // SAFETY: UIKit's constructors and methods, on the main thread where WebKit
+    // asks; the blocks hold what they read.
+    unsafe {
+        let controller: Retained<AnyObject> = msg_send![class!(UIAlertController),
+            alertControllerWithTitle: std::ptr::null::<AnyObject>(),
+            message: message,
+            preferredStyle: 1isize];
+        if let Some(text) = &field {
+            let text = crate::ios_system::ns_string(text);
+            let configure = block2::RcBlock::new(move |field: *mut AnyObject| {
+                let _: () = msg_send![field, setText: &*text];
+            });
+            let _: () = msg_send![&*controller, addTextFieldWithConfigurationHandler: &*configure];
+        }
+        let has_field = field.is_some();
+        let weak = objc2::rc::Weak::from_retained(&controller);
+        let ok_done = done.clone();
+        let ok = block2::RcBlock::new(move |_: *mut AnyObject| {
+            let text = has_field.then(|| {
+                weak.load().map_or_else(String::new, |controller| {
+                    let fields: Retained<AnyObject> = msg_send![&*controller, textFields];
+                    let first: Option<Retained<AnyObject>> = msg_send![&*fields, firstObject];
+                    first.map_or_else(String::new, |first| string_of(msg_send![&*first, text]))
+                })
+            });
+            if let Some(done) = ok_done.borrow_mut().take() {
+                done(Some(text.unwrap_or_default()));
+            }
+            zgx::native_view::wake();
+        });
+        let title = crate::ios_system::ns_string("OK");
+        let action: Retained<AnyObject> = msg_send![class!(UIAlertAction),
+            actionWithTitle: &*title, style: 0isize, handler: &*ok];
+        let _: () = msg_send![&*controller, addAction: &*action];
+        if cancels {
+            let cancel = block2::RcBlock::new(move |_: *mut AnyObject| {
+                if let Some(done) = done.borrow_mut().take() {
+                    done(None);
+                }
+                zgx::native_view::wake();
+            });
+            let title = crate::ios_system::ns_string("Cancel");
+            let action: Retained<AnyObject> = msg_send![class!(UIAlertAction),
+                actionWithTitle: &*title, style: 1isize, handler: &*cancel];
+            let _: () = msg_send![&*controller, addAction: &*action];
+        }
+        present_when_free(root, controller);
+    }
+}
+
+/// Present `controller` once what `root` is showing has gone: a page asking again
+/// as soon as it is answered comes while the last alert is still leaving, UIKit
+/// refuses that, and the page would wait for an answer for ever.
+fn present_when_free(root: Retained<AnyObject>, controller: Retained<AnyObject>) {
+    // SAFETY: UIViewController's getters and method, and NSTimer's constructor, on
+    // the main thread, which runs the timer.
+    unsafe {
+        let busy: Option<Retained<AnyObject>> = msg_send![&*root, presentedViewController];
+        if busy.is_none() {
+            let _: () = msg_send![&*root,
+                presentViewController: &*controller,
+                animated: true,
+                completion: std::ptr::null::<AnyObject>()];
+            return;
+        }
+        let waiting = RefCell::new(Some((root, controller)));
+        let retry = block2::RcBlock::new(move |_: *mut AnyObject| {
+            if let Some((root, controller)) = waiting.borrow_mut().take() {
+                present_when_free(root, controller);
+            }
+        });
+        let _: Retained<AnyObject> = msg_send![class!(NSTimer),
+            scheduledTimerWithTimeInterval: 0.05f64,
+            repeats: false,
+            block: &*retry];
+    }
+}
 
 impl NavigationDelegate {
     fn fail(&self, view: &AnyObject, error: &AnyObject) {
@@ -118,6 +271,19 @@ pub(crate) struct IosWebView {
 impl IosWebView {
     pub(crate) fn view(&self) -> Retained<AnyObject> {
         self.view.clone()
+    }
+}
+
+impl Drop for IosWebView {
+    fn drop(&mut self) {
+        let title = crate::ios_system::ns_string("title");
+        // SAFETY: NSObject's method, on the main thread that owns the view, with
+        // the observer and key path `backend` added.
+        unsafe {
+            let _: () = msg_send![&*self.view,
+                removeObserver: &*self._delegate,
+                forKeyPath: &*title];
+        }
     }
 }
 
@@ -210,6 +376,13 @@ pub(crate) fn backend(web: &WebView) -> Option<Rc<dyn WebViewBackend>> {
             initWithFrame: frame,
             configuration: &*config];
         let _: () = msg_send![&*view, setNavigationDelegate: &*delegate];
+        let _: () = msg_send![&*view, setUIDelegate: &*delegate];
+        let title = crate::ios_system::ns_string("title");
+        let _: () = msg_send![&*view,
+            addObserver: &*delegate,
+            forKeyPath: &*title,
+            options: 1usize,
+            context: std::ptr::null_mut::<std::ffi::c_void>()];
         let _: () = msg_send![&*view, setAllowsBackForwardNavigationGestures: true];
         (view, delegate)
     };
