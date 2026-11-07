@@ -547,11 +547,6 @@ impl Surfaces {
         // SAFETY: UIView's and CALayer's setters, on the main thread.
         unsafe {
             let _: () = msg_send![&**plane, setContentScaleFactor: scale as f64];
-            // What it holds is never scaled up to a new size, whatever else goes
-            // wrong: a small plane's frame would show enormous.
-            let layer: Retained<AnyObject> = msg_send![&**plane, layer];
-            let top_left = crate::ios_system::objc2_foundation_string("topLeft");
-            let _: () = msg_send![&*layer, setContentsGravity: &*top_left];
         }
         let view = NonNull::from(&**plane).cast();
         // SAFETY: the view lives as long as these surfaces, and they drop
@@ -635,7 +630,11 @@ impl Surfaces {
         if *was == Some(shown) {
             return;
         }
-        crate::ios_gestures::log_plane(level, shown);
+        // Its box moves with a page each frame; a new size is rare, and the record.
+        let sized = |rect: Option<Rect>| rect.map(|rect| (rect.width, rect.height));
+        if was.map(sized) != Some(sized(shown)) {
+            crate::ios_gestures::log_plane(level, shown);
+        }
         *was = Some(shown);
         // SAFETY: UIView's setters, on the main thread.
         unsafe {

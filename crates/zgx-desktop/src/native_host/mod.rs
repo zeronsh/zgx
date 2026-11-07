@@ -573,9 +573,11 @@ impl NativeHost {
             // In the transaction always: a surface made again starts without.
             if let Some(overlay) = &mut self.overlay {
                 overlay.present_with_native_views(true);
+                overlay.keep_plane_contents_unscaled();
             }
             for (index, above) in self.above.iter_mut().enumerate() {
                 above.renderer.present_with_native_views(true);
+                above.renderer.keep_plane_contents_unscaled();
                 let level = index as u8 + 2;
                 let plane = zgx::native_view::Plane::Above(level);
                 above.renderer.set_plane(split.clone(), plane);
@@ -725,10 +727,10 @@ impl NativeHost {
         for (index, above) in self.above.iter_mut().enumerate() {
             let level = index as u8 + 2;
             let live = self.split.bounds_at(level).is_some();
+            let shown = live.then(|| above.renderer.plane_rect()).flatten();
             let presented = live
                 && above.drawn
                 && plane_presented(&mut above.renderer, level, &mut self.plane_retry)?;
-            let shown = live.then(|| above.renderer.plane_rect()).flatten();
             // As the overlay's, above.
             if shown.is_some() && !presented && surfaces.level_would_change(level, shown) {
                 self.plane_retry = true;
@@ -853,10 +855,20 @@ fn plane_presented(
     let presented = status == zgx_gpu::PresentationStatus::Presented;
     if !presented {
         crate::ios_gestures::log(&format!("plane {level} not presented: {status:?}"));
+    }
+    let fits = plane.presented_fits_plane();
+    if presented && !fits {
+        crate::ios_gestures::log(&format!(
+            "plane {level} frame {:?} isn't for {:?}",
+            plane.presented_size(),
+            plane.plane_rect()
+        ));
+    }
+    if !presented || !fits {
         plane.repaint_all();
         *retry = true;
     }
-    Ok(presented)
+    Ok(presented && fits)
 }
 
 #[cfg(any(

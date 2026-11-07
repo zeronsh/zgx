@@ -35,9 +35,7 @@ pub(crate) fn log(line: &str) {
 /// A drawing plane shown, moved or hidden (`ZGX_IOS_PLANE_DEBUG` only: there are
 /// many).
 pub(crate) fn log_plane(level: u8, shown: Option<zgx::scene::Rect>) {
-    if zgx::env::var_os("ZGX_IOS_PLANE_DEBUG").is_some() {
-        log(&format!("plane {level} shows {shown:?}"));
-    }
+    log(&format!("plane {level} shows {shown:?}"));
 }
 
 /// A frame of a page moving with the keyboard, for comparing it with UIKit's own

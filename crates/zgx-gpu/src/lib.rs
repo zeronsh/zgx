@@ -3975,6 +3975,13 @@ pub struct GpuRenderer {
     /// The next present joins the Core Animation transaction that resized the layer.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     transaction_present: bool,
+    /// Its layer never stretches what it holds (`keep_plane_contents_unscaled`):
+    /// a surface made again has a new layer.
+    #[cfg(target_os = "ios")]
+    plane_contents_set: bool,
+    /// The size of the drawable last presented.
+    #[cfg(target_os = "ios")]
+    presented_size: Option<(u32, u32)>,
     /// Until when the layer keeps a third drawable after a resize (see
     /// `widen_drawables`).
     #[cfg(target_os = "macos")]
@@ -4616,6 +4623,10 @@ impl GpuRenderer {
             native_surfaces: None,
             #[cfg(any(target_os = "macos", target_os = "ios"))]
             transaction_present: false,
+            #[cfg(target_os = "ios")]
+            plane_contents_set: false,
+            #[cfg(target_os = "ios")]
+            presented_size: None,
             #[cfg(target_os = "macos")]
             wide_until: None,
             canvases: Default::default(),
@@ -13223,6 +13234,11 @@ impl GpuRenderer {
             mapped.get_mut().submitted();
         }
         before_present();
+        #[cfg(target_os = "ios")]
+        {
+            let size = frame.texture.size();
+            self.presented_size = Some((size.width, size.height));
+        }
         frame.present();
         #[cfg(windows)]
         if let Some(surface) = &self.surface {
@@ -16201,6 +16217,10 @@ impl surface::SurfaceSource for GpuRenderer {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             self.transaction_present = false;
+        }
+        #[cfg(target_os = "ios")]
+        {
+            self.plane_contents_set = false;
         }
         Ok(())
     }

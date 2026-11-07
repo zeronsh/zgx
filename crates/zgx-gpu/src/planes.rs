@@ -40,6 +40,12 @@ fn plane_pixels(rect: Rect, scale: f32) -> (f32, f32, f32, f32) {
     (left, top, right, bottom)
 }
 
+/// Whether a frame of `size` pixels was drawn for a plane in `rect`.
+#[cfg(any(test, target_os = "ios"))]
+fn plane_frame_fits(size: (u32, u32), rect: Rect, scale: f32) -> bool {
+    size == plane_size(rect, scale)
+}
+
 /// The pixels a plane in `rect` draws into, at `scale` pixels a point
 /// (`GpuRenderer::set_plane_rect`, `set_popup`): the size to make its surface.
 pub fn plane_size(rect: Rect, scale: f32) -> (u32, u32) {
@@ -310,6 +316,45 @@ impl GpuRenderer {
         #[cfg(target_os = "ios")]
         self.set_transaction_present(natives);
     }
+    /// A plane's layer never scales what it holds, and shows nothing past its
+    /// box: late or stale, a back button's small frame at a page's size would fill
+    /// the screen. The layer is the surface's own, a sublayer of the plane's view.
+    #[cfg(target_os = "ios")]
+    pub fn keep_plane_contents_unscaled(&mut self) {
+        if self.plane_contents_set {
+            return;
+        }
+        let Some(surface) = &self.surface else {
+            return;
+        };
+        // SAFETY: Only the surface's layer is used; nothing destroys it.
+        let Some(hal) = (unsafe { surface.as_hal::<wgpu::hal::api::Metal>() }) else {
+            return;
+        };
+        let layer = hal.render_layer().lock();
+        // SAFETY: CALayer's setters, on the main thread where planes are shown.
+        unsafe {
+            let top_left: *mut objc2::runtime::AnyObject = objc2::msg_send![
+                objc2::class!(NSString), stringWithUTF8String: c"topLeft".as_ptr()];
+            let _: () = objc2::msg_send![&**layer, setContentsGravity: top_left];
+            let _: () = objc2::msg_send![&**layer, setMasksToBounds: true];
+        }
+        self.plane_contents_set = true;
+    }
+    /// Whether the frame last presented is this plane's size: never shown in a
+    /// box it wasn't drawn for.
+    #[cfg(target_os = "ios")]
+    pub fn presented_fits_plane(&self) -> bool {
+        match (self.plane_rect(), self.presented_size) {
+            (Some(rect), Some(size)) => plane_frame_fits(size, rect, self.scale),
+            _ => false,
+        }
+    }
+    /// The frame last presented's size in pixels, for the record.
+    #[cfg(target_os = "ios")]
+    pub fn presented_size(&self) -> Option<(u32, u32)> {
+        self.presented_size
+    }
     /// Show frames on the plain layer for `duration` from now: they then
     /// change in the caller's Core Animation transaction, with native views
     /// moved in it (the video layer shows frames on its own thread, later).
@@ -398,4 +443,24 @@ fn window_span(start: i64, size: u32, whole: u32) -> (u32, u32, u32) {
     let to = (whole - start).clamp(from + 1, size);
     let at = (start + from).clamp(0, whole - 1);
     (from as u32, (to.min(from + whole - at)) as u32, at as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_small_planes_frame_doesnt_fit_a_page_sized_box() {
+        let back_button = Rect::new(7., 53.333332, 62., 67.333336);
+        let page = Rect::new(0., 0., 420., 874.);
+        let frame = plane_size(back_button, 3.);
+        assert!(plane_frame_fits(frame, back_button, 3.));
+        assert!(!plane_frame_fits(frame, page, 3.));
+        // Where its edges fall on pixels counts: moved, the same box can be a pixel wider.
+        let moved = Rect::new(97.333336, 53.333332, 62.333332, 67.333336);
+        assert_eq!(
+            plane_frame_fits(frame, moved, 3.),
+            plane_size(moved, 3.) == frame
+        );
+    }
 }
