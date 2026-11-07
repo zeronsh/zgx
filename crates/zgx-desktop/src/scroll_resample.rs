@@ -254,6 +254,10 @@ impl ScrollResampler {
             .unwrap_or(Duration::from_millis(8))
             .clamp(MIN_DELAY, MAX_DELAY)
     }
+    /// The margin chosen by the last refresh, for opt-in presentation logs.
+    pub fn sampling_delay(&self) -> Duration {
+        self.sample_delay.unwrap_or_else(|| self.delay())
+    }
     /// Cumulative position at `time`, linear between the events around it.
     fn position_at(&self, time: Instant) -> (f32, f32) {
         let mut previous = match self.points.front() {

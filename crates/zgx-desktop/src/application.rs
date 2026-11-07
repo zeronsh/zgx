@@ -4787,6 +4787,14 @@ impl Host {
                     self.context.viewport.with_untracked(|viewport| *viewport),
                 );
                 let (dx, dy) = wheel_delta(delta, self.scale_factor, step);
+                // Receipt, application and presentation share the log's host
+                // clock. This is host receipt, not the native event timestamp.
+                zgx_gpu::present_log::log(|| {
+                    format!(
+                        "scroll-received window={:?} dx={dx:.3} dy={dy:.3} phase={phase:?}",
+                        self.window.as_ref().map(|window| window.id())
+                    )
+                });
                 // A touchpad's scroll coasts on after the fingers lift
                 // (Wayland says when: libinput's axis stop).
                 #[cfg(target_os = "linux")]
@@ -4836,6 +4844,9 @@ impl Host {
                         MouseScrollDelta::LineDelta(..) => self.scroll.push_wheel(now, (dx, dy)),
                     }
                 } else {
+                    zgx_gpu::present_log::log(|| {
+                        format!("scroll-applied source=direct dx={dx:.3} dy={dy:.3}")
+                    });
                     self.dispatch(InputEvent::Scroll {
                         x: self.cursor.0,
                         y: self.cursor.1,
@@ -4851,6 +4862,9 @@ impl Host {
                 {
                     // What the refreshes have not applied yet, first.
                     if let Some((delta_x, delta_y)) = self.scroll.flush() {
+                        zgx_gpu::present_log::log(|| {
+                            format!("scroll-applied source=end dx={delta_x:.3} dy={delta_y:.3}")
+                        });
                         let (x, y) = self.scroll.position;
                         self.dispatch(InputEvent::Scroll {
                             x,
@@ -5618,6 +5632,18 @@ impl Host {
                 None
             };
             if let Some((delta_x, delta_y)) = delta {
+                zgx_gpu::present_log::log(|| {
+                    format!(
+                        "scroll-applied source={} dx={delta_x:.3} dy={delta_y:.3} delay_ms={:.3} refresh_ms={:.3}",
+                        if self.frames_presented() {
+                            "refresh"
+                        } else {
+                            "hidden"
+                        },
+                        self.scroll.sampling_delay().as_secs_f64() * 1000.,
+                        self.frame_interval.as_secs_f64() * 1000.
+                    )
+                });
                 let (x, y) = self.scroll.position;
                 self.dispatch(InputEvent::Scroll {
                     x,
