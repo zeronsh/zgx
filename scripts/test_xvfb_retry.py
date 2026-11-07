@@ -78,7 +78,10 @@ class Wrapper(unittest.TestCase):
     def stop_all(self):
         for pid in self.started + self.servers():
             if running(pid):
-                os.kill(pid, signal.SIGKILL)
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # It went between the two lines: what this is here to make sure of.
 
     def servers(self):
         return [int(line) for line in self.pids_file.read_text().split()] if self.pids_file.exists() else []
