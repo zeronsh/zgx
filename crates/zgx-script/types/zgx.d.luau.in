@@ -2191,8 +2191,9 @@ export type NodeProps = {
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: ("polite" | "assertive" | "off")?,
-	-- Read after its name, as a hint (`aria-description`).
-	description: string?,
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
+	description: (string | ReadOnlyState<string> | (() -> string))?,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: (string | Readable<string?> | (() -> string?))?,

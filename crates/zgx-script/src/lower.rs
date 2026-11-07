@@ -4351,6 +4351,13 @@ fn styled(
         if let Some(description) = &a11y.description {
             view = view.accessible_description(description.to_string());
         }
+        if let Some(description) = &a11y.description_of {
+            let (description, vm) = (resolve_owned(description), vm.clone());
+            view = view.description_when(move || match resolve(&description, Ty::Str, None, &vm) {
+                Some(Lit::Str(s)) => s.to_string(),
+                _ => String::new(),
+            });
+        }
         if a11y.hidden {
             view = view.accessible_hidden();
         }
