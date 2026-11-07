@@ -4255,6 +4255,16 @@ impl Scene {
             out.push((bounds, radii));
         }
     }
+    /// The nodes whose layer shaders have inputs, each with its box in
+    /// window points (`world_bounds`), for a renderer to run their passes.
+    #[doc(hidden)]
+    pub fn layer_input_boxes(&self) -> Vec<(NodeId, Rect)> {
+        self.cold.as_deref().map_or(Vec::new(), |cold| {
+            (cold.layer_inputs.iter())
+                .map(|id| (*id, self.world_bounds(*id)))
+                .collect()
+        })
+    }
     /// Whether any layer shader has inputs (passes, pictures, boxes).
     pub fn has_layer_inputs(&self) -> bool {
         self.cold

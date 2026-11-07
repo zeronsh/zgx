@@ -4145,6 +4145,9 @@ pub struct GpuRenderer {
     /// Layer shaders' textures, passes and bindings, for those with inputs
     /// (`FillShader::with_inputs`), by shader id.
     chains: FxHashMap<u64, passes::Chain>,
+    /// Pipelines of layer shaders whose passes couldn't run this frame, put
+    /// aside so the layer composites as painted (`prepare_inputs`).
+    parked_inputs: Vec<(bool, u64, compile::Compiled<wgpu::RenderPipeline>)>,
     /// Their shaders, to tell when no scene holds one any more (`trim`).
     filter_shaders: FxHashMap<u64, Arc<zgx::decoration::FillShader>>,
     /// Blended layers' pipelines (blend.wgsl): `BLEND_PLAIN`'s, and each
@@ -4729,6 +4732,7 @@ impl GpuRenderer {
             layers_declared: 0,
             filter_pipelines: FxHashMap::default(),
             chains: FxHashMap::default(),
+            parked_inputs: Vec::new(),
             blend_pipelines: FxHashMap::default(),
             blend_layouts: std::cell::OnceCell::new(),
             backdrops: FxHashMap::default(),
@@ -5324,6 +5328,11 @@ impl GpuRenderer {
         }
     }
     fn render_once(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
+        // Layer shaders with inputs: their pipelines and this frame's passes,
+        // before anything draws them.
+        if scene.has_layer_inputs() {
+            self.prepare_inputs(scene);
+        }
         // A frame deferred but never presented draws into the retained target
         // before this one prunes images or layers it may reference.
         self.flush_pending();
@@ -6349,19 +6358,6 @@ impl GpuRenderer {
     /// until then its layer composites as painted. zgx's own colour filter
     /// waits, as it's a matter of what the view looks like, not an effect
     /// joining it.
-    /// `prepare_filter`, and for a shader with inputs its passes run for
-    /// this frame (`run_passes`).
-    #[inline(never)]
-    fn prepare_layer_shader(
-        &mut self,
-        scene: &Scene,
-        bounds: Rect,
-        shader: &Arc<zgx::decoration::FillShader>,
-        layer: &zgx::scene::LayerShader,
-    ) -> bool {
-        self.prepare_filter(shader)
-            && (shader.inputs().is_none() || self.run_passes(scene, bounds, shader, layer))
-    }
     fn prepare_filter(&mut self, shader: &Arc<zgx::decoration::FillShader>) -> bool {
         if shader.reads_backdrop() {
             // Only ever drawn reading the backdrop's group.
@@ -6370,20 +6366,8 @@ impl GpuRenderer {
         }
         let apps = shader.source() != zgx::decoration::color_filter_shader().source();
         if !self.filter_pipelines.contains_key(&shader.id()) {
-            let device = self.device.clone();
-            let (layout, source) = match shader.inputs() {
-                Some(inputs) => self.chain(shader.id(), inputs).quads_layout(shader),
-                None => (
-                    self.context.inner.quad_layout.clone(),
-                    filter_source(shader.source()),
-                ),
-            };
-            let app_layout = shader
-                .inputs()
-                .map_or(AppLayout::Quads, |inputs| AppLayout::Inputs {
-                    blend: false,
-                    textures: passes::textures(inputs),
-                });
+            let (device, layout) = (self.device.clone(), self.context.inner.quad_layout.clone());
+            let source = filter_source(shader.source());
             let backend = self.info.backend;
             let slot = compile::spawn(move || {
                 fill_validates(&source)
@@ -6394,7 +6378,7 @@ impl GpuRenderer {
                             apps,
                             &source,
                             "zgx_filter",
-                            app_layout,
+                            AppLayout::Quads,
                             |vertex, fragment| {
                                 fill_pipeline(&device, vertex, fragment, &layout, "zgx_filter")
                             },
@@ -6465,24 +6449,8 @@ impl GpuRenderer {
                 Some(shader) => (filter_source(shader.source()), "zgx_filter_blended"),
                 None => (blend_source(), "zgx_blended"),
             };
-            let mut layout = self.blend_layouts().1.clone();
-            let mut source = source;
-            if let Some((shader, inputs)) =
-                shader.and_then(|shader| Some((shader, shader.inputs()?)))
-            {
-                let backdrop = self.blend_layouts().0.clone();
-                (layout, source) = self
-                    .chain(shader.id(), inputs)
-                    .blend_layout(shader, &backdrop);
-            }
+            let layout = self.blend_layouts().1.clone();
             let device = self.device.clone();
-            let app_layout =
-                shader
-                    .and_then(|shader| shader.inputs())
-                    .map_or(AppLayout::Blend, |inputs| AppLayout::Inputs {
-                        blend: true,
-                        textures: passes::textures(inputs),
-                    });
             let backend = self.info.backend;
             let slot = compile::spawn(move || {
                 fill_validates(&source)
@@ -6493,7 +6461,7 @@ impl GpuRenderer {
                             apps,
                             &source,
                             entry,
-                            app_layout,
+                            AppLayout::Blend,
                             |vertex, fragment| {
                                 blend_pipeline(&device, vertex, fragment, &layout, entry)
                             },
@@ -7532,9 +7500,6 @@ impl GpuRenderer {
             .any(|item| item.effects.opacity > 0. && item.effects.blur_radius > 0.);
         // Layer shaders reading what's behind them depend on it as a filter does.
         let readers = scene.has_backdrop_readers();
-        // Layer shaders with inputs, whose passes run as they're prepared:
-        // a frame with none prepares each as a plain layer shader.
-        let inputs = scene.has_layer_inputs();
         // Reconstruct every sampled backdrop pixel before replaying filters. A
         // dependency can reach another filter, so expand to a fixed point.
         let damage = if self.fresh {
@@ -7725,10 +7690,7 @@ impl GpuRenderer {
                     .then(|| scene.layer_shader(item.id))
                     .flatten()
                     .and_then(|layer| Some((layer.shader.clone()?, layer)))
-                    .filter(|(shader, layer)| match inputs {
-                        false => self.prepare_filter(shader),
-                        true => self.prepare_layer_shader(scene, item.bounds, shader, layer),
-                    });
+                    .filter(|(shader, _)| self.prepare_filter(shader));
                 // And blended with its backdrop, once that compiles (or
                 // reading it, plainly over it).
                 let blend = item

@@ -496,6 +496,120 @@ fn sized(device: &wgpu::Device, pass: &mut Pass, size: (u32, u32), both: bool) {
 }
 
 impl GpuRenderer {
+    /// A frame's layer shaders with inputs, before anything draws them:
+    /// each one's pipeline started with its inputs' layout (so the frame's
+    /// own preparation finds it as any layer shader's), and its passes run.
+    /// One whose passes can't run yet has its pipeline put aside for the
+    /// frame, so its layer composites as painted.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn prepare_inputs(&mut self, scene: &zgx::scene::Scene) {
+        for (reading, id, compiled) in std::mem::take(&mut self.parked_inputs) {
+            let pipelines = match reading {
+                true => &mut self.blend_pipelines,
+                false => &mut self.filter_pipelines,
+            };
+            pipelines.insert(id, compiled);
+        }
+        let viewport = zgx::scene::Rect::new(
+            0.,
+            0.,
+            self.width as f32 / self.scale,
+            self.height as f32 / self.scale,
+        );
+        for (node, bounds) in scene.layer_input_boxes() {
+            let Some(layer) = scene.layer_shader(node).cloned() else {
+                continue;
+            };
+            let Some(shader) = layer.shader.clone() else {
+                continue;
+            };
+            let Some(inputs) = shader.inputs() else {
+                continue;
+            };
+            let reading = shader.reads_backdrop();
+            let id = shader.id();
+            self.filter_shaders.insert(id, shader.clone());
+            let started = match reading {
+                true => self.blend_pipelines.contains_key(&id),
+                false => self.filter_pipelines.contains_key(&id),
+            };
+            if !started {
+                self.start_with_inputs(&shader, inputs, reading);
+            }
+            // Out of the window: no passes, as no frame shows it.
+            if !bounds.intersects(viewport) {
+                continue;
+            }
+            if !self.run_passes(scene, bounds, &shader, &layer) {
+                let pipelines = match reading {
+                    true => &mut self.blend_pipelines,
+                    false => &mut self.filter_pipelines,
+                };
+                if let Some(compiled) = pipelines.get_mut(&id) {
+                    let compiled = std::mem::replace(compiled, compile::Compiled::Done(None));
+                    self.parked_inputs.push((reading, id, compiled));
+                }
+            }
+        }
+    }
+    /// Start compiling `shader`'s layer pipeline (blended, if it reads the
+    /// backdrop) with its inputs' bindings.
+    fn start_with_inputs(
+        &mut self,
+        shader: &Arc<FillShader>,
+        inputs: &ShaderInputs,
+        reading: bool,
+    ) {
+        let apps = true;
+        let device = self.device.clone();
+        let backend = self.info.backend;
+        let textures = textures(inputs);
+        let (layout, source, entry) = match reading {
+            true => {
+                let backdrop = self.blend_layouts().0.clone();
+                let (layout, source) = self
+                    .chain(shader.id(), inputs)
+                    .blend_layout(shader, &backdrop);
+                (layout, source, "zgx_filter_blended")
+            }
+            false => {
+                let (layout, source) = self.chain(shader.id(), inputs).quads_layout(shader);
+                (layout, source, "zgx_filter")
+            }
+        };
+        let app_layout = crate::AppLayout::Inputs {
+            blend: reading,
+            textures,
+        };
+        let slot = compile::spawn(move || {
+            crate::fill_validates(&source)
+                .then(|| {
+                    Self::app_built(
+                        &device,
+                        backend,
+                        apps,
+                        &source,
+                        entry,
+                        app_layout,
+                        |vertex, fragment| match reading {
+                            true => {
+                                crate::blend_pipeline(&device, vertex, fragment, &layout, entry)
+                            }
+                            false => {
+                                crate::fill_pipeline(&device, vertex, fragment, &layout, entry)
+                            }
+                        },
+                    )
+                })
+                .flatten()
+        });
+        let pipelines = match reading {
+            true => &mut self.blend_pipelines,
+            false => &mut self.filter_pipelines,
+        };
+        pipelines.insert(shader.id(), compile::Compiled::Pending(slot));
+    }
     /// `id`'s chain, made if new.
     pub(crate) fn chain(&mut self, id: u64, inputs: &ShaderInputs) -> &Chain {
         let (device, queue) = (&self.device, &self.queue);
