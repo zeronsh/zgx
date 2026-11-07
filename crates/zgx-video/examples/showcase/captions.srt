@@ -1,0 +1,23 @@
+1
+00:00:00,600 --> 00:00:03,800
+A film written as an interface.
+
+2
+00:00:04,600 --> 00:00:07,800
+Every frame is a function of time.
+
+3
+00:00:09,000 --> 00:00:13,600
+Shaders run in the script, on the GPU.
+
+4
+00:00:14,600 --> 00:00:17,800
+Real glass: blur, tint and depth.
+
+5
+00:00:18,800 --> 00:00:21,800
+Seven hundred particles, and no state between frames.
+
+6
+00:00:22,600 --> 00:00:27,400
+An ordinary app, played frame by frame.
