@@ -191,6 +191,15 @@ impl Stage {
         *pixels = self.gpu.readback()?;
         Ok(())
     }
+    /// Draw the frame it stands at, whole, reading nothing back: what a frame
+    /// costs to make, for measuring it.
+    #[doc(hidden)]
+    pub fn render(&mut self) -> Result<(), GpuError> {
+        let mut scene = self.ui.scene.borrow_mut();
+        scene.flush();
+        let whole = [scene.bounds(scene.root())];
+        self.gpu.render(&scene, &whole).map(drop)
+    }
     /// [`Stage::draw`], repainting only what changed since it last drew, as a
     /// window does: for comparing the two.
     #[doc(hidden)]

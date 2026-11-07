@@ -5343,6 +5343,7 @@ dependencies = [
  "gif",
  "png 0.18.1",
  "serde_json",
+ "wgpu",
  "zgx",
  "zgx-gpu",
  "zgx-run",
