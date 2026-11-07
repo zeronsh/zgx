@@ -16,6 +16,7 @@ anime.spring(params: { bounce: number?, duration: number? }?) -> AnimeEase
 anime.createScope(params: { defaults: Timing? }?) -> Scope
 ui.tween(state: State<any>, opts: TweenOptions?) -> Binding
 ui.spring(state: State<any>, opts: SpringOptions?) -> Binding
+ui.spring_to(state: State<number>, target: number, opts: SpringToOptions?) -> () -> number
 ui.loop(opts: LoopOptions?) -> Binding
 ```
 
@@ -96,6 +97,8 @@ Timelines also take `add(targets, params, position)` (or `add(timerParams, posit
 ## Bindings
 
 A property bound to `ui.tween(state, opts)` or `ui.spring(state, opts)` eases to its new value whenever the state changes, in Rust, with no script call per frame. Without `from` and `to` the scalar is the state's number (a boolean is 0 or 1); with both, it maps 0 to `from` and 1 to `to` (numbers, colors or pairs). Colors may be theme tokens (`from = "$text.secondary", to = "$text.primary"`): the node blends them from its theme as it eases, and keeps following theme changes. `ui.loop(opts)` runs from 0 to 1 and back for as long as the node is mounted.
+
+`ui.spring_to(state, target, opts) -> stop` runs a state itself to `target` on a spring, in Rust with no script call per frame, for a value something else also writes, such as a page a finger drags and a release lets go. It takes `stiffness` and `damping`, or `response` (ms) and `bounce` as SwiftUI's springs say them, plus `velocity` (units a second), `from` (where the spring itself begins, the state staying where it is until the spring passes it), `delay` (ms), `most` (ms, then it lands whatever the spring says) and `done`. It rests within a thousandth of the way it runs, so a 0 to 1 opacity eases to its end. `stop()` leaves the state where it is and returns its speed, for the next one to carry.
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |
