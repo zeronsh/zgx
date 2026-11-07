@@ -2309,6 +2309,17 @@ impl Host {
         {
             self.input_arrived = true;
         }
+        // A person's press, release or key: what a pointer lock may come
+        // just after (`InputDispatcher::note_gesture`).
+        if matches!(
+            event,
+            InputEvent::PointerDown { .. }
+                | InputEvent::PointerUp { .. }
+                | InputEvent::KeyDown { repeat: false, .. }
+                | InputEvent::KeyUp { .. }
+        ) {
+            self.context.ui.input.note_gesture();
+        }
         // macOS: typing draws at once even mid-animation (see `process`);
         // pointer motion and scrolling keep the refresh's pace.
         #[cfg(target_os = "macos")]
@@ -7855,6 +7866,9 @@ impl WindowManager {
             // A renderer lost with its GPU device, due another try; or a
             // plane's frame left for a tick.
             let now = std::time::Instant::now();
+            // The turn's presses and keys, at this time: what a pointer
+            // lock may come within a second of (`settle_gestures`).
+            host.context.ui.input.settle_gestures(now);
             #[cfg(target_os = "macos")]
             let plane_room = host.plane_retry.is_some()
                 && host

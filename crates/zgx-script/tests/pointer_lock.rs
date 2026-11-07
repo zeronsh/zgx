@@ -44,13 +44,16 @@ return ui.column {
 }
 "#;
 
+/// A press and release, as a host hands them on (`note_gesture` first).
 fn press(h: &mut Harness) {
     let button = PointerButton::Primary;
+    h.ui.input.note_gesture();
     h.ui.dispatch(InputEvent::PointerDown {
         x: 50.,
         y: 60.,
         button,
     });
+    h.ui.input.note_gesture();
     h.ui.dispatch(InputEvent::PointerUp {
         x: 50.,
         y: 60.,
@@ -60,6 +63,7 @@ fn press(h: &mut Harness) {
 }
 
 fn key(h: &mut Harness, key: Key) {
+    h.ui.input.note_gesture();
     h.ui.dispatch(InputEvent::KeyDown {
         key,
         modifiers: Modifiers::default(),

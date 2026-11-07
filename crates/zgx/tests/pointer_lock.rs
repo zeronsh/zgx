@@ -58,10 +58,23 @@ fn world() -> (Ui, NodeId, NodeId, Heard, Heard) {
     (ui, g, o, game, other)
 }
 
+/// A press and release, as a host hands them on (`note_gesture` first).
 fn press(ui: &mut Ui, x: f32, y: f32) {
     let button = PointerButton::Primary;
-    ui.dispatch(InputEvent::PointerDown { x, y, button });
-    ui.dispatch(InputEvent::PointerUp { x, y, button });
+    for event in [
+        InputEvent::PointerDown { x, y, button },
+        InputEvent::PointerUp { x, y, button },
+    ] {
+        ui.input.note_gesture();
+        ui.dispatch(event);
+    }
+}
+/// A key, as a host hands it on.
+fn typed(ui: &mut Ui, event: InputEvent) {
+    if !matches!(event, InputEvent::KeyDown { repeat: true, .. }) {
+        ui.input.note_gesture();
+    }
+    ui.dispatch(event);
 }
 
 fn key(key: Key) -> InputEvent {
@@ -96,11 +109,36 @@ fn the_pointer_locks_only_just_after_a_press_or_a_key() {
         delta_y: 10.,
     });
     assert!(!ui.input.lock_pointer(&ui.scene, g));
-    ui.dispatch(key(Key::Character("e".into())));
+    typed(&mut ui, key(Key::Character("e".into())));
     assert!(ui.input.lock_pointer(&ui.scene, g));
     assert_eq!(ui.input.pointer_lock(&ui.scene.borrow()), Some(g));
     assert!(game.borrow().contains(&"locked true".to_owned()));
     assert!(ui.input.lock_pointer(&ui.scene, g), "already holding it");
+}
+
+#[test]
+fn a_lock_comes_within_a_second_of_the_gesture_as_the_host_settles_it() {
+    use std::time::{Duration, Instant};
+    let (mut ui, g, _, _, _) = world();
+    // The host settles each turn's presses and keys at its turn's time: a
+    // lock a second and more after one (a timer's) is refused.
+    press(&mut ui, 50., 50.);
+    ui.input
+        .settle_gestures(Instant::now() - Duration::from_millis(1500));
+    assert!(
+        !ui.input.lock_pointer(&ui.scene, g),
+        "a second and a half on"
+    );
+    // Settled just now, it may.
+    press(&mut ui, 50., 50.);
+    ui.input.settle_gestures(Instant::now());
+    assert!(ui.input.lock_pointer(&ui.scene, g));
+    // Unsettled, a gesture is happening now (its handlers, its turn).
+    ui.input.unlock_pointer(&ui.scene);
+    ui.input
+        .settle_gestures(Instant::now() - Duration::from_secs(5));
+    press(&mut ui, 50., 50.);
+    assert!(ui.input.lock_pointer(&ui.scene, g));
 }
 
 #[test]
@@ -129,7 +167,7 @@ fn a_locked_pointer_takes_every_press_and_its_motion_to_the_node() {
 fn escape_ends_the_lock_and_goes_nowhere_else() {
     let (mut ui, _, o, game, other) = locked();
     ui.input.focus(&ui.scene, Some(o));
-    ui.dispatch(key(Key::Escape));
+    typed(&mut ui, key(Key::Escape));
     assert_eq!(*game.borrow(), ["locked false"]);
     assert!(
         other.borrow().is_empty(),
@@ -142,7 +180,7 @@ fn escape_ends_the_lock_and_goes_nowhere_else() {
     assert_eq!(*game.borrow(), ["locked false"]);
     assert_eq!(*other.borrow(), ["down", "up", "click"]);
     // The next Escape is an ordinary key again.
-    ui.dispatch(key(Key::Escape));
+    typed(&mut ui, key(Key::Escape));
     assert_eq!(
         other.borrow().last().map(String::as_str),
         Some("key Escape")
@@ -161,15 +199,18 @@ fn escape(repeat: bool) -> InputEvent {
 fn the_escape_that_ends_a_lock_is_no_gesture_to_lock_again() {
     let (mut ui, g, o, game, other) = locked();
     ui.input.focus(&ui.scene, Some(o));
-    ui.dispatch(escape(false));
+    typed(&mut ui, escape(false));
     // A handler hearing the lock end (or a timer just after) can't take
     // the pointer straight back: Escape always lets it go.
     assert!(!ui.input.lock_pointer(&ui.scene, g), "on the Escape");
-    ui.dispatch(escape(true));
-    ui.dispatch(InputEvent::KeyUp {
-        key: Key::Escape,
-        modifiers: Modifiers::default(),
-    });
+    typed(&mut ui, escape(true));
+    typed(
+        &mut ui,
+        InputEvent::KeyUp {
+            key: Key::Escape,
+            modifiers: Modifiers::default(),
+        },
+    );
     assert!(!ui.input.lock_pointer(&ui.scene, g), "on its release");
     assert_eq!(*game.borrow(), ["locked false"]);
     assert!(
@@ -231,7 +272,7 @@ fn a_disabled_node_loses_the_lock() {
 #[test]
 fn another_node_locking_takes_it_and_unlocking_lets_it_go() {
     let (mut ui, _, o, game, other) = locked();
-    ui.dispatch(key(Key::Character("e".into())));
+    typed(&mut ui, key(Key::Character("e".into())));
     assert!(ui.input.lock_pointer(&ui.scene, o));
     assert_eq!(*game.borrow(), ["locked false"]);
     assert_eq!(
