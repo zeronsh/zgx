@@ -603,9 +603,14 @@ impl GpuRenderer {
     }
     /// Jobs given up before they were drawn: their slots draw again.
     pub(crate) fn forget_effects(&mut self, jobs: &[Job]) {
+        let slots: Vec<_> = jobs.iter().map(|job| (job.node, job.purpose)).collect();
+        self.forget_slots(&slots);
+    }
+    /// Slots whose jobs were given up: they draw again.
+    pub(crate) fn forget_slots(&mut self, slots: &[(NodeId, Purpose)]) {
         if let Some(atlas) = &mut self.effects {
-            for job in jobs {
-                if let Some(slot) = atlas.slots.get_mut(&(job.node, job.purpose)) {
+            for key in slots {
+                if let Some(slot) = atlas.slots.get_mut(key) {
                     slot.key = None;
                 }
             }
