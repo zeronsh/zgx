@@ -35,7 +35,7 @@ A text field's `accessibilityActivate` takes focus and brings the keyboard; rows
 
 - Checked by a person on a phone: VoiceOver, Switch Control, Voice Control, Full Keyboard Access, feel. Measured there so far: glass, planes, frame rate, launch, memory (`scripts/ios/device.py measure`).
 - System glass isn't cut by rounded or scrolling parents: it ignores masks and clips. A pane scrolled away is hidden whole.
-- Morph transitions between panes beyond a group's merging; terminals; web views' new windows, downloads, finding and printing.
+- Morphs between panes that aren't in one group (a pane joining a group grows out of it and melts back); terminals; web views' new windows, downloads, finding and printing.
 - Notifications.
 - `Documents/zgx-gesture.log` records each gesture, scroll, refresh and keyboard reveal; `ZGX_IOS_SHOT=seconds` writes the window to `Documents/shot.png`.
 

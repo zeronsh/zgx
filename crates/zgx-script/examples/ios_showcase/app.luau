@@ -297,6 +297,10 @@ local function GlassPage(_nav: any)
 				interactive = true,
 				x = ui.spring(apart),
 			},
+			-- A pane joining the group grows out of its glass, and melts back.
+			ui.show(function()
+				return apart:get() < 40
+			end, ui.glass { absolute = true, left = 192, top = 0, w = 68, h = 96, radius = 34 }),
 		},
 		ui.glass {
 			absolute = true,

@@ -11,7 +11,7 @@ use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
     rc::Retained,
     runtime::AnyClass,
-    runtime::{AnyObject, NSObject, NSObjectProtocol},
+    runtime::{AnyObject, Bool, NSObject, NSObjectProtocol},
     sel,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -298,6 +298,11 @@ struct Mounted {
     frame: Option<Rect>,
     alpha: f32,
     hidden: bool,
+    /// Which `apply` made it: a pane new to a group that was already there grows
+    /// out of the group's glass rather than appearing.
+    born: u64,
+    /// It has been placed once.
+    placed: bool,
 }
 
 /// `scroll`'s effect on `edge`.
@@ -466,6 +471,8 @@ pub(crate) struct Surfaces {
     root: Retained<AnyObject>,
     /// What holds the app in a scroll view of the system's, once one is asked for.
     edge_host: Option<EdgeHost>,
+    /// Counts `apply`s.
+    pass: u64,
     mounted: HashMap<NodeId, Mounted>,
     order: Vec<NodeId>,
     zoom: f32,
@@ -513,6 +520,7 @@ impl Surfaces {
             planes,
             root,
             edge_host: None,
+            pass: 0,
             mounted: HashMap::new(),
             order: Vec::new(),
             zoom: 1.,
@@ -646,6 +654,7 @@ impl Surfaces {
     }
     pub fn apply(&mut self, natives: &NativeViews, split: &PlaneSplit) {
         let views = natives.views();
+        self.pass += 1;
         // Gone: their views too.
         let reusable = &mut self.reusable;
         self.mounted.retain(|node, mounted| {
@@ -654,7 +663,11 @@ impl Surfaces {
                 // SAFETY: UIView's method, on the main thread.
                 unsafe {
                     let top = mounted.clip.as_ref().unwrap_or(&mounted.view);
-                    let _: () = msg_send![&**top, removeFromSuperview];
+                    if mounted.parent.is_some() && matches!(mounted.content, Content::Glass(_)) {
+                        dematerialize(top);
+                    } else {
+                        let _: () = msg_send![&**top, removeFromSuperview];
+                    }
                 }
                 // Scrolling away and back makes and drops a row's control each
                 // time: kept, as a table view keeps its cells.
@@ -727,6 +740,8 @@ impl Surfaces {
                                 frame: None,
                                 alpha: 1.,
                                 hidden: false,
+                                born: self.pass,
+                                placed: false,
                             },
                         );
                         continue;
@@ -748,6 +763,7 @@ impl Surfaces {
                 }
                 clip
             });
+            let pass = self.pass;
             self.mounted.entry(*node).or_insert_with(|| Mounted {
                 view,
                 clip,
@@ -760,6 +776,8 @@ impl Surfaces {
                 frame: None,
                 alpha: 1.,
                 hidden: false,
+                born: pass,
+                placed: false,
             });
         }
         // What must lie under the effect and what above it, by its slot.
@@ -856,6 +874,20 @@ impl Surfaces {
         }
     }
     fn place(&mut self, placement: &NativePlacement, parent: Option<NodeId>) {
+        self.place_inner(placement, parent);
+        let group_older = parent
+            .and_then(|group| self.mounted.get(&group))
+            .is_some_and(|group| group.born < self.pass);
+        if let Some(mounted) = self.mounted.get_mut(&placement.node)
+            && !std::mem::replace(&mut mounted.placed, true)
+            && group_older
+            && let Content::Glass(GlassContent::Pane(style)) = &mounted.content
+        {
+            // SAFETY: as `materialize` asks, here on the main thread.
+            unsafe { materialize(&mounted.view, *style.borrow()) };
+        }
+    }
+    fn place_inner(&mut self, placement: &NativePlacement, parent: Option<NodeId>) {
         let origin = parent
             .and_then(|group| self.mounted.get(&group))
             .and_then(|group| group.frame)
@@ -1058,6 +1090,70 @@ fn make_toggle(state: &Rc<ToggleState>) -> (Retained<AnyObject>, Retained<Toggle
             action: sel!(toggled:),
             forControlEvents: 1usize << 12];
         (view, target)
+    }
+}
+
+/// A pane joining a group grows out of it, as the system's glass materializes:
+/// nothing in this frame's transaction, whose actions are off, then the glass
+/// animated in. Reduce Motion: there at once.
+///
+/// # Safety
+/// `view` is a UIVisualEffectView, on the main thread.
+unsafe fn materialize(view: &Retained<AnyObject>, style: GlassStyle) {
+    // SAFETY: as the caller promises.
+    unsafe {
+        if crate::ios_system::preferences().reduced_motion {
+            return;
+        }
+        let none = std::ptr::null::<AnyObject>();
+        let _: () = msg_send![&**view, setEffect: none];
+        let view = view.clone();
+        let start = block2::RcBlock::new(move |_: *mut AnyObject| {
+            let view = view.clone();
+            let animations = block2::RcBlock::new(move || {
+                let _: () = msg_send![&*view, setEffect: &*glass_effect(style)];
+            });
+            let _: () = msg_send![class!(UIView),
+                animateWithDuration: 0.4f64,
+                animations: &*animations];
+        });
+        let _: Retained<AnyObject> = msg_send![class!(NSTimer),
+            scheduledTimerWithTimeInterval: 0f64,
+            repeats: false,
+            block: &*start];
+    }
+}
+
+/// A pane leaving a group melts back into it, then goes.
+///
+/// # Safety
+/// `view` is a UIVisualEffectView, on the main thread.
+unsafe fn dematerialize(view: &Retained<AnyObject>) {
+    // SAFETY: as the caller promises.
+    unsafe {
+        if crate::ios_system::preferences().reduced_motion {
+            let _: () = msg_send![&**view, removeFromSuperview];
+            return;
+        }
+        let view = view.clone();
+        let start = block2::RcBlock::new(move |_: *mut AnyObject| {
+            let (fading, going) = (view.clone(), view.clone());
+            let animations = block2::RcBlock::new(move || {
+                let none = std::ptr::null::<AnyObject>();
+                let _: () = msg_send![&*fading, setEffect: none];
+            });
+            let completion = block2::RcBlock::new(move |_: Bool| {
+                let _: () = msg_send![&*going, removeFromSuperview];
+            });
+            let _: () = msg_send![class!(UIView),
+                animateWithDuration: 0.28f64,
+                animations: &*animations,
+                completion: &*completion];
+        });
+        let _: Retained<AnyObject> = msg_send![class!(NSTimer),
+            scheduledTimerWithTimeInterval: 0f64,
+            repeats: false,
+            block: &*start];
     }
 }
 
