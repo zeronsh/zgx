@@ -6,6 +6,8 @@
 //! input is instead resampled between buffered events. Irregular or sparse
 //! input stays one interval behind; a stable stream at a multiple of the
 //! display rate gradually moves to half an interval for less finger latency.
+//! At a slow refresh (60 Hz) events keep up with frames, and being a whole
+//! interval behind costs more than it evens out: a short, fixed time instead.
 //! Discrete wheel notches have no motion curve of
 //! their own; they ease towards their destination over a few refreshes.
 use std::{collections::VecDeque, time::Duration, time::Instant};
@@ -16,9 +18,25 @@ const STALL: Duration = Duration::from_millis(50);
 /// stops and restarts the display link (a lost refresh each time) when the
 /// applied motion momentarily catches up with the input.
 const LINGER: Duration = Duration::from_millis(120);
-/// Bounds for the sampling delay, which tracks the input interval.
+/// Bounds for the sampling delay, which tracks the input interval. The most is
+/// past the gap of events 30 a second, what a trackpad's slow end sends: at 20 ms
+/// a frame ran out between them, stopped, and jumped, a 30 Hz rhythm at any frame
+/// rate. Real events at 30 a second and 120 Hz: 37-44% of steps alternating and
+/// 9-12% near nothing at 20 ms, against 8-13% and 0.4%.
 const MIN_DELAY: Duration = Duration::from_millis(4);
-const MAX_DELAY: Duration = Duration::from_millis(20);
+const MAX_DELAY: Duration = Duration::from_millis(40);
+/// Refreshes this long or longer stand `SLOW_REFRESH_DELAY` behind what has
+/// come, not an event interval, while events come within `SLOW_EVENTS` of them.
+const SLOW_REFRESH: Duration = Duration::from_millis(12);
+/// Real trackpad events at 60 Hz, position behind the read that carried it (p50)
+/// and gaps of 25 ms or more between frames that moved, in a window: an interval
+/// behind, 19 ms and 1.7%; this, 13 ms and 4.6%; none, 5 ms and 12%, a frame in
+/// eight showing nothing new.
+const SLOW_REFRESH_DELAY: Duration = Duration::from_millis(8);
+/// Events further apart than this many refreshes are still bridged: a slow
+/// device's motion would otherwise show every few frames. At 2, real events 30 a
+/// second at 60 Hz stairstepped: 26% of gaps 25 ms or more, against 0.1% here.
+const SLOW_EVENTS: f32 = 1.5;
 /// Require a run of regular events before shortening the sampling delay.
 const STABLE_INTERVALS: u8 = 8;
 /// Wheel notches close this fraction of the remaining distance per second, in
@@ -47,6 +65,8 @@ pub(crate) struct ScrollResampler {
     applied: (f32, f32),
     /// Smoothed spacing between continuous events.
     interval: Option<Duration>,
+    /// The time between refreshes, as last sampled.
+    refresh: Duration,
     stable_intervals: u8,
     sample_delay: Option<Duration>,
     /// Wheel distance not yet applied, and when it last advanced.
@@ -170,6 +190,7 @@ impl ScrollResampler {
     }
     /// The motion to apply at a display refresh processed at `now`.
     pub fn sample(&mut self, now: Instant, refresh_interval: Duration) -> Option<(f32, f32)> {
+        self.refresh = refresh_interval;
         let full_delay = self.delay();
         let aligned = self.interval.is_some_and(|interval| {
             let ratio = refresh_interval.as_secs_f64() / interval.as_secs_f64();
@@ -250,6 +271,14 @@ impl ScrollResampler {
         (delta != (0., 0.)).then_some(delta)
     }
     fn delay(&self) -> Duration {
+        // (Events closer than that keep their interval: it's as short, and even.)
+        if self.refresh >= SLOW_REFRESH
+            && self.interval.is_some_and(|interval| {
+                interval >= SLOW_REFRESH && interval <= self.refresh.mul_f32(SLOW_EVENTS)
+            })
+        {
+            return SLOW_REFRESH_DELAY;
+        }
         self.interval
             .unwrap_or(Duration::from_millis(8))
             .clamp(MIN_DELAY, MAX_DELAY)
@@ -458,6 +487,80 @@ mod tests {
         }
     }
 
+    /// Each event's motion, one frame's worth, sampled at a refresh of `refresh`
+    /// just after it came: how far behind what has come each frame stands.
+    fn behind(refresh: Duration, events: Duration) -> f32 {
+        let start = Instant::now();
+        let mut resampler = ScrollResampler::default();
+        let (mut received, mut applied) = (0., 0.);
+        for i in 0..120u32 {
+            // Jitter past the half-margin's tolerance: the fixed delay alone.
+            let wobble = if i % 2 == 0 {
+                Duration::from_millis(1)
+            } else {
+                Duration::ZERO
+            };
+            resampler.push_precise(start + events * i + wobble, (0., 10.));
+            received += 10.;
+            let at = start + events * i + Duration::from_micros(2500);
+            applied += resampler.sample(at, refresh).map_or(0., |(_, dy)| dy);
+        }
+        received - applied
+    }
+
+    /// At 60 Hz events keep up: a refresh stands a short time behind them, not
+    /// a whole interval.
+    #[test]
+    fn a_slow_refresh_stands_a_short_time_behind() {
+        let refresh = Duration::from_micros(16_667);
+        let behind = behind(refresh, refresh);
+        assert!(behind < 6., "{behind}");
+    }
+
+    /// At 120 Hz frames outrun events: they're bridged, as ever, a gap behind.
+    #[test]
+    fn a_fast_refresh_stays_behind_to_stay_even() {
+        let behind = behind(Duration::from_micros(8_333), Duration::from_micros(16_667));
+        assert!(behind > 5., "{behind}");
+    }
+
+    /// A slow device's events at 60 Hz are bridged too: not a jump every few frames.
+    #[test]
+    fn events_slower_than_a_slow_refresh_are_still_bridged() {
+        let behind = behind(
+            Duration::from_micros(16_667),
+            3 * Duration::from_micros(16_667),
+        );
+        assert!(behind > 5., "{behind}");
+    }
+
+    /// Events 30 a second, slower than any refresh: a frame between two of them
+    /// doesn't run out and stop. Steps stay even, at 60 Hz and 120 Hz.
+    #[test]
+    fn events_thirty_a_second_move_every_frame_evenly() {
+        for refresh in [Duration::from_micros(8_333), Duration::from_micros(16_667)] {
+            let start = Instant::now();
+            let mut resampler = ScrollResampler::default();
+            let gap = Duration::from_micros(33_333);
+            let frames = (2_000_000 / refresh.as_micros()) as u32;
+            let (mut steps, mut next) = (Vec::new(), 0u32);
+            for frame in 0..frames {
+                let now = start + refresh * frame;
+                while gap * next <= now - start {
+                    resampler.push_precise(start + gap * next, (0., 10.));
+                    next += 1;
+                }
+                steps.push(resampler.sample(now, refresh).map_or(0., |(_, dy)| dy));
+            }
+            let steady = &steps[steps.len() / 2..];
+            let mean = steady.iter().sum::<f32>() / steady.len() as f32;
+            assert!(
+                steady.iter().all(|step| (step - mean).abs() < mean * 0.5),
+                "{refresh:?}: {steady:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_stalled_stroke_applies_everything() {
         let start = Instant::now();
@@ -640,8 +743,14 @@ mod tests {
     #[test]
     fn jittery_input_keeps_the_interpolation_margin() {
         let (lag, cv) = stroke(60, 60, true);
+        // At a slow refresh the margin is `SLOW_REFRESH_DELAY`, short of this
+        // stream's 5 ms of jitter past its 16.7 ms: less even than a whole interval
+        // behind (under 0.21), for 8 ms less lag. At 120 Hz it stays a whole interval.
+        assert!(lag > 2., "irregular input needs its interpolation margin");
+        assert!(cv < 0.3, "jitter must stay smoothed, got {cv}");
+        let (lag, cv) = stroke(120, 60, true);
         assert!(lag > 7., "irregular input needs its interpolation margin");
-        assert!(cv < 0.21, "jitter must stay smoothed, got {cv}");
+        assert!(cv < 0.25, "jitter must stay smoothed, got {cv}");
     }
 
     #[test]
