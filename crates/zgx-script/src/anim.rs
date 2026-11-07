@@ -44,6 +44,50 @@ fn scalar(value: &Value) -> f32 {
     value.as_f64().unwrap_or(0.) as f32
 }
 
+/// What a spring with a side or a delay of its own is making for: `ui.spring`'s
+/// `up`, `down` and `delay` (out of a plain spring's frames).
+struct Chase {
+    chasing: f32,
+    seen: f32,
+    due: Option<Instant>,
+    params: Option<crate::node::SpringParams>,
+}
+impl Chase {
+    fn new(from: f32) -> Self {
+        Self {
+            chasing: from,
+            seen: from,
+            due: None,
+            params: None,
+        }
+    }
+    /// This frame's spring and what it makes for. A new goal picks its spring by
+    /// the way it lies from the last, not by where the value is: past its goal
+    /// in an overshoot, it keeps the spring it came with.
+    #[inline(never)]
+    fn toward(
+        &mut self,
+        goal: f32,
+        now: Instant,
+        both: crate::node::SpringParams,
+        up: Option<crate::node::SpringParams>,
+        down: Option<crate::node::SpringParams>,
+    ) -> (crate::node::SpringParams, f32) {
+        if goal != self.seen || self.params.is_none() {
+            let side = if goal > self.seen { up } else { down };
+            let chosen = side.unwrap_or(both);
+            self.params = Some(chosen);
+            self.seen = goal;
+            self.due =
+                Some(now + std::time::Duration::from_secs_f32(chosen.delay_ms.max(0.) / 1000.));
+        }
+        if self.due.is_none_or(|due| now >= due) {
+            self.chasing = goal;
+        }
+        (self.params.unwrap_or(both), self.chasing)
+    }
+}
+
 /// The animated scalar for `anim`, owned by the component in `cx`.
 pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
     let frames = cx.frames();
@@ -99,6 +143,16 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
             // In f64: a spring between ±1e36 accelerates past f32's range.
             let mut velocity = 0_f64;
             let mut start: Option<(Instant, f32, f32)> = None;
+            // A spring that opens and closes alike and starts at once makes for
+            // its goal: only another keeps what it's making for (`Chase`).
+            let mut chase = match &curve {
+                Curve::Spring { both, up, down }
+                    if up.is_some() || down.is_some() || both.delay_ms != 0. =>
+                {
+                    Some(Box::new(Chase::new(value.with_untracked(|v| *v))))
+                }
+                _ => None,
+            };
             // When it last stepped: a spring steps by the time that passed, not by
             // a refresh interval a display reports (iOS's can be shorter than its
             // frames, and a frame can be late).
@@ -127,7 +181,7 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
                             at as f32
                         });
                     }
-                    Curve::Spring { stiffness, damping } => {
+                    Curve::Spring { both, up, down } => {
                         // The time since its last frame, at most a quarter second (a
                         // window back after a while catches up that much, not all of
                         // it at once); past a frame and a half, in steps no longer than
@@ -141,8 +195,12 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
                             .min(0.25);
                         stepped = Some(frame.time);
                         let goal = target.get();
+                        let (chosen, chasing) = match &mut chase {
+                            None => (*both, goal),
+                            Some(chase) => chase.toward(goal, frame.time, *both, *up, *down),
+                        };
                         let (mut x, to) =
-                            (f64::from(value.with_untracked(|v| *v)), f64::from(goal));
+                            (f64::from(value.with_untracked(|v| *v)), f64::from(chasing));
                         // A frame on time at 40 Hz or faster is one step: only a late
                         // frame or a slower display's is cut up.
                         let on_time =
@@ -154,17 +212,25 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
                         };
                         let dt = elapsed / steps;
                         for _ in 0..steps as usize {
-                            velocity += (-f64::from(*stiffness) * (x - to)
-                                - f64::from(*damping) * velocity)
+                            velocity += (-f64::from(chosen.stiffness) * (x - to)
+                                - f64::from(chosen.damping) * velocity)
                                 * dt;
                             x += velocity * dt;
                         }
                         let settle = 1e-3 * to.abs().max(1.);
                         // A value past f32's range (or none) lands on its
                         // goal: it can't be shown, and would never settle.
-                        let settled = !((x as f32).is_finite() && velocity.is_finite())
-                            || (x - to).abs() < settle && velocity.abs() < settle * 10.;
-                        value.set(if settled { goal } else { x as f32 });
+                        let lost = !((x as f32).is_finite() && velocity.is_finite());
+                        let settled =
+                            lost || (x - to).abs() < settle && velocity.abs() < settle * 10.;
+                        let reached = settled && chasing == goal;
+                        value.set(if lost || reached {
+                            goal
+                        } else if settled {
+                            chasing
+                        } else {
+                            x as f32
+                        });
                         if settled {
                             velocity = 0.;
                         }

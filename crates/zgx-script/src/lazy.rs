@@ -18,6 +18,9 @@ struct Module {
     make: Option<Make>,
 }
 
+/// How many modules a VM registers, about (`add`).
+const MODULES: usize = 35;
+
 /// The modules a VM has not made yet.
 #[derive(Default)]
 pub(crate) struct Lazy(RefCell<Vec<Module>>);
@@ -40,7 +43,15 @@ impl Lazy {
         self.add(names, true, Box::new(make));
     }
     fn add(&self, names: &'static [&'static str], global: bool, make: Make) {
-        self.0.borrow_mut().push(Module {
+        let mut modules = self.0.borrow_mut();
+        // Every VM's modules, at once: a list grown as they register copies
+        // itself and leaves holes the heap's next allocations fall into, and
+        // what a script then costs moves with how many there happen to be.
+        if modules.capacity() == 0 {
+            modules.reserve_exact(MODULES);
+        }
+        debug_assert!(modules.len() < MODULES, "`MODULES` is too few");
+        modules.push(Module {
             names,
             global,
             make: Some(make),

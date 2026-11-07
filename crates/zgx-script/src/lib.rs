@@ -51,6 +51,12 @@ mod file_events;
 #[cfg(target_os = "linux")]
 #[path = "file_events_linux.rs"]
 mod file_events;
+#[cfg(target_os = "ios")]
+#[path = "file_events_kqueue.rs"]
+mod file_events;
+// Its tests run where tests run: kqueue is macOS's too.
+#[cfg(all(test, target_os = "macos"))]
+mod file_events_kqueue;
 mod folder;
 mod form;
 mod handlers;
@@ -70,6 +76,7 @@ pub mod markdown;
 mod meter;
 mod modifiers;
 mod motion;
+mod native;
 mod node;
 mod opens;
 mod paged;
@@ -98,6 +105,16 @@ mod windows;
 
 pub use bundle::{Bundle, BundleFile, build};
 pub use calls::{Body, Request, Response};
+/// `ui.window.safe_area`'s value, keys sorted as a `Value::Map`'s are.
+fn safe_area_value(insets: [f32; 4]) -> Value {
+    let n = |v: f32| Value::Num(f64::from(v));
+    Value::Map(Rc::from([
+        (Rc::from("bottom"), n(insets[2])),
+        (Rc::from("left"), n(insets[3])),
+        (Rc::from("right"), n(insets[1])),
+        (Rc::from("top"), n(insets[0])),
+    ]))
+}
 pub use command::{Command, DroppedShortcut};
 pub use design::DesignLint;
 pub use fetch_policy::{FetchPolicy, Url};
@@ -1671,6 +1688,7 @@ struct Inner {
     /// Keeps `ui.window.titlebar_area` and `controls` as the window's
     /// (`window_chrome`).
     chrome: RefCell<Option<zgx::reactive::Effect>>,
+    safe_area: RefCell<Option<zgx::reactive::Effect>>,
     window_size: RefCell<Option<zgx::reactive::Effect>>,
     /// `ui.window.full_screen` and `full_screen_transition` kept as the
     /// window says (`ScriptHost::window_full_screen`).
@@ -1881,6 +1899,7 @@ impl ScriptHost {
             locales: Rc::default(),
             shared: Rc::new(Store::new(runtime)),
             chrome: RefCell::default(),
+            safe_area: RefCell::default(),
             window_size: RefCell::default(),
             full_screen: RefCell::default(),
             zoom: RefCell::default(),
@@ -2599,6 +2618,28 @@ impl ScriptHost {
             buttons.set(rect(controls.get()));
         });
         *self.0.chrome.borrow_mut() = Some(effect);
+    }
+    /// Keep `ui.window.safe_area` as the window has it: pass its
+    /// `WindowInfo::safe_area` (top, right, bottom, left in points), shown as
+    /// `{ top, right, bottom, left }`.
+    pub fn window_safe_area(
+        &self,
+        safe_area: Signal<[f32; 4]>,
+        keyboard: Signal<f32>,
+        overscroll: Signal<f32>,
+    ) {
+        let covered = self.0.shared.state(windows::KEYBOARD, Value::Num(0.));
+        let stretched = self.0.shared.state(windows::OVERSCROLL, Value::Num(0.));
+        let state = self
+            .0
+            .shared
+            .state(windows::SAFE_AREA, safe_area_value([0.; 4]));
+        let effect = self.0.runtime.effect_now(move || {
+            state.set(safe_area_value(safe_area.get()));
+            covered.set(Value::Num(f64::from(keyboard.get())));
+            stretched.set(Value::Num(f64::from(overscroll.get())));
+        });
+        self.0.safe_area.replace(Some(effect));
     }
     /// Publish whether `ui`'s window is the active one and whether it
     /// shows (`Ui::observe_window_active`, `Ui::observe_shown`), as
@@ -3472,16 +3513,24 @@ impl ScriptHost {
             // A bundle never changes; the plugins beside it (on the disk)
             // are watched as any file is.
             // The kernel says when a file changes; nothing runs meanwhile.
-            #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+            #[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
             if let Some(mut events) = file_events::FileEvents::new() {
                 // A reload (new plugins) has the watched files looked at again.
                 let (rewatch, mut rewatched) = zgx::task::latest::<()>();
                 *host.0.rewatch.borrow_mut() = Some(rewatch);
                 let mut heard = false;
+                let signed_bundle = signed_bundle();
                 loop {
                     // After a change, open them again: a file an editor
                     // replaced is a new file.
-                    events.watch(host.watched_files(), host.watched_dirs(), heard);
+                    events.watch(
+                        host.watched_files()
+                            .into_iter()
+                            .filter(|file| !in_signed_bundle(file, signed_bundle.as_deref()))
+                            .collect(),
+                        host.watched_dirs(),
+                        heard,
+                    );
                     // While a type check runs on its thread, its result is
                     // looked for this often; a change still wakes this at
                     // once.
@@ -3525,7 +3574,7 @@ impl ScriptHost {
     /// Every file a reload depends on: the scripts, what they required, the
     /// images they read and the theme files.
     #[cfg_attr(
-        not(any(target_os = "macos", windows, target_os = "linux")),
+        not(any(target_os = "macos", windows, target_os = "linux", target_os = "ios")),
         allow(dead_code)
     )]
     fn watched_files(&self) -> Vec<PathBuf> {
@@ -3538,7 +3587,7 @@ impl ScriptHost {
     /// The directories whose every entry a reload depends on: the plugins',
     /// so the first plugin dropped into an empty one loads.
     #[cfg_attr(
-        not(any(target_os = "macos", windows, target_os = "linux")),
+        not(any(target_os = "macos", windows, target_os = "linux", target_os = "ios")),
         allow(dead_code)
     )]
     fn watched_dirs(&self) -> Vec<PathBuf> {
@@ -4236,7 +4285,7 @@ impl ScriptHost {
         // Each module made the first time a script names it (`lazy`).
         let lazy = lazy::Lazy::default();
         lazy.ui(&["path", "linear"], canvas::install);
-        lazy.ui(&["glass"], node::install_glass);
+        lazy.ui(&["springs"], node::install_springs);
         #[cfg(feature = "scene3d")]
         lazy.ui(
             &["scene3d", "mesh", "light", "group", "model"],
@@ -4297,7 +4346,8 @@ impl ScriptHost {
         );
         // A plugin's lent packages' tokens too: a lent design system themes it.
         let (dir, packages) = (script.dir(), self.packages(plugin.then_some(&*grants)));
-        lazy.ui(&["prefers", "theme", "tokens"], move |lua, ui| {
+        lazy.ui(&["prefers"], theme::install_prefers);
+        lazy.ui(&["theme", "tokens"], move |lua, ui| {
             theme::install(lua, ui, dir, packages)
         });
         lazy.ui(&["form"], form::install);
@@ -4308,6 +4358,8 @@ impl ScriptHost {
         lazy.ui(&["modifiers"], modifiers::install);
         lazy.ui(&["editor"], element::install_editor);
         lazy.ui(&["router"], router::install);
+        native::install_glass(&lazy);
+        lazy.ui(&["ios", "scroll_edge", "keyboard_bar"], native::install_kit);
         lazy.ui(&["async", "optimistic"], handlers::install);
         let app_actions = self.0.actions.clone();
         lazy.ui(&["actions"], move |lua, ui| {
@@ -4425,14 +4477,32 @@ impl ScriptHost {
 
 /// How long a save's writes must stop for before it reloads (`watch`): an
 /// editor's save as a write and a rename comes within a millisecond or two.
-#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
 const SETTLE: Duration = Duration::from_millis(10);
 /// At most this long after a change, it reloads even if writes go on.
-#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
 const SETTLE_MAX: Duration = Duration::from_millis(100);
 
+/// The app bundle whose files never change, where one is: a release build on
+/// iOS, its scripts signed. Stat-ing them was all that woke a resting app (240
+/// wakeups a minute in the simulator; a static UIKit app has none), and a
+/// watch on them would hold descriptors for nothing. A debug build watches
+/// them for hot reload, and what lies outside (a plugin in the app's documents)
+/// is watched either way, however late it comes.
+#[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
+fn signed_bundle() -> Option<PathBuf> {
+    if cfg!(target_os = "ios") && !cfg!(debug_assertions) {
+        return std::env::current_exe().ok()?.parent().map(PathBuf::from);
+    }
+    None
+}
+/// Whether `file` lies in `bundle` (`signed_bundle`), with no need of a watch.
+#[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
+fn in_signed_bundle(file: &std::path::Path, bundle: Option<&std::path::Path>) -> bool {
+    bundle.is_some_and(|bundle| file.starts_with(bundle))
+}
 /// What woke `watch`.
-#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
 enum Woke {
     /// A watched file changed.
     Changed,
@@ -4444,7 +4514,7 @@ enum Woke {
     Timer,
 }
 /// The first of a change, a reload's rewatch, or `after` going by.
-#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
 async fn wake(
     events: &mut file_events::FileEvents,
     rewatched: &mut zgx::task::LatestReceiver<()>,
@@ -4521,6 +4591,26 @@ fn trim_idle(inner: &Inner) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_signed_bundles_files_alone_go_unwatched() {
+        use super::in_signed_bundle;
+        use std::path::Path;
+        let bundle = Path::new("/app/My.app");
+        assert!(in_signed_bundle(
+            Path::new("/app/My.app/x/app.luau"),
+            Some(bundle)
+        ));
+        // A plugin in the app's documents, and any file with no such bundle.
+        assert!(!in_signed_bundle(
+            Path::new("/data/Documents/p.luau"),
+            Some(bundle)
+        ));
+        assert!(!in_signed_bundle(
+            Path::new("/app/My.app.luau"),
+            Some(bundle)
+        ));
+        assert!(!in_signed_bundle(Path::new("/app/My.app/x/app.luau"), None));
+    }
     use super::*;
 
     /// A directory for one test, under its real path.

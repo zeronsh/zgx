@@ -275,6 +275,39 @@ fn inputs_take_letter_spacing() {
 }
 
 #[test]
+fn leading_lowers_inherits_and_takes_a_token() {
+    let mut h = Harness::inline(
+        r##"ui.theme.tokens { ["app.leading"] = 1.7129 }
+        return ui.column {
+            leading = 2,
+            ui.text { "inherited", id = "a" },
+            ui.text { "own", id = "b", leading = 1.75 },
+            ui.text { "token", id = "c", leading = "$app.leading" },
+            ui.text { "reset", id = "d", leading = 0 },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    let ids = ["a", "b", "c", "d"].map(|id| h.find(id).unwrap());
+    let scene = h.ui.scene.borrow();
+    // Its text node's.
+    let leading = |i: usize| {
+        let mut stack = vec![ids[i]];
+        while let Some(n) = stack.pop() {
+            if let zgx::scene::NodeKind::Text { .. } = scene.kind(n) {
+                return scene.font(n).line_height;
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        panic!("no text node")
+    };
+    use zgx::text_layout::LineHeight;
+    assert_eq!(leading(0), LineHeight::with_leading(2.));
+    assert_eq!(leading(1), LineHeight::with_leading(1.75));
+    assert_eq!(leading(2), LineHeight::with_leading(1.7129));
+    assert_eq!(leading(3), LineHeight::NORMAL);
+}
+
+#[test]
 fn menus_open_where_placed() {
     let mut h = Harness::inline(
         r##"local open = ui.state("open", true)

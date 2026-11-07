@@ -356,19 +356,24 @@ fn ui_prefers_follows_the_systems_display_settings() {
         r##"return ui.column {
             ui.text { function()
                 local p = ui.prefers
-                return `{p.reduced_motion:get()} {p.more_contrast:get()} {p.reduced_transparency:get()}`
+                return `{p.reduced_motion:get()} {p.more_contrast:get()} {p.reduced_transparency:get()} {p.without_color:get()} {p.inverted_colors:get()}`
             end, id = "p" } }"##,
     );
     h.frames(2);
-    assert_eq!(h.text("p"), "false false false");
+    assert_eq!(h.text("p"), "false false false false false");
     h.ui.theme().set_system_preferences(SystemPreferences {
         reduced_motion: true,
         increased_contrast: false,
         reduced_transparency: true,
-        ..Default::default()
+        differentiate_without_color: true,
+        inverted_colors: false,
     });
     h.frames(1);
-    assert_eq!(h.text("p"), "true false true", "as the system changes");
+    assert_eq!(
+        h.text("p"),
+        "true false true true false",
+        "as the system changes"
+    );
 }
 
 /// A box's corner radii (top left, top right, bottom right, bottom left)

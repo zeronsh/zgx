@@ -525,6 +525,14 @@ fn window_of(
 /// (`ScriptHost::window_chrome`), which `ui.window.titlebar_area` and
 /// `ui.window.controls` read.
 pub(crate) const TITLEBAR_AREA: &str = "zgx.window.titlebar_area";
+/// `ui.window.safe_area`'s state (`ScriptHost::window_safe_area`).
+pub(crate) const SAFE_AREA: &str = "zgx.window.safe_area";
+/// `ui.window.keyboard`'s state (`ScriptHost::window_safe_area`).
+pub(crate) const KEYBOARD: &str = "zgx.window.keyboard";
+/// `ui.window.overscroll`'s state (`ScriptHost::window_safe_area`).
+pub(crate) const OVERSCROLL: &str = "zgx.window.overscroll";
+/// `ui.window.tab_bar`'s state: a mounted `ui.native_tabs` sets it.
+pub(crate) const TAB_BAR: &str = "zgx.window.tab_bar";
 pub(crate) const CONTROLS: &str = "zgx.window.controls";
 /// The shared keys holding the app's window's zoom (1 at 100%) and whether
 /// its keys zoom it (`ScriptHost::window_zoom`): `ui.window.zoom` and
@@ -631,6 +639,11 @@ pub(crate) fn install(
             let state = match name.as_deref() {
                 Some("size") => None,
                 _ if plugin => return Ok(mlua::Value::Nil),
+                // What the system's bars and keyboard leave of it: iOS's to set.
+                Some("safe_area") => Some(shared.state(SAFE_AREA, crate::safe_area_value([0.; 4]))),
+                Some("overscroll") => Some(shared.state(OVERSCROLL, Value::Num(0.))),
+                Some("keyboard") => Some(shared.state(KEYBOARD, Value::Num(0.))),
+                Some("tab_bar") => Some(shared.state(TAB_BAR, Value::Num(0.))),
                 Some("zoom") => Some(shared.state(ZOOM, Value::Num(1.))),
                 Some("zoomable") => Some(shared.state(ZOOMABLE, Value::Bool(true))),
                 Some("visible") => Some(shared.state(VISIBLE, Value::Bool(true))),
