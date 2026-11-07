@@ -39,6 +39,8 @@ struct EffectRecord {
     /// `Inner::owned`): its callback was wrapped to drop that before it runs
     /// again, and its drop drops it. Effects that never own pay nothing.
     owns: bool,
+    /// TEMPORARY (effect sites): where it was made.
+    site: &'static std::panic::Location<'static>,
 }
 /// What effects made while they ran, by effect (`Runtime::own`).
 type Owned = HashMap<EffectId, Vec<Box<dyn Any>>, std::hash::BuildHasherDefault<IdHasher>>;
@@ -318,9 +320,17 @@ impl Inner {
         };
         #[cfg(feature = "trace")]
         let traced = crate::trace::enabled().then(std::time::Instant::now);
+        // TEMPORARY (effect sites): each run's time, by where it was made.
+        let timed = crate::profile::enabled().then(|| {
+            let site = self.effects.borrow().get(&id).map(|record| record.site);
+            (site, std::time::Instant::now())
+        });
         {
             let _active = Active::run(&self.active, id);
             (*callback.borrow_mut())();
+        }
+        if let Some((Some(site), started)) = timed {
+            crate::profile::effect_ran(site, started.elapsed());
         }
         #[cfg(feature = "trace")]
         if let Some(started) = traced {
@@ -402,10 +412,12 @@ impl Runtime {
         }
     }
     /// Runs immediately. Keep the returned handle alive to keep the subscription.
+    #[track_caller]
     pub fn effect(&self, callback: impl FnMut() + 'static) -> Effect {
         self.effect_marked(false, callback)
     }
     /// [`Runtime::effect`], `mount_pure` if it reads no layout.
+    #[track_caller]
     pub(crate) fn effect_marked(
         &self,
         mount_pure: bool,
@@ -415,6 +427,7 @@ impl Runtime {
     }
     /// [`Runtime::effect_marked`] with its callback already allocated: a
     /// large closure moves into its allocation once.
+    #[track_caller]
     pub(crate) fn effect_callback(&self, mount_pure: bool, callback: Callback) -> Effect {
         let born = self.inner.next.get();
         self.inner.next.set(born + 1);
@@ -428,6 +441,7 @@ impl Runtime {
                 stopped: false,
                 mount_pure,
                 owns: false,
+                site: std::panic::Location::caller(),
             },
         );
         self.inner.queue(id);
@@ -442,6 +456,7 @@ impl Runtime {
     /// even inside a batch or a flush, where `effect` queues it behind what
     /// is running: a value derived by it is readable at once (a computed
     /// made while a component builds, which `on_mount` then reads).
+    #[track_caller]
     pub fn effect_now(&self, callback: impl FnMut() + 'static) -> Effect {
         if self.inner.batch_depth.get() == 0 && !self.inner.flushing.get() {
             return self.effect(callback);
@@ -459,6 +474,7 @@ impl Runtime {
                 stopped: false,
                 mount_pure: false,
                 owns: false,
+                site: std::panic::Location::caller(),
             },
         );
         // Made before it runs: a first run that panics drops it, so

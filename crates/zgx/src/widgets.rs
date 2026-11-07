@@ -2093,12 +2093,14 @@ impl Ui {
     }
     /// Run `f` now and whenever what it reads changes, for as long as `owner`
     /// is mounted.
+    #[track_caller]
     pub fn bind(&mut self, owner: NodeId, f: impl FnMut() + 'static) {
         self.bind_marked(owner, false, f);
     }
     /// [`Ui::bind`]. `mount_pure`: `f` reads no layout, so a mount's
     /// deferred input draws need not be made before it runs
     /// (`watch_geometry`).
+    #[track_caller]
     pub(crate) fn bind_marked(
         &mut self,
         owner: NodeId,
