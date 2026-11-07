@@ -607,6 +607,8 @@ impl GpuRenderer {
                 step: 0,
                 factor: 1f32.to_bits(),
                 exact: false,
+                cropped: false,
+                glyphs: 0.,
                 transformed: false,
                 used: self.layer_frame,
                 parked: false,
