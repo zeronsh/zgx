@@ -3137,7 +3137,8 @@ fn read_range(lua: &Lua, node: &mut Node, table: &Table) -> mlua::Result<()> {
     node.a11y.get_or_insert_default().range = Some(Box::new(range));
     Ok(())
 }
-/// A slider's `value_text` from `table`, if it has one.
+/// What an element reads as besides its name (`value_text`), a slider's
+/// or any other's, from `table`, if it has one.
 #[inline(never)]
 fn read_value_text(lua: &Lua, node: &mut Node, table: &Table) -> mlua::Result<()> {
     let text = table.get::<mlua::Value>("value_text")?;
@@ -4876,6 +4877,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     matches!(a11y.role, Some(Role::Slider | Role::SpinButton))
                 }) {
                     read_range(lua, &mut node, table)?;
+                } else {
+                    // What it reads as besides its name (`aria-valuetext`):
+                    // a row's detail, as a Settings cell's value.
+                    read_value_text(lua, &mut node, table)?;
                 }
             }
             node_ud(lua, node)
@@ -4895,6 +4900,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             if let Some(table) = &table {
                 button_look(lua, table)?;
                 fill_from(lua, &mut node, table, None, lint)?;
+                read_value_text(lua, &mut node, table)?;
             }
             node_ud(lua, node)
         })?,
