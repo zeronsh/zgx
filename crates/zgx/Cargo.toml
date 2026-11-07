@@ -65,6 +65,17 @@ profile-nested = []
 # effects, per frame. Off at run time until asked; built only for them.
 trace = []
 
+# A deep recursion's stack segment, kept for the next (`deep`): on iOS, and
+# in zgx's own tests on any Unix. Nowhere else, so a desktop build's crates
+# and their code are as they were.
+[target.'cfg(target_os = "ios")'.dependencies]
+libc = "0.2"
+psm = "0.1.32"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+psm = "0.1.32"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation = "0.3.2"
 objc2-core-video = "0.3.2"
