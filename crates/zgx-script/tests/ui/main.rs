@@ -49,6 +49,8 @@ mod layout_motion;
 mod layout_unsettled;
 #[path = "../lazy_ui.rs"]
 mod lazy_ui;
+#[path = "../list_drag_keeps_row.rs"]
+mod list_drag_keeps_row;
 #[path = "../list_edges.rs"]
 mod list_edges;
 #[path = "../list_estimate.rs"]
@@ -71,8 +73,6 @@ mod list_long_budget;
 mod list_reindex;
 #[path = "../list_tab_rows.rs"]
 mod list_tab_rows;
-#[path = "../list_drag_keeps_row.rs"]
-mod list_drag_keeps_row;
 #[path = "../list_thin_rows.rs"]
 mod list_thin_rows;
 #[path = "../markdown_lazy.rs"]
