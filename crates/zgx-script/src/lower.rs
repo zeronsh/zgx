@@ -2942,6 +2942,7 @@ fn kind_view(
             contain,
             wheel_across,
             paging,
+            ride,
             padding,
         } => {
             let offset = match offset {
@@ -2968,6 +2969,10 @@ fn kind_view(
                 view
             };
             let view = if *paging { view.paging(true) } else { view };
+            let view = match ride {
+                Some(ride) => view.keyboard_ride(*ride),
+                None => view,
+            };
             let view = match padding {
                 Some(padding) => with_scroll_padding(view, padding, vm),
                 None => view,

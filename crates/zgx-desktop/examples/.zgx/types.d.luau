@@ -4668,6 +4668,11 @@ export type ScrollProps = {
 	-- Comes to rest only on whole pages, each its own length along the way it
 	-- scrolls, as UIKit's paging scroll views.
 	paging: boolean?,
+	-- How it moves a focused field clear of the software keyboard (iOS):
+	-- "native" (the default) as UIKit's scroll views, one scroll on an
+	-- ease-in-out over the keyboard's duration; "attached", the field riding
+	-- the keyboard's edge on its spring, the gap between them held.
+	keyboard_ride: ("native" | "attached")?,
 	-- What a focused control or a find keeps clear of scrolling into view
 	-- (CSS's scroll-padding): a composer or a bar floating over its edges.
 	-- Points: one number for every side, or { top, bottom, left, right };

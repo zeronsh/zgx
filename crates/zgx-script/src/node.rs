@@ -1101,6 +1101,9 @@ pub(crate) enum Kind {
         wheel_across: bool,
         /// `paging = true`: it comes to rest on whole pages.
         paging: bool,
+        /// `keyboard_ride = "native" | "attached"`: how it moves a focused
+        /// field clear of a software keyboard.
+        ride: Option<zgx::elastic::KeyboardRide>,
         /// `scroll_padding`: kept clear as what it holds scrolls into view.
         padding: Option<Box<ScrollPadding>>,
     },
@@ -3560,6 +3563,7 @@ const LATE_FIELDS: &[&str] = &[
     "overscroll",
     "wheel_across",
     "paging",
+    "keyboard_ride",
     "capture_keys",
     "scroll_padding",
     "read_only",
@@ -3744,6 +3748,25 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 Kind::List { rare, .. } => rare.get_or_insert_default().contain = contain,
                 Kind::Input { rare, .. } => rare.get_or_insert_default().contain = contain,
                 _ => {}
+            }
+        }
+        "keyboard_ride" => {
+            use zgx::elastic::KeyboardRide;
+            let ride = match value {
+                mlua::Value::String(ref text) if &*text.to_str()? == "native" => {
+                    KeyboardRide::Native
+                }
+                mlua::Value::String(ref text) if &*text.to_str()? == "attached" => {
+                    KeyboardRide::Attached
+                }
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "`keyboard_ride` is \"native\" or \"attached\"",
+                    ));
+                }
+            };
+            if let Kind::Scroll { ride: set, .. } = &mut node.kind {
+                *set = Some(ride);
             }
         }
         "at_caret" => {
@@ -5132,6 +5155,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             contain: false,
                             wheel_across: false,
                             paging: false,
+                            ride: None,
                             padding: None,
                         },
                     ),

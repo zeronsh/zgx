@@ -5821,3 +5821,33 @@ fn a_pointer_event_says_where_and_the_keys_held() {
         "{said}"
     );
 }
+
+#[test]
+fn a_scroll_view_says_how_a_field_rides_the_keyboard() {
+    // Taken by any scroll view; kept and read only on iOS (zgx's
+    // `elastic::driven_tests` check it reaches the driver).
+    let tall = r#"ui.div { h = 2000 }"#;
+    for code in [
+        format!("return ui.scroll {{ w = 200, h = 200, {tall} }}"),
+        format!(r#"return ui.scroll {{ w = 200, h = 200, keyboard_ride = "attached", {tall} }}"#),
+    ] {
+        let h = Harness::inline(&code);
+        h.frames(2);
+        assert_eq!(h.host.error().get(), None, "{code}");
+    }
+    let wrong = zgx_script::testing::TestApp::try_new(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.scroll { keyboard_ride = "glued" }"#,
+        )
+    });
+    assert!(
+        wrong
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.contains("keyboard_ride")),
+        "{:?}",
+        wrong.err()
+    );
+}
