@@ -3517,6 +3517,9 @@ export type GlassProps = ContainerProps & {
 	tint: Reactive<Color>?,
 	-- Its corners' radius in points.
 	radius: Reactive<number>?,
+	-- Each corner's own, over `radius`: `{ tl, tr, br, bl }` or four numbers
+	-- (the drawn glass; macOS's system glass takes `radius`).
+	corners: Reactive<Corners>?,
 }
 export type ScrollProps = {
 	-- Size and position.

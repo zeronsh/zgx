@@ -445,6 +445,8 @@ pub(crate) struct GlassSpec {
     pub clear: Option<Source>,
     pub tint: Option<Source>,
     pub radius: Option<Source>,
+    /// Each corner's own (`{ tl, tr, br, bl }` or four numbers).
+    pub corners: Option<Source>,
 }
 /// `ui.glass`, made the first time a script names it.
 pub(crate) fn install_glass(lua: &Lua, ui: &Table) -> mlua::Result<()> {
@@ -463,6 +465,7 @@ pub(crate) fn install_glass(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                 clear: take("clear", Ty::Bool)?,
                 tint: take("tint", Ty::Color)?,
                 radius: take("radius", Ty::Num)?,
+                corners: take("corners", Ty::Corners)?,
             };
             let node = fill(
                 lua,
