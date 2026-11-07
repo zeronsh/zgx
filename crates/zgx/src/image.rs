@@ -466,6 +466,20 @@ impl ImageData {
         // An animation's still: its other frames, or its stream, too.
         own + (self.pixels.animation.as_ref()).map_or(0, |animation| animation.bytes())
     }
+    /// All its pixels, straight, for a moment (a copy to the clipboard): a
+    /// kept file's decoded for this and dropped with it, where `pixels` holds
+    /// them for as long as the image.
+    pub fn pixels_now(&self) -> Arc<[u8]> {
+        match &*self.pixels.kept {
+            Some(kept) => match kept.pinned.get() {
+                Some(pinned) => pinned.clone(),
+                None => (kept.decode)(&kept.encoded).unwrap_or_else(|_| {
+                    vec![0; self.width as usize * self.height as usize * 4].into()
+                }),
+            },
+            None => self.pixels.decoded.clone(),
+        }
+    }
     /// Its pixels, straight, shared (`pixels`, by count).
     pub fn pixels_arc(&self) -> Arc<[u8]> {
         match &*self.pixels.kept {
@@ -828,6 +842,24 @@ mod kept_tests {
         // Borrowed: whole, straight, and kept.
         assert_eq!(image.pixels().len(), 8 * 4 * 4);
         assert_eq!(image.pixels_arc().len(), 8 * 4 * 4);
+    }
+
+    /// Read whole for a moment (a copy to the clipboard), a kept file holds
+    /// nothing after; `pixels` holds it from then on, and it's read from there.
+    #[test]
+    fn pixels_read_now_are_not_kept() {
+        let _alone = alone();
+        let image = ImageData::kept(8, 4, Arc::from(&b"file"[..]), decode).unwrap();
+        release_decoded();
+        let before = decoded_bytes();
+        let now = image.pixels_now();
+        assert_eq!(now.len(), 8 * 4 * 4);
+        assert_eq!(&now[..4], &[255, 0, 0, 255]);
+        drop(now);
+        assert_eq!(decoded_bytes(), before, "nothing kept");
+        image.pixels();
+        assert_eq!(decoded_bytes(), before + 8 * 4 * 4);
+        assert!(Arc::ptr_eq(&image.pixels_now(), &image.pixels_arc()));
     }
 
     /// A small picture decodes in the frame that draws it (no pop-in); a
