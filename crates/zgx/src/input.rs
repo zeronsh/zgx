@@ -540,6 +540,27 @@ impl EventContext {
 /// events, shorter than a person's pause between gestures.
 const SCROLL_LATCH: Duration = Duration::from_millis(300);
 
+/// A wheel gesture's scroll view (`State::scroll_latch`), as AppKit latches
+/// one: it holds for the gesture and its momentum, never past them. A
+/// trackpad's next gesture (`ScrollGesture::Began`), or its momentum's end,
+/// lets go, so the next one goes to the view under the pointer, whatever
+/// the last one's coast or a pause left; a mouse wheel's notch, which has no
+/// gesture, lets go once the pointer has moved; a press always does.
+#[derive(Clone, Copy, Debug)]
+struct ScrollLatch {
+    node: NodeId,
+    /// The axis the gesture began along: horizontal or not.
+    axis: bool,
+    /// When it last scrolled.
+    at: Instant,
+    /// Where the pointer was as it last scrolled.
+    pointer: (f32, f32),
+}
+
+/// How far the pointer moves before a mouse wheel's next notch is no longer
+/// the latched gesture's: past a hand's tremor, short of another view.
+const WHEEL_MOVED: f32 = 2.;
+
 /// How far a scroll must move along the other axis to be a turn rather than a
 /// finger's drift.
 const SCROLL_TURN: f32 = 8.;
@@ -790,11 +811,10 @@ struct State {
     spring_delay: Option<Option<std::time::Duration>>,
     /// The physical key of the key event being dispatched (`set_key_code`).
     key_code: Option<Rc<str>>,
-    /// The scroll view a wheel gesture is latched to, the axis it began along
-    /// (horizontal or not) and when it last scrolled: the rest of the gesture
-    /// goes to it alone, its drift included, until it clearly turns
-    /// (`axis_turned`).
-    scroll_latch: Option<(NodeId, bool, Instant)>,
+    /// The scroll view a wheel gesture is latched to: the rest of the
+    /// gesture goes to it alone, its drift included, until it clearly turns
+    /// (`axis_turned`), a new one begins, or it ends (`ScrollLatch`).
+    scroll_latch: Option<ScrollLatch>,
     /// The modifier keys last known held (from the platform's pointer and
     /// key events): what an activation (a click) was made with.
     modifiers: Modifiers,
@@ -899,6 +919,15 @@ impl InputDispatcher {
     }
     /// Whether `target` or a view around it takes navigation
     /// (`take_navigation`). Reads only.
+    /// A trackpad gesture's phase: a new gesture, or the end of the last
+    /// one's momentum, lets go of the scroll view that one latched to, so
+    /// the next scroll goes to the view under the pointer, as AppKit's does.
+    /// (The fingers lifting keeps it: the momentum that follows is theirs.)
+    pub(crate) fn scroll_gesture(&self, phase: ScrollGesture) {
+        if matches!(phase, ScrollGesture::Began | ScrollGesture::MomentumEnded) {
+            self.state.borrow_mut().scroll_latch = None;
+        }
+    }
     pub(crate) fn navigates(&self, scene: &Scene, target: NodeId) -> bool {
         let state = self.state.borrow();
         !state.navigators.is_empty()
@@ -1484,7 +1513,7 @@ impl InputDispatcher {
                 .chain(s.hover.iter().copied())
                 .chain(s.hover_told.iter().copied())
                 .chain(s.file_hovered.iter().copied())
-                .chain(s.scroll_latch.map(|(id, ..)| id))
+                .chain(s.scroll_latch.map(|latch| latch.node))
                 .chain(s.drag.iter().flat_map(drag::DragSession::nodes))
                 .chain(s.drag_ending)
                 .chain(s.visit.as_ref().and_then(drag::Visit::node))
@@ -2694,28 +2723,44 @@ impl InputDispatcher {
         if capture.is_none() {
             self.set_capture(None, &event);
         }
+        // A press never leaves scrolling pinned: what scrolls next is what's
+        // under the pointer then.
+        if matches!(event, InputEvent::PointerDown { .. }) {
+            self.state.borrow_mut().scroll_latch = None;
+        }
         // The rest of a wheel gesture goes to the scroll view it latched
         // to, alone, as macOS latches one: it neither chains to the views
         // around it at an edge nor moves to one that slides under the
-        // pointer. A pause ends the gesture.
+        // pointer. A pause ends the gesture, as does a trackpad's next one
+        // (`scroll_gesture`); a mouse wheel's notch after the pointer moved
+        // is one of its own.
         if let InputEvent::Scroll {
-            delta_x, delta_y, ..
+            x,
+            y,
+            delta_x,
+            delta_y,
         } = &event
         {
             let now = Instant::now();
-            let (delta_x, delta_y) = (*delta_x, *delta_y);
-            let latched = self.state.borrow().scroll_latch.filter(|(node, axis, at)| {
-                !axis_turned(*axis, delta_x, delta_y)
-                    && now.saturating_duration_since(*at) < SCROLL_LATCH
-                    && scene.borrow().contains(*node)
-                    && self.enabled(&scene.borrow(), *node)
+            let (x, y, delta_x, delta_y) = (*x, *y, *delta_x, *delta_y);
+            let wheel = mouse_wheel_shift().is_some();
+            let latched = self.state.borrow().scroll_latch.filter(|latch| {
+                !axis_turned(latch.axis, delta_x, delta_y)
+                    && now.saturating_duration_since(latch.at) < SCROLL_LATCH
+                    && !(wheel
+                        && (x - latch.pointer.0).hypot(y - latch.pointer.1) > WHEEL_MOVED)
+                    && scene.borrow().contains(latch.node)
+                    && self.enabled(&scene.borrow(), latch.node)
             });
-            if let Some((node, ..)) = latched {
+            if let Some(latch) = latched {
+                let node = latch.node;
                 let ctx =
                     self.route_pointer(scene, node, event, modifiers.unwrap_or_default(), 0, true);
-                let axis = self.state.borrow().scroll_latch.map(|(_, axis, _)| axis);
-                self.state.borrow_mut().scroll_latch =
-                    Some((node, axis.unwrap_or(false), now));
+                self.state.borrow_mut().scroll_latch = Some(ScrollLatch {
+                    at: now,
+                    pointer: (x, y),
+                    ..latch
+                });
                 return DispatchResult {
                     target: Some(node),
                     default_prevented: ctx.prevented,
@@ -2885,14 +2930,22 @@ impl InputDispatcher {
                 }
             }
             if let InputEvent::Scroll {
-                delta_x, delta_y, ..
+                x,
+                y,
+                delta_x,
+                delta_y,
             } = event
             {
                 let horizontal = delta_x.abs() > delta_y.abs();
                 self.state.borrow_mut().scroll_latch = ctx
                     .prevented_by
                     .filter(|_| ctx.prevented)
-                    .map(|node| (node, horizontal, Instant::now()));
+                    .map(|node| ScrollLatch {
+                        node,
+                        axis: horizontal,
+                        at: Instant::now(),
+                        pointer: (x, y),
+                    });
             }
             if let Some((source, payload, pressed_at)) = ctx.drag_request.clone()
                 && let InputEvent::PointerMove { x, y } = event
