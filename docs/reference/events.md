@@ -52,7 +52,7 @@ on_drag_spring: ((payload: any) -> boolean?)?
 | `on_key` | `{ key, code, shift, ctrl, alt, meta, cmd, repeat, editing }` (`code`: the physical key, as the DOM's `KeyboardEvent.code`, `"KeyA"`, `"Digit1"`; `editing`: a text field holds focus, so a bare-key shortcut gives way) | a key goes down while it, or a node inside it, has focus. Return `true` to consume the key: the default action and the ancestors' handlers do not see it |
 | `on_key_up` | the key's name | the key comes up |
 | `on_focus`, `on_blur` | nothing | it takes or loses keyboard focus |
-| `on_wheel` | `{ dx, dy, x, y, local_x, local_y, shift, ctrl, alt, meta, cmd }` | a wheel or trackpad scroll over it. Return `true` to take it from the scroll views around it: a canvas pans with it, or zooms about the pointer with ⌘ or Ctrl held |
+| `on_wheel` | `{ dx, dy, x, y, local_x, local_y, shift, ctrl, alt, meta, cmd }` | a wheel or trackpad scroll over it. Return `true` to take it from the scroll views around it: a canvas pans with it, or zooms about the pointer with ⌘ or Ctrl held. With Shift (and not Ctrl) held, a mouse wheel's vertical lines arrive as `dx`, as browsers give them, on every platform (macOS reports them so itself) |
 | `on_pinch` | `{ scale, x, y, local_x, local_y, shift, ctrl, alt, meta, cmd }` (`scale`: the change in the fingers' spread, 0.05 for 5% apart: zoom in; negative, out) | a trackpad pinch over it (macOS); `true` takes it |
 | `on_mount` | its [element](#elements) | once, when it is mounted: start animations here |
 | `on_resize` | `{ w, h }`, its element | layout gives it a new size, and at its first layout (as a ResizeObserver reports) |
