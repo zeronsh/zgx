@@ -130,8 +130,9 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
                     Curve::Spring { stiffness, damping } => {
                         // The time since its last frame, at most a quarter second (a
                         // window back after a while catches up that much, not all of
-                        // it at once), in steps no longer than a 120 Hz frame's: the
-                        // same curve at 24 Hz as at 120, and stable whatever the gap.
+                        // it at once); past a frame and a half, in steps no longer than
+                        // a 120 Hz frame's: the same curve at 24 Hz as at 120, and
+                        // stable whatever the gap.
                         let elapsed = stepped
                             .map_or(frame.interval, |last| {
                                 frame.time.saturating_duration_since(last)
@@ -142,7 +143,15 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
                         let goal = target.get();
                         let (mut x, to) =
                             (f64::from(value.with_untracked(|v| *v)), f64::from(goal));
-                        let steps = (elapsed * 120.).ceil().max(1.);
+                        // A frame on time at 40 Hz or faster is one step: only a late
+                        // frame or a slower display's is cut up.
+                        let on_time =
+                            elapsed <= frame.interval.as_secs_f64() * 1.5 && elapsed <= 0.025;
+                        let steps = if on_time {
+                            1.
+                        } else {
+                            (elapsed * 120.).ceil().max(1.)
+                        };
                         let dt = elapsed / steps;
                         for _ in 0..steps as usize {
                             velocity += (-f64::from(*stiffness) * (x - to)
