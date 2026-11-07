@@ -77,7 +77,11 @@ fn displayed(h: &mut Harness, id: &str) -> bool {
     let node = h.find(id).unwrap_or_else(|| panic!("no node `{id}`"));
     let scene = h.ui.scene.borrow();
     std::iter::once(node).chain(scene.ancestors(node)).all(|n| {
-        scene.style(n).layout_options.as_deref().and_then(|o| o.display)
+        scene
+            .style(n)
+            .layout_options
+            .as_deref()
+            .and_then(|o| o.display)
             != Some(zgx::layout::Display::None)
     })
 }
@@ -109,10 +113,11 @@ fn with_reduce_motion_a_push_and_a_pop_cross_fade_as_uikits_do() {
             end,
         }"#,
     );
-    h.ui.theme().set_system_preferences(zgx::theme::SystemPreferences {
-        reduced_motion: true,
-        ..Default::default()
-    });
+    h.ui.theme()
+        .set_system_preferences(zgx::theme::SystemPreferences {
+            reduced_motion: true,
+            ..Default::default()
+        });
     h.frames(2);
     assert_eq!(h.error(), None);
     h.click("go");
@@ -127,7 +132,10 @@ fn with_reduce_motion_a_push_and_a_pop_cross_fade_as_uikits_do() {
     assert!((0.15..0.75).contains(&outgoing), "halfway out: {outgoing}");
     h.advance_ms(400.);
     assert!((seen(&mut h, "back") - 1.).abs() < 0.01);
-    assert!(!displayed(&mut h, "root"), "the page under goes once it has faded");
+    assert!(
+        !displayed(&mut h, "root"),
+        "the page under goes once it has faded"
+    );
     // A pop: the root fades back in, the page goes when it has faded.
     h.click("back");
     h.advance_ms(267.);
@@ -136,4 +144,56 @@ fn with_reduce_motion_a_push_and_a_pop_cross_fade_as_uikits_do() {
     h.advance_ms(400.);
     assert!(h.find("back").is_none(), "the popped page is gone");
     assert!((seen(&mut h, "root") - 1.).abs() < 0.01);
+}
+
+#[test]
+fn a_sheets_grabber_toggles_its_detents_and_says_so_as_uikits() {
+    let mut h = Harness::inline(
+        r#"local open = ui.state("open", true)
+        return ui.div { w = "100%", h = "100%",
+            ui.ios.sheet { open = open, build = function() return ui.text { "Inside" } end },
+        }"#,
+    );
+    h.ui.set_assistive_technology(true);
+    h.frames(2);
+    h.advance_ms(800.);
+    assert_eq!(h.error(), None);
+    let grabber = |h: &mut Harness| {
+        with_role(h, Role::Button)
+            .into_iter()
+            .find(|n| n.label == "Sheet Grabber")
+            .expect("the grabber")
+    };
+    let at_medium = grabber(&mut h);
+    assert_eq!(at_medium.value.as_deref(), Some("Half screen"));
+    assert_eq!(
+        at_medium.description.as_deref(),
+        Some("Double tap to expand the sheet.")
+    );
+    // A tap goes to the detent before, the largest after the smallest.
+    let node = {
+        let scene = h.ui.scene.borrow();
+        let semantics = h.ui.semantics.borrow();
+        let mut pending = vec![scene.root()];
+        let mut found = None;
+        while let Some(id) = pending.pop() {
+            if semantics
+                .get(id)
+                .is_some_and(|n| n.label == "Sheet Grabber")
+            {
+                found = Some(id);
+            }
+            pending.extend(scene.children(id).iter().copied());
+        }
+        found.expect("the grabber's node")
+    };
+    h.ui.input
+        .dispatch_to(&h.ui.scene, node, zgx::input::InputEvent::Activate);
+    h.advance_ms(800.);
+    let at_large = grabber(&mut h);
+    assert_eq!(at_large.value.as_deref(), Some("Expanded"));
+    assert_eq!(
+        at_large.description.as_deref(),
+        Some("Double tap to collapse the sheet.")
+    );
 }

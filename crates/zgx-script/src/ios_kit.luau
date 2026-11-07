@@ -1176,6 +1176,8 @@ ios.sheet = ui.component(function(props)
 	local safe = ui.window.safe_area
 	local window = ui.window.size
 	local detent = 1
+	-- The detent it rests at, for what reads it (the grabber's value and hint).
+	local resting = ui.use_state(1)
 	local grabbed = 0
 	local function height()
 		return window:get().height
@@ -1231,6 +1233,7 @@ ios.sheet = ui.component(function(props)
 			bottom = 0,
 			on_mount = function()
 				detent = 1
+				resting:set(1)
 				run(rise, target(1))
 			end,
 			ui.button {
@@ -1333,6 +1336,7 @@ ios.sheet = ui.component(function(props)
 									return
 								end
 								detent = #detents + 1 - landing
+								resting:set(detent)
 								run(rise, target(detent), nil, speed, spring)
 							end
 						end,
@@ -1361,9 +1365,21 @@ ios.sheet = ui.component(function(props)
 					active = {},
 					items = "center",
 					label = "Sheet Grabber",
+					-- UIKit's hint, by where a tap would take it.
+					description = function()
+						local at = resting:get()
+						local count = #detents
+						if count < 2 then
+							return ""
+						end
+						-- Detents are smallest first: a later one is larger.
+						local next = (at - 2) % count + 1
+						return if next > at
+							then "Double tap to expand the sheet."
+							else "Double tap to collapse the sheet."
+					end,
 					value_text = function()
-						local _ = rise:get()
-						local d = detents[detent]
+						local d = detents[resting:get()]
 						return if d == "large" then "Expanded" elseif d == "medium" then "Half screen" else ""
 					end,
 					on_click = function()
@@ -1372,6 +1388,7 @@ ios.sheet = ui.component(function(props)
 							return
 						end
 						detent = (detent - 2) % count + 1
+						resting:set(detent)
 						run(rise, target(detent), nil, 0, SHEET_SPRING)
 					end,
 					ui.div { w = 36, h = 5, rounded = 2.5, bg = "$text.tertiary", aria_hidden = true },

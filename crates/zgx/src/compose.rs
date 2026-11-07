@@ -7272,6 +7272,9 @@ impl Accessibility {
         if outer.description.is_some() {
             inner.description = outer.description;
         }
+        if outer.description_when.is_some() {
+            inner.description_when = outer.description_when;
+        }
         if outer.error.is_some() {
             inner.error = outer.error;
         }
