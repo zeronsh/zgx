@@ -50,3 +50,53 @@ fn a_glyph_repeated_along_a_line_is_one_image_below_2x() {
         "at 2x a glyph keeps its quarter-pixel places"
     );
 }
+
+/// A centred line whose box grows, so only its start moves, keeps its spacing
+/// below 2x: each column of its ink the same, frame after frame, not a letter
+/// a pixel nearer its neighbour as the line's start passes each half pixel.
+#[test]
+fn a_line_that_only_moves_keeps_its_spacing_below_2x() {
+    use zgx::text_layout::{FontStyle, TextAlign};
+    let scale = 1.;
+    let mut gpu = GpuRenderer::new(400, 40).expect("a GPU adapter");
+    gpu.set_scale_factor(scale);
+    FontData::new(GEIST.to_vec())
+        .unwrap()
+        .install(&mut gpu.text_system().borrow_mut());
+    let mut lines = Vec::new();
+    for step in 0..16 {
+        let mut scene = Scene::new(400., 40.);
+        gpu.install_text(&mut scene);
+        let node = scene.append(
+            scene.root(),
+            NodeKind::Text {
+                text: "minimum illicit".into(),
+                font_size: 13.,
+                color: Color(255, 255, 255, 255),
+            },
+            Style {
+                width: Some(300. + step as f32 * 0.25),
+                height: Some(40.),
+                ..Default::default()
+            },
+        );
+        scene.set_font(
+            node,
+            FontStyle {
+                family: "Geist".into(),
+                align: TextAlign::Center,
+                ..Default::default()
+            },
+        );
+        let damage = scene.flush().damage;
+        gpu.render(&scene, &damage).unwrap();
+        let pixels = gpu.readback().unwrap();
+        let columns: Vec<u32> = (0..400)
+            .map(|x| (0..40).map(|y| pixels[(y * 400 + x) * 4] as u32).sum())
+            .collect();
+        let first = columns.iter().position(|ink| *ink > 0).unwrap();
+        let last = columns.iter().rposition(|ink| *ink > 0).unwrap();
+        lines.push(columns[first..=last].to_vec());
+    }
+    assert!(lines.iter().all(|line| *line == lines[0]));
+}
