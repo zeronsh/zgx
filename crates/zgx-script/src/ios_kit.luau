@@ -12,6 +12,14 @@ end
 -- A navigation controller's decay, measured beside one: remaining distance
 -- falls about 4.3 times in each 83 ms, 99% there at about 0.35 s.
 local STIFFNESS = 600
+-- A navigation controller's, measured beside a real one: a push or pop by a button,
+-- which starts a moment after the call; and what a released swipe settles on.
+local PUSH_SPRING = { stiffness = 650, damping = 56, delay = 35 }
+local POP_SPRING = { stiffness = 650, damping = 56, delay = 30 }
+local SWIPE_SPRING = { stiffness = 440, damping = 35.7 }
+-- A flick this fast (points a second) leaves past the edge and comes back.
+local FLICK = 650
+local SCREEN_CORNER = 62
 -- How far the page under the top one lies back, of the width.
 local PARALLAX = 0.3
 local SETTLE_MOST = 1200
@@ -22,7 +30,7 @@ local REFRESH_MOST = 15000
 
 -- Runs `state` to `target` as a critically damped spring from where it is, in
 -- Rust, then `done`. What it returns stops it and says how fast it was going.
-local function settle(state, target, done, speed)
+local function settle(state, target, done, speed, spring)
 	-- Reduce Motion: there at once.
 	if ui.prefers.reduced_motion:get() then
 		state:set(target)
@@ -31,10 +39,13 @@ local function settle(state, target, done, speed)
 		end
 		return function() end
 	end
+	spring = spring or {}
 	return ui.spring_to(state, target, {
-		stiffness = STIFFNESS,
-		damping = 2 * math.sqrt(STIFFNESS),
-		velocity = speed or 0,
+		stiffness = spring.stiffness or STIFFNESS,
+		damping = spring.damping or 2 * math.sqrt(STIFFNESS),
+		delay = spring.delay,
+		from = spring.from,
+		velocity = spring.velocity or speed or 0,
 		most = SETTLE_MOST,
 		done = function()
 			ui.gesture_log("settled at " .. target)
@@ -577,33 +588,6 @@ function ios.page(props)
 				},
 			},
 		},
-		props.nav and props.nav.depth() > 1 and ui.glass {
-			absolute = true,
-			left = 16,
-			top = function()
-				return safe:get().top + 3
-			end,
-			w = 44,
-			h = 44,
-			radius = 22,
-			interactive = true,
-			ui.button {
-				w = 44,
-				h = 44,
-				p = 0,
-				rounded = 22,
-				bg = "#00000000",
-				hover = {},
-				active = {},
-				label = "Back",
-				items = "center",
-				justify = "center",
-				on_click = function()
-					props.nav.pop()
-				end,
-				ui.symbol { name = "chevron.backward", size = 18, weight = 600, color = "$text.primary" },
-			},
-		} or nil,
 		props.trailing and ui.div {
 			absolute = true,
 			right = 16,
@@ -638,21 +622,41 @@ ios.stack = ui.component(function(props)
 	-- A spring each: one taking over from the other would leave that one's page
 	-- stopped where it was, with nothing to move it on.
 	local running_drag, running_enter
-	local function run_drag(target, done, speed)
-		-- A change of mind keeps the speed it had; a finger's gives its own.
+	-- From rest a button's waits as a navigation controller does; a change of mind
+	-- keeps the speed it had and goes at once.
+	local function from_button(spring, carried)
+		return if carried ~= 0
+			then { stiffness = spring.stiffness, damping = spring.damping, velocity = carried }
+			else spring
+	end
+	local function run_drag(target, done, spring)
 		local carried = if running_drag then running_drag() else 0
 		running_drag = settle(drag, target, function()
 			running_drag = nil
 			if done then
 				done()
 			end
-		end, speed or carried)
+		end, nil, spring or from_button(POP_SPRING, carried))
 	end
 	local function run_enter()
 		local carried = if running_enter then running_enter() else 0
 		running_enter = settle(entering, 0, function()
 			running_enter = nil
-		end, carried)
+		end, nil, from_button(PUSH_SPRING, carried))
+	end
+	-- What a released swipe does, as a navigation controller's: a flick home leaves
+	-- from behind the finger and quicker than it, so it passes the edge and comes back;
+	-- anything else starts from rest a moment later.
+	local function released(target, vx, at)
+		if target ~= 0 and vx >= FLICK then
+			return {
+				stiffness = SWIPE_SPRING.stiffness,
+				damping = SWIPE_SPRING.damping,
+				from = at - (0.115 * vx - 30),
+				velocity = 6 * vx - 1000,
+			}
+		end
+		return { stiffness = SWIPE_SPRING.stiffness, damping = SWIPE_SPRING.damping, delay = 12 }
 	end
 	-- Nothing may rest part way: whatever got here, a page out of place with no
 	-- spring on it goes home, and says so in the record.
@@ -687,19 +691,19 @@ ios.stack = ui.component(function(props)
 		run_enter()
 		check_soon()
 	end
-	local function finish_pop(speed)
+	local function finish_pop(spring)
 		run_drag(width, function()
 			local kept = table.clone(pages:get())
 			builders[table.remove(kept)] = nil
 			pages:set(kept)
 			drag:set(0)
-		end, speed)
+		end, spring)
 	end
 	function nav.pop()
 		if #pages:get() < 2 then
 			return
 		end
-		finish_pop(0)
+		finish_pop()
 		check_soon()
 	end
 	local start = 0
@@ -732,16 +736,18 @@ ios.stack = ui.component(function(props)
 			elseif e.phase == "ended" then
 				holding = false
 				check_soon()
-				local at = drag:get()
+				-- Where the finger left it, which its last move may not have drawn.
+				local at = clamp(start + e.x, 0, width)
+				drag:set(at)
 				if e.vx > FLING or (at > width / 2 and e.vx > -FLING) then
-					finish_pop(e.vx)
+					finish_pop(released(width, e.vx, at))
 				else
-					run_drag(0, nil, e.vx)
+					run_drag(0, nil, released(0, e.vx, at))
 				end
 			else
 				holding = false
 				check_soon()
-				run_drag(0, nil, 0)
+				run_drag(0, nil, released(0, 0, drag:get()))
 			end
 		end,
 	}
@@ -761,6 +767,17 @@ ios.stack = ui.component(function(props)
 			width = size.w
 		end,
 		ui.each(pages, function(id, index)
+			-- What lies under the top page moves as a navigation controller's does.
+			local function page_x(at)
+				local depth = #pages:get()
+				local moved = drag:get() + entering:get()
+				if at == depth then
+					return moved
+				elseif at == depth - 1 then
+					return (moved - width) * PARALLAX
+				end
+				return -width * PARALLAX
+			end
 			local on_top = function()
 				return index == #pages:get()
 			end
@@ -770,17 +787,18 @@ ios.stack = ui.component(function(props)
 				top = 0,
 				w = "100%",
 				h = "100%",
-				-- What lies under the top page moves as a navigation controller's does.
 				x = function()
-					local depth = #pages:get()
-					local moved = drag:get() + entering:get()
-					if index == depth then
-						return moved
-					elseif index == depth - 1 then
-						return (moved - width) * PARALLAX
-					end
-					return -width * PARALLAX
+					return page_x(index)
 				end,
+				-- A page in motion has the screen's rounded corners.
+				rounded = function()
+					return if index == #pages:get()
+							and index > 1
+							and drag:get() + entering:get() ~= 0
+						then SCREEN_CORNER
+						else 0
+				end,
+				overflow = "hidden",
 				-- Quite covered once it settles: it shows nothing, and asks no
 				-- plane of its own.
 				hidden = function()
@@ -831,6 +849,45 @@ ios.stack = ui.component(function(props)
 				},
 			}
 		end, { display = "contents" }),
+		-- One back button over the pages, as a navigation controller's: it stays
+		-- where it is and fades as a first page comes and goes.
+		ui.glass {
+			absolute = true,
+			left = 16,
+			top = function()
+				return ui.window.safe_area:get().top + 3
+			end,
+			w = 44,
+			h = 44,
+			radius = 22,
+			interactive = true,
+			hidden = function()
+				return #pages:get() < 2
+			end,
+			opacity = function()
+				if #pages:get() > 2 then
+					return 1
+				end
+				local moved = (drag:get() + entering:get()) / width
+				return clamp((0.88 - moved) / 0.78, 0, 1)
+			end,
+			ui.button {
+				w = 44,
+				h = 44,
+				p = 0,
+				rounded = 22,
+				bg = "#00000000",
+				hover = {},
+				active = {},
+				label = "Back",
+				items = "center",
+				justify = "center",
+				on_click = function()
+					nav.pop()
+				end,
+				ui.symbol { name = "chevron.backward", size = 18, weight = 600, color = "$text.primary" },
+			},
+		},
 	}
 end)
 

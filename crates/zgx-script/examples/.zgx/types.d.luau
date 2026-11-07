@@ -21748,6 +21748,11 @@ export type SpringToOptions = {
 	damping: number?,
 	-- Points a second to start from, for what a gesture hands over.
 	velocity: number?,
+	-- Where the spring itself begins, if not at the state: the state stays where it
+	-- is until the spring has passed it.
+	from: number?,
+	-- Ms before it moves.
+	delay: number?,
 	-- Ms, by when it lands whatever the spring says.
 	most: number?,
 	-- When it arrives.

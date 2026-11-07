@@ -1495,6 +1495,33 @@ pub(crate) struct SpringParams {
     pub damping: f32,
     pub delay_ms: f32,
 }
+/// How far from its goal a spring is `t` seconds on and how fast it is going, from
+/// `left` away at `speed`: stiffness and damping for a mass of 1, in closed form.
+fn spring_at(left: f64, speed: f64, stiffness: f64, damping: f64, t: f64) -> (f64, f64) {
+    let half = damping / 2.;
+    let rest = half * half - stiffness;
+    if rest > 1e-6 {
+        let root = rest.sqrt();
+        let (fast, slow) = (-half - root, -half + root);
+        let a = (speed - fast * left) / (slow - fast);
+        let b = left - a;
+        let (a_now, b_now) = (a * (slow * t).exp(), b * (fast * t).exp());
+        (a_now + b_now, a_now * slow + b_now * fast)
+    } else if rest < -1e-6 {
+        let turn = (-rest).sqrt();
+        let (a, b) = (left, (speed + half * left) / turn);
+        let (cos, sin) = ((turn * t).cos(), (turn * t).sin());
+        let decay = (-half * t).exp();
+        let now = decay * (a * cos + b * sin);
+        (now, decay * (b * turn * cos - a * turn * sin) - half * now)
+    } else {
+        let b = speed + half * left;
+        let decay = (-half * t).exp();
+        let now = (left + b * t) * decay;
+        (now, b * decay - half * now)
+    }
+}
+
 impl SpringParams {
     /// From a table: `response` (ms, the time of one undamped swing) and `bounce`
     /// (0 settles without overshoot, higher overshoots more) as SwiftUI's springs
@@ -6377,43 +6404,43 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 let vm = env.vm.clone();
                 let done = std::cell::RefCell::new(done);
                 let elapsed_cell = std::cell::Cell::new(0f64);
-                let began = std::cell::Cell::new(Some(std::time::Instant::now()));
+                let began = std::time::Instant::now();
+                let (speed_from, shown_from) = (
+                    velocity.get(),
+                    state
+                        .with_untracked(|value| value.as_f64())
+                        .unwrap_or(target),
+                );
+                // Where the spring itself begins, if not at the state: the state stays
+                // where it is until the spring has passed it.
+                let from = opts.get::<Option<f64>>("from")?.unwrap_or(shown_from);
+                let delay = f64::from(params.delay_ms) / 1000.;
                 env.engine.tick_with(Rc::new(move |dt_ms| {
                     if stopped.get() {
                         return false;
                     }
-                    // The first step counts from the call, not one frame: a page's
-                    // mount can take a while, and the motion keeps its time through it.
-                    let waited = began.take().map(|began| began.elapsed().as_secs_f64());
-                    let dt = (dt_ms / 1000.).max(waited.unwrap_or(0.)).min(0.05);
-                    elapsed_cell.set(elapsed_cell.get() + dt);
-                    let (mut at, mut speed) = (
-                        state
-                            .with_untracked(|value| value.as_f64())
-                            .unwrap_or(target),
-                        running.get(),
+                    // Counted from the call, not the first frame, and by the clock: a
+                    // page's mount can take a while, and a frame come late, and the
+                    // motion keeps its time through them. (A test's clock runs ahead of it.)
+                    elapsed_cell.set(
+                        (elapsed_cell.get() + dt_ms / 1000.).max(began.elapsed().as_secs_f64()),
                     );
-                    let (stiffness, damping) =
-                        (f64::from(params.stiffness), f64::from(params.damping));
-                    let mut advance = |step: f64| {
-                        speed += (stiffness * (target - at) - damping * speed) * step;
-                        at += speed * step;
+                    // Where the spring is at this time, whatever the frames: the same
+                    // curve on any display, and through a late one.
+                    let (left, speed) = spring_at(
+                        from - target,
+                        speed_from,
+                        f64::from(params.stiffness),
+                        f64::from(params.damping),
+                        (elapsed_cell.get() - delay).max(0.),
+                    );
+                    let at = if (target + left - shown_from) * (target - shown_from) < 0. {
+                        shown_from
+                    } else {
+                        target + left
                     };
-                    // The first step is one, of about a frame, and the rest no
-                    // longer than a fast display's: the same curve on any display and
-                    // through a late frame, and the same start, which is most of the feel.
-                    let first = if waited.is_some() { dt.min(0.015) } else { 0. };
-                    if first > 0. {
-                        advance(first);
-                    }
-                    let rest = dt - first;
-                    let steps = (rest / 0.0095).ceil();
-                    for _ in 0..steps as usize {
-                        advance(rest / steps);
-                    }
                     running.set(speed);
-                    let settled =
-                        (at - target).abs() < 0.5 && speed.abs() < 5. || elapsed_cell.get() > most;
+                    let settled = left.abs() < 0.5 && speed.abs() < 5. || elapsed_cell.get() > most;
                     state.set(Value::from(if settled { target } else { at }));
                     if settled {
                         running.set(0.);

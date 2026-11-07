@@ -62,3 +62,5 @@ While the page rides the keyboard its scroll offset goes on frame by frame while
 ## In Luau
 
 `ui.ios` (a Settings-style app's sections, rows, pages with large titles, stacks with edge swipes, sheets, search, pull to refresh), `ui.alert`, `ui.action_sheet`, `ui.haptic`, `ui.share`, `ui.system_menu`, `ui.on_escape`, `ui.native_pan`, `ui.pull_refresh`, `ui.scroll_edge`, `ui.webview`. `crates/zgx-script/examples/ios_showcase` holds them in one app.
+
+A stack pushes and pops on a navigation controller's own curves, measured beside one: a button's push or pop starts about 33 ms after the call on a spring of stiffness 650 and damping 56; a released swipe settles on stiffness 440 and damping 36, and a flick home passes the edge by up to about 40 points and comes back, as UIKit's does. One back button stays over the pages and fades with the first one; the moving page has the screen's rounded corners. Within a few points of UIKit at every time measured in the simulator, from the call or the release.

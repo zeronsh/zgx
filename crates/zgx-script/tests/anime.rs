@@ -1798,12 +1798,31 @@ fn a_state_runs_to_its_target_on_a_spring_with_no_script_each_frame() {
         100. * (1. - (1. + rate * t) * (-rate * t).exp())
     };
     let i = 9;
-    let (ms, found) = ((i + 1) as f64 * 17., f64::from(path[i]));
+    let (ms, found) = (i as f64 * 17., f64::from(path[i]));
     assert!(
-        (found - at(ms)).abs() < 15.,
+        (found - at(ms)).abs() < 1.,
         "{found} at {ms} ms, against {}",
         at(ms)
     );
+}
+
+#[test]
+fn a_spring_with_little_damping_passes_its_target_and_comes_back() {
+    let path = spring_to_path("stiffness = 440, damping = 35.7, velocity = 3000, most = 1200");
+    let peak = path.iter().copied().fold(0f32, f32::max);
+    assert!(peak > 101., "past it: {peak}");
+    assert_eq!(*path.last().unwrap(), 100.);
+}
+
+#[test]
+fn a_delay_holds_a_spring_and_from_waits_until_it_has_passed() {
+    let path = spring_to_path("stiffness = 650, damping = 56, delay = 40");
+    assert_eq!(path[0], 0., "still waiting");
+    assert!(path[5] > 0., "then moves");
+    // Starting behind the state, it stays until the spring reaches it.
+    let path = spring_to_path("stiffness = 440, damping = 35.7, from = -200, velocity = 6000");
+    assert!(path.iter().all(|at| *at >= 0.), "never back: {path:?}");
+    assert!(path.iter().any(|at| *at > 90.));
 }
 
 #[test]

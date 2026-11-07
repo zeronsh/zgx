@@ -21,7 +21,7 @@ ui.loop(opts: LoopOptions?) -> Binding
 
 `ui.spring`'s options say a spring as SwiftUI does, `{ response = 400, bounce = 0.15 }` (`response` in ms, `bounce` from 0, no overshoot, up to about 0.3, a lot), or as `stiffness` and `damping`; `ui.springs.smooth`, `.snappy` and `.bouncy` are named ones. `up` and `down` give another spring toward a higher value or a lower, for an opening and a closing that differ, and `delay` (ms) holds a spring back when its goal changes. A goal that changes on the way keeps the speed it had: `ui.spring(height, { up = { response = 420, bounce = 0.15, delay = 35 }, down = { response = 280 } })`.
 
-`ui.spring_to(state, target, opts) -> stop` runs a state itself to `target` on a spring, in Rust with no script call per frame, for a value something else also writes, such as a page a finger drags and a release lets go. It takes the same spring options plus `velocity` (units a second), `most` (ms, then it lands whatever the spring says) and `done`. `stop()` leaves the state where it is and returns its speed, for the next one to carry.
+`ui.spring_to(state, target, opts) -> stop` runs a state itself to `target` on a spring, in Rust with no script call per frame, for a value something else also writes, such as a page a finger drags and a release lets go. It takes the same spring options plus `velocity` (units a second), `from` (where the spring itself begins, the state staying where it is until the spring passes it), `delay` (ms), `most` (ms, then it lands whatever the spring says) and `done`. `stop()` leaves the state where it is and returns its speed, for the next one to carry.
 
 ## Targets
 

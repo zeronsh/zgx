@@ -180,7 +180,10 @@ pub(crate) fn note_draw(began: Instant) {
     let took = began.elapsed();
     let [prepared, rendered, presented, planes, applied] =
         MARKS.with(|marks| marks.replace([None; 5]));
-    note_burst(began, took);
+    // A pass that presented nothing isn't a frame.
+    if presented.is_some() {
+        note_burst(began, took);
+    }
     if took >= LONG_DRAW {
         let ms = |from: Option<Instant>, to: Option<Instant>| {
             from.zip(to).map_or(-1., |(from, to)| {
