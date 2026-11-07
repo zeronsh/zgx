@@ -161,7 +161,7 @@ pub struct EventLoop<T: 'static> {
     // It is a timer used on timed waits.
     // It is created lazily in case if we have `ControlFlow::WaitUntil`.
     // Keep it as a field to avoid recreating it on every `ControlFlow::WaitUntil`.
-    high_resolution_timer: Option<OwnedHandle>,
+    high_resolution_timer: Option<HighResolutionTimer>,
     // zgx patch: how a proxy wakes the loop while it waits (`ProxyWake`).
     proxy_wake: Option<Arc<ProxyWake>>,
 }
@@ -707,6 +707,22 @@ const FIFTY_DAYS: Duration = Duration::from_secs(50_u64 * 24 * 60 * 60);
 /// because they are even less precise (can overshoot by few ms).
 const MIN_WAIT: Duration = Duration::from_nanos(100);
 
+/// The timer of timed waits, and the `ControlFlow::WaitUntil` deadline it is
+/// armed for, if any. zgx patch: a wait for the deadline it is armed for
+/// arms it again for nothing (a kernel call each turn, every turn of a burst
+/// of input under one deadline), so it isn't. Waiting on it consumes its
+/// signal (a synchronization timer), so a wait it ends leaves it unarmed.
+struct HighResolutionTimer {
+    handle: OwnedHandle,
+    armed: Option<Instant>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Times a timer was armed on this thread (`set_high_resolution_timer`).
+    static TIMER_ARMS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 fn create_high_resolution_timer() -> Option<OwnedHandle> {
     unsafe {
         let handle: HANDLE = CreateWaitableTimerExW(
@@ -742,6 +758,8 @@ unsafe fn set_high_resolution_timer(timer: RawHandle, timeout: Duration) -> Resu
     debug_assert!(intervals_to_wait < i64::MAX as u64, "Must be called with smaller duration",);
     // Use negative time to indicate relative time.
     let due_time: i64 = -(intervals_to_wait as i64);
+    #[cfg(test)]
+    TIMER_ARMS.with(|arms| arms.set(arms.get() + 1));
     unsafe {
         let set_result = SetWaitableTimer(timer as HANDLE, &due_time, 0, None, ptr::null(), FALSE);
         if set_result != FALSE {
@@ -758,11 +776,16 @@ unsafe fn set_high_resolution_timer(timer: RawHandle, timeout: Duration) -> Resu
 /// including winits internal notifications about waiting and new messages arrival.
 /// The user events a proxy's event woke the wait for (zgx patch: `ProxyWake`).
 fn wait_for_messages_impl(
-    high_resolution_timer: &mut Option<OwnedHandle>,
+    high_resolution_timer: &mut Option<HighResolutionTimer>,
     proxy_wake: Option<&ProxyWake>,
     control_flow: ControlFlow,
     timeout: Option<Duration>,
 ) -> usize {
+    // The `WaitUntil` deadline, when it is what the wait waits for.
+    let mut deadline = match control_flow {
+        ControlFlow::WaitUntil(deadline) => Some(deadline),
+        _ => None,
+    };
     let timeout = {
         let control_flow_timeout = match control_flow {
             ControlFlow::Wait => None,
@@ -779,39 +802,51 @@ fn wait_for_messages_impl(
         }
         // Now we decided to wait so need to do some clamping
         // to avoid problems with overflow and calling WinAPI with invalid parameters.
-        timeout
+        let clamped = timeout
             .map(|t| t.min(FIFTY_DAYS))
             // If timeout is less than minimally supported by Windows,
             // increase it to that minimum. Who want less than microsecond delays anyway?
-            .map(|t| t.max(MIN_WAIT))
+            .map(|t| t.max(MIN_WAIT));
+        // Another limit, or a clamp, waits for something else.
+        if clamped != control_flow_timeout {
+            deadline = None;
+        }
+        clamped
     };
 
     if timeout.is_some() && high_resolution_timer.is_none() {
-        *high_resolution_timer = create_high_resolution_timer();
+        *high_resolution_timer =
+            create_high_resolution_timer().map(|handle| HighResolutionTimer { handle, armed: None });
     }
 
-    let high_resolution_timer: Option<RawHandle> =
-        high_resolution_timer.as_ref().map(OwnedHandle::as_raw_handle);
-
     let use_timer: bool;
-    if let (Some(handle), Some(timeout)) = (high_resolution_timer, timeout) {
-        let res = unsafe {
-            // Safety: handle can be Some only if we succeeded in creating high resolution
-            // timer. We properly clamped timeout so it can be used as argument
-            // to timer.
-            set_high_resolution_timer(handle, timeout)
-        };
-        if let Err(error_code) = res {
-            // We successfully got timer but failed to set it?
-            // Should be some bug in our code.
-            tracing::trace!("Failed to set high resolution timer: last error {}", error_code);
-            use_timer = false;
-        } else {
+    if let (Some(timer), Some(timeout)) = (high_resolution_timer.as_mut(), timeout) {
+        if deadline.is_some() && timer.armed == deadline {
+            // zgx patch: armed for this deadline already, and not yet fired.
             use_timer = true;
+        } else {
+            let res = unsafe {
+                // Safety: handle can be Some only if we succeeded in creating high resolution
+                // timer. We properly clamped timeout so it can be used as argument
+                // to timer.
+                set_high_resolution_timer(timer.handle.as_raw_handle(), timeout)
+            };
+            if let Err(error_code) = res {
+                // We successfully got timer but failed to set it?
+                // Should be some bug in our code.
+                tracing::trace!("Failed to set high resolution timer: last error {}", error_code);
+                timer.armed = None;
+                use_timer = false;
+            } else {
+                timer.armed = deadline;
+                use_timer = true;
+            }
         }
     } else {
         use_timer = false;
     }
+    let timer_handle: Option<RawHandle> =
+        high_resolution_timer.as_ref().map(|timer| timer.handle.as_raw_handle());
 
     unsafe {
         // Either:
@@ -822,7 +857,7 @@ fn wait_for_messages_impl(
         let mut raw_handles: [RawHandle; 2] = [ptr::null_mut(); 2];
         let mut num_handles = 0;
         if use_timer {
-            raw_handles[num_handles] = high_resolution_timer.unwrap();
+            raw_handles[num_handles] = timer_handle.unwrap();
             num_handles += 1;
         }
         // zgx patch: a proxy's event (`ProxyWake`), after the timer.
@@ -845,6 +880,13 @@ fn wait_for_messages_impl(
             // Well, nothing smart to do in such case.
             // Treat it as spurious wake up.
             tracing::warn!("Failed to MsgWaitForMultipleObjectsEx: error code {}", GetLastError(),);
+        }
+        // The timer ended the wait (its signal now consumed), or the wait
+        // failed: armed for nothing now.
+        if use_timer && (result == WAIT_OBJECT_0 || result == WAIT_FAILED) {
+            if let Some(timer) = high_resolution_timer.as_mut() {
+                timer.armed = None;
+            }
         }
         match (proxy_wake, wake_index) {
             (Some(wake), Some(index)) => wake.taken(result == WAIT_OBJECT_0 + index as u32),
@@ -2794,5 +2836,54 @@ fn get_pointer_move_kind(
         PointerMoveKind::Leave
     } else {
         PointerMoveKind::None
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use std::time::{Duration, Instant};
+
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        PeekMessageW, PostThreadMessageW, MSG, PM_REMOVE, WM_USER,
+    };
+
+    use super::{wait_for_messages_impl, ControlFlow, TIMER_ARMS};
+
+    fn arms() -> u32 {
+        TIMER_ARMS.with(|arms| arms.get())
+    }
+    /// A wait that a message already queued ends at once.
+    fn wait_with_a_message(timer: &mut Option<super::HighResolutionTimer>, flow: ControlFlow) {
+        unsafe { PostThreadMessageW(GetCurrentThreadId(), WM_USER, 0, 0) };
+        wait_for_messages_impl(timer, None, flow, None);
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        while unsafe { PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) } != 0 {}
+    }
+
+    /// Turns that wait for one deadline, each ended by a message (pointer
+    /// moves, say), arm the timer once; a new deadline arms it again, and so
+    /// does one after the timer has fired, which consumed its signal.
+    #[test]
+    fn a_deadline_already_armed_isnt_armed_again() {
+        let mut timer = None;
+        let start = arms();
+        let later = Instant::now() + Duration::from_secs(10);
+        for _ in 0..100 {
+            wait_with_a_message(&mut timer, ControlFlow::WaitUntil(later));
+        }
+        assert_eq!(arms() - start, 1, "one deadline, armed once");
+        wait_with_a_message(&mut timer, ControlFlow::WaitUntil(later + Duration::from_secs(1)));
+        assert_eq!(arms() - start, 2, "a new deadline, armed again");
+        // Waiting indefinitely leaves it as it was.
+        wait_with_a_message(&mut timer, ControlFlow::Wait);
+        wait_with_a_message(&mut timer, ControlFlow::WaitUntil(later + Duration::from_secs(1)));
+        assert_eq!(arms() - start, 2);
+        // A deadline the timer itself ends the wait for: armed again after.
+        let soon = Instant::now() + Duration::from_millis(5);
+        wait_for_messages_impl(&mut timer, None, ControlFlow::WaitUntil(soon), None);
+        assert!(Instant::now() >= soon - Duration::from_millis(1), "the timer ended the wait");
+        assert_eq!(arms() - start, 3);
+        assert!(timer.as_ref().is_some_and(|t| t.armed.is_none()), "its signal consumed");
     }
 }
