@@ -1047,14 +1047,22 @@ fn styled_glyphs<'a>(
     for run in runs {
         // Most texts are one line: one allocation at its size.
         glyphs.reserve(run.glyphs.len());
+        // Below 2x, the line's start on a whole pixel, and each glyph on one
+        // counted from there: a line that only moves keeps its spacing.
+        let sharp = scale < SHARP_TEXT_BELOW;
+        let line_start = match run.glyphs.first() {
+            Some(glyph) if sharp => (glyph.x + glyph.font_size * glyph.x_offset) * scale,
+            _ => 0.,
+        };
         for glyph in run.glyphs {
             // Below 2x, each glyph on the nearest whole device pixel (its
             // subpixel bin zero), as Windows' own text is: a stem a quarter
             // pixel off lands on two columns at part strength, which reads
             // as blur on a ~96 dpi screen. Its line keeps its layout.
-            let p = if scale < SHARP_TEXT_BELOW {
+            let p = if sharp {
                 let exact = (glyph.x + glyph.font_size * glyph.x_offset) * scale;
-                glyph.physical((exact.round() - exact, 0.), scale)
+                let placed = line_start.round() + (exact - line_start).round();
+                glyph.physical((placed - exact, 0.), scale)
             } else {
                 glyph.physical((0., 0.), scale)
             };
