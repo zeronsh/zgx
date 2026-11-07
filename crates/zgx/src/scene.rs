@@ -3062,7 +3062,7 @@ pub struct Scene {
     escaped: Vec<NodeId>,
     /// `measure` calls, for tests of how much work layout does.
     #[cfg(test)]
-    measure_calls: u64,
+    pub(crate) measure_calls: u64,
     /// While a mount defers its text inputs' layout: the observer running
     /// now, whose geometry reads (`bounds` and the boxes made from it) are
     /// kept with what they found (`geometry_reads`), to run it again if

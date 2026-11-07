@@ -8718,3 +8718,57 @@ struct RowFocus {
     /// Where Tab would have gone: past the list's last row that way.
     otherwise: Option<NodeId>,
 }
+
+#[cfg(test)]
+mod layout_drag_tests {
+    use super::Ui;
+    use crate::compose::prelude::VariableHeights;
+    mod layout_drag_page {
+        use crate as zgx;
+        include!("../examples/support/layout_drag_page.rs");
+    }
+
+    /// Passes and measures a frame as the split between six panes is dragged,
+    /// on `layout_drag_bench`'s page (which the gate counts as `layout-drag`).
+    fn drag() -> (f64, f64, usize) {
+        let mut ui = Ui::new(2000., 1100.);
+        let split = ui.signal(320_f32);
+        let heights = VariableHeights::new(&ui.runtime, layout_drag_page::LIST_ROWS, 60.);
+        let runtime = ui.runtime.clone();
+        let _handle = ui.mount(layout_drag_page::page(split.clone(), &runtime, &heights));
+        for _ in 0..3 {
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush();
+        }
+        let (passes, measures) = {
+            let scene = ui.scene.borrow();
+            (scene.layout_passes(), scene.measure_calls)
+        };
+        let mut frames = 0;
+        for width in layout_drag_page::widths(30, 12.) {
+            split.set(width);
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush();
+            frames += 1;
+        }
+        let scene = ui.scene.borrow();
+        (
+            (scene.layout_passes() - passes) as f64 / frames as f64,
+            (scene.measure_calls - measures) as f64 / frames as f64,
+            scene.len(),
+        )
+    }
+
+    /// A frame of the drag takes no more passes and measures than it did when
+    /// `layout-drag` was added (3.13 and 2,170 over 630 nodes). Each pane
+    /// asks its nodes under several constraints a pass, and its lists' and
+    /// text areas' viewports resized ask for another: lower these as that
+    /// work goes.
+    #[test]
+    fn a_dragged_split_measures_within_its_budget() {
+        let (passes, measures, nodes) = drag();
+        eprintln!("drag: {passes:.2} passes, {measures:.0} measures a frame, {nodes} nodes");
+        assert!(passes <= 3.2, "{passes:.2} passes a frame");
+        assert!(measures <= 2200., "{measures:.0} measures a frame");
+    }
+}
