@@ -1309,7 +1309,12 @@ impl LateSample {
         {
             return std::time::Duration::ZERO;
         }
-        period.saturating_sub(Latch::LEAD + Self::MARGIN + self.work)
+        let wait = period.saturating_sub(Latch::LEAD + Self::MARGIN + self.work);
+        // Diagnostic: `ZGX_LATE_FRAC=0.5` starts frames half as late.
+        match crate::scroll_resample::diag("ZGX_LATE_FRAC").and_then(|v| v.parse::<f32>().ok()) {
+            Some(frac) => wait.mul_f32(frac.clamp(0., 1.)),
+            None => wait,
+        }
     }
     /// When the next frame starts, `next` being the first refresh after `now`:
     /// in the refresh under way if that's still to come, else the next.
