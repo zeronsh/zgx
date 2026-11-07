@@ -261,6 +261,8 @@ fn a_composition_names_the_fonts_beside_it() {
     std::fs::create_dir_all(dir.join("fonts")).unwrap();
     std::fs::copy(&font, dir.join("fonts/Geist.ttf")).unwrap();
     std::fs::write(dir.join("fonts/notes.txt"), "not a font").unwrap();
+    // Named as a font but not one: said, and left out.
+    std::fs::write(dir.join("fonts/broken.ttf"), "not a font either").unwrap();
     let fonts = zgx_video::script::fonts_beside(&dir.join("video.luau"));
     assert_eq!(fonts.len(), 1);
     assert!(fonts[0].families().iter().any(|family| family == "Geist"));
@@ -415,4 +417,19 @@ fn repainting_what_changed_draws_what_painting_it_all_draws() {
             "frame {frame}: {count} pixels differ, first at {first:?}"
         );
     }
+}
+
+#[test]
+fn a_stage_leaves_its_thread_decoding_large_pictures_as_it_was() {
+    // A stage made on an app's own thread (a still from a window's): its
+    // frames decode every picture, and the thread's go back to what they were.
+    assert!(!zgx::image::whole_frames_on_this_thread());
+    let stage = inline("return ui.div { w = 10, h = 10 }", 10., 10., 30.);
+    assert!(zgx::image::whole_frames_on_this_thread(), "while it lives");
+    drop(stage);
+    assert!(!zgx::image::whole_frames_on_this_thread(), "and back after");
+    // Even when it fails to be made.
+    let failed = zgx_video::Stage::new(Default::default(), |_| Err("no view".to_owned()));
+    assert!(failed.is_err());
+    assert!(!zgx::image::whole_frames_on_this_thread());
 }

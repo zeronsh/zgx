@@ -96,8 +96,14 @@ thread_local! {
 /// that frame, as `Decoding::Sync` does. For a renderer whose frames are
 /// written out (a video), where a frame drawn without them is wrong, not
 /// late. `Decoding::Async` images still decode off the thread.
-pub fn set_whole_frames_on_this_thread(whole: bool) {
-    WHOLE_FRAMES.set(whole);
+/// It returns what it was, for whoever set it to put it back.
+pub fn set_whole_frames_on_this_thread(whole: bool) -> bool {
+    WHOLE_FRAMES.replace(whole)
+}
+/// Whether frames drawn on this thread decode every picture they draw
+/// (`set_whole_frames_on_this_thread`).
+pub fn whole_frames_on_this_thread() -> bool {
+    WHOLE_FRAMES.get()
 }
 /// An image drawn in nine pieces (a nine-patch; CSS's `border-image` with
 /// `fill`, `Scene::set_image_slice`): `slice` cuts its pixels into corners,

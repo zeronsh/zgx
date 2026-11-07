@@ -61,6 +61,24 @@ pub struct Stage {
     frame: u64,
     /// Fields drop in order: what waits on the clock goes before it.
     clock: VirtualClock,
+    /// Its thread decodes every picture a frame draws, until it goes.
+    _whole_frames: WholeFrames,
+}
+
+/// This thread's frames decode every picture they draw while it lives (see
+/// `zgx::image::set_whole_frames_on_this_thread`), as it was put back after:
+/// a stage made on an app's own thread (`render_still` from a window's) leaves
+/// that thread's pictures decoding off it, as a window's should.
+struct WholeFrames(bool);
+impl WholeFrames {
+    fn on() -> Self {
+        Self(zgx::image::set_whole_frames_on_this_thread(true))
+    }
+}
+impl Drop for WholeFrames {
+    fn drop(&mut self) {
+        zgx::image::set_whole_frames_on_this_thread(self.0);
+    }
 }
 
 impl Stage {
@@ -72,8 +90,9 @@ impl Stage {
         let clock = VirtualClock::new();
         // A frame drawn without a picture's pixels would be written out so: a
         // large one decodes as it's first drawn, as a small one does, rather
-        // than off the thread for a later frame.
-        zgx::image::set_whole_frames_on_this_thread(true);
+        // than off the thread for a later frame. Put back when it goes, or if
+        // it fails to be made.
+        let whole_frames = WholeFrames::on();
         let (width, height) = pixels(&options);
         let mut gpu = GpuRenderer::new(width, height).map_err(|error| error.to_string())?;
         gpu.set_scale_factor(options.scale);
@@ -113,6 +132,7 @@ impl Stage {
             options,
             frame: 0,
             clock,
+            _whole_frames: whole_frames,
         };
         stage.settle();
         stage.lay_out()?;
