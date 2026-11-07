@@ -13761,6 +13761,28 @@ impl GpuRenderer {
             self.idle = true;
         }
     }
+    /// Metal's queue let go of, for a window at rest a while (`rest_queue`'s
+    /// caller waits `QUEUE_REST_DELAY` past `trim`): the driver's memory for it,
+    /// up to 174 MB, given back. A queue idle that long is as slow to start
+    /// again as a new one, so the next frame pays nothing more for it. Nothing
+    /// elsewhere.
+    pub fn rest_queue(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.renew_queue();
+    }
+    /// Metal's queue let go of, the driver's memory for it given back
+    /// (`Queue::renew`), with all this renderer gave it finished and let go of
+    /// (a command buffer holds its queue).
+    #[cfg(target_os = "macos")]
+    fn renew_queue(&mut self) {
+        self.finish_direct();
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        // SAFETY: Only the queue's handle goes; wgpu's work on it has been waited
+        // for, and nothing is being encoded (`renew` looks).
+        if let Some(queue) = unsafe { self.queue.as_hal::<wgpu::hal::api::Metal>() } {
+            queue.renew();
+        }
+    }
     /// Drop the fill and layer shaders no one holds but this renderer (a
     /// removed node's, a reloaded script's: ids are never reused), with
     /// their pipelines, unless the kept frame still draws them.
