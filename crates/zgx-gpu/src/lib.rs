@@ -1541,6 +1541,13 @@ struct LayerCache {
     /// At a zoom's scale exactly: composited with its corner on a pixel,
     /// texel for pixel.
     exact: bool,
+    /// Drawn in part: what showed of it, magnified past what fits whole
+    /// (`prepare_layer`).
+    cropped: bool,
+    /// Pixels its largest glyph takes per unit of raster scale, once a
+    /// magnified raster found one too large for the atlas (0 until then):
+    /// it rasterizes no finer than that glyph fits.
+    glyphs: f32,
     /// Promoted by a local transform rather than isolation: kept a while
     /// once back at identity (`LAYER_PARK_FRAMES`).
     transformed: bool,
@@ -1583,6 +1590,25 @@ impl Shown<'_> {
         within(self.clip, window).then_some(window)
     }
 }
+/// Where a layer's texels land in the target it composites into, and what
+/// of it can show there (`GpuRenderer::placed`).
+#[derive(Clone, Copy)]
+struct Placed {
+    /// Its content's points onto the target's pixels.
+    grid: zgx::affine::Affine,
+    /// What of its content can show there, in its own points.
+    visible: Option<Rect>,
+}
+impl Placed {
+    /// `grid`, where it lands each texel of a raster at `scale` on a pixel
+    /// of its own: scaled alike both ways by as much, not turned or skewed.
+    fn aligned(&self, scale: f32) -> Option<zgx::affine::Affine> {
+        let grid = self.grid;
+        let near = |v: f32| (v.abs() - scale).abs() <= scale * 1e-4;
+        let level = |v: f32| v.abs() <= scale * 1e-6;
+        (near(grid.a) && near(grid.d) && level(grid.b) && level(grid.c)).then_some(grid)
+    }
+}
 /// Whether `inner` lies within `outer`.
 fn within(outer: Rect, inner: Rect) -> bool {
     inner.x >= outer.x
@@ -1621,9 +1647,13 @@ const LAYER_BUDGET: usize = 64 * 1024 * 1024;
 /// retry passes what is left).
 const LAYER_ROOM: usize = usize::MAX;
 const MB: f32 = 1024. * 1024.;
-/// Raster scales a layer renders at, in √2 steps from the device's: a
-/// sixteenth to four times. Above, a texture grows faster than detail shows;
-/// below, what's scaled down that far is a sliver of what it was laid out as.
+/// The most pixels a magnified layer's largest glyph rasterizes at: the
+/// atlas's limit, with room for rounding (`prepare_layer`).
+const GLYPH_ROOM: f32 = MAX_ATLAS as f32 * 0.98;
+/// Raster scales a shrunk layer renders at, in √2 steps from the device's
+/// (a magnified one renders at its own scale, `prepare_layer`, these only
+/// where that does not fit): a sixteenth to four times. Below, what's
+/// scaled down that far is a sliver of what it was laid out as.
 const RASTER_STEPS: std::ops::RangeInclusive<i32> = -8..=4;
 /// The raster step for content magnified `magnification` times: the
 /// nearest √2 step, kept while within three quarters of a step of
@@ -4010,6 +4040,11 @@ pub struct GpuRenderer {
     /// The layer `paint_layer` just drew went without something
     /// (`LayerCache::incomplete`).
     layer_incomplete: bool,
+    /// The largest glyph, in pixels, the layer being drawn left out as too
+    /// large for the atlas (0: none), and whether that layer draws again
+    /// at a scale its glyphs fit instead (`prepare_layer`): then it is no
+    /// issue.
+    layer_glyph_too_large: (f32, bool),
     /// A kept file's pixels were uploaded (`take_images_uploaded`).
     images_uploaded: bool,
     /// Images' own textures (`upload_image`), by the frame each was last
@@ -4684,6 +4719,7 @@ impl GpuRenderer {
             images: FxHashMap::default(),
             images_awaited: false,
             layer_incomplete: false,
+            layer_glyph_too_large: (0., false),
             images_uploaded: false,
             image_drawn: FxHashMap::default(),
             images_gone: Default::default(),
@@ -5523,6 +5559,7 @@ impl GpuRenderer {
         for item in &items {
             if item.isolated && item.effects.opacity > 0. {
                 let shown = self.shown(item, damage, viewport);
+                let placed = Self::placed(item, self.layer_origin, self.scale, Some(viewport));
                 self.layer_shifted = false;
                 self.prepare_layer(
                     scene,
@@ -5530,6 +5567,7 @@ impl GpuRenderer {
                     1.,
                     true,
                     shown,
+                    placed,
                     &mut layer_stats,
                     LAYER_ROOM,
                 )?;
@@ -5740,6 +5778,8 @@ impl GpuRenderer {
     /// does: changed, it repaints only where the window's damage reaches it.
     /// `room`: the bytes its texture may take (`LAYER_ROOM`, or what the
     /// budget has left: it then rasterizes coarser, never fails).
+    /// `placed`: where its texels land in the target it composites into,
+    /// and what of it can show there (`placed`), when known.
     #[allow(clippy::too_many_arguments)]
     fn prepare_layer(
         &mut self,
@@ -5748,6 +5788,7 @@ impl GpuRenderer {
         magnified: f32,
         exact_around: bool,
         shown: Option<Shown<'_>>,
+        placed: Option<Placed>,
         stats: &mut GpuStats,
         room: usize,
     ) -> Result<(), GpuError> {
@@ -5763,18 +5804,57 @@ impl GpuRenderer {
         let magnification = magnified * local.magnification() * zoom;
         // Zoomed (and not otherwise scaled): at its scale exactly, crisp.
         let exact = exact_around && local.is_identity();
+        // Shown larger than laid out (scaled, or inside something scaled):
+        // at the scale it shows at exactly too, as its content would draw
+        // there, rather than a smaller raster stretched soft. Smaller, it
+        // keeps to steps: sampled down, a near scale shows as sharp.
+        let magnifying = magnification > 1. && magnification.is_finite();
         let current = self.layers.get(&id).map(|cache| cache.step);
         let mut step = raster_step(magnification, current);
-        let mut factor = match exact && magnification != 1. {
+        let mut factor = match (exact || magnifying) && magnification != 1. {
             true => magnification,
             false => step_scale(step),
         };
+        // No finer than its largest glyph fits the atlas, once a raster
+        // found it too large (`glyph_too_large`): finer, it would not draw.
+        let glyphs = self.layers.get(&id).map_or(0., |cache| cache.glyphs);
+        let glyph_room = GLYPH_ROOM / glyphs;
+        let capped = magnifying && glyphs > 0. && factor > glyph_room;
+        if capped {
+            factor = glyph_room.max(1.);
+        }
+        let exact = exact && !capped;
+        // What of it can show: all of it may not fit the texture limits or
+        // the budget at that scale, while the part in view does. Not where
+        // something reaches past its pixels (a blur, a mask, a shader, a
+        // drop shadow).
+        let visible = placed.and_then(|placed| placed.visible).filter(|_| {
+            scene.filter_blur(id) <= 0.
+                && scene.mask(id).is_none()
+                && scene.layer_shader(id).is_none()
+                && scene.drop_shadow(id).is_none()
+        });
         let frame = self.layer_frame;
         if let Some(cache) = self.layers.get_mut(&id)
             && cache.revision == revision
             && !cache.incomplete
             && cache.step == step
             && cache.factor == factor.to_bits()
+            // Drawn in part: that part still holds all that shows.
+            && (!cache.cropped
+                || visible.is_some_and(|visible| {
+                    let moved = |r: Rect| {
+                        Rect::new(
+                            r.x + root.x - cache.root_origin.0,
+                            r.y + root.y - cache.root_origin.1,
+                            r.width,
+                            r.height,
+                        )
+                    };
+                    visible
+                        .intersection(moved(cache.content))
+                        .is_none_or(|visible| within(moved(cache.bounds), visible))
+                }))
         {
             cache.bounds.x += root.x - cache.root_origin.0;
             cache.bounds.y += root.y - cache.root_origin.1;
@@ -5796,18 +5876,39 @@ impl GpuRenderer {
         let room = room.min(budget);
         // Magnified past what the texture limits or the budget allow, a
         // layer renders at the finest scale that fits.
-        let pixels = |factor: f32| {
+        let pixels = |factor: f32, area: Rect| {
             let scale = self.scale * factor;
-            (content.width + 2. / scale) * scale * (content.height + 2. / scale) * scale
+            (area.width + 2. / scale) * scale * (area.height + 2. / scale) * scale
         };
-        let fits = |factor: f32| {
-            (content.width.max(content.height) + 2.) * self.scale * factor <= limit as f32
-                && pixels(factor) * 4. <= room as f32
+        let fits = |factor: f32, area: Rect| {
+            (area.width.max(area.height) + 2.) * self.scale * factor <= limit as f32
+                && pixels(factor, area) * 4. <= room as f32
         };
-        // Too large at a zoom's scale: the finest step that fits.
-        let exact = exact && fits(factor);
+        // What it draws: all of it, or magnified past what fits, what of it
+        // shows, with a quarter of that around it to pan into before it is
+        // drawn again; or just what shows.
+        let mut area = content;
+        let mut cropped = false;
+        if magnifying
+            && !fits(factor, content)
+            && let Some(visible) = visible
+            && let Some(shows) = visible.intersection(content)
+        {
+            let around = (visible.expand(0.25 * shows.width.max(shows.height)))
+                .intersection(content)
+                .unwrap_or(shows);
+            area = match fits(factor, around) {
+                true => around,
+                false => shows,
+            };
+            cropped = true;
+        }
+        let fits = |factor: f32| fits(factor, area);
+        // Too large at the scale it shows at: the finest step that fits.
+        let at_scale = (exact || magnifying) && fits(factor);
+        let exact = exact && at_scale;
         let mut coarser = false;
-        if !exact {
+        if !at_scale {
             while step > 0 && !fits(step_scale(step)) {
                 step -= 1;
             }
@@ -5815,10 +5916,10 @@ impl GpuRenderer {
             // Too large at any step: as coarse as it takes.
             coarser = !fits(factor);
             if coarser {
-                let (width, height) = (content.width * self.scale, content.height * self.scale);
+                let (width, height) = (area.width * self.scale, area.height * self.scale);
                 let side = (limit as f32 - 2.) / width.max(height).max(1.);
-                let area = (room as f32 / 4. / (width * height).max(1.)).sqrt() * 0.9;
-                factor = factor.min(side).min(area).max(1. / 4096.);
+                let room = (room as f32 / 4. / (width * height).max(1.)).sqrt() * 0.9;
+                factor = factor.min(side).min(room).max(1. / 4096.);
             }
         }
         if coarser {
@@ -5829,15 +5930,33 @@ impl GpuRenderer {
         // A transparent texel border lets linear sampling preserve fractional
         // translation coverage (and smooth a rotated layer's edges) instead
         // of clamping opaque edge pixels.
-        let bounds = content.expand(1. / scale);
+        let bounds = area.expand(1. / scale);
         // At a zoom's scale, its texels on the device's pixels: counted from
-        // its box's corner, which layout puts on a pixel.
-        let (x, y) = match exact && factor != 1. {
-            true => (
+        // its box's corner, which layout puts on a pixel. Magnified, at the
+        // scale it shows at and not turned: on its target's pixels too,
+        // from where they land there, so it composites texel for pixel
+        // rather than resampled half a pixel off.
+        let aligned = placed
+            .filter(|_| at_scale && !exact && factor != 1.)
+            .and_then(|placed| placed.aligned(scale));
+        let (x, y) = match (exact && factor != 1., aligned) {
+            (true, _) => (
                 root.x + ((bounds.x - root.x) * scale).floor() / scale,
                 root.y + ((bounds.y - root.y) * scale).floor() / scale,
             ),
-            false => (bounds.x, bounds.y),
+            (false, Some(grid)) => {
+                // Back from the texel corner to the pixel corner before it.
+                let back = |at: f32, by: f32| {
+                    let fraction = match by > 0. {
+                        true => at - at.floor(),
+                        false => at.ceil() - at,
+                    };
+                    fraction / by.abs()
+                };
+                let (px, py) = grid.point(bounds.x, bounds.y);
+                (bounds.x - back(px, grid.a), bounds.y - back(py, grid.d))
+            }
+            (false, None) => (bounds.x, bounds.y),
         };
         let (width, height) = match (x, y) == (bounds.x, bounds.y) {
             true => (bounds.width, bounds.height),
@@ -5896,15 +6015,19 @@ impl GpuRenderer {
         // A layer nested in it drawn from another corner differs anywhere
         // in it, and so does it.
         let mut shifted = false;
+        // What of it shows, which is all its layers can show in.
+        let inside = (visible.and_then(|visible| visible.intersection(bounds))).unwrap_or(bounds);
         for item in &items {
             if item.isolated && item.effects.opacity > 0. {
                 self.layer_shifted = false;
+                let placed = Self::placed(item, (bounds.x, bounds.y), scale, Some(inside));
                 self.prepare_layer(
                     scene,
                     item.id,
                     magnification,
                     exact,
                     None,
+                    placed,
                     stats,
                     LAYER_ROOM,
                 )?;
@@ -5913,12 +6036,16 @@ impl GpuRenderer {
         }
         // Drawn from another corner (its content grew left or up): its
         // texels round otherwise, and what didn't change shows a level off
-        // where the window keeps its last frame (`render_once`).
+        // where the window keeps its last frame (`render_once`). Not at a
+        // new scale it shows at: the transform that changed it damaged all
+        // it covers, and every texel differs anyway.
+        let rescaled = magnifying && at_scale;
         shifted |= self.layers.get(&id).is_some_and(|cache| {
             (
                 cache.bounds.x - cache.root_origin.0,
                 cache.bounds.y - cache.root_origin.1,
             ) != (bounds.x - root.x, bounds.y - root.y)
+                && !(rescaled && cache.factor != factor.to_bits())
         });
         self.layer_shifted = shifted;
         self.prepare_effects(scene, &items)?;
@@ -5971,7 +6098,16 @@ impl GpuRenderer {
         if (used - existing + bytes > budget || width > limit || height > limit) && room == budget {
             self.note_layer_coarser(id);
             let room = budget.saturating_sub(used - existing).min(budget - 1);
-            return self.prepare_layer(scene, id, magnified, exact_around, shown, stats, room);
+            return self.prepare_layer(
+                scene,
+                id,
+                magnified,
+                exact_around,
+                shown,
+                placed,
+                stats,
+                room,
+            );
         }
         // Animated layers change size every frame: round allocations up and
         // reuse any texture that fits without wasting more than half of it.
@@ -6004,10 +6140,19 @@ impl GpuRenderer {
         ];
         let whole = [Rect::new(0., 0., bounds.width, bounds.height)];
         self.banding = banding;
+        // Magnified, a glyph too large for the atlas is left out: it draws
+        // again no finer than that glyph fits.
+        let coarser_glyphs = magnifying && factor > 1.;
+        let outer = std::mem::replace(&mut self.layer_glyph_too_large, (0., coarser_glyphs));
         let (texture, result) =
             self.paint_layer(scene, items, bounds, texture, scale, &whole, true);
+        let (too_large, _) = std::mem::replace(&mut self.layer_glyph_too_large, outer);
         let result = result?;
         add_layer_stats(stats, &result);
+        let found = match coarser_glyphs && too_large > 0. {
+            true => glyphs.max(too_large / factor),
+            false => glyphs,
+        };
         self.layers.insert(
             id,
             LayerCache {
@@ -6021,6 +6166,8 @@ impl GpuRenderer {
                 step,
                 factor: factor.to_bits(),
                 exact: exact && factor != 1.,
+                cropped,
+                glyphs: found,
                 transformed,
                 used: frame,
                 parked: false,
@@ -6029,6 +6176,18 @@ impl GpuRenderer {
                 incomplete: std::mem::take(&mut self.layer_incomplete),
             },
         );
+        if found > glyphs {
+            return self.prepare_layer(
+                scene,
+                id,
+                magnified,
+                exact_around,
+                shown,
+                placed,
+                stats,
+                room,
+            );
+        }
         Ok(())
     }
     /// Draw `items` into a layer's `texture` at `scale`, its content's
@@ -6084,6 +6243,30 @@ impl GpuRenderer {
         self.layer_incomplete = self.images_awaited;
         self.images_awaited |= awaited;
         (texture, result)
+    }
+    /// Where `item`, a layer, lands in a target whose pixels start at
+    /// `origin` (its points) at `scale`, and what of it shows there, from
+    /// what of the target does (`shows`). `None` in perspective.
+    fn placed(
+        item: &zgx::scene::PaintItem<'_>,
+        origin: (f32, f32),
+        scale: f32,
+        shows: Option<Rect>,
+    ) -> Option<Placed> {
+        use zgx::affine::Affine;
+        let map = match item.projective() {
+            Some(map) => map.affine()?,
+            None => Affine::IDENTITY,
+        };
+        let grid = map
+            .then(Affine::translation(-origin.0, -origin.1))
+            .then(Affine::scale(scale, scale));
+        let shows = shows.and_then(|shows| match item.clip {
+            Some(clip) => clip.intersection(shows),
+            None => Some(shows),
+        });
+        let visible = shows.and_then(|shows| Some(map.inverse()?.bounds(shows)));
+        Some(Placed { grid, visible })
     }
     /// How `item`, a layer in the window's own pass, shows there: its map
     /// (none: as laid out), what of the window it can show in, and the
@@ -12286,7 +12469,7 @@ impl GpuRenderer {
             // As `glyph`, through another lookup: `glyph` keeps its one caller.
             let size = f32::from_bits(glyph.key.font_size_bits);
             if !size.is_finite() || size > MAX_ATLAS as f32 {
-                self.warn(GLYPH_TOO_LARGE);
+                self.glyph_too_large(size);
                 continue;
             }
             let entry = match self.entries.get_mut(&AtlasKey::from(glyph.key)) {
@@ -12333,7 +12516,7 @@ impl GpuRenderer {
         }
         let size = f32::from_bits(key.font_size_bits);
         if !size.is_finite() || size > MAX_ATLAS as f32 {
-            self.warn(GLYPH_TOO_LARGE);
+            self.glyph_too_large(size);
             return Ok(None);
         }
         if MODE != PATCH
@@ -12342,6 +12525,18 @@ impl GpuRenderer {
             return Ok(*entry);
         }
         self.raster_glyph(key, stats)
+    }
+    /// A glyph of `size` pixels left out, too large for the atlas: an issue,
+    /// unless its magnified layer draws again coarser (`prepare_layer`).
+    #[cold]
+    fn glyph_too_large(&mut self, size: f32) {
+        let (largest, redrawn) = &mut self.layer_glyph_too_large;
+        if size.is_finite() {
+            *largest = largest.max(size);
+        }
+        if !(*redrawn && size.is_finite()) {
+            self.warn(GLYPH_TOO_LARGE);
+        }
     }
     /// `glyph`'s miss: rasterize `key` into the atlas. Out of line, and
     /// `glyph`, the per-glyph lookup, has one caller: inlined there.
