@@ -696,3 +696,43 @@ fn draws_around_a_reader_sharing_a_copy_do_not_draw_over_it() {
         }
     }
 }
+
+#[test]
+fn a_backdrop_reader_keeps_what_lies_under_its_shadow() {
+    let _gpu_fixture = gpu_fixture();
+    for (direct, mut gpu) in renderers() {
+        let mut scene = scene();
+        let root = scene.root();
+        behind(&mut scene, root);
+        let id = reader(&mut scene, root);
+        // A shadow reaching far past the box and what it reads: its layer
+        // composites over all of it.
+        scene.set_kind(
+            id,
+            NodeKind::Quad(QuadStyle {
+                shadow: Some(BoxShadow {
+                    color: Color(0, 0, 0, 30),
+                    offset: Transform { x: 0., y: 8. },
+                    blur_radius: 20.,
+                    spread: 0.,
+                }),
+                ..Default::default()
+            }),
+        );
+        let (_, p) = render(&mut gpu, &mut scene);
+        for (x, y, color) in [
+            (4, 4, RED),
+            (196, 4, GREEN),
+            (4, 196, RED),
+            (196, 196, GREEN),
+        ] {
+            let Color(r, g, b, a) = color;
+            let got = pixel(&p, x, y);
+            assert!(
+                near(got, [r, g, b, a]),
+                "direct {direct}, at {:?}: {got:?}",
+                (x, y)
+            );
+        }
+    }
+}
