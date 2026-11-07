@@ -665,6 +665,18 @@ impl Rare {
         inner.keymap.extend(self.keymap);
         inner.mount_flags |= self.mount_flags;
         inner.conditional.extend(self.conditional);
+        // What it is to assistive technology, as set outside a component
+        // over what the component set (`aria_hidden` on a switch a row
+        // already stands for): each part the outer view set wins.
+        if self.accessible_label.is_some() {
+            inner.accessible_label = self.accessible_label;
+        }
+        if let Some(outer) = self.accessibility {
+            match &mut inner.accessibility {
+                Some(own) => outer.merge_into(own),
+                None => inner.accessibility = Some(outer),
+            }
+        }
     }
 }
 impl View {
@@ -7216,6 +7228,54 @@ pub(crate) struct Accessibility {
     /// `View::adjustable`: what moves a custom slider (boxed: few views
     /// have one).
     adjust: Option<Box<Adjust>>,
+}
+impl Accessibility {
+    /// `Rare::merge_into`'s part for assistive technology: what the outer
+    /// view set, over the inner's.
+    fn merge_into(self: Box<Self>, inner: &mut Accessibility) {
+        let outer = *self;
+        if outer.role.is_some() {
+            inner.role = outer.role;
+        }
+        if outer.level.is_some() {
+            inner.level = outer.level;
+        }
+        if outer.selected.is_some() {
+            inner.selected = outer.selected;
+        }
+        if outer.checked.is_some() {
+            inner.checked = outer.checked;
+        }
+        inner.radio_item |= outer.radio_item;
+        if outer.expanded.is_some() {
+            inner.expanded = outer.expanded;
+        }
+        if outer.value.is_some() {
+            inner.value = outer.value;
+        }
+        if outer.numeric.is_some() {
+            inner.numeric = outer.numeric;
+        }
+        if outer.live.is_some() {
+            inner.live = outer.live;
+        }
+        if outer.description.is_some() {
+            inner.description = outer.description;
+        }
+        if outer.error.is_some() {
+            inner.error = outer.error;
+        }
+        inner.hidden |= outer.hidden;
+        if outer.focus_group.is_some() {
+            inner.focus_group = outer.focus_group;
+        }
+        if outer.label.is_some() {
+            inner.label = outer.label;
+        }
+        if outer.adjust.is_some() {
+            inner.adjust = outer.adjust;
+        }
+    }
 }
 /// What moves a custom slider or spin button (`View::adjustable`): its
 /// step, whether the keys do as well as assistive technology, and what
