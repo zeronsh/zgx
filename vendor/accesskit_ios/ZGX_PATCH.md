@@ -20,3 +20,5 @@ technology beside what UIKit offers for the same screen (`ZGX_IOS_AX_DUMP=1`).
    simulator (`adapter.rs`, `shutdown_tests`).
 
 **Custom actions.** `set_custom_actions` gives each node's `accessibilityCustomActions`, asked for only as VoiceOver reaches it (`custom_actions.rs`, `node.rs`).
+
+- A text field's `accessibilityActivate` takes focus; `accessibilityUserInputLabels` offers a row's name before its comma alone, for Voice Control.

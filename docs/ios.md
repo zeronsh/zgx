@@ -27,6 +27,10 @@ A window with no native view does none of the plane work, as on the desktop.
 
 There is one tree of elements, zgx's, through AccessKit's iOS adapter (`vendor/accesskit_ios`, its changes in `ZGX_PATCH.md`). System views are hidden from assistive technology and exposed as their zgx node. `ZGX_IOS_AX_DUMP=1` prints what is offered. The adapter builds nothing until a tree is read, shuts down when VoiceOver stops, and lets go 30 seconds after the last read when nothing says assistive technology runs (`vendor/accesskit_ios/tests/shutdown.rs`, on a simulator).
 
+Bold Text makes every weight a step heavier, in text and in symbols, and text shapes again when it changes. `ui.prefers.without_color` and `ui.prefers.inverted_colors` say Differentiate Without Color and Smart or Classic Invert: inversion is the compositor's and a simulator doesn't show it, so what it does to a window of Metal needs a phone.
+
+A text field's `accessibilityActivate` takes focus and brings the keyboard; rows, tabs and switches click. A search field is marked as one, and Voice Control answers to a row's name alone ("Wi-Fi", from "Wi-Fi, Home"), by `accessibilityUserInputLabels`.
+
 ## Not there yet
 
 - Checked by a person on a phone: VoiceOver, Switch Control, Voice Control, Full Keyboard Access, feel. Measured there so far: glass, planes, frame rate, launch, memory (`scripts/ios/device.py measure`).
