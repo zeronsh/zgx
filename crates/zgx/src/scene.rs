@@ -9783,6 +9783,7 @@ impl Scene {
     /// `id` laid out under `constraints`, the result it then holds (with its
     /// children's places) for `arrange`.
     fn measure_full(&mut self, id: NodeId, mut constraints: Constraints) -> (f32, f32) {
+        let _span = crate::profile::nested(crate::profile::Phase::Measure);
         self.measured(id, &mut constraints, true)
     }
     fn measured(&mut self, id: NodeId, constraints: &mut Constraints, full: bool) -> (f32, f32) {
@@ -11198,6 +11199,7 @@ impl Scene {
     /// (`grid_takes_cells`), otherwise as rounded rectangles all walk long,
     /// a grid made meanwhile taking them as `add_damage` gives them.
     fn arrange_from(&mut self, id: NodeId, x: f32, y: f32, report: &mut FrameReport) {
+        let _span = crate::profile::nested(crate::profile::Phase::Arrange);
         assert!(self.contains(id), "stale scene node");
         match self.grid_takes_cells() {
             true => self.arrange::<true>(id, x, y, report, false, 0, &mut None),

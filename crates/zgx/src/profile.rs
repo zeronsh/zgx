@@ -62,10 +62,14 @@ pub enum Phase {
     Node,
     /// TEMPORARY: text measured outside layout.
     EagerText,
+    /// TEMPORARY: layout's measuring (`Scene::measure_full`).
+    Measure,
+    /// TEMPORARY: layout's placing (`Scene::arrange_from`).
+    Arrange,
 }
 
 /// Every phase, in report order.
-pub const PHASES: [Phase; 16] = [
+pub const PHASES: [Phase; 18] = [
     Phase::Input,
     Phase::Script,
     Phase::Update,
@@ -82,6 +86,8 @@ pub const PHASES: [Phase; 16] = [
     Phase::Mount,
     Phase::Node,
     Phase::EagerText,
+    Phase::Measure,
+    Phase::Arrange,
 ];
 
 /// Frames between reports.
@@ -107,6 +113,8 @@ impl Phase {
             Phase::Mount => "mount",
             Phase::Node => "node",
             Phase::EagerText => "eager-text",
+            Phase::Measure => "measure",
+            Phase::Arrange => "arrange",
         }
     }
     /// Phases that run many times a frame inside another: timed, but not
@@ -120,6 +128,8 @@ impl Phase {
                 | Phase::Mount
                 | Phase::Node
                 | Phase::EagerText
+                | Phase::Measure
+                | Phase::Arrange
         )
     }
 }
@@ -333,6 +343,40 @@ pub fn report() {
     }
 }
 
+/// TEMPORARY (effect sites): an effect made at `site` ran for `time`.
+pub(crate) fn effect_ran(site: &'static std::panic::Location<'static>, time: Duration) {
+    if !reported() {
+        return;
+    }
+    SITES.with(|sites| {
+        let mut sites = sites.borrow_mut();
+        let entry = sites.entry(site).or_insert((0, Duration::ZERO));
+        entry.0 += 1;
+        entry.1 += time;
+    });
+}
+type Sites = std::collections::HashMap<&'static std::panic::Location<'static>, (u64, Duration)>;
+thread_local! {
+    static SITES: RefCell<Sites> = RefCell::new(Sites::new());
+}
+/// The ten sites whose effects took longest since the last report, per frame.
+fn report_sites(frames: u64) {
+    SITES.with(|sites| {
+        let mut sites = sites.borrow_mut();
+        let mut ranked: Vec<_> = sites.drain().collect();
+        ranked.sort_by_key(|a| std::cmp::Reverse(a.1.1));
+        for (site, (runs, time)) in ranked.into_iter().take(10) {
+            eprintln!(
+                "profile effect {:.1} us/frame {} runs/frame: {}:{}",
+                time.as_secs_f64() * 1e6 / frames as f64,
+                runs / frames,
+                site.file(),
+                site.line()
+            );
+        }
+    });
+}
+
 #[derive(Default, Clone, Copy)]
 struct Totals {
     instructions: u64,
@@ -422,6 +466,7 @@ impl Profile {
             }
         }
         eprintln!("{line}");
+        report_sites(frames);
         self.totals = Default::default();
         self.frames = 0;
     }
@@ -716,8 +761,24 @@ mod signpost {
     /// The phases' names as C strings, static in this image (signpost
     /// names must be).
     static NAMES: [&std::ffi::CStr; PHASES.len()] = [
-        c"input", c"script", c"update", c"style", c"layout", c"text", c"damage", c"paint",
-        c"encode", c"submit", c"present", c"wait", c"teardown", c"mount", c"node", c"eager-text",
+        c"input",
+        c"script",
+        c"update",
+        c"style",
+        c"layout",
+        c"text",
+        c"damage",
+        c"paint",
+        c"encode",
+        c"submit",
+        c"present",
+        c"wait",
+        c"teardown",
+        c"mount",
+        c"node",
+        c"eager-text",
+        c"measure",
+        c"arrange",
     ];
     struct Log(*mut c_void);
     // SAFETY: An os_log_t is usable from any thread.
