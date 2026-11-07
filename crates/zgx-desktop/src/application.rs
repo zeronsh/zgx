@@ -9326,8 +9326,9 @@ mod tests {
 
     /// On Windows a turn's pointer moves come as one too: a burst the window
     /// manager hears is held as its last, and a press after it hands that
-    /// move on first. (Windows folds only moves not yet read; one handled
-    /// slower than the mouse reports finds the next already waiting.)
+    /// move on first, as do the app's own events and the loop's wait.
+    /// (Windows folds only moves not yet read; one handled slower than the
+    /// mouse reports finds the next already waiting.)
     #[cfg(target_os = "windows")]
     #[test]
     fn a_turns_pointer_moves_come_as_its_last_on_windows() {
@@ -9336,6 +9337,8 @@ mod tests {
             manager: WindowManager,
             held: Option<f64>,
             held_after_press: bool,
+            held_after_user_event: bool,
+            held_after_wait: bool,
         }
         impl ApplicationHandler<Event> for Probe {
             fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -9359,6 +9362,16 @@ mod tests {
                 };
                 ApplicationHandler::window_event(&mut self.manager, event_loop, id, press);
                 self.held_after_press = self.manager.pending_move.0.is_some();
+                let moved = |x: f64| WindowEvent::CursorMoved {
+                    device_id,
+                    position: (x, 10.).into(),
+                };
+                ApplicationHandler::window_event(&mut self.manager, event_loop, id, moved(1.));
+                ApplicationHandler::user_event(&mut self.manager, event_loop, Event::ImagesDecoded);
+                self.held_after_user_event = self.manager.pending_move.0.is_some();
+                ApplicationHandler::window_event(&mut self.manager, event_loop, id, moved(2.));
+                ApplicationHandler::about_to_wait(&mut self.manager, event_loop);
+                self.held_after_wait = self.manager.pending_move.0.is_some();
                 event_loop.exit();
             }
             fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
@@ -9401,10 +9414,14 @@ mod tests {
             manager,
             held: None,
             held_after_press: true,
+            held_after_user_event: true,
+            held_after_wait: true,
         };
         event_loop.run_app(&mut probe).unwrap();
         assert_eq!(probe.held, Some(999.));
-        assert!(!probe.held_after_press);
+        assert!(!probe.held_after_press, "a press hands the move on first");
+        assert!(!probe.held_after_user_event, "so does the app's own event");
+        assert!(!probe.held_after_wait, "and the loop's wait");
     }
 
     #[test]
