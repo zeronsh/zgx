@@ -9,6 +9,9 @@ local List = require("@components/list")
 local Detail = require("@components/detail")
 local Compose = require("@components/compose")
 local Settings = require("@components/settings")
+if ui.args[1] == "soak" then
+	require("./soak")
+end
 
 -- The system's appearance, unless the settings choose one.
 ui.effect(function()
