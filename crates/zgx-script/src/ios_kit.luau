@@ -42,6 +42,12 @@ local NAV_POP_START = 40
 -- spring of 0.415 s, read off the glass's content view in UIKit (response
 -- 0.414 s on a push, 50 ms after the page starts, rms 0.001; 0.418 s on a pop,
 -- with the page); its glass shows at once and goes when the pop is done.
+-- With Reduce Motion a push or pop cross-fades, as UIKit's
+-- `_UINavigationCrossfadeAnimator` does: 0.5 s (`transitionDuration:`) through
+-- `animateWithDuration:`, so UIView's ease-in-out; the page coming in from
+-- alpha 0, the one going out to it.
+local CROSSFADE_MS = 500
+local CROSSFADE_EASE = "cubicBezier(0.42, 0, 0.58, 1)"
 local BACK_FADE = uikit_spring(1, 0.415)
 local BACK_FADE_LAG = 50
 local NAV_TRACKING = uikit_spring(0.85, 0.08)
@@ -823,11 +829,63 @@ ios.stack = ui.component(function(props)
 			)
 		end)
 	end
+	-- A cross-fade under Reduce Motion: the page fading in (from 0), the one
+	-- fading out (to 0), whether one runs (the page under stays shown), and
+	-- the pages a cross-fade covered, kept at 0 until one uncovers them.
+	local fading_in = ui.use_state(0)
+	local fading_out = ui.use_state(0)
+	local crossfading = ui.use_state(false)
+	local faded = ui.use_state {}
+	local function reduced()
+		return ui.prefers.reduced_motion:get()
+	end
+	local function set_faded(id, on)
+		local next = table.clone(faded:get())
+		next[id] = if on then true else nil
+		faded:set(next)
+	end
+	-- Pages a slide uncovers show as they are.
+	local function unfade()
+		if next(faded:get()) then
+			faded:set {}
+		end
+	end
+	local function crossfade(arriving, going, done)
+		crossfading:set(true)
+		fading_in:set(arriving)
+		-- The next frame: what fades in starts from 0, and the other goes.
+		ui.after(0, function()
+			fading_in:set(0)
+			set_faded(arriving, false)
+			fading_out:set(going)
+		end)
+		ui.after(CROSSFADE_MS, function()
+			if done then
+				done()
+			end
+			fading_out:set(0)
+			crossfading:set(false)
+		end)
+	end
 	function nav.push(build)
 		next_id += 1
 		builders[next_id] = build
 		local list = table.clone(pages:get())
+		local under = list[#list]
 		table.insert(list, next_id)
+		if reduced() then
+			fading_in:set(next_id)
+			pages:set(list)
+			crossfade(next_id, under, function()
+				set_faded(under, true)
+			end)
+			if #list == 2 then
+				chevron:set(1)
+			end
+			check_soon()
+			return
+		end
+		unfade()
 		entering:set(width)
 		pages:set(list)
 		run_enter()
@@ -846,9 +904,24 @@ ios.stack = ui.component(function(props)
 		end, spring)
 	end
 	function nav.pop()
-		if #pages:get() < 2 then
+		local list = pages:get()
+		if #list < 2 then
 			return
 		end
+		if reduced() then
+			local top, under = list[#list], list[#list - 1]
+			crossfade(under, top, function()
+				local kept = table.clone(pages:get())
+				builders[table.remove(kept)] = nil
+				pages:set(kept)
+			end)
+			if #list == 2 then
+				chevron:set(0)
+			end
+			check_soon()
+			return
+		end
+		unfade()
 		finish_pop()
 		if #pages:get() == 2 then
 			fade_chevron(0, NAV_POP_START)
@@ -881,6 +954,7 @@ ios.stack = ui.component(function(props)
 				start = drag:get()
 				stats = swipe_statistics()
 				sample(e)
+				unfade()
 				if running_chevron then
 					running_chevron()
 					running_chevron = nil
@@ -960,6 +1034,13 @@ ios.stack = ui.component(function(props)
 				x = function()
 					return page_x(index)
 				end,
+				-- Under Reduce Motion, a cross-fade instead (`crossfade`).
+				opacity = ui.tween(
+					ui.computed(function()
+						return if fading_in:get() == id or fading_out:get() == id or faded:get()[id] then 0 else 1
+					end),
+					{ duration = CROSSFADE_MS, ease = CROSSFADE_EASE }
+				),
 				-- A page in motion is a card with a navigation controller's faint shadow.
 				shadow = function()
 					return if drag:get() + entering:get() ~= 0
@@ -970,7 +1051,8 @@ ios.stack = ui.component(function(props)
 				-- plane of its own.
 				hidden = function()
 					local depth = #pages:get()
-					return index < depth - 1 or (index < depth and drag:get() == 0 and entering:get() == 0)
+					return index < depth - 1
+						or (index < depth and drag:get() == 0 and entering:get() == 0 and not crossfading:get())
 				end,
 				pointer_events = on_top,
 				Page { build = builders[id], nav = nav },
@@ -1266,14 +1348,33 @@ ios.sheet = ui.component(function(props)
 					bg = "$surface.base",
 					opacity = largeness,
 				},
-				-- UIKit's grabber: 36 by 5, 5 points below the top.
-				ui.div {
+				-- UIKit's grabber: 36 by 5, 5 points below the top. A tap (and
+				-- VoiceOver's) goes to the detent before the current one, the
+				-- largest after the smallest, as `_indexOfActiveDetentForTappingGrabber`
+				-- does; its name and value are UIKit's own strings.
+				ui.button {
 					h = 15,
 					pt = 5,
+					p = 0,
+					bg = "#00000000",
+					hover = {},
+					active = {},
 					items = "center",
-					label = "Sheet handle",
-					role = "button",
-					ui.div { w = 36, h = 5, rounded = 2.5, bg = "$text.tertiary" },
+					label = "Sheet Grabber",
+					value_text = function()
+						local _ = rise:get()
+						local d = detents[detent]
+						return if d == "large" then "Expanded" elseif d == "medium" then "Half screen" else ""
+					end,
+					on_click = function()
+						local count = #detents
+						if count < 2 then
+							return
+						end
+						detent = (detent - 2) % count + 1
+						run(rise, target(detent), nil, 0, SHEET_SPRING)
+					end,
+					ui.div { w = 36, h = 5, rounded = 2.5, bg = "$text.tertiary", aria_hidden = true },
 				},
 				props.build(),
 			},
