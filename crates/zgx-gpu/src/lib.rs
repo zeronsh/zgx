@@ -1588,6 +1588,16 @@ fn within(outer: Rect, inner: Rect) -> bool {
         && inner.y + inner.height <= outer.y + outer.height
 }
 /// A layer's repaint, counted in the frame's `stats`.
+/// Add to `stats` what preparing layers did (`prepared`, as `prepare_layer`
+/// counts it).
+fn add_prepared_layers(stats: &mut GpuStats, prepared: &GpuStats) {
+    let repaints = stats.layer_repaints;
+    add_layer_stats(stats, prepared);
+    stats.layer_repaints = repaints + prepared.layer_repaints;
+    stats.layer_partial_repaints += prepared.layer_partial_repaints;
+    stats.layer_cache_hits += prepared.layer_cache_hits;
+    stats.layer_texture_allocations += prepared.layer_texture_allocations;
+}
 fn add_layer_stats(stats: &mut GpuStats, result: &GpuStats) {
     stats.draw_calls += result.draw_calls;
     stats.render_passes += result.render_passes;
@@ -1667,6 +1677,9 @@ struct Kept {
     /// texts outgrowing their room move past them, to its end, where a
     /// subtree's quads no longer lie together.
     ordered: u32,
+    /// Whether any of its items is a layer composited from its texture:
+    /// those are prepared before a patched frame draws.
+    layers: bool,
 }
 /// Each node's first item in a kept frame (`Kept::by_node`): a node's slot
 /// number indexes a dense table while the frame's nodes are numbered close
@@ -1857,6 +1870,29 @@ fn subtree_ends(scene: &Scene, items: &mut [KeptItem], base: u32) {
 }
 /// Paint that changes without the scene marking its node: a native
 /// surface shows each frame its source gives it.
+/// Whether a kept frame can hold a draw of `shading`: a layer shader's
+/// composite (`Filter`) is, its uniforms' changes marked on its node; not a
+/// shader fill or polyline (their uniforms and points change unmarked) or a
+/// blend, which reads what's behind it.
+#[inline]
+fn keepable(shading: Shading) -> bool {
+    !matches!(
+        shading,
+        Shading::Fill(_) | Shading::Blend | Shading::FilterBlend(_) | Shading::Polyline
+    )
+}
+/// The place in `kept` of the layer `id` lies in, if a kept item is one:
+/// its nearest kept ancestor, if that is a layer.
+fn kept_layer_of(scene: &Scene, kept: &Kept, id: NodeId) -> Option<usize> {
+    let mut at = scene.parent(id);
+    while let Some(ancestor) = at {
+        if let Some(place) = kept.by_node.get(ancestor, &kept.items) {
+            return scene.is_layer(ancestor).then_some(place);
+        }
+        at = scene.parent(ancestor);
+    }
+    None
+}
 fn changes_unmarked(kind: &NodeKind) -> bool {
     #[cfg(target_os = "macos")]
     if matches!(kind, NodeKind::NativeSurface(_)) {
@@ -3923,6 +3959,8 @@ pub struct GpuRenderer {
     /// its texture from another corner than it had: all of it may differ
     /// where it shows, not only where the scene's damage says.
     layer_shifted: bool,
+    /// What preparing a kept frame's layers did, for its stats.
+    kept_layer_stats: GpuStats,
     layer_origin: (f32, f32),
     shapes: FxHashMap<NodeId, Shaped>,
     /// For text the prepared cache doesn't lay out, a node shaped from each
@@ -4638,6 +4676,7 @@ impl GpuRenderer {
             band_pool: Vec::new(),
             layer_frame: 0,
             layer_shifted: false,
+            kept_layer_stats: GpuStats::default(),
             layer_origin: (0., 0.),
             shapes: FxHashMap::default(),
             shaped_like: FxHashMap::default(),
@@ -5542,9 +5581,7 @@ impl GpuRenderer {
             && self.effect_jobs.is_empty()
             // A box on a plane draws nothing a patch could follow.
             && !self.views.as_ref().is_some_and(|views| views.has_planes())
-            && items
-                .iter()
-                .all(|item| !item.isolated && !changes_unmarked(item.kind));
+            && items.iter().all(|item| !changes_unmarked(item.kind));
         self.banding = banding;
         let mut stats = match keep {
             true => self.render_keeping(scene, items, inherited, damage, merged, viewport)?,
@@ -5552,6 +5589,16 @@ impl GpuRenderer {
         };
         stats.add_made(&std::mem::take(&mut self.patch_stats));
         self.rendered_serial = Some(scene.flush_serial());
+        // Layers a kept frame prepared before it was drawn as usual: found
+        // again current here (hits), counted as what they were.
+        let prepared = std::mem::take(&mut self.kept_layer_stats);
+        if prepared.layer_repaints + prepared.layer_cache_hits > 0 {
+            let again = prepared.layer_repaints.min(layer_stats.layer_cache_hits);
+            layer_stats.layer_cache_hits -= again;
+            let hits = layer_stats.layer_cache_hits;
+            add_prepared_layers(&mut layer_stats, &prepared);
+            layer_stats.layer_cache_hits = hits;
+        }
         stats.layer_repaints = layer_stats.layer_repaints;
         stats.layer_partial_repaints = layer_stats.layer_partial_repaints;
         stats.layer_cache_hits = layer_stats.layer_cache_hits;
@@ -6565,6 +6612,7 @@ impl GpuRenderer {
         viewport: Rect,
     ) -> Result<GpuStats, GpuError> {
         let ids: Vec<NodeId> = items.iter().map(|item| item.id).collect();
+        let layers = items.iter().any(|item| item.isolated);
         let boxed: Vec<Option<KeptBox>> = items
             .iter()
             .map(|item| match item.kind {
@@ -6583,16 +6631,7 @@ impl GpuRenderer {
         if ranges.len() != ids.len()
             || inherited.len() != ids.len()
             || !self.frame_points.is_empty()
-            || self.frame_draws.iter().any(|draw| {
-                matches!(
-                    draw.shading,
-                    Shading::Fill(_)
-                        | Shading::Filter(_)
-                        | Shading::Blend
-                        | Shading::FilterBlend(_)
-                        | Shading::Polyline
-                )
-            })
+            || self.frame_draws.iter().any(|draw| !keepable(draw.shading))
         {
             self.item_ranges = ranges;
             let mut drawn = self.render_flat::<FRAME>(scene, Vec::new(), damage, merged, false)?;
@@ -6645,6 +6684,7 @@ impl GpuRenderer {
             patched: false,
             upload: upload::KeptQuads::new(),
             ordered: len as u32,
+            layers,
         }));
         Ok(drawn)
     }
@@ -6715,6 +6755,14 @@ impl GpuRenderer {
                 continue;
             }
             let Some(first) = first else {
+                // Inside a kept layer: its texture is painted again
+                // (`prepare_kept_layers`), and its composite made again.
+                if kept.layers
+                    && let Some(layer) = kept_layer_of(scene, &kept, id)
+                {
+                    splices.push((layer, kept.items[layer].end as usize, kept.items[layer].id));
+                    continue;
+                }
                 entering.push(id);
                 continue;
             };
@@ -6824,6 +6872,12 @@ impl GpuRenderer {
                     .any(|&(_, _, root)| scene.is_within(id, root))
             })
         {
+            (self.box_quads, self.box_draws) = (box_quads, box_draws);
+            return Ok(self.recycle_kept(*kept));
+        }
+        // Its layers current, as a frame drawn whole prepares them, now that
+        // it patches.
+        if kept.layers && !self.prepare_kept_layers(scene, &kept, damage, viewport)? {
             (self.box_quads, self.box_draws) = (box_quads, box_draws);
             return Ok(self.recycle_kept(*kept));
         }
@@ -6990,6 +7044,10 @@ impl GpuRenderer {
         let mut drawn = drawn?;
         drawn.patched_items = stats.patched_items;
         drawn.add_made(&stats);
+        if kept.layers {
+            let layers = std::mem::take(&mut self.kept_layer_stats);
+            add_prepared_layers(&mut drawn, &layers);
+        }
         self.kept = Some(kept);
         Ok(Some(drawn))
     }
@@ -6999,6 +7057,52 @@ impl GpuRenderer {
     /// Whether `text`'s node is one a kept frame patched (`changed_texts`).
     fn changes(&self, text: Option<NodeId>) -> bool {
         text.is_some_and(|id| self.changed_texts.contains(&id))
+    }
+    /// Prepare the layers a kept frame composites (`prepare_layer`, as a
+    /// frame drawn whole does for its walk's): a texture reused, or painted
+    /// again where what's in it changed. False if one would shift what the
+    /// frame shows of it (then the frame is drawn as usual).
+    #[cold]
+    #[inline(never)]
+    fn prepare_kept_layers(
+        &mut self,
+        scene: &Scene,
+        kept: &Kept,
+        damage: &[Rect],
+        viewport: Rect,
+    ) -> Result<bool, GpuError> {
+        let mut stats = GpuStats::default();
+        self.layer_frame += 1;
+        let mut out = Vec::new();
+        let whole = damage.iter().any(|d| {
+            d.x <= viewport.x
+                && d.y <= viewport.y
+                && d.x + d.width >= viewport.x + viewport.width
+                && d.y + d.height >= viewport.y + viewport.height
+        });
+        for kept_item in &kept.items {
+            if !scene.contains(kept_item.id) || !scene.is_layer(kept_item.id) {
+                continue;
+            }
+            // The layer as the window's walk makes it: its first item.
+            let items = scene.layer_items_from(kept_item.id, &kept_item.inherited, &mut out);
+            let Some(item) = items.first().filter(|item| item.id == kept_item.id) else {
+                continue;
+            };
+            if !item.isolated || item.effects.opacity <= 0. {
+                continue;
+            }
+            let shown = self.shown(item, damage, viewport);
+            self.layer_shifted = false;
+            self.prepare_layer(scene, item.id, 1., true, shown, &mut stats, LAYER_ROOM)?;
+            // Its pixels drawn from another corner now: shown again whole,
+            // which damage over the whole window does already.
+            if std::mem::take(&mut self.layer_shifted) && !whole {
+                return Ok(false);
+            }
+        }
+        self.kept_layer_stats = stats;
+        Ok(true)
     }
     fn recycle_kept(&mut self, kept: Kept) -> Option<GpuStats> {
         let mut quads = kept.quads;
@@ -7225,11 +7329,7 @@ impl GpuRenderer {
         let mut out = Vec::new();
         for &(first, _, root) in splices {
             let items = scene.layer_items_from(root, &kept.items[first].inherited, &mut out);
-            if out.len() != items.len()
-                || items
-                    .iter()
-                    .any(|item| item.isolated || changes_unmarked(item.kind))
-            {
+            if out.len() != items.len() || items.iter().any(|item| changes_unmarked(item.kind)) {
                 return Ok(None);
             }
             counts.push(items.len());
@@ -7244,16 +7344,7 @@ impl GpuRenderer {
         let ranges = std::mem::take(&mut self.item_ranges);
         let keeps = ranges.len() == ids.len()
             && self.frame_points.is_empty()
-            && !self.frame_draws.iter().any(|draw| {
-                matches!(
-                    draw.shading,
-                    Shading::Fill(_)
-                        | Shading::Filter(_)
-                        | Shading::Blend
-                        | Shading::FilterBlend(_)
-                        | Shading::Polyline
-                )
-            });
+            && self.frame_draws.iter().all(|draw| keepable(draw.shading));
         if !keeps {
             self.item_ranges = ranges;
             return Ok(None);

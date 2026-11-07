@@ -146,6 +146,10 @@ SCENES = [
     ('fx-none', 'zgx-3d', 'fx_bench', {'SCENE': 'none', 'ZGX_GPU_NOOP': '1'}),
     ('fx-layer', 'zgx-3d', 'fx_bench', {'SCENE': 'layer', 'ZGX_GPU_NOOP': '1'}),
     ('fx-reader', 'zgx-3d', 'fx_bench', {'SCENE': 'reader', 'ZGX_GPU_NOOP': '1'}),
+    # Pictures on springs under a layer shader, a still page over them: a
+    # frame where only layers move (and the same still, at zero).
+    ('parallax', 'zgx-3d', 'parallax_bench', {'FRAMES': '300', 'ZGX_GPU_NOOP': '1'}),
+    ('parallax-still', 'zgx-3d', 'parallax_bench', {'SCENE': 'still', 'FRAMES': '300', 'ZGX_GPU_NOOP': '1'}),
     # The example apps' common interactions (`support/apps.rs`), small and
     # undrawn but for their canvases' CPU work, run by list_state_bench (no
     # binary of their own to link): the
