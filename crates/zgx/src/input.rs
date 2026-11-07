@@ -4188,6 +4188,7 @@ mod disabled_observer_tests {
 
 #[path = "input_drag.rs"]
 mod drag;
+pub(crate) use drag::starting_drag;
 pub use drag::{DragEnded, DragEvent, DragItem, DragPhase, DragState, DraggedText, SPRING_DELAY};
 
 #[cfg(test)]
