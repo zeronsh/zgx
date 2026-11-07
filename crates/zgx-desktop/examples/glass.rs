@@ -1,6 +1,7 @@
 //! A pane of `zgx::glass` over stripes, with text over it: the system's glass
-//! on macOS 26, drawn elsewhere (`GLASS_DRAWN=1` here too). The layout
-//! `scripts/glass_compare.py` measures. `GLASS_DARK=1`: dark stripes.
+//! on macOS 26, drawn elsewhere (`GLASS_DRAWN=1` here too), to see the two
+//! side by side (`scripts/glass_compare.py` measures them). `GLASS_DARK=1`:
+//! dark stripes.
 //! `GLASS_CLEAR=1`: the clear variant. With `GLASS_OUT=path` on macOS, the
 //! window's own pixels as the window server composited them go there as a PNG
 //! after a moment, and it quits (a window may read itself, asking no
@@ -136,20 +137,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .mt(84.)
                 };
                 let pane = match drawn {
-                    true => div()
-                        .w(300.)
-                        .h(200.)
-                        .child(
-                            div()
-                                .absolute()
-                                .left(0.)
-                                .top(0.)
-                                .w_full()
-                                .h_full()
-                                .rounded(24.)
-                                .shader_drive(move || style().drawn(true)),
-                        )
-                        .child(word()),
+                    true => {
+                        let mut drawn = div()
+                            .absolute()
+                            .left(0.)
+                            .top(0.)
+                            .w_full()
+                            .h_full()
+                            .rounded(24.);
+                        if let Some(shadow) = style().drawn_shadow(true) {
+                            drawn = drawn.shadow(shadow);
+                        }
+                        div()
+                            .w(300.)
+                            .h(200.)
+                            .child(drawn.shader_drive(move || style().drawn(true)))
+                            .child(word())
+                    }
                     false => glass(style).w(300.).h(200.).child(word()),
                 };
                 let whole = zgx::env::var("GLASS_WINDOW").is_ok();
