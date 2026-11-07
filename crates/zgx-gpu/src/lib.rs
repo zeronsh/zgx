@@ -1548,6 +1548,11 @@ struct LayerCache {
     /// magnified raster found one too large for the atlas (0 until then):
     /// it rasterizes no finer than that glyph fits.
     glyphs: f32,
+    /// Where it landed in its target (`Placed::grid`) and how magnified,
+    /// in the last frame it was prepared in (the scene's flush serial
+    /// first), and in the one before (`prepare_layer`): unchanged since
+    /// then, it is still; changed, it moves, and keeps its raster.
+    seen: Seen,
     /// Promoted by a local transform rather than isolation: kept a while
     /// once back at identity (`LAYER_PARK_FRAMES`).
     transformed: bool,
@@ -1573,6 +1578,12 @@ impl LayerCache {
         (w * self.uv[0]).round() as usize * (h * self.uv[1]).round() as usize * 4
     }
 }
+/// `LayerCache::seen`: (the frame, its grid, its magnification) and the
+/// grid and magnification of the frame before.
+type Seen = (
+    (u64, Option<zgx::affine::Affine>, f32),
+    (Option<zgx::affine::Affine>, f32),
+);
 /// How a layer of the window's own shows there (`GpuRenderer::shown`).
 #[derive(Clone, Copy)]
 struct Shown<'a> {
@@ -5809,12 +5820,57 @@ impl GpuRenderer {
         // there, rather than a smaller raster stretched soft. Smaller, it
         // keeps to steps: sampled down, a near scale shows as sharp.
         let magnifying = magnification > 1. && magnification.is_finite();
+        // Moving (scaled, moved or turned since the frame before, or what
+        // holds it was), it keeps the raster it has while that is fine
+        // enough, and its texels where they were: its content drawn again
+        // lands on them alike, so it moves as one picture rather than its
+        // glyphs and lines drawn afresh, on other pixels, each frame.
+        // Still, it is drawn at its scale exactly (the first frame it
+        // shows included).
+        let grid = placed.map(|placed| placed.grid);
+        let serial = scene.flush_serial();
+        let held = self.layers.get(&id).map(|cache| {
+            // What it was in the frame before this one (a frame may prepare
+            // it twice: `layer_shifted`).
+            let ((frame, seen_grid, seen_magnification), before) = cache.seen;
+            let before = match frame == serial {
+                true => before,
+                false => (seen_grid, seen_magnification),
+            };
+            let moving = match (grid, before.0) {
+                (Some(grid), Some(was)) => grid != was,
+                _ => before.1 != magnification,
+            };
+            (moving, f32::from_bits(cache.factor), before)
+        });
+        let moving = held.is_some_and(|(moving, ..)| moving);
+        let seen: Seen = (
+            (serial, grid, magnification),
+            held.map_or((grid, magnification), |(.., before)| before),
+        );
         let current = self.layers.get(&id).map(|cache| cache.step);
         let mut step = raster_step(magnification, current);
         let mut factor = match (exact || magnifying) && magnification != 1. {
-            true => magnification,
+            true if exact || !moving => magnification,
+            true => match held {
+                // Fine enough (stretched by a hundredth at most) and not
+                // past √2 finer than it shows.
+                Some((_, kept, _))
+                    if kept * 1.01 >= magnification
+                        && kept <= magnification * std::f32::consts::SQRT_2 =>
+                {
+                    kept
+                }
+                // Else the next √2 step at or above it: room to grow into.
+                _ => step_scale((2. * magnification.log2() - 1e-3).ceil() as i32),
+            },
             false => step_scale(step),
         };
+        if magnifying && !exact {
+            // Its step follows its raster, which holds while it moves.
+            step = ((2. * factor.log2()).round() as i32)
+                .clamp(*RASTER_STEPS.start(), *RASTER_STEPS.end());
+        }
         // No finer than its largest glyph fits the atlas, once a raster
         // found it too large (`glyph_too_large`): finer, it would not draw.
         let glyphs = self.layers.get(&id).map_or(0., |cache| cache.glyphs);
@@ -5835,11 +5891,28 @@ impl GpuRenderer {
                 && scene.drop_shadow(id).is_none()
         });
         let frame = self.layer_frame;
+        // Still and at its scale, its texels on its target's pixels: drawn
+        // again if they moved off them (it moved, and stopped).
+        let aligned_scale = (magnifying && !exact && !moving).then_some(self.scale * factor);
+        let off_pixels = |cache: &LayerCache| {
+            let Some(grid) =
+                aligned_scale.and_then(|scale| placed.and_then(|placed| placed.aligned(scale)))
+            else {
+                return false;
+            };
+            let corner = (
+                cache.bounds.x + root.x - cache.root_origin.0,
+                cache.bounds.y + root.y - cache.root_origin.1,
+            );
+            let (px, py) = grid.point(corner.0, corner.1);
+            (px - px.round()).abs() > 1e-3 || (py - py.round()).abs() > 1e-3
+        };
         if let Some(cache) = self.layers.get_mut(&id)
             && cache.revision == revision
             && !cache.incomplete
             && cache.step == step
             && cache.factor == factor.to_bits()
+            && !off_pixels(cache)
             // Drawn in part: that part still holds all that shows.
             && (!cache.cropped
                 || visible.is_some_and(|visible| {
@@ -5862,6 +5935,7 @@ impl GpuRenderer {
             cache.content.y += root.y - cache.root_origin.1;
             cache.root_origin = (root.x, root.y);
             cache.transformed = transformed;
+            cache.seen = seen;
             cache.used = frame;
             cache.parked = false;
             cache.watched = shown.and_then(|shown| shown.window(cache.content));
@@ -5937,12 +6011,28 @@ impl GpuRenderer {
         // from where they land there, so it composites texel for pixel
         // rather than resampled half a pixel off.
         let aligned = placed
-            .filter(|_| at_scale && !exact && factor != 1.)
+            .filter(|_| at_scale && !exact && !moving && factor != 1.)
             .and_then(|placed| placed.aligned(scale));
+        // Moving, its texels where they were at this scale (from its box's
+        // corner, as it moved); else counted from its box's corner.
+        let anchor = self
+            .layers
+            .get(&id)
+            .filter(|cache| moving && cache.factor == factor.to_bits())
+            .map_or((root.x, root.y), |cache| {
+                (
+                    cache.bounds.x + root.x - cache.root_origin.0,
+                    cache.bounds.y + root.y - cache.root_origin.1,
+                )
+            });
         let (x, y) = match (exact && factor != 1., aligned) {
             (true, _) => (
                 root.x + ((bounds.x - root.x) * scale).floor() / scale,
                 root.y + ((bounds.y - root.y) * scale).floor() / scale,
+            ),
+            (false, None) if magnifying => (
+                anchor.0 + ((bounds.x - anchor.0) * scale).floor() / scale,
+                anchor.1 + ((bounds.y - anchor.1) * scale).floor() / scale,
             ),
             (false, Some(grid)) => {
                 // Back from the texel corner to the pixel corner before it.
@@ -6037,15 +6127,14 @@ impl GpuRenderer {
         // Drawn from another corner (its content grew left or up): its
         // texels round otherwise, and what didn't change shows a level off
         // where the window keeps its last frame (`render_once`). Not at a
-        // new scale it shows at: the transform that changed it damaged all
-        // it covers, and every texel differs anyway.
-        let rescaled = magnifying && at_scale;
+        // new scale as it moves: the transform that moved it damaged all it
+        // covers, and every texel differs anyway.
         shifted |= self.layers.get(&id).is_some_and(|cache| {
             (
                 cache.bounds.x - cache.root_origin.0,
                 cache.bounds.y - cache.root_origin.1,
             ) != (bounds.x - root.x, bounds.y - root.y)
-                && !(rescaled && cache.factor != factor.to_bits())
+                && !(moving && cache.factor != factor.to_bits())
         });
         self.layer_shifted = shifted;
         self.prepare_effects(scene, &items)?;
@@ -6063,6 +6152,7 @@ impl GpuRenderer {
                     used: frame,
                     watched: window,
                     incomplete: std::mem::take(&mut self.layer_incomplete),
+                    seen,
                     ..cache
                 },
             );
@@ -6168,6 +6258,7 @@ impl GpuRenderer {
                 exact: exact && factor != 1.,
                 cropped,
                 glyphs: found,
+                seen,
                 transformed,
                 used: frame,
                 parked: false,
