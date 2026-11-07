@@ -736,3 +736,97 @@ fn a_backdrop_reader_keeps_what_lies_under_its_shadow() {
         }
     }
 }
+
+/// Each pixel of the node's top-left 100 points reads the cell 900 points
+/// right and down of it, `params[0].xy` into the cell: a 1-point checker
+/// held at the far corner of a large layer.
+const FAR_READ: &str = "
+fn layer(input: LayerInput) -> vec4<f32> {
+    if all(input.p < vec2(100.0)) {
+        return zgx_sample(floor(input.p) + vec2(900.0) + input.params[0].xy);
+    }
+    return input.color;
+}";
+
+#[test]
+fn a_layer_reads_its_own_far_pixels_exactly() {
+    let _gpu_fixture = gpu_fixture();
+    let shader = FillShader::new(FAR_READ, None);
+    // A checker of 1-point cells, black and white, 100 by 100.
+    let cells: Vec<u8> = (0..100 * 100)
+        .flat_map(|at| match (at % 100 + at / 100) % 2 {
+            0 => [255, 255, 255, 255],
+            _ => [0, 0, 0, 255],
+        })
+        .collect();
+    let checker = std::sync::Arc::new(zgx::image::ImageData::new(100, 100, cells).unwrap());
+    // (device scale, the layer's own scale): its texels per point the two
+    // multiplied, each read at the middle of a cell's first texel, where a
+    // sample a quarter texel off blends in the cell beside it.
+    let mut failures = Vec::new();
+    for (device, scale) in [(1., 1.), (2., 1.), (1., 2.), (2., 2.)] {
+        let texels = device * scale;
+        let mut gpu = GpuRenderer::new(SIZE, SIZE).unwrap();
+        gpu.set_scale_factor(device);
+        let points = SIZE as f32 / device;
+        let mut scene = Scene::new(points, points);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let root = scene.root();
+        let id = scene.append(
+            root,
+            NodeKind::Container(Layout::Overlay),
+            fixed(1000., 1000.),
+        );
+        scene.append(
+            id,
+            NodeKind::Rect(Color(0, 0, 255, 255)),
+            fixed(1000., 1000.),
+        );
+        let data = scene.append(id, NodeKind::Image(checker.clone()), fixed(100., 100.));
+        scene.set_transform(data, Transform { x: 900., y: 900. });
+        scene.set_image_rendering(data, zgx::image::ImageRendering::Pixelated);
+        scene.set_layer_shader(id, Some(shader.clone()));
+        let into = 0.5 / texels;
+        scene.set_layer_uniforms(
+            id,
+            ShaderUniforms {
+                time: 0.,
+                params: [[into, into, 0., 0.], [0.; 4], [0.; 4], [0.; 4]],
+            },
+        );
+        if scale != 1. {
+            scene.set_local_transform(
+                id,
+                LocalTransform {
+                    scale: (scale, scale),
+                    origin: (0., 0.),
+                    ..LocalTransform::IDENTITY
+                },
+            );
+        }
+        let damage = scene.flush().damage;
+        gpu.render(&scene, &damage).unwrap();
+        let p = gpu.readback().unwrap();
+        // Window pixel (x, y) shows the cell its point lies in.
+        let read = SIZE.min((100. * texels) as u32);
+        let wrong: Vec<(u32, u32, [u8; 4])> = (0..read)
+            .flat_map(|y| (0..read).map(move |x| (x, y)))
+            .filter_map(|(x, y)| {
+                let cell = |at: u32| ((at as f32 + 0.5) / texels).floor() as u32;
+                let white = (cell(x) + cell(y)) % 2 == 0;
+                let expected = if white { [255; 4] } else { [0, 0, 0, 255] };
+                let actual = pixel(&p, x, y);
+                let exact = actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 1);
+                (!exact).then_some((x, y, actual))
+            })
+            .collect();
+        if !wrong.is_empty() {
+            failures.push(format!(
+                "device {device}, scale {scale}: {} pixels read the wrong cell or a blend, first {:?}",
+                wrong.len(),
+                &wrong[..wrong.len().min(3)]
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
