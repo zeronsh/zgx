@@ -138,6 +138,8 @@ SCENES = [
     ('3d-textured', 'zgx-3d', 'world_bench', {'SCENE': 'textured', 'MESHES': '2000', 'FRAMES': '30'}),
     ('3d-mixed', 'zgx-3d', 'world_bench', {'SCENE': 'mixed', 'MESHES': '2000', 'FRAMES': '30'}),
     ('widgets', 'zgx', 'widget_bench', {}),
+    # A pointer moving over a deep page with hover styles, undrawn.
+    ('pointer-move', 'zgx', 'pointer_bench', {}),
     # Effects' CPU work through the whole renderer, drawn by wgpu's no-op
     # backend: a scene of boxes as they are, then the same with an animated
     # layer shader painting past its box, and with one reading what's behind
