@@ -80,6 +80,8 @@ pub(crate) struct ScrollResampler {
     wheel_gap: Option<Duration>,
     /// When the latest input arrived.
     last_input: Option<Instant>,
+    /// Diagnostic: under a device pixel, held back (`ZGX_WHOLE_PX`).
+    carry: (f32, f32),
     /// Pointer position of the latest input; motion is delivered there.
     pub position: (f32, f32),
 }
@@ -268,9 +270,27 @@ impl ScrollResampler {
                 self.wheel_at = None;
             }
         }
+        // Diagnostic: `ZGX_WHOLE_PX=<scale>` moves only in whole device pixels,
+        // what's left carried to the next refresh.
+        if let Some(scale) = diag("ZGX_WHOLE_PX").and_then(|v| v.parse::<f32>().ok()) {
+            let carried = (self.carry.0 + delta.0, self.carry.1 + delta.1);
+            let whole = (
+                (carried.0 * scale).trunc() / scale,
+                (carried.1 * scale).trunc() / scale,
+            );
+            self.carry = (carried.0 - whole.0, carried.1 - whole.1);
+            delta = whole;
+        }
         (delta != (0., 0.)).then_some(delta)
     }
     fn delay(&self) -> Duration {
+        // Diagnostic: `ZGX_DRAIN_OFF` takes the slow refresh's rule (#1520) out.
+        if diag("ZGX_DRAIN_OFF").is_some() {
+            return self
+                .interval
+                .unwrap_or(Duration::from_millis(8))
+                .clamp(MIN_DELAY, Duration::from_millis(20));
+        }
         // (Events closer than that keep their interval: it's as short, and even.)
         if self.refresh >= SLOW_REFRESH
             && self.interval.is_some_and(|interval| {
@@ -799,4 +819,17 @@ mod tests {
         applied += resampler.flush().unwrap_or_default().1;
         assert!(applied.abs() < 0.001, "reversal stranded {applied} points");
     }
+}
+
+/// Diagnostic switches, read once each.
+pub(crate) fn diag(name: &str) -> Option<String> {
+    use std::sync::OnceLock;
+    static VARS: OnceLock<[Option<String>; 3]> = OnceLock::new();
+    let vars = VARS.get_or_init(|| {
+        ["ZGX_DRAIN_OFF", "ZGX_WHOLE_PX", "ZGX_LATE_OFF"].map(|v| std::env::var(v).ok())
+    });
+    let i = ["ZGX_DRAIN_OFF", "ZGX_WHOLE_PX", "ZGX_LATE_OFF"]
+        .iter()
+        .position(|v| *v == name)?;
+    vars[i].clone()
 }

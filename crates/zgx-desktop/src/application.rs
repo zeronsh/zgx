@@ -1304,7 +1304,9 @@ impl LateSample {
     const MARGIN: std::time::Duration = std::time::Duration::from_millis(3);
     /// How long into a refresh a frame starts.
     fn wait(&self, period: std::time::Duration) -> std::time::Duration {
-        if period < crate::scroll_resample::SLOW_REFRESH {
+        if period < crate::scroll_resample::SLOW_REFRESH
+            || crate::scroll_resample::diag("ZGX_LATE_OFF").is_some()
+        {
             return std::time::Duration::ZERO;
         }
         period.saturating_sub(Latch::LEAD + Self::MARGIN + self.work)
@@ -5989,7 +5991,10 @@ impl Host {
         }
         // A scroll at a slow refresh starts each frame so late it makes the
         // refresh it's for, with nothing to wait for (`LateSample`).
-        if self.frame_interval >= crate::scroll_resample::SLOW_REFRESH && self.scroll.active(now) {
+        if self.frame_interval >= crate::scroll_resample::SLOW_REFRESH
+            && crate::scroll_resample::diag("ZGX_LATE_OFF").is_none()
+            && self.scroll.active(now)
+        {
             self.latch = Latch::default();
             return None;
         }
