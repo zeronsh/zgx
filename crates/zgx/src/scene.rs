@@ -2254,6 +2254,12 @@ impl Constraints {
     }
 }
 type ChildPlacement = (NodeId, Rect, Constraints);
+/// `Scene::hit_test_all`'s last answer: its point's bits and the revisions
+/// it was found at (`geometry_revision`, `content_revision`), and its hits.
+struct HitMemo {
+    key: (u32, u32, u64, u64),
+    hits: Vec<NodeId>,
+}
 struct Measurement {
     constraints: Constraints,
     size: (f32, f32),
@@ -3082,6 +3088,10 @@ pub struct Scene {
     geometry_reader: std::cell::Cell<Option<u64>>,
     geometry_reads: std::cell::RefCell<Vec<(u64, NodeId, Rect)>>,
     geometry_revision: u64,
+    /// The last point hit tested, the revisions it was hit at and what it
+    /// hit (`hit_test_all`): a pointer move's dispatch and its cursor ask the
+    /// same, and most moves between frames ask where nothing changed.
+    hit_memo: std::cell::RefCell<Option<HitMemo>>,
     cursor_styles: usize,
     /// Scroll content translated since the last flush: its transform before
     /// the first move, and whether it moved again (see `resolve_moves`).
@@ -3288,6 +3298,7 @@ impl Scene {
             geometry_reader: Default::default(),
             geometry_reads: Default::default(),
             geometry_revision: 0,
+            hit_memo: Default::default(),
             cursor_styles: 0,
             contents_styles: Default::default(),
             given_styles: Default::default(),
@@ -5163,7 +5174,33 @@ impl Scene {
     /// The point maps through each transformed ancestor's inverse, so nodes
     /// are hit where they are drawn; a singular transform hits nothing.
     pub fn hit_test_all(&self, x: f32, y: f32) -> Vec<NodeId> {
+        self.with_hits(x, y, <[NodeId]>::to_vec)
+    }
+    /// `f` with `hit_test_all`'s hits, in place: kept with the point and the
+    /// revisions they were found at, so that asking again where nothing
+    /// changed (a pointer move's dispatch, then its cursor) doesn't walk
+    /// again, and nothing is copied either way.
+    pub(crate) fn with_hits<R>(&self, x: f32, y: f32, f: impl FnOnce(&[NodeId]) -> R) -> R {
         self.settle_children();
+        let key = (
+            x.to_bits(),
+            y.to_bits(),
+            self.geometry_revision,
+            self.content_revision,
+        );
+        // Asked again inside `f` (no caller does now): walked, not kept.
+        let Ok(mut memo) = self.hit_memo.try_borrow_mut() else {
+            return f(&self.hit_test_all_walked(x, y));
+        };
+        if memo.as_ref().is_none_or(|memo| memo.key != key) {
+            let hits = self.hit_test_all_walked(x, y);
+            *memo = Some(HitMemo { key, hits });
+        }
+        let memo =
+            std::cell::RefMut::map(memo, |memo| &mut memo.as_mut().expect("kept above").hits);
+        f(&memo)
+    }
+    fn hit_test_all_walked(&self, x: f32, y: f32) -> Vec<NodeId> {
         // Before the others, which compile as they did: a scene with
         // targets walks apart (`hit_test_targets`).
         if self.has_hit_targets() {
@@ -13117,6 +13154,125 @@ mod tests {
         assert_eq!(scene.bounds(restyled).width, 50.);
         assert!(report.layout_nodes > 0);
         assert!(!report.damage.is_empty());
+    }
+    /// A hit test asked again where nothing changed is answered from the
+    /// last; anything that changes what is under the point gives the new
+    /// answer, never a node moved, removed, hidden, clipped away, faded
+    /// out or covered.
+    #[test]
+    fn a_hit_test_asked_again_is_never_stale() {
+        let fixed = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let mut scene = Scene::new(200., 200.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let holder = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            fixed(100., 100.),
+        );
+        let a = scene.append(
+            holder,
+            NodeKind::Rect(Color(1, 1, 1, 255)),
+            fixed(100., 100.),
+        );
+        let b = scene.append(
+            holder,
+            NodeKind::Rect(Color(2, 2, 2, 255)),
+            fixed(100., 100.),
+        );
+        scene.flush();
+        let top = |scene: &Scene| scene.hit_test_all(50., 50.).first().copied();
+        assert_eq!(top(&scene), Some(b));
+        assert_eq!(top(&scene), Some(b), "asked again");
+        // Reordered: the other on top.
+        assert!(scene.reorder_children(holder, &[b, a]));
+        assert_eq!(top(&scene), Some(a), "reordered");
+        // Faded out: what is under it.
+        scene.set_effects(
+            a,
+            Effects {
+                opacity: 0.,
+                ..Default::default()
+            },
+        );
+        assert_eq!(top(&scene), Some(b), "faded out");
+        scene.set_effects(a, Effects::default());
+        assert_eq!(top(&scene), Some(a));
+        // Hidden.
+        let hidden = Style {
+            layout_options: Some(Arc::new(crate::layout::LayoutOptions {
+                display: Some(crate::layout::Display::None),
+                ..Default::default()
+            })),
+            ..fixed(100., 100.)
+        };
+        scene.set_style(a, hidden);
+        assert_eq!(top(&scene), Some(b), "hidden");
+        // Removed.
+        scene.remove(a);
+        assert_eq!(top(&scene), Some(b));
+        scene.remove(b);
+        assert_eq!(top(&scene), Some(holder), "removed");
+        // Moved by layout, away from the point.
+        let c = scene.append(
+            holder,
+            NodeKind::Rect(Color(3, 3, 3, 255)),
+            fixed(100., 100.),
+        );
+        scene.flush();
+        assert_eq!(top(&scene), Some(c));
+        scene.set_style(
+            c,
+            Style {
+                margin: Insets {
+                    left: 120.,
+                    ..Default::default()
+                },
+                ..fixed(60., 60.)
+            },
+        );
+        scene.flush();
+        assert_ne!(top(&scene), Some(c), "moved away");
+        // Moved by a transform, back over it.
+        scene.set_transform(c, Transform { x: -110., y: 0. });
+        assert_eq!(top(&scene), Some(c), "moved back");
+        // Clipped away by its holder.
+        scene.set_transform(c, Transform { x: 0., y: 0. });
+        scene.set_style(c, fixed(60., 60.));
+        scene.flush();
+        assert_eq!(top(&scene), Some(c));
+        scene.set_style(
+            c,
+            Style {
+                margin: Insets {
+                    left: 90.,
+                    top: 40.,
+                    ..Default::default()
+                },
+                ..fixed(60., 60.)
+            },
+        );
+        scene.flush();
+        assert_eq!(
+            scene.hit_test_all(140., 60.).first().copied(),
+            Some(c),
+            "past its holder"
+        );
+        scene.set_style(
+            holder,
+            Style {
+                clip: true,
+                ..fixed(100., 100.)
+            },
+        );
+        assert_ne!(
+            scene.hit_test_all(140., 60.).first().copied(),
+            Some(c),
+            "clipped away"
+        );
     }
     /// A text's proof that it holds no right-to-left script goes with its
     /// text: changed to Hebrew, its ink is its whole box again.
