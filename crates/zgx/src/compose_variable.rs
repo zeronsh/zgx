@@ -531,6 +531,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                 ui,
                 root,
                 std::rc::Rc::new(move |y: f32| rows.index.borrow().row_at(y + 0.5)),
+                // Rows of their own heights: a line is the one rows are
+                // taken to have until measured.
+                heights.index.borrow().estimate(),
             );
             let mut handled_reveal = 0;
             // A destination followed through measurement: the row, where it
