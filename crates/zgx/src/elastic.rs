@@ -46,7 +46,8 @@ pub(crate) struct Elastic {
     /// Room past the content's end, while something covers that much of it (a
     /// keyboard): scrolling there is scrolling, not stretch.
     end_room: Rc<Cell<f32>>,
-    root: NodeId,
+    /// Drawn here whatever its offset says (`ScrollDriver::hold`); a list's has none.
+    held: Option<Signal<Option<f32>>>,
 }
 impl Elastic {
     fn main(&self, size: (f32, f32)) -> f32 {
@@ -152,6 +153,7 @@ pub(crate) fn register(
     extent: Signal<(f32, f32)>,
     offset: Signal<f32>,
     end_room: Rc<Cell<f32>>,
+    held: Option<Signal<Option<f32>>>,
 ) -> Signal<f32> {
     let shown = ui.signal(0_f32);
     let elastic = Rc::new(Elastic {
@@ -165,7 +167,7 @@ pub(crate) fn register(
         next: Cell::new(None),
         bounced: Cell::new(None),
         end_room,
-        root,
+        held,
     });
     {
         let mut state = ui.elastic_state().borrow_mut();
@@ -537,9 +539,21 @@ impl ScrollDriver {
             stretch: view.shown.with_untracked(|s| *s),
         })
     }
-    /// The node of its scroll view.
-    pub fn node(&self) -> Option<NodeId> {
-        self.0.upgrade().map(|view| view.root)
+    /// Keep drawing it at `at` as its offset goes on (the host moves what is
+    /// drawn itself, a page riding a keyboard), or back to its offset: everything
+    /// that reads the offset follows, with nothing of it drawn again. False if
+    /// this kind of scroll view can't.
+    pub fn hold(&self, at: Option<f32>) -> bool {
+        let Some(view) = self.0.upgrade() else {
+            return false;
+        };
+        let Some(held) = &view.held else {
+            return false;
+        };
+        if held.with_untracked(|now| *now != at) {
+            held.set(at);
+        }
+        true
     }
     /// Give it `room` past its content's end to scroll into, 0 for none.
     pub fn set_end_room(&self, room: f32) {

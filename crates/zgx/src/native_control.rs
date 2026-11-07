@@ -264,23 +264,6 @@ pub fn keyboard_rise(travel: f64, contact: f64, total: f64) -> f64 {
         (past + ease) * (past + ease) / (4. * ease)
     }
 }
-type ShownScrolls = std::collections::HashMap<crate::scene::NodeId, Rc<dyn Fn(f32)>>;
-thread_local! {
-    static SHOWN_SCROLLS: std::cell::RefCell<ShownScrolls> = std::cell::RefCell::default();
-}
-/// Tell `told` where scroll view `node` shows while the host moves it without
-/// drawing it (the page riding a keyboard), its offset not changing: a bar over
-/// it can follow. Told a negative when its offset says again.
-pub fn set_shown_scroll(node: crate::scene::NodeId, told: Rc<dyn Fn(f32)>) {
-    SHOWN_SCROLLS.with(|scrolls| scrolls.borrow_mut().insert(node, told));
-}
-/// What the host tells of scroll view `node`: `set_shown_scroll`.
-pub fn tell_shown_scroll(node: crate::scene::NodeId, shown: f32) {
-    let told = SHOWN_SCROLLS.with(|scrolls| scrolls.borrow().get(&node).cloned());
-    if let Some(told) = told {
-        told(shown);
-    }
-}
 /// A bar that goes with the keyboard (`ui.keyboard_bar`).
 #[derive(Clone)]
 pub struct KeyboardBar {

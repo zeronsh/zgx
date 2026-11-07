@@ -21867,9 +21867,6 @@ declare ui: {
 	-- A bar that goes with the keyboard, its look in its children: a composer.
 	keyboard_bar: (props: ContainerProps?) -> Node,
 	native_keyboard_bar: (element: Element, lift: (up: number) -> ()) -> (),
-	-- Told where a scroll view shows while the host moves it without its offset
-	-- changing (a page riding the keyboard), and a negative when that is over.
-	native_shown_scroll: (element: Element, told: (shown: number) -> ()) -> (),
 	-- The system's pull to refresh on a scroll view's element (iOS). `top` says
 	-- where its spinner hangs; `on_refresh` is given what ends it.
 	pull_refresh: (opts: { element: Element, top: () -> number, on_refresh: (done: () -> ()) -> () }) -> (),

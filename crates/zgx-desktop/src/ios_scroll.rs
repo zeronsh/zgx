@@ -164,6 +164,8 @@ struct Glue {
     drawn: f32,
     /// The offset to draw once it has.
     target: f32,
+    /// Whether the offset goes on while what is drawn holds (`ScrollDriver::hold`).
+    held: bool,
 }
 /// Told how far up a keyboard bar is to be drawn.
 pub(crate) type BarLift = Rc<dyn Fn(f32)>;
@@ -287,13 +289,6 @@ fn eased(plain: impl Fn(f64) -> f32, start: f64, end: f64) -> impl Fn(f64) -> f3
     move |edge| rest + zgx::native_control::keyboard_rise(bottom - edge, contact, total) as f32
 }
 
-/// Tell a bar over the page where it shows (`set_shown_scroll`).
-fn tell_shown(driver: &ScrollDriver, shown: f32) {
-    if let Some(node) = driver.node() {
-        zgx::native_control::tell_shown_scroll(node, shown);
-    }
-}
-
 fn page_views() -> Vec<Retained<AnyObject>> {
     crate::native_host::ios::held_view().into_iter().collect()
 }
@@ -413,13 +408,14 @@ fn unglue(state: &State) {
     };
     let shown = shown_translation(&page_views());
     glue.driver.drive(glue.drawn - shown as f32);
-    tell_shown(&glue.driver, -1.);
+    glue.driver.hold(None);
     *state.after_frame.borrow_mut() = Some(AfterFrame::Remove);
     state.window.request_redraw();
 }
 
 /// Called as the keyboard's animation is made, in its transaction.
 fn glue_to_keyboard(state: &State) {
+    let was_moving = state.glue.borrow().is_some();
     unglue(state);
     unglue_bar(state);
     let (spring, end) = {
@@ -494,17 +490,20 @@ fn glue_to_keyboard(state: &State) {
         "keyboard glue {first:.0} to {last:.0}, drawn {drawn:.0}, spring {:.0} over {:.3}s",
         spring.from, spring.duration
     ));
-    tell_shown(&driver, first.max(0.));
+    let held = driver.hold(Some(drawn));
     *state.glue.borrow_mut() = Some(Glue {
         driver: driver.clone(),
         drawn,
         target: last,
+        held,
     });
-    if (drawn - first).abs() < 0.5 {
+    if (drawn - first).abs() < 0.5 && !was_moving {
         // In this transaction, so on the keyboard's clock with no begin time.
         start_glue(&page_views(), &values, duration, 0.);
     } else {
-        driver.drive(drawn);
+        if !held {
+            driver.drive(drawn);
+        }
         *state.after_frame.borrow_mut() = Some(AfterFrame::Start(values));
         state.window.request_redraw();
     }
@@ -652,8 +651,12 @@ fn keyboard_frame(state: &State, link: &AnyObject) {
     if let Some(glue) = &*state.glue.borrow() {
         let shown = f64::from(glue.drawn) - shown_translation(&page_views());
         crate::ios_gestures::log_follow_edge(edge, edge, shown);
-        tell_shown(&glue.driver, shown.max(0.) as f32);
-        state.window.request_redraw();
+        // Its offset goes on while what is drawn holds still: all that reads it
+        // follows the page as it follows a scroll (a bar's title, an edge's fade).
+        if glue.held {
+            glue.driver.drive(shown.max(0.) as f32);
+            state.window.request_redraw();
+        }
     }
     let lock = state.lock.borrow();
     match &*lock {
@@ -708,8 +711,9 @@ fn finish_keyboard_move(state: &State, edge: f64) {
     }
     if let Some(glue) = state.glue.borrow_mut().take() {
         // The new offset's frame and the animation's end, in one transaction.
-        tell_shown(&glue.driver, -1.);
+        glue.driver.hold(None);
         if (glue.target - glue.drawn).abs() < 0.5 {
+            glue.driver.drive(glue.target);
             remove_glue(&page_views());
         } else {
             glue.driver.drive(glue.target);

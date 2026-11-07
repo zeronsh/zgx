@@ -6010,7 +6010,8 @@ impl ListStretch {
                 }
             });
         }
-        let shown = crate::elastic::register(ui, root, false, size, extents, offset, Rc::default());
+        let shown =
+            crate::elastic::register(ui, root, false, size, extents, offset, Rc::default(), None);
         let placed = Rc::new(Cell::new(0_f32));
         {
             let (placed, shown, scene) = (placed.clone(), shown.clone(), ui.scene.clone());
@@ -6276,6 +6277,7 @@ fn mount_scroll(
     // What a trackpad stretches it by past an edge (`elastic`): zero unless
     // the host scrolls elastically.
     let end_room: Rc<Cell<f32>> = Rc::default();
+    let held = ui.signal(None::<f32>);
     let stretch = crate::elastic::register(
         ui,
         root,
@@ -6284,6 +6286,7 @@ fn mount_scroll(
         extent.clone(),
         offset.clone(),
         end_room.clone(),
+        Some(held.clone()),
     );
     if scrollbar {
         let main_extent = ui.signal(main_size(extent.get()));
@@ -6450,7 +6453,8 @@ fn mount_scroll(
         // shows no stretch: whatever a gesture left goes as it ends
         // (`elastic`).
         let stretch = if limit > 0. { stretch.get() } else { 0. };
-        scene.set_transform(content, translation(position + stretch, rtl));
+        let drawn = held.get().unwrap_or(position + stretch);
+        scene.set_transform(content, translation(drawn, rtl));
     });
 }
 #[cfg(target_os = "macos")]

@@ -18,6 +18,37 @@ fn window(content_height: f32) -> Ui {
 }
 
 #[test]
+fn a_held_view_stays_drawn_where_it_is_as_its_offset_goes_on() {
+    let ui = window(1000.);
+    let driver = ui.scroll_driver_at(50., 50.).expect("a view with room");
+    driver.drive(100.);
+    ui.prepare_frame();
+    let content = |ui: &Ui| {
+        let scene = ui.scene.borrow();
+        let root = scene.root();
+        let mut node = root;
+        let mut y = 0.;
+        // The one transformed node of this little tree.
+        while let Some(child) = scene.children(node).first().copied() {
+            y += scene.transform(child).y;
+            node = child;
+        }
+        y
+    };
+    assert_eq!(content(&ui), -100.);
+
+    assert!(driver.hold(Some(100.)));
+    driver.drive(300.);
+    ui.prepare_frame();
+    assert_eq!(driver.metrics().unwrap().offset, 300., "readers follow");
+    assert_eq!(content(&ui), -100., "nothing of it moves");
+
+    driver.hold(None);
+    ui.prepare_frame();
+    assert_eq!(content(&ui), -300.);
+}
+
+#[test]
 fn a_driver_moves_the_view_and_keeps_its_offset_in_range() {
     let ui = window(1000.);
     let driver = ui.scroll_driver_at(50., 50.).expect("a view with room");
