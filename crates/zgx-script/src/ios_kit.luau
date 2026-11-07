@@ -32,11 +32,41 @@ local NAV_RELEASE = uikit_spring(0.85, 0.3)
 -- a second) is over 1.5.
 local NAV_FLICK_AVERAGE = 1.5
 local NAV_FLICK_BOOST = 4.25
+-- Whether a release goes back or comes home: UIKit's own decision read at eight
+-- places across the width (how far along, then the finger's average speed in
+-- widths a second at or above which it goes back), between them the line
+-- through its neighbours.
+local NAV_GOES_BACK = {
+	{ 0.0249, 1.33085 },
+	{ 0.1492, 1.03609 },
+	{ 0.2479, 0.62451 },
+	{ 0.3485, 0.50118 },
+	{ 0.4484, 0.23476 },
+	{ 0.5454, -0.22234 },
+	{ 0.6724, -0.40252 },
+	{ 0.7981, -0.74489 },
+}
+local function goes_back(along, average)
+	local points = NAV_GOES_BACK
+	local least = points[1][2]
+	if along <= points[1][1] then
+		least = points[1][2]
+	elseif along >= points[#points][1] then
+		least = points[#points][2]
+	else
+		for i = 1, #points - 1 do
+			local a, b = points[i], points[i + 1]
+			if along <= b[1] then
+				least = a[2] + (b[2] - a[2]) * (along - a[1]) / (b[1] - a[1])
+				break
+			end
+		end
+	end
+	return average >= least
+end
 -- How far the page under the top one lies back, of the width.
 local PARALLAX = 0.3
 local SETTLE_MOST = 1200
--- A release this fast decides, wherever the finger is (points a second).
-local FLING = 300
 -- A refresh that never says it's done ends after this long (milliseconds).
 local REFRESH_MOST = 15000
 
@@ -770,7 +800,7 @@ ios.stack = ui.component(function(props)
 				holding = false
 				check_soon()
 				local at = clamp(start + e.x, 0, width)
-				if e.vx > FLING or (at > width / 2 and e.vx > -FLING) then
+				if goes_back(at / width, average) then
 					finish_pop(released(e.vx))
 				else
 					run_drag(0, nil, released(e.vx))
