@@ -58,11 +58,13 @@ impl GlassStyle {
             static MATERIAL: std::sync::Arc<crate::decoration::FillShader> =
                 crate::decoration::FillShader::new(include_str!("glass.wgsl"), None);
         }
-        // [black, white, saturation, top], fill, blur.
+        // [black, white, saturation, top], fill, blur (the system's has a
+        // sharp core and a broad shoulder: one sigma fitted over text,
+        // pictures and an edge together).
         let (face, fill, frost) = match (self.variant, dark) {
-            (GlassVariant::Regular, false) => ([0.5, 1.03, 1., 0.97], [1., 1., 1., 0.4], 7.25),
+            (GlassVariant::Regular, false) => ([0.5, 1.03, 1., 0.97], [1., 1., 1., 0.4], 4.5),
             // Its filter's black is 0.2; on screen it reads 0.17.
-            (GlassVariant::Regular, true) => ([0.17, 0.6, 1., 0.97], [0., 0., 0., 0.4], 7.25),
+            (GlassVariant::Regular, true) => ([0.17, 0.6, 1., 0.97], [0., 0., 0., 0.4], 4.5),
             (GlassVariant::Clear, _) => ([0.075, 1.15, 1.06, 1.], [1., 1., 1., 0.], 1.5),
         };
         // The rim's colour from the face: gain, luma taken off, lift; and its
