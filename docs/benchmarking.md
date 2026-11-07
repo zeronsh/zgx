@@ -1,5 +1,23 @@
 # Reproducible GUI comparison
 
+## Trackpad response
+
+`ZGX_PRESENT_LOG=1` also records `scroll-received` and `scroll-applied` on
+the presentation log's host clock. The received deltas are logical points;
+the applied records distinguish direct input, display refreshes, hidden-window
+flushes and gesture-end flushes. Refresh records include the sampling delay
+and display period in milliseconds. The received timestamp marks the desktop
+host handling the event, not its native hardware timestamp.
+
+Use one window and the same wheel tape for repeated comparisons. On macOS,
+compare `ZGX_PRESENT_DRAWABLE=0` and `ZGX_PRESENT_DRAWABLE=1` at both 60 Hz
+and 120 Hz. Correlate the input and application records with the renderer's
+hand-offs and actual presentation feedback or a synchronized screen capture;
+render completion alone does not establish visible input latency. Keep logs
+off while comparing CPU and memory, since per-event logging adds work.
+
+## Shared comparison workload
+
 The three adapters use the same `comparisons/workload` Rust crate. GPUI is pinned to crates.io **0.2.2**; QuickGUI is pinned to upstream commit **811d6e2816d5229711f59683c4c9dfbb6fc74133**. Their standalone Cargo workspaces isolate large platform dependency graphs from zgx core. Commit the generated Cargo.lock files to preserve transitive versions.
 
 The target UI is a 960×720 logical-pixel dark window. Header: “zgx performance lab”. Three controls append three items, perform two equal writes to the first item, and set done to 999. Count/title/duplicate count match the provided service example. The list initially has capacity four and count zero; append preserves successful earlier writes if the fourth-slot limit is reached, reporting done=-1; the virtual dataset is independently 100,000 synthetic rows. Streaming pane: (20,110), 920×160. List: (20,290), 920×400. Rows: 28px. Font: DejaVu Sans, 14px; header 20px. OS window decorations are outside the content coordinates.
