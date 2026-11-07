@@ -109,7 +109,10 @@ pub fn window_size_value(width: f32, height: f32) -> Value {
     windows::size(width, height)
 }
 pub use rules::GuardKind;
-pub use value::{ElementHandle, PathKey, Shared, Store, Value, tables_converted, values_converted};
+pub use value::{
+    ElementHandle, Folded, PathKey, Shared, Store, Unfold, Value, tables_converted,
+    values_converted,
+};
 pub use windows::{Window, WindowExtras};
 
 use mlua::Lua;
