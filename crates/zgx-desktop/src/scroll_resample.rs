@@ -24,7 +24,7 @@ const MAX_DELAY: Duration = Duration::from_millis(20);
 /// events come within `SLOW_EVENTS` of them. A real trackpad's events through
 /// this at 60 Hz: position 4.9 ms behind the read that carried it (p50; 12.9 at
 /// p95) against 19 (38), steps over 50% off their neighbours 23% against 14%.
-const NO_DELAY_REFRESH: Duration = Duration::from_millis(12);
+pub(crate) const SLOW_REFRESH: Duration = Duration::from_millis(12);
 /// Events further apart than this many refreshes are still bridged: a slow
 /// device's motion would otherwise show every few frames.
 const SLOW_EVENTS: f32 = 2.;
@@ -224,7 +224,7 @@ impl ScrollResampler {
         (delta != (0., 0.)).then_some(delta)
     }
     fn delay(&self) -> Duration {
-        if self.refresh >= NO_DELAY_REFRESH
+        if self.refresh >= SLOW_REFRESH
             && self
                 .interval
                 .is_some_and(|interval| interval <= self.refresh.mul_f32(SLOW_EVENTS))

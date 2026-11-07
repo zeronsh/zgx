@@ -1271,6 +1271,71 @@ const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(500)
 /// release spring or a hover fade that follows input keeps its frames too.
 #[cfg(any(target_os = "macos", windows))]
 const INPUT_FULL_RATE: std::time::Duration = std::time::Duration::from_millis(250);
+/// When a scroll's frames start at a slow refresh (`scroll_resample::SLOW_REFRESH`).
+/// Started as a refresh begins, what a frame shows is a whole refresh old by the
+/// next, 16.7 ms at 60 Hz, however fast the app. Started as late as it still
+/// makes that refresh, as a system scroll view's does, it's the frame's work
+/// and a few milliseconds old. One that runs long shows on the refresh after,
+/// no older than a frame started as the refresh began would be by then, and
+/// the frames after it start earlier.
+#[cfg(target_os = "macos")]
+struct LateSample {
+    /// How long frames lately took from starting to handed over (the most,
+    /// forgotten over seconds).
+    work: std::time::Duration,
+    started: Option<std::time::Instant>,
+}
+#[cfg(target_os = "macos")]
+impl Default for LateSample {
+    fn default() -> Self {
+        Self {
+            work: Self::FIRST,
+            started: None,
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+impl LateSample {
+    /// What the first frame is taken to need.
+    const FIRST: std::time::Duration = std::time::Duration::from_millis(8);
+    /// Room left for a frame longer than any lately, and a timer waking late.
+    /// Modeled at 60 Hz, frames of 5 ms (9 at p95): 14.5 ms from sampled to
+    /// shown against 16.4, 1.1% of gaps long against 0.2; of 1.5 ms: 7.9 ms.
+    const MARGIN: std::time::Duration = std::time::Duration::from_millis(3);
+    /// How long into a refresh a frame starts.
+    fn wait(&self, period: std::time::Duration) -> std::time::Duration {
+        if period < crate::scroll_resample::SLOW_REFRESH {
+            return std::time::Duration::ZERO;
+        }
+        period.saturating_sub(Latch::LEAD + Self::MARGIN + self.work)
+    }
+    /// When the next frame starts, `next` being the first refresh after `now`:
+    /// in the refresh under way if that's still to come, else the next.
+    fn deadline(
+        &self,
+        now: std::time::Instant,
+        next: std::time::Instant,
+        period: std::time::Duration,
+    ) -> std::time::Instant {
+        let wait = self.wait(period);
+        match (next + wait).checked_sub(period) {
+            Some(this) if this > now => this,
+            _ => next + wait,
+        }
+    }
+    /// A frame started at `at`.
+    fn start(&mut self, at: std::time::Instant) {
+        self.started = Some(at);
+    }
+    /// The frame was handed over at `at`.
+    fn handed_over(&mut self, at: std::time::Instant) {
+        if let Some(started) = self.started.take() {
+            self.work = at
+                .saturating_duration_since(started)
+                .max(self.work.mul_f64(0.99));
+        }
+    }
+}
 /// The refresh point steady frames present at (see `Host::refresh_grid`),
 /// and when they render before it.
 #[cfg(target_os = "macos")]
@@ -1648,6 +1713,8 @@ struct Host {
     reported_size: Option<PhysicalSize<u32>>,
     #[cfg(target_os = "macos")]
     latch: Latch,
+    #[cfg(target_os = "macos")]
+    late_sample: LateSample,
     frame_timer: crate::frame_source::FrameTimer,
     frame_interval: std::time::Duration,
     /// The display the window shows on and its rate (`refresh_frame_interval`).
@@ -2071,6 +2138,8 @@ impl Host {
             reported_size: None,
             #[cfg(target_os = "macos")]
             latch: Latch::default(),
+            #[cfg(target_os = "macos")]
+            late_sample: LateSample::default(),
             frame_arrived: false,
             #[cfg(target_os = "macos")]
             refresh_frame: false,
@@ -2848,6 +2917,7 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 {
                     self.presented_at = Some(std::time::Instant::now());
+                    self.late_sample.handed_over(std::time::Instant::now());
                     // What it shows now, for `Ui::snapshot` (the last frame's
                     // surface is the renderer's to reuse again).
                     *self.shown.borrow_mut() = renderer
@@ -5853,6 +5923,8 @@ impl Host {
     }
     fn poll_frame_deadline(&mut self, now: std::time::Instant) {
         if self.frame_deadline.is_some_and(|deadline| now >= deadline) {
+            #[cfg(target_os = "macos")]
+            self.late_sample.start(now);
             let frame = self.frame_timer.frame(now, self.frame_interval);
             self.deliver_frame(frame);
         }
@@ -5886,6 +5958,12 @@ impl Host {
             .resized_at
             .is_some_and(|at| now.duration_since(at) < RESIZE_SETTLE)
         {
+            self.latch = Latch::default();
+            return None;
+        }
+        // A scroll at a slow refresh starts each frame so late it makes the
+        // refresh it's for, with nothing to wait for (`LateSample`).
+        if self.frame_interval >= crate::scroll_resample::SLOW_REFRESH && self.scroll.active(now) {
             self.latch = Latch::default();
             return None;
         }
@@ -5993,11 +6071,14 @@ impl Host {
                         // (whole refreshes apart, on the same ones), so the
                         // cadence holds as the link and the timer take turns.
                         let every = rate.map_or(1, |rate| zgx::frame::divisor(refresh, rate));
-                        self.frame_deadline = Some(self.frame_timer.next_deadline_every(
-                            now,
-                            self.frame_interval,
-                            every,
-                        ));
+                        let next =
+                            self.frame_timer
+                                .next_deadline_every(now, self.frame_interval, every);
+                        self.frame_deadline = Some(if scrolling && every == 1 {
+                            self.late_sample.deadline(now, next, self.frame_interval)
+                        } else {
+                            next
+                        });
                     }
                 } else {
                     link.set_preferred_rate(rate);
@@ -9311,6 +9392,88 @@ mod tests {
         assert_eq!(left, [true]);
     }
 
+    #[cfg(target_os = "macos")]
+    mod late_sample {
+        use super::super::LateSample;
+        use std::time::{Duration, Instant};
+        const SIXTY: Duration = Duration::from_micros(16_667);
+        fn ms(ms: u64) -> Duration {
+            Duration::from_millis(ms)
+        }
+        /// Frames of `work`, each started when `deadline` says, on refreshes of
+        /// `period`: how long each is from starting to showing, the refreshes
+        /// shown on, and each frame handed over before its point (2 ms ahead).
+        fn run(period: Duration, works: &[Duration]) -> (Vec<Duration>, Vec<u32>) {
+            let start = Instant::now();
+            let mut late = LateSample::default();
+            let mut now = start;
+            let (mut ages, mut shown) = (Vec::new(), Vec::new());
+            for &work in works {
+                let refreshes = (now - start).as_secs_f64() / period.as_secs_f64();
+                let next = start + period.mul_f64(refreshes.floor() + 1.);
+                let at = late.deadline(now, next, period);
+                assert!(at > now, "a frame starts after the one before");
+                late.start(at);
+                now = at + work;
+                late.handed_over(now);
+                let by = (now + ms(2) - start).as_secs_f64() / period.as_secs_f64();
+                let on = by.ceil() as u32;
+                shown.push(on);
+                ages.push(start + period * on - at);
+            }
+            (ages, shown)
+        }
+        #[test]
+        fn a_faster_refresh_starts_as_it_begins() {
+            let late = LateSample::default();
+            assert_eq!(late.wait(Duration::from_micros(8_333)), Duration::ZERO);
+            let (ages, _) = run(Duration::from_micros(8_333), &[ms(2); 30]);
+            assert!(ages[20] >= Duration::from_millis(8), "{:?}", ages[20]);
+        }
+        #[test]
+        fn at_a_slow_refresh_a_frame_is_its_work_and_a_few_ms_old() {
+            let (ages, shown) = run(SIXTY, &[ms(2); 600]);
+            // Once the first frames' estimate has been forgotten.
+            let age = ages[500];
+            assert!(age < ms(9), "{age:?}");
+            let last = &shown[500..];
+            assert!(
+                last.windows(2).all(|w| w[1] == w[0] + 1),
+                "a frame every refresh: {last:?}"
+            );
+        }
+        #[test]
+        fn a_frame_that_runs_long_costs_no_more_than_a_refresh_and_frames_start_earlier() {
+            let mut works = vec![ms(2); 600];
+            works[500] = ms(9);
+            let (ages, shown) = run(SIXTY, &works);
+            let missed = shown[500] - shown[499];
+            assert_eq!(missed, 2, "the refresh after");
+            assert!(
+                ages[500] < SIXTY * 2,
+                "no older than a refresh more: {:?}",
+                ages[500]
+            );
+            // The next may make that refresh too, newer; none goes without one.
+            assert!(
+                shown[500..].windows(2).all(|w| w[1] <= w[0] + 1),
+                "{:?}",
+                &shown[500..510]
+            );
+            assert!(
+                ages[501] > ages[499] + ms(5),
+                "started earlier: {:?}",
+                ages[501]
+            );
+        }
+        #[test]
+        fn work_too_long_for_a_late_start_starts_as_the_refresh_begins() {
+            let (ages, shown) = run(SIXTY, &[ms(13); 100]);
+            assert!(ages[50] >= SIXTY - ms(1), "{:?}", ages[50]);
+            let last = &shown[50..];
+            assert!(last.windows(2).all(|w| w[1] == w[0] + 1), "{last:?}");
+        }
+    }
     #[cfg(target_os = "macos")]
     #[test]
     fn an_added_bool_method_states_bools_own_encoding() {
