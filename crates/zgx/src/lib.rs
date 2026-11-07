@@ -301,7 +301,10 @@ mod segment_tests {
         if level == levels {
             return u32::from(frame[0]);
         }
-        super::deep(level, || descend(level + 1, levels)) + u32::from(frame[1] & 0)
+        let below = super::deep(level, || descend(level + 1, levels));
+        // The frame stays live across the call, as a real level's does.
+        std::hint::black_box(&frame);
+        below
     }
 
     #[test]
