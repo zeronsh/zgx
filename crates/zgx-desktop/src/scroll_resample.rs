@@ -5,7 +5,9 @@
 //! refresh, which reads as judder even at full frame rate. Continuous (pixel)
 //! input is instead resampled: each refresh applies the motion up to one input
 //! interval before the refresh, interpolated between the events around it, so
-//! every frame advances evenly. Discrete wheel notches have no motion curve of
+//! every frame advances evenly. At a slow refresh (60 Hz) events keep up with
+//! frames, and being an interval behind costs more than it evens out: each
+//! refresh takes what has come. Discrete wheel notches have no motion curve of
 //! their own; they ease towards their destination over a few refreshes.
 use std::{collections::VecDeque, time::Duration, time::Instant};
 
@@ -18,6 +20,14 @@ const LINGER: Duration = Duration::from_millis(120);
 /// Bounds for the sampling delay, which tracks the input interval.
 const MIN_DELAY: Duration = Duration::from_millis(4);
 const MAX_DELAY: Duration = Duration::from_millis(20);
+/// Refreshes this long or longer apply what has come, with no delay, while
+/// events come within `SLOW_EVENTS` of them. A real trackpad's events through
+/// this at 60 Hz: position 4.9 ms behind the read that carried it (p50; 12.9 at
+/// p95) against 19 (38), steps over 50% off their neighbours 23% against 14%.
+const NO_DELAY_REFRESH: Duration = Duration::from_millis(12);
+/// Events further apart than this many refreshes are still bridged: a slow
+/// device's motion would otherwise show every few frames.
+const SLOW_EVENTS: f32 = 2.;
 /// Wheel notches close this fraction of the remaining distance per second, in
 /// the exponent: about 95% within 100 ms.
 const WHEEL_RATE: f32 = 30.;
@@ -37,6 +47,8 @@ pub(crate) fn enabled() -> bool {
 
 #[derive(Default)]
 pub(crate) struct ScrollResampler {
+    /// The time between refreshes (`set_refresh`).
+    refresh: Duration,
     /// Arrival time and cumulative position of each buffered event.
     points: VecDeque<(Instant, (f32, f32))>,
     /// Cumulative continuous motion received and applied.
@@ -148,6 +160,10 @@ impl ScrollResampler {
         (delta != (0., 0.)).then_some(delta)
     }
     /// The motion to apply at a display refresh processed at `now`.
+    /// The time between the refreshes it's sampled at.
+    pub fn set_refresh(&mut self, refresh: Duration) {
+        self.refresh = refresh;
+    }
     pub fn sample(&mut self, now: Instant) -> Option<(f32, f32)> {
         let target = match self.points.back() {
             Some((last, total)) if now.duration_since(*last) >= STALL => *total,
@@ -208,6 +224,13 @@ impl ScrollResampler {
         (delta != (0., 0.)).then_some(delta)
     }
     fn delay(&self) -> Duration {
+        if self.refresh >= NO_DELAY_REFRESH
+            && self
+                .interval
+                .is_some_and(|interval| interval <= self.refresh.mul_f32(SLOW_EVENTS))
+        {
+            return Duration::ZERO;
+        }
         self.interval
             .unwrap_or(Duration::from_millis(8))
             .clamp(MIN_DELAY, MAX_DELAY)
@@ -405,6 +428,46 @@ mod tests {
         for dy in steady {
             assert!((dy - 10.).abs() < 4.5, "{deltas:?}");
         }
+    }
+
+    /// Each event's motion, one frame's worth, sampled at a refresh of `refresh`
+    /// just after it came: how far behind what has come each frame stands.
+    fn behind(refresh: Duration, events: Duration) -> f32 {
+        let start = Instant::now();
+        let mut resampler = ScrollResampler::default();
+        resampler.set_refresh(refresh);
+        let (mut received, mut applied) = (0., 0.);
+        for i in 0..120u32 {
+            resampler.push_precise(start + events * i, (0., 10.));
+            received += 10.;
+            let at = start + events * i + Duration::from_micros(1500);
+            applied += resampler.sample(at).map_or(0., |(_, dy)| dy);
+        }
+        received - applied
+    }
+
+    /// At 60 Hz events keep up: each refresh shows what has come.
+    #[test]
+    fn a_slow_refresh_shows_what_has_come() {
+        let refresh = Duration::from_micros(16_667);
+        assert_eq!(behind(refresh, refresh), 0.);
+    }
+
+    /// At 120 Hz frames outrun events: they're bridged, as ever, a gap behind.
+    #[test]
+    fn a_fast_refresh_stays_behind_to_stay_even() {
+        let behind = behind(Duration::from_micros(8_333), Duration::from_micros(16_667));
+        assert!(behind > 5., "{behind}");
+    }
+
+    /// A slow device's events at 60 Hz are bridged too: not a jump every few frames.
+    #[test]
+    fn events_slower_than_a_slow_refresh_are_still_bridged() {
+        let behind = behind(
+            Duration::from_micros(16_667),
+            3 * Duration::from_micros(16_667),
+        );
+        assert!(behind > 5., "{behind}");
     }
 
     #[test]
