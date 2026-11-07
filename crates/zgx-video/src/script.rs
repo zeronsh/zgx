@@ -271,6 +271,51 @@ fn host(
         }
         told.clips.insert(id, placed);
     });
+    // A sound's spectrum, loudness and waveform at a moment
+    // (`video.audio_data`), each file decoded once.
+    let sounds: Rc<RefCell<BTreeMap<PathBuf, Rc<crate::audio::Sound>>>> = Rc::default();
+    let sound_dir = entry.parent().map(Path::to_owned).unwrap_or_default();
+    host.function("zgx.video.audio_data", move |arg| {
+        let arg = json_of(&arg);
+        let src = sound_dir.join(arg["src"].as_str().unwrap_or_default());
+        let kept = sounds.borrow().get(&src).cloned();
+        let sound = match kept {
+            Some(sound) => sound,
+            None => match crate::audio::decode(&src) {
+                Ok(sound) => {
+                    let sound = Rc::new(sound);
+                    sounds.borrow_mut().insert(src.clone(), sound.clone());
+                    sound
+                }
+                Err(error) => {
+                    return Value::from_json(&json!({ "error": error }).to_string())
+                        .unwrap_or_default();
+                }
+            },
+        };
+        let seconds = arg["seconds"].as_f64().unwrap_or(0.);
+        let floor = arg["floor_db"].as_f64().unwrap_or(-70.) as f32;
+        let answer = match arg["what"].as_str().unwrap_or("length") {
+            "bars" => {
+                let bars = crate::analysis::Bars {
+                    count: arg["count"].as_u64().unwrap_or(32).clamp(1, 1024) as usize,
+                    low: arg["low"].as_f64().unwrap_or(40.) as f32,
+                    high: arg["high"].as_f64().unwrap_or(16_000.) as f32,
+                    floor_db: floor,
+                };
+                json!(crate::analysis::bars(&sound, seconds, bars))
+            }
+            "level" => json!(crate::analysis::level(&sound, seconds, floor)),
+            "waveform" => json!(crate::analysis::waveform(
+                &sound,
+                seconds,
+                arg["span"].as_f64().unwrap_or(0.1),
+                arg["count"].as_u64().unwrap_or(64).clamp(1, 4096) as usize,
+            )),
+            _ => json!(sound.0.len() as f64 / 2. / f64::from(crate::audio::SAMPLE_RATE)),
+        };
+        Value::from_json(&answer.to_string()).unwrap_or_default()
+    });
     let heard = told.clone();
     host.action("zgx.video.hold", move |hold| {
         let hold = json_of(&hold);

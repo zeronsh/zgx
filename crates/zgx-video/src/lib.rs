@@ -1,6 +1,7 @@
 //! Videos written as zgx interfaces: an ordinary view or Luau script played on
 //! a virtual clock ([`zgx::clock::VirtualClock`]), a frame at a time, as fast
 //! as the machine draws, and the same way each time.
+pub mod analysis;
 pub mod audio;
 pub mod clip;
 pub mod compose;

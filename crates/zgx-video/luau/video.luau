@@ -691,6 +691,57 @@ function video.clip(opts: any): any
 	}
 end
 
+-- What a sound file holds, moment by moment, to draw from: `bars`, its
+-- spectrum as `count` values from 0 to 1 in bands from `low` to `high` hertz
+-- (32, 40 to 16000), spaced as pitch is; `level`, its loudness from 0 to 1;
+-- `waveform`, `count` peaks from -1 to 1 over `span` seconds from then.
+-- Each takes a frame (this sequence's, `f:get()` by default) and reads the
+-- same whichever frame came before; levels below `floor_db` (-70) read 0.
+-- `seconds` is the sound's length. Read in a function given to a property,
+-- it follows the frame: `h = function() return 4 + song:level() * 200 end`.
+export type AudioData = {
+	seconds: number,
+	bars: (self: AudioData, opts: any?) -> { number },
+	level: (self: AudioData, opts: any?) -> number,
+	waveform: (self: AudioData, opts: any?) -> { number },
+}
+local function audio_ask(src: string, what: string, args: any): any
+	args.src = src
+	args.what = what
+	local answer = ui.call_sync("zgx.video.audio_data", args)
+	if type(answer) == "table" and answer.error then
+		error(`video.audio_data: {answer.error}`, 3)
+	end
+	return answer
+end
+function video.audio_data(src: string): AudioData
+	local time = time_here()
+	local data: any = { seconds = audio_ask(src, "length", {}) }
+	local function seconds_of(o: any): number
+		local frame = if o and o.frame ~= nil then o.frame else (frame_state:get() - time.offset)
+		return (frame - (if o and o.from then o.from else 0)) / time.fps
+	end
+	function data.bars(_self: any, o: any?): { number }
+		local opts = o or {}
+		return audio_ask(src, "bars", {
+			seconds = seconds_of(opts),
+			count = opts.count,
+			low = opts.low,
+			high = opts.high,
+			floor_db = opts.floor_db,
+		})
+	end
+	function data.level(_self: any, o: any?): number
+		local opts = o or {}
+		return audio_ask(src, "level", { seconds = seconds_of(opts), floor_db = opts.floor_db })
+	end
+	function data.waveform(_self: any, o: any?): { number }
+		local opts = o or {}
+		return audio_ask(src, "waveform", { seconds = seconds_of(opts), count = opts.count, span = opts.span })
+	end
+	return data
+end
+
 -- Hold the render until the function this returns is called: for what loads in
 -- real time (`ui.fetch`, a remote picture). `label` says what, should it take too long.
 function video.hold(label: string?): () -> ()
