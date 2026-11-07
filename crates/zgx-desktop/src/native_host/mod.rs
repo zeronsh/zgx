@@ -545,7 +545,9 @@ impl NativeHost {
                 &renderer.context(),
                 scale,
             )?;
-            #[cfg(any(target_os = "ios", all(windows, feature = "webview2")))]
+            #[cfg(all(windows, feature = "webview2"))]
+            let overlay = surfaces.overlay_renderer(&renderer.context(), scale)?;
+            #[cfg(target_os = "ios")]
             let mut overlay = surfaces.overlay_renderer(&renderer.context(), scale)?;
             // Its drawables show in the frame's transaction, as the base's.
             #[cfg(target_os = "ios")]
