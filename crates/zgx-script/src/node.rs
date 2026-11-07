@@ -934,6 +934,8 @@ pub(crate) enum Kind {
         scrollbar: bool,
         /// `overscroll = "contain"`: a wheel over it stays with it.
         contain: bool,
+        /// `wheel_across = true` (`ui.scroll_x`): a mouse wheel moves it.
+        wheel_across: bool,
         /// `scroll_padding`: kept clear as what it holds scrolls into view.
         padding: Option<Box<ScrollPadding>>,
     },
@@ -3291,6 +3293,7 @@ const LATE_FIELDS: &[&str] = &[
     "at_end",
     "on_paste",
     "overscroll",
+    "wheel_across",
     "capture_keys",
     "scroll_padding",
     "read_only",
@@ -3438,6 +3441,21 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                     .rare
                     .get_or_insert_default()
                     .capture_keys = true;
+            }
+        }
+        "wheel_across" => {
+            let across = lua.unpack::<bool>(value)?;
+            match &mut node.kind {
+                Kind::Scroll {
+                    horizontal: true,
+                    wheel_across,
+                    ..
+                } => *wheel_across = across,
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "`wheel_across` is for a `ui.scroll_x`",
+                    ));
+                }
             }
         }
         "overscroll" => {
@@ -4751,6 +4769,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             scrollbar,
                             // Set as `fill` walks the table (`late_field`).
                             contain: false,
+                            wheel_across: false,
                             padding: None,
                         },
                     ),
