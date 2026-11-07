@@ -8925,6 +8925,7 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         }
         (FontFeatures, Lit::Str(v)) => s.font_features(font_features(v)),
         (Lang, Lit::Str(v)) => s.lang(&**v),
+        (Geometry, Lit::Str(v)) => geometry_of(s, v),
         _ => s,
     }
 }
@@ -9431,4 +9432,10 @@ fn a_rows_identity_and_key_read_as_formatted() {
         assert!(!displays_as(&value, &text[..text.len() - 1]));
         assert!(!displays_as(&value, "x"));
     }
+}
+/// `geometry = "tag"`: its box read by shaders asking for the tag.
+#[cold]
+#[inline(never)]
+fn geometry_of<S: Styled>(s: S, name: &str) -> S {
+    s.geometry_tag(zgx::decoration::geometry_tag(name))
 }

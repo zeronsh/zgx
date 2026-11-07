@@ -102,6 +102,73 @@ pub struct FillShader {
     /// Whether its source calls `zgx_backdrop` (a layer shader's read of
     /// what lies behind it: `Scene::set_layer_shader`).
     reads_backdrop: bool,
+    /// What a layer shader reads besides its layer (`FillShader::with_inputs`).
+    inputs: Option<Box<ShaderInputs>>,
+}
+/// How large a pass's texture is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PassSize {
+    /// This many pixels, whatever the box's size (a simulation's grid).
+    Pixels(u32, u32),
+    /// This fraction of its box's device pixels: drawn again from nothing
+    /// when that changes.
+    OfBox(f32),
+}
+/// What a pass's texture holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PassFormat {
+    /// Eight bits a channel, 0 to 1.
+    #[default]
+    Rgba8,
+    /// Sixteen-bit floats a channel: past 1 and below 0, filterable.
+    Rgba16Float,
+}
+/// One step of a layer shader's chain: a WGSL `run(input: PassInput)`,
+/// drawing a texture the passes after it and the shader sample by its name.
+#[derive(Clone, Debug)]
+pub struct ShaderPass {
+    /// Its name: `zgx_<name>(uv)` samples it, `zgx_<name>_texel(xy)` reads a
+    /// texel and `zgx_<name>_size()` is its size. An identifier.
+    pub name: String,
+    /// Its WGSL.
+    pub source: String,
+    /// How large its texture is.
+    pub size: PassSize,
+    /// What its texture holds.
+    pub format: PassFormat,
+    /// Its own last result stays readable (under its name) as it draws the
+    /// next: state from frame to frame. Costs a second texture.
+    pub feedback: bool,
+    /// Times it runs a frame (`PassInput::step` counts them): a solver's
+    /// iterations.
+    pub steps: u32,
+    /// It draws once (again if its size changes), then only its texture is
+    /// read: what doesn't move.
+    pub once: bool,
+}
+/// What a layer shader reads besides its layer: see `FillShader::with_inputs`.
+#[derive(Clone, Debug, Default)]
+pub struct ShaderInputs {
+    /// Passes, in the order they draw each frame.
+    pub passes: Vec<ShaderPass>,
+    /// Pictures to sample by name, as passes are.
+    pub images: Vec<(String, Arc<crate::image::ImageData>)>,
+    /// GPU views (`GpuView::id`) to sample by name, as passes are: each
+    /// drawn into a texture of its box's size before each frame by its
+    /// painter, with the renderer's device and an encoder of its own, so a
+    /// Rust effect can run anything its device has (a compute pass). The
+    /// caller keeps its `GpuView`.
+    pub views: Vec<(String, u64)>,
+    /// A tag: the rounded boxes of the nodes carrying it
+    /// (`Styled::geometry_tag`), as data for the passes and the shader.
+    pub geometry: Option<u64>,
+}
+/// The tag `name` is, for `ShaderInputs::geometry` and `Styled::geometry_tag`.
+pub fn geometry_tag(name: &str) -> u64 {
+    // FNV-1a: stable, and no table to keep.
+    name.bytes().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    })
 }
 impl FillShader {
     /// `source`, its time advancing at most `fps` times a second (a dither
@@ -114,7 +181,26 @@ impl FillShader {
             reads_backdrop: source.contains("zgx_backdrop"),
             source,
             fps: fps.filter(|fps| fps.is_finite() && *fps > 0.),
+            inputs: None,
         })
+    }
+    /// A layer shader that also samples `inputs`: passes the renderer runs
+    /// before each frame showing it, pictures, and tagged nodes' boxes. One
+    /// such shader is one running effect, with one set of textures: made
+    /// when it first draws, freed with it, and nothing for a shader without.
+    /// The nodes showing it share them, so give each effect its own.
+    pub fn with_inputs(
+        source: impl Into<Arc<str>>,
+        fps: Option<f32>,
+        inputs: ShaderInputs,
+    ) -> Arc<Self> {
+        let mut shader = Self::new(source, fps);
+        Arc::get_mut(&mut shader).expect("just made").inputs = Some(Box::new(inputs));
+        shader
+    }
+    /// What it reads besides its layer (`with_inputs`).
+    pub fn inputs(&self) -> Option<&ShaderInputs> {
+        self.inputs.as_deref()
     }
     /// Stable for this shader's lifetime: renderers cache its pipeline by it.
     pub fn id(&self) -> u64 {

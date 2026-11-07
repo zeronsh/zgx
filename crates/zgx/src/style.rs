@@ -729,6 +729,8 @@ pub(crate) struct ColdStyles {
     pub(crate) layer_uniforms: Option<crate::decoration::ShaderUniforms>,
     /// `Styled::layer_bleed` and `layer_reach`: how far past the box.
     pub(crate) layer_extent: Option<(f32, f32)>,
+    /// `Styled::geometry_tag`.
+    pub(crate) geometry_tag: Option<u64>,
     /// `Styled::grid_template_columns` and `grid_template_rows`.
     pub(crate) grid_template: Option<std::sync::Arc<crate::grid_tracks::GridTemplate>>,
     /// `Styled::grid_area`, `grid_column` and `grid_row`.
@@ -2690,6 +2692,15 @@ pub trait Styled: Sized {
     fn layer_reach(mut self, points: f32) -> Self {
         let cold = self.styles_mut().rare_mut().cold.get_or_insert_default();
         cold.layer_extent = Some((cold.layer_extent.map_or(0., |(bleed, _)| bleed), points));
+        self
+    }
+    /// Give this box's rounded rectangle, where it is on screen each frame
+    /// (moved, sprung, transformed), to layer shaders asking for this tag
+    /// (`crate::decoration::ShaderInputs::geometry`): what lights cards from
+    /// a shader. Costs nothing but a list entry.
+    fn geometry_tag(mut self, tag: u64) -> Self {
+        let cold = self.styles_mut().rare_mut().cold.get_or_insert_default();
+        cold.geometry_tag = Some(tag);
         self
     }
     /// CSS `filter: hue-rotate()`: colours turned `degrees` round the hue

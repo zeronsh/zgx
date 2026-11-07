@@ -23,6 +23,10 @@ pub(crate) enum Layout {
     Quads,
     /// A blended layer's: the quads' groups and the backdrop texture.
     Blend,
+    /// A layer shader's with inputs (`passes`, `GROUP`): the quads' groups,
+    /// nothing or the backdrop, then a sampler, the boxes and this many
+    /// textures.
+    Inputs { blend: bool, textures: u32 },
 }
 
 /// What a bind group entry is, as wgpu-hal maps it.
@@ -36,19 +40,21 @@ enum Entry {
 
 /// `layout`'s groups, entries in the order the layouts declare them
 /// (`create_quad_pipelines`, `blend_layouts`).
-fn groups(layout: Layout) -> &'static [&'static [Entry]] {
-    const QUADS: &[&[Entry]] = &[
-        &[Entry::Texture(1), Entry::Sampler(2)],
-        &[Entry::Uniform(0), Entry::StorageRead(1)],
+fn groups(layout: Layout) -> Vec<Vec<Entry>> {
+    let quads = vec![
+        vec![Entry::Texture(1), Entry::Sampler(2)],
+        vec![Entry::Uniform(0), Entry::StorageRead(1)],
     ];
-    const BLEND: &[&[Entry]] = &[
-        &[Entry::Texture(1), Entry::Sampler(2)],
-        &[Entry::Uniform(0), Entry::StorageRead(1)],
-        &[Entry::Texture(0)],
-    ];
+    let backdrop = vec![Entry::Texture(0)];
     match layout {
-        Layout::Quads => QUADS,
-        Layout::Blend => BLEND,
+        Layout::Quads => quads,
+        Layout::Blend => [quads, vec![backdrop]].concat(),
+        Layout::Inputs { blend, textures } => {
+            let mut inputs = vec![Entry::Sampler(0), Entry::StorageRead(1)];
+            inputs.extend((0..textures).map(|index| Entry::Texture(index + 2)));
+            let between = if blend { backdrop } else { Vec::new() };
+            [quads, vec![between, inputs]].concat()
+        }
     }
 }
 
@@ -70,7 +76,7 @@ pub(crate) fn options(layout: Layout) -> hlsl::Options {
         let group = group as u32;
         let binding = |binding| naga::ResourceBinding { group, binding };
         // Views, in order.
-        for entry in *entries {
+        for entry in entries {
             match *entry {
                 Entry::Uniform(b) => {
                     binding_map.insert(binding(b), target(0, cbv));
@@ -85,7 +91,7 @@ pub(crate) fn options(layout: Layout) -> hlsl::Options {
         }
         // Samplers, by index into the group's sampler index buffer.
         let mut samplers = 0;
-        for entry in *entries {
+        for entry in entries {
             if let Entry::Sampler(b) = *entry {
                 binding_map.insert(binding(b), target(255, samplers));
                 samplers += 1;
