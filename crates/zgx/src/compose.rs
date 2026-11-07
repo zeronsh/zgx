@@ -3495,7 +3495,12 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             let mut cx = Context::new(runtime.clone(), environment.clone());
                             let view = build(index_signal.clone(), key.clone(), &mut cx);
                             let row = ui.container(content, Layout::Overlay, Default::default());
-                            crate::selection::mount_row(&mut ui, row, &index_signal);
+                            crate::selection::mount_row(
+                                &mut ui,
+                                row,
+                                &index_signal,
+                                std::hash::BuildHasher::hash_one(&rustc_hash::FxBuildHasher, key),
+                            );
                             let node = mount(&mut ui, row, view, environment.clone());
                             cx.finish(&mut ui, node);
                             if let Some(navigation) = &navigation {
