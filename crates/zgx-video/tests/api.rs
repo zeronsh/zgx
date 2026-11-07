@@ -4,7 +4,7 @@ use common::*;
 use serde_json::json;
 use zgx_video::compositions;
 
-fn app(name: &str, code: &str) -> std::path::PathBuf {
+fn app(name: &str, code: &str) -> TempDir {
     let dir = temp_dir(name);
     std::fs::write(dir.join("video.luau"), code).unwrap();
     dir

@@ -16,7 +16,7 @@ return video.compositions { video.composition {
     end,
 } }
 "##;
-fn app(name: &str) -> std::path::PathBuf {
+fn app(name: &str) -> TempDir {
     let dir = temp_dir(name);
     std::fs::write(dir.join("video.luau"), MOVES).unwrap();
     dir
@@ -303,7 +303,7 @@ fn a_dataset_makes_a_video_of_each_row() {
     .unwrap();
     let status = std::process::Command::new(env!("CARGO_BIN_EXE_zgx-video"))
         .arg("render")
-        .arg(&dir)
+        .arg(&*dir)
         .arg(dir.join("out-{title}"))
         .args(["--dataset"])
         .arg(dir.join("rows.json"))

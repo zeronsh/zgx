@@ -105,7 +105,7 @@ impl App {
     }
 }
 
-fn script_dir(name: &str) -> std::path::PathBuf {
+fn script_dir(name: &str) -> TempDir {
     let dir = temp_dir(name);
     std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
     dir
@@ -133,7 +133,7 @@ fn a_frame_scrubbed_back_to_is_the_frame_a_render_writes() {
     assert_eq!(state["tracks"][0]["name"], "Later", "{state}");
     let shown = app.studio.preview_pixels().expect("a preview");
     // On another thread, which has its own clock.
-    let dir_there = dir.clone();
+    let dir_there = dir.to_path_buf();
     let written = std::thread::spawn(move || {
         let mut stage = zgx_video::ScriptStage::new(
             &dir_there,

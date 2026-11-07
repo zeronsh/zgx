@@ -27,7 +27,7 @@ fn write_clip(path: &std::path::Path) -> bool {
     drop(child.stdin.take());
     child.wait().unwrap().success()
 }
-fn app(name: &str) -> Option<std::path::PathBuf> {
+fn app(name: &str) -> Option<TempDir> {
     let dir = temp_dir(name);
     if !write_clip(&dir.join("three.mp4")) {
         eprintln!("no ffmpeg with libx264rgb here: skipped");
@@ -90,7 +90,7 @@ fn a_clip_seeked_back_to_shows_that_frame() {
     let out = dir.join("range");
     zgx_video::render(
         &zgx_video::RenderOptions {
-            script: dir.clone(),
+            script: dir.to_path_buf(),
             output: out.clone(),
             frames: Some((6, 7)),
             ..Default::default()
