@@ -1,8 +1,8 @@
 // The material a glass box draws where the system has none (`crate::glass`),
 // made as the system's glass makes its face, in Display P3 as a Mac's display
 // does: what's behind it, blurred already by the box's backdrop blur, its
-// luma moved into a range with its colour kept, a fill laid over, a tint, and
-// a lit rim a point wide. params:
+// luma moved into a range with its colour kept, bent inward near its edge, a
+// fill laid over, a tint, and a lit rim a point wide. params:
 // [black, white, saturation, top], [fill, fill alpha],
 // [rim gain, rim luma, rim lift, shadow alpha], [tint, tint alpha].
 fn zgx_glass_box(p: vec2<f32>, size: vec2<f32>, radii: vec4<f32>) -> f32 {
@@ -43,7 +43,21 @@ fn zgx_glass_shadow(p: vec2<f32>, size: vec2<f32>, radii: vec4<f32>) -> f32 {
 fn layer(input: LayerInput) -> vec4<f32> {
     let d = zgx_glass_box(input.p, input.size, input.radii);
     let rim = input.params[2];
-    let behind = zgx_glass_p3(zgx_backdrop(input.p).rgb);
+    // Within 20 points of its edge it bends what's behind it inward, as the
+    // system's glass does: the band shows what lies further in, mirrored.
+    let depth = -d;
+    let height = min(20.0, 0.5 * min(input.size.x, input.size.y));
+    var at = input.p;
+    if depth < height {
+        let eps = 0.75;
+        let gradient = vec2(
+            zgx_glass_box(input.p + vec2(eps, 0.0), input.size, input.radii) - zgx_glass_box(input.p - vec2(eps, 0.0), input.size, input.radii),
+            zgx_glass_box(input.p + vec2(0.0, eps), input.size, input.radii) - zgx_glass_box(input.p - vec2(0.0, eps), input.size, input.radii),
+        );
+        let inward = -gradient / max(length(gradient), 0.0001);
+        at = input.p + inward * 44.0 * pow(1.0 - max(depth, 0.0) / height, 2.55);
+    }
+    let behind = zgx_glass_p3(zgx_backdrop(at).rgb);
     let face = input.params[0];
     let luma = zgx_glass_luma(behind);
     var color = clamp(vec3(face.x + (face.y - face.x) * luma) + face.z * (behind - luma), vec3(0.0), vec3(face.w));
