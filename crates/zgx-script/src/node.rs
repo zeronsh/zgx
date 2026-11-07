@@ -440,43 +440,6 @@ pub(crate) struct Shaders {
     /// the engine keeps it up (boxed: few shaders are).
     pub drive: Option<DriveBox>,
 }
-/// How a `ui.glass` looks: its props, each a value or state.
-#[derive(Clone)]
-pub(crate) struct GlassSpec {
-    pub clear: Option<Source>,
-    pub tint: Option<Source>,
-    pub radius: Option<Source>,
-    /// Each corner's own (`{ tl, tr, br, bl }` or four numbers).
-    pub corners: Option<Source>,
-}
-/// `ui.glass`, made the first time a script names it.
-pub(crate) fn install_glass(lua: &Lua, ui: &Table) -> mlua::Result<()> {
-    ui.set(
-        "glass",
-        lua.create_function(|lua, table: Table| {
-            let take = |name: &str, ty: Ty| -> mlua::Result<Option<Source>> {
-                let value = table.get::<mlua::Value>(name)?;
-                table.raw_set(name, mlua::Value::Nil)?;
-                match value {
-                    mlua::Value::Nil => Ok(None),
-                    value => source(lua, ty, name, value).map(Some),
-                }
-            };
-            let spec = GlassSpec {
-                clear: take("clear", Ty::Bool)?,
-                tint: take("tint", Ty::Color)?,
-                radius: take("radius", Ty::Num)?,
-                corners: take("corners", Ty::Corners)?,
-            };
-            let node = fill(
-                lua,
-                Node::new(owner(lua)?, Kind::Glass(Box::new(spec))),
-                Some(&table),
-            )?;
-            node_ud(lua, node)
-        })?,
-    )
-}
 /// A box of `DriveProps` dropped out of line, so what drops a node stays as
 /// small as with no such field: every node's drop inlines this one's check.
 #[derive(Clone, Default)]
@@ -785,11 +748,15 @@ impl Node {
             Kind::Image { .. } => "image",
             Kind::Svg { .. } => "svg",
             Kind::Canvas(..) => "canvas",
-            Kind::Glass(_) => "glass",
             #[cfg(feature = "scene3d")]
             Kind::Scene3d(_) => "scene3d",
             Kind::WebView(_) => "webview",
             Kind::Terminal(_) => "terminal",
+            Kind::Glass(_) => "glass",
+            Kind::GlassGroup(_) => "glass_group",
+            Kind::Symbol(_) => "symbol",
+            Kind::Toggle(..) => "native_switch",
+            Kind::Tabs(..) => "native_tabs",
             Kind::Checkbox { .. } => "checkbox",
             Kind::Input { .. } => "input",
             Kind::Progress { .. } => "progress",
@@ -1083,10 +1050,15 @@ pub(crate) enum Kind {
         follow: bool,
         /// `scrollbar = true`: an interactive scrollbar over its edge.
         scrollbar: bool,
+        /// `paging = true`: it comes to rest on whole pages (iOS).
+        paging: bool,
         /// `overscroll = "contain"`: a wheel over it stays with it.
         contain: bool,
         /// `wheel_across = true` (`ui.scroll_x`): a mouse wheel moves it.
         wheel_across: bool,
+        /// `keyboard_ride = "native" | "attached"`: how it moves a focused
+        /// field clear of a software keyboard.
+        ride: Option<zgx::elastic::KeyboardRide>,
         /// `scroll_padding`: kept clear as what it holds scrolls into view.
         padding: Option<Box<ScrollPadding>>,
     },
@@ -1125,6 +1097,16 @@ pub(crate) enum Kind {
     /// `ui.terminal { term = ui.term(id) }`: a terminal session, shown
     /// where the node is.
     Terminal(zgx::terminal::Terminal),
+    /// `ui.glass_group { spacing = n, ... }`: glass that merges.
+    GlassGroup(f32),
+    /// `ui.symbol { name = "wifi", ... }`: a system symbol.
+    Symbol(Box<SymbolSpec>),
+    /// `ui.native_switch { value = state, label = "…" }`: the system's on and off
+    /// control where it has one.
+    Toggle(String, Signal<Value>),
+    /// `ui.native_tabs { value = state, items = { { title, symbol }, … } }`:
+    /// the system's tab bar where it has one.
+    Tabs(Vec<(String, String)>, Signal<Value>),
     Checkbox {
         label: String,
         value: Signal<Value>,
@@ -1163,6 +1145,9 @@ pub(crate) enum Kind {
         max: f32,
         /// `step`: what an arrow moves, and what a drag lands on.
         step: Option<f32>,
+        /// The system's `UISlider` rather than the drawn one (`picks_native`).
+        #[cfg(target_os = "ios")]
+        native: bool,
     },
     /// A component of the library (`zgx-components`, the `components`
     /// feature): a data grid, a tree, tabs, a select…
@@ -1312,7 +1297,6 @@ impl Kind {
             Kind::Column
                 | Kind::Row
                 | Kind::Div
-                | Kind::Glass(_)
                 | Kind::Overlay
                 | Kind::Button
                 | Kind::Scroll { .. }
@@ -1323,6 +1307,8 @@ impl Kind {
                 | Kind::Submenu { .. }
                 | Kind::MenuItem(..)
                 | Kind::Decision(_)
+                | Kind::Glass(_)
+                | Kind::GlassGroup(_)
         ) || self.library_takes_children()
     }
     /// A component of the library holding children (a disclosure's content,
@@ -1624,6 +1610,8 @@ pub(crate) struct Anim {
     pub from: Option<Value>,
     pub to: Option<Value>,
 }
+/// One spring: a unit mass on a stiffness and a damping, starting `delay_ms` after
+/// its goal changes.
 #[derive(Clone, Copy)]
 pub(crate) struct SpringParams {
     pub stiffness: f32,
@@ -1696,8 +1684,11 @@ pub(crate) enum Curve {
         ease: crate::anime::ease::Ease,
     },
     Spring {
-        stiffness: f32,
-        damping: f32,
+        /// As it moves unless `up` or `down` says otherwise.
+        both: SpringParams,
+        /// Toward a higher value and a lower: an opening and a closing differ.
+        up: Option<SpringParams>,
+        down: Option<SpringParams>,
     },
     /// `fps` caps the frames a decorative loop asks for.
     Loop {
@@ -1726,6 +1717,26 @@ impl Pseudo {
     }
 }
 
+/// How a `ui.glass` looks: its props, each a value or state.
+#[derive(Clone)]
+pub(crate) struct GlassSpec {
+    /// `clear = true`, as `variant = "clear"`.
+    pub clear: Option<Source>,
+    pub variant: Option<Source>,
+    pub tint: Option<Source>,
+    pub interactive: Option<Source>,
+    pub radius: Option<Source>,
+    /// Each corner's own (`{ tl, tr, br, bl }` or four numbers).
+    pub corners: Option<Source>,
+}
+/// How a `ui.symbol` looks: its props, each a value or state.
+#[derive(Clone)]
+pub(crate) struct SymbolSpec {
+    pub name: String,
+    pub size: Option<Source>,
+    pub weight: Option<Source>,
+    pub color: Option<Source>,
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Ty {
     Num,
@@ -3519,6 +3530,8 @@ const LATE_FIELDS: &[&str] = &[
     "on_paste",
     "overscroll",
     "wheel_across",
+    "keyboard_ride",
+    "paging",
     "capture_keys",
     "scroll_padding",
     "read_only",
@@ -3698,6 +3711,30 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 Kind::List { rare, .. } => rare.get_or_insert_default().contain = contain,
                 Kind::Input { rare, .. } => rare.get_or_insert_default().contain = contain,
                 _ => {}
+            }
+        }
+        "keyboard_ride" => {
+            use zgx::elastic::KeyboardRide;
+            let ride = match value {
+                mlua::Value::String(ref text) if &*text.to_str()? == "native" => {
+                    KeyboardRide::Native
+                }
+                mlua::Value::String(ref text) if &*text.to_str()? == "attached" => {
+                    KeyboardRide::Attached
+                }
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "`keyboard_ride` is \"native\" or \"attached\"",
+                    ));
+                }
+            };
+            if let Kind::Scroll { ride: set, .. } = &mut node.kind {
+                *set = Some(ride);
+            }
+        }
+        "paging" => {
+            if let Kind::Scroll { paging, .. } = &mut node.kind {
+                *paging = lua.unpack::<Option<bool>>(value)?.unwrap_or(false);
             }
         }
         "at_caret" => {
@@ -5040,8 +5077,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             follow,
                             scrollbar,
                             // Set as `fill` walks the table (`late_field`).
+                            paging: false,
                             contain: false,
                             wheel_across: false,
+                            ride: None,
                             padding: None,
                         },
                     ),
@@ -5473,12 +5512,21 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             if step.is_some_and(|s| !(s.is_finite() && s > 0.)) {
                 return Err(mlua::Error::runtime("a slider's step is positive"));
             }
+            // Only iOS has a system slider to choose; elsewhere it is drawn.
+            let native: Option<bool> = t.get("native")?;
+            t.raw_set("native", mlua::Value::Nil)?;
+            #[cfg(target_os = "ios")]
+            let native = picks_native(native, styled(t, CONTROL_LOOKS)?);
+            #[cfg(not(target_os = "ios"))]
+            let _ = native;
             Ok(Kind::Slider {
                 label,
                 value,
                 min,
                 max,
                 step,
+                #[cfg(target_os = "ios")]
+                native,
             })
         })?,
     )?;
@@ -6511,10 +6559,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 ms: duration.unwrap_or(ms),
                 ease: ease.unwrap_or(e),
             },
-            Curve::Spring { stiffness, damping } => Curve::Spring {
-                stiffness: opts.get::<Option<f32>>("stiffness")?.unwrap_or(stiffness),
-                damping: opts.get::<Option<f32>>("damping")?.unwrap_or(damping),
-            },
+            Curve::Spring { both, .. } => {
+                let both = SpringParams::read(&opts, both)?;
+                let side = |name: &str| -> mlua::Result<Option<SpringParams>> {
+                    opts.get::<Option<Table>>(name)?
+                        .map(|table| SpringParams::read(&table, both))
+                        .transpose()
+                };
+                Curve::Spring {
+                    both,
+                    up: side("up")?,
+                    down: side("down")?,
+                }
+            }
             Curve::Loop {
                 ms,
                 ease: e,
@@ -6566,8 +6623,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "spring",
         lua.create_function(move |lua, (state, opts): (mlua::Value, Option<Table>)| {
             let curve = Curve::Spring {
-                stiffness: 260.,
-                damping: 24.,
+                both: SpringParams {
+                    stiffness: 260.,
+                    damping: 24.,
+                    delay_ms: 0.,
+                },
+                up: None,
+                down: None,
             };
             anim(
                 lua,
@@ -7134,6 +7196,71 @@ fn scroll_padding(lua: &Lua, value: mlua::Value) -> mlua::Result<zgx::scene::Ins
             Ok(zgx::scene::Insets::all(all))
         }
     }
+}
+
+/// Springs by name, for `ui.spring(state, ui.springs.snappy)`: made the first
+/// time a script names `ui.springs` (`lazy`), so a VM that never does holds none.
+pub(crate) fn install_springs(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+    let springs = lua.create_table()?;
+    for (name, response, bounce) in [
+        ("smooth", 500., 0.),
+        ("snappy", 350., 0.15),
+        ("bouncy", 450., 0.3),
+    ] {
+        let spring = lua.create_table()?;
+        spring.set("response", response)?;
+        spring.set("bounce", bounce)?;
+        spring.set_readonly(true);
+        springs.set(name, spring)?;
+    }
+    springs.set_readonly(true);
+    ui.set("springs", springs)
+}
+/// What a drawn control's look takes that the system's doesn't: its fill,
+/// corners, colour and the room inside it.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) const CONTROL_LOOKS: &[&str] = &["bg", "rounded", "color", "px", "py", "p"];
+
+/// Whether a control is the system's (iOS): `native` when the app says, and
+/// otherwise unless it is styled past what the system's control takes, which
+/// only the drawn one can show.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn picks_native(native: Option<bool>, styled: bool) -> bool {
+    native.unwrap_or(!styled)
+}
+
+#[cfg(test)]
+mod native_choice_tests {
+    use super::{CONTROL_LOOKS, picks_native, styled};
+
+    #[test]
+    fn a_control_is_the_systems_unless_styled_or_told_otherwise() {
+        assert!(picks_native(None, false), "by default");
+        assert!(!picks_native(None, true), "styled past the system's");
+        assert!(!picks_native(Some(false), false), "told not to be");
+        assert!(picks_native(Some(true), true), "told to be, styles or not");
+    }
+
+    #[test]
+    fn a_slider_is_styled_by_its_rail_thumb_or_room() {
+        let lua = mlua::Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set("w", 200).unwrap();
+        assert!(!styled(&table, CONTROL_LOOKS).unwrap(), "a size is no look");
+        table.set("color", "#ff0000").unwrap();
+        assert!(styled(&table, CONTROL_LOOKS).unwrap());
+    }
+}
+
+/// Whether `table` sets any of `looks`.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn styled(table: &Table, looks: &[&str]) -> mlua::Result<bool> {
+    for look in looks {
+        if table.contains_key(*look)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

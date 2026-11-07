@@ -8,6 +8,8 @@ showcase's and the mail example's `soak` modes), so nothing is posted to it.
     python3 scripts/ios/soak.py dev.zgx.ios.soak-showcase --minutes 60
     python3 scripts/ios/soak.py dev.zgx.ios.soak-showcase --minutes 5 --only push
 
+The mail example's copy with its soak in comes from `mail_soak.py`.
+
 It samples `footprint` (phys_footprint, exact bytes) and CPU every minute,
 counts objects by class with `heap` after the first minute and at the end,
 and fails when one of `--watch` grew by more than `--slack` (each class is a
@@ -26,7 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "target" / "ios-soak"
-WATCH = ["_UIUpdateLinkViewInteraction", "UIVisualEffectView", "UISwitch", "__NSMallocBlock__"]
+WATCH = ["_UIUpdateLinkViewInteraction", "UIVisualEffectView", "UISwitch", "UIStepper", "__NSMallocBlock__"]
 
 
 def call(args, timeout, **kwargs):

@@ -315,6 +315,8 @@ pub(crate) fn unknown_tokens(files: &[File]) -> Vec<Diagnostic> {
             }
             match known(name) {
                 None if names.is_open(name) => {}
+                // UIKit's colours, set on iOS (zgx-desktop's `ios_system`).
+                None if name.starts_with("ios.") => {}
                 None => report(
                     file,
                     i,

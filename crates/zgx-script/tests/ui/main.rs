@@ -41,6 +41,8 @@ mod idle_gc;
 mod image_cache;
 #[path = "../intrinsic_sizes.rs"]
 mod intrinsic_sizes;
+#[path = "../ios_kit.rs"]
+mod ios_kit;
 #[path = "../layout_gaps.rs"]
 mod layout_gaps;
 #[path = "../layout_motion.rs"]

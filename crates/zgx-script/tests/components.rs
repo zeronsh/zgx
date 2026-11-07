@@ -1368,6 +1368,65 @@ fn any_element_is_a_slider_with_its_value_range_text_and_what_moves_it() {
 }
 
 #[test]
+fn a_slider_says_whether_it_is_the_systems_on_every_platform() {
+    // iOS's own where it has one, drawn elsewhere: the same slider either way.
+    let mut h = Harness::inline(
+        r#"local level = ui.state("level", 0.5)
+        return ui.column {
+            ui.slider { id = "own", label = "Own", value = level, native = false },
+            ui.slider { id = "system", label = "System", value = level, native = true, step = 0.25 },
+            ui.slider { id = "styled", label = "Styled", value = level, bg = "$danger" },
+        }"#,
+    );
+    h.ui.set_assistive_technology(true);
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    for id in ["own", "system", "styled"] {
+        let slider = node(&mut h, id);
+        assert_eq!(slider.role, Role::Slider, "{id}");
+        assert_eq!(slider.numeric_value, Some(0.5), "{id}");
+    }
+    let system = h.find("system").unwrap();
+    h.ui.input
+        .dispatch_to(&h.ui.scene, system, InputEvent::Increment);
+    h.frames(1);
+    for id in ["own", "system", "styled"] {
+        assert_eq!(node(&mut h, id).numeric_value, Some(0.75), "{id} follows");
+    }
+}
+
+#[test]
+fn a_stepper_takes_native_on_every_platform() {
+    let mut h = Harness::inline(
+        r#"local count = ui.state("count", 3)
+        return ui.column {
+            ui.stepper { id = "own", value = count, min = 0, max = 9, native = false },
+            ui.stepper { id = "system", value = count, min = 0, max = 9, native = true },
+            ui.stepper { id = "open", value = count },
+            ui.text { function() return `{count:get()}` end },
+        }"#,
+    );
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    assert!(h.texts().contains(&"3".to_owned()));
+}
+
+#[test]
+fn a_segmented_control_takes_native_on_every_platform() {
+    let mut h = Harness::inline(
+        r#"local mode = ui.state("mode", "Day")
+        return ui.column {
+            ui.segmented { id = "own", value = mode, options = { "Day", "Week" }, native = false },
+            ui.segmented { id = "system", value = mode, options = { "Day", "Week" }, native = true },
+            ui.text { function() return mode:get() end },
+        }"#,
+    );
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    assert!(h.texts().contains(&"Day".to_owned()));
+}
+
+#[test]
 #[should_panic(expected = "a slider role needs a finite `min` below its `max`")]
 fn a_slider_role_needs_its_range() {
     Harness::inline(r#"return ui.div { role = "slider", label = "Level", value = 1 }"#);

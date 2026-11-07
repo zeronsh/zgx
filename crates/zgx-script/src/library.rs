@@ -109,12 +109,18 @@ pub(crate) enum Library {
         value: Signal<Value>,
         /// Each option's value and what it shows.
         options: Vec<(Value, String)>,
+        /// The system's `UISegmentedControl` rather than the drawn one.
+        #[cfg(target_os = "ios")]
+        native: bool,
     },
     /// `ui.stepper { value = state, min, max, step, decimals }`.
     Stepper {
         label: String,
         value: Signal<Value>,
         options: StepperOptions,
+        /// The system's `UIStepper` rather than the drawn one.
+        #[cfg(target_os = "ios")]
+        native: bool,
     },
     /// `ui.disclosure { open = state, summary = "…", content… }`.
     Disclosure {
@@ -475,10 +481,22 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                     "ui.segmented needs at least one option",
                 ));
             }
+            // Only iOS has a system control to choose; elsewhere it is drawn.
+            let native: Option<bool> = t.get("native")?;
+            t.raw_set("native", mlua::Value::Nil)?;
+            #[cfg(target_os = "ios")]
+            let native = crate::node::picks_native(
+                native,
+                crate::node::styled(t, crate::node::CONTROL_LOOKS)?,
+            );
+            #[cfg(not(target_os = "ios"))]
+            let _ = native;
             Ok(Kind::Library(Box::new(Library::Segmented {
                 label,
                 value,
                 options,
+                #[cfg(target_os = "ios")]
+                native,
             })))
         })?,
     )?;
@@ -499,10 +517,23 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                     "ui.stepper needs min <= max and a positive step",
                 ));
             }
+            // Only iOS has a system stepper to choose, and it needs a range.
+            let native: Option<bool> = t.get("native")?;
+            t.raw_set("native", mlua::Value::Nil)?;
+            #[cfg(target_os = "ios")]
+            let native = options.min < options.max
+                && crate::node::picks_native(
+                    native,
+                    crate::node::styled(t, crate::node::CONTROL_LOOKS)?,
+                );
+            #[cfg(not(target_os = "ios"))]
+            let _ = native;
             Ok(Kind::Library(Box::new(Library::Stepper {
                 label,
                 value,
                 options,
+                #[cfg(target_os = "ios")]
+                native,
             })))
         })?,
     )?;
@@ -1411,6 +1442,8 @@ pub(crate) fn view(
             label,
             value,
             options,
+            #[cfg(target_os = "ios")]
+            native,
         } => {
             // The chosen option's value, as its index both ways.
             let values: Rc<[Value]> = options.iter().map(|(v, _)| v.clone()).collect();
@@ -1421,6 +1454,14 @@ pub(crate) fn view(
             let chosen = bridge_with(need(&mut cx), value, index, move |i: usize| {
                 values.get(i).cloned().unwrap_or_default()
             });
+            #[cfg(target_os = "ios")]
+            if *native {
+                return zgx::native_control::native_segmented(
+                    label.clone(),
+                    options.iter().map(|(_, shown)| shown.clone()).collect(),
+                    chosen,
+                );
+            }
             segmented(
                 label.clone(),
                 chosen,
@@ -1431,16 +1472,26 @@ pub(crate) fn view(
             label,
             value,
             options,
-        } => stepper(
-            label.clone(),
-            bridge(
+            #[cfg(target_os = "ios")]
+            native,
+        } => {
+            let value = bridge(
                 need(&mut cx),
                 value,
                 |v| v.as_f64().unwrap_or(0.),
                 Value::Num,
-            ),
-            *options,
-        ),
+            );
+            #[cfg(target_os = "ios")]
+            if *native {
+                return zgx::native_control::native_stepper(
+                    label.clone(),
+                    value,
+                    options.min..=options.max,
+                    options.step,
+                );
+            }
+            stepper(label.clone(), value, *options)
+        }
         Library::Disclosure { open, summary } => {
             let open = bridge(need(&mut cx), open, Value::truthy, Value::Bool);
             let summary = match summary {

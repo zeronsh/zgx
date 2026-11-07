@@ -889,6 +889,8 @@ fn engine_kept_states_are_read_only_states_a_script_can_call() {
         "reduced_motion",
         "more_contrast",
         "reduced_transparency",
+        "without_color",
+        "inverted_colors",
         "shift",
         "control",
         "alt",
