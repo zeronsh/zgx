@@ -1651,6 +1651,8 @@ pub(crate) struct GlassSpec {
     pub tint: Option<Source>,
     pub interactive: Option<Source>,
     pub radius: Option<Source>,
+    /// Each corner's own (`{ tl, tr, br, bl }` or four numbers).
+    pub corners: Option<Source>,
 }
 /// How a `ui.symbol` looks: its props, each a value or state.
 #[derive(Clone)]

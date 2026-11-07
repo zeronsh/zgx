@@ -379,6 +379,7 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
                         tint: take("tint", Ty::Color)?,
                         interactive: take("interactive", Ty::Bool)?,
                         radius: take("radius", Ty::Num)?,
+                        corners: take("corners", Ty::Corners)?,
                     };
                     let node = fill(
                         lua,

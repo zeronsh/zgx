@@ -1055,12 +1055,12 @@ end)
 -- 0.56 of that (0.63 in a window 568 points tall or less), as its detent block
 -- has it; the sheet is a detent tall plus the bottom safe area. Medium is the
 -- full-width sheet scaled to leave 8 points at the sides and bottom, top
--- corners 56.2 (62 at large); large is opaque, on the page's background. The
--- page under it dims to 20% black.
+-- corners 56.2 (62 at large), bottom ones 38; large is opaque, on the page's
+-- background. The page under it dims to 20% black.
 local SHEET_SPRING = { stiffness = 333.3333, damping = 36.5148 }
 local SHEET_MEDIUM, SHEET_MEDIUM_SHORT, SHEET_SHORT = 0.56, 0.63, 568
 local SHEET_INSET = 8
-local SHEET_CORNERS_MEDIUM, SHEET_CORNERS_LARGE = 56.2, 62
+local SHEET_CORNERS_MEDIUM, SHEET_CORNERS_LARGE, SHEET_CORNERS_BOTTOM = 56.2, 62, 38
 local SHEET_DIM = 0.2
 -- A drag's release, read from `_UISheetInteraction draggingEndedInSource:` and
 -- its `_UIHyperInteractor`: a speed under 250 points a second counts as none;
@@ -1114,7 +1114,8 @@ ios.sheet = ui.component(function(props)
 		end)
 	end
 	local corners = ui.computed(function()
-		return SHEET_CORNERS_MEDIUM + (SHEET_CORNERS_LARGE - SHEET_CORNERS_MEDIUM) * largeness()
+		local top = SHEET_CORNERS_MEDIUM + (SHEET_CORNERS_LARGE - SHEET_CORNERS_MEDIUM) * largeness()
+		return { tl = top, tr = top, br = SHEET_CORNERS_BOTTOM, bl = SHEET_CORNERS_BOTTOM }
 	end)
 	local running
 	local function run(state, to, done, speed, spring)
@@ -1176,7 +1177,7 @@ ios.sheet = ui.component(function(props)
 				y = function()
 					return -SHEET_INSET * (1 - largeness())
 				end,
-				radius = corners,
+				corners = corners,
 				role = "dialog",
 				overflow = "hidden",
 				-- iOS recognizes the drag, anywhere on the sheet, and tells every

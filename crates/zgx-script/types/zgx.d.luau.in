@@ -3362,6 +3362,9 @@ export type GlassProps = Merge<Props, {
 	interactive: (boolean | ReadOnlyState<boolean>)?,
 	-- Its corners' radius in points (default 24).
 	radius: (number | ReadOnlyState<number>)?,
+	-- Each corner's own, over `radius`: `{ tl, tr, br, bl }` or four numbers
+	-- (iOS and the drawn glass; macOS's takes `radius`).
+	corners: (Corners | ReadOnlyState<Corners>)?,
 }>
 export type GlassGroupProps = Merge<Props, {
 	[number]: Child,

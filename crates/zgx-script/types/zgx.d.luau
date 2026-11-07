@@ -18946,7 +18946,6 @@ export type GlassProps = {
 	bg_image: Props_bg_image,
 	bg_fit: Props_bg_fit,
 	rounded: Props_rounded,
-	corners: Props_corners,
 	rounded_tl: Props_rounded_tl,
 	rounded_tr: Props_rounded_tr,
 	rounded_br: Props_rounded_br,
@@ -19262,6 +19261,9 @@ export type GlassProps = {
 	interactive: (boolean | ReadOnlyState<boolean>)?,
 	-- Its corners' radius in points (default 24).
 	radius: (number | ReadOnlyState<number>)?,
+	-- Each corner's own, over `radius`: `{ tl, tr, br, bl }` or four numbers
+	-- (iOS and the drawn glass; macOS's takes `radius`).
+	corners: (Corners | ReadOnlyState<Corners>)?,
 }
 export type GlassGroupProps = {
 	-- Size and position.

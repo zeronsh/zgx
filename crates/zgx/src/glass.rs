@@ -40,6 +40,9 @@ pub struct GlassStyle {
     pub interactive: bool,
     /// Its corners' radius in points; `f32::INFINITY` for a capsule.
     pub radius: f32,
+    /// Each corner's own radius, over `radius` (iOS and the drawn glass;
+    /// macOS's takes one, `radius`).
+    pub corners: Option<crate::decoration::Corners>,
 }
 impl Default for GlassStyle {
     fn default() -> Self {
@@ -48,6 +51,7 @@ impl Default for GlassStyle {
             tint: None,
             interactive: false,
             radius: 24.,
+            corners: None,
         }
     }
 }
@@ -178,16 +182,18 @@ pub fn glass(mut style: impl FnMut() -> GlassStyle + 'static) -> View {
             let rounded = style();
             let theme = cx.theme();
             let themes = crate::theme::Themes::of(&cx.runtime());
-            return filling()
-                .rounded(radius_of(&rounded))
-                .shader_drive(move || {
-                    let mut drive = style().drawn(theme.theme_kind().is_dark());
-                    // Asked for less transparency, as the system's goes solid.
-                    if themes.system_preferences().reduced_transparency {
-                        drive.params[0][3] = 0.97;
-                    }
-                    drive
-                });
+            let filled = match rounded.corners {
+                Some(corners) => filling().rounded_corners(corners),
+                None => filling().rounded(radius_of(&rounded)),
+            };
+            return filled.shader_drive(move || {
+                let mut drive = style().drawn(theme.theme_kind().is_dark());
+                // Asked for less transparency, as the system's goes solid.
+                if themes.system_preferences().reduced_transparency {
+                    drive.params[0][3] = 0.97;
+                }
+                drive
+            });
         };
         let pane = GlassPane(shared.clone());
         let effect = cx.runtime().effect(move || {

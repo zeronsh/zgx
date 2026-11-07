@@ -2661,6 +2661,7 @@ fn symbol_view(
 fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
     use zgx::glass::{GlassStyle, GlassVariant, glass};
     let own = |source: &Option<Source>| source.as_ref().map(resolve_owned);
+    let corners = own(&spec.corners);
     let (clear, variant, tint, interactive, radius) = (
         own(&spec.clear),
         own(&spec.variant),
@@ -2698,6 +2699,9 @@ fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
         }
         if let Some(Lit::Num(radius)) = read(&radius, Ty::Num) {
             style.radius = radius;
+        }
+        if let Some(Lit::Corners(corners)) = read(&corners, Ty::Corners) {
+            style.corners = Some(corners);
         }
         style
     })

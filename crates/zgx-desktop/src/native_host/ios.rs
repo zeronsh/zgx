@@ -1230,7 +1230,24 @@ unsafe fn glass_effect(style: GlassStyle) -> Retained<AnyObject> {
 unsafe fn set_corners(view: &AnyObject, style: GlassStyle) {
     // SAFETY: UIKit's constructors and setter, as the caller promises.
     unsafe {
-        let corners: Retained<AnyObject> = if style.radius.is_finite() {
+        let fixed = |radius: f32| -> Retained<AnyObject> {
+            msg_send![class!(UICornerRadius), fixedRadius: radius as f64]
+        };
+        let corners: Retained<AnyObject> = if let Some(c) = style.corners {
+            let (tl, tr, bl, br) = (
+                fixed(c.top_left),
+                fixed(c.top_right),
+                fixed(c.bottom_left),
+                fixed(c.bottom_right),
+            );
+            msg_send![
+                class!(UICornerConfiguration),
+                configurationWithTopLeftRadius: &*tl,
+                topRightRadius: &*tr,
+                bottomLeftRadius: &*bl,
+                bottomRightRadius: &*br
+            ]
+        } else if style.radius.is_finite() {
             let radius: Retained<AnyObject> =
                 msg_send![class!(UICornerRadius), fixedRadius: style.radius as f64];
             msg_send![class!(UICornerConfiguration), configurationWithRadius: &*radius]
