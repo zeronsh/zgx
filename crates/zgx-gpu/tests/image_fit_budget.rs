@@ -239,7 +239,10 @@ fn a_picture_past_the_budget_uploads_once() {
             ));
         }
         let mut gpu = GpuRenderer::new(window.0, window.1).unwrap();
-        settle(&mut gpu, &mut scene, window);
+        // (They come to their shares over a frame or two.)
+        for _ in 0..4 {
+            settle(&mut gpu, &mut scene, window);
+        }
         // Fading: every frame draws them, and none uploads again.
         for frame in 0..4 {
             for picture in &pictures {
@@ -329,11 +332,12 @@ fn kept_files_past_the_budget_decode_no_more_than_they_show() {
     settle(&mut gpu, &mut scene, window);
     let stats = gpu.debug_cache_stats();
     assert_eq!(stats.image_textures, 4);
-    // Their decoded copies come to the budget too: four whole were 160 MB.
+    // Their decoded copies, before a host gives them back: four whole were
+    // 160 MB. (As they come to even shares, some decode twice.)
     let decoded: usize = (images.iter())
         .map(|image| image.pixels_at((1, 1)).expect("decoded").pixels.len())
         .sum();
-    assert!(decoded <= (64 << 20) + 4 * 64 * 64 * 4, "{decoded}");
+    assert!(decoded < 128 << 20, "{decoded}");
     assert_eq!(gpu.take_issues(), Vec::<String>::new());
 }
 
@@ -383,4 +387,84 @@ fn the_memory_report_names_what_went_softer() {
             .map(|line| &line.name)
             .collect::<Vec<_>>()
     );
+}
+
+/// Pictures that don't all fit share the budget evenly, whichever is drawn
+/// first, and small ones among them stay sharp. As they go, the rest take
+/// their room back.
+#[test]
+fn pictures_past_the_budget_share_it_evenly() {
+    let window = WINDOWS[0];
+    let (width, height) = (5000u32, 2500u32);
+    let full = (width as f32, height as f32);
+    let mut scene = Scene::new(window.0 as f32, window.1 as f32);
+    let stack = stack(&mut scene);
+    let (a, b) = (
+        raw(width, height, [200, 20, 20, 255]),
+        raw(width, height, [20, 200, 20, 255]),
+    );
+    let small = raw(100, 50, [20, 20, 200, 255]);
+    let first = scene.append(stack, NodeKind::Image(a.clone()), sized(full));
+    scene.append(stack, NodeKind::Image(b.clone()), sized(full));
+    scene.append(stack, NodeKind::Image(small.clone()), sized((100., 50.)));
+    let mut gpu = GpuRenderer::new(window.0, window.1).unwrap();
+    for _ in 0..4 {
+        settle(&mut gpu, &mut scene, window);
+    }
+    let (at_a, at_b) = (
+        gpu.debug_image_size(&a).unwrap(),
+        gpu.debug_image_size(&b).unwrap(),
+    );
+    assert_eq!(at_a, at_b, "even");
+    let each = at_a.0 as usize * at_a.1 as usize * 4;
+    assert!(each > 28 << 20, "not far under its share: {at_a:?}");
+    assert_eq!(gpu.debug_image_size(&small), Some((100, 50)), "stays sharp");
+    assert!(gpu.debug_cache_stats().image_bytes <= 64 << 20);
+    assert_eq!(gpu.debug_cache_stats().images_softer, 2);
+    // Settled: no more uploads.
+    assert_eq!(settle(&mut gpu, &mut scene, window), 0);
+    // One gone: the other takes its room back.
+    scene.remove(first);
+    for _ in 0..4 {
+        settle(&mut gpu, &mut scene, window);
+    }
+    assert_eq!(gpu.debug_image_size(&b), Some((width, height)));
+    assert_eq!(gpu.debug_cache_stats().images_softer, 0);
+    assert_eq!(gpu.take_issues(), Vec::<String>::new());
+}
+
+/// A box laid out at a picture's full size under a parent scaling it down
+/// rasterizes at what shows, not at half of what it was laid out as.
+#[test]
+fn a_picture_scaled_down_by_its_parent_takes_what_it_shows() {
+    let window = WINDOWS[1];
+    let mut scene = Scene::new(window.0 as f32, window.1 as f32);
+    let stack = stack(&mut scene);
+    let image = raw(W, H, [200, 20, 20, 255]);
+    let holder = scene.append(
+        stack,
+        NodeKind::Container(Layout::Overlay),
+        Style::default(),
+    );
+    scene.append(
+        holder,
+        NodeKind::Image(image.clone()),
+        sized((W as f32, H as f32)),
+    );
+    let scale = DRAWN.0 / W as f32;
+    scene.set_local_transform(
+        holder,
+        LocalTransform {
+            scale: (scale, scale),
+            origin: (0., 0.),
+            ..Default::default()
+        },
+    );
+    let mut gpu = GpuRenderer::new(window.0, window.1).unwrap();
+    settle(&mut gpu, &mut scene, window);
+    let stats = gpu.debug_cache_stats();
+    // A sixteenth, the finest it goes: about a megabyte, where it took 13.
+    assert!(stats.image_bytes <= 2 << 20, "{}", stats.image_bytes);
+    assert_eq!(pixel(&mut gpu, window, (100, 50))[0], 200);
+    assert_eq!(gpu.take_issues(), Vec::<String>::new());
 }

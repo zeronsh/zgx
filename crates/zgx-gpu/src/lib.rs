@@ -235,6 +235,11 @@ fn fitted_size(width: u32, height: u32, drawn: Option<(f32, f32)>) -> (u32, u32)
     let side = |v: u32| ((v as f32 * scale).ceil() as u32).clamp(1, v.max(1));
     (side(width), side(height))
 }
+/// `size` by `scale`, its shape kept, at most `image`'s own size.
+fn scaled_size(size: (u32, u32), image: &zgx::image::ImageData, scale: f32) -> (u32, u32) {
+    let side = |v: u32, full: u32| ((v as f32 * scale).ceil() as u32).clamp(1, full.max(1));
+    (side(size.0, image.width()), side(size.1, image.height()))
+}
 use zgx::image::resample::{halve, shrink};
 /// Why an image can have no texture: a frame goes on without it.
 const IMAGE_MISSES: [&str; 2] = [
@@ -1557,9 +1562,10 @@ const LAYER_BUDGET: usize = 64 * 1024 * 1024;
 /// retry passes what is left).
 const LAYER_ROOM: usize = usize::MAX;
 const MB: f32 = 1024. * 1024.;
-/// Raster scales a layer renders at, in √2 steps from the device's: half
-/// to four times. Beyond, a texture grows faster than detail shows.
-const RASTER_STEPS: std::ops::RangeInclusive<i32> = -2..=4;
+/// Raster scales a layer renders at, in √2 steps from the device's: a
+/// sixteenth to four times. Above, a texture grows faster than detail shows;
+/// below, what's scaled down that far is a sliver of what it was laid out as.
+const RASTER_STEPS: std::ops::RangeInclusive<i32> = -8..=4;
 /// The raster step for content magnified `magnification` times: the
 /// nearest √2 step, kept while within three quarters of a step of
 /// `current`, so a scale animation re-renders a layer once per step it
@@ -3950,7 +3956,11 @@ pub struct GpuRenderer {
     /// Images and layers that went softer for their budgets: no issue, the
     /// budget doing its job, but `zgx inspect memory` shows them. Written only
     /// as that happens, and read only as asked (`debug_cache_stats`).
-    images_softer: FxHashSet<u64>,
+    images_softer: FxHashMap<u64, usize>,
+    /// What one image's texture may take while images drawn together don't
+    /// all fit: the large ones share what the small ones leave, evenly
+    /// (`share_images`).
+    image_share: usize,
     layers_coarser: FxHashSet<NodeId>,
     /// GPU views' textures, by view (`viewport`): none until one shows.
     views: Option<Box<viewport::Views>>,
@@ -4602,7 +4612,8 @@ impl GpuRenderer {
             images_gone: Default::default(),
             image_frame: 0,
             images_decoding: 0,
-            images_softer: FxHashSet::default(),
+            images_softer: FxHashMap::default(),
+            image_share: usize::MAX,
             layers_coarser: FxHashSet::default(),
             views: None,
             #[cfg(target_os = "macos")]
@@ -4784,7 +4795,7 @@ impl GpuRenderer {
             swash_outlines: self.swash.outline_command_cache.len(),
             image_textures: self.images.len(),
             image_bytes: self.images.values().map(|i| i.1).sum(),
-            images_softer: (self.images_softer.iter())
+            images_softer: (self.images_softer.keys())
                 .filter(|id| self.images.contains_key(id))
                 .count(),
             canvas_raster_bytes: self.canvases.bytes(),
@@ -5087,6 +5098,9 @@ impl GpuRenderer {
         }
         self.image_frame += 1;
         self.images_decoding = 0;
+        if !self.images_softer.is_empty() {
+            self.share_images();
+        }
         if self.image_frame == LAUNCH_FRAMES {
             // An app that never goes idle checks its font cache here, once.
             font_cache_check();
@@ -5145,6 +5159,14 @@ impl GpuRenderer {
             self.repaint_all();
         }
         awaited
+    }
+    /// The size of `image`'s texture, if it has one. For tests and devtools.
+    #[doc(hidden)]
+    pub fn debug_image_size(&self, image: &zgx::image::ImageData) -> Option<(u32, u32)> {
+        self.images.get(&image.id()).map(|entry| match entry.3 {
+            (0, 0) => (image.width(), image.height()),
+            held => held,
+        })
     }
     /// Whether a kept file's pixels were uploaded since the last call: their
     /// decoded copy may go (`zgx::image::release_decoded`).
@@ -11411,36 +11433,85 @@ impl GpuRenderer {
     fn image_budget(&self) -> usize {
         (self.width as usize * self.height as usize * 4 * 4).max(IMAGE_TEXTURES)
     }
+    /// What images drawn last frame leave of the budget, shared: each takes
+    /// what it wants up to an even share of what the smaller leave. They come
+    /// to this over a frame or two, as they upload again, and only while some
+    /// are held softer: otherwise no image pays for it.
+    #[cold]
+    fn share_images(&mut self) {
+        let images = &self.images;
+        self.images_softer.retain(|id, _| images.contains_key(id));
+        // (The last frame that drew them: one kept draws none anew.)
+        let last = self.image_drawn.values().copied().max().unwrap_or(0);
+        let mut wants: Vec<usize> = (self.images.iter())
+            .filter(|(id, _)| self.image_drawn.get(id).is_some_and(|drawn| *drawn == last))
+            .map(|(id, entry)| self.images_softer.get(id).copied().unwrap_or(entry.1))
+            .collect();
+        wants.sort_unstable();
+        let mut left = self.image_budget();
+        let mut share = usize::MAX;
+        for (at, want) in wants.iter().enumerate() {
+            let even = left / (wants.len() - at);
+            if *want > even {
+                // (A little under, as sizes round up.)
+                share = even / 100 * 97;
+                break;
+            }
+            left -= want;
+        }
+        let was = self.image_share;
+        let moved = match (was, share) {
+            (usize::MAX, usize::MAX) => false,
+            (usize::MAX, _) | (_, usize::MAX) => true,
+            _ => was.abs_diff(share) > was / 20,
+        };
+        if !moved {
+            return;
+        }
+        self.image_share = share;
+        // Those over it upload again as they're drawn, as all may take more.
+        self.images
+            .retain(|_, entry| entry.1 <= share.saturating_add(share / 20));
+        let images = &self.images;
+        self.image_drawn.retain(|id, _| images.contains_key(id));
+        self.repaint_all();
+    }
+    /// `wanted` under the texture limit, its shape kept.
+    fn image_size_limited(&self, image: &zgx::image::ImageData, wanted: (u32, u32)) -> (u32, u32) {
+        let limit = self.device.limits().max_texture_dimension_2d;
+        let mut scale = 1f32;
+        loop {
+            let (w, h) = scaled_size(wanted, image, scale);
+            if (w <= limit && h <= limit) || (w, h) == (1, 1) {
+                return (w, h);
+            }
+            scale *= 0.75;
+        }
+    }
     /// The size `image`'s texture takes, wanted at `wanted`, with `held` bytes
     /// of others staying: smaller, its shape kept, while past the texture
-    /// limit or the budget; never left out (`IMAGE_LEAST_SIDE`).
+    /// limit, its share or the budget; never left out (`IMAGE_LEAST_SIDE`).
     fn image_size_within(
         &self,
         image: &zgx::image::ImageData,
         wanted: (u32, u32),
         held: usize,
     ) -> (u32, u32) {
-        let limit = self.device.limits().max_texture_dimension_2d;
         let budget = self.image_budget();
-        let (full_w, full_h) = (image.width().max(1), image.height().max(1));
-        let at = |scale: f32| {
-            let side = |v: u32, full: u32| ((v as f32 * scale).ceil() as u32).clamp(1, full);
-            (side(wanted.0, full_w), side(wanted.1, full_h))
-        };
+        let mut size = self.image_size_limited(image, wanted);
+        let bytes = |(w, h): (u32, u32)| w as usize * h as usize * 4;
+        if bytes(size) > self.image_share {
+            let scale = (self.image_share as f32 / bytes(size) as f32).sqrt();
+            size = scaled_size(size, image, scale.min(1.));
+        }
         let mut scale = 1f32;
-        while {
-            let (w, h) = at(scale);
-            (w > limit || h > limit) && (w, h) != (1, 1)
-        } {
+        loop {
+            let at = scaled_size(size, image, scale);
+            if bytes(at) + held <= budget || at.0.max(at.1) <= IMAGE_LEAST_SIDE {
+                return at;
+            }
             scale *= 0.75;
         }
-        while {
-            let (w, h) = at(scale);
-            w as usize * h as usize * 4 + held > budget && w.max(h) > IMAGE_LEAST_SIDE
-        } {
-            scale *= 0.75;
-        }
-        at(scale)
     }
     /// `upload_image` at `size` (`fitted_size`), or smaller where the budget
     /// or the texture limit says: drawn softer rather than left out.
@@ -11460,8 +11531,9 @@ impl GpuRenderer {
         let replaced = self.images.get(&image.id()).map_or(0, |entry| entry.1);
         let mut held = self.images.values().map(|entry| entry.1).sum::<usize>() - replaced
             + self.images_decoding;
-        let whole = self.image_size_within(image, wanted, 0);
-        if bytes(whole) + held > budget {
+        let whole = self.image_size_limited(image, wanted);
+        let most = self.image_size_within(image, wanted, 0);
+        if bytes(most) + held > budget {
             // Images not drawn this frame give their textures back, least
             // recently drawn first (a long page scrolled through): drawn
             // again, they upload again.
@@ -11473,7 +11545,7 @@ impl GpuRenderer {
                 .collect();
             idle.sort_unstable();
             for (_, id) in idle {
-                if bytes(whole) + held <= budget {
+                if bytes(most) + held <= budget {
                     break;
                 }
                 if id == image.id() {
@@ -11489,14 +11561,24 @@ impl GpuRenderer {
         let (width, height) = self.image_size_within(image, wanted, held);
         if (width, height) != whole {
             let images = &self.images;
-            self.images_softer.retain(|id| images.contains_key(id));
-            self.images_softer.insert(image.id());
+            self.images_softer.retain(|id, _| images.contains_key(id));
+            self.images_softer.insert(image.id(), bytes(whole));
         } else if !self.images_softer.is_empty() {
             self.images_softer.remove(&image.id());
         }
         let bytes = bytes((width, height));
         if self.images.len() >= MAX_IMAGES && !self.images.contains_key(&image.id()) {
-            return Err(GpuError(IMAGE_MISSES[0].into()));
+            // Images not drawn this frame give way, the longest gone first;
+            // only as many as this drawn at once leave one out.
+            let oldest = (self.image_drawn.iter())
+                .filter(|(_, drawn)| **drawn < self.image_frame)
+                .min_by_key(|(_, drawn)| **drawn)
+                .map(|(id, _)| *id);
+            let Some(oldest) = oldest else {
+                return Err(GpuError(IMAGE_MISSES[0].into()));
+            };
+            self.image_drawn.remove(&oldest);
+            self.images.remove(&oldest);
         }
         if width > limit || height > limit {
             return Err(GpuError(IMAGE_MISSES[1].into()));
