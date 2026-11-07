@@ -306,12 +306,13 @@ fn raster_scale_rerenders_only_when_it_changes() {
         },
         fixed(100., 50.),
     );
+    let tick = rect(&mut scene, root, 0., 0., (1., 1.), Color(0, 0, 0, 0));
     scene.set_local_transform(card, rotated(0.2));
     assert_eq!(render(&mut gpu, &mut scene).0.layer_repaints, 1);
     let bytes = gpu.debug_cache_stats().layer_bytes;
     // (scale, repaints). Smaller than laid out: √2 steps, three quarters
-    // of a step of hysteresis. Larger: at its scale exactly, drawn again
-    // as that changes and never while it holds.
+    // of a step of hysteresis. Larger, moving: the raster it has while it
+    // is fine enough, else the next √2 step above (room to grow into).
     let steps = [
         (0.9, 0),
         (0.8, 0),
@@ -322,12 +323,13 @@ fn raster_scale_rerenders_only_when_it_changes() {
         (0.6, 0),
         (0.8, 1),
         (1.0, 1),
+        (1.005, 0),
         (1.1, 1),
         (1.1, 0),
-        (1.25, 1),
+        (1.25, 0),
+        (1.4, 0),
         (2.5, 1),
         (2.5, 0),
-        (1.0, 1),
     ];
     for (factor, repaints) in steps {
         scene.set_local_transform(
@@ -344,6 +346,11 @@ fn raster_scale_rerenders_only_when_it_changes() {
             assert_eq!(stats.layer_cache_hits, 0, "scale {factor}");
         }
     }
+    // Held a frame, at its scale exactly; held on, kept.
+    assert_eq!(hold(&mut gpu, &mut scene, tick).layer_repaints, 1);
+    assert_eq!(hold(&mut gpu, &mut scene, tick).layer_repaints, 0);
+    scene.set_local_transform(card, rotated(0.2));
+    assert_eq!(render(&mut gpu, &mut scene).0.layer_repaints, 1);
     // Rotation and skew at scale 1 never re-render.
     for angle in [0.5, 1.0, 2.0, 3.0] {
         scene.set_local_transform(
@@ -524,10 +531,13 @@ fn a_pushed_in_line_keeps_its_hard_edges() {
     );
     rect(&mut scene, stage, 0., 195., (WINDOW as f32, 1.), RED);
     rect(&mut scene, stage, 195., 0., (1., WINDOW as f32), RED);
+    // Something else changing: a frame after the push, the line holds.
+    let tick = rect(&mut scene, root, 0., 0., (1., 1.), Color(0, 0, 0, 0));
     for push in [1.07, 1.0731, 2.5, 2.4567, 20.] {
         scene.set_local_transform(stage, scaled(push));
         let damage = scene.flush().damage;
         gpu.render(&scene, &damage).unwrap();
+        hold(&mut gpu, &mut scene, tick);
         let p = gpu.readback().unwrap();
         // Rows across the horizontal line, columns across the vertical one.
         let (at, _) = scaled(push)
@@ -546,6 +556,18 @@ fn a_pushed_in_line_keeps_its_hard_edges() {
             assert!((full - push).abs() <= 1., "scale {push}: {profile:?}");
         }
     }
+}
+/// A frame with `tick` changed and nothing else, drawn whole (as a video's
+/// are): what moved last frame holds still in this one.
+fn hold(gpu: &mut GpuRenderer, scene: &mut Scene, tick: NodeId) -> zgx_gpu::GpuStats {
+    let level = match scene.kind(tick) {
+        NodeKind::Rect(Color(_, _, _, a)) => a ^ 1,
+        _ => 0,
+    };
+    scene.set_kind(tick, NodeKind::Rect(Color(0, 0, 0, level)));
+    scene.flush();
+    gpu.render(scene, &[Rect::new(0., 0., 4096., 4096.)])
+        .unwrap()
 }
 fn pixel_in(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
     let at = ((y * width + x) * 4) as usize;
@@ -644,4 +666,157 @@ fn a_glyph_magnified_past_the_atlas_still_draws() {
         assert_eq!(pixel_in(&p, WINDOW, 200, 200)[3], 255, "scale {push}");
         assert_eq!(gpu.debug_cache_stats().layers_coarser, 0);
     }
+}
+
+const PARAGRAPH: (u32, u32) = (400, 240);
+/// A paragraph in a 300 × 150 box, and a node beside it in the box that
+/// can change each frame, as a film's content does (its layer then drawn
+/// again every frame).
+fn paragraph(scene: &mut Scene) -> (NodeId, NodeId) {
+    let root = scene.root();
+    let card = scene.append(
+        root,
+        NodeKind::Container(Layout::Overlay),
+        fixed(300., 150.),
+    );
+    scene.append(
+        card,
+        NodeKind::Text {
+            text: "The quick brown fox jumps over the lazy dog. Pack my box with five \
+                   dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of \
+                   black quartz, judge my vow."
+                .into(),
+            color: Color(255, 255, 255, 255),
+            font_size: 13.,
+        },
+        fixed(300., 150.),
+    );
+    let blink = scene.append(card, NodeKind::Rect(Color(0, 0, 0, 255)), fixed(2., 2.));
+    scene.set_transform(blink, Transform { x: 0., y: 146. });
+    (card, blink)
+}
+/// The paragraph's box corner at `corner` and scaled `scale` about it.
+fn place(scene: &mut Scene, card: NodeId, (corner, scale): ((f32, f32), f32)) {
+    scene.set_transform(
+        card,
+        Transform {
+            x: corner.0,
+            y: corner.1,
+        },
+    );
+    scene.set_local_transform(
+        card,
+        LocalTransform {
+            scale: (scale, scale),
+            origin: (0., 0.),
+            ..LocalTransform::IDENTITY
+        },
+    );
+}
+/// How much a moving paragraph's frames differ from each other once the
+/// motion is taken out: each pixel of a frame against the last frame's at
+/// the same point of the paragraph (bilinearly between its pixels), root
+/// mean square over the pixels either shows ink in, in levels of 255.
+/// `at(frame)`: its corner and scale. A picture moved rigidly scores above
+/// zero too (resampled twice): about 11 panned, 30 zoomed, for this one
+/// drawn 4× and box-filtered, or composited from a √2 raster.
+fn wobble(at: impl Fn(u32) -> ((f32, f32), f32), frames: u32) -> f32 {
+    let (width, height) = PARAGRAPH;
+    let mut gpu = GpuRenderer::new(width, height).unwrap();
+    let mut scene = Scene::new(width as f32, height as f32);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let (card, blink) = paragraph(&mut scene);
+    let gray = |p: &[u8], x: i32, y: i32| -> f32 {
+        if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+            return 0.;
+        }
+        f32::from(p[((y as u32 * width + x as u32) * 4) as usize])
+    };
+    let mut last: Option<(Vec<u8>, (f32, f32), f32)> = None;
+    let (mut sum, mut count) = (0f64, 0u64);
+    for frame in 0..frames {
+        let (corner, scale) = at(frame);
+        place(&mut scene, card, (corner, scale));
+        scene.set_kind(blink, NodeKind::Rect(Color((frame % 2) as u8, 0, 0, 255)));
+        let damage = scene.flush().damage;
+        gpu.render(&scene, &damage).unwrap();
+        let p = gpu.readback().unwrap();
+        if let Some((before, was, was_scale)) = &last {
+            for y in 0..height as i32 {
+                for x in 0..width as i32 {
+                    // The paragraph's point under this pixel's middle, and
+                    // where the last frame showed it.
+                    let px = (x as f32 + 0.5 - corner.0) / scale;
+                    let py = (y as f32 + 0.5 - corner.1) / scale;
+                    let (bx, by) = (was.0 + px * was_scale - 0.5, was.1 + py * was_scale - 0.5);
+                    let (x0, y0) = (bx.floor(), by.floor());
+                    let (fx, fy) = (bx - x0, by - y0);
+                    let (x0, y0) = (x0 as i32, y0 as i32);
+                    let then = gray(before, x0, y0) * (1. - fx) * (1. - fy)
+                        + gray(before, x0 + 1, y0) * fx * (1. - fy)
+                        + gray(before, x0, y0 + 1) * (1. - fx) * fy
+                        + gray(before, x0 + 1, y0 + 1) * fx * fy;
+                    let now = gray(&p, x, y);
+                    if now > 8. || then > 8. {
+                        sum += f64::from((now - then) * (now - then));
+                        count += 1;
+                    }
+                }
+            }
+        }
+        last = Some((p, corner, scale));
+    }
+    (sum / count.max(1) as f64).sqrt() as f32
+}
+
+#[test]
+fn text_under_a_moving_transform_moves_as_one_picture() {
+    let _gpu_fixture = gpu_fixture();
+    // Zoomed slowly from 1 to 1.3 over 60 frames, panned a tenth of a pixel
+    // a frame, and both, its content changing all the while. Drawn afresh
+    // at each frame's scale, its glyphs and lines landed on other pixels
+    // each frame: 70, 44 and 77. As one picture: within the floor above.
+    let zoom = |f: u32| ((20., 20.), 1. + 0.3 * f as f32 / 60.);
+    let pan = |f: u32| ((20.3 + 0.1 * f as f32, 20.), 1.15);
+    let both = |f: u32| ((20.3 + 0.1 * f as f32, 20.), 1. + 0.3 * f as f32 / 60.);
+    let measured = [wobble(zoom, 61), wobble(pan, 61), wobble(both, 61)];
+    assert!(
+        measured[0] < 34. && measured[1] < 14. && measured[2] < 35.,
+        "zoom, pan, both: {measured:?}"
+    );
+
+    // Come to rest, it is drawn at its scale exactly: as sharp as a
+    // paragraph shown there from the start.
+    let (width, height) = PARAGRAPH;
+    let whole = [Rect::new(0., 0., width as f32, height as f32)];
+    let mut gpu = GpuRenderer::new(width, height).unwrap();
+    let mut scene = Scene::new(width as f32, height as f32);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let (card, blink) = paragraph(&mut scene);
+    for frame in 0..=60 {
+        place(&mut scene, card, both(frame));
+        scene.flush();
+        gpu.render(&scene, &whole).unwrap();
+    }
+    scene.set_kind(blink, NodeKind::Rect(Color(1, 0, 0, 255)));
+    scene.flush();
+    let stats = gpu.render(&scene, &whole).unwrap();
+    assert_eq!(stats.layer_repaints, 1);
+    let rest = gpu.readback().unwrap();
+    let mut fresh = GpuRenderer::new(width, height).unwrap();
+    let mut scene = Scene::new(width as f32, height as f32);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let (card, blink) = paragraph(&mut scene);
+    scene.set_kind(blink, NodeKind::Rect(Color(1, 0, 0, 255)));
+    place(&mut scene, card, both(60));
+    scene.flush();
+    fresh.render(&scene, &whole).unwrap();
+    let first = fresh.readback().unwrap();
+    let differ = rest
+        .iter()
+        .zip(&first)
+        .filter(|(a, b)| a.abs_diff(**b) > 1)
+        .count();
+    let most = rest.iter().zip(&first).map(|(a, b)| a.abs_diff(*b)).max();
+    assert_eq!(differ, 0, "{differ} channels differ, by up to {most:?}");
 }
