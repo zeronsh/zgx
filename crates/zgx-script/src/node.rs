@@ -441,43 +441,6 @@ pub(crate) struct Shaders {
     /// the engine keeps it up (boxed: few shaders are).
     pub drive: Option<DriveBox>,
 }
-/// How a `ui.glass` looks: its props, each a value or state.
-#[derive(Clone)]
-pub(crate) struct GlassSpec {
-    pub clear: Option<Source>,
-    pub tint: Option<Source>,
-    pub radius: Option<Source>,
-    /// Each corner's own (`{ tl, tr, br, bl }` or four numbers).
-    pub corners: Option<Source>,
-}
-/// `ui.glass`, made the first time a script names it.
-pub(crate) fn install_glass(lua: &Lua, ui: &Table) -> mlua::Result<()> {
-    ui.set(
-        "glass",
-        lua.create_function(|lua, table: Table| {
-            let take = |name: &str, ty: Ty| -> mlua::Result<Option<Source>> {
-                let value = table.get::<mlua::Value>(name)?;
-                table.raw_set(name, mlua::Value::Nil)?;
-                match value {
-                    mlua::Value::Nil => Ok(None),
-                    value => source(lua, ty, name, value).map(Some),
-                }
-            };
-            let spec = GlassSpec {
-                clear: take("clear", Ty::Bool)?,
-                tint: take("tint", Ty::Color)?,
-                radius: take("radius", Ty::Num)?,
-                corners: take("corners", Ty::Corners)?,
-            };
-            let node = fill(
-                lua,
-                Node::new(owner(lua)?, Kind::Glass(Box::new(spec))),
-                Some(&table),
-            )?;
-            node_ud(lua, node)
-        })?,
-    )
-}
 /// A box of `DriveProps` dropped out of line, so what drops a node stays as
 /// small as with no such field: every node's drop inlines this one's check.
 #[derive(Clone, Default)]
@@ -788,6 +751,8 @@ impl Node {
             Kind::Div => "div",
             Kind::Overlay => "overlay",
             Kind::Button => "button",
+            #[cfg(target_os = "ios")]
+            Kind::NativeButton(_) => "button",
             Kind::Scroll { .. } => "scroll",
             Kind::Text(_) => "text",
             Kind::Markdown { .. } => "markdown_view",
@@ -795,11 +760,15 @@ impl Node {
             Kind::Image { .. } => "image",
             Kind::Svg { .. } => "svg",
             Kind::Canvas(..) => "canvas",
-            Kind::Glass(_) => "glass",
             #[cfg(feature = "scene3d")]
             Kind::Scene3d(_) => "scene3d",
             Kind::WebView(_) => "webview",
             Kind::Terminal(_) => "terminal",
+            Kind::Glass(_) => "glass",
+            Kind::GlassGroup(_) => "glass_group",
+            Kind::Symbol(_) => "symbol",
+            Kind::Toggle(..) => "native_switch",
+            Kind::Tabs(..) => "native_tabs",
             Kind::Checkbox { .. } => "checkbox",
             Kind::Input { .. } => "input",
             Kind::Progress { .. } => "progress",
@@ -952,6 +921,9 @@ pub(crate) struct RareEvents {
     /// `capture_keys = true`: while focus is in it, every key goes to what
     /// is focused, no shortcut or menu taking one (a shortcut recorder).
     pub capture_keys: bool,
+    /// `table_row = true`: one of a table's rows (`View::table_row`, iOS).
+    #[cfg(target_os = "ios")]
+    pub table_row: bool,
 }
 impl Kind {
     /// Regions that become a box of any number of children, laid out as
@@ -1101,8 +1073,14 @@ pub(crate) enum Kind {
         wheel_across: bool,
         /// `paging = true`: it comes to rest on whole pages.
         paging: bool,
-        /// `scroll_padding`: kept clear as what it holds scrolls into view.
-        padding: Option<Box<ScrollPadding>>,
+        /// `keyboard_ride = "native" | "attached"`: how it moves a focused
+        /// field clear of a software keyboard.
+        ride: Option<zgx::elastic::KeyboardRide>,
+        /// `scroll_padding` and `indicator_insets`, which few have.
+        insets: Option<Box<ScrollInsets>>,
+        /// `keyboard_dismiss = "none" | "on_drag" | "interactive"`: what
+        /// dragging it does to a software keyboard.
+        dismiss: Option<zgx::elastic::KeyboardDismiss>,
     },
     Text(Text),
     /// `ui.markdown_view { text }`: markdown drawn, parsed as the text
@@ -1136,6 +1114,20 @@ pub(crate) enum Kind {
     /// `ui.terminal { term = ui.term(id) }`: a terminal session, shown
     /// where the node is.
     Terminal(zgx::terminal::Terminal),
+    /// `ui.glass_group { spacing = n, ... }`: glass that merges.
+    GlassGroup(f32),
+    /// `ui.symbol { name = "wifi", ... }`: a system symbol.
+    Symbol(Box<SymbolSpec>),
+    /// `ui.native_switch { value = state, label = "…" }`: the system's on and off
+    /// control where it has one.
+    Toggle(String, Signal<Value>),
+    /// `ui.native_tabs { value = state, items = { { title, symbol }, … } }`:
+    /// the system's tab bar where it has one.
+    Tabs(
+        Vec<(String, String)>,
+        Signal<Value>,
+        zgx::native_control::TabsMinimize,
+    ),
     Checkbox {
         label: String,
         value: Signal<Value>,
@@ -1174,7 +1166,13 @@ pub(crate) enum Kind {
         max: f32,
         /// `step`: what an arrow moves, and what a drag lands on.
         step: Option<f32>,
+        /// The system's `UISlider` rather than the drawn one (`picks_native`).
+        #[cfg(target_os = "ios")]
+        native: bool,
     },
+    /// The system's `UIButton` (`native_button`), which holds its content itself.
+    #[cfg(target_os = "ios")]
+    NativeButton(Box<NativeButton>),
     /// A component of the library (`zgx-components`, the `components`
     /// feature): a data grid, a tree, tabs, a select…
     #[cfg(feature = "components")]
@@ -1329,7 +1327,6 @@ impl Kind {
             Kind::Column
                 | Kind::Row
                 | Kind::Div
-                | Kind::Glass(_)
                 | Kind::Overlay
                 | Kind::Button
                 | Kind::Scroll { .. }
@@ -1340,6 +1337,8 @@ impl Kind {
                 | Kind::Submenu { .. }
                 | Kind::MenuItem(..)
                 | Kind::Decision(_)
+                | Kind::Glass(_)
+                | Kind::GlassGroup(_)
         ) || self.library_takes_children()
     }
     /// A component of the library holding children (a disclosure's content,
@@ -1493,6 +1492,20 @@ pub(crate) struct Tooltip {
     /// `tooltip_delay`: how long the pointer rests before it shows.
     pub delay: Option<std::time::Duration>,
 }
+/// What a system button shows and how (`Kind::NativeButton`).
+#[cfg(target_os = "ios")]
+#[derive(Clone)]
+pub(crate) struct NativeButton {
+    pub title: Text,
+    pub symbol: Option<String>,
+    pub style: zgx::native_control::ButtonStyle,
+    /// Whether the script gives its width and its height.
+    pub sized: (bool, bool),
+    /// What a press shows instead, when a `ui.menu` is anchored on it: handed over
+    /// as the anchor is lowered, and held by the view from then on.
+    pub menu: std::cell::RefCell<Option<(zgx::native_control::MenuBuilder, Signal<bool>)>>,
+}
+
 #[derive(Clone)]
 pub(crate) enum TooltipContent {
     /// Drawn in the theme's tooltip look.
@@ -1663,6 +1676,8 @@ pub(crate) struct Anim {
     pub from: Option<Value>,
     pub to: Option<Value>,
 }
+/// One spring: a unit mass on a stiffness and a damping, starting `delay_ms` after
+/// its goal changes.
 #[derive(Clone, Copy)]
 pub(crate) struct SpringParams {
     pub stiffness: f32,
@@ -1735,8 +1750,11 @@ pub(crate) enum Curve {
         ease: crate::anime::ease::Ease,
     },
     Spring {
-        stiffness: f32,
-        damping: f32,
+        /// As it moves unless `up` or `down` says otherwise.
+        both: SpringParams,
+        /// Toward a higher value and a lower: an opening and a closing differ.
+        up: Option<SpringParams>,
+        down: Option<SpringParams>,
     },
     /// `fps` caps the frames a decorative loop asks for.
     Loop {
@@ -1765,6 +1783,26 @@ impl Pseudo {
     }
 }
 
+/// How a `ui.glass` looks: its props, each a value or state.
+#[derive(Clone)]
+pub(crate) struct GlassSpec {
+    /// `clear = true`, as `variant = "clear"`.
+    pub clear: Option<Source>,
+    pub variant: Option<Source>,
+    pub tint: Option<Source>,
+    pub interactive: Option<Source>,
+    pub radius: Option<Source>,
+    /// Each corner's own (`{ tl, tr, br, bl }` or four numbers).
+    pub corners: Option<Source>,
+}
+/// How a `ui.symbol` looks: its props, each a value or state.
+#[derive(Clone)]
+pub(crate) struct SymbolSpec {
+    pub name: String,
+    pub size: Option<Source>,
+    pub weight: Option<Source>,
+    pub color: Option<Source>,
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Ty {
     Num,
@@ -1873,6 +1911,7 @@ props! {
     "drop_shadow" => DropShadow: Shadow,
     "slice" => Slice: Corners,
     "geometry" => Geometry: Str,
+    "leading" => Leading: Num,
     // Transforms: after layout, about `origin` (fractions of the node).
     // Last, so that `is_transform` is a single comparison.
     "x" => X: Num, "y" => Y: Num,
@@ -3314,6 +3353,21 @@ fn button_look(lua: &Lua, table: &Table) -> mlua::Result<()> {
     let str = |s: &str| lua.create_string(s).map(mlua::Value::String);
     let look: Vec<(&str, mlua::Value)> = match variant.as_deref() {
         None | Some("default") => Vec::new(),
+        Some(glass @ ("glass" | "prominent_glass")) => {
+            let prominent = glass == "prominent_glass";
+            glass_backing(lua, table, prominent)?;
+            let mut look = vec![
+                ("bg", str("#00000000")?),
+                ("rounded", mlua::Value::Number(GLASS_CAPSULE.into())),
+                ("relative", mlua::Value::Boolean(true)),
+                ("hover", mlua::Value::Table(lua.create_table()?)),
+                ("active", mlua::Value::Table(lua.create_table()?)),
+            ];
+            if prominent {
+                look.push(("color", str("$accent.text")?));
+            }
+            look
+        }
         Some("primary") => vec![
             ("bg", str("$accent")?),
             ("color", str("$accent.text")?),
@@ -3330,7 +3384,7 @@ fn button_look(lua: &Lua, table: &Table) -> mlua::Result<()> {
         ],
         Some(other) => {
             return Err(mlua::Error::runtime(format!(
-                "a button's `variant` is \"primary\", \"ghost\", \"danger\" or \"default\", not `{other}`"
+                "a button's `variant` is \"primary\", \"ghost\", \"danger\", \"glass\", \"prominent_glass\" or \"default\", not `{other}`"
             )));
         }
     };
@@ -3340,6 +3394,41 @@ fn button_look(lua: &Lua, table: &Table) -> mlua::Result<()> {
         }
     }
     Ok(())
+}
+/// A radius past any button's half height: the system's glass button is a capsule.
+const GLASS_CAPSULE: f32 = 999.;
+/// The glass behind a drawn glass button (`button_look`): `table`'s first child.
+#[cold]
+#[inline(never)]
+fn glass_backing(lua: &Lua, table: &Table, prominent: bool) -> mlua::Result<()> {
+    let spec = GlassSpec {
+        clear: None,
+        variant: None,
+        tint: prominent
+            .then(|| {
+                let accent = mlua::Value::String(lua.create_string("$accent")?);
+                source(lua, Ty::Color, "tint", accent)
+            })
+            .transpose()?,
+        interactive: Some(Source::Lit(Lit::Bool(true))),
+        radius: Some(Source::Lit(Lit::Num(GLASS_CAPSULE))),
+        corners: None,
+    };
+    let place = lua.create_table()?;
+    place.raw_set("absolute", true)?;
+    for edge in ["left", "right", "top", "bottom"] {
+        place.raw_set(edge, 0)?;
+    }
+    let glass = fill(
+        lua,
+        Node::new(owner(lua)?, Kind::Glass(Box::new(spec))),
+        Some(&place),
+    )?;
+    let children = table.raw_len();
+    for index in (1..=children).rev() {
+        table.raw_set(index + 1, table.raw_get::<mlua::Value>(index)?)?;
+    }
+    table.raw_set(1, node_ud(lua, glass)?)
 }
 /// Whether a `role` says it is checked: a menu item with a checkmark.
 fn checkable_menu_role(name: &str) -> bool {
@@ -3413,6 +3502,11 @@ pub(crate) struct MenuItemOptions {
     pub checked: Option<Source>,
     pub radio: bool,
     pub shortcut: Option<String>,
+    /// It set `symbol`: only such an item reads it again.
+    pub symbol: bool,
+    /// `style = "destructive"`, for the system's menu (drawn, it is the colour).
+    #[cfg(target_os = "ios")]
+    pub destructive: bool,
 }
 
 /// What an input edits: a state, both ways, or (controlled, as React's
@@ -3540,6 +3634,9 @@ const WIDGET_FIELDS: &[&str] = &[
 /// added here costs them nothing (a test checks none is a property).
 #[cfg(test)]
 const LATE_FIELDS: &[&str] = &[
+    "native",
+    "symbol",
+    "style",
     "hit",
     "inputmode",
     "caret_color",
@@ -3559,9 +3656,13 @@ const LATE_FIELDS: &[&str] = &[
     "on_paste",
     "overscroll",
     "wheel_across",
+    "keyboard_ride",
     "paging",
+    "keyboard_dismiss",
     "capture_keys",
+    "table_row",
     "scroll_padding",
+    "indicator_insets",
     "read_only",
     "selection_radius",
     "autocorrect",
@@ -3691,14 +3792,26 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
             let padding = match &value {
                 mlua::Value::Function(_) => ScrollPadding::Live(value),
                 _ if state_of(&value).is_some() => ScrollPadding::Live(value),
-                _ => ScrollPadding::Fixed(scroll_padding(lua, value)?),
+                _ => ScrollPadding::Fixed(scroll_padding(lua, value, "scroll_padding")?),
             };
             match &mut node.kind {
-                Kind::Scroll { padding: set, .. } => *set = Some(Box::new(padding)),
+                Kind::Scroll { insets, .. } => {
+                    insets.get_or_insert_default().padding = Some(padding);
+                }
                 Kind::List { rare, .. } => {
                     rare.get_or_insert_default().scroll_padding = Some(padding)
                 }
                 _ => {}
+            }
+        }
+        "indicator_insets" => {
+            let indicator = match &value {
+                mlua::Value::Function(_) => ScrollPadding::Live(value),
+                _ if state_of(&value).is_some() => ScrollPadding::Live(value),
+                _ => ScrollPadding::Fixed(scroll_padding(lua, value, "indicator_insets")?),
+            };
+            if let Kind::Scroll { insets, .. } = &mut node.kind {
+                insets.get_or_insert_default().indicator = Some(indicator);
             }
         }
         "capture_keys" => {
@@ -3708,6 +3821,19 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 // No handler sets it for this one (`any_input`).
                 events.input = true;
             }
+        }
+        "table_row" => {
+            let row = lua.unpack::<bool>(value)?;
+            #[cfg(target_os = "ios")]
+            if row {
+                node.events
+                    .get_or_insert_default()
+                    .rare
+                    .get_or_insert_default()
+                    .table_row = true;
+            }
+            #[cfg(not(target_os = "ios"))]
+            let _ = row;
         }
         "wheel_across" => {
             let across = lua.unpack::<bool>(value)?;
@@ -3746,9 +3872,81 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 _ => {}
             }
         }
+        "keyboard_dismiss" => {
+            use zgx::elastic::KeyboardDismiss;
+            let dismiss = match value {
+                mlua::Value::String(ref text) if &*text.to_str()? == "none" => {
+                    KeyboardDismiss::None
+                }
+                mlua::Value::String(ref text) if &*text.to_str()? == "on_drag" => {
+                    KeyboardDismiss::OnDrag
+                }
+                mlua::Value::String(ref text) if &*text.to_str()? == "interactive" => {
+                    KeyboardDismiss::Interactive
+                }
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "`keyboard_dismiss` is \"none\", \"on_drag\" or \"interactive\"",
+                    ));
+                }
+            };
+            if let Kind::Scroll { dismiss: set, .. } = &mut node.kind {
+                *set = Some(dismiss);
+            }
+        }
+        "keyboard_ride" => {
+            use zgx::elastic::KeyboardRide;
+            let ride = match value {
+                mlua::Value::String(ref text) if &*text.to_str()? == "native" => {
+                    KeyboardRide::Native
+                }
+                mlua::Value::String(ref text) if &*text.to_str()? == "attached" => {
+                    KeyboardRide::Attached
+                }
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "`keyboard_ride` is \"native\" or \"attached\"",
+                    ));
+                }
+            };
+            if let Kind::Scroll { ride: set, .. } = &mut node.kind {
+                *set = Some(ride);
+            }
+        }
         "at_caret" => {
             if let Kind::Popover { at_caret, .. } = &mut node.kind {
                 *at_caret = lua.unpack::<Option<bool>>(value)?.unwrap_or(false);
+            }
+        }
+        // Only iOS has a system button to choose (`native_button` reads it there).
+        "native" if matches!(node.kind, Kind::Button) => {}
+        // A menu item's, as `ui.system_menu`'s: `symbol = "doc"` ahead of what it
+        // says (its constructor adds it: the children aren't made yet), and
+        // `style = "destructive"`, the colour first so a `color` of the script's
+        // wins, and the system menu's mark.
+        "symbol" if matches!(node.kind, Kind::MenuItem(..)) => {
+            if let Kind::MenuItem(_, options) = &mut node.kind {
+                options.symbol = true;
+            }
+        }
+        "style" if matches!(node.kind, Kind::MenuItem(..)) => {
+            let style: String = lua.unpack(value)?;
+            match style.as_str() {
+                "default" => {}
+                "destructive" => {
+                    let danger = mlua::Value::String(lua.create_string("$danger")?);
+                    let danger = source(lua, Ty::Color, "color", danger)?;
+                    node.props.insert(0, (Prop::TextColor, danger));
+                    #[cfg(target_os = "ios")]
+                    if let Kind::MenuItem(_, options) = &mut node.kind {
+                        options.destructive = true;
+                    }
+                }
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "a menu item's `style` is \"destructive\" or \"default\", not `{other}`"
+                    )));
+                }
             }
         }
         "private" => node.private = lua.unpack(value)?,
@@ -5085,6 +5283,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let (owner, lint) = owner_and_lint(lua)?;
             let mut node = Node::new(owner, Kind::Button);
             if let Some(table) = &table {
+                #[cfg(target_os = "ios")]
+                if native_button(lua, &mut node, table, lint)? {
+                    return node_ud(lua, node);
+                }
                 button_look(lua, table)?;
                 fill_from(lua, &mut node, table, None, lint)?;
             }
@@ -5132,7 +5334,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             contain: false,
                             wheel_across: false,
                             paging: false,
-                            padding: None,
+                            ride: None,
+                            insets: None,
+                            dismiss: None,
                         },
                     ),
                     table.as_ref(),
@@ -5563,12 +5767,21 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             if step.is_some_and(|s| !(s.is_finite() && s > 0.)) {
                 return Err(mlua::Error::runtime("a slider's step is positive"));
             }
+            // Only iOS has a system slider to choose; elsewhere it is drawn.
+            let native: Option<bool> = t.get("native")?;
+            t.raw_set("native", mlua::Value::Nil)?;
+            #[cfg(target_os = "ios")]
+            let native = picks_native(native, styled(t, CONTROL_LOOKS)?);
+            #[cfg(not(target_os = "ios"))]
+            let _ = native;
             Ok(Kind::Slider {
                 label,
                 value,
                 min,
                 max,
                 step,
+                #[cfg(target_os = "ios")]
+                native,
             })
         })?,
     )?;
@@ -6040,15 +6253,36 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 checked,
                 radio,
                 shortcut,
+                symbol: false,
+                #[cfg(target_os = "ios")]
+                destructive: false,
             };
-            node_ud(
+            let mut node = fill(
                 lua,
-                fill(
-                    lua,
-                    Node::new(owner(lua)?, Kind::MenuItem(label, options)),
-                    Some(&table),
-                )?,
-            )
+                Node::new(owner(lua)?, Kind::MenuItem(label, options)),
+                Some(&table),
+            )?;
+            if matches!(&node.kind, Kind::MenuItem(_, options) if options.symbol) {
+                let spec = SymbolSpec {
+                    name: table.get("symbol")?,
+                    size: None,
+                    weight: None,
+                    color: None,
+                };
+                let symbol = Node::new(node.owner.clone(), Kind::Symbol(Box::new(spec)));
+                // Content replaces an item's label: it goes in too, unless it has its own.
+                let says = match &node.kind {
+                    Kind::MenuItem(label, _) if node.children.is_empty() => Some(label.clone()),
+                    _ => None,
+                };
+                node.children.insert(0, Rc::new(symbol));
+                if let Some(label) = says {
+                    let text = Kind::Text(Text::Literal(label));
+                    node.children
+                        .push(Rc::new(Node::new(node.owner.clone(), text)));
+                }
+            }
+            node_ud(lua, node)
         })?,
     )?;
     ui.set(
@@ -6601,10 +6835,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 ms: duration.unwrap_or(ms),
                 ease: ease.unwrap_or(e),
             },
-            Curve::Spring { stiffness, damping } => Curve::Spring {
-                stiffness: opts.get::<Option<f32>>("stiffness")?.unwrap_or(stiffness),
-                damping: opts.get::<Option<f32>>("damping")?.unwrap_or(damping),
-            },
+            Curve::Spring { both, .. } => {
+                let both = SpringParams::read(&opts, both)?;
+                let side = |name: &str| -> mlua::Result<Option<SpringParams>> {
+                    opts.get::<Option<Table>>(name)?
+                        .map(|table| SpringParams::read(&table, both))
+                        .transpose()
+                };
+                Curve::Spring {
+                    both,
+                    up: side("up")?,
+                    down: side("down")?,
+                }
+            }
             Curve::Loop {
                 ms,
                 ease: e,
@@ -6656,8 +6899,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "spring",
         lua.create_function(move |lua, (state, opts): (mlua::Value, Option<Table>)| {
             let curve = Curve::Spring {
-                stiffness: 260.,
-                damping: 24.,
+                both: SpringParams {
+                    stiffness: 260.,
+                    damping: 24.,
+                    delay_ms: 0.,
+                },
+                up: None,
+                down: None,
             };
             anim(
                 lua,
@@ -7176,11 +7424,18 @@ pub(crate) enum ScrollPadding {
     Fixed(zgx::scene::Insets),
     Live(mlua::Value),
 }
-/// What a live `scroll_padding` says now (read in an effect, which follows
-/// it): a function called, a state read.
+/// A scroll view's `scroll_padding` and `indicator_insets`.
+#[derive(Clone, Default)]
+pub(crate) struct ScrollInsets {
+    pub(crate) padding: Option<ScrollPadding>,
+    pub(crate) indicator: Option<ScrollPadding>,
+}
+/// What a live `scroll_padding` (or `indicator_insets`, `name`) says now
+/// (read in an effect, which follows it): a function called, a state read.
 pub(crate) fn scroll_padding_now(
     vm: &crate::Vm,
     source: &mlua::Value,
+    name: &str,
 ) -> mlua::Result<zgx::scene::Insets> {
     let value = match source {
         mlua::Value::Function(f) => vm.call::<mlua::Value>(f, ())?,
@@ -7189,20 +7444,20 @@ pub(crate) fn scroll_padding_now(
             None => other.clone(),
         },
     };
-    scroll_padding(&vm.lua, value)
+    scroll_padding(&vm.lua, value, name)
 }
 
 /// `scroll_padding = 8` (every side) or `{ top, bottom, left, right }`
 /// (each 0 unless given): what a scroll view keeps clear as what it holds
 /// scrolls into view, as CSS's `scroll-padding`.
-fn scroll_padding(lua: &Lua, value: mlua::Value) -> mlua::Result<zgx::scene::Insets> {
+fn scroll_padding(lua: &Lua, value: mlua::Value, name: &str) -> mlua::Result<zgx::scene::Insets> {
     let side = |n: f32| {
         if n.is_finite() && n >= 0. {
             Ok(n)
         } else {
-            Err(mlua::Error::runtime(
-                "`scroll_padding` takes points, 0 or more",
-            ))
+            Err(mlua::Error::runtime(format!(
+                "`{name}` takes points, 0 or more"
+            )))
         }
     };
     match value {
@@ -7219,11 +7474,364 @@ fn scroll_padding(lua: &Lua, value: mlua::Value) -> mlua::Result<zgx::scene::Ins
         }
         value => {
             let all = side(lua.unpack::<f32>(value).map_err(|_| {
-                mlua::Error::runtime("`scroll_padding` is a number or { top, bottom, left, right }")
+                mlua::Error::runtime(format!(
+                    "`{name}` is a number or {{ top, bottom, left, right }}"
+                ))
             })?)?;
             Ok(zgx::scene::Insets::all(all))
         }
     }
+}
+
+/// Springs by name, for `ui.spring(state, ui.springs.snappy)`: made the first
+/// time a script names `ui.springs` (`lazy`), so a VM that never does holds none.
+pub(crate) fn install_springs(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+    let springs = lua.create_table()?;
+    for (name, response, bounce) in [
+        ("smooth", 500., 0.),
+        ("snappy", 350., 0.15),
+        ("bouncy", 450., 0.3),
+    ] {
+        let spring = lua.create_table()?;
+        spring.set("response", response)?;
+        spring.set("bounce", bounce)?;
+        spring.set_readonly(true);
+        springs.set(name, spring)?;
+    }
+    springs.set_readonly(true);
+    ui.set("springs", springs)
+}
+/// What a drawn control's look takes that the system's doesn't: its fill,
+/// corners, colour and the room inside it.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) const CONTROL_LOOKS: &[&str] = &["bg", "rounded", "color", "px", "py", "p"];
+
+/// Whether a control is the system's (iOS): `native` when the app says, and
+/// otherwise unless it is styled past what the system's control takes, which
+/// only the drawn one can show.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn picks_native(native: Option<bool>, styled: bool) -> bool {
+    native.unwrap_or(!styled)
+}
+
+#[cfg(test)]
+mod native_button_tests {
+    use super::{Kind, Node, SymbolSpec, Text, button_content, button_extras, button_style};
+    use std::rc::{Rc, Weak};
+    use zgx::native_control::ButtonStyle;
+
+    #[test]
+    fn each_variant_is_the_systems_look_for_it() {
+        for (variant, style) in [
+            (None, ButtonStyle::Gray),
+            (Some("default"), ButtonStyle::Gray),
+            (Some("primary"), ButtonStyle::Filled),
+            (Some("ghost"), ButtonStyle::Plain),
+            (Some("danger"), ButtonStyle::Danger),
+            (Some("glass"), ButtonStyle::Glass),
+            (Some("prominent_glass"), ButtonStyle::ProminentGlass),
+        ] {
+            assert_eq!(button_style(variant), Some(style), "{variant:?}");
+        }
+        assert_eq!(button_style(Some("neon")), None);
+    }
+
+    #[test]
+    fn only_a_look_or_a_behaviour_is_past_the_system() {
+        let lua = mlua::Lua::new();
+        let table = lua.create_table().unwrap();
+        for (key, value) in [("w", 120.), ("mt", 8.), ("opacity", 0.5)] {
+            table.set(key, value).unwrap();
+        }
+        table.set("variant", "primary").unwrap();
+        table.set("disabled", true).unwrap();
+        table.raw_set(1, "Save").unwrap();
+        assert!(button_extras(&table).unwrap().is_empty());
+        table.set("bg", "#ff0000").unwrap();
+        assert_eq!(button_extras(&table).unwrap(), ["bg"]);
+        table.set("bg", mlua::Value::Nil).unwrap();
+        table.set("disabled", lua.create_table().unwrap()).unwrap();
+        assert_eq!(button_extras(&table).unwrap(), ["disabled"]);
+    }
+
+    fn text() -> Rc<Node> {
+        Rc::new(Node::new(
+            Weak::new(),
+            Kind::Text(Text::Literal("Save".into())),
+        ))
+    }
+    fn symbol(size: bool) -> Rc<Node> {
+        let spec = SymbolSpec {
+            name: "star".into(),
+            size: size.then(|| super::Source::Lit(super::Lit::Num(20.))),
+            weight: None,
+            color: None,
+        };
+        Rc::new(Node::new(Weak::new(), Kind::Symbol(Box::new(spec))))
+    }
+
+    #[test]
+    fn a_system_button_shows_a_title_and_perhaps_a_symbol_ahead_of_it() {
+        assert_eq!(button_content(&[text()]), Some((Some(0), None)));
+        assert_eq!(button_content(&[symbol(false)]), Some((None, Some(0))));
+        assert_eq!(
+            button_content(&[symbol(false), text()]),
+            Some((Some(1), Some(0)))
+        );
+        assert_eq!(button_content(&[]), None, "nothing to show");
+        assert_eq!(
+            button_content(&[text(), symbol(false)]),
+            None,
+            "symbol behind"
+        );
+        assert_eq!(button_content(&[text(), text()]), None);
+        assert_eq!(
+            button_content(&[symbol(true), text()]),
+            None,
+            "a styled symbol"
+        );
+        let mut styled = Node::new(Weak::new(), Kind::Text(Text::Literal("Save".into())));
+        styled.id = Some("title".into());
+        assert_eq!(
+            button_content(&[Rc::new(styled)]),
+            None,
+            "a text with more to it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod native_choice_tests {
+    use super::{CONTROL_LOOKS, picks_native, styled};
+
+    #[test]
+    fn a_control_is_the_systems_unless_styled_or_told_otherwise() {
+        assert!(picks_native(None, false), "by default");
+        assert!(!picks_native(None, true), "styled past the system's");
+        assert!(!picks_native(Some(false), false), "told not to be");
+        assert!(picks_native(Some(true), true), "told to be, styles or not");
+    }
+
+    #[test]
+    fn a_slider_is_styled_by_its_rail_thumb_or_room() {
+        let lua = mlua::Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set("w", 200).unwrap();
+        assert!(!styled(&table, CONTROL_LOOKS).unwrap(), "a size is no look");
+        table.set("color", "#ff0000").unwrap();
+        assert!(styled(&table, CONTROL_LOOKS).unwrap());
+    }
+}
+
+/// What a `ui.button` may set and still be the system's: where it lies, what it
+/// is called and what pressing it does. Anything else is a look or a behaviour
+/// only the drawn one has.
+#[cfg(any(target_os = "ios", test))]
+const NATIVE_BUTTON_KEYS: &[&str] = &[
+    "w",
+    "h",
+    "size",
+    "min_w",
+    "max_w",
+    "min_h",
+    "max_h",
+    "w_full",
+    "h_full",
+    "aspect",
+    "absolute",
+    "relative",
+    "top",
+    "left",
+    "right",
+    "bottom",
+    "inset_start",
+    "inset_end",
+    "m",
+    "mx",
+    "my",
+    "mt",
+    "mr",
+    "mb",
+    "ml",
+    "ms",
+    "me",
+    "grow",
+    "shrink",
+    "basis",
+    "self",
+    "col_start",
+    "row_start",
+    "col_span",
+    "row_span",
+    "col_span_full",
+    "row_span_full",
+    "hidden",
+    "invisible",
+    "z",
+    "opacity",
+    "x",
+    "y",
+    "id",
+    "class",
+    "label",
+    "description",
+    "on_click",
+    "on_mount",
+    "disabled",
+    "variant",
+    "native",
+    "hook",
+    "private",
+    "aria_hidden",
+    "ref",
+];
+
+/// The string keys of `table` a system button can't take.
+#[cfg(any(target_os = "ios", test))]
+fn button_extras(table: &Table) -> mlua::Result<Vec<String>> {
+    let mut extras = Vec::new();
+    for pair in table.pairs::<mlua::Value, mlua::Value>() {
+        let (key, value) = pair?;
+        let mlua::Value::String(key) = key else {
+            continue;
+        };
+        let key = key.to_string_lossy();
+        // `disabled = { … }` is the styles it shows while disabled.
+        let styles = key == "disabled" && value.is_table();
+        if styles || !NATIVE_BUTTON_KEYS.contains(&key.as_str()) {
+            extras.push(key);
+        }
+    }
+    Ok(extras)
+}
+
+/// The system's look for a button's `variant`, if it is one of them.
+#[cfg(any(target_os = "ios", test))]
+fn button_style(variant: Option<&str>) -> Option<zgx::native_control::ButtonStyle> {
+    use zgx::native_control::ButtonStyle;
+    Some(match variant {
+        None | Some("default") => ButtonStyle::Gray,
+        Some("primary") => ButtonStyle::Filled,
+        Some("ghost") => ButtonStyle::Plain,
+        Some("danger") => ButtonStyle::Danger,
+        Some("glass") => ButtonStyle::Glass,
+        Some("prominent_glass") => ButtonStyle::ProminentGlass,
+        Some(_) => return None,
+    })
+}
+
+/// Which children hold what a system button shows, a text, a plain symbol, or the
+/// symbol ahead of the text, nothing about either but its content: the text's
+/// index, and the symbol's.
+#[cfg(any(target_os = "ios", test))]
+fn button_content(children: &[Rc<Node>]) -> Option<(Option<usize>, Option<usize>)> {
+    let bare = |node: &Node| {
+        node.props.is_empty()
+            && node.children.is_empty()
+            && node.id.is_none()
+            && node.a11y.is_none()
+            && node.events.is_none()
+            && node.refs.is_empty()
+            && node.classes.is_empty()
+    };
+    let is_text = |node: &Node| matches!(node.kind, Kind::Text(_)) && bare(node);
+    let is_symbol = |node: &Node| {
+        bare(node)
+            && matches!(&node.kind, Kind::Symbol(spec)
+                if spec.size.is_none() && spec.weight.is_none() && spec.color.is_none())
+    };
+    match children {
+        [text] if is_text(text) => Some((Some(0), None)),
+        [symbol] if is_symbol(symbol) => Some((None, Some(0))),
+        [symbol, text] if is_symbol(symbol) && is_text(text) => Some((Some(1), Some(0))),
+        _ => None,
+    }
+}
+
+/// `ui.button` as the system's where it can be, what it shows being a title and
+/// perhaps a symbol ahead of it and nothing styled past `variant`: `native =
+/// false` keeps it drawn, and `native = true` shows the system's and leaves out
+/// what it can't take. False, with nothing read into `node`, where it stays drawn.
+#[cfg(target_os = "ios")]
+fn native_button(
+    lua: &Lua,
+    node: &mut Node,
+    table: &Table,
+    lint: crate::DesignLint,
+) -> mlua::Result<bool> {
+    let told: Option<bool> = table.get("native")?;
+    let extras = button_extras(table)?;
+    let variant: Option<String> = table.get("variant")?;
+    let Some(style) = button_style(variant.as_deref()) else {
+        return Ok(false);
+    };
+    if !picks_native(told, !extras.is_empty()) {
+        return Ok(false);
+    }
+    // What it shows comes first: without a title it stays drawn.
+    let shown = lua.create_table()?;
+    for (index, item) in table.sequence_values::<mlua::Value>().enumerate() {
+        shown.raw_set(index + 1, item?)?;
+    }
+    let mut content = Node::new(owner(lua)?, Kind::Div);
+    fill_from(lua, &mut content, &shown, None, lint)?;
+    let Some((text, symbol)) = button_content(&content.children) else {
+        return Ok(false);
+    };
+    let title = match text.map(|text| &content.children[text].kind) {
+        Some(Kind::Text(title)) => title.clone(),
+        _ => Text::Literal(String::new()),
+    };
+    let symbol = symbol.and_then(|at| match &content.children[at].kind {
+        Kind::Symbol(spec) => Some(spec.name.clone()),
+        _ => None,
+    });
+    let has = |keys: &[&str]| -> mlua::Result<bool> {
+        for key in keys {
+            if table.contains_key(*key)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    let sized = (
+        has(&["w", "size", "w_full"])?,
+        has(&["h", "size", "h_full"])?,
+    );
+    let place = lua.create_table()?;
+    for pair in table.pairs::<mlua::Value, mlua::Value>() {
+        let (key, value) = pair?;
+        let keep = match &key {
+            mlua::Value::String(key) => {
+                let key = key.to_string_lossy();
+                key != "native" && key != "variant" && !extras.contains(&key)
+            }
+            _ => false,
+        };
+        if keep {
+            place.raw_set(key, value)?;
+        }
+    }
+    fill_from(lua, node, &place, None, lint)?;
+    node.kind = Kind::NativeButton(Box::new(NativeButton {
+        title,
+        symbol,
+        style,
+        sized,
+        menu: Default::default(),
+    }));
+    Ok(true)
+}
+
+/// Whether `table` sets any of `looks`.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn styled(table: &Table, looks: &[&str]) -> mlua::Result<bool> {
+    for look in looks {
+        if table.contains_key(*look)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

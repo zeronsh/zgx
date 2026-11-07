@@ -1368,6 +1368,139 @@ fn any_element_is_a_slider_with_its_value_range_text_and_what_moves_it() {
 }
 
 #[test]
+fn a_slider_says_whether_it_is_the_systems_on_every_platform() {
+    // iOS's own where it has one, drawn elsewhere: the same slider either way.
+    let mut h = Harness::inline(
+        r#"local level = ui.state("level", 0.5)
+        return ui.column {
+            ui.slider { id = "own", label = "Own", value = level, native = false },
+            ui.slider { id = "system", label = "System", value = level, native = true, step = 0.25 },
+            ui.slider { id = "styled", label = "Styled", value = level, bg = "$danger" },
+        }"#,
+    );
+    h.ui.set_assistive_technology(true);
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    for id in ["own", "system", "styled"] {
+        let slider = node(&mut h, id);
+        assert_eq!(slider.role, Role::Slider, "{id}");
+        assert_eq!(slider.numeric_value, Some(0.5), "{id}");
+    }
+    let system = h.find("system").unwrap();
+    h.ui.input
+        .dispatch_to(&h.ui.scene, system, InputEvent::Increment);
+    h.frames(1);
+    for id in ["own", "system", "styled"] {
+        assert_eq!(node(&mut h, id).numeric_value, Some(0.75), "{id} follows");
+    }
+}
+
+#[test]
+fn a_button_takes_native_and_the_glass_variants_on_every_platform() {
+    // The system's on iOS, drawn elsewhere: one API, clicking the same.
+    let mut h = Harness::inline(
+        r#"local clicks = ui.state("clicks", 0)
+        local function click() clicks:set(clicks:get() + 1) end
+        return ui.column {
+            ui.button { "Own", id = "own", native = false, on_click = click },
+            ui.button { "System", id = "system", native = true, variant = "primary", on_click = click },
+            ui.button { "Glass", id = "glass", variant = "glass", on_click = click },
+            ui.button { "Prominent", id = "prominent", variant = "prominent_glass", on_click = click },
+            ui.button { ui.symbol { name = "star" }, id = "symbol", label = "Star", on_click = click },
+            ui.text { function() return `Clicks {clicks:get()}` end },
+        }"#,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    for (at, id) in ["own", "system", "glass", "prominent", "symbol"]
+        .iter()
+        .enumerate()
+    {
+        h.click(id);
+        h.frames(1);
+        assert!(h.texts().contains(&format!("Clicks {}", at + 1)), "{id}");
+    }
+    assert_eq!(h.error(), None);
+}
+
+#[test]
+#[should_panic(expected = "\"glass\"")]
+fn a_buttons_variant_names_what_it_can_be() {
+    Harness::inline(r#"return ui.button { "Odd", variant = "neon" }"#);
+}
+
+#[test]
+fn a_menu_item_takes_a_symbol_and_a_style_and_says_which_styles_it_has() {
+    let mut h = Harness::inline(
+        r#"local open = ui.state("open", true)
+        local chose = ui.state("chose", "")
+        return ui.column {
+            ui.menu { open = open, anchor = ui.button { "Sort", id = "anchor", native = false },
+                ui.menu_item { "Name", id = "name", symbol = "textformat" },
+                ui.menu_item { "Own", id = "own", style = "destructive", color = "$accent" },
+                ui.menu_item { "Delete", id = "delete", style = "destructive",
+                    on_click = function() chose:set("delete") end },
+            },
+            ui.text { id = "chose", function() return chose:get() end },
+        }"#,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    // Each makes a real change: the symbol is a child ahead of the label's, which
+    // an item without one doesn't have.
+    let children = |h: &mut Harness, id: &str| {
+        let item = h.find(id).unwrap();
+        h.ui.scene.borrow().children(item).len()
+    };
+    assert_eq!(children(&mut h, "name"), children(&mut h, "own") + 1);
+    assert!(h.texts().contains(&"Name".to_owned()), "it still says it");
+    assert!(h.texts().contains(&"Own".to_owned()));
+    h.click("delete");
+    h.frames(1);
+    assert_eq!(h.text("chose"), "delete");
+}
+
+#[test]
+#[should_panic(expected = "a menu item's `style`")]
+fn a_menu_items_style_names_what_it_can_be() {
+    Harness::inline(
+        r#"return ui.menu { open = ui.state("o", true), anchor = ui.button { "A" },
+            ui.menu_item { "B", style = "neon" } }"#,
+    );
+}
+
+#[test]
+fn a_stepper_takes_native_on_every_platform() {
+    let mut h = Harness::inline(
+        r#"local count = ui.state("count", 3)
+        return ui.column {
+            ui.stepper { id = "own", value = count, min = 0, max = 9, native = false },
+            ui.stepper { id = "system", value = count, min = 0, max = 9, native = true },
+            ui.stepper { id = "open", value = count },
+            ui.text { function() return `{count:get()}` end },
+        }"#,
+    );
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    assert!(h.texts().contains(&"3".to_owned()));
+}
+
+#[test]
+fn a_segmented_control_takes_native_on_every_platform() {
+    let mut h = Harness::inline(
+        r#"local mode = ui.state("mode", "Day")
+        return ui.column {
+            ui.segmented { id = "own", value = mode, options = { "Day", "Week" }, native = false },
+            ui.segmented { id = "system", value = mode, options = { "Day", "Week" }, native = true },
+            ui.text { function() return mode:get() end },
+        }"#,
+    );
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    assert!(h.texts().contains(&"Day".to_owned()));
+}
+
+#[test]
 #[should_panic(expected = "a slider role needs a finite `min` below its `max`")]
 fn a_slider_role_needs_its_range() {
     Harness::inline(r#"return ui.div { role = "slider", label = "Level", value = 1 }"#);

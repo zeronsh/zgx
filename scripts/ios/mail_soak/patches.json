@@ -1,0 +1,5 @@
+[
+  ["app.luau", "local Settings = require(\"@components/settings\")\n", "local Settings = require(\"@components/settings\")\nif ui.args[1] == \"soak\" then\n\trequire(\"./soak\")\nend\n"],
+  ["components/compose.luau", "\t\t\tid = \"body\",\n", "\t\t\tid = \"body\",\n\t\t\tref = state.body,\n"],
+  ["state.luau", "M.rows = ui.ref()\n", "M.rows = ui.ref()\nM.body = ui.ref()\n"]
+]
