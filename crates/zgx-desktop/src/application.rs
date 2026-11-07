@@ -1131,7 +1131,7 @@ impl Application {
             carrying: None,
             #[cfg(target_os = "linux")]
             last_focused: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             pending_move: HeldMove::default(),
             factory,
             active: false,
@@ -6229,9 +6229,9 @@ struct WindowManager {
     /// The window last focused: the one another launch raises (Linux).
     #[cfg(target_os = "linux")]
     last_focused: Option<u64>,
-    /// The last pointer move heard and not yet handled (Linux): see
-    /// `ApplicationHandler::window_event`.
-    #[cfg(target_os = "linux")]
+    /// The last pointer move heard and not yet handled (Linux, Windows):
+    /// see `ApplicationHandler::window_event`.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pending_move: HeldMove<WindowId, WindowEvent>,
     factory: WindowFactory,
     active: bool,
@@ -6254,23 +6254,23 @@ impl WindowManager {
         }));
     }
     /// The pointer move held back (`pending_move`), handled now.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn flush_move(&mut self, event_loop: &ActiveEventLoop) {
         if let Some((id, event)) = self.pending_move.take() {
             self.window_event_now(event_loop, id, event);
         }
     }
 }
-/// The pointer moves of one turn of the event loop, as one (Linux): the
-/// last move heard, for window `W`, not yet handled.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// The pointer moves of one turn of the event loop, as one (Linux,
+/// Windows): the last move heard, for window `W`, not yet handled.
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 struct HeldMove<W, E>(Option<(W, E)>);
 impl<W, E> Default for HeldMove<W, E> {
     fn default() -> Self {
         Self(None)
     }
 }
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 impl<W: PartialEq, E> HeldMove<W, E> {
     /// A move for window `id`, held in place of the one before; that one is
     /// handed back to handle now if it was another window's (each window
@@ -7525,7 +7525,7 @@ impl ApplicationHandler<Event> for WindowManager {
         self.contain(event_loop, None, |this| this.suspended_turn());
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         self.flush_move(event_loop);
         self.contain(event_loop, None, |this| {
             this.user_event_turn(event_loop, event)
@@ -7535,11 +7535,15 @@ impl ApplicationHandler<Event> for WindowManager {
         // Pointer moves come as often as the mouse reports them (Wayland
         // and X11 pass each on, up to 1000 a second), and each is handled
         // on laid-out content: a move that changes layout (a pane's edge
-        // dragged) lays the window out again for every one. AppKit and
-        // Windows hand an app one move per turn; here the moves of one turn
-        // of the loop come as one, the last, handled before any other event
-        // (keeping their order) and before the loop waits.
-        #[cfg(target_os = "linux")]
+        // dragged) lays the window out again for every one. Windows folds
+        // only the moves not yet read: a move that takes longer to handle
+        // than the mouse takes to report the next finds another waiting,
+        // so a turn handles one after another (11 in one frame, a 1000 Hz
+        // mouse dragging a pane's edge) and paints wait for the pointer to
+        // stop. AppKit hands an app one move per turn; here the moves of
+        // one turn of the loop come as one, the last, handled before any
+        // other event (keeping their order) and before the loop waits.
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             if matches!(event, WindowEvent::CursorMoved { .. }) {
                 if let Some((other, moved)) = self.pending_move.moved(id, event) {
@@ -7552,7 +7556,7 @@ impl ApplicationHandler<Event> for WindowManager {
         self.window_event_now(event_loop, id, event);
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         self.flush_move(event_loop);
         self.contain(event_loop, None, |this| this.about_to_wait_turn(event_loop));
     }
@@ -8852,7 +8856,7 @@ mod tests {
             carrying: None,
             #[cfg(target_os = "linux")]
             last_focused: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             pending_move: HeldMove::default(),
             factory,
             active: false,
@@ -9318,6 +9322,89 @@ mod tests {
             super::BOOL_GETTER.to_str().unwrap(),
             format!("{}@:", Bool::ENCODING)
         );
+    }
+
+    /// On Windows a turn's pointer moves come as one too: a burst the window
+    /// manager hears is held as its last, and a press after it hands that
+    /// move on first. (Windows folds only moves not yet read; one handled
+    /// slower than the mouse reports finds the next already waiting.)
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_turns_pointer_moves_come_as_its_last_on_windows() {
+        use winit::platform::windows::EventLoopBuilderExtWindows;
+        struct Probe {
+            manager: WindowManager,
+            held: Option<f64>,
+            held_after_press: bool,
+        }
+        impl ApplicationHandler<Event> for Probe {
+            fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+                let device_id = winit::event::DeviceId::dummy();
+                let id = WindowId::dummy();
+                for x in 0..1000 {
+                    let moved = WindowEvent::CursorMoved {
+                        device_id,
+                        position: (f64::from(x), 10.).into(),
+                    };
+                    ApplicationHandler::window_event(&mut self.manager, event_loop, id, moved);
+                }
+                self.held = match &self.manager.pending_move.0 {
+                    Some((_, WindowEvent::CursorMoved { position, .. })) => Some(position.x),
+                    _ => None,
+                };
+                let press = WindowEvent::MouseInput {
+                    device_id,
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                };
+                ApplicationHandler::window_event(&mut self.manager, event_loop, id, press);
+                self.held_after_press = self.manager.pending_move.0.is_some();
+                event_loop.exit();
+            }
+            fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+        }
+        let event_loop = EventLoop::<Event>::with_user_event()
+            .with_any_thread(true)
+            .build()
+            .unwrap();
+        let factory = WindowFactory {
+            fonts: Default::default(),
+            text_language: Default::default(),
+            menus: Rc::new(RefCell::new(Vec::new())),
+            menus_left_out: Rc::default(),
+            reserved: Rc::default(),
+            pending: Rc::new(RefCell::new(VecDeque::new())),
+            next: Rc::new(Cell::new(1)),
+            alive: Rc::new(Cell::new(true)),
+            clipboard: Rc::new(RefCell::new(None)),
+            gpu_contexts: Rc::new(RefCell::new(Vec::new())),
+            early_gpu: Rc::default(),
+            proxy: event_loop.create_proxy(),
+            runtime: zgx::reactive::Runtime::new(),
+        };
+        let manager = WindowManager {
+            _native_events: None,
+            application_event: None,
+            quit_on_last_window_close: true,
+            hosts: HashMap::new(),
+            panics: Vec::new(),
+            native: HashMap::new(),
+            drag_over: Cell::new(None),
+            carrying: None,
+            pending_move: HeldMove::default(),
+            factory,
+            active: false,
+            error: None,
+            timers: zgx::timer::host(|| {}),
+        };
+        let mut probe = Probe {
+            manager,
+            held: None,
+            held_after_press: true,
+        };
+        event_loop.run_app(&mut probe).unwrap();
+        assert_eq!(probe.held, Some(999.));
+        assert!(!probe.held_after_press);
     }
 
     #[test]
