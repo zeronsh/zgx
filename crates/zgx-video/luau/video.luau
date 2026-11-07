@@ -742,6 +742,119 @@ function video.audio_data(src: string): AudioData
 	return data
 end
 
+-- Captions. `video.captions_of(src)` reads an SRT or WebVTT file beside the
+-- script into its cues, `{ start, end, text }` in seconds; a list of such
+-- tables can be written by hand as well.
+export type Cue = { start: number, ["end"]: number, text: string }
+function video.captions_of(src: string): { Cue }
+	local answer = ui.call_sync("zgx.video.captions", { src = src })
+	if type(answer) == "table" and (answer :: any).error then
+		error(`video.captions_of: {(answer :: any).error}`, 2)
+	end
+	return answer :: any
+end
+
+-- The cue showing at `seconds`, and where in it, from 0 to 1.
+function video.caption_at(cues: { Cue }, seconds: number): (Cue?, number)
+	for _, cue in cues do
+		if seconds >= cue.start and seconds < cue["end"] then
+			return cue, (seconds - cue.start) / math.max(cue["end"] - cue.start, 1e-6)
+		end
+	end
+	return nil, 0
+end
+
+-- Shows the caption of the moment: `src` (a file) or `cues`, timed from this
+-- sequence's start (`offset` seconds later). `words = true` shows each word
+-- as its share of the cue's time comes, the one being said in `active_color`
+-- and those to come in `upcoming_color` (or hidden, with `reveal = true`).
+-- Its other properties style the text.
+local CAPTION_KEYS = {
+	src = true,
+	cues = true,
+	offset = true,
+	words = true,
+	active_color = true,
+	upcoming_color = true,
+	reveal = true,
+	color = true,
+}
+function video.captions(opts: any): any
+	local time = time_here()
+	local cues: { Cue } = opts.cues or video.captions_of(opts.src)
+	local offset = opts.offset or 0
+	local function now(): (Cue?, number)
+		return video.caption_at(cues, (frame_state:get() - time.offset) / time.fps - offset)
+	end
+	local style: any = {}
+	for key, value in opts do
+		if type(key) == "string" and not CAPTION_KEYS[key] then
+			style[key] = value
+		end
+	end
+	local color = opts.color or "#ffffff"
+	if not opts.words then
+		local text = table.clone(style)
+		text[1] = function()
+			local cue = now()
+			return if cue then cue.text else ""
+		end
+		text.color = color
+		text.wrap = if text.wrap == nil then true else text.wrap
+		return ui.text(text)
+	end
+	-- Each word's share of the cue's time follows its length.
+	local spans = ui.computed(function(): any
+		local cue, at = now()
+		if not cue then
+			return {}
+		end
+		local words = {}
+		for word in cue.text:gmatch("%S+") do
+			table.insert(words, word)
+		end
+		local total = 0
+		for _, word in words do
+			total += #word + 1
+		end
+		local out, seen = {}, 0
+		for i, word in words do
+			local from, to = seen / total, (seen + #word + 1) / total
+			seen += #word + 1
+			local state = if at >= to then "said" elseif at >= from then "active" else "upcoming"
+			out[i] = { text = word, state = state }
+		end
+		return out
+	end)
+	local active = opts.active_color or "#ffd166"
+	local upcoming = opts.upcoming_color or color
+	local row = table.clone(style)
+	row.direction = "row"
+	row.flex_wrap = true
+	row.justify = row.justify or "center"
+	row.gap_x = row.gap_x or (style.text_size or 16) * 0.3
+	local text_style: any = {}
+	for _, key in { "text_size", "weight", "font", "letter_spacing", "italic", "line_height" } do
+		text_style[key] = style[key]
+		row[key] = nil
+	end
+	row[1] = ui.each(spans, function(word: any, _i: number, item: any)
+		local t = table.clone(text_style)
+		t[1] = function()
+			return item:get().text
+		end
+		t.color = function()
+			local state = item:get().state
+			return if state == "active" then active elseif state == "said" then color else upcoming
+		end
+		t.opacity = function()
+			return if opts.reveal and item:get().state == "upcoming" then 0 else 1
+		end
+		return ui.text(t)
+	end)
+	return ui.div(row)
+end
+
 -- Hold the render until the function this returns is called: for what loads in
 -- real time (`ui.fetch`, a remote picture). `label` says what, should it take too long.
 function video.hold(label: string?): () -> ()

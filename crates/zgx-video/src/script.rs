@@ -229,6 +229,22 @@ fn host(
             audio.push(clip);
         }
     });
+    // A caption file's cues (`video.captions_of`).
+    let caption_dir = entry.parent().map(Path::to_owned).unwrap_or_default();
+    host.function("zgx.video.captions", move |arg| {
+        let arg = json_of(&arg);
+        let src = caption_dir.join(arg["src"].as_str().unwrap_or_default());
+        let answer = match std::fs::read_to_string(&src) {
+            Ok(text) => json!(
+                crate::captions::parse(&text)
+                    .into_iter()
+                    .map(|cue| json!({ "start": cue.start, "end": cue.end, "text": cue.text }))
+                    .collect::<Vec<_>>()
+            ),
+            Err(error) => json!({ "error": format!("{}: {error}", src.display()) }),
+        };
+        Value::from_json(&answer.to_string()).unwrap_or_default()
+    });
     let heard = told.clone();
     let base_dir = entry.parent().map(Path::to_owned).unwrap_or_default();
     host.action("zgx.video.clip", move |clip| {

@@ -3,6 +3,7 @@
 //! as the machine draws, and the same way each time.
 pub mod analysis;
 pub mod audio;
+pub mod captions;
 pub mod clip;
 pub mod compose;
 pub mod encode;
