@@ -113,7 +113,7 @@ On an Apple M-series Mac shared with other work, the showcase with 4-sample moti
 
 ## Studio
 
-`zgx video studio <dir>` opens the compositions in a window. The window itself is a zgx app (`crates/zgx-video/studio/app.luau`) with a composition list, the preview, a timeline of the sequences shown so far with a playhead to drag, playback at real speed (Space; ← and → step a frame), a props panel that redraws as props change, a render button with progress, and reloading as the script is saved. Its frames come from a thread with a virtual clock of its own, through the same code a render uses, so the preview shows what a render writes. While it isn't playing, that thread waits for a message and does no work. `--screenshot out.png --frames N` draws the studio headless.
+`zgx video studio <dir>` opens the compositions in a window. The window itself is a zgx app (`crates/zgx-video/studio/app.luau`) with a composition list, the preview, a timeline of the sequences shown so far with a playhead to drag, playback at real speed (Space; ← and → step a frame), a props panel that redraws as props change, a render queue (each render added waits its turn and shows its progress, and any queued or running one can be stopped), and reloading as the script is saved. Its frames come from a thread with a virtual clock of its own, through the same code a render uses, so the preview shows what a render writes. While it isn't playing, that thread waits for a message and does no work. `--screenshot out.png --frames N` draws the studio headless.
 
 ## A player in any app
 
