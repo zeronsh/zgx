@@ -394,7 +394,7 @@ end
 ---------------------------------------------------------------- timeline
 
 local RULER = 22
-local ROW = 24
+local ROW = 20
 
 local function timeline(): any
 	local box: any = ui.ref()
@@ -435,7 +435,7 @@ local function timeline(): any
 		return `{(frame / math.max(comp and comp.duration or 1, 1)) * 100}%`
 	end
 	return ui.column {
-		h = 190,
+		h = 240,
 		shrink = 0,
 		bg = palette.panel,
 		border_sides = { 1, 0, 0, 0 },

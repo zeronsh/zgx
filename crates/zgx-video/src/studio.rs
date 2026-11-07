@@ -132,11 +132,13 @@ impl Preview {
             .and_then(|id| list.iter().find(|comp| comp.id == id).cloned())
             .unwrap_or_else(|| list[0].clone());
         // The preview is drawn no larger than a window shows it.
+        // No wider than a window shows it: playing keeps up.
+        let scale = self.scale * (1280. / composition.width).min(1.);
         self.stage = Some(ScriptStage::with(
             &self.path,
             composition.clone(),
             &self.props,
-            self.scale,
+            scale,
             Color(0, 0, 0, 0),
             Timing::default(),
         )?);
