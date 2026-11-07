@@ -614,11 +614,18 @@ fn the_system_text_size_scales_font_tokens_whichever_theme_sets_them() {
     ui.theme().set_system_text_scale(1.5);
     assert_eq!(size(&ui), base * 1.5);
     assert_eq!(line(&ui), base_line * 1.5);
+    // A control grows to hold a body line and its padding, never shrinks.
+    let control = |ui: &Ui| ui.theme().root().number_untracked(tok::CONTROL_HEIGHT);
+    assert_eq!(control(&ui), (base * 1.5 * 1.4).ceil() + 12.);
     // Spacing is not text.
     let space = ui.theme().root().number_untracked(tok::SPACE_3);
     ui.theme().set_system_text_scale(1.);
     assert_eq!(ui.theme().root().number_untracked(tok::SPACE_3), space);
     assert_eq!(size(&ui), base);
+    assert_eq!(control(&ui), 36., "the theme's");
+    ui.theme().set_system_text_scale(0.8);
+    assert_eq!(control(&ui), 36., "never below the theme's");
+    ui.theme().set_system_text_scale(1.);
     // An app theme's own sizes scale too.
     ui.theme().register(
         Theme::new("test-large", ThemeKind::Dark)

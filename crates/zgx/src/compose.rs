@@ -4272,6 +4272,7 @@ struct WidgetStyles {
     progress: Styles,
     slider: Styles,
     editor: Styles,
+    editor_line: Styles,
 }
 impl WidgetStyles {
     fn new() -> Self {
@@ -4319,6 +4320,17 @@ impl WidgetStyles {
                 .border(1.)
                 .border_color(tok::BORDER)
                 .border_over(true),
+            // A field one line high: a control's height, kept current (the
+            // theme's, and the system text size's: `Themes::set_system_text_scale`
+            // raises it to fit a line). Built once, a larger text would clip.
+            // Made here once, not added to `editor` at each mount.
+            editor_line: Styles::new()
+                .bg(tok::INPUT_BG)
+                .rounded(tok::RADIUS_MD)
+                .border(1.)
+                .border_color(tok::BORDER)
+                .border_over(true)
+                .h(tok::CONTROL_HEIGHT),
         }
     }
 }
@@ -5157,7 +5169,10 @@ fn open_element(
             multiline,
         } => {
             dim_when_disabled(&mut view);
-            let mut defaults = widget_style(|w| &w.editor);
+            let mut defaults = widget_style(|w| match multiline {
+                true => &w.editor,
+                false => &w.editor_line,
+            });
             // The default outline is drawn over; a border the app gives
             // takes room, as CSS's does, unless it says otherwise.
             let own_border =
