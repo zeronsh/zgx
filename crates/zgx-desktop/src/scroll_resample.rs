@@ -99,6 +99,10 @@ impl ScrollResampler {
     pub fn pending(&self) -> bool {
         self.received != self.applied || self.wheel != (0., 0.)
     }
+    /// What's waiting is a mouse wheel's notches, not a trackpad's motion.
+    pub fn wheel_only(&self) -> bool {
+        self.wheel != (0., 0.) && self.received == self.applied
+    }
     /// A gesture is under way: refreshes should keep coming at full rate.
     pub fn active(&self, now: Instant) -> bool {
         self.pending()
