@@ -10874,13 +10874,23 @@ impl GpuRenderer {
                 read.y + read.height - item.bounds.y,
             ]
         };
+        // A box shadow grows the layer its composite replaces past what the
+        // shader reads: what's under all of it is copied.
+        let shadowed = matches!(
+            item.kind,
+            NodeKind::Quad(style) | NodeKind::Panel { quad: style, .. } if !style.shadows().is_empty()
+        );
         let Some(matrix) = item.projective() else {
             // What's clipped away is never asked for, however large the box.
             let read = output
                 .intersection(clip)?
                 .expand(layer.reach)
                 .intersection(viewport)?;
-            return Some((read.expand(margin), from_box(read)));
+            let copied = match shadowed {
+                true => self.under_shadowed_layer(item, read, None, viewport),
+                false => read,
+            };
+            return Some((copied.expand(margin), from_box(read)));
         };
         use zgx::affine::{Affine, Projective};
         let (x, y) = self.layer_origin;
@@ -10890,7 +10900,37 @@ impl GpuRenderer {
         matrix.bounds(output).intersection(clip)?;
         let whole = output.expand(layer.reach);
         let read = matrix.bounds(whole).intersection(viewport)?;
-        Some((read.expand(margin), from_box(whole)))
+        let copied = match shadowed {
+            true => self.under_shadowed_layer(item, read, Some(&matrix), viewport),
+            false => read,
+        };
+        Some((copied.expand(margin), from_box(whole)))
+    }
+    /// `read` grown to all a shadowed backdrop reader's layer covers (in this
+    /// target's space, through `matrix` if it's transformed), within
+    /// `viewport`: its composite replaces every pixel of it.
+    #[cold]
+    #[inline(never)]
+    fn under_shadowed_layer(
+        &self,
+        item: &zgx::scene::PaintItem<'_>,
+        read: Rect,
+        matrix: Option<&zgx::affine::Projective>,
+        viewport: Rect,
+    ) -> Rect {
+        let Some(layer) = self.layers.get(&item.id) else {
+            return read;
+        };
+        let bounds = Rect::new(
+            layer.bounds.x - self.layer_origin.0,
+            layer.bounds.y - self.layer_origin.1,
+            layer.bounds.width,
+            layer.bounds.height,
+        );
+        let bounds = matrix.map_or(bounds, |matrix| matrix.bounds(bounds));
+        bounds
+            .intersection(viewport)
+            .map_or(read, |bounds| read.union(bounds))
     }
     /// Copy what the target holds under blended `draw`, within `regions`,
     /// into the backdrop for its size (and reading the backdrop, `read`
