@@ -30,7 +30,10 @@ fn world() -> (Ui, NodeId, NodeId, Heard, Heard) {
                 InputEvent::PointerLockChange(locked) => format!("locked {locked}"),
                 InputEvent::Scroll { .. } => "wheel".to_owned(),
                 InputEvent::Activate => "click".to_owned(),
-                InputEvent::KeyDown { key, .. } => format!("key {key:?}"),
+                InputEvent::KeyDown { key, repeat, .. } => {
+                    format!("key {key:?}{}", if *repeat { " again" } else { "" })
+                }
+                InputEvent::KeyUp { key, .. } => format!("key up {key:?}"),
                 _ => return,
             };
             heard.borrow_mut().push(said);
@@ -144,6 +147,48 @@ fn escape_ends_the_lock_and_goes_nowhere_else() {
         other.borrow().last().map(String::as_str),
         Some("key Escape")
     );
+}
+
+fn escape(repeat: bool) -> InputEvent {
+    InputEvent::KeyDown {
+        key: Key::Escape,
+        modifiers: Modifiers::default(),
+        repeat,
+    }
+}
+
+#[test]
+fn the_escape_that_ends_a_lock_is_no_gesture_to_lock_again() {
+    let (mut ui, g, o, game, other) = locked();
+    ui.input.focus(&ui.scene, Some(o));
+    ui.dispatch(escape(false));
+    // A handler hearing the lock end (or a timer just after) can't take
+    // the pointer straight back: Escape always lets it go.
+    assert!(!ui.input.lock_pointer(&ui.scene, g), "on the Escape");
+    ui.dispatch(escape(true));
+    ui.dispatch(InputEvent::KeyUp {
+        key: Key::Escape,
+        modifiers: Modifiers::default(),
+    });
+    assert!(!ui.input.lock_pointer(&ui.scene, g), "on its release");
+    assert_eq!(*game.borrow(), ["locked false"]);
+    assert!(
+        other.borrow().is_empty(),
+        "its repeats and release go nowhere either: {:?}",
+        other.borrow()
+    );
+    // A new press is a new gesture.
+    press(&mut ui, 50., 50.);
+    assert!(ui.input.lock_pointer(&ui.scene, g));
+}
+
+#[test]
+fn a_press_before_the_window_lost_focus_locks_nothing() {
+    let (mut ui, g, _, _, _) = world();
+    press(&mut ui, 50., 50.);
+    ui.dispatch(InputEvent::Blur);
+    assert!(!ui.input.lock_pointer(&ui.scene, g));
+    assert_eq!(ui.input.pointer_lock(&ui.scene.borrow()), None);
 }
 
 #[test]

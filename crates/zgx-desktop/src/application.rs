@@ -3218,7 +3218,12 @@ impl Host {
     /// it go.
     fn sync_pointer_lock(&mut self) {
         let ui = &self.context.ui;
-        let want = ui.input.pointer_lock(&ui.scene.borrow());
+        let mut want = ui.input.pointer_lock(&ui.scene.borrow());
+        // A window without the keyboard doesn't take the pointer (a lock
+        // asked for as its focus went); one losing it lets go (`Focused`).
+        if want.is_some() && !self.native_focused {
+            want = None;
+        }
         if want.is_none() {
             // Its node left or was disabled: the lock ends, heard if it can be.
             ui.input.unlock_pointer(&ui.scene);
@@ -3244,10 +3249,12 @@ impl Host {
                 });
             }
             (None, Some(held)) => {
-                let _ = window.set_cursor_grab(CursorGrabMode::None);
+                // Put back before it's let go: Wayland moves a pointer only
+                // while it's locked (a hint to the compositor).
                 let (x, y) = held.at;
                 let _ =
                     window.set_cursor_position(LogicalPosition::new(f64::from(x), f64::from(y)));
+                let _ = window.set_cursor_grab(CursorGrabMode::None);
                 show_pointer(&window, true);
                 self.pending_motion = (0., 0.);
                 // Shown again, it takes zgx's cursor afresh.
@@ -7812,10 +7819,13 @@ impl WindowManager {
             host.sync_pointer_lock();
             locked |= host.pointer_lock.is_some();
         }
+        // `Always` rather than `WhenFocused`: X11 applies that at the next
+        // change of focus, and a lock is taken in a focused window (and
+        // ends as it loses focus).
         if locked != self.device_events {
             self.device_events = locked;
             event_loop.listen_device_events(if locked {
-                winit::event_loop::DeviceEvents::WhenFocused
+                winit::event_loop::DeviceEvents::Always
             } else {
                 winit::event_loop::DeviceEvents::Never
             });

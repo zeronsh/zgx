@@ -439,14 +439,16 @@ pub(crate) struct Vm {
 }
 impl Vm {
     /// A pointer event's table for a handler: `x`, `y`, `local_x`,
-    /// `local_y` and the keys held. Built in one call into the state: field
-    /// by field from Rust, each `set` (and each key's string) was a
-    /// protected call of its own while a memory limit is set, and a pointer
-    /// move makes one of these for every handler on its way.
+    /// `local_y` and the keys held, and a move's `dx`, `dy` (and `locked`,
+    /// while the pointer is). Built in one call into the state: field by
+    /// field from Rust, each `set` (and each key's string) was a protected
+    /// call of its own while a memory limit is set, and a pointer move
+    /// makes one of these for every handler on its way.
     pub(crate) fn point_table(
         &self,
         (x, y, local_x, local_y): (f32, f32, f32, f32),
         (shift, ctrl, alt, meta, cmd): (bool, bool, bool, bool, bool),
+        motion: Option<(f32, f32, bool)>,
     ) -> mlua::Result<mlua::Table> {
         let make = match self.point.get() {
             Some(make) => make,
@@ -454,16 +456,23 @@ impl Vm {
                 let made = self
                     .lua
                     .load(
-                        "local x, y, local_x, local_y, shift, ctrl, alt, meta, cmd = ...\n\
+                        "local x, y, local_x, local_y, shift, ctrl, alt, meta, cmd, dx, dy, locked = ...\n\
                          return { x = x, y = y, local_x = local_x, local_y = local_y, shift = shift, \
-                         ctrl = ctrl, alt = alt, meta = meta, cmd = cmd }",
+                         ctrl = ctrl, alt = alt, meta = meta, cmd = cmd, dx = dx, dy = dy, \
+                         locked = locked }",
                     )
                     .set_name("=zgx pointer event")
                     .into_function()?;
                 self.point.get_or_init(|| made)
             }
         };
-        make.call((x, y, local_x, local_y, shift, ctrl, alt, meta, cmd))
+        let (dx, dy, locked) = match motion {
+            Some((dx, dy, locked)) => (Some(dx), Some(dy), locked.then_some(true)),
+            None => (None, None, None),
+        };
+        make.call((
+            x, y, local_x, local_y, shift, ctrl, alt, meta, cmd, dx, dy, locked,
+        ))
     }
     /// Runs `f` with its own budget. A nested call (a component built
     /// while a handler runs) stops the outer call's clock meanwhile.

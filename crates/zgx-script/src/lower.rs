@@ -5301,7 +5301,7 @@ fn with_events(
                 .unwrap_or((x, y))
         };
         let held = event.pointer_modifiers();
-        let point = |x: f32, y: f32| -> mlua::Result<mlua::Table> {
+        let point_with = |x: f32, y: f32, motion| -> mlua::Result<mlua::Table> {
             let (lx, ly) = local(x, y);
             vm.point_table(
                 (x, y, lx, ly),
@@ -5312,8 +5312,10 @@ fn with_events(
                     held.meta,
                     held.primary_shortcut(),
                 ),
+                motion,
             )
         };
+        let point = |x: f32, y: f32| point_with(x, y, None);
         if captures
             && event.phase == EventPhase::Target
             && matches!(
@@ -5357,9 +5359,7 @@ fn with_events(
             InputEvent::PointerMove { x, y } => {
                 let (dx, dy) = last.map_or((0., 0.), |(lx, ly)| (x - lx, y - ly));
                 last = Some((*x, *y));
-                if let (Some(h), Ok(p)) = (&moved, point(*x, *y))
-                    && p.set("dx", dx).and_then(|_| p.set("dy", dy)).is_ok()
-                {
+                if let (Some(h), Ok(p)) = (&moved, point_with(*x, *y, Some((dx, dy, false)))) {
                     run(h, &vm, &actions, p);
                 }
             }
@@ -5367,12 +5367,7 @@ fn with_events(
             // as it moved, `x`, `y` where it stays.
             InputEvent::PointerMotion { dx, dy } => {
                 let (x, y) = handle.get().and_then(|h| h.pointer()).unwrap_or_default();
-                if let (Some(h), Ok(p)) = (&moved, point(x, y))
-                    && p.set("dx", *dx)
-                        .and_then(|_| p.set("dy", *dy))
-                        .and_then(|_| p.set("locked", true))
-                        .is_ok()
-                {
+                if let (Some(h), Ok(p)) = (&moved, point_with(x, y, Some((*dx, *dy, true)))) {
                     run(h, &vm, &actions, p);
                 }
             }
@@ -5692,13 +5687,9 @@ fn with_double_click(
     })
 }
 
-/// `on_navigate`: a listener of its own, so a node without one pays nothing
-/// for it; the node takes navigation (`View::on_navigate`), so a swipe
-/// between pages over it navigates where nothing under the fingers scrolls
-/// that way.
-#[inline(never)]
 /// `on_pointer_lock`: the node took the pointer's lock or lost it. Its own
 /// lock alone: a descendant's goes by.
+#[inline(never)]
 fn with_pointer_lock(view: View, handler: Handler, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     let (vm, actions) = (vm.clone(), low.actions.clone());
     view.on_event(move |event| {
@@ -5710,6 +5701,11 @@ fn with_pointer_lock(view: View, handler: Handler, vm: &Rc<Vm>, low: &Rc<Lowerin
     })
 }
 
+/// `on_navigate`: a listener of its own, so a node without one pays nothing
+/// for it; the node takes navigation (`View::on_navigate`), so a swipe
+/// between pages over it navigates where nothing under the fingers scrolls
+/// that way.
+#[inline(never)]
 fn with_navigate(view: View, handler: Handler, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     let (vm, actions) = (vm.clone(), low.actions.clone());
     view.on_navigate(move |navigation| {

@@ -781,6 +781,8 @@ struct State {
     /// When a person last pressed, released or typed: the pointer locks
     /// only just after (`POINTER_LOCK_ACTIVATION`).
     activation: Option<Instant>,
+    /// Escape ended the lock: its release goes nowhere either.
+    escape_ended_lock: bool,
 }
 /// Routes input events to the nodes listening for them, and holds focus,
 /// pointer capture, modal scopes and key bindings. Clones share one
@@ -1819,6 +1821,14 @@ impl InputDispatcher {
             InputEvent::KeyDown {
                 key: Key::Escape, ..
             } => {
+                // Not a gesture that may lock again: a handler hearing the
+                // lock end can't take the pointer straight back. The next
+                // press or key can.
+                {
+                    let mut state = self.state.borrow_mut();
+                    state.activation = None;
+                    state.escape_ended_lock = true;
+                }
                 self.unlock_pointer(scene);
                 Some(swallowed)
             }
@@ -2714,6 +2724,42 @@ impl InputDispatcher {
                 | InputEvent::KeyUp { .. }
         ) {
             self.state.borrow_mut().activation = Some(Instant::now());
+        }
+        // The Escape that ended a lock, held (its repeats) and let go: as
+        // its press, nowhere, and no more a gesture that may lock again.
+        if self.state.borrow().escape_ended_lock {
+            match event {
+                InputEvent::KeyDown {
+                    key: Key::Escape,
+                    repeat: true,
+                    ..
+                } => {
+                    return DispatchResult {
+                        default_prevented: true,
+                        ..Default::default()
+                    };
+                }
+                InputEvent::KeyUp {
+                    key: Key::Escape, ..
+                } => {
+                    let mut state = self.state.borrow_mut();
+                    state.escape_ended_lock = false;
+                    state.activation = None;
+                    return DispatchResult {
+                        default_prevented: true,
+                        ..Default::default()
+                    };
+                }
+                // Another key, or focus gone: its release won't come here.
+                InputEvent::KeyDown { .. } | InputEvent::Blur => {
+                    self.state.borrow_mut().escape_ended_lock = false;
+                }
+                _ => {}
+            }
+        }
+        // Gone from the window, a gesture before doesn't lock the pointer.
+        if matches!(event, InputEvent::Blur) {
+            self.state.borrow_mut().activation = None;
         }
         if self.state.borrow().pointer_lock.is_some() {
             // (Its borrow ends here: the listeners below change the scene.)
