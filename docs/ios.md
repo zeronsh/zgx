@@ -51,6 +51,8 @@ A field low on a page and a `ui.keyboard_bar` move with the keyboard in the rend
 
 While the page rides the keyboard its offset doesn't change, so a page's bar is told where it shows, frame by frame (`ui.native_shown_scroll`): the edge effect and the small title change with the motion, as a real scroll's do. A field moves again if a finger took it under the keyboard and someone types, or if focus reached it after the keyboard moved. `Documents/zgx-gesture.log` has every change of the page's offset while the keyboard is up.
 
+`ui.ios.composer { value = text, on_send = send, on_plus = add }` is one built on it: a pill that springs open with the keyboard's rise, grows with its lines to `max_lines`, then scrolls inside, and shows a send button when there is text.
+
 `ui.keyboard_bar { absolute = true, left = 16, right = 16, bottom = 100, ... }` is a chat's composer. It takes the top two drawing levels for itself, so what it shows goes through its children; a background of its own stays behind with the page. One bar in a window. A touch on a control leaves the focused field and the keyboard alone, as UIKit's controls do.
 
 ## In Luau

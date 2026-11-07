@@ -272,6 +272,117 @@ function ios.keyboard_bar(props)
 	return ui.div(box)
 end
 
+-- A chat's composer on a keyboard bar: a small pill at rest that opens into a wider
+-- rounded box as it takes focus, with the keyboard's rise, and closes again. It
+-- grows with its lines, to `max_lines`, then scrolls inside. `value` (a state),
+-- `placeholder`, `on_send` (the text; a send button shows when there is any),
+-- `on_plus`, `bottom`.
+function ios.composer(props)
+	local value = props.value
+	local focused = ui.use_state(false)
+	local LINE = 22
+	local max_lines = props.max_lines or 6
+	local open = function(rest, wide)
+		return ui.spring(
+			ui.computed(function()
+				return if focused:get() then wide else rest
+			end),
+			{ stiffness = 320, damping = 30 }
+		)
+	end
+	return ios.keyboard_bar {
+		absolute = true,
+		left = open(36, 8),
+		right = open(36, 8),
+		bottom = props.bottom or 100,
+		ui.glass {
+			radius = open(22, 20),
+			interactive = true,
+			direction = "row",
+			items = "end",
+			min_h = open(44, 56),
+			px = 6,
+			py = open(0, 6),
+			ui.button {
+				w = 32,
+				h = 44,
+				p = 0,
+				bg = "#00000000",
+				hover = {},
+				active = {},
+				label = "Add",
+				items = "center",
+				justify = "center",
+				on_click = props.on_plus,
+				ui.symbol { name = "plus", size = 18, weight = 500, color = "$text.secondary" },
+			},
+			-- The lines' height comes from their text, laid out unseen beneath the
+			-- editor, which fills what that makes and scrolls past the limit.
+			ui.div {
+				grow = 1,
+				min_w = 0,
+				ml = 2,
+				mr = 4,
+				my = 11,
+				max_h = LINE * max_lines,
+				overflow = "hidden",
+				ui.text {
+					function()
+						local text = value:get()
+						return if text == "" then " " else text .. " "
+					end,
+					wrap = true,
+					opacity = 0,
+					aria_hidden = true,
+					pointer_events = false,
+				},
+				ui.textarea {
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = 0,
+					bottom = 0,
+					value = value,
+					label = props.placeholder or "Message",
+					placeholder = props.placeholder or "Message",
+					wrap = true,
+					p = 0,
+					bg = "#00000000",
+					border = 0,
+					focus = {},
+					on_focus = function()
+						focused:set(true)
+					end,
+					on_blur = function()
+						focused:set(false)
+					end,
+				},
+			},
+			ui.button {
+				hidden = function()
+					return value:get() == ""
+				end,
+				w = 36,
+				h = 44,
+				p = 0,
+				bg = "#00000000",
+				hover = {},
+				active = {},
+				label = "Send",
+				items = "center",
+				justify = "center",
+				on_click = function()
+					if props.on_send then
+						props.on_send(value:get())
+					end
+					value:set("")
+				end,
+				ui.symbol { name = "arrow.up.circle.fill", size = 30, color = "$ios.blue" },
+			},
+		},
+	}
+end
+
 -- A search field on glass, the system's keyboard over zgx's editor.
 function ios.search(props)
 	return ui.glass {

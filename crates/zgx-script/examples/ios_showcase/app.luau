@@ -208,40 +208,7 @@ end
 
 local function Composer()
 	local message = ui.use_state("")
-	return ui.keyboard_bar {
-		absolute = true,
-		left = 16,
-		right = 16,
-		bottom = 100,
-		ui.glass {
-			radius = 26,
-			min_h = 52,
-			interactive = true,
-			direction = "row",
-			items = "center",
-			pl = 12,
-			pr = 8,
-			ui.input {
-				value = message,
-				label = "Message",
-				placeholder = "Message",
-				grow = 1,
-				bg = "#00000000",
-				border = 0,
-				focus = {},
-			},
-			ui.button {
-				label = "Send",
-				bg = "#00000000",
-				border = 0,
-				px = 0,
-				on_click = function()
-					message:set("")
-				end,
-				ui.symbol { name = "arrow.up.circle.fill", size = 32, color = "$ios.blue" },
-			},
-		},
-	}
+	return ios.composer { value = message, placeholder = "Message" }
 end
 
 local function TextPage(nav: any)

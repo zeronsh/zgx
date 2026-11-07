@@ -20057,6 +20057,16 @@ export type IosKit = {
 		color: Color?,
 	}) -> Node,
 	search: (props: { value: State<string>, placeholder: string?, mx: number? }) -> Node,
+	-- A chat's composer on a keyboard bar: a small pill that opens as it takes focus
+	-- and grows with its lines, to `max_lines`, then scrolls inside.
+	composer: (props: {
+		value: State<string>,
+		placeholder: string?,
+		max_lines: number?,
+		bottom: number?,
+		on_send: ((text: string) -> ())?,
+		on_plus: (() -> ())?,
+	}) -> Node,
 	page: (props: {
 		title: string,
 		nav: any?,
