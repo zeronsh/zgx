@@ -6347,9 +6347,16 @@ impl GpuRenderer {
                 self.start_fill(shader);
             }
         }
-        // Layer shaders that will first draw in a hurry: a one-shot's.
+        // Layer shaders that will first draw in a hurry: a one-shot's. One
+        // with inputs compiles with their bindings, as the frame's pre-pass
+        // would start it (`prepare_inputs`).
         for shader in zgx::decoration::declared_layer_shaders(&mut self.layers_declared) {
-            self.prepare_filter(&shader);
+            match shader.inputs() {
+                Some(inputs) => self.start_inputs(&shader, inputs),
+                None => {
+                    self.prepare_filter(&shader);
+                }
+            }
         }
         self.fills_declared = compile::declared() + zgx::decoration::layer_shaders_declared();
     }
