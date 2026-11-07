@@ -27,42 +27,78 @@ local NAV_PUSH_START = 53
 local NAV_POP_START = 40
 local NAV_TRACKING = uikit_spring(0.85, 0.08)
 local NAV_RELEASE = uikit_spring(0.85, 0.3)
--- A release's speed, as UIKit's interactive pop decides it: the finger's, or 4.25
--- times it when the finger's average speed (each sample a third of it, in widths
--- a second) is over 1.5.
+-- A swipe's release, as UIKit's interactive pop (`_UINavigationInteractiveTransitionBase`)
+-- decides it, read from its code: each finger sample's speed (in widths a second)
+-- and the change in it a second, each averaged over the last three samples; a
+-- sample under a millisecond after the last, or under ten with the finger where it
+-- was, doesn't count, and a change in acceleration is held within 5 of the last.
+-- It goes back when where the page would be after the transition's 0.35 s at that
+-- speed and acceleration is past 187.5 points or halfway, whichever is less, and
+-- leaves at the finger's speed, 4.25 times it while still a flick: every average
+-- since the finger landed at 1.5 widths a second or more.
+local NAV_PROJECTION = 0.35
+local NAV_BACK_POINTS = 187.5
 local NAV_FLICK_AVERAGE = 1.5
 local NAV_FLICK_BOOST = 4.25
--- Whether a release goes back or comes home: UIKit's own decision read at eight
--- places across the width (how far along, then the finger's average speed in
--- widths a second at or above which it goes back), between them the line
--- through its neighbours.
-local NAV_GOES_BACK = {
-	{ 0.0249, 1.33085 },
-	{ 0.1492, 1.03609 },
-	{ 0.2479, 0.62451 },
-	{ 0.3485, 0.50118 },
-	{ 0.4484, 0.23476 },
-	{ 0.5454, -0.22234 },
-	{ 0.6724, -0.40252 },
-	{ 0.7981, -0.74489 },
-}
-local function goes_back(along, average)
-	local points = NAV_GOES_BACK
-	local least = points[1][2]
-	if along <= points[1][1] then
-		least = points[1][2]
-	elseif along >= points[#points][1] then
-		least = points[#points][2]
-	else
-		for i = 1, #points - 1 do
-			local a, b = points[i], points[i + 1]
-			if along <= b[1] then
-				least = a[2] + (b[2] - a[2]) * (along - a[1]) / (b[1] - a[1])
-				break
-			end
+local NAV_ACCELERATION_STEP = 5
+local function swipe_statistics()
+	local s = {}
+	local function average(ring, now)
+		local n = s.n
+		local slot = n % 3 + 1
+		local value
+		if n <= 2 then
+			value = (s[ring .. "_average"] * n + now) / (n + 1)
+		else
+			value = (s[ring .. "_average"] * 3 - s[ring][slot] + now) / 3
 		end
+		s[ring][slot] = now
+		s[ring .. "_average"] = value
 	end
-	return average >= least
+	-- `t` in seconds, `along` and `speed` in widths and widths a second.
+	function s.first(t, along, speed)
+		s.n, s.time, s.skip, s.along = 1, t, t, math.max(along, 0)
+		s.speed, s.acceleration = speed, 0
+		s.speeds, s.accelerations = { speed, 0, 0 }, { 0, 0, 0 }
+		s.speeds_average, s.accelerations_average = speed, 0
+		s.flick = true
+	end
+	function s.sample(t, along, speed)
+		if not s.n then
+			s.first(t, along, speed)
+			return
+		end
+		along = math.max(along, 0)
+		local since = t - s.skip
+		s.skip = t
+		if since < 0.01 and (since <= 0.001 or along == s.along) then
+			return
+		end
+		local dt = t - s.time
+		average("speeds", speed)
+		if s.flick and math.abs(s.speeds_average) < NAV_FLICK_AVERAGE then
+			s.flick = false
+		end
+		local acceleration = (speed - s.speed) / dt
+		if math.abs(acceleration - s.acceleration) > NAV_ACCELERATION_STEP then
+			acceleration = s.acceleration
+				+ (if acceleration > s.acceleration then NAV_ACCELERATION_STEP else -NAV_ACCELERATION_STEP)
+		end
+		average("accelerations", acceleration)
+		s.acceleration, s.speed, s.along, s.time = acceleration, speed, along, t
+		s.n += 1
+	end
+	-- Whether a release at `along` (0 to 1) goes back, for a page `width` wide.
+	function s.goes_back(along, width)
+		local d = NAV_PROJECTION
+		local projected = along + s.speeds_average * d + 0.5 * s.accelerations_average * d * d
+		return projected > math.min(NAV_BACK_POINTS / width, 0.5)
+	end
+	-- The release's speed in points a second.
+	function s.release_speed(width)
+		return s.speed * width * (if s.flick then NAV_FLICK_BOOST else 1)
+	end
+	return s
 end
 -- How far the page under the top one lies back, of the width.
 local PARALLAX = 0.3
@@ -704,19 +740,19 @@ ios.stack = ui.component(function(props)
 			running_drag = nil
 		end, nil, { stiffness = NAV_TRACKING.stiffness, damping = NAV_TRACKING.damping, velocity = carried })
 	end
-	-- The finger's speed in widths a second, averaged as UIKit averages it.
-	local average = 0
-	local function sample(vx, first)
-		local now = vx / width
-		average = if first then now else average * 2 / 3 + now / 3
+	-- Where the page was when the finger landed.
+	local start = 0
+	-- The finger's samples, as UIKit's interactive pop keeps them.
+	local stats = swipe_statistics()
+	local function sample(e)
+		stats.sample(ui.now() / 1000, clamp(start + e.x, 0, width) / width, e.vx / width)
 	end
-	-- From where it is, at the finger's speed, or more for a flick.
-	local function released(vx)
+	-- From where it is, at the speed UIKit would give it.
+	local function released(speed)
 		if running_drag then
 			running_drag()
 		end
 		running_drag = nil
-		local speed = if average > NAV_FLICK_AVERAGE then vx * NAV_FLICK_BOOST else vx
 		return { stiffness = NAV_RELEASE.stiffness, damping = NAV_RELEASE.damping, velocity = speed }
 	end
 	-- Nothing may rest part way: whatever got here, a page out of place with no
@@ -767,7 +803,6 @@ ios.stack = ui.component(function(props)
 		finish_pop()
 		check_soon()
 	end
-	local start = 0
 	-- iOS recognizes the swipe, and tells every ending; the page only follows.
 	local function shows()
 		return not props.active or props.active()
@@ -792,18 +827,21 @@ ios.stack = ui.component(function(props)
 					entering:set(0)
 				end
 				start = drag:get()
-				sample(e.vx, true)
+				stats = swipe_statistics()
+				sample(e)
 			elseif e.phase == "changed" then
-				sample(e.vx, false)
+				sample(e)
 				follow(clamp(start + e.x, 0, width))
 			elseif e.phase == "ended" then
 				holding = false
 				check_soon()
+				sample(e)
 				local at = clamp(start + e.x, 0, width)
-				if goes_back(at / width, average) then
-					finish_pop(released(e.vx))
+				local speed = stats.release_speed(width)
+				if stats.goes_back(at / width, width) then
+					finish_pop(released(speed))
 				else
-					run_drag(0, nil, released(e.vx))
+					run_drag(0, nil, released(speed))
 				end
 			else
 				holding = false
