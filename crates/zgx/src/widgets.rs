@@ -4945,7 +4945,7 @@ impl Ui {
         // empty.
         let shown = match &initial {
             TextValue::Flat(text)
-                if !(multiline && text.contains('\n')) && !crate::editor_lines::is_long(text) =>
+                if (!multiline || !text.contains('\n')) && !crate::editor_lines::is_long(text) =>
             {
                 text.clone()
             }

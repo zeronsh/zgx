@@ -2896,7 +2896,7 @@ impl Host {
         // A frame left for a tick draws as soon as there is room: it is the
         // one due, not one more.
         if (plane_frames != self.plane_frames && planes_due || self.plane_retry.is_some())
-            && !(self.frame_paced && !self.present_ready)
+            && (!self.frame_paced || self.present_ready)
             && let Some(renderer) = &mut self.renderer
         {
             self.plane_frames = plane_frames;
