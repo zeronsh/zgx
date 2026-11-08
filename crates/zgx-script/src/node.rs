@@ -6835,6 +6835,29 @@ pub(crate) fn computed_state(_: &Lua, env: &Env, f: Function) -> crate::value::S
     retain(env, Box::new(effect));
     crate::value::State(signal, Some(crate::value::Fresh::One(refresh)))
 }
+/// A state kept current in Rust by `body` (what it reads followed), as
+/// `ui.computed`'s is by a script function, and owned as that is
+/// (`retain`): `ui.markdown` given a state.
+pub(crate) fn derived_state(
+    env: &Env,
+    mut body: impl FnMut() -> mlua::Result<Value> + 'static,
+) -> crate::value::State {
+    let signal = env.runtime.signal(Value::Nil);
+    let (vm, out) = (env.vm.clone(), signal.clone());
+    let effect = env.runtime.effect_now(move || match body() {
+        Ok(value) => {
+            out.set(value);
+        }
+        Err(error) => {
+            if let Some(vm) = vm.upgrade() {
+                vm.report(error);
+            }
+        }
+    });
+    let refresh = effect.refresher();
+    retain(env, Box::new(effect));
+    crate::value::State(signal, Some(crate::value::Fresh::One(refresh)))
+}
 /// A node's interaction styles by slot (`variants::INTERACTION`'s order).
 pub(crate) fn interaction_of(pseudo: &[(Pseudo, Styles)]) -> [Vec<(Prop, Lit)>; 4] {
     let mut out: [Vec<(Prop, Lit)>; 4] = Default::default();

@@ -2402,6 +2402,11 @@ impl State {
     pub fn new(signal: Signal<Value>) -> Self {
         Self(signal, None)
     }
+    /// What it holds, as a script's `get` reads it: brought up to date,
+    /// and followed by what reads it.
+    pub(crate) fn read(&self) -> Value {
+        self.fresh().get()
+    }
     /// A computed's value is current when read, even in a handler or a
     /// batch, where its effect would otherwise run only afterwards.
     fn fresh(&self) -> &Signal<Value> {
@@ -2691,19 +2696,17 @@ impl UserData for State {
 /// so the app's states write without a check.
 #[derive(Clone)]
 pub(crate) struct ReadState(pub State, pub Rc<str>);
-/// What a state handle (`ui.state`'s, or a plugin's read-only one) holds,
-/// read as its `get` reads it: brought up to date, and followed by what
-/// reads it. `None` for anything else.
-pub(crate) fn state_value(value: &mlua::Value) -> Option<Value> {
+/// The state a handle is (`ui.state`'s, a computed's, or a plugin's
+/// read-only one), to read as its `get` reads it ([`State::read`]); `None`
+/// for anything else.
+pub(crate) fn state_handle(value: &mlua::Value) -> Option<State> {
     let mlua::Value::UserData(ud) = value else {
         return None;
     };
     if let Ok(state) = ud.borrow::<State>() {
-        return Some(state.fresh().get());
+        return Some(state.clone());
     }
-    ud.borrow::<ReadState>()
-        .ok()
-        .map(|state| state.0.fresh().get())
+    ud.borrow::<ReadState>().ok().map(|state| state.0.clone())
 }
 /// What a `State` writes with: a `ReadState` refuses each.
 const WRITES: [&str; 10] = [

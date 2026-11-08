@@ -1,6 +1,6 @@
 //! A long Markdown reply streaming in: 400 sections appended a chunk at a
-//! time to a state, a computed parsing it with `ui.markdown { key }` and a
-//! `ui.each` drawing its blocks (the docs' own way, text.md), each chunk
+//! time to a state, `ui.markdown(reply, { key })` keeping a state of its
+//! blocks and a `ui.each` drawing them (the docs' own way, text.md), each chunk
 //! laid out and flushed, undrawn. What the last chunks of a long reply cost
 //! a frame is what's guarded (`md-stream`).
 //! Run: cargo run -p zgx-script --release --example md_stream_bench
@@ -22,9 +22,7 @@ local function runs(list: { MarkdownRun }): Node
 	return ui.rich(props)
 end
 
-local blocks = ui.computed(function()
-	return ui.markdown(reply, { key = "reply" })
-end)
+local blocks = ui.markdown(reply, { key = "reply" })
 
 ui.command { id = "append", run = function()
 	local n = chunks:get() + 1

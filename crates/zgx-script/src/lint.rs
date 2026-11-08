@@ -26,6 +26,9 @@
 //!   Luau and restyles every reader on every display frame.
 //! - `update-copy`: `state:update(fn)` doing what `push`, `insert`, `remove`
 //!   or `set_key` do without copying the whole value through Luau.
+//! - `computed-markdown-state`: `ui.markdown(state, …)` inside a
+//!   `ui.computed`: given a state it answers a state of its blocks, kept
+//!   current in Rust, so the computed only makes one again each time it runs.
 //! - `list-key`: a positional `ui.list` over a list the file removes from or
 //!   inserts into: every row after the change is written again.
 //! - `list-measured`: a `ui.list` of fixed heights whose rows wrap text: a
@@ -137,6 +140,10 @@ pub const RULES: &[(&str, &str)] = &[
     (
         "computed-sort",
         "a computed that sorts a whole list again each time it runs",
+    ),
+    (
+        "computed-markdown-state",
+        "ui.markdown given a state inside a computed: a state of blocks made again each run",
     ),
     (
         "list-key",
@@ -253,6 +260,8 @@ const NOT_ELEMENTS: &[&str] = &[
     "image_size",
     "raw",
     "tween",
+    // Blocks to draw, not an element: what it reads in a computed is followed.
+    "markdown",
     "spring",
     "spring_to",
     "loop",
@@ -1943,6 +1952,50 @@ impl Linter<'_> {
                     .into(),
             );
         }
+        // `ui.computed(function() return ui.markdown(reply, …) end)` with
+        // `reply` a state: given a state, `ui.markdown` keeps a state of
+        // its blocks current itself, which the computed makes again each run.
+        if computes
+            && let Some(at) = body.clone().find(|&j| {
+                self.is(j, "ui")
+                    && self.is(j + 1, ".")
+                    && self.is(j + 2, "markdown")
+                    && self.is(j + 3, "(")
+                    && (self.is(j + 5, ",") || self.is(j + 5, ")"))
+                    && self.name(j + 4).is_some_and(|name| self.holds_state(name))
+            })
+        {
+            self.report(
+                at,
+                "computed-markdown-state",
+                "given a state, `ui.markdown` answers a state of its blocks and keeps it current \
+                 as the text grows: `local blocks = ui.markdown(reply, { key = … })`, then \
+                 `ui.each(blocks, …)`, with no computed around it (which makes that state again \
+                 each time it runs)."
+                    .into(),
+            );
+        }
+    }
+    /// Whether the file makes `name` a state: `name = ui.state(…)`, or a
+    /// shared, persisted, component, computed or sorted one.
+    fn holds_state(&self, name: &str) -> bool {
+        (0..self.tokens.len()).any(|j| {
+            self.name(j) == Some(name)
+                && self.is(j + 1, "=")
+                && self.is(j + 2, "ui")
+                && self.is(j + 3, ".")
+                && [
+                    "state",
+                    "use_state",
+                    "shared",
+                    "persist",
+                    "computed",
+                    "sorted",
+                ]
+                .iter()
+                .any(|call| self.is(j + 4, call))
+                && self.is(j + 5, "(")
+        })
     }
 }
 
@@ -2274,6 +2327,24 @@ local sorted = ui.sort({ 3, 1, 2 }, function(n) return n end) -- fine: once
 local live = ui.sorted(rows, { by = "price" })
 "##;
         assert_eq!(rules(source), one(4, "computed-sort"));
+    }
+
+    #[test]
+    fn a_computed_around_markdown_given_a_state_is_reported() {
+        let source = r##"
+local reply = ui.state("reply", "")
+local blocks = ui.computed(function()
+    return ui.markdown(reply, { key = "reply" })
+end)
+local text = ui.computed(function()
+    return ui.markdown(reply:get(), { key = "text" }) -- fine: a string, followed
+end)
+local direct = ui.markdown(reply, { key = "direct" }) -- fine: no computed
+local function draw(source: string)
+    return ui.computed(function() return ui.markdown(source) end) -- fine: not a state
+end
+"##;
+        assert_eq!(rules(source), one(4, "computed-markdown-state"));
     }
 
     #[test]

@@ -206,11 +206,12 @@ fn a_streamed_markdown_chunk_converts_what_changed_not_what_it_holds() {
     );
 }
 
-/// `ui.markdown` given the state holding a reply rather than its text: at
-/// every append the same blocks as a stream of its text, past where the
-/// string becomes a long one (`state:append` keeping its edits, which the
-/// stream then parses alone), and the computed around it follows the state
-/// (a stale answer would differ). A hanging `**` across chunks included.
+/// `ui.markdown` given the state holding a reply rather than its text
+/// answers a state of its blocks: at every append the same blocks as a
+/// stream of its text, past where the string becomes a long one
+/// (`state:append` keeping its edits, which the stream then parses alone),
+/// and kept current as the reply grows (a stale answer would differ). A
+/// hanging `**` across chunks included.
 #[test]
 fn markdown_takes_the_state_holding_its_text() {
     let mut h = Harness::inline(
@@ -223,9 +224,8 @@ local function same(a: any, b: any): boolean
     for k in b do if a[k] == nil then return false end end
     return true
 end
-local by_state = ui.computed(function()
-    return ui.markdown(reply, { key = "state" })
-end)
+-- Given the state: a state of its blocks, kept current in Rust.
+local by_state = ui.markdown(reply, { key = "state" })
 local by_text = ui.computed(function()
     return ui.markdown(reply:get(), { key = "text" })
 end)
@@ -262,4 +262,49 @@ return ui.column {
     // Long by the end: the stream followed `state:append`'s edits.
     let length: usize = h.text("length").parse().unwrap();
     assert!(length > 64 * 1024, "{length} bytes");
+}
+
+/// A reply streamed into `ui.markdown`'s state of blocks, drawn by
+/// `ui.each`: a chunk converts as many tables for scripts with a long reply
+/// as with a short one (the last block's row, not the list), as no table is
+/// made for the answer.
+#[test]
+fn a_chunk_of_a_streamed_state_converts_what_it_adds() {
+    let per_chunk = |sections: usize| {
+        let h = Harness::inline(
+            r###"local reply = ui.state("reply", "")
+local chunks = ui.state("chunks", 0)
+local blocks = ui.markdown(reply, { key = "reply" })
+ui.command { id = "append", run = function()
+    local n = chunks:get() + 1
+    chunks:set(n)
+    reply:append(if n % 3 == 1 then "## Section " .. n .. "\n\n"
+        elseif n % 3 == 2 then "Words with **bold** and `code`, "
+        else "the end of it.\n\n")
+end }
+return ui.column {
+    ui.each(blocks, function(b: MarkdownBlock)
+        return ui.text { b.t, literal = true }
+    end),
+}"###,
+        );
+        h.settle();
+        for _ in 0..sections * 3 {
+            assert!(h.host.run_command("append"));
+            h.settle();
+        }
+        let before = tables_converted();
+        for _ in 0..30 {
+            assert!(h.host.run_command("append"));
+            h.settle();
+        }
+        (tables_converted() - before) / 30
+    };
+    let (short, long) = (per_chunk(10), per_chunk(120));
+    assert_eq!(
+        short, long,
+        "a chunk converts as much at 120 sections as at 10"
+    );
+    // The last block's row: its block, its runs and theirs.
+    assert!(short <= 8, "a chunk converts {short} tables");
 }

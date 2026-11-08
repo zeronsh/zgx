@@ -27,6 +27,7 @@ pub(crate) mod view;
 pub use mend::PENDING_LINK_URL;
 
 use crate::Value;
+use mlua::IntoLua;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use std::rc::Rc;
 
@@ -385,111 +386,194 @@ impl Incremental {
         }
         out
     }
+    /// [`blocks`](Self::blocks) as one shared list, made in place: a long
+    /// reply's answer is one allocation, not a vector and its copy.
+    pub fn blocks_shared(&self) -> std::rc::Rc<[Value]> {
+        let stable = self.tops.len().saturating_sub(1);
+        let head = || self.tops[..stable].iter().flat_map(|t| t.blocks.iter());
+        let tail = || -> Box<dyn Iterator<Item = &Value> + '_> {
+            match &self.display_tail {
+                Some(tail) => Box::new(tail.iter()),
+                None => Box::new(self.tops[stable..].iter().flat_map(|t| t.blocks.iter())),
+            }
+        };
+        let len = self.tops[..stable]
+            .iter()
+            .map(|t| t.blocks.len())
+            .sum::<usize>()
+            + tail().count();
+        let mut list = std::rc::Rc::<[Value]>::new_uninit_slice(len);
+        let slots = std::rc::Rc::get_mut(&mut list).expect("made here, held nowhere else");
+        for (slot, block) in slots.iter_mut().zip(head().chain(tail())) {
+            slot.write(block.clone());
+        }
+        // SAFETY: `len` is what `head` and `tail` yield, so every slot was
+        // written above.
+        unsafe { list.assume_init() }
+    }
+}
+
+/// What a `ui.markdown` call asks: how its text is read, its key, and how
+/// a keyed text landing whole is parsed.
+struct Call {
+    options: Options,
+    key: Option<String>,
+    lazy: Option<usize>,
+    first: Option<usize>,
+}
+impl Call {
+    fn read(opts: &Option<mlua::Table>) -> mlua::Result<Self> {
+        let flag = |name: &str| -> mlua::Result<bool> {
+            Ok(match opts {
+                Some(t) => t.get::<Option<bool>>(name)?.unwrap_or(false),
+                None => false,
+            })
+        };
+        let options = Options {
+            breaks: flag("breaks")?,
+            paths: flag("paths")?,
+            code: None,
+        };
+        let key: Option<String> = match opts {
+            Some(t) => t.get("key")?,
+            None => None,
+        };
+        // `lazy = true` (4 KB) or a byte count: a keyed text that long
+        // landing whole is parsed over frames, the end first
+        // (`set_text_lazy`).
+        let lazy = match opts {
+            Some(t) => match t.get::<mlua::Value>("lazy")? {
+                mlua::Value::Boolean(true) => Some(LAZY_FROM),
+                mlua::Value::Integer(n) => Some(n.max(0) as usize),
+                mlua::Value::Number(n) if n.is_finite() => Some(n.max(0.) as usize),
+                mlua::Value::Nil | mlua::Value::Boolean(false) => None,
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "ui.markdown `lazy` is true or a byte count",
+                    ));
+                }
+            },
+            None => None,
+        };
+        let first: Option<usize> = match opts {
+            Some(t) => t.get::<Option<usize>>("first")?,
+            None => None,
+        };
+        Ok(Self {
+            options,
+            key,
+            lazy,
+            first,
+        })
+    }
+}
+
+/// The text a call parses: a script's string, or what a state holds.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Str(&'a str),
+    Held(&'a Value),
 }
 
 /// `ui.markdown(text, { key?, breaks?, paths? })`: the blocks. With `key`
 /// (a message's id), text that grows under the same key parses
 /// incrementally, sharing its earlier blocks with the last answer; without,
 /// the same text answers with the same blocks.
+///
+/// Given the state holding the text instead (`ui.markdown(reply, { key })`),
+/// a read-only state of the blocks, kept current in Rust as the text
+/// changes: no script table is made for an answer (a `ui.each` over it takes
+/// each chunk's blocks as they are, the new ones alone), and the text is
+/// never a script's string (a keyed stream parses a long one, `state:append`'s,
+/// from what was appended alone).
 pub(crate) fn script(
     lua: &mlua::Lua,
     (text, opts): (mlua::Value, Option<mlua::Table>),
-) -> mlua::Result<Value> {
-    // A state holding the text is read as its `get` reads it (a computed
-    // around the call follows it), and its text never becomes a script's
-    // string: a keyed stream parses a long one (`state:append`'s) from what
-    // was appended alone, neither copying nor comparing what came before.
-    let held = crate::value::state_value(&text);
-    let borrowed = match (&held, &text) {
-        (None, mlua::Value::String(text)) => Some(text.to_str()?),
-        (None, _) => {
-            return Err(mlua::Error::runtime(
-                "ui.markdown takes a string, or a state holding one",
-            ));
-        }
-        (Some(Value::Nil | Value::Str(_) | Value::Text(_)), _) => None,
-        (Some(_), _) => {
-            return Err(mlua::Error::runtime(
-                "ui.markdown's state holds a string: the markdown",
-            ));
-        }
+) -> mlua::Result<mlua::Value> {
+    let call = Call::read(&opts)?;
+    if let Some(state) = crate::value::state_handle(&text) {
+        let env = crate::node::env(lua)?;
+        let weak = lua.weak();
+        let blocks = crate::node::derived_state(&env, move || {
+            let Some(lua) = weak.try_upgrade() else {
+                return Ok(Value::Nil);
+            };
+            let held = state.read();
+            answer(&lua, Source::Held(&held), &call, false)
+        });
+        drop(env);
+        return blocks.into_lua(lua);
+    }
+    let mlua::Value::String(text) = &text else {
+        return Err(mlua::Error::runtime(
+            "ui.markdown takes a string, or a state holding one",
+        ));
     };
+    let text = text.to_str()?;
+    answer(lua, Source::Str(&text), &call, true)?.into_lua(lua)
+}
+
+/// The blocks `call` makes of `text`; with `table`, its script table derived
+/// from the last answer's (a script is given the blocks as a table, not a
+/// state).
+fn answer(lua: &mlua::Lua, text: Source, call: &Call, table: bool) -> mlua::Result<Value> {
+    if let Source::Held(held) = text
+        && !matches!(held, Value::Nil | Value::Str(_) | Value::Text(_))
+    {
+        return Err(mlua::Error::runtime(
+            "ui.markdown's state holds a string: the markdown",
+        ));
+    }
     // The whole text, where a path needs it (a long text made one string
     // only then).
     let whole = || -> std::borrow::Cow<'_, str> {
-        match (&borrowed, &held) {
-            (Some(text), _) => std::borrow::Cow::Borrowed(&**text),
-            (None, Some(Value::Str(text))) => std::borrow::Cow::Borrowed(&**text),
-            (None, Some(Value::Text(text))) => text.to_cow(),
-            _ => std::borrow::Cow::Borrowed(""),
+        match text {
+            Source::Str(text) => std::borrow::Cow::Borrowed(text),
+            Source::Held(Value::Str(text)) => std::borrow::Cow::Borrowed(&**text),
+            Source::Held(Value::Text(text)) => text.to_cow(),
+            Source::Held(_) => std::borrow::Cow::Borrowed(""),
         }
-    };
-    let flag = |name: &str| -> mlua::Result<bool> {
-        Ok(match &opts {
-            Some(t) => t.get::<Option<bool>>(name)?.unwrap_or(false),
-            None => false,
-        })
-    };
-    let options = Options {
-        breaks: flag("breaks")?,
-        paths: flag("paths")?,
-        code: None,
-    };
-    let key: Option<String> = match &opts {
-        Some(t) => t.get("key")?,
-        None => None,
-    };
-    // `lazy = true` (4 KB) or a byte count: a keyed text that long landing
-    // whole is parsed over frames, the end first (`set_text_lazy`).
-    let lazy = match &opts {
-        Some(t) => match t.get::<mlua::Value>("lazy")? {
-            mlua::Value::Boolean(true) => Some(LAZY_FROM),
-            mlua::Value::Integer(n) => Some(n.max(0) as usize),
-            mlua::Value::Number(n) if n.is_finite() => Some(n.max(0.) as usize),
-            mlua::Value::Nil | mlua::Value::Boolean(false) => None,
-            _ => {
-                return Err(mlua::Error::runtime(
-                    "ui.markdown `lazy` is true or a byte count",
-                ));
-            }
-        },
-        None => None,
-    };
-    let first: Option<usize> = match &opts {
-        Some(t) => t.get::<Option<usize>>("first")?,
-        None => None,
     };
     // (The VM registers its cache when it starts: `install`.)
     let Some(parsed) = lua.app_data_ref::<Parsed>() else {
-        return Ok(Value::List(parse(&whole(), &options).into()));
+        return Ok(Value::List(parse(&whole(), &call.options).into()));
     };
-    let flags = (options.breaks, options.paths);
-    Ok(match key {
+    let flags = (call.options.breaks, call.options.paths);
+    Ok(match &call.key {
         Some(key) => {
             let mut streams = parsed.streams.borrow_mut();
-            let fresh = !matches!(streams.get(&key), Some((f, ..)) if *f == flags);
+            let fresh = !matches!(streams.get(key), Some((f, ..)) if *f == flags);
             if fresh {
-                streams.insert(key.clone(), (flags, Incremental::new(options), None, None));
+                streams.insert(
+                    key.clone(),
+                    (flags, Incremental::new(call.options.clone()), None, None),
+                );
             }
-            let (_, stream, last, kept) = streams.get_mut(&key).expect("inserted above");
-            match (lazy, &held) {
+            let (_, stream, last, kept) = streams.get_mut(key).expect("inserted above");
+            match (call.lazy, text) {
                 (Some(threshold), _) => stream.set_text_lazy(&whole(), threshold),
-                (None, Some(held)) => stream.set_value(held),
-                (None, None) => stream.set_text(&whole()),
+                (None, Source::Held(held)) => stream.set_value(held),
+                (None, Source::Str(text)) => stream.set_text(text),
             }
             let pending = stream.has_pending();
-            let blocks = Value::List(stream.blocks().into());
-            // Its table from the last answer's, which holds the same blocks
-            // but the end: only what's new is converted and weighed, not
-            // the whole list each time a chunk lands (`value::derive`).
-            if let Some(old) = last.replace(blocks.clone()) {
-                // The last answer's table, if the sweep left none kept: a
-                // script read it since.
-                if kept.is_none() {
-                    *kept = crate::value::table_of(lua, &old)?;
+            let blocks = Value::List(stream.blocks_shared());
+            if table {
+                // Its table from the last answer's, which holds the same
+                // blocks but the end: only what's new is converted and
+                // weighed, not the whole list each time a chunk lands
+                // (`value::derive`).
+                if let Some(old) = last.replace(blocks.clone()) {
+                    // The last answer's table, if the sweep left none kept:
+                    // a script read it since.
+                    if kept.is_none() {
+                        *kept = crate::value::table_of(lua, &old)?;
+                    }
+                    crate::value::derive(lua, &old, &blocks)?;
+                    *kept = crate::value::table_of(lua, &blocks)?;
                 }
-                crate::value::derive(lua, &old, &blocks)?;
-                *kept = crate::value::table_of(lua, &blocks)?;
+            } else {
+                // A state's: no table, nor one to derive the next from.
+                (*last, *kept) = (None, None);
             }
             touch(
                 &mut parsed.stream_order.borrow_mut(),
@@ -498,7 +582,7 @@ pub(crate) fn script(
             );
             drop(streams);
             if pending {
-                follow_lazy(lua, key, first.and_then(|i| i.checked_sub(1)))?;
+                follow_lazy(lua, key.clone(), call.first.and_then(|i| i.checked_sub(1)))?;
             }
             blocks
         }
@@ -509,7 +593,7 @@ pub(crate) fn script(
             if let Some(blocks) = texts.get(&at) {
                 return Ok(blocks.clone());
             }
-            let blocks = Value::List(parse(&text, &options).into());
+            let blocks = Value::List(parse(&text, &call.options).into());
             if texts.len() >= KEPT {
                 texts.clear();
             }

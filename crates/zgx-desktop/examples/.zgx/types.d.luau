@@ -21499,7 +21499,7 @@ declare ui: {
 	-- from its uses, which misfires). A row whose item changes is built
 	-- again; a `build` taking a third parameter gets the row's item as
 	-- state instead, kept current, and its row updates in place.
-	each: (list: State<{ any }> | { any }, build: (item: any, index: number, row: State<any>) -> Node, opts: EachOptions?) -> Node,
+	each: (list: State<{ any }> | ReadOnlyState<{ any }> | { any }, build: (item: any, index: number, row: State<any>) -> Node, opts: EachOptions?) -> Node,
 	-- What `build` makes of the value, entering and exiting as it changes;
 	-- nil shows nothing. The value is `any`, as `each`'s item is.
 	presence: (value: string | Readable<unknown> | (() -> unknown), build: (value: any) -> Node, opts: PresenceOptions?) -> Node,
@@ -21558,7 +21558,7 @@ declare ui: {
 	-- table, img; runs `{ x, b?, i?, c?, s?, a?, f? }`). With `key` (a
 	-- reply's id), text growing under it parses only its new end, and its
 	-- earlier blocks are the same tables as before.
-	markdown: (text: string | State<string> | ReadOnlyState<string>, opts: MarkdownOptions?) -> { MarkdownBlock },
+	markdown: ((text: string, opts: MarkdownOptions?) -> { MarkdownBlock }) & ((text: State<string> | ReadOnlyState<string>, opts: MarkdownOptions?) -> ReadOnlyState<{ MarkdownBlock }>),
 	-- Markdown drawn: paragraphs, headings, lists, quotes, tables, and code
 	-- blocks with a Copy button, in the theme's colours and sizes,
 	-- selectable. As its text changes it parses only what changed and
