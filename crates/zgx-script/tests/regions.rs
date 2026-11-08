@@ -255,6 +255,61 @@ fn a_clipping_layout_box_clips_to_the_space() {
     );
 }
 
+/// A layout box inside a layout box (a fold in a group that folds too): the
+/// inner one eases its change, and the outer one's space follows it frame
+/// for frame, so what follows the outer box stays right under the content,
+/// never overlapping its foot or cutting it. A change of the outer box's own
+/// (a row arriving) still eases as it did.
+#[test]
+fn a_layout_box_follows_one_easing_inside_it() {
+    let mut h = Harness::inline(
+        r##"local tall = ui.state("tall", false)
+        local more = ui.state("more", false)
+        return ui.column {
+            ui.column { id = "outer", layout = "height", layout_clip = true, layout_ease = "outQuart", layout_duration = 200,
+                ui.column { id = "inner", layout = "height", layout_clip = true, layout_ease = "outQuart", layout_duration = 260,
+                    ui.div { w = 50, h = function() return tall:get() and 140 or 20 end } },
+                ui.div { id = "foot", w = 50, h = 10 },
+                ui.show(more, ui.div { w = 50, h = 60 }) },
+            ui.div { id = "after", w = 50, h = 10 },
+            ui.button { id = "go", w = 1, h = 1, absolute = true, left = 300, top = 0, on_click = function() tall:set(not tall:get()) end },
+            ui.button { id = "add", w = 1, h = 1, absolute = true, left = 340, top = 0, on_click = function() more:set(not more:get()) end },
+        }"##,
+    );
+    h.run_frames(5);
+    let rest = h.rect("after").y - (h.rect("foot").y + 10.);
+    assert!(rest.abs() < 0.5, "at rest, right under it: {rest}");
+    for way in ["open", "fold"] {
+        h.click("go");
+        let mut moved = false;
+        for frame in 1..=24 {
+            h.frame();
+            let (foot, after) = (h.rect("foot"), h.rect("after"));
+            let gap = after.y - (foot.y + foot.height);
+            assert!(
+                gap.abs() < 0.5,
+                "{way}, frame {frame}: what follows is {gap} from the content's foot"
+            );
+            moved |= frame > 1 && foot.y > 25. && foot.y < 155.;
+        }
+        assert!(moved, "{way}: the inner box eased");
+        h.run_frames(10);
+    }
+    // The outer box's own change (a row arriving in it) eases as ever.
+    h.click("add");
+    h.frame();
+    h.run_frames(3);
+    let after = h.rect("after").y;
+    let foot = h.rect("foot");
+    let full = foot.y + foot.height + 60.;
+    assert!(
+        after < full - 5.,
+        "its own change eases: {after} short of {full}"
+    );
+    h.run_frames(20);
+    assert!((h.rect("after").y - full).abs() < 0.5);
+}
+
 #[test]
 fn a_presence_box_showing_nothing_lets_the_pointer_through() {
     use zgx::input::{InputEvent, PointerButton};
