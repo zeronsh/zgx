@@ -35,4 +35,8 @@ their `AXValue`, which VoiceOver reads ("heading level 2").
    accesskit_consumer's `is_invalid` and `error_message`
    (vendor/accesskit_consumer/ZGX_PATCH.md).
 
+5. `Context::remove_platform_node` (`src/context.rs`): a table of platform
+   nodes far larger than its nodes gives back its room, as the consumer's does
+   (vendor/accesskit_consumer/ZGX_PATCH.md).
+
 Drop the patch when an upstream release does the same.

@@ -22,6 +22,10 @@ the platform a field was invalid or what said why.
    only where the adapters read it, and to say it in the description
    otherwise (crates.io's adapters read neither).
 
+3. `State::shed` (`src/tree.rs`): after an update, a node table far larger than
+   its nodes gives back its room. A hash table only grows by itself, so one
+   long page kept its peak for as long as the window lived.
+
 The adapters' use of them is in vendor/accesskit_macos, accesskit_windows
 and accesskit_atspi_common's ZGX_PATCH.md. Drop the patch when an
 upstream release does the same.

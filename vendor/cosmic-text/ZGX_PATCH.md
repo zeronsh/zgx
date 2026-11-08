@@ -399,3 +399,9 @@ is passed to the script fallbacks, as an exact-weight face is, so Chinese
 falls through to its fonts as before. zgx-gpu's
 `a_family_without_the_weight_asked_for_draws_in_its_nearest` checks it,
 under each platform's first fallback family's name.
+
+## Shaping's scratch at rest
+
+`FontSystem::rest` gives back `ShapeBuffer`'s buffers. They hold what the longest
+text shaped since left there, kept for reuse: a visual line's lists, one per line
+of that text, for as long as the app runs. zgx-gpu calls it as a window goes idle.
