@@ -346,7 +346,9 @@ impl Encoder {
                 Format::WebM => command.args(["-c:a", "libopus", "-b:a", "192k"]),
                 _ => command.args(["-c:a", "aac", "-b:a", "256k"]),
             };
-            command.arg("-shortest");
+            // No `-shortest`: the mix is never longer than the frames (see
+            // `render::mix_range`), and to end at the shorter stream ffmpeg
+            // holds 10 s of decoded frames, 1.8 GB at 1080p and 60 fps.
         }
         if matches!(options.format, Format::H264 | Format::Hevc | Format::Av1) {
             command.args(["-movflags", "+faststart"]);

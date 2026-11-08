@@ -273,7 +273,10 @@ fn placed_audio(options: &RenderOptions) -> Result<(Vec<AudioClip>, f64), String
     })
 }
 
-/// The mix of `clips` over frames `first` to `end` of a file at `output_fps`.
+/// The mix of `clips` over frames `first` to `end` of a file at `output_fps`:
+/// in whole frames of the composition, rounded down, so it's never longer
+/// than the frames and the encoder needn't cut it (or end the video early,
+/// a mix rounded short having cut its last frame).
 fn mix_range(
     clips: Vec<AudioClip>,
     fps: f64,
@@ -281,7 +284,8 @@ fn mix_range(
     first: u64,
     end: u64,
 ) -> Result<Option<PathBuf>, String> {
-    let frames = ((end + 1 - first) as f64 / output_fps * fps).round() as u64;
+    // A whole count computed a hair under stays whole.
+    let frames = ((end + 1 - first) as f64 / output_fps * fps + 1e-9).floor() as u64;
     let skip = (first as f64 / output_fps * fps).round() as i64;
     let clips: Vec<_> = clips
         .into_iter()
