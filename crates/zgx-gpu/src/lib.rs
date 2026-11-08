@@ -12235,9 +12235,7 @@ impl GpuRenderer {
             Some(source) => (source.pixels.to_vec(), (source.width, source.height)),
             None => {
                 let mut pixels = image.pixels().to_vec();
-                for pixel in pixels.as_chunks_mut::<4>().0 {
-                    premultiply(pixel);
-                }
+                premultiply(&mut pixels);
                 (pixels, (full_w, full_h))
             }
         };
@@ -14632,20 +14630,36 @@ pub(crate) fn bgra_to_rgba(word: u32) -> u32 {
     (word & 0xFF00_FF00) | ((word >> 16) & 0xFF) | ((word & 0xFF) << 16)
 }
 
-/// A straight RGBA pixel made premultiplied: each colour times its alpha,
-/// `(c · a + 127) / 255`, exactly, as a multiply and two shifts. An opaque
-/// pixel (a photo's, a video's: nearly all) is as it was, and left so.
-#[inline]
-fn premultiply(pixel: &mut [u8; 4]) {
-    let alpha = u32::from(pixel[3]);
-    if alpha == 255 {
-        return;
-    }
-    for channel in &mut pixel[..3] {
-        // ⌊x / 255⌋ is (x + 1 + (x >> 8)) >> 8 for every x up to 64,897,
-        // the most c · a + 127 comes to short of full alpha (not at 65,535).
-        let x = u32::from(*channel) * alpha + 127;
-        *channel = ((x + 1 + (x >> 8)) >> 8) as u8;
+/// Straight RGBA pixels made premultiplied, in place, sixteen at a time: a
+/// block all opaque (a photo's, a video's) is as it was, one all
+/// transparent (around a canvas's marks) is zeros, and in the rest each
+/// colour is times its alpha, `(c · a + 127) / 255`, exactly, as a multiply
+/// and two shifts in 16 bits. No branch a pixel, so each part is
+/// vectorized: one per pixel (an early return for opaque pixels) made a
+/// canvas's a pixel at a time.
+fn premultiply(pixels: &mut [u8]) {
+    for block in pixels.chunks_mut(64) {
+        let (mut all, mut any) = (255u8, 0u8);
+        for pixel in block.as_chunks::<4>().0 {
+            all &= pixel[3];
+            any |= pixel[3];
+        }
+        if all == 255 {
+            continue;
+        }
+        if any == 0 {
+            block.fill(0);
+            continue;
+        }
+        for pixel in block.as_chunks_mut::<4>().0 {
+            let alpha = u16::from(pixel[3]);
+            for channel in &mut pixel[..3] {
+                // ⌊x / 255⌋ is (x + 1 + (x >> 8)) >> 8 for every x c · a + 127
+                // reaches (at most 65,152, where the sum is 65,407: 16 bits).
+                let x = u16::from(*channel) * alpha + 127;
+                *channel = ((x + 1 + (x >> 8)) >> 8) as u8;
+            }
+        }
     }
 }
 
@@ -19202,15 +19216,48 @@ mod rest_tests {
 
 #[cfg(test)]
 mod premultiply_tests {
-    #[test]
-    fn premultiplying_is_exact_for_every_colour_and_alpha() {
-        for alpha in 0..=255u8 {
-            for colour in 0..=255u8 {
-                let mut pixel = [colour, colour, colour, alpha];
-                super::premultiply(&mut pixel);
-                let exact = ((u16::from(colour) * u16::from(alpha) + 127) / 255) as u8;
-                assert_eq!(pixel, [exact, exact, exact, alpha], "{colour} at {alpha}");
+    fn exact(pixels: &[u8]) -> Vec<u8> {
+        let mut out = pixels.to_vec();
+        for pixel in out.as_chunks_mut::<4>().0 {
+            let alpha = u16::from(pixel[3]);
+            for channel in &mut pixel[..3] {
+                *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
             }
         }
+        out
+    }
+
+    #[test]
+    fn premultiplying_is_exact_for_every_colour_and_alpha() {
+        // Every colour at every alpha, in blocks that mix them.
+        let mut pixels: Vec<u8> = (0..=255u8)
+            .flat_map(|alpha| (0..=255u8).flat_map(move |c| [c, 255 - c, c / 2, alpha]))
+            .collect();
+        let expected = exact(&pixels);
+        super::premultiply(&mut pixels);
+        assert!(pixels == expected, "differs from the division");
+    }
+
+    #[test]
+    fn opaque_and_transparent_blocks_premultiply_as_any_other() {
+        // Sixteen opaque pixels, sixteen transparent with colour, sixteen of
+        // one alpha in between, and a short block left over: each kind of
+        // block, and the tail.
+        let mut pixels = Vec::new();
+        for i in 0..16u8 {
+            pixels.extend([i * 13, 200 - i, 7, 255]);
+        }
+        for i in 0..16u8 {
+            pixels.extend([i * 13, 200 - i, 7, 0]);
+        }
+        for i in 0..16u8 {
+            pixels.extend([i * 13, 200 - i, 7, 255 - i]);
+        }
+        for i in 0..5u8 {
+            pixels.extend([i * 40, 9, 250, if i % 2 == 0 { 0 } else { 255 }]);
+        }
+        let expected = exact(&pixels);
+        super::premultiply(&mut pixels);
+        assert!(pixels == expected, "a block differs from the division");
     }
 }
