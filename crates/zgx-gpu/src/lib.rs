@@ -11243,6 +11243,19 @@ impl GpuRenderer {
                     },
                 };
                 if let Some((merged, promoted)) = merged {
+                    // A batch draws one run of instances: a draw joining it
+                    // starts at or past its end (past it: draws between
+                    // lay outside the region, scissored away). One placed
+                    // before would cut the batch short, and both would draw
+                    // nothing.
+                    debug_assert!(
+                        start >= open.end,
+                        "draw {}..{} joins a batch {}..{} out of order",
+                        start,
+                        draw.end,
+                        open.start,
+                        open.end
+                    );
                     open.shading = merged;
                     open.promoted = promoted;
                     open.pixels += pixels;
@@ -17170,6 +17183,45 @@ pub mod canvas;
 pub mod decoration;
 
 pub mod svg;
+
+#[cfg(test)]
+mod batch_order_tests {
+    use super::*;
+    fn draw(start: u32, end: u32, x: f32) -> Draw {
+        Draw {
+            shading: Shading::Basic,
+            blur: None,
+            start,
+            end,
+            clip: Rect::new(0., 0., 40., 20.),
+            bounds: Rect::new(x, 0., 4., 4.),
+            source: TextureSource::Atlas,
+        }
+    }
+    fn batches(draws: &[Draw]) -> Vec<(u32, u32)> {
+        let gpu = GpuRenderer::new(40, 20).unwrap();
+        let mut out = Vec::new();
+        gpu.batches(Rect::new(0., 0., 40., 20.), draws, 0, |batch| {
+            out.push((batch.start, batch.end))
+        });
+        out
+    }
+    /// Draws in instance order join one batch, across a gap (instances of
+    /// draws outside the region, scissored away) too.
+    #[test]
+    fn draws_in_instance_order_join_one_batch() {
+        assert_eq!(batches(&[draw(0, 2, 0.), draw(2, 3, 8.)]), [(0, 3)]);
+        assert_eq!(batches(&[draw(0, 2, 0.), draw(5, 6, 8.)]), [(0, 6)]);
+    }
+    /// A draw whose instances lie before the batch's would cut it short:
+    /// both would draw nothing. That fails loudly.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "out of order")]
+    fn a_draw_before_the_batch_it_joins_fails_loudly() {
+        batches(&[draw(4, 6, 0.), draw(0, 2, 8.)]);
+    }
+}
 
 #[cfg(test)]
 mod native_surface_shader_tests {
