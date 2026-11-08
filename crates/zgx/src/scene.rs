@@ -1831,6 +1831,39 @@ struct Node {
     /// Its style or kind changed since its result was stored: a column's
     /// earlier children's places, kept from that result, may not stand.
     restyled: bool,
+    /// A column's sums after its last two children (`ColumnMemo`): laid out
+    /// again with only its end changed, it resumes there.
+    column_memo: Option<Box<ColumnMemo>>,
+}
+/// A column's running sums (`Node::column_memo`) after its last child and
+/// the one before, for the result of `pass` under `constraints` with
+/// `count` children: its width (the widest), its height and its children's
+/// main sizes before gaps, and where the next child would go.
+#[derive(Clone, Copy)]
+struct ColumnMemo {
+    pass: u64,
+    constraints: Constraints,
+    count: usize,
+    at: [ColumnSums; 2],
+}
+/// What `column_end` needs of its column, as `measure_uncached` worked it
+/// out.
+#[derive(Clone, Copy)]
+struct ColumnEnd {
+    natural: Constraints,
+    inner_w: f32,
+    gap: f32,
+    padding: (f32, f32),
+    vertical_padding: f32,
+    count: usize,
+    constraints: Constraints,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ColumnSums {
+    natural_w: f32,
+    natural_h: f32,
+    main: f32,
+    cursor: f32,
 }
 /// A node's local transform and zoom (`Node::local`).
 #[derive(Clone, Copy, PartialEq)]
@@ -3258,6 +3291,7 @@ impl Scene {
                     layer_revision: 0,
                     style_writes: 0,
                     restyled: true,
+                    column_memo: None,
                 }),
             }],
             free: Vec::new(),
@@ -6660,6 +6694,7 @@ impl Scene {
             layer_revision: 0,
             style_writes: 0,
             restyled: true,
+            column_memo: None,
         };
         let id = if let Some(index) = self.free.pop() {
             self.slots[index as usize].node = Some(node);
@@ -10477,7 +10512,7 @@ impl Scene {
                     Layout::Overlay => (0.0, 0.0),
                 }
             }
-            Some(layout) => {
+            Some(layout) => 'laid: {
                 // One set per level of the recursion, back in the pool as
                 // this measure ends.
                 let Scratch {
@@ -10561,6 +10596,89 @@ impl Scene {
                     percent_height,
                     ..Constraints::default()
                 };
+                // The earlier children kept from its last result (`column`):
+                // asked as before, and changed nothing since.
+                let prefix = if absolute.is_empty() {
+                    children
+                        .iter()
+                        .zip(&ids)
+                        .take_while(|((child, placed, under), id)| {
+                            // Unchanged, and holding the result it was
+                            // placed with (a box moved alone keeps its own).
+                            let node = self.tree_node(**id);
+                            // Not flexed: a column's child it asked as now
+                            // has no height forced on it.
+                            child == *id
+                                && under.force_height.is_none()
+                                && node.dirty & LAYOUT == 0
+                                && node.measurement.as_ref().is_some_and(|held| {
+                                    held.constraints == *under
+                                        && held.size == (placed.width, placed.height)
+                                })
+                        })
+                        .count()
+                } else {
+                    0
+                };
+                // Only its end changed, from one of its last two children:
+                // resumed from its sums there (`ColumnMemo`), its end alone
+                // measured and placed, as below works each child out.
+                // Its last result's children, then those it keeps.
+                let placed = children.len();
+                children.truncate(prefix);
+                let resume = (column && absolute.is_empty())
+                    .then(|| {
+                        let node = self.tree_node(id);
+                        let memo = node.column_memo.as_deref()?;
+                        let last = node.measurement.as_ref()?;
+                        (memo.pass == last.pass
+                            && memo.constraints == constraints
+                            && memo.count == placed
+                            && memo.count > 0
+                            && prefix + 1 >= memo.count
+                            && prefix < ids.len())
+                        .then(|| memo.at[prefix + 1 - memo.count])
+                    })
+                    .flatten();
+                if let Some(start) = resume
+                    && let Some(sums) = self.column_end(
+                        id,
+                        &ids[prefix..],
+                        start,
+                        &mut children,
+                        prefix,
+                        ColumnEnd {
+                            natural,
+                            inner_w: dimension(
+                                explicit_w.unwrap_or_default(),
+                                style.min_width,
+                                style.max_width,
+                            ) - horizontal_padding,
+                            gap: style.gap,
+                            padding: (padding.left, padding.top),
+                            vertical_padding,
+                            count: ids.len(),
+                            constraints,
+                        },
+                        &aligned,
+                        &filled,
+                    )
+                {
+                    self.scratch.push(Scratch {
+                        ids,
+                        absolute,
+                        asked,
+                        kept,
+                        sizes,
+                        allocated,
+                        bases,
+                        frozen,
+                        floors,
+                        weights,
+                        margins,
+                    });
+                    break 'laid sums;
+                }
                 // What each child's size was last asked under: its place is
                 // that result's (see `store_measurement`).
                 asked.clear();
@@ -10572,28 +10690,6 @@ impl Scene {
                         ..natural
                     }
                 }));
-                // The earlier children kept from its last result (`column`):
-                // asked as before, and changed nothing since.
-                let prefix = if absolute.is_empty() {
-                    children
-                        .iter()
-                        .zip(&ids)
-                        .take_while(|((child, placed, under), id)| {
-                            // Unchanged, and holding the result it was
-                            // placed with (a box moved alone keeps its own).
-                            let node = self.tree_node(**id);
-                            child == *id
-                                && node.dirty & LAYOUT == 0
-                                && node.measurement.as_ref().is_some_and(|held| {
-                                    held.constraints == *under
-                                        && held.size == (placed.width, placed.height)
-                                })
-                        })
-                        .count()
-                } else {
-                    0
-                };
-                children.truncate(prefix);
                 sizes.clear();
                 kept.clear();
                 for i in 0..ids.len() {
@@ -10971,6 +11067,34 @@ impl Scene {
                         placed,
                     ));
                 }
+                // Its sums after its last two children, for a layout that
+                // changes only its end (`column_end`), as worked out above.
+                if column && absolute.is_empty() && !ids.is_empty() {
+                    let sums = |k: usize| {
+                        let mut sums = ColumnSums::default();
+                        for (size, m) in sizes[..k].iter().zip(&margins) {
+                            sums.natural_w = sums.natural_w.max(size.0 + m.left + m.right);
+                            sums.natural_h += size.1 + m.top + m.bottom;
+                            sums.cursor += size.1 + (m.top + m.bottom) + style.gap + extra_gap;
+                        }
+                        sums.main = sizes[..k]
+                            .iter()
+                            .zip(&margins)
+                            .map(|(size, m)| size.1 + (m.top + m.bottom))
+                            .sum::<f32>();
+                        sums
+                    };
+                    let count = ids.len();
+                    let memo = ColumnMemo {
+                        pass,
+                        constraints,
+                        count,
+                        at: [sums(count - 1), sums(count)],
+                    };
+                    self.tree_node_mut(id).column_memo = Some(Box::new(memo));
+                } else if self.tree_node(id).column_memo.is_some() {
+                    self.tree_node_mut(id).column_memo = None;
+                }
                 self.scratch.push(Scratch {
                     ids,
                     absolute,
@@ -10999,6 +11123,95 @@ impl Scene {
         );
         self.store_measurement(id, constraints, (width, height), children);
         (width, height)
+    }
+    /// The end of column `id` from child `prefix` on (`ColumnMemo`): each
+    /// child measured and placed as `measure_uncached` does, the sums
+    /// carried on from `start`; the column's extent, its new sums kept.
+    /// None, nothing kept, where flex distribution would share room out (a
+    /// padded column whose sums round off by a thousandth): laid out whole.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn column_end(
+        &mut self,
+        id: NodeId,
+        end: &[NodeId],
+        start: ColumnSums,
+        children: &mut Vec<ChildPlacement>,
+        prefix: usize,
+        column: ColumnEnd,
+        aligned: &impl Fn(&Style) -> Align,
+        filled: &impl Fn(&Self, NodeId) -> (Option<f32>, Option<f32>),
+    ) -> Option<(f32, f32)> {
+        let ColumnEnd {
+            natural,
+            inner_w,
+            gap,
+            padding: (left, top),
+            vertical_padding,
+            count,
+            constraints,
+        } = column;
+        // The sums its kept children give, worked out again (debug builds).
+        #[cfg(debug_assertions)]
+        {
+            let mut kept = ColumnSums::default();
+            for &(child, placed, _) in &children[..prefix] {
+                let m = self.node(child).style.margin;
+                let (w, h) = (placed.width, placed.height);
+                kept.natural_w = kept.natural_w.max(w + m.left + m.right);
+                kept.natural_h += h + m.top + m.bottom;
+                kept.cursor += h + (m.top + m.bottom) + gap + 0.0;
+            }
+            kept.main = children[..prefix]
+                .iter()
+                .map(|&(child, placed, _)| {
+                    let m = self.node(child).style.margin;
+                    placed.height + (m.top + m.bottom)
+                })
+                .sum::<f32>();
+            assert_eq!(kept, start, "a column's sums where its end resumes");
+        }
+        let (mut sums, mut before) = (start, start);
+        for &child in end {
+            before = sums;
+            let (width, height) = filled(self, child);
+            let asked = Constraints {
+                force_width: width,
+                force_height: height,
+                ..natural
+            };
+            let ((w, h), under) = self.measure_kept(child, asked);
+            let s = &self.node(child).style;
+            let m = s.margin;
+            sums.natural_w = sums.natural_w.max(w + m.left + m.right);
+            sums.natural_h += h + m.top + m.bottom;
+            let main_margin = m.top + m.bottom;
+            sums.main += h + main_margin;
+            let cross_free = inner_w - w - m.left - m.right;
+            let cross = match aligned(s) {
+                Align::Center => cross_free / 2.0,
+                Align::End => cross_free,
+                _ => 0.0,
+            };
+            let placed = Rect::new(cross + m.left + left, sums.cursor + m.top + top, w, h);
+            children.push((child, placed, under));
+            sums.cursor += h + main_margin + gap + 0.0;
+        }
+        let gaps = gap * count.saturating_sub(1) as f32;
+        let natural_main = sums.main + gaps;
+        let limit = dimension(natural_main + vertical_padding, None, None) - vertical_padding;
+        if (limit - natural_main).abs() >= 0.001 {
+            children.truncate(prefix);
+            return None;
+        }
+        let memo = ColumnMemo {
+            pass: self.layout_pass,
+            constraints,
+            count,
+            at: [before, sums],
+        };
+        self.tree_node_mut(id).column_memo = Some(Box::new(memo));
+        Some((sums.natural_w, sums.natural_h + gaps))
     }
     /// An empty box whose size its style or constraints fix (a bar, a
     /// swatch), as the rest of `measure_uncached` works it out: its width and
@@ -14156,6 +14369,87 @@ mod tests {
         assert_eq!(scene.bounds(column), fresh.bounds(fresh_column));
         for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
             assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
+        }
+    }
+    /// A column streamed into every way its end can change: appended to,
+    /// its last child growing, a child before it changing (laid out from
+    /// there), its last removed, padded so its sums carry far: each time
+    /// every box where a column built with what it holds then puts it (and
+    /// debug builds check the sums it resumes from).
+    #[test]
+    fn a_column_resumed_at_its_end_lays_out_as_one_built_whole() {
+        let measurer = |text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.3)
+        };
+        let column_style = Style {
+            width: Some(220.0),
+            gap: 6.5,
+            padding: 3.25,
+            ..Style::default()
+        };
+        let wrap = Style {
+            text_wrap: true,
+            margin: Insets {
+                top: 1.5,
+                bottom: 2.25,
+                ..Insets::default()
+            },
+            ..Style::default()
+        };
+        let build = |words: &[String]| {
+            let mut scene = Scene::new(300.0, 4000.0);
+            scene.set_text_measurer(measurer);
+            let column = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                column_style.clone(),
+            );
+            let ids: Vec<_> = words
+                .iter()
+                .map(|w| scene.append(column, text(w), wrap.clone()))
+                .collect();
+            scene.flush();
+            (scene, column, ids)
+        };
+        let same = |scene: &Scene, column: NodeId, ids: &[NodeId], words: &[String]| {
+            let (fresh, fresh_column, fresh_ids) = build(words);
+            assert_eq!(scene.bounds(column), fresh.bounds(fresh_column));
+            for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
+                assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
+            }
+        };
+        let mut words: Vec<String> = (0..30).map(|i| format!("block {i} of the reply")).collect();
+        let (mut scene, column, mut ids) = build(&words);
+        for step in 0..12 {
+            match step % 4 {
+                // Appended.
+                0 | 2 => {
+                    words.push(format!("a block arriving at step {step}"));
+                    ids.push(scene.append(column, text(words.last().unwrap()), wrap.clone()));
+                }
+                // The last grows.
+                1 => {
+                    words
+                        .last_mut()
+                        .unwrap()
+                        .push_str(" with more words after it");
+                    scene.set_text(*ids.last().unwrap(), words.last().unwrap().as_str());
+                }
+                // One before the end changes, then the last is removed.
+                _ => {
+                    let at = ids.len() - 3;
+                    words[at].push_str(" changed");
+                    scene.set_text(ids[at], words[at].as_str());
+                    scene.flush();
+                    same(&scene, column, &ids, &words);
+                    words.pop();
+                    scene.remove(ids.pop().unwrap());
+                }
+            }
+            scene.flush();
+            same(&scene, column, &ids, &words);
         }
     }
     #[test]
