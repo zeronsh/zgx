@@ -97,11 +97,8 @@ impl Tracked {
     pub fn retain(&self, resource: Box<dyn Any>) -> Result<(), Box<dyn Any>> {
         match self.tracker.current() {
             Some(module) => {
-                self.owned
-                    .borrow_mut()
-                    .entry(module)
-                    .or_default()
-                    .push(resource);
+                let mut owned = self.owned.borrow_mut();
+                crate::node::keep_in(owned.entry(module).or_default(), resource);
                 Ok(())
             }
             None => Err(resource),
