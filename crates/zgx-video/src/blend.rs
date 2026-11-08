@@ -98,6 +98,23 @@ mod tests {
     }
 
     #[test]
+    fn the_average_is_exact_for_every_count_and_every_sum() {
+        // Each count of samples up to 256, power of two or not (shift and
+        // reciprocal), at every sum it can reach (0 to 255 n): about 8 M
+        // cases, against a division.
+        let mut blend = Blend::default();
+        let mut out = Vec::new();
+        for n in 1..=NARROW {
+            blend.narrow = (0..=255 * n).map(|sum| sum as u16).collect();
+            blend.average_into(n, &mut out);
+            for (sum, average) in out.iter().enumerate() {
+                let exact = (sum as u32 + n / 2) / n;
+                assert_eq!(u32::from(*average), exact, "{sum} / {n}");
+            }
+        }
+    }
+
+    #[test]
     fn every_count_of_samples_averages_as_dividing_each_sum_does() {
         // Every byte value at each place, and the extremes, over samples
         // that differ: rounding at each half shows.
