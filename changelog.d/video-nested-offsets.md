@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **Nested sounds land where the sequence places them** (zgx-video): a series, loop, freeze, sound, clip or sequence given to a `video.sequence` as a table rather than a function was built before the sequence, in the time around it, so its sounds started at the wrong frames (a series in a sequence from frame 20 placed its first scene's sound at 0) and its frames counted from the wrong start. Each now takes its time where it mounts, from the sequence around it, so offsets add up however children are given. `video.audio` adds an empty box of no size, out of the flow, and places its sound when that box mounts: a call whose result is dropped (a statement, not among a node's children) now places nothing. A script nesting through functions, as the showcase does, renders byte-identically.

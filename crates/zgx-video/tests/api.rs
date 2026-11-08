@@ -184,6 +184,58 @@ fn nested_sequences_add_their_offsets_and_components_read_the_time_they_mount_in
 }
 
 #[test]
+fn sounds_given_to_a_sequence_as_tables_start_where_it_places_them() {
+    // Children given as tables are built before the sequence is: a series, a
+    // loop, a sound or a sequence among them takes its time where it mounts.
+    let dir = app(
+        "nested-sounds",
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "S", w = 32, h = 32, fps = 30, duration = 120,
+            render = function()
+                return ui.div { w_full = true, h_full = true,
+                    video.sequence { from = 20, video.series {
+                        video.scene { duration = 20, function() return video.audio { src = "one.wav" } end },
+                        video.slide { from = "right", duration = 6 },
+                        video.scene { duration = 20, function() return video.audio { src = "two.wav" } end },
+                    } },
+                    video.sequence { from = 50, duration = 20, video.loop { duration = 10, function()
+                        return video.audio { src = "turn.wav" }
+                    end } },
+                    video.sequence { from = 80, video.audio { src = "direct.wav" } },
+                    video.sequence { from = 90, video.sequence { from = 5, function()
+                        return video.audio { src = "inner.wav" }
+                    end } },
+                }
+            end,
+        } }
+        "##,
+    );
+    let mut stage = script_stage(&dir, json!({}));
+    stage.step_to(119).unwrap();
+    let placed: Vec<(String, u64)> = stage
+        .audio()
+        .iter()
+        .map(|clip| {
+            let name = clip.src.file_name().unwrap().to_string_lossy();
+            (name.into_owned(), clip.from)
+        })
+        .collect();
+    let expected: Vec<(String, u64)> = [
+        ("one.wav", 20),
+        ("two.wav", 34),
+        ("turn.wav", 50),
+        ("direct.wav", 80),
+        ("inner.wav", 95),
+    ]
+    .into_iter()
+    .map(|(name, from)| (name.to_owned(), from))
+    .collect();
+    assert_eq!(placed, expected);
+}
+
+#[test]
 fn what_starts_as_a_sequence_mounts_starts_then() {
     let dir = app(
         "mount",
