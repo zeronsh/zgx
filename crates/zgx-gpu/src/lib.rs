@@ -14499,31 +14499,40 @@ impl GpuRenderer {
             .map_err(|e| GpuError(e.to_string()))?;
         let mapped = buffer.get_mapped_range(..);
         let row = self.width as usize * 4;
-        // The same length as the last read leaves it as it is: nothing zeroed.
-        pixels.resize(row * self.height as usize, 0);
-        // Retained textures are BGRA (see `FORMAT`); callers read RGBA. Each
-        // row is copied and its red and blue swapped in one pass, a pixel a
-        // word, which the compiler makes a few vector instructions a block.
+        let length = row * self.height as usize;
+        // Retained textures are BGRA (see `FORMAT`); callers read RGBA.
         let bgra = texture.format() == wgpu::TextureFormat::Bgra8Unorm;
-        for (out, read) in pixels
-            .chunks_exact_mut(row)
-            .zip(mapped.chunks(stride as usize))
-        {
-            let read = &read[..row];
-            if bgra {
-                for (out, read) in out
-                    .as_chunks_mut::<4>()
-                    .0
-                    .iter_mut()
-                    .zip(read.as_chunks::<4>().0)
-                {
-                    let word = u32::from_le_bytes(*read);
-                    let swapped =
-                        (word & 0xFF00_FF00) | ((word >> 16) & 0xFF) | ((word & 0xFF) << 16);
-                    *out = swapped.to_le_bytes();
+        let rows = mapped.chunks(stride as usize).map(|read| &read[..row]);
+        if pixels.len() == length {
+            // A kept buffer (a video's, frame after frame): each row copied
+            // and its red and blue swapped in one pass, a pixel a word.
+            for (out, read) in pixels.chunks_exact_mut(row).zip(rows) {
+                if bgra {
+                    for (out, read) in out
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(read.as_chunks::<4>().0)
+                    {
+                        *out = bgra_to_rgba(u32::from_le_bytes(*read)).to_le_bytes();
+                    }
+                } else {
+                    out.copy_from_slice(read);
                 }
-            } else {
-                out.copy_from_slice(read);
+            }
+        } else {
+            // A fresh one (a one-off read): grown a row at a time, nothing
+            // zeroed first, then swapped where it lies.
+            pixels.clear();
+            pixels.reserve_exact(length);
+            for read in rows {
+                let at = pixels.len();
+                pixels.extend_from_slice(read);
+                if bgra {
+                    for pixel in pixels[at..].as_chunks_mut::<4>().0 {
+                        *pixel = bgra_to_rgba(u32::from_le_bytes(*pixel)).to_le_bytes();
+                    }
+                }
             }
         }
         drop(mapped);
@@ -14531,9 +14540,17 @@ impl GpuRenderer {
         Ok(())
     }
 }
+/// A BGRA pixel, as a little-endian word, swapped to RGBA: a few vector
+/// instructions a block of pixels.
+#[inline]
+fn bgra_to_rgba(word: u32) -> u32 {
+    (word & 0xFF00_FF00) | ((word >> 16) & 0xFF) | ((word & 0xFF) << 16)
+}
+
 /// The staging buffer [`GpuRenderer::readback_into`] reads through, kept by
 /// whoever reads every frame (a video's stage) and made at its first read:
-/// an app that never reads back holds none.
+/// an app that never reads back holds none. It belongs to one renderer: its
+/// buffer is that renderer's device's, and another's can't copy into it.
 #[derive(Default)]
 pub struct Readback(Option<wgpu::Buffer>);
 
