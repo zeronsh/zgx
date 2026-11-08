@@ -338,6 +338,11 @@ fn thousand_streaming_frames_keep_caches_bounded_and_reuse_vertices() {
         let d = scene.flush().damage;
         gpu.render(&scene, &d).unwrap();
     }
+    // Below its four buffers the ring grows rather than waits whenever every
+    // buffer is still being read (d3d11_frame.rs `Ring::write_parts`), so a
+    // GPU busy with other work can add one at any frame here. Warm means the
+    // GPU has caught up: a readback waits for it, and the frame after reuses.
+    gpu.readback().unwrap();
     let initial = gpu.debug_cache_stats().vertex_buffer_bytes;
     // Vertices written in place (unified memory, Direct3D 12) go round a
     // ring of up to four buffers in flight; a staging copy keeps one. Each
@@ -5003,8 +5008,8 @@ fn fade_insets_end_the_bands_inside_the_clip() {
 /// Whole-pixel scrolls shift the retained pixels and draw only the exposed
 /// strip; the result matches a fresh renderer exactly. A list fading at its
 /// edges copies its interior and repaints its bands. A sibling painting over
-/// the list, or a fractional shift, make a copy inexact, so those repaint
-/// instead.
+/// the list repaints all its ink over the copy, so the list copies under it
+/// too. A fractional shift makes a copy inexact, so that repaints instead.
 #[test]
 fn scroll_copies_match_a_fresh_render_and_decline_when_inexact() {
     let _gpu_fixture = gpu_fixture();
@@ -5096,9 +5101,9 @@ fn scroll_copies_match_a_fresh_render_and_decline_when_inexact() {
             // Its interior copies, its bands repaint (bands.rs).
             Case::Faded => assert!(copies >= 3, "{copies}"),
             Case::Rounded => assert!(copies >= 3, "{copies}"),
-            // Only 28→100 copies: its 72 px exposed strip repaints the whole
-            // overlay, which the smaller moves would have shifted.
-            Case::Covered => assert_eq!(copies, 1),
+            // The overlay repaints its own ink over what the copy moved
+            // (copy_blocker_tests), so the list copies as the plain one does.
+            Case::Covered => assert!(copies >= 3, "{copies}"),
         }
     }
 }
