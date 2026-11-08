@@ -2026,10 +2026,15 @@ pub(crate) struct OverlayLook {
     /// A menu item: its padding, how far its highlight is inset from the
     /// panel (across, down), and that highlight's corner radius.
     pub(crate) menu_item_padding: (f32, f32),
+    /// The least a menu item is tall (its text centred in it), if any.
+    pub(crate) menu_item_min_height: Option<f32>,
     pub(crate) menu_item_inset: (f32, f32),
     pub(crate) menu_item_radius: f32,
-    /// A popover's panel's corner radius.
+    /// A popover's panel's corner radius and padding.
     pub(crate) popover_radius: crate::theme::Themed<f32>,
+    pub(crate) popover_padding: f32,
+    /// How far a menu item's shortcut sits from its label.
+    pub(crate) shortcut_gap: f32,
     /// A text tooltip: its padding (across, above, below), corner radius
     /// and font size.
     pub(crate) tooltip_padding: (f32, f32, f32),
@@ -2041,9 +2046,12 @@ pub(crate) const BUILT_IN_OVERLAY: OverlayLook = OverlayLook {
     menu_radius: crate::theme::Themed::Token(tok::RADIUS_MD.0),
     menu_padding: (16., 16.),
     menu_item_padding: (12., 8.),
+    menu_item_min_height: None,
     menu_item_inset: (0., 0.),
     menu_item_radius: 0.,
     popover_radius: crate::theme::Themed::Token(tok::RADIUS_MD.0),
+    popover_padding: 16.,
+    shortcut_gap: 24.,
     tooltip_padding: (8., 4., 4.),
     tooltip_radius: crate::theme::Themed::Token(tok::RADIUS_SM.0),
     tooltip_font_size: crate::theme::Themed::Token(tok::FONT_SIZE_XS.0),
@@ -2069,9 +2077,31 @@ pub(crate) const WINDOWS_OVERLAY: OverlayLook = OverlayLook {
     tooltip_padding: (9., 6., 8.),
     tooltip_radius: crate::theme::Themed::Token(tok::RADIUS_SM.0),
     tooltip_font_size: crate::theme::Themed::Value(12.),
+    ..BUILT_IN_OVERLAY
+};
+/// GNOME's, as libadwaita draws its popover menus and popovers
+/// (`_common.scss`, `widgets/_menus.scss`, `_popovers.scss`): a menu's
+/// panel rounded as popovers are (`$popover_radius`, 15) holding its items
+/// 6 in (`$menu_margin`), each item 32 tall (`min-height`), padded 12
+/// across (`$menu_padding`) and rounded 9 (`$menu_radius`), its shortcut
+/// 12 from its label (`accelerator`); a popover rounded 15 and padded 8.
+/// Colours stay the theme's but the highlight (`linux_look`).
+pub(crate) const LINUX_OVERLAY: OverlayLook = OverlayLook {
+    menu_radius: crate::theme::Themed::Value(15.),
+    menu_padding: (6., 6.),
+    menu_item_padding: (12., 0.),
+    menu_item_min_height: Some(32.),
+    menu_item_inset: (0., 0.),
+    menu_item_radius: 9.,
+    popover_radius: crate::theme::Themed::Value(15.),
+    popover_padding: 8.,
+    shortcut_gap: 12.,
+    ..BUILT_IN_OVERLAY
 };
 pub(crate) const OVERLAY: OverlayLook = if cfg!(windows) {
     WINDOWS_OVERLAY
+} else if cfg!(target_os = "linux") {
+    LINUX_OVERLAY
 } else {
     BUILT_IN_OVERLAY
 };
@@ -4026,7 +4056,10 @@ fn mount_portal_panel(
         // dialog keeps the card's.
         let (padding, radius) = match (is_menu, anchored) {
             (true, _) => (OVERLAY.menu_padding, OVERLAY.menu_radius),
-            (false, true) => ((16., 16.), OVERLAY.popover_radius),
+            (false, true) => (
+                (OVERLAY.popover_padding, OVERLAY.popover_padding),
+                OVERLAY.popover_radius,
+            ),
             (false, false) => ((16., 16.), crate::theme::Themed::Token(tok::RADIUS_MD.0)),
         };
         let card = Styles::new().w(if anchored { 240. } else { 360. });
@@ -4434,6 +4467,10 @@ impl WidgetStyles {
             menu_item: {
                 let (x, y) = OVERLAY.menu_item_padding;
                 let item = Styles::new().px(x).py(y).items_center();
+                let item = match OVERLAY.menu_item_min_height {
+                    Some(height) => item.min_h(height),
+                    None => item,
+                };
                 // Inset and rounded only where the platform's are.
                 let ((x, y), radius) = (OVERLAY.menu_item_inset, OVERLAY.menu_item_radius);
                 if (x, y, radius) == (0., 0., 0.) {
@@ -5170,6 +5207,13 @@ fn open_element(
             // (an icon, the label, a shortcut): the label stays its
             // accessible name and what typing finds it by.
             let mut defaults = widget_style(|w| &w.menu_item);
+            // A height the app gives the item is its height: the platform's
+            // least (GNOME's 32) is for items sized by their content.
+            if OVERLAY.menu_item_min_height.is_some()
+                && (view.styles.height.is_some() || view.styles.height_percent.is_some())
+            {
+                defaults = defaults.min_h(0.);
+            }
             defaults.merge(&view.styles);
             view.styles = defaults;
             if view.variants.hover.is_none() {
@@ -5219,7 +5263,7 @@ fn open_element(
                 if let Some(keys) = shortcut {
                     view.children.push(
                         text(keys)
-                            .ml(24.)
+                            .ml(OVERLAY.shortcut_gap)
                             .text_color(tok::TEXT_TERTIARY)
                             .accessible_hidden(),
                     );
@@ -5565,10 +5609,10 @@ fn open_element(
                 {
                     // Where menus are windows of their own (AppKit's), the
                     // chosen item flashes, then the menu closes, then its
-                    // action runs, as AppKit sends it. Windows' menus close
-                    // at once, as WinUI's do.
+                    // action runs, as AppKit sends it. Windows' and GNOME's
+                    // menus close at once, as WinUI's and GTK's do.
                     if let (Some(runner), Some(ui)) = (&runner, weak_ui.upgrade())
-                        && !cfg!(windows)
+                        && !cfg!(any(windows, target_os = "linux"))
                         && ui.popup_screens().with_untracked(|s| !s.is_empty())
                     {
                         let (click, modifiers) = (menu_click.clone(), cx.pointer_modifiers());

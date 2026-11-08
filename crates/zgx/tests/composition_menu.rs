@@ -577,8 +577,9 @@ fn a_menu_in_a_popup_window_names_its_trigger_while_open() {
 
 /// A menu takes its platform's shape: on Windows WinUI's (its panel
 /// rounded 8, 2 above its items and none across, each item's highlight
-/// inset 4 and rounded 4), elsewhere zgx's (rounded `radius.md`, padded 16,
-/// items edge to edge).
+/// inset 4 and rounded 4); on Linux GNOME's (libadwaita's: its panel rounded
+/// 15 holding its items 6 in, each 32 tall and rounded 9); elsewhere zgx's
+/// (rounded `radius.md`, padded 16, items edge to edge).
 #[test]
 fn a_menu_takes_its_platforms_shape() {
     use zgx::scene::NodeKind;
@@ -588,31 +589,40 @@ fn a_menu_takes_its_platforms_shape() {
         column().p(20.).child(
             menu("Edit", open, button().id("anchor").size(80., 28.))
                 .id("panel")
-                .child(menu_item("Cut").id("cut")),
+                .child(menu_item("Cut").id("cut"))
+                .child(menu_item("Copy").id("copy").h(20.)),
         ),
     );
     ui.prepare_frame();
     ui.prepare_frame();
     let scene = ui.scene.borrow();
     let panel = view.find("panel").unwrap();
-    let (panel_box, item) = (scene.bounds(panel), scene.bounds(view.find("cut").unwrap()));
-    let radius = match scene.kind(panel) {
+    let cut = view.find("cut").unwrap();
+    // An item the app sizes keeps its size on every platform.
+    assert_eq!(scene.bounds(view.find("copy").unwrap()).height, 20.);
+    let (panel_box, item) = (scene.bounds(panel), scene.bounds(cut));
+    let radius = |node| match scene.kind(node) {
         NodeKind::Panel { quad, .. } => quad.radius,
         other => panic!("{other:?}"),
     };
     let (inset, above) = (item.x - panel_box.x, item.y - panel_box.y);
     if cfg!(windows) {
-        assert_eq!(radius, 8.);
+        assert_eq!(radius(panel), 8.);
         assert_eq!((inset, above), (4., 4.), "0 + 4 across, 2 + 2 down");
+    } else if cfg!(target_os = "linux") {
+        assert_eq!(radius(panel), 15.);
+        assert_eq!((inset, above), (6., 6.));
+        assert_eq!(item.height, 32., "GTK's min-height");
+        assert_eq!(radius(cut), 9.);
     } else {
-        assert_eq!(radius, 6., "radius.md");
+        assert_eq!(radius(panel), 6., "radius.md");
         assert_eq!((inset, above), (16., 16.));
     }
 }
 
 /// Where menus are windows of their own, a chosen item flashes before its
-/// menu closes and its action runs, as AppKit's do; on Windows, as WinUI's,
-/// the menu closes and the action runs at once.
+/// menu closes and its action runs, as AppKit's do; on Windows and Linux, as
+/// WinUI's and GTK's, the menu closes and the action runs at once.
 #[test]
 fn a_chosen_item_flashes_first_where_menus_do() {
     use std::{cell::RefCell, rc::Rc};
@@ -658,7 +668,7 @@ fn a_chosen_item_flashes_first_where_menus_do() {
         ui.dispatch(event);
     }
     ui.prepare_frame();
-    if cfg!(windows) {
+    if cfg!(any(windows, target_os = "linux")) {
         assert_eq!(*chosen.borrow(), 1, "its action at once");
         assert!(!open.get(), "its menu closed at once");
         assert_eq!(*spawned.borrow(), 0, "no flash");

@@ -82,6 +82,10 @@ fn tokens() -> Vec<(TokenId, TokenInput)> {
         if settings.reduced_motion {
             tokens.extend(still());
         }
+        // GNOME's colours for menus, under high contrast's.
+        if !settings.contrast {
+            tokens.extend(zgx::theme::linux_look());
+        }
         tokens
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
