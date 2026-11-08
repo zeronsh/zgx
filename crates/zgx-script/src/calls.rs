@@ -500,9 +500,10 @@ pub(crate) fn settle_with(
     future: impl Future<Output = Result<Value, String>> + 'static,
 ) -> mlua::Result<()> {
     // Cancelled (`p:cancel()`), the host's work is dropped where it waits: a
-    // dialog closes (a desktop's as its future drops, iOS's picker is
-    // dismissed), a read stops being waited on. An action goes on, its answer
-    // unheard: what it changes elsewhere isn't left half done.
+    // dialog's request (Linux's portal closes its picker; macOS's sheet and
+    // Windows's dialog stay up, their answer unheard), a read no longer
+    // waited on. An action goes on, its answer unheard: what it changes
+    // elsewhere isn't left half done.
     let stop = Rc::new(Stop::default());
     if kind != Kind::Action && promise.abort.borrow().is_none() {
         *promise.abort.borrow_mut() = Some(Box::new({

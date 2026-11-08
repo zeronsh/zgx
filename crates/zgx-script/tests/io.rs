@@ -220,7 +220,7 @@ impl Platform for Unanswered {
 
 #[test]
 fn a_dialog_the_script_cancels_is_dropped_where_it_waits() {
-    // iOS dismisses its picker as the request drops; a desktop's dialog closes.
+    // A dropped request closes Linux's portal picker and iOS's document picker.
     let dropped = Rc::new(std::cell::Cell::new(false));
     let platform = Rc::new(Unanswered(dropped.clone()));
     let mut h = Harness::wrapped(
