@@ -116,11 +116,27 @@ jobs:
       - run: cargo fmt --all -- --check
       # Every Luau script in the repository (examples and probes too), as
       # stylua.toml and .styluaignore have them.
-      - uses: JohnnyMorganz/stylua-action@v4
+      # StyLua and luau-lsp kept between runs, and fetched with retries when
+      # missing (`fetch_release.sh`): a release download that times out
+      # (HTTP 504) failed the job before a test ran.
+      - uses: actions/cache@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          version: 2.6.0
-          args: --check .
+          path: |
+            ~/.local/stylua-2.6.0
+            ~/.local/luau-lsp-1.70.1
+          key: luau-tools-stylua-2.6.0-luau-lsp-1.70.1-linux-x86_64
+      - name: Luau format
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dir="$HOME/.local/stylua-2.6.0"
+          if [ ! -x "$dir/stylua" ]; then
+            mkdir -p "$dir"
+            scripts/fetch_release.sh JohnnyMorganz/StyLua v2.6.0 stylua-linux-x86_64.zip "$dir.zip"
+            unzip -q -o "$dir.zip" -d "$dir"
+            chmod +x "$dir/stylua"
+          fi
+          "$dir/stylua" --check .
       - run: cargo clippy --workspace --all-targets --features zgx-desktop/webkitgtk --locked -- -D warnings
       # Feature gating stays honest: the crates build without their defaults,
       # on the oldest Rust they claim (`rust-version`): a check this job
@@ -139,11 +155,16 @@ jobs:
       # Every example script type checks (luau-lsp, the shipped ui/anime
       # types); zgx-script's check tests run with it too.
       - name: Script type check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          dir="$RUNNER_TEMP/luau-lsp-1.70.1"
-          mkdir -p "$dir"
-          curl -fsSL https://github.com/JohnnyMorganz/luau-lsp/releases/download/1.70.1/luau-lsp-linux-x86_64.zip -o "$dir.zip"
-          unzip -q -o "$dir.zip" -d "$dir"
+          dir="$HOME/.local/luau-lsp-1.70.1"
+          if [ ! -x "$dir/luau-lsp" ]; then
+            mkdir -p "$dir"
+            scripts/fetch_release.sh JohnnyMorganz/luau-lsp 1.70.1 luau-lsp-linux-x86_64.zip "$dir.zip"
+            unzip -q -o "$dir.zip" -d "$dir"
+            chmod +x "$dir/luau-lsp"
+          fi
           echo "LUAU_LSP=$dir/luau-lsp" >> "$GITHUB_ENV"
           LUAU_LSP="$dir/luau-lsp" cargo run -q -p zgx-script --bin zgx --locked -- check crates/zgx-script/examples crates/zgx-desktop/examples crates/zgx-fx/examples/gallery
       # With 3D scenes (zgx-script's `scene3d`, off by default; the Windows
