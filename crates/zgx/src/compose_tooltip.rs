@@ -171,7 +171,8 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             Content::View(view) => *view,
             Content::Text(text) => crate::compose::column()
                 .px(tok::TOOLTIP_PADDING_X)
-                .py(tok::TOOLTIP_PADDING_Y)
+                .pt(tok::TOOLTIP_PADDING_Y)
+                .pb(tok::TOOLTIP_PADDING_BOTTOM)
                 .max_w(320.)
                 .bg(tok::POPOVER_BG)
                 .border(tok::TOOLTIP_BORDER)

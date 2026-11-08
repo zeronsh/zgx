@@ -8123,6 +8123,19 @@ impl GpuRenderer {
                                     quads.push(outline_quad(
                                         &outline, style, bounds, opacity, edge_fade,
                                     ));
+                                    // And its inner ring, just within it.
+                                    if let Some((width, color)) = scene.outline_inner(item.id) {
+                                        let inner = zgx::scene::Outline {
+                                            width,
+                                            color,
+                                            offset: outline.offset - width,
+                                        };
+                                        if inner.visible() {
+                                            quads.push(outline_quad(
+                                                &inner, style, bounds, opacity, edge_fade,
+                                            ));
+                                        }
+                                    }
                                 }
                             }
                         } else {

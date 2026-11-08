@@ -316,12 +316,18 @@ schema! {
     TOOLTIP_PADDING_X: Number = "tooltip.padding.x" => "8",
     /// A text tooltip's padding down.
     TOOLTIP_PADDING_Y: Number = "tooltip.padding.y" => "4",
+    /// A text tooltip's padding below its text (its padding down by
+    /// default; WinUI's is 2 more than above).
+    TOOLTIP_PADDING_BOTTOM: Number = "tooltip.padding.bottom" => "{tooltip.padding.y}",
     /// The width of a text tooltip's border (its colour is `border`).
     TOOLTIP_BORDER: Number = "tooltip.border" => "0.5",
     /// A text tooltip's corner radius.
     TOOLTIP_RADIUS: Number = "tooltip.radius" => "{radius.sm}",
     /// A text tooltip's font size.
     TOOLTIP_FONT_SIZE: Number = "tooltip.font.size" => "{font.size.xs}",
+    /// The contrasting ring inside a focus ring drawn outside its control
+    /// (Windows' focus visual's inner ring, `FocusStrokeColorInner`).
+    FOCUS_RING_INNER: Color = "focus.ring.inner" => "alpha({background}, 0.7)",
     /// What a modal dims the window with behind it.
     BACKDROP: Color = "backdrop" => "#00000082",
     /// Selected text while its window is in the background.

@@ -11,23 +11,30 @@ use super::{TokenId, TokenInput, tok};
 /// (`MenuFlyoutItemMargin`) and rounded as controls are
 /// (`ControlCornerRadius`, 4), padded 11 across and 4 down (the narrow
 /// padding a mouse or keyboard opens it with); a popover rounded 8; a
-/// tooltip padded 9 by 6 (`ToolTipBorderPadding`, 9,6,9,8) in 12-point text
+/// tooltip padded 9 across, 6 above and 8 below (`ToolTipBorderPadding`) in 12-point text
 /// (`ToolTipContentThemeFontSize`). No border on menus and popovers: in
-/// windows of their own, the default, DWM draws their rim.
+/// windows of their own, the default, DWM draws their rim. Keyboard focus in
+/// the text's colour, as its focus visual's outer ring (drawn outside the
+/// control on Windows, `focus_outside`).
 pub fn windows_look() -> Vec<(TokenId, TokenInput)> {
-    let number = |value: &str| TokenInput::parse(value).expect("a number");
+    let value = |value: &str| TokenInput::parse(value).expect("a token value");
     vec![
-        (tok::MENU_RADIUS.0, number("8")),
-        (tok::MENU_PADDING_X.0, number("0")),
-        (tok::MENU_PADDING_Y.0, number("2")),
-        (tok::MENU_ITEM_PADDING_X.0, number("11")),
-        (tok::MENU_ITEM_PADDING_Y.0, number("4")),
-        (tok::MENU_ITEM_INSET_X.0, number("4")),
-        (tok::MENU_ITEM_INSET_Y.0, number("2")),
-        (tok::MENU_ITEM_RADIUS.0, number("4")),
-        (tok::POPOVER_RADIUS.0, number("8")),
-        (tok::TOOLTIP_PADDING_X.0, number("9")),
-        (tok::TOOLTIP_PADDING_Y.0, number("6")),
-        (tok::TOOLTIP_FONT_SIZE.0, number("12")),
+        (tok::MENU_RADIUS.0, value("8")),
+        (tok::MENU_PADDING_X.0, value("0")),
+        (tok::MENU_PADDING_Y.0, value("2")),
+        (tok::MENU_ITEM_PADDING_X.0, value("11")),
+        (tok::MENU_ITEM_PADDING_Y.0, value("4")),
+        (tok::MENU_ITEM_INSET_X.0, value("4")),
+        (tok::MENU_ITEM_INSET_Y.0, value("2")),
+        (tok::MENU_ITEM_RADIUS.0, value("4")),
+        (tok::POPOVER_RADIUS.0, value("8")),
+        (tok::TOOLTIP_PADDING_X.0, value("9")),
+        (tok::TOOLTIP_PADDING_Y.0, value("6")),
+        (tok::TOOLTIP_PADDING_BOTTOM.0, value("8")),
+        (tok::TOOLTIP_FONT_SIZE.0, value("12")),
+        // Its focus visual's outer ring in the text's colour
+        // (`FocusStrokeColorOuter`: white on dark, near-black on light);
+        // its inner ring is `focus.ring.inner`'s default.
+        (tok::FOCUS_RING.0, value("{text.primary}")),
     ]
 }

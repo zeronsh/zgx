@@ -434,8 +434,12 @@ tokens too, each the built-in look by default: `menu.radius`
 `menu.item.inset.x` and `.y` (0, how far an item's highlight sits in),
 `menu.item.radius` (0); `popover.radius`, `popover.border` (0) and
 `popover.border.color`; `tooltip.padding.x` (8) and `.y` (4),
+`tooltip.padding.bottom` (`{tooltip.padding.y}`),
 `tooltip.border` (0.5), `tooltip.radius` (`{radius.sm}`) and
-`tooltip.font.size` (`{font.size.xs}`). On macOS, where menus
+`tooltip.font.size` (`{font.size.xs}`). Keyboard focus is an accent ring inside the control (`focus.ring`); on
+Windows, as WinUI's focus visual, a ring 2 wide 1 outside it in `focus.ring`
+(the text's colour there) over a ring 1 wide in `focus.ring.inner` (the
+background at 70%), with `Styled::outline_inner`. On macOS, where menus
 and popovers show in windows of their own over AppKit's material, the system
 sets `menu.bg` and `popover.bg` clear and `menu.hover` to the accent, as an
 app theme setting them overrides.

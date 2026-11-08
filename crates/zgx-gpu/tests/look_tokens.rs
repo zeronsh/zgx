@@ -24,11 +24,28 @@ const SIZE: (f32, f32) = (420., 260.);
 
 /// The three, drawn with `tokens` set as a platform's.
 fn drawn(tokens: Vec<(zgx::theme::TokenId, TokenInput)>) -> Vec<u8> {
+    drawn_with(tokens, None)
+}
+
+/// `drawn`, in the app's theme `app` (named "app") if any, over the
+/// system's tokens.
+fn drawn_with(
+    tokens: Vec<(zgx::theme::TokenId, TokenInput)>,
+    app: Option<&zgx::theme::Theme>,
+) -> Vec<u8> {
+    let set = |ui: &Ui, tokens: Vec<(zgx::theme::TokenId, TokenInput)>| {
+        let themes = Themes::of(&ui.runtime);
+        themes.set_system_tokens(tokens);
+        if let Some(app) = app {
+            themes.register(app.clone());
+            themes.set("app").unwrap();
+        }
+    };
     let first = tokens.clone();
     let mut gpu = GpuRenderer::new(SIZE.0 as u32, SIZE.1 as u32).unwrap();
     let mut ui = Ui::new(SIZE.0, SIZE.1);
     gpu.install_text(&mut ui.scene.borrow_mut());
-    Themes::of(&ui.runtime).set_system_tokens(first);
+    set(&ui, first);
     let open = ui.signal(false);
     let view = ui.mount(
         column()
@@ -77,7 +94,7 @@ fn drawn(tokens: Vec<(zgx::theme::TokenId, TokenInput)>) -> Vec<u8> {
     // The tooltip in a window of its own: an open menu takes the pointer.
     let mut ui = Ui::new(SIZE.0, SIZE.1);
     gpu.install_text(&mut ui.scene.borrow_mut());
-    Themes::of(&ui.runtime).set_system_tokens(tokens);
+    set(&ui, tokens);
     let view = ui.mount(
         column()
             .size(SIZE.0, SIZE.1)
@@ -130,6 +147,7 @@ fn menus_popovers_and_tooltips_default_to_the_built_in_look() {
         (tok::POPOVER_BORDER.0, number("0")),
         (tok::TOOLTIP_PADDING_X.0, number("8")),
         (tok::TOOLTIP_PADDING_Y.0, number("4")),
+        (tok::TOOLTIP_PADDING_BOTTOM.0, number("4")),
         (tok::TOOLTIP_BORDER.0, number("0.5")),
         (tok::TOOLTIP_RADIUS.0, number("{radius.sm}")),
         (tok::TOOLTIP_FONT_SIZE.0, number("{font.size.xs}")),
@@ -148,6 +166,7 @@ fn menus_popovers_and_tooltips_default_to_the_built_in_look() {
         (tok::POPOVER_RADIUS.0, "8"),
         (tok::POPOVER_BORDER.0, "1"),
         (tok::TOOLTIP_PADDING_X.0, "9"),
+        (tok::TOOLTIP_PADDING_BOTTOM.0, "8"),
         (tok::TOOLTIP_FONT_SIZE.0, "12"),
     ] {
         assert!(
@@ -166,4 +185,37 @@ fn windows_look_reshapes_menus_popovers_and_tooltips() {
     assert!(windows != alone, "Windows' look changes nothing");
     // Drawn again, the same: its tokens are the frame's alone.
     assert!(drawn(zgx::theme::windows_look()) == windows);
+}
+
+#[test]
+fn an_apps_theme_overrides_the_systems_look() {
+    let _gpu = gpu_fixture();
+    // An app theme setting every shape the system's look sets, to the
+    // built-in values: the built-in look, whatever the system says.
+    let mut app = zgx::theme::Theme::new("app", zgx::theme::ThemeKind::Dark).extending("zgx-dark");
+    for (token, value) in [
+        (tok::MENU_RADIUS.0, "{radius.md}"),
+        (tok::MENU_PADDING_X.0, "16"),
+        (tok::MENU_PADDING_Y.0, "16"),
+        (tok::MENU_ITEM_PADDING_X.0, "12"),
+        (tok::MENU_ITEM_PADDING_Y.0, "8"),
+        (tok::MENU_ITEM_INSET_X.0, "0"),
+        (tok::MENU_ITEM_INSET_Y.0, "0"),
+        (tok::MENU_ITEM_RADIUS.0, "0"),
+        (tok::POPOVER_RADIUS.0, "{radius.md}"),
+        (tok::TOOLTIP_PADDING_X.0, "8"),
+        (tok::TOOLTIP_PADDING_Y.0, "4"),
+        (tok::TOOLTIP_PADDING_BOTTOM.0, "4"),
+        (tok::TOOLTIP_FONT_SIZE.0, "{font.size.xs}"),
+        (tok::FOCUS_RING.0, "{accent}"),
+    ] {
+        app = app.with(token, number(value));
+    }
+    let built_in = drawn_with(Vec::new(), Some(&app));
+    let over_windows = drawn_with(zgx::theme::windows_look(), Some(&app));
+    assert!(
+        over_windows == built_in,
+        "the app's theme wins over the system's tokens"
+    );
+    assert!(drawn(zgx::theme::windows_look()) != built_in);
 }

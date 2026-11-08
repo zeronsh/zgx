@@ -189,6 +189,7 @@ export type ColorToken =
 	| "$popover.bg"
 	| "$menu.border.color"
 	| "$popover.border.color"
+	| "$focus.ring.inner"
 	| "$backdrop"
 	| "$selection.inactive"
 	| "$selection.text"
@@ -274,6 +275,7 @@ export type NumberToken =
 	| "$popover.border"
 	| "$tooltip.padding.x"
 	| "$tooltip.padding.y"
+	| "$tooltip.padding.bottom"
 	| "$tooltip.border"
 	| "$tooltip.radius"
 	| "$tooltip.font.size"
@@ -381,9 +383,11 @@ export type TokenName =
 	| "popover.border.color"
 	| "tooltip.padding.x"
 	| "tooltip.padding.y"
+	| "tooltip.padding.bottom"
 	| "tooltip.border"
 	| "tooltip.radius"
 	| "tooltip.font.size"
+	| "focus.ring.inner"
 	| "backdrop"
 	| "selection.inactive"
 	| "selection.text"
@@ -479,7 +483,10 @@ export type Tokens = {
 		match: string,
 	},
 	focus: {
-		ring: string,
+		ring: {
+			inner: string,
+			value: string,
+		},
 	},
 	font: {
 		line: {
@@ -622,6 +629,7 @@ export type Tokens = {
 			size: string,
 		},
 		padding: {
+			bottom: string,
 			x: string,
 			y: string,
 		},

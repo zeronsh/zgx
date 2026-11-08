@@ -242,3 +242,30 @@ fn outlines_and_shadows_past_a_clip_repaint_through_layers() {
         render(&mut gpu, &mut scene);
     }
 }
+
+#[test]
+fn an_inner_ring_draws_between_the_box_and_its_outline() {
+    let _gpu = gpu_fixture();
+    let mut gpu = GpuRenderer::new(SIZE, SIZE).unwrap();
+    let mut scene = Scene::new(SIZE as f32, SIZE as f32);
+    // As Windows draws focus: 2 wide, 1 outside, a ring of 1 in the gap.
+    let id = outlined(&mut scene, 8., 2., 1.);
+    let render = |gpu: &mut GpuRenderer, scene: &mut Scene| {
+        let frame = scene.flush();
+        gpu.render(scene, &frame.damage).unwrap();
+        gpu.readback().unwrap()
+    };
+    let single = render(&mut gpu, &mut scene);
+    // The gap left by the offset is clear; the ring white past it.
+    assert_eq!(pixel(&single, 100, 49), CLEAR);
+    assert_eq!(pixel(&single, 100, 47), WHITE);
+    scene.set_outline_inner(id, Some((1., Color(0, 0, 255, 255))));
+    assert_eq!(scene.outline_inner(id), Some((1., Color(0, 0, 255, 255))));
+    let double = render(&mut gpu, &mut scene);
+    assert_eq!(pixel(&double, 100, 49), [0, 0, 255, 255], "the inner ring");
+    assert_eq!(pixel(&double, 100, 47), WHITE, "the outline, as it was");
+    assert_eq!(pixel(&double, 100, 51), DARK, "the box, as it was");
+    // Taken away, the frame is the single ring's again.
+    scene.set_outline_inner(id, None);
+    assert!(render(&mut gpu, &mut scene) == single);
+}

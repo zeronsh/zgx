@@ -2018,8 +2018,14 @@ pub fn overlay() -> View {
 /// A control's default focus ring: an accent border. Where the control has
 /// no border of its own it paints over the control (an inset stroke, taking
 /// no layout room), so focusing never moves its content; otherwise it
-/// colours the control's own border. (Made when first focused.)
+/// colours the control's own border. On Windows, a ring outside it as
+/// WinUI draws one, taking no room either. (Made when first focused.)
 fn focus_ring(styles: &Styles) -> fn() -> Styles {
+    // Windows draws keyboard focus outside the control, bordered or not, as
+    // WinUI's focus visual does (`focus_outside`).
+    if cfg!(windows) {
+        return || widget_style(|w| &w.focus_outside);
+    }
     match bordered(styles) {
         true => || widget_style(|w| &w.focus_recolor),
         false => || widget_style(|w| &w.focus_ring),
@@ -4296,6 +4302,11 @@ struct WidgetStyles {
     /// so focusing moves nothing; with one, its border recoloured.
     focus_ring: Styles,
     focus_recolor: Styles,
+    /// Windows' focus (WinUI's focus visual): a ring 2 wide, 1 outside
+    /// the control, and a contrasting one in that gap (its secondary, 1
+    /// wide), its corners the control's grown by 3.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    focus_outside: Styles,
     menu_focus_recolor: Styles,
     menu_item: Styles,
     menu_hover: Styles,
@@ -4316,6 +4327,11 @@ impl WidgetStyles {
                 .border_color(tok::FOCUS_RING)
                 .border_over(true),
             focus_recolor: Styles::new().border_color(tok::FOCUS_RING),
+            focus_outside: Styles::new()
+                .outline_width(2.)
+                .outline_color(tok::FOCUS_RING)
+                .outline_offset(1.)
+                .outline_inner(1., tok::FOCUS_RING_INNER),
             menu_focus_recolor: Styles::new()
                 .bg(tok::MENU_HOVER)
                 .border_color(tok::FOCUS_RING),
