@@ -11383,7 +11383,13 @@ impl Scene {
         if changed || arrange_dirty {
             report.layout_nodes += 1;
         }
-        let damage = changed && !covered;
+        // Grown or shrunk where it stands, painting nothing of its own (a
+        // streamed reply's column, every chunk): its subtree paints as it
+        // did but where its children move, and each child whose box changes
+        // damages itself, so its subtree is neither damaged nor covered.
+        let resized = changed && !childless && self.resized_in_place(node, bounds);
+        let changed_paint = changed && !resized;
+        let damage = changed_paint && !covered;
         // A leaf, nothing transformed or filtered: what it painted is damaged
         // with what it will paint, once it is placed (see `leaf_damage`).
         let leaf = damage && childless && self.transformed + self.filtered.get() == 0;
@@ -11444,11 +11450,11 @@ impl Scene {
             // would outline what it inlines (`add_moved_leaf_damage`).
             if CELLS && self.children_raw(self.tree_node(child)).is_empty() {
                 let (x, y) = (x + rect.x, y + rect.y);
-                self.place_leaf(child, x, y, report, covered || changed, &mut children);
+                self.place_leaf(child, x, y, report, covered || changed_paint, &mut children);
                 continue;
             }
             crate::deep(level + 1, || {
-                let covered = covered || changed;
+                let covered = covered || changed_paint;
                 let (x, y) = (x + rect.x, y + rect.y);
                 self.arrange::<CELLS>(child, x, y, report, covered, level + 1, &mut children)
             });
@@ -11459,6 +11465,23 @@ impl Scene {
         let node = self.tree_node_mut(id);
         node.dirty &= !LAYOUT;
         node.arrange_dirty = false;
+    }
+    /// Whether `node`, laid out at `bounds` where its box was elsewhere,
+    /// only grew or shrank in place, and nothing it paints itself depends
+    /// on its size: a plain container (no backdrop blur), its corner where
+    /// it was, clipping and fading nothing, outside every layer. Then only
+    /// its children's own changes change what its subtree paints.
+    #[inline(always)]
+    fn resized_in_place(&self, node: &Node, bounds: Rect) -> bool {
+        node.bounds.x == bounds.x
+            && node.bounds.y == bounds.y
+            && matches!(node.kind, NodeKind::Container(_))
+            && node.effects.blur_radius <= 0.
+            && clip_axes(&node.style) == (false, false)
+            && !fades(&node.style)
+            && !node.style.fade_overflow
+            && !node.layered
+            && self.transformed + self.filtered.get() == 0
     }
     /// `arrange::<true>` for a leaf: placed, its damage added, with no
     /// children to walk. The same work in the same order.
@@ -13404,6 +13427,36 @@ impl<'a> Iterator for PaintIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A block appended to a column that grows where it stands (a streamed
+    /// reply's, inside another) damages its own box alone: neither column
+    /// paints anything of its own, and no other block moves.
+    #[test]
+    fn an_append_to_a_growing_column_damages_only_what_it_adds() {
+        let mut scene = Scene::new(400., 1000.);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        let outer = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        let column = scene.append(outer, NodeKind::Container(Layout::Column), Style::default());
+        let block = |scene: &mut Scene, n: u8| {
+            scene.append(
+                column,
+                NodeKind::Rect(Color(n, 40, 80, 255)),
+                Style {
+                    width: Some(200.),
+                    height: Some(20.),
+                    ..Style::default()
+                },
+            )
+        };
+        for n in 0..30 {
+            block(&mut scene, n);
+        }
+        scene.flush();
+        let added = block(&mut scene, 30);
+        let damage = scene.flush().damage;
+        assert_eq!(scene.bounds(added), Rect::new(0., 600., 200., 20.));
+        assert_eq!(damage, [Rect::new(0., 600., 200., 20.)]);
+    }
     /// A move under the parent the last move was under takes that parent's
     /// context as kept (`move_context`): the damage of every frame is, to
     /// the bit, what working each move's context out again gives, as rows
