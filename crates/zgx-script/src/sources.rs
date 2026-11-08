@@ -108,10 +108,11 @@ pub(crate) fn compiled(code: &[u8]) -> (Rc<Compiled>, bool) {
 /// Packages' modules compiled (`ScriptHost::package`), shared by every host
 /// on every thread: a package's files are the same for each host that
 /// requires them (a video's stages one after another, render workers, a
-/// player building its stage again), so each compiles once. Each host holds
-/// what its last load required; [`release_unused_packages`], run as a host
-/// goes idle, drops those no host holds, so a process at rest keeps nothing
-/// it doesn't use, released at that point and never as a collector runs.
+/// player building its stage again), so each compiles once until a host goes
+/// idle: [`release_packages`], run then, drops them all. No host holds them
+/// (its VM keeps what it loaded), so a process at rest keeps none, released
+/// at that point and never as a collector runs. A hot-reloading host keeps
+/// its own by path, in its [`Sources`].
 static PACKAGES: std::sync::Mutex<Vec<std::sync::Arc<Compiled>>> =
     std::sync::Mutex::new(Vec::new());
 
@@ -124,7 +125,7 @@ fn packages() -> std::sync::MutexGuard<'static, Vec<std::sync::Arc<Compiled>>> {
 /// A package module's `code` compiled: the entry another host compiled from
 /// the same bytes, what was compiled ahead, or compiled now (outside the
 /// lock: another thread's requires don't wait for it). The second value is
-/// whether it was compiled now. Hold the `Arc` while the host uses it.
+/// whether it was compiled now.
 pub(crate) fn package_compiled(code: &[u8]) -> (std::sync::Arc<Compiled>, bool) {
     let found =
         |entries: &[std::sync::Arc<Compiled>]| entries.iter().find(|entry| entry.is(code)).cloned();
@@ -161,12 +162,11 @@ pub(crate) fn package_compiled(code: &[u8]) -> (std::sync::Arc<Compiled>, bool) 
     (entry, now)
 }
 
-/// Drops the packages' modules no host holds; how many it dropped.
-pub(crate) fn release_unused_packages() -> usize {
-    let mut entries = packages();
-    let before = entries.len();
-    entries.retain(|entry| std::sync::Arc::strong_count(entry) > 1);
-    before - entries.len()
+/// Drops every package module compiled (a host went idle).
+pub(crate) fn release_packages() {
+    // Taken out under the lock, dropped outside it.
+    let entries = std::mem::take(&mut *packages());
+    drop(entries);
 }
 
 /// How many packages' modules are compiled and kept (for tests).

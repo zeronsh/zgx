@@ -1354,24 +1354,27 @@ fn require_module<const LENDING: bool>(
     let lent = LENDING
         && matches!(files, Files::Disk)
         && packages.iter().any(|(_, dir)| within(dir, &path));
-    // A package's module, the app's: compiled once for every host while
-    // its bytes stay the same, held while this host uses it.
+    // A package's module, the app's: compiled once for every host until
+    // the next idle trim. A hot-reloading host keeps its own by path (its
+    // `sources`), as for its other files: a trim between edits would
+    // otherwise compile them again at each reload.
     let in_package = !LENDING
         && matches!(files, Files::Disk)
         && packages.iter().any(|(_, dir)| path.starts_with(dir));
-    let package = in_package.then(|| host.upgrade()).flatten().map(|h| {
-        let (entry, now) = sources::package_compiled(&code);
-        let count = if now {
-            &h.package_compiles
-        } else {
-            &h.package_hits
-        };
-        count.set(count.get() + 1);
-        h.package_compiled
-            .borrow_mut()
-            .insert(path.clone(), entry.clone());
-        entry
-    });
+    let package = in_package
+        .then(|| host.upgrade())
+        .flatten()
+        .filter(|h| !h.sources.hot())
+        .map(|h| {
+            let (entry, now) = sources::package_compiled(&code);
+            let count = if now {
+                &h.package_compiles
+            } else {
+                &h.package_hits
+            };
+            count.set(count.get() + 1);
+            entry
+        });
     let compiled = match files {
         _ if package.is_some() => None,
         Files::Disk if lent => host.upgrade().map(|h| {
@@ -1491,8 +1494,8 @@ pub fn compile_ahead(script: &std::path::Path, packages: &[(&str, &std::path::Pa
 /// What [`compile_ahead`] did: its latest session's files compiled, whether
 /// its worker is done, whether the session is still open (no load has ended
 /// since), `require`s that found their file compiled ahead (all sessions),
-/// How many packages' modules are kept compiled for hosts to share (held by
-/// a live host, or not yet released at an idle trim). For tests.
+/// How many packages' modules are kept compiled for hosts to share, until
+/// the next idle trim. For tests.
 #[doc(hidden)]
 pub fn packages_kept() -> usize {
     sources::packages_kept()
@@ -1693,11 +1696,8 @@ struct Inner {
     lent_compiled: RefCell<HashMap<PathBuf, Rc<sources::Compiled>>>,
     /// How many lent modules were compiled (not found compiled).
     lent_compiles: Cell<u64>,
-    /// The packages' modules its last load required, compiled once for
-    /// every host (`sources::package_compiled`): held, so kept while it
-    /// lives, by path.
-    package_compiled: RefCell<HashMap<PathBuf, std::sync::Arc<sources::Compiled>>>,
-    /// Packages' modules it compiled, and found compiled by another host.
+    /// Packages' modules it compiled, and found compiled by another host
+    /// (`sources::package_compiled`).
     package_compiles: Cell<u64>,
     package_hits: Cell<u64>,
     /// The scripts' bytecode by what their files held, once the host
@@ -1888,7 +1888,6 @@ impl ScriptHost {
             lent: RefCell::default(),
             lent_compiled: RefCell::default(),
             lent_compiles: Cell::new(0),
-            package_compiled: RefCell::default(),
             package_compiles: Cell::new(0),
             package_hits: Cell::new(0),
             sources: sources::Sources::default(),
@@ -3256,10 +3255,6 @@ impl ScriptHost {
                         .lent_compiled
                         .borrow_mut()
                         .retain(|path, _| required.contains(path));
-                    self.0
-                        .package_compiled
-                        .borrow_mut()
-                        .retain(|path, _| required.contains(path));
                 }
                 let mut problems = self
                     .0
@@ -4512,8 +4507,8 @@ fn trim_idle(inner: &Inner) {
     collect_garbage(inner);
     mlua::release_free_pages();
     inner.assets.trim();
-    // Packages' modules no host holds now (every host's, process-wide).
-    sources::release_unused_packages();
+    // Packages' compiled modules, every host's: the next host compiles them.
+    sources::release_packages();
 }
 
 #[cfg(test)]

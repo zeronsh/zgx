@@ -1,8 +1,8 @@
 //! A package's modules compile once for every host that requires them
 //! (`ScriptHost::package`): a host made after another, or beside it, loads
-//! the bytecode. An entry stays while a host holds it, and one no host
-//! holds is released as a host goes idle (`zgx::idle::trim`), not before.
-//! Its own process: what is kept is the process's.
+//! the bytecode. No host holds it: the table keeps it until a host goes
+//! idle (`zgx::idle::trim`), which releases it all. A hot-reloading host
+//! keeps its own. Its own process: what is kept is the process's.
 use std::path::PathBuf;
 use zgx::reactive::Runtime;
 use zgx_script::ScriptHost;
@@ -34,7 +34,7 @@ fn host(runtime: &Runtime, app: &PathBuf, kit: &PathBuf) -> ScriptHost {
 }
 
 #[test]
-fn a_packages_modules_compile_once_for_every_host_and_go_at_rest() {
+fn a_packages_modules_compile_once_for_every_host_until_a_trim() {
     let (app, kit) = files();
     let runtime = Runtime::new();
     // The first host compiles the package's two modules; one beside it
@@ -44,30 +44,32 @@ fn a_packages_modules_compile_once_for_every_host_and_go_at_rest() {
     assert_eq!(zgx_script::packages_kept(), 2);
     let beside = host(&runtime, &app, &kit);
     assert_eq!(beside.package_compiles(), (0, 2));
-    // Held by a live host, an idle trim keeps them.
-    drop(first);
-    zgx::idle::trim(&runtime);
-    assert_eq!(zgx_script::packages_kept(), 2, "released while held");
-    // No host holds them: kept until a host goes idle, so a host made
-    // right after (a video's next stage) still finds them.
-    drop(beside);
-    assert_eq!(zgx_script::packages_kept(), 2, "released before a trim");
+    // Gone with no trim between: a host made right after (a video's next
+    // stage) still finds them.
+    drop((first, beside));
     let next = host(&runtime, &app, &kit);
     assert_eq!(next.package_compiles(), (0, 2));
-    // At rest with no host holding them, the trim releases them, and a
-    // host after compiles them again.
-    drop(next);
-    let idle = ScriptHost::inline(&runtime, "app", "return ui.text { \"idle\" }");
-    idle.reload().unwrap();
+    // A host going idle releases them all, a live host's included: it
+    // holds none (its VM keeps what it loaded, and still runs).
     zgx::idle::trim(&runtime);
     assert_eq!(zgx_script::packages_kept(), 0, "kept at rest");
-    let after = host(&runtime, &app, &kit);
-    assert_eq!(after.package_compiles(), (2, 0));
-    // A module whose bytes changed compiles anew; the old entry goes once
-    // no host holds it.
+    assert!(next.reload().is_ok(), "a live host loads again");
+    assert_eq!(
+        next.package_compiles(),
+        (2, 2),
+        "compiled again after a trim"
+    );
+    // A module whose bytes changed compiles anew.
     std::fs::write(kit.join("theme.luau"), "return { accent = \"?\" }").unwrap();
-    after.reload().unwrap();
-    assert_eq!(after.package_compiles(), (3, 1));
+    next.reload().unwrap();
+    assert_eq!(next.package_compiles(), (3, 3));
     zgx::idle::trim(&runtime);
-    assert_eq!(zgx_script::packages_kept(), 2, "the old theme stayed");
+    assert_eq!(zgx_script::packages_kept(), 0);
+    // A hot-reloading host keeps its packages' modules itself, by path, as
+    // its other files: none in the table, so a trim between edits doesn't
+    // make each reload compile them again.
+    let hot = ScriptHost::new(&runtime, &app).package("kit", &kit);
+    assert!(hot.reload_if_changed(), "loaded, hot-reloading");
+    assert_eq!(hot.package_compiles(), (0, 0));
+    assert_eq!(zgx_script::packages_kept(), 0);
 }
