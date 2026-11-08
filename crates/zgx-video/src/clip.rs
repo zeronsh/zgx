@@ -110,7 +110,8 @@ impl Decoder {
         // the file's times (from its start), takes for each composition
         // frame the last file frame at or before it (`round=up`), and
         // leaves out what comes before frame `frame` (half a frame early,
-        // whatever the printed time rounds to).
+        // whatever the printed time rounds to) by its time: `select`, as
+        // `trim` keeps a frame that only ends past where it starts.
         let early = (at - 1.).max(0.);
         let first = (frame as f64 - 0.5).max(0.) / self.fps;
         let child = Command::new(ffmpeg)
@@ -120,7 +121,7 @@ impl Decoder {
             .arg(&self.clip.src)
             .args(["-an", "-vf"])
             .arg(format!(
-                "fps={}:round=up,trim=start={first:.6},scale={width}:{height}:flags=lanczos,format=rgba",
+                "fps={}:round=up,select='gte(t,{first:.6})',scale={width}:{height}:flags=lanczos,format=rgba",
                 self.fps
             ))
             .args(["-f", "rawvideo", "-"])
@@ -174,4 +175,61 @@ pub(crate) fn has_audio(src: &Path) -> bool {
         .arg(src)
         .output()
         .is_ok_and(|out| !out.stdout.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A 7 fps file of 30 frames (4.3 s), each its own grey: frame `k` is
+    /// 8 + 8k. None without ffmpeg (and libx264rgb).
+    fn greys(dir: &Path) -> Option<PathBuf> {
+        let ffmpeg = crate::encode::ffmpeg()?;
+        let path = dir.join("greys.mp4");
+        let mut child = Command::new(ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo"])
+            .args(["-pix_fmt", "rgb24", "-s", "16x16", "-r", "7", "-i", "-"])
+            .args(["-c:v", "libx264rgb", "-qp", "0"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .ok()?;
+        let stdin = child.stdin.as_mut()?;
+        for k in 0..30u8 {
+            stdin.write_all(&[8 + 8 * k; 3].repeat(16 * 16)).ok()?;
+        }
+        drop(child.stdin.take());
+        child.wait().ok()?.success().then_some(path)
+    }
+
+    #[test]
+    fn a_decoder_started_between_the_files_frames_gives_the_one_on_screen_then() {
+        let dir = std::env::temp_dir().join(format!("zgx-clip-seek-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let Some(src) = greys(&dir) else {
+            eprintln!("no ffmpeg with libx264rgb here: skipped");
+            return;
+        };
+        // Each a decoder of its own, asked first for frame n of a 30 fps
+        // video: n / 30 s in, past a second so it seeks a second early, and
+        // between two of the file's frames. On screen then: the last of its
+        // frames to start at or before it, 7n / 30 rounded down.
+        for n in [34u64, 40, 47, 61, 64, 90, 121] {
+            let clip = Clip {
+                id: "greys".into(),
+                src: src.clone(),
+                from: 0.,
+                duration: None,
+                trim: 0.,
+                size: (16, 16),
+                looped: false,
+            };
+            let mut decoder = Decoder::new(clip, 30.);
+            let pixels = decoder.frame(n).unwrap();
+            let shown = (i32::from(pixels[0]) - 8 + 4).div_euclid(8);
+            assert_eq!(shown, (7 * n / 30) as i32, "started at frame {n}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
