@@ -81,6 +81,46 @@ spacer, and the cursor goes past both (in insert mode the row after it
 shifts a cell first, as `input` shifts it); on the last column it starts
 the next line as a wide character does. Programs counting with `wcwidth`
 (readline) see one column, as in those terminals, so an edit across such an
-emoji puts their cursor a cell off. Mode 2027 (grapheme clustering) isn't
-recognized. zgx-terminal's `an_emoji_asked_for_with_vs16_takes_two_cells`
+emoji puts their cursor a cell off (0.26.3 lets them reset grapheme
+clustering, below, for one column). zgx-terminal's `an_emoji_asked_for_with_vs16_takes_two_cells`
 checks the cells, the line's end and the cases left alone. Version 0.26.2.
+
+## Grapheme clustering, DEC mode 2027
+
+As Ghostty has it (`Terminal.print`, `unicode/grapheme.zig`), on by
+default, set and reset with `CSI ? 2027 h` and `l`, answered by DECRQM
+(`CSI ? 2027 ; 1 $ y` set, `2` reset) and on again after a full reset. In
+the mode a character above U+00FF continuing the grapheme cluster before
+the cursor (UAX #29, `unicode-segmentation`) joins that cell: an emoji ZWJ
+sequence, a flag or a skin-toned emoji is one character in two cells (they
+took six, two and four). The cluster's width is its first character's,
+made two by VS16 after a character with both presentations
+(emoji-variation-sequences.txt) or by any character that has width inside
+a cluster (a spacing mark, a conjunct consonant, the second regional
+indicator), and one by VS15; a regional indicator alone takes two. A
+variation selector after something without both presentations, or a
+zero-width character continuing nothing, is dropped. Reset, each character
+takes its own width (zero-width ones joined to the cell before), as
+`wcwidth` counts and a line editor such as readline expects: its cursor
+then keeps in step across ❤️, where with the mode set it is a cell off.
+
+Ordinary text pays nothing for it: printable ASCII is told before the
+width lookup, and anything else above U+00FF reaches `grapheme_input`
+(cold, out of line) only if it is zero-width or may continue a cluster
+(`grapheme::may_continue`: most text, Latin to Arabic, CJK, kana, Hangul and
+fullwidth forms, is out after a compare or two; a table made from
+`unicode-segmentation` takes the rest, and
+`the_continuing_table_is_what_segmentation_says` checks it against every
+character). Hangul syllables continuing a leading jamo (old Hangul written
+in parts), four pictographs in the CJK blocks after a ZWJ, and a character
+after a Prepend aren't joined. The fork's `grapheme_tests` check the mode
+and its answers, ZWJ sequences, flags, skin tones, both selectors,
+combining and spacing marks, conjuncts and the last column; zgx-terminal's
+`grapheme_clusters_take_one_cell_or_two_until_mode_2027_is_reset` prints
+them through a pty, and
+`a_readline_edit_across_an_emoji_keeps_its_cursor_with_mode_2027_reset`
+edits across ❤️ in bash. A cell's joined characters (`CellExtra`'s
+`zerowidth`) are kept inline for up to four (`SmallVec`), so a cluster, or
+a selector or ZWJ joined with the mode reset, costs one allocation rather
+than two. Version 0.26.3, depending on `unicode-segmentation` and
+`smallvec`.
