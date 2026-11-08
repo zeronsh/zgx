@@ -80,7 +80,7 @@ float firm(
     float a,
     float k
 ) {
-    return a + (((k * 0.67) * a) * (1.0 - a));
+    return a + ((((k * 0.67) * a) * (1.0 - a)) * metal::smoothstep(0.35, 0.7, a));
 }
 
 float rounded(

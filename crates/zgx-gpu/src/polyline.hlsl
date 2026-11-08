@@ -155,7 +155,7 @@ float firmness(float options_y, float3 text)
 
 float firm(float a, float k)
 {
-    return (a + (((k * 0.67) * a) * (1.0 - a)));
+    return (a + ((((k * 0.67) * a) * (1.0 - a)) * smoothstep(0.35, 0.7, a)));
 }
 
 float rounded(float4 b, float4 r, float feather, float2 p)
