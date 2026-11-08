@@ -7931,6 +7931,11 @@ impl NodeHandle {
             .contains(self.node)
             .then(|| ui.observe_visibility(self.node))
     }
+    /// Whether its window shows (not hidden, minimized or covered), as it
+    /// changes (`Ui::observe_shown`).
+    pub fn observe_shown(&self) -> Option<Signal<bool>> {
+        self.ui.upgrade().map(|ui| ui.observe_shown())
+    }
     /// Sweep the node's mask (`Styled::mask`) from where its style puts it
     /// by `by`, over and over every `period`, at `max_rate` steps a second
     /// at most (a text shimmer's bright band). The scene moves the mask

@@ -189,7 +189,7 @@ On an Apple M-series Mac shared with other work, the showcase with 4-sample moti
 
 ## A player in any app
 
-`zgx_video::Player` plays a composition live inside any zgx app, as the studio's preview does. Its frames are made on a thread of its own, on that thread's virtual clock, through the code a render uses. While it's neither playing nor asked for a frame, that thread waits and does no work.
+`zgx_video::Player` plays a composition live inside any zgx app, as the studio's preview does. Its frames are made on a thread of its own, on that thread's virtual clock, through the code a render uses. While it's neither playing nor asked for a frame, that thread waits and does no work. While what it shows is unseen it draws nothing either, playing or not: its clock runs on, and seen again it draws the frame due then (a looping one, as far into its pass as time says). `Player::view` tells it so itself, from whether any of its box shows and its window shows; a script's player is told with `ui.invoke("clip.watch", seen)`.
 
 ```rust
 let player = zgx_video::Player::new(&cx.ui.runtime, "videos/intro".as_ref(), 1.)?;
@@ -198,7 +198,7 @@ player.play(true);
 cx.render(div().size(640., 360.).child(player.view().size(640., 360.)));
 ```
 
-`open(id, props, frame)`, `seek`, `play`, `looping` and `reload` drive it. `frame`, `playing`, `composition`, `tracks`, `error` and `image` are its state, as signals. For a Luau app, `player.expose(&host, "clip")` gives the script `ui.image { src = "host:clip" }` to show it, `ui.call("clip.listen")` to follow it, `ui.invoke("clip.open" | "clip.seek" | "clip.play" | "clip.loop", …)` to drive it, and `ui.shared("clip")` for its frame, whether it plays, its composition and its error.
+`open(id, props, frame)`, `seek`, `play`, `looping`, `watch` and `reload` drive it. `frame`, `playing`, `composition`, `tracks`, `error` and `image` are its state, as signals. For a Luau app, `player.expose(&host, "clip")` gives the script `ui.image { src = "host:clip" }` to show it, `ui.call("clip.listen")` to follow it, `ui.invoke("clip.open" | "clip.seek" | "clip.play" | "clip.loop" | "clip.watch", …)` to drive it, and `ui.shared("clip")` for its frame, whether it plays, its composition and its error.
 
 ```lua
 -- The script side of a host that called `player.expose(&host, "clip")`.
@@ -209,7 +209,16 @@ ui.on_mount(function()
 	ui.invoke("clip.play", true)
 end)
 return ui.column {
-	ui.image { src = "host:clip", w = 640, h = 360, fit = "contain" },
+	-- Scrolled away, it draws nothing until it shows again.
+	ui.image {
+		src = "host:clip",
+		w = 640,
+		h = 360,
+		fit = "contain",
+		on_visible = function(seen)
+			ui.invoke("clip.watch", seen)
+		end,
+	},
 	ui.text { function() return `frame {clip:get().frame or 0}` end },
 }
 ```

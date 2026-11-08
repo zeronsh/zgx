@@ -254,3 +254,171 @@ fn a_players_translucent_picture_shows_over_what_is_behind_it_as_drawn() {
         "{r} {g} {b}"
     );
 }
+
+/// Each frame a different bar, so a picture tells its frame.
+const RUN: &str = r##"
+local video = require("@video")
+return video.compositions { video.composition {
+    id = "Run", w = 100, h = 50, fps = 30, duration = DURATION,
+    render = function()
+        local f = video.frame()
+        return ui.div { w_full = true, h_full = true, bg = "#000000",
+            ui.div { h = 50, w = function() return f:get() % 100 end, bg = "#00ff00" } }
+    end,
+} }
+"##;
+
+/// A player shown in a 200 by 100 stage (`placed` puts its box), stepped
+/// until `done` says so.
+struct Shown {
+    stage: Stage,
+    player: std::rc::Rc<Player>,
+}
+fn shown(dir: &std::path::Path, placed: impl Fn(View) -> View) -> Shown {
+    let mut held = None;
+    let path = dir.to_path_buf();
+    let stage = Stage::new(
+        StageOptions {
+            width: 200.,
+            height: 100.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            let view = div()
+                .w(200.)
+                .h(100.)
+                .overflow_hidden()
+                .child(placed(player.view().w(100.).h(50.)));
+            held = Some(player);
+            Ok(view)
+        },
+    )
+    .unwrap();
+    Shown {
+        stage,
+        player: held.unwrap(),
+    }
+}
+impl Shown {
+    fn frame(&self) -> Option<u64> {
+        self.player
+            .image
+            .with_untracked(Option::is_some)
+            .then(|| self.player.frame.with_untracked(|f| *f))
+    }
+    fn until(&mut self, what: impl Fn(Option<u64>) -> bool) -> Option<u64> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            self.stage.step().unwrap();
+            if what(self.frame()) {
+                return self.frame();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "it never came: {:?}",
+                self.frame()
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    /// Steps for `time`, returning the frames seen meanwhile.
+    fn watch_for(&mut self, time: Duration) -> Vec<Option<u64>> {
+        let until = Instant::now() + time;
+        let mut seen = Vec::new();
+        while Instant::now() < until {
+            self.stage.step().unwrap();
+            seen.push(self.frame());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        seen
+    }
+    fn pixels(&self) -> Vec<u8> {
+        self.player
+            .image
+            .with_untracked(|image| image.as_ref().unwrap().pixels().to_vec())
+    }
+}
+
+#[test]
+fn an_unseen_player_draws_nothing_and_seen_again_shows_the_frame_due_then() {
+    let dir = temp_dir("player-unseen");
+    std::fs::write(dir.join("video.luau"), RUN.replace("DURATION", "900")).unwrap();
+    let mut shown = shown(&dir, |view| view);
+    shown.player.open("Run", json!({}), 0);
+    shown.player.play(true);
+    shown.until(|frame| frame.is_some_and(|f| f >= 10));
+    shown.player.watch(false);
+    let hidden = Instant::now();
+    // A frame on its way as it was told may still come; then none.
+    shown.watch_for(Duration::from_millis(100));
+    let held = shown.frame();
+    let meanwhile = shown.watch_for(Duration::from_millis(600));
+    assert!(
+        meanwhile.iter().all(|f| *f == held),
+        "drew unseen: {meanwhile:?}"
+    );
+    // Seen again: the frame its clock is at, not the one it left.
+    let before = held.unwrap();
+    let seen_at = Instant::now();
+    shown.player.watch(true);
+    let resumed = shown.until(|frame| frame != held).unwrap();
+    let elapsed = |at: Instant| (at - hidden).as_secs_f64() * 30.;
+    let (low, high) = (elapsed(seen_at) - 2., elapsed(Instant::now()) + 2.);
+    let ran = (resumed - before) as f64;
+    assert!(
+        ran >= low && ran <= high + 4.,
+        "resumed at {resumed}, {before} + {ran} (due {low}..{high})"
+    );
+    // And the picture is that frame's, as a player opened there draws it.
+    let resumed_pixels = shown.pixels();
+    drop(shown);
+    let mut fresh = self::shown(&dir, |view| view);
+    fresh.player.open("Run", json!({}), resumed);
+    fresh.until(|frame| frame == Some(resumed));
+    assert!(
+        fresh.pixels() == resumed_pixels,
+        "frame {resumed} drawn differently"
+    );
+}
+
+#[test]
+fn a_looping_player_unseen_past_its_end_resumes_where_time_has_it() {
+    let dir = temp_dir("player-unseen-loop");
+    // One second a pass.
+    std::fs::write(dir.join("video.luau"), RUN.replace("DURATION", "30")).unwrap();
+    let mut shown = shown(&dir, |view| view);
+    shown.player.open("Run", json!({}), 0);
+    shown.player.looping(true);
+    shown.player.play(true);
+    let before = shown.until(|frame| frame.is_some_and(|f| f >= 3)).unwrap();
+    shown.player.watch(false);
+    let hidden = Instant::now();
+    shown.watch_for(Duration::from_millis(1500));
+    shown.player.watch(true);
+    let seen_at = Instant::now();
+    let held = shown.frame();
+    let resumed = shown.until(|frame| frame != held).unwrap();
+    // Half a pass on from where it was: not back at its start.
+    let due = (before as f64 + (seen_at - hidden).as_secs_f64() * 30.) % 30.;
+    let off = ((resumed as f64 - due + 45.) % 30.) - 15.;
+    assert!(off.abs() <= 4., "resumed at {resumed}, due about {due:.1}");
+}
+
+#[test]
+fn a_player_whose_box_is_clipped_away_draws_nothing() {
+    let dir = temp_dir("player-offscreen");
+    std::fs::write(dir.join("video.luau"), RUN.replace("DURATION", "900")).unwrap();
+    // Its box outside the clip of the stage's box: none of it shows.
+    let mut shown = shown(&dir, |view| view.absolute().left(400.));
+    shown.player.open("Run", json!({}), 40);
+    shown.player.play(true);
+    let meanwhile = shown.watch_for(Duration::from_millis(500));
+    assert!(
+        meanwhile.iter().all(Option::is_none),
+        "drew offscreen: {meanwhile:?}"
+    );
+}
