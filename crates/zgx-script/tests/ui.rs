@@ -1297,9 +1297,10 @@ fn tooltips_show_after_a_rest_and_at_once_after_another() {
             y: b.y + 5.,
         });
     };
+    let (delay, reshow) = tooltip_waits();
     to(&mut h, "b");
     assert!(!visible(&mut h, "bee"), "not at once");
-    wait_ms(&mut h, 350);
+    wait_ms(&mut h, delay + 50);
     // (It fades in over 140 ms.)
     wait_ms(&mut h, 200);
     assert!(visible(&mut h, "bee"), "after a rest");
@@ -1310,6 +1311,8 @@ fn tooltips_show_after_a_rest_and_at_once_after_another() {
         "gone as the pointer leaves (after its fade)"
     );
     to(&mut h, "b");
+    // At once (GTK's: after its short wait), just after another.
+    wait_ms(&mut h, reshow);
     h.frames(1);
     assert!(visible(&mut h, "bee"), "at once just after another");
 }
@@ -1377,6 +1380,18 @@ fn wait_ms(h: &mut Harness, ms: u64) {
         h.settle();
         h.frames(1);
     }
+}
+
+/// The platform's tooltip waits (`TooltipTiming::default`): zgx's 300 ms
+/// and at once just after another; GTK's 500 and 60 on Linux. A reshow that
+/// waits is given a frame's grace past its timer.
+fn tooltip_waits() -> (u64, u64) {
+    let timing = zgx::compose::TooltipTiming::default();
+    let reshow = timing.reshow_delay.as_millis() as u64;
+    (
+        timing.delay.as_millis() as u64,
+        if reshow > 0 { reshow + 50 } else { 0 },
+    )
 }
 
 #[test]
@@ -1706,13 +1721,15 @@ fn one_tooltip_shows_at_a_time() {
         });
         h.frames(1);
     };
+    let (delay, reshow) = tooltip_waits();
     to(&mut h, "a");
-    wait_ms(&mut h, 350);
+    wait_ms(&mut h, delay + 50);
     wait_ms(&mut h, 200);
     assert!(visible(&mut h, "ca"));
-    // Straight to the next: its card opens at once, and the last one goes
-    // (not left showing out its grace).
+    // Straight to the next: its card opens at once (GTK's: after its short
+    // wait), and the last one goes (not left showing out its grace).
     to(&mut h, "b");
+    wait_ms(&mut h, reshow);
     assert!(visible(&mut h, "cb"), "the next opens at once");
     assert!(!visible(&mut h, "ca"), "and the last one closes");
 }

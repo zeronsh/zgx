@@ -278,3 +278,50 @@ fn a_reshow_waits_as_the_systems_timing_says() {
     );
     set_tooltip_timing(TooltipTiming::default());
 }
+
+/// By default (`TooltipTiming::default`) a tooltip waits as its platform's
+/// do: on Linux as GTK's (500 ms; within 500 ms of another closing, 60),
+/// elsewhere zgx's (300 ms; at once within a second): the second of two
+/// reshows after a wait there, at once here.
+#[test]
+fn a_reshow_waits_as_its_platforms_do() {
+    let mut ui = Ui::new(300., 200.);
+    let executor = Rc::new(RefCell::new(LocalExecutor::new()));
+    ui.mount(provide(
+        TaskRunner::from_executor(executor.clone()),
+        column()
+            .p(60.)
+            .gap(20.)
+            .child(div().size(60., 24.).tooltip("First"))
+            .child(div().size(60., 24.).tooltip("Second")),
+    ));
+    ui.prepare_frame();
+    let until = |ui: &mut Ui, ms: u64, done: &dyn Fn(&Ui) -> bool| {
+        let end = std::time::Instant::now() + Duration::from_millis(ms);
+        loop {
+            while executor.borrow_mut().tick() > 0 {}
+            ui.prepare_frame();
+            if done(ui) {
+                return true;
+            }
+            if std::time::Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    hover(&mut ui, 70., 70.);
+    assert!(until(&mut ui, 3000, &|ui| showing(ui, "First")));
+    hover(&mut ui, 70., 110.);
+    // At once (zgx's) shows within a frame; GTK's 60 ms waits a little.
+    let at_once = showing(&ui, "Second");
+    assert_eq!(
+        at_once,
+        !cfg!(target_os = "linux"),
+        "a reshow at once only off Linux"
+    );
+    assert!(
+        until(&mut ui, 2000, &|ui| showing(ui, "Second")),
+        "then shows"
+    );
+}
