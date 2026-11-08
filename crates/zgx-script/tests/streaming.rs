@@ -184,6 +184,9 @@ fn per_chunk(sections: usize) -> (u64, u64) {
     for _ in 0..chunks {
         assert!(h.host.run_command("word"));
         h.settle();
+        // However the collector runs between chunks, the next derives from
+        // this one (`value::hold`): a full collection each time.
+        h.host.collect_garbage();
     }
     (
         (tables_converted() - tables) / chunks,

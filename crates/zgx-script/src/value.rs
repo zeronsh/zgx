@@ -2129,6 +2129,17 @@ pub(crate) fn derive(lua: &Lua, old: &Value, new: &Value) -> mlua::Result<()> {
     };
     file_weighed(lua, new, &table, added)
 }
+/// `value`'s table, if it has one (`derive`'s), among the large tables kept
+/// for the reads to come (`keep_large`), as one made whole is: a list a
+/// stream derives each answer from (`markdown`'s) finds its last one there,
+/// however the collector ran between them. Only filed (a weak entry), it
+/// could be gone by the next answer, which then converted whole.
+pub(crate) fn hold(lua: &Lua, value: &Value) -> mlua::Result<()> {
+    if let Some(table) = cached(lua, value)? {
+        keep_large(lua, value, &table);
+    }
+    Ok(())
+}
 /// Whether two list items convert to the same script value: one table, or
 /// equal plain values.
 fn same_item(a: &Value, b: &Value) -> bool {
