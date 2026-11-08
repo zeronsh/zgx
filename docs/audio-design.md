@@ -305,7 +305,7 @@ With zgx-audio:
   It passes on the M5 MacBook Pro and in the container. Where there's no output it says so and passes.
 - **The clock, measured.** Clicks scheduled with `at` land on their exact samples.
   - The mixer's own test sends three sounds 0, 3 and 7 buffers apart. They start on frames 2,912, 12,512 and 22,112 of its output: exactly 9,600 apart at 48 kHz, none late.
-  - `tests/capture.rs`, on Linux, reads back what ALSA was given (its file plugin, `ZGX_AUDIO_CAPTURE`). Three clicks scheduled 0.2 s apart are at frames 960,000, 969,600 and 979,200 in 5 runs of 5, as CI's Linux job checks.
+  - `tests/capture.rs`, on Linux, reads back what ALSA was given (its file plugin, `ZGX_AUDIO_CAPTURE`). Three clicks scheduled 0.2 s apart are at frames 960,000, 969,600 and 979,200 in 5 runs of 5. On CI's Linux job they were at 960,240, 969,840 and 979,440: the device wrote one 240-frame period before the first command started the clock. The test checks the spacing, and that the first is within a tenth of a second of its time.
   - The Luau click example (`t = audio.now() + 0.05`, then `at = t + (i - 1) * 0.2`) wrote clicks exactly 9,600 frames apart in 8 runs of 8.
   - Before the clock started at the first command, the first sound's file decoding ran into the schedule: 2 runs of 3 were wrong.
   - The null device doesn't wait: it writes about 20 million frames a second. The capture test therefore schedules 20 s ahead, which is about 50 ms there.

@@ -59,5 +59,15 @@ fn scheduled_clicks_land_on_their_samples() {
     let fifth = u64::from(rate) / 5;
     println!("capture: clicks at frames {heard:?}, {late} late");
     assert_eq!(late, 0);
-    assert_eq!(heard, [first, first + fifth, first + 2 * fifth]);
+    assert_eq!(heard.len(), 3, "three clicks");
+    // The file begins where the device opened; the clock, at the first
+    // command, a buffer or so later: the first click is that much past its
+    // time on the clock, and the others exactly a fifth of a second apart.
+    assert!(heard[0] >= first, "{heard:?} from {first}");
+    let lead = heard[0] - first;
+    assert!(
+        lead < u64::from(rate) / 10,
+        "{lead} frames before the clock began"
+    );
+    assert_eq!(heard, [heard[0], heard[0] + fifth, heard[0] + 2 * fifth]);
 }
