@@ -157,6 +157,76 @@ fn a_picked_file_reads_and_a_saved_one_is_written() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A dialog the person never answers, telling when the host drops it.
+struct Waiting(Rc<std::cell::Cell<bool>>);
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.0.set(true);
+    }
+}
+struct Unanswered(Rc<std::cell::Cell<bool>>);
+impl Platform for Unanswered {
+    fn clipboard_text(&self) -> Option<String> {
+        None
+    }
+    fn set_clipboard_text(&self, _: String) -> bool {
+        false
+    }
+    fn open_files(&self, _: FilePicker) -> Pending<Result<Vec<PathBuf>, String>> {
+        let waiting = Waiting(self.0.clone());
+        Box::pin(async move {
+            let _waiting = waiting;
+            std::future::pending::<()>().await;
+            Ok(Vec::new())
+        })
+    }
+    fn save_file(&self, _: FilePicker) -> Pending<Result<Option<PathBuf>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+#[test]
+fn a_dialog_the_script_cancels_is_dropped_where_it_waits() {
+    // A dropped request closes Linux's portal picker and iOS's document picker.
+    let dropped = Rc::new(std::cell::Cell::new(false));
+    let platform = Rc::new(Unanswered(dropped.clone()));
+    let mut h = Harness::wrapped(
+        |runtime| {
+            ScriptHost::inline(
+                runtime,
+                "app",
+                r#"local shown = ui.state("shown", "")
+                local picking = nil
+                return ui.column {
+                    ui.text { id = "label", function() return shown:get() end },
+                    ui.button { id = "ask", w = 40, h = 20, "a", on_click = function()
+                        picking = ui.open_files({})
+                        shown:set("asked")
+                    end },
+                    ui.button { id = "cancel", w = 40, h = 20, "c", on_click = function()
+                        picking:cancel()
+                        shown:set("cancelled")
+                    end },
+                }"#,
+            )
+        },
+        move |view| zgx::compose::provide(PlatformService(platform), view),
+    );
+    h.frames(1);
+    h.click("ask");
+    wait_for(&mut h, "asked");
+    h.frames(2);
+    assert!(!dropped.get(), "waiting on the person");
+    h.click("cancel");
+    wait_for(&mut h, "cancelled");
+    h.frames(2);
+    assert!(
+        dropped.get(),
+        "the dialog dropped once the script cancelled it"
+    );
+    assert_eq!(h.error(), None);
+}
+
 #[test]
 fn a_file_the_user_did_not_pick_is_out_of_reach() {
     let dir = dir("sneak");
