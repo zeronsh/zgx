@@ -8737,7 +8737,6 @@ struct RowFocus {
 #[cfg(test)]
 mod layout_drag_tests {
     use super::Ui;
-    use crate::compose::prelude::VariableHeights;
     mod layout_drag_page {
         use crate as zgx;
         include!("../examples/support/layout_drag_page.rs");
@@ -8748,9 +8747,8 @@ mod layout_drag_tests {
     fn drag() -> (f64, f64, usize) {
         let mut ui = Ui::new(2000., 1100.);
         let split = ui.signal(320_f32);
-        let heights = VariableHeights::new(&ui.runtime, layout_drag_page::LIST_ROWS, 60.);
         let runtime = ui.runtime.clone();
-        let _handle = ui.mount(layout_drag_page::page(split.clone(), &runtime, &heights));
+        let _handle = ui.mount(layout_drag_page::page(split.clone(), &runtime));
         for _ in 0..3 {
             ui.prepare_frame();
             ui.scene.borrow_mut().flush();

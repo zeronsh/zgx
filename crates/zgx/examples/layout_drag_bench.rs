@@ -6,7 +6,6 @@
 //! measures on the same page (`support/layout_drag_page.rs`).
 //! Run: cargo run -p zgx --release --example layout_drag_bench
 //! (`ROUNDS` sets the drags there and back, 3 by default.)
-use zgx::compose::prelude::VariableHeights;
 use zgx::widgets::Ui;
 
 #[path = "support/layout_drag_page.rs"]
@@ -19,9 +18,8 @@ fn main() {
         .unwrap_or(3);
     let mut ui = Ui::new(2000., 1100.);
     let split = ui.signal(320_f32);
-    let heights = VariableHeights::new(&ui.runtime, layout_drag_page::LIST_ROWS, 60.);
     let runtime = ui.runtime.clone();
-    let _handle = ui.mount(layout_drag_page::page(split.clone(), &runtime, &heights));
+    let _handle = ui.mount(layout_drag_page::page(split.clone(), &runtime));
     for _ in 0..3 {
         ui.prepare_frame();
         ui.scene.borrow_mut().flush();

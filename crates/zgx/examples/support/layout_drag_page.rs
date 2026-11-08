@@ -65,11 +65,13 @@ fn band() -> View {
 
 /// What pane `index` scrolls: messages, or (the third and fifth) a
 /// measured list.
-fn content(index: usize, offset: Signal<f32>, heights: &VariableHeights) -> View {
+/// Each measured list keeps its own heights: lists sized apart share none
+/// (`measured_virtual_list`).
+fn content(index: usize, offset: Signal<f32>, runtime: &Runtime) -> View {
     if index == 2 || index == 4 {
         return measured_virtual_list(
             offset,
-            heights.clone(),
+            VariableHeights::new(runtime, LIST_ROWS, 60.),
             4,
             |row| row,
             |_, row, _| {
@@ -95,13 +97,13 @@ fn content(index: usize, offset: Signal<f32>, heights: &VariableHeights) -> View
     )
 }
 
-fn pane(index: usize, split: Signal<f32>, runtime: &Runtime, heights: &VariableHeights) -> View {
+fn pane(index: usize, split: Signal<f32>, runtime: &Runtime) -> View {
     let mut inner =
         column()
             .w_full()
             .h_full()
             .relative()
-            .child(content(index, runtime.signal(0.), heights));
+            .child(content(index, runtime.signal(0.), runtime));
     if index != 2 && index != 4 {
         inner = inner.child(
             div().absolute().left(0.).right(0.).bottom(12.).child(
@@ -148,8 +150,8 @@ fn pane(index: usize, split: Signal<f32>, runtime: &Runtime, heights: &VariableH
     }
 }
 
-/// The page, its first pane `split` wide; `heights` the measured list's.
-pub fn page(split: Signal<f32>, runtime: &Runtime, heights: &VariableHeights) -> View {
+/// The page, its first pane `split` wide.
+pub fn page(split: Signal<f32>, runtime: &Runtime) -> View {
     let sidebar = column()
         .w(220.)
         .h_full()
@@ -160,7 +162,7 @@ pub fn page(split: Signal<f32>, runtime: &Runtime, heights: &VariableHeights) ->
         .h_full()
         .flex_grow(1.)
         .min_w(0.)
-        .children((0..6).map(|i| pane(i, split.clone(), runtime, heights)));
+        .children((0..6).map(|i| pane(i, split.clone(), runtime)));
     let shell = column()
         .w_full()
         .h_full()
