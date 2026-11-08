@@ -8260,6 +8260,22 @@ impl Scene {
         // Its old place and its new, under the same ancestors: their
         // context is worked out once, and kept for the next move under the
         // same parent while nothing else changed (`move_context`).
+        let mut context = self.kept_context(parent);
+        self.damage_subtree_with(id, &mut context);
+        self.move_context = None;
+        self.node_mut(id).transform = transform;
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        self.damage_subtree_with(id, &mut context);
+        self.invalidate(id, COMPOSITE);
+        // Moving a child (and marking it and its ancestors to repaint)
+        // leaves the parent's places, clips and visibility as they were: a
+        // child is never its own parent's ancestor.
+        self.keep_context(parent, context);
+    }
+    /// The context kept for `parent` (`move_context`), if any.
+    #[inline(always)]
+    fn kept_context(&mut self, parent: Option<NodeId>) -> Option<DamageContext> {
+        #[allow(unused_mut)]
         let mut context = match self.move_context {
             Some((kept, context)) if Some(kept) == parent => Some(context),
             _ => None,
@@ -8283,15 +8299,14 @@ impl Scene {
             };
             assert_eq!(bits(kept), bits(now), "a kept move context went stale");
         }
-        self.damage_subtree_with(id, &mut context);
-        self.move_context = None;
-        self.node_mut(id).transform = transform;
-        self.geometry_revision = self.geometry_revision.wrapping_add(1);
-        self.damage_subtree_with(id, &mut context);
-        self.invalidate(id, COMPOSITE);
-        // Moving a child (and marking it and its ancestors to repaint)
-        // leaves the parent's places, clips and visibility as they were: a
-        // child is never its own parent's ancestor.
+        context
+    }
+    /// Keeps `parent`'s `context`, worked out (or taken as kept) for a child
+    /// whose translation or effects changed: neither changes its parent's
+    /// places, clips or visibility (a child is never its own parent's
+    /// ancestor, and no context reads effects).
+    #[inline(always)]
+    fn keep_context(&mut self, parent: Option<NodeId>, context: Option<DamageContext>) {
         if let (Some(parent), Some(context)) = (parent, context) {
             self.move_context = Some((parent, context));
         }
@@ -8336,10 +8351,13 @@ impl Scene {
         // A content blur's spread damages under the old effects, then the new.
         // Opacity and colour filters paint where the node painted before:
         // that place is damaged once (an animated fade, every frame).
-        let old = self.node(id).effects;
+        let node = self.node(id);
+        let (old, parent) = (node.effects, node.parent);
         let same_area =
             old.blur_radius == effects.blur_radius && old.filter_blur == effects.filter_blur;
-        let mut context = None;
+        // Its parent's context, kept from the last change under it: a fade
+        // changes no context (none reads effects), so it keeps it again.
+        let mut context = self.kept_context(parent);
         if !same_area {
             self.damage_subtree_with(id, &mut context);
         }
@@ -8358,6 +8376,7 @@ impl Scene {
         self.node_mut(id).effects = effects;
         self.damage_subtree_with(id, &mut context);
         self.invalidate(id, COMPOSITE);
+        self.keep_context(parent, context);
     }
     /// `set_transform` and `set_effects` together, as an animation moving and
     /// fading a node writes them: its old and its new look are damaged once
@@ -8391,7 +8410,8 @@ impl Scene {
             return;
         }
         self.effects_changing(id, &effects);
-        let mut context = None;
+        let parent = self.node(id).parent;
+        let mut context = self.kept_context(parent);
         self.damage_subtree_with(id, &mut context);
         self.filter_changing(id, &effects);
         self.move_context = None;
@@ -8401,6 +8421,7 @@ impl Scene {
         self.geometry_revision = self.geometry_revision.wrapping_add(1);
         self.damage_subtree_with(id, &mut context);
         self.invalidate(id, COMPOSITE);
+        self.keep_context(parent, context);
     }
     /// Bookkeeping before a node's effects change, ahead of its old damage.
     // Keep bookkeeping in each entry even when its application body is shared,
@@ -13546,6 +13567,34 @@ mod tests {
             scene.set_box(scroller, &boxed(200., 150., true), &mut kept_box);
             frame(&mut scene);
             shift(&mut scene, &rows, 7.8);
+            frame(&mut scene);
+            // Rows fade, under the parent the last move was under, between
+            // moves, and across a change to their parent's clip.
+            let fade = |scene: &mut Scene, rows: &[NodeId], step: f32| {
+                for (n, &row) in rows.iter().enumerate() {
+                    let opacity = 0.2 + ((n as f32 + step) * 0.37) % 0.8;
+                    scene.set_effects(
+                        row,
+                        Effects {
+                            opacity,
+                            ..Effects::default()
+                        },
+                    );
+                }
+            };
+            fade(&mut scene, &rows, 1.);
+            frame(&mut scene);
+            shift(&mut scene, &rows[..3], 8.1);
+            fade(&mut scene, &rows[3..], 2.);
+            shift(&mut scene, &rows[3..], 8.1);
+            fade(&mut scene, &rows[..3], 3.);
+            frame(&mut scene);
+            fade(&mut scene, &rows[..4], 4.);
+            scene.set_style(list, boxed(220., 300., true));
+            fade(&mut scene, &rows[4..], 4.);
+            frame(&mut scene);
+            fade(&mut scene, &rows, 5.);
+            scene.set_style(list, boxed(220., 400., true));
             frame(&mut scene);
             // Between rows: the list's rows change, then the viewport.
             shift(&mut scene, &rows[..5], 8.);
