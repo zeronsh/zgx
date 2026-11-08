@@ -103,14 +103,24 @@ impl Decoder {
         })?;
         let (width, height) = self.clip.size;
         let at = frame as f64 / self.fps;
+        // The file's frame on screen at each of the composition's: the last
+        // to start at or before its time. Seeking to `at` itself would drop
+        // the one that started a moment before it (ffmpeg drops frames
+        // timed before where it seeks), so it seeks a second early, keeps
+        // the file's times (from its start), takes for each composition
+        // frame the last file frame at or before it (`round=up`), and
+        // leaves out what comes before frame `frame` (half a frame early,
+        // whatever the printed time rounds to).
+        let early = (at - 1.).max(0.);
+        let first = (frame as f64 - 0.5).max(0.) / self.fps;
         let child = Command::new(ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
-            .args(["-ss", &format!("{at:.6}")])
+            .args(["-ss", &format!("{early:.6}"), "-copyts", "-start_at_zero"])
             .arg("-i")
             .arg(&self.clip.src)
             .args(["-an", "-vf"])
             .arg(format!(
-                "fps={},scale={width}:{height}:flags=lanczos,format=rgba",
+                "fps={}:round=up,trim=start={first:.6},scale={width}:{height}:flags=lanczos,format=rgba",
                 self.fps
             ))
             .args(["-f", "rawvideo", "-"])
