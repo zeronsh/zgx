@@ -38,7 +38,8 @@ fn text_services_measure_as_a_renderer_does() {
 /// Without a renderer to trim the words it shapes as it draws, the text
 /// cache sweeps them as they grow: 450,000 labels' values churned headless
 /// leave cosmic-text's words bounded (untrimmed, they grow about 2.7 KB a
-/// frame, without end); `release_unused` empties both caches at once.
+/// frame, without end); `release_unused` empties both caches at once, and
+/// gives back the table the words filled.
 #[test]
 fn headless_words_stay_bounded_and_release_on_demand() {
     let services = TextServices::new();
@@ -79,6 +80,9 @@ fn headless_words_stay_bounded_and_release_on_demand() {
     );
     services.release_unused();
     assert_eq!(held(), (0, 0));
+    // The words' table too, not only the words: it stays the size the churn
+    // grew it to otherwise.
+    assert_eq!(services.text_system().borrow().shape_run_cache.bytes(), 0);
     // What is shown is shaped again as it is laid out.
     frame(15001);
     assert!(held().0 > 0);

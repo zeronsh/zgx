@@ -125,12 +125,17 @@ impl ShapeRunCache {
         })
     }
 
-    /// zgx patch: the bytes of the glyphs it holds.
+    /// zgx patch: the bytes it holds: its glyphs, and its table at the size
+    /// it last grew to (a slot and a control byte each), which after a
+    /// burst of shaping can outweigh the glyphs.
     pub fn bytes(&self) -> usize {
-        self.cache
+        let slot = core::mem::size_of::<(ShapeRunKey, (u64, Vec<ShapeGlyph>))>() + 1;
+        let glyphs: usize = self
+            .cache
             .values()
             .map(|(_, glyphs)| glyphs.capacity() * core::mem::size_of::<ShapeGlyph>())
-            .sum()
+            .sum();
+        glyphs + self.cache.capacity() * slot
     }
 
     /// zgx patch: how many runs it holds.
@@ -171,9 +176,12 @@ impl ShapeRunCache {
     /// Remove everything: the fonts the runs were shaped with changed.
     ///
     /// zgx patch: `trim` sweeps only every `TRIM_PERIOD` ages, so it cannot
-    /// empty the cache when a font is replaced.
+    /// empty the cache when a font is replaced. The table goes too, not
+    /// only its words: a host letting go of what it shaped (`TextServices`)
+    /// gets back the size it peaked at, which shaping a long transcript
+    /// left at 13 MB.
     pub fn clear(&mut self) {
-        self.cache.clear();
+        self.cache = HashMap::default();
     }
 
     /// Remove anything in the cache with an age older than `keep_ages`
