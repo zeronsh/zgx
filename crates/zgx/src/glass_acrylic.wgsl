@@ -3,8 +3,9 @@
 // it. What's behind it, blurred already by the box's backdrop blur (a
 // sigma of 30), takes the tint's luminosity at the luminosity opacity
 // (the luminosity blend), then the tint's hue and saturation at the tint
-// opacity (the colour blend); a grey noise lies over that at 0.02. With
-// Transparency effects off it's its fallback colour alone. params:
+// opacity (the colour blend); a grey noise lies over that at 0.02. Where the
+// window shows the system's own blur behind it, only the tint goes over that.
+// With Transparency effects off it's its fallback colour alone. params:
 // [tint, tint opacity], [luminosity opacity, fallback weight, _, _],
 // [fallback], [luminosity colour].
 fn zgx_acrylic_box(p: vec2<f32>, size: vec2<f32>, radii: vec4<f32>) -> f32 {
@@ -37,7 +38,8 @@ fn layer(input: LayerInput) -> vec4<f32> {
     let d = zgx_acrylic_box(input.p, input.size, input.radii);
     let tint = input.params[0];
     let options = input.params[1];
-    let behind = zgx_backdrop(input.p).rgb;
+    let seen = zgx_backdrop(input.p);
+    let behind = seen.rgb;
     // Luminosity: the backdrop's hue and saturation, the tint's lightness.
     var color = mix(behind, zgx_acrylic_set_lum(behind, zgx_acrylic_lum(input.params[3].rgb)), options.x);
     // Colour: the tint's hue and saturation, that lightness.
@@ -46,8 +48,17 @@ fn layer(input: LayerInput) -> vec4<f32> {
     let pixel = floor(input.p * input.scale);
     let n = fract(sin(dot(pixel, vec2(12.9898, 78.233))) * 43758.5453);
     color = mix(color, vec3(0.5 + (n - 0.5) * 0.72), 0.02);
-    color = mix(color, input.params[2].rgb, options.y);
-    let glass = vec4(clamp(color, vec3(0.0), vec3(1.0)), clamp(0.5 - d * input.scale, 0.0, 1.0));
+    // Where the window shows what's behind it (a popup's or a glass window's
+    // system blur, which blurs and darkens on its own), the tint alone over
+    // that: no blur or luminosity of its own a second time.
+    let over = seen.a;
+    var held = clamp(color, vec3(0.0), vec3(1.0)) * over + tint.rgb * tint.a * (1.0 - over);
+    var alpha = over + tint.a * (1.0 - over);
+    // Its fallback colour, opaque (Transparency effects off).
+    held = mix(held, input.params[2].rgb, options.y);
+    alpha = mix(alpha, 1.0, options.y);
+    let straight = select(vec3(0.0), held / alpha, alpha > 0.0);
+    let glass = vec4(straight, alpha * clamp(0.5 - d * input.scale, 0.0, 1.0));
     let a = input.color.a + glass.a * (1.0 - input.color.a);
     if a <= 0.0 {
         return vec4(0.0);
