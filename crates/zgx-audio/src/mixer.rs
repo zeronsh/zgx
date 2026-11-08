@@ -519,7 +519,7 @@ mod tests {
         let mut buffer = 0;
         let mut render = |mixer: &mut Mixer, heard: &mut Vec<u64>| {
             mixer.render(&mut out);
-            for (i, frame) in out.chunks_exact(2).enumerate() {
+            for (i, frame) in out.as_chunks::<2>().0.iter().enumerate() {
                 if frame[0] != 0. {
                     heard.push(buffer * 512 + i as u64);
                 }

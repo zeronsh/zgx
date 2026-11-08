@@ -39,7 +39,7 @@ fn main() -> Result<(), String> {
     let rate = engine.rate() as f32;
     let mut phase = 0f32;
     engine.stream(move |out: &mut [f32], info: Info| {
-        for (i, frame) in out.chunks_exact_mut(2).enumerate() {
+        for (i, frame) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let t = (info.frame + i as u64) as f32 / rate;
             let envelope = (t * 40.).min(1.) * (1. - t / 0.4).max(0.);
             phase = (phase + 440. / rate).fract();

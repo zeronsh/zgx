@@ -42,11 +42,15 @@ fn scheduled_clicks_land_on_their_samples() {
     drop(engine);
     let bytes = std::fs::read(&capture).unwrap();
     let samples: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect();
     let heard: Vec<u64> = samples
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .enumerate()
         .filter(|(_, frame)| frame[0] != 0.)
         .map(|(i, _)| i as u64)
