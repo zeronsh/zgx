@@ -1,7 +1,8 @@
 //! A flex item shrinks no further than its content's min-content size
 //! (CSS's `min-width: auto`): a word it cannot break keeps its width while
 //! a sibling gives way. One that clips (a scroll container) may shrink to
-//! nothing, and a minimum the item sets, `min_w(0.)` say, is its own. An
+//! nothing, as text that ends in an ellipsis may across (CSS's needs
+//! `overflow: hidden`), and a minimum the item sets, `min_w(0.)` say, is its own. An
 //! icon or an image that sets its size keeps it, as CSS's replaced elements
 //! (`<img>`, `<canvas>`) do: its box holds no content to measure. An image
 //! sized by its pixels keeps that natural size, as `<img>` does, unless its
@@ -73,6 +74,20 @@ fn a_clipping_box_and_an_explicit_minimum_shrink_past_the_content() {
         squeezed(text(WORD).text_wrap(false).min_w(0.)),
     ] {
         assert!((share(&rects) - proportional).abs() < 0.01, "{rects:?}");
+    }
+}
+
+#[test]
+fn a_truncated_label_shrinks_past_its_longest_word() {
+    // It gives way in proportion, as one that clips does; a styled
+    // paragraph too.
+    let word = word_width();
+    let proportional = word - (180. + word - 200.) * word / (180. + word);
+    for rects in [
+        squeezed(text(WORD).truncate()),
+        squeezed(rich_text().child(text_span(WORD)).truncate().into()),
+    ] {
+        assert!((rects[1].width - proportional).abs() < 0.01, "{rects:?}");
     }
 }
 

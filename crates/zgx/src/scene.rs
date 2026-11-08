@@ -2413,6 +2413,17 @@ pub(crate) fn clips(style: &Style) -> bool {
             .as_deref()
             .is_some_and(|o| o.clip_x == Some(true) || o.clip_y == Some(true))
 }
+/// Whether a node is text that ends in an ellipsis where it overflows:
+/// CSS's `text-overflow: ellipsis`, which needs `overflow: hidden`, so it
+/// clips across as a scroll container does.
+fn truncates(node: &Node) -> bool {
+    use crate::text_layout::TextOverflow::Ellipsis;
+    match &node.kind {
+        NodeKind::Text { .. } => node.style.text_options.overflow == Ellipsis,
+        NodeKind::RichText { text } => text.options().overflow == Ellipsis,
+        _ => false,
+    }
+}
 use crate::text_layout::min_content_lines;
 /// `Node::reads`: known, reads the available width, the height; has a
 /// width or height percentage in its subtree; resolves its own against the
@@ -4604,7 +4615,13 @@ impl Scene {
         // A `contents` node's style is the one it lays out with (its last
         // child's, with the margins added); its content, and so whether it
         // clips, is that child's.
-        if clips(&self.node(self.laid_out_as(id)).style) {
+        let laid = self.node(self.laid_out_as(id));
+        if clips(&laid.style) {
+            return 0.;
+        }
+        // Text that ends in an ellipsis clips what it cannot show, so a
+        // truncated label shrinks past its longest word, as on the web.
+        if horizontal && truncates(laid) {
             return 0.;
         }
         let style = &self.node(id).style;

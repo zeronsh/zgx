@@ -549,7 +549,7 @@ return ui.column {
 
 - A state or function whose value does not fit the property (a string for `w` that is not a length, a boolean for `bg`) is ignored at run time; a literal that does not fit is an error. In the editor both are type errors.
 - `hover`, `active`, `focus`, `disabled` and `context_menu_style` take plain values: a state, function or binding in them is an error. To animate on hover, animate the base style from `on_hover`.
-- Children stretch across their container (`items = "stretch"`) and shrink in one too small for them (`shrink = 1`), as CSS's flexbox; text does not wrap (`wrap = false`) unless asked. A child that shrinks stops at its content's narrowest (CSS's `min-width: auto`: a text's longest word), unless it clips (`overflow`, a scroll) or sets `min_w = 0`; `shrink = 0` holds it.
+- Children stretch across their container (`items = "stretch"`) and shrink in one too small for them (`shrink = 1`), as CSS's flexbox; text does not wrap (`wrap = false`) unless asked. A child that shrinks stops at its content's narrowest (CSS's `min-width: auto`: a text's longest word), unless it clips (`overflow`, a scroll), is text that ends in "…" (`truncate = true`) or sets `min_w = 0`; `shrink = 0` holds it.
 - `gap` is points only; `gap_x` and `gap_y` take percentages.
 - A transparent border still takes its width; a ring that must not move content is `border_over = true`.
 - `bg_fit` and the shape of `mask`, `bg_shader`, `shader_params`, `layer_shader` and `layer_params` are read once, as literals.
