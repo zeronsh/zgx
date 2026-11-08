@@ -11,11 +11,11 @@ fn firmness(options_y:f32, text:vec3<f32>)->f32 {
  if options_y<1.1||options_y>1.5 {return 0.;}
  return clamp(dot(text,vec3(.2126,.7152,.0722))*2.,0.,1.);
 }
-// Its curve: `a*(k+1)/(a*k+1)` to within 0.03 of coverage, with no division (a
-// software rasterizer runs this for every glyph's every pixel), on a stroke's
-// own edges only: from 0.35 coverage, fully from 0.7. The faint column a stem
-// spills into the next one stays as it is; firmed, a one-pixel stem reads as a
-// soft two-pixel one.
+// Its curve: a lift that is `a*(k+1)/(a*k+1)` to within 0.03 of coverage, with
+// no division (a software rasterizer runs this for every glyph's every pixel),
+// taken by coverage: none up to 0.35, all of it from 0.7. The faint column a
+// stem spills into the next one (some 0.3) stays as drawn; lifted, a one-pixel
+// stem reads as a soft two-pixel one.
 fn firm(a:f32, k:f32)->f32 {return a+k*.67*a*(1.-a)*smoothstep(.35,.7,a);}
 // Group 1: one immutable buffer per viewport size, so layers never rewrite it.
 @group(1) @binding(0) var<uniform> viewport:vec4<f32>;
