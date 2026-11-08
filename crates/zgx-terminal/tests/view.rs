@@ -927,3 +927,36 @@ fn runs_are_drawn_on_the_grid_of_cells() {
     let cell = spacing.and_then(|spacing| spacing.cell());
     assert!(cell.is_some_and(|cell| cell > 0.), "on a grid: {spacing:?}");
 }
+
+/// A replayed terminal (the gate's bench) draws what it is fed, on the
+/// feeding thread, with no program, pty or task behind it: each feed read
+/// and drawn at once.
+#[test]
+fn a_replayed_terminal_draws_what_it_is_fed() {
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    // No task runner: nothing reads it but a feed.
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    replay.feed(b"\x1b[1;32mbuilt\x1b[0m in 2s\r\n");
+    app.ui.prepare_frame();
+    assert!(app.shows("built"), "{:?}", app.texts());
+    assert!(app.shows("in 2s"), "{:?}", app.texts());
+    replay.feed(b"\x1b[2J\x1b[Hagain");
+    app.ui.prepare_frame();
+    assert!(
+        app.shows("again") && !app.shows("built"),
+        "{:?}",
+        app.texts()
+    );
+    assert_eq!(term.state().get().pid, 0);
+}
