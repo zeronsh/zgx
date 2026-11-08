@@ -57,12 +57,21 @@ impl Sniffer {
         let offset = |rest: &[u8]| bytes.len() - rest.len();
         while !rest.is_empty() {
             match self.state {
-                State::Ground => match memchr(0x1b, rest) {
-                    Some(at) => {
-                        self.state = State::Escape;
-                        rest = &rest[at + 1..];
+                // Most escapes (colours, cursor moves) start nothing read
+                // here: told by the byte after, they are passed over in
+                // this loop, without the states.
+                State::Ground => loop {
+                    let Some(at) = memchr::memchr(0x1b, rest) else {
+                        return;
+                    };
+                    match rest.get(at + 1) {
+                        Some(b']' | 0x1b) | None => {
+                            self.state = State::Escape;
+                            rest = &rest[at + 1..];
+                            break;
+                        }
+                        Some(_) => rest = &rest[at + 2..],
                     }
-                    None => return,
                 },
                 State::Escape => {
                     self.state = if rest[0] == b']' {
@@ -124,10 +133,6 @@ impl Sniffer {
         }
         self.command.clear();
     }
-}
-
-fn memchr(byte: u8, bytes: &[u8]) -> Option<usize> {
-    bytes.iter().position(|&b| b == byte)
 }
 
 fn parse(command: &[u8]) -> Option<Osc> {
@@ -266,6 +271,20 @@ mod tests {
                     body: "green".into()
                 },
             ]
+        );
+    }
+
+    /// Escapes starting nothing read here are passed over; one starting a
+    /// command is seen wherever it falls: after another escape, or split
+    /// from its `]` by the end of a read.
+    #[test]
+    fn commands_start_after_any_escape_and_across_reads() {
+        assert_eq!(
+            sniff(&[
+                b"\x1b[0m\x1bM\x1b\x1b]7;/a\x07\x1b[1m\x1b",
+                b"]7;/b\x07\x1b"
+            ]),
+            [Osc::Pwd("/a".into()), Osc::Pwd("/b".into())]
         );
     }
 
