@@ -224,6 +224,21 @@ if ui.args[1] == "sheet" then
 	end)
 end
 
+-- `notify` (`ZGX_APP_ARGS`): a notification posted and a badge set on their own at
+-- 2 s, what came of each printed (with `ZGX_NOTIFY_NO_ASK=1` an undecided
+-- permission is refused, so no prompt shows: a check of the paths on a simulator).
+if ui.args[1] == "notify" then
+	ui.after(2000, function()
+		ui.task(function()
+			local ok, err = pcall(function()
+				ui.notify({ title = "Showcase", body = "A notification from the soak", tag = "showcase" }):await()
+			end)
+			print(string.format("NOTIFY %s %s", if ok then "posted" else "refused", if ok then "" else tostring(err)))
+		end)
+		print(string.format("BADGE %s", tostring(ui.badge(3))))
+	end)
+end
+
 -- `composer_loop` (`ZGX_APP_ARGS`): the composer opens and closes ten times on its
 -- own, each frame logged, to compare with the keyboard on a phone.
 local composer_editor = ui.ref()

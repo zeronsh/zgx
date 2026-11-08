@@ -4180,6 +4180,8 @@ impl Host {
             let _ = crate::ios_system::keyboard_height();
             crate::ios_system::dump_accessibility_later(&window);
             crate::ios_system::audio_session_from_bundle();
+            // A tap on a notification that launched the app reaches it.
+            crate::notify::install();
             crate::ios_metrics::start();
             // What the bars leave of it, before its first frame.
             self.context

@@ -31,6 +31,10 @@ Bold Text makes every weight a step heavier, in text and in symbols, and text sh
 
 A text field's `accessibilityActivate` takes focus and brings the keyboard; rows, tabs and switches click. A search field is marked as one, and Voice Control answers to a row's name alone ("Wi-Fi", from "Wi-Fi, Home"), by `accessibilityUserInputLabels`.
 
+## Notifications
+
+`ui.notify { title, body, tag, on_click }` and `ui.badge(n)` work as on the desktop, through `UNUserNotificationCenter` (`notify.rs`). Permission is asked only when an app first posts and nobody has decided: the system's prompt then, once. With `ZGX_NOTIFY_NO_ASK=1` an undecided permission is a refusal instead, so automated runs never raise it (`ZGX_APP_ARGS=notify` in the showcase posts one and sets a badge on its own, to check the paths). The center's delegate is set at launch, so a tap that launched the app reaches `on_click`; one arriving while the app is in front shows as a banner. A badge is a count only (iOS draws no text on the icon), shown once badges are allowed.
+
 ## For the App Store
 
 `python3 scripts/ios/package.py app.json` builds a manifest's app for devices and lays it out as the App Store takes it, unsigned: `target/ios-package/<Name>.xcarchive` (the app, a dSYM, the archive's own Info.plist), `<Name>-unsigned.ipa` (a `Payload` folder), and `<Name>.entitlements` for whoever signs. It signs nothing and reads no Keychain: Xcode's Organizer opens the archive, signs and uploads it. `--check <archive>` checks one (every plist with `plutil -lint`, the app where the archive says, its keys, an arm64 iOS executable, compiled icons, symbols, no signature yet).
@@ -40,10 +44,10 @@ The manifest (`scripts/ios/package/app.example.json`) names the app, its bundle 
 ## Not there yet
 
 - Checked on a simulator against UIKit's own (Ref): the tree VoiceOver reads (order, labels, values, hints, traits; a sheet read alone; a pushed page's back button first, named for the page before), Dynamic Type from xS to AX5 (sizes from `preferredFontForTextStyle:`, the bar and titles placed as UINavigationBar's), Reduce Motion's cross-fade (headless), and a suspend and resume (sent to the background by another app: no CPU while there, the same process and picture back).
-- Still for a person on a phone (build 1794077264 has each; the Notes tab's "Field rides the keyboard" toggle switches the ride): VoiceOver's gestures in practice (the headings rotor, a two-finger scrub closing a sheet, a double tap on the grabber), Switch Control, Voice Control, Full Keyboard Access, Dynamic Type and Reduce Motion as they feel, and the two keyboard rides side by side. Measured there so far: glass, planes, frame rate, launch, memory (`scripts/ios/device.py measure`).
+- Still for a person on a phone (build 1794077264 has each; the Notes tab's "Field rides the keyboard" toggle switches the ride): VoiceOver's gestures in practice (the headings rotor, a two-finger scrub closing a sheet, a double tap on the grabber), Switch Control, Voice Control, Full Keyboard Access, Dynamic Type and Reduce Motion as they feel, the two keyboard rides side by side, and notifications: allowing them at the first post's prompt, a banner in front and in the background, a tap on one from the background and from a cold launch reaching `on_click`, the badge's count on the icon. Measured there so far: glass, planes, frame rate, launch, memory (`scripts/ios/device.py measure`).
 - System glass isn't cut by rounded or scrolling parents: it ignores masks and clips. A pane scrolled away is hidden whole.
 - Morphs between panes that aren't in one group (a pane joining a group grows out of it and melts back); terminals; web views' new windows, downloads, finding and printing.
-- Notifications. An app's own audio (the session's category is set, no API makes sound).
+- An app's own audio (the session's category is set, no API makes sound).
 - `Documents/zgx-gesture.log` records each gesture, scroll, refresh and keyboard reveal; `ZGX_IOS_SHOT=seconds` writes the window to `Documents/shot.png`.
 
 ## The edge fade
