@@ -10173,19 +10173,17 @@ impl GpuRenderer {
             return;
         };
         let mut awaited = false;
+        let wait = self.waits_for_shaders();
         for draw in draws {
-            let (shader, kind) = match draw.shading {
-                Shading::Fill(id) => (self.fill_shaders.get(&id), AppShader::Fill),
-                Shading::Filter(id) => (self.filter_shaders.get(&id), AppShader::Filter),
+            let (id, shaders, kind) = match draw.shading {
+                Shading::Fill(id) => (id, &self.fill_shaders, AppShader::Fill),
+                Shading::Filter(id) => (id, &self.filter_shaders, AppShader::Filter),
                 _ => continue,
             };
-            // zgx's own colour filter waits, as wgpu's does
-            // (`prepare_filter`): it's what the view looks like.
-            let wait = self.waits_for_shaders()
-                || shader.is_some_and(|shader| {
-                    shader.source() == zgx::decoration::color_filter_shader().source()
-                });
-            match shader.map(|shader| state.device.app_shader(shader, kind, wait)) {
+            let ready = shaders
+                .get(&id)
+                .map(|shader| state.device.app_shader(shader, kind, wait));
+            match ready {
                 Some(Some(true)) => {}
                 Some(None) => {
                     awaited = true;
