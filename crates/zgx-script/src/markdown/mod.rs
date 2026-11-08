@@ -713,7 +713,27 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool) -> Ve
     let mut tops = Vec::new();
     let mut depth = 0usize;
     let mut start = 0;
+    // Each strikethrough open, whether it's struck (`~~`) or plain (`~`).
+    let mut tildes: Vec<bool> = Vec::new();
     for (event, range) in Parser::new_ext(text, flags).into_offset_iter() {
+        // Only `~~` strikes, as `mend` holds it: one tilde is a path's
+        // (`~/.zeron`), and two in a line would strike all between them.
+        let event = match event {
+            Event::Start(Tag::Strikethrough) => {
+                let struck = text[range.clone()].starts_with("~~");
+                tildes.push(struck);
+                if struck {
+                    event
+                } else {
+                    Event::Text("~".into())
+                }
+            }
+            Event::End(TagEnd::Strikethrough) => match tildes.pop() {
+                Some(false) => Event::Text("~".into()),
+                _ => event,
+            },
+            event => event,
+        };
         let opens = matches!(event, Event::Start(_));
         let closes = matches!(event, Event::End(_));
         if depth == 0 {
@@ -1463,10 +1483,20 @@ mod tests {
         let text = "# Title\n\nSome *words* and a [link](https://example.com).";
         let ask = || script(&lua, (lua.create_string(text).unwrap(), None)).expect("its blocks");
         let first = ask();
-        let held = |lua: &mlua::Lua| lua.app_data_ref::<Parsed>().expect("installed").texts.borrow().len();
+        let held = |lua: &mlua::Lua| {
+            lua.app_data_ref::<Parsed>()
+                .expect("installed")
+                .texts
+                .borrow()
+                .len()
+        };
         assert_eq!(held(&lua), 1);
         rest(&lua);
-        assert_eq!(held(&lua), 0, "nothing kept for a text no one is asking for");
+        assert_eq!(
+            held(&lua),
+            0,
+            "nothing kept for a text no one is asking for"
+        );
         assert_eq!(ask(), first);
     }
     #[test]
@@ -1475,18 +1505,33 @@ mod tests {
         install(&lua);
         let keyed = lua.create_table().unwrap();
         keyed.set("key", "message-1").unwrap();
-        script(&lua, (lua.create_string("Some words").unwrap(), Some(keyed))).expect("its blocks");
-        let streams = |lua: &mlua::Lua| lua.app_data_ref::<Parsed>().expect("installed").streams.borrow().len();
+        script(
+            &lua,
+            (lua.create_string("Some words").unwrap(), Some(keyed)),
+        )
+        .expect("its blocks");
+        let streams = |lua: &mlua::Lua| {
+            lua.app_data_ref::<Parsed>()
+                .expect("installed")
+                .streams
+                .borrow()
+                .len()
+        };
         rest(&lua);
         assert_eq!(streams(&lua), 1, "it may go on: asked for a moment ago");
         {
             let parsed = lua.app_data_ref::<Parsed>().expect("installed");
             let mut order = parsed.stream_order.borrow_mut();
-            let long_ago = std::time::Instant::now() - STREAM_QUIET - std::time::Duration::from_secs(1);
+            let long_ago =
+                std::time::Instant::now() - STREAM_QUIET - std::time::Duration::from_secs(1);
             order.iter_mut().for_each(|(_, used)| *used = long_ago);
         }
         rest(&lua);
-        assert_eq!(streams(&lua), 0, "quiet this long, it has ended, or parses again if it goes on");
+        assert_eq!(
+            streams(&lua),
+            0,
+            "quiet this long, it has ended, or parses again if it goes on"
+        );
     }
     fn paths() -> Options {
         Options {
@@ -1620,6 +1665,34 @@ mod tests {
             blocks[2].field("lang").map(|v| v.to_json()),
             Some("\"rust\"".into())
         );
+    }
+
+    #[test]
+    fn one_tilde_is_text_and_two_strike() {
+        // A path's tilde, twice in a line, as a prompt has it.
+        let text = "Work in ~/Documents/tmp, not the running Zeron (~/.zeron), and ~~not this~~.";
+        let blocks = parse(text, &plain());
+        let runs = blocks[0].field("s").unwrap().list();
+        let shown: String = runs
+            .iter()
+            .map(|r| match r.field("x") {
+                Some(Value::Str(x)) => x.to_string(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            "Work in ~/Documents/tmp, not the running Zeron (~/.zeron), and not this."
+        );
+        let struck: Vec<String> = runs
+            .iter()
+            .filter(|r| r.field("s").is_some())
+            .map(|r| match r.field("x") {
+                Some(Value::Str(x)) => x.to_string(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(struck, ["not this"], "only the `~~` run strikes");
     }
 
     #[test]
