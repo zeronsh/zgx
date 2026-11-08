@@ -1389,8 +1389,11 @@ mod letter_spacing_tests {
                 ..Default::default()
             };
             let on_grid = attrs(&grid, size);
-            assert!(on_grid.letter_spacing_opt.is_none());
-            assert_eq!(on_grid.cell_grid_opt.unwrap().0, 7. / size);
+            let cell = on_grid
+                .letter_spacing_opt
+                .and_then(|spacing| spacing.cell());
+            assert!((cell.unwrap() - 7. / size).abs() < 1e-5);
+            assert_eq!(on_grid.letter_spacing_opt.unwrap().tracking(), 0.);
             assert_eq!(
                 attrs(&font(3.), size).letter_spacing_opt.unwrap().0,
                 3. / size

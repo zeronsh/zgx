@@ -149,14 +149,22 @@ pub struct TextRun {
     pub radius: f32,
 }
 impl TextRun {
-    /// The approximate advance of `grapheme` at byte `at` (no shaper): 0.6
-    /// em a cell, zero-width characters none, and the run's padding on its
-    /// first and last.
-    pub(crate) fn estimated_advance(&self, grapheme: &str, at: usize) -> f32 {
+    /// A cell's approximate advance in this run (no shaper): 0.6 em and its
+    /// tracking, or a grid's cell. Taken once a run, not for each grapheme.
+    pub(crate) fn estimated_glyph(&self) -> f32 {
+        match self.font.letter_spacing.cell() {
+            Some(cell) => cell,
+            None => self.font_size * 0.6 + self.font.letter_spacing.pixels(),
+        }
+    }
+    /// The approximate advance of `grapheme` at byte `at` (no shaper), a
+    /// cell being `glyph` (`estimated_glyph`): zero-width characters none,
+    /// and the run's padding on its first and last.
+    pub(crate) fn estimated_advance(&self, glyph: f32, grapheme: &str, at: usize) -> f32 {
         let glyph = if matches!(grapheme, "\u{200B}" | "\u{2060}") {
             0.
         } else {
-            self.font_size * 0.6 + self.font.letter_spacing.pixels()
+            glyph
         };
         let first = (at == self.range.start) as u8 as f32;
         let last = (at + grapheme.len() == self.range.end) as u8 as f32;
@@ -313,9 +321,11 @@ pub fn fallback_measure(rich: &RichText, width: Option<f32>) -> (f32, f32) {
         .or((rich.options.overflow == crate::text_layout::TextOverflow::Ellipsis).then_some(1));
     let mut row = 1;
     let (mut x, mut y, mut max_x, mut pitch) = (0_f32, 0_f32, 0_f32, 0_f32);
+    let mut glyph = rich.runs.first().map_or(0., TextRun::estimated_glyph);
     for (index, grapheme) in rich.text.grapheme_indices(true) {
         while rich.runs[run_index].range.end <= index {
             run_index += 1;
+            glyph = rich.runs[run_index].estimated_glyph();
         }
         let run = &rich.runs[run_index];
         let line = run.font.line_height.resolve(run.font_size);
@@ -345,7 +355,7 @@ pub fn fallback_measure(rich: &RichText, width: Option<f32>) -> (f32, f32) {
             pitch = line;
             continue;
         }
-        let advance = run.estimated_advance(grapheme, index);
+        let advance = run.estimated_advance(glyph, grapheme, index);
         if width.is_some_and(|w| x > 0. && x + advance > w.max(0.)) {
             if limit.is_some_and(|limit| row >= limit) {
                 return (
@@ -413,7 +423,7 @@ impl RichText {
 }
 #[cfg(test)]
 mod tests {
-    /// A run's estimate decodes a grid (no tracking), never its bits.
+    /// A run's estimate decodes a grid (its cell), never its bits.
     #[test]
     fn an_estimate_on_a_grid_is_finite() {
         let run = TextRun {
@@ -423,7 +433,8 @@ mod tests {
             },
             ..TextRun::default()
         };
-        assert_eq!(run.estimated_advance("a", 0), run.font_size * 0.6);
+        assert_eq!(run.estimated_glyph(), 7.);
+        assert_eq!(run.estimated_advance(run.estimated_glyph(), "a", 0), 7.);
     }
 
     use super::*;

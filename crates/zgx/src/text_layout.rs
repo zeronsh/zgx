@@ -673,14 +673,19 @@ impl FallbackTextLayout {
         let (mut x, mut y, mut max_x, mut pitch) = (0_f32, 0_f32, 0_f32, 0_f32);
         let mut row_start = 0;
         let mut run_index = 0;
+        let mut glyph = rich
+            .runs()
+            .first()
+            .map_or(0., crate::rich_text::TextRun::estimated_glyph);
         for (index, grapheme) in rich.text().grapheme_indices(true) {
             while rich.runs()[run_index].range.end <= index {
                 run_index += 1;
+                glyph = rich.runs()[run_index].estimated_glyph();
             }
             let run = &rich.runs()[run_index];
             let line = run.font.line_height.resolve(run.font_size);
             let newline = grapheme.contains(['\r', '\n']);
-            let advance = run.estimated_advance(grapheme, index);
+            let advance = run.estimated_advance(glyph, grapheme, index);
             if newline || width.is_some_and(|w| x > 0. && x + advance > w.max(0.)) {
                 if newline {
                     pitch = pitch.max(line);
@@ -747,9 +752,7 @@ impl FallbackTextLayout {
                         .runs()
                         .iter()
                         .find(|r| r.range.contains(&index))
-                        .map_or(0., |r| {
-                            (r.font_size * 0.6 + r.font.letter_spacing.pixels()).max(0.)
-                        });
+                        .map_or(0., |r| r.estimated_glyph().max(0.));
                     while layout
                         .cells
                         .last()

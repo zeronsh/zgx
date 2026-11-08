@@ -226,16 +226,46 @@ impl FontFeatures {
 }
 
 /// A wrapper for letter spacing to get around that f32 doesn't implement Eq and Hash
+///
+/// zgx: or a grid of cells (`LetterSpacing::grid`, `Attrs::cell_grid`), kept as
+/// a NaN's payload, which tracking never is: an attribute no bigger for it.
 #[derive(Clone, Copy, Debug)]
 pub struct LetterSpacing(pub f32);
 
+/// zgx: a grid's bits, a positive quiet NaN whose payload is the cell in EM,
+/// `GRID_SCALE` to one.
+const GRID: u32 = 0x7fc0_0000;
+const GRID_UNITS: u32 = 0x003f_ffff;
+const GRID_SCALE: f32 = (1 << 20) as f32;
+
+impl LetterSpacing {
+    /// zgx: a grid of cells `cell` EM wide (up to 4 EM; none at zero or below):
+    /// each cluster takes its characters' cells (`shape::snap_to_cells`).
+    pub fn grid(cell: f32) -> Option<Self> {
+        let units = (cell * GRID_SCALE).round();
+        if units.is_nan() || units < 1.0 {
+            return None;
+        }
+        Some(Self(f32::from_bits(GRID | units.min(GRID_UNITS as f32) as u32)))
+    }
+
+    /// zgx: the grid's cell in EM, if it is one.
+    pub fn cell(self) -> Option<f32> {
+        let bits = self.0.to_bits();
+        (bits & !GRID_UNITS == GRID && bits & GRID_UNITS != 0)
+            .then(|| (bits & GRID_UNITS) as f32 / GRID_SCALE)
+    }
+
+    /// zgx: the tracking in EM (none on a grid).
+    pub fn tracking(self) -> f32 {
+        if self.0.is_nan() { 0.0 } else { self.0 }
+    }
+}
+
 impl PartialEq for LetterSpacing {
     fn eq(&self, other: &Self) -> bool {
-        if self.0.is_nan() {
-            other.0.is_nan()
-        } else {
-            self.0 == other.0
-        }
+        // zgx: a NaN (a grid) by its bits, so grids of other cells differ.
+        self.0 == other.0 || (self.0.is_nan() && self.0.to_bits() == other.0.to_bits())
     }
 }
 
@@ -246,7 +276,12 @@ impl Hash for LetterSpacing {
         const CANONICAL_NAN_BITS: u32 = 0x7fc0_0000;
 
         let bits = if self.0.is_nan() {
-            CANONICAL_NAN_BITS
+            // zgx: a grid's payload is its cell.
+            if self.cell().is_some() {
+                self.0.to_bits()
+            } else {
+                CANONICAL_NAN_BITS
+            }
         } else {
             // Add +0.0 to canonicalize -0.0 to +0.0
             (self.0 + 0.0).to_bits()
@@ -331,10 +366,6 @@ pub struct Attrs<'a> {
     /// zgx: room added before a span's first glyph and after its last, in
     /// EM (CSS's inline padding: an inline code chip's)
     pub padding_opt: Option<LetterSpacing>,
-    /// zgx: a grid of cells this wide, in EM (a terminal's): each cluster
-    /// takes its characters' cells (their widths, as unicode-width tells
-    /// them) exactly, its glyphs centred in them, whichever font draws it.
-    pub cell_grid_opt: Option<LetterSpacing>,
     /// zgx: the optical size variable fonts shape and draw at (their
     /// `opsz` axis), in pixels: CSS's `font-optical-sizing: auto` sets it to
     /// the font size. 0 leaves the font's default.
@@ -362,7 +393,6 @@ impl<'a> Attrs<'a> {
             metrics_opt: None,
             letter_spacing_opt: None,
             padding_opt: None,
-            cell_grid_opt: None,
             optical: 0,
             masked: false,
             font_features: FontFeatures::new(),
@@ -442,9 +472,12 @@ impl<'a> Attrs<'a> {
         self
     }
 
-    /// zgx: set a grid of cells this wide (in EM) each cluster snaps to
-    pub const fn cell_grid(mut self, cell: f32) -> Self {
-        self.cell_grid_opt = Some(LetterSpacing(cell));
+    /// zgx: set a grid of cells this wide (in EM, a terminal's) each cluster
+    /// takes its characters' cells on, its glyphs centred in them, whichever
+    /// font draws it; kept in `letter_spacing_opt` (`LetterSpacing::grid`),
+    /// no tracking with it.
+    pub fn cell_grid(mut self, cell: f32) -> Self {
+        self.letter_spacing_opt = LetterSpacing::grid(cell);
         self
     }
 
@@ -538,7 +571,6 @@ pub struct AttrsOwned {
     /// Letter spacing (tracking) in EM
     pub letter_spacing_opt: Option<LetterSpacing>,
     pub padding_opt: Option<LetterSpacing>,
-    pub cell_grid_opt: Option<LetterSpacing>,
     pub optical: u16,
     pub masked: bool,
     pub font_features: FontFeatures,
@@ -558,7 +590,6 @@ impl AttrsOwned {
             metrics_opt: attrs.metrics_opt,
             letter_spacing_opt: attrs.letter_spacing_opt,
             padding_opt: attrs.padding_opt,
-            cell_grid_opt: attrs.cell_grid_opt,
             optical: attrs.optical,
             masked: attrs.masked,
             font_features: attrs.font_features.clone(),
@@ -578,7 +609,6 @@ impl AttrsOwned {
             metrics_opt: self.metrics_opt,
             letter_spacing_opt: self.letter_spacing_opt,
             padding_opt: self.padding_opt,
-            cell_grid_opt: self.cell_grid_opt,
             optical: self.optical,
             masked: self.masked,
             font_features: self.font_features.clone(),

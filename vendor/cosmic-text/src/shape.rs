@@ -6,7 +6,7 @@ use crate::fallback::FontFallbackIter;
 use crate::{
     math, Align, Attrs, AttrsList, AttrsOwned, CacheKeyFlags, Color, DecorationMetrics,
     DecorationSpan, Ellipsize, EllipsizeHeightLimit, Family, Font, FontFeatures, FontSystem,
-    GlyphDecorationData, Hinting,
+    GlyphDecorationData, Hinting, LetterSpacing,
     LayoutGlyph, LayoutLine, Metrics, Wrap,
 };
 #[cfg(not(feature = "std"))]
@@ -266,7 +266,7 @@ fn shape_fallback(
             &glyph_attrs
         };
         let x_advance = pos.x_advance as f32 / font_scale
-            + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
+            + attrs.letter_spacing_opt.map_or(0.0, LetterSpacing::tracking);
         let y_advance = pos.y_advance as f32 / font_scale;
         let x_offset = pos.x_offset as f32 / font_scale;
         let y_offset = pos.y_offset as f32 / font_scale;
@@ -754,8 +754,8 @@ fn shape_run(
 
     // zgx: on a grid of cells (a terminal's), each cluster takes exactly
     // its cells, whichever font drew it.
-    if let Some(cell) = attrs.cell_grid_opt {
-        snap_to_cells(&mut glyphs[glyph_start..], line, cell.0);
+    if let Some(cell) = attrs.letter_spacing_opt.and_then(LetterSpacing::cell) {
+        snap_to_cells(&mut glyphs[glyph_start..], line, cell);
     }
 
     /*
@@ -1011,7 +1011,7 @@ fn shape_skip(
                     glyph.x_advance = fb_glyph_metrics.advance_width(glyph_id)
                         + span_attrs
                             .letter_spacing_opt
-                            .map_or(0.0, |spacing| spacing.0);
+                            .map_or(0.0, LetterSpacing::tracking);
                     glyph.cache_key_flags = override_fake_italic(
                         span_attrs.cache_key_flags,
                         fb_font.as_ref(),
@@ -1072,7 +1072,7 @@ fn shape_skip_glyphs_as(
                     + attrs_list
                         .get_span(start_run + chr_idx)
                         .letter_spacing_opt
-                        .map_or(0.0, |spacing| spacing.0);
+                        .map_or(0.0, LetterSpacing::tracking);
                 let attrs = attrs_list.get_span(start_run + chr_idx);
 
                 ShapeGlyph {
