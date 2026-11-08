@@ -98,10 +98,13 @@ fn timers_made_in_handlers_fire_and_stop_as_those_before_them_go() {
     for round in 1..=5 {
         h.click("burst");
         let want = (round * 40).to_string();
-        assert!(h.wait_until(|app| app.text("fired") == want), "round {round}: {}", h.text("fired"));
+        assert!(
+            h.wait_until(|app| app.text("fired") == want),
+            "round {round}: {}",
+            h.text("fired")
+        );
     }
     std::thread::sleep(std::time::Duration::from_millis(40));
     h.frames(2);
     assert_eq!(h.text("stopped"), "0");
 }
-

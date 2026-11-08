@@ -213,7 +213,9 @@ mod ended {
         }
         assert!(waiting.get(), "not stopped by those around it going");
         assert!(kept.iter().any(|k| k.downcast_ref::<&str>().is_some()));
-        assert!(kept.iter().any(|k| k.downcast_ref::<Stop>().is_some_and(|s| !s.done())));
+        assert!(
+            kept.iter()
+                .any(|k| k.downcast_ref::<Stop>().is_some_and(|s| !s.done()))
+        );
     }
 }
-

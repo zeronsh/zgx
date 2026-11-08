@@ -1491,10 +1491,20 @@ mod tests {
         let text = "# Title\n\nSome *words* and a [link](https://example.com).";
         let ask = || script(&lua, (lua.create_string(text).unwrap(), None)).expect("its blocks");
         let first = ask();
-        let held = |lua: &mlua::Lua| lua.app_data_ref::<Parsed>().expect("installed").texts.borrow().len();
+        let held = |lua: &mlua::Lua| {
+            lua.app_data_ref::<Parsed>()
+                .expect("installed")
+                .texts
+                .borrow()
+                .len()
+        };
         assert_eq!(held(&lua), 1);
         rest(&lua);
-        assert_eq!(held(&lua), 0, "nothing kept for a text no one is asking for");
+        assert_eq!(
+            held(&lua),
+            0,
+            "nothing kept for a text no one is asking for"
+        );
         assert_eq!(ask(), first);
     }
     #[test]
@@ -1503,18 +1513,33 @@ mod tests {
         install(&lua);
         let keyed = lua.create_table().unwrap();
         keyed.set("key", "message-1").unwrap();
-        script(&lua, (lua.create_string("Some words").unwrap(), Some(keyed))).expect("its blocks");
-        let streams = |lua: &mlua::Lua| lua.app_data_ref::<Parsed>().expect("installed").streams.borrow().len();
+        script(
+            &lua,
+            (lua.create_string("Some words").unwrap(), Some(keyed)),
+        )
+        .expect("its blocks");
+        let streams = |lua: &mlua::Lua| {
+            lua.app_data_ref::<Parsed>()
+                .expect("installed")
+                .streams
+                .borrow()
+                .len()
+        };
         rest(&lua);
         assert_eq!(streams(&lua), 1, "it may go on: asked for a moment ago");
         {
             let parsed = lua.app_data_ref::<Parsed>().expect("installed");
             let mut order = parsed.stream_order.borrow_mut();
-            let long_ago = std::time::Instant::now() - STREAM_QUIET - std::time::Duration::from_secs(1);
+            let long_ago =
+                std::time::Instant::now() - STREAM_QUIET - std::time::Duration::from_secs(1);
             order.iter_mut().for_each(|(_, used)| *used = long_ago);
         }
         rest(&lua);
-        assert_eq!(streams(&lua), 0, "quiet this long, it has ended, or parses again if it goes on");
+        assert_eq!(
+            streams(&lua),
+            0,
+            "quiet this long, it has ended, or parses again if it goes on"
+        );
     }
     fn paths() -> Options {
         Options {

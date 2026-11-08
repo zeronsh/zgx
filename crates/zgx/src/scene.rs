@@ -3688,8 +3688,12 @@ impl Scene {
                     let arc = (radius - pad).max(0.);
                     let clear = (arc - 1.).max(0.);
                     let within = |x: f32, y: f32| {
-                        let dx = (inner.x + arc - x).max(x - (inner.x + inner.width - arc)).max(0.);
-                        let dy = (inner.y + arc - y).max(y - (inner.y + inner.height - arc)).max(0.);
+                        let dx = (inner.x + arc - x)
+                            .max(x - (inner.x + inner.width - arc))
+                            .max(0.);
+                        let dy = (inner.y + arc - y)
+                            .max(y - (inner.y + inner.height - arc))
+                            .max(0.);
                         dx * dx + dy * dy <= clear * clear
                     };
                     let (right, bottom) = (bounds.x + bounds.width, bounds.y + bounds.height);
@@ -3758,7 +3762,11 @@ impl Scene {
                 NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => quad.paints_nothing(),
                 _ => false,
             };
-        !empty || self.children_raw(node).iter().any(|child| crate::deep(0, || self.paints(*child)))
+        !empty
+            || self
+                .children_raw(node)
+                .iter()
+                .any(|child| crate::deep(0, || self.paints(*child)))
     }
     /// The part of `id`'s box that shows: inside its clips and not fully
     /// transparent; `None` when nothing does. Under a popup root
@@ -13641,10 +13649,22 @@ mod tests {
         assert!(scene.plain_box(caret).is_some());
         // These change how the content shows.
         for changed in [
-            Effects { filter_blur: 2., ..Effects::default() },
-            Effects { opacity: 0.5, ..Effects::default() },
-            Effects { edge_fade: 4., ..Effects::default() },
-            Effects { saturate: 0.5, ..Effects::default() },
+            Effects {
+                filter_blur: 2.,
+                ..Effects::default()
+            },
+            Effects {
+                opacity: 0.5,
+                ..Effects::default()
+            },
+            Effects {
+                edge_fade: 4.,
+                ..Effects::default()
+            },
+            Effects {
+                saturate: 0.5,
+                ..Effects::default()
+            },
         ] {
             scene.set_effects(panel, changed);
             scene.flush();

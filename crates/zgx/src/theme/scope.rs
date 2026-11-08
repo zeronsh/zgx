@@ -1056,18 +1056,33 @@ mod scopes_gone {
             drop(root.child(ThemeOverride::default()));
         }
         // (Each entry keeps its scope's allocation, so this is the leak itself.)
-        assert!(root.children.borrow().len() <= 4, "{}", root.children.borrow().len());
+        assert!(
+            root.children.borrow().len() <= 4,
+            "{}",
+            root.children.borrow().len()
+        );
     }
 
     #[test]
     fn scopes_in_use_stay_listed_and_at_rest_only_they_do() {
         let (_runtime, root) = root();
-        let kept: Vec<_> = (0..100).map(|_| root.child(ThemeOverride::default())).collect();
+        let kept: Vec<_> = (0..100)
+            .map(|_| root.child(ThemeOverride::default()))
+            .collect();
         for _ in 0..1_000 {
             drop(root.child(ThemeOverride::default()));
         }
-        let live = root.children.borrow().iter().filter(|c| c.strong_count() > 0).count();
-        assert_eq!(live, kept.len(), "a theme change must still reach every one");
+        let live = root
+            .children
+            .borrow()
+            .iter()
+            .filter(|c| c.strong_count() > 0)
+            .count();
+        assert_eq!(
+            live,
+            kept.len(),
+            "a theme change must still reach every one"
+        );
         root.rest();
         assert_eq!(root.children.borrow().len(), kept.len());
     }
