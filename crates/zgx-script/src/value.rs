@@ -1478,6 +1478,7 @@ impl IntoLua for Value {
 thread_local! {
     static CONVERTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static ITEMS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static FILED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 /// How many tables state values have been converted into for scripts on
 /// this thread, ever: for budgets (a delta's work must not grow with what
@@ -1490,6 +1491,14 @@ pub fn tables_converted() -> u64 {
 /// `tables_converted` however many rows it holds.
 pub fn values_converted() -> u64 {
     ITEMS.get()
+}
+/// How many tables were filed in the conversion cache on this thread, ever:
+/// each converted, and each a computed handed back (`remember`). For tests:
+/// what a script is given, or gives back, must cost the same whenever the
+/// collector last ran.
+#[doc(hidden)]
+pub fn values_filed() -> u64 {
+    FILED.get()
 }
 fn count_items(n: usize) {
     ITEMS.set(ITEMS.get() + n as u64);
@@ -1520,29 +1529,18 @@ fn large(value: &Value) -> bool {
     }
     matches!(value, Value::List(_) | Value::Map(_)) && count(value, &mut CACHED_FROM.clone())
 }
-/// A table whose keys don't keep what they name.
-fn weak_keys(lua: &Lua) -> mlua::Result<Table> {
-    let t = lua.create_table()?;
-    let meta = lua.create_table()?;
-    meta.raw_set("__mode", "k")?;
-    t.set_metatable(Some(meta))?;
-    Ok(t)
-}
 /// Give a new VM its cache of converted values.
 pub(crate) fn install_cache(lua: &Lua) {
-    let weak = |mode: &str| -> mlua::Result<Table> {
-        let t = lua.create_table()?;
-        let meta = lua.create_table()?;
-        meta.raw_set("__mode", mode)?;
-        t.set_metatable(Some(meta))?;
-        Ok(t)
-    };
-    let tables = weak("v");
+    // Tables by id strong: whether a read finds its table must not depend
+    // on when the collector last ran. What no script holds goes as the host
+    // goes idle (`weaken_cache`, `sweep_idle`). Ids by table weak: a table
+    // the collector could take is one no read has in hand to look up.
+    let (tables, ids) = (lua.create_table(), weak(lua, "k"));
     let clone = lua
         .globals()
         .get::<Table>("table")
         .and_then(|t| t.get::<mlua::Function>("clone"));
-    if let (Ok(tables), Ok(ids), Ok(clone)) = (tables, weak_keys(lua), clone) {
+    if let (Ok(tables), Ok(ids), Ok(clone)) = (tables, ids, clone) {
         lua.set_app_data(Converted {
             held: Default::default(),
             tables: RefCell::new(tables),
@@ -1553,9 +1551,17 @@ pub(crate) fn install_cache(lua: &Lua) {
             swept: std::cell::Cell::new(0),
             recent: Default::default(),
             next_recent: std::cell::Cell::new(0),
-            recent_large: Default::default(),
         });
     }
+}
+/// A table whose keys (`"k"`) or values (`"v"`) don't keep what they are
+/// alive.
+fn weak(lua: &Lua, mode: &str) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    let meta = lua.create_table()?;
+    meta.raw_set("__mode", mode)?;
+    t.set_metatable(Some(meta))?;
+    Ok(t)
 }
 /// A VM's converted values, by the identity of their contents. `held` keeps
 /// each value alive while it is cached, so an address is never reused for
@@ -1567,13 +1573,15 @@ pub(crate) fn install_cache(lua: &Lua) {
 struct Converted {
     /// id → the value and its `weight`.
     held: std::cell::RefCell<HashMap<usize, (Value, usize)>>,
-    /// id → table, while `held` holds its value and a script holds the table
-    /// (weak values: a long list's rows are not a copy of it in the VM once
-    /// no script reads them). (Handles, not registry keys: looked up for
-    /// every row converted.)
+    /// id → table, while `held` holds its value. Strong: a long list's rows
+    /// no script holds any more go as the host goes idle (`weaken_cache`),
+    /// not as the collector happens to run. (Handles, not registry keys:
+    /// looked up for every row converted.)
     tables: RefCell<Table>,
-    /// table → id, weak keys: a read-only table given back (a computed
-    /// returning a row it read) is its value again, without a walk.
+    /// table → id: a read-only table given back (a computed returning a row
+    /// it read) is its value again, without a walk. Weak keys: one the
+    /// collector could take is a table no read has in hand to look up, and
+    /// the collector need not mark what only `tables` holds twice.
     ids: RefCell<Table>,
     /// Luau's `table.clone`: a table copied in C (see `derive`).
     clone: mlua::Function,
@@ -1589,19 +1597,7 @@ struct Converted {
     recent: std::cell::RefCell<Vec<(usize, Value, Table)>>,
     /// Where the next one goes once `recent` is full.
     next_recent: std::cell::Cell<usize>,
-    /// The last few large tables a script read, as `recent`: read again and
-    /// again and held by none between, each is converted once all the same.
-    /// Long lists apart from the rest, which a list's rows would crowd out, and
-    /// each a whole conversion to read again.
-    recent_large: [Recent; 2],
 }
-/// Tables kept from their last conversions, oldest first.
-#[derive(Default)]
-struct Recent {
-    tables: std::cell::RefCell<Vec<(usize, Value, Table)>>,
-}
-/// What counts as a long list, in `Converted::recent_large`.
-const LONG_LIST: usize = 64;
 /// Sweeps wait until the cache holds this much (`weight`) at least.
 const SWEPT_FROM: usize = 1 << 12;
 /// The values a cached value's table holds, its small parts counted all the
@@ -1648,83 +1644,10 @@ pub(crate) fn shared_lua(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> 
     if !large(value) {
         return recent_lua(value, lua);
     }
-    let made = CONVERTED.get();
-    let converted = shared_part(value, lua)?;
-    // Only a table just made joins the ring: one found cached (most reads)
-    // costs no look-up of the cache here.
-    if CONVERTED.get() == made {
-        return Ok(converted);
-    }
-    if let mlua::Value::Table(table) = &converted {
-        keep_large(lua, value, table);
-    }
-    Ok(converted)
+    shared_part(value, lua)
 }
-/// `table`, `value`'s, among the large tables kept for the reads to come
-/// (`Converted::recent_large`).
-fn keep_large(lua: &Lua, value: &Value, table: &Table) {
-    let Some(cache) = lua.app_data_ref::<Converted>() else {
-        return;
-    };
-    let id = identity(value);
-    let kept = &cache.recent_large[usize::from(value.list().len() >= LONG_LIST)];
-    let mut recent = kept.tables.borrow_mut();
-    if recent.iter().any(|(at, ..)| *at == id) {
-        return;
-    }
-    // Held with its value, so its address is not another's meanwhile. Oldest
-    // first: the newest goes last, and what goes for room goes from the front.
-    recent.push((id, value.clone(), table.clone()));
-    let_go_of_old(&mut recent);
-}
-/// Of `recent`, what nothing else holds any more (a list a state replaced) is
-/// kept only so far: the newest `LET_GO_NEWEST` of those, whose tables the
-/// lists after them are made from, and others while they hold no more than
-/// `LET_GO_ROWS` rows. A busy window
-/// given list after list keeps one or two, not the last eight, until it rests.
-fn let_go_of_old(recent: &mut Vec<(usize, Value, Table)>) {
-    // Held by nothing but the ring and the cache: a count of two. (The cache
-    // holds whatever is in the ring: a value is filed as it's made, before it
-    // joins, and a sweep lets go only of what the cache alone holds.)
-    let let_go = |value: &Value| match value {
-        Value::List(items) => Rc::strong_count(items) <= 2,
-        Value::Map(fields) => Rc::strong_count(fields) <= 2,
-        _ => true,
-    };
-    let (mut rows, mut newest) = (0, LET_GO_NEWEST);
-    // Newest first, as many as the ring holds before it's trimmed.
-    let mut keep = [true; RECENT_LARGE + 1];
-    for (at, (_, value, _)) in recent.iter().rev().take(keep.len()).enumerate() {
-        keep[at] = if !let_go(value) {
-            true
-        } else if newest > 0 {
-            newest -= 1;
-            true
-        } else {
-            rows += value.list().len().max(1);
-            rows <= LET_GO_ROWS
-        };
-    }
-    let (len, mut at) = (recent.len(), 0);
-    recent.retain(|_| {
-        at += 1;
-        keep.get(len - at).copied().unwrap_or(true)
-    });
-    if recent.len() > RECENT_LARGE {
-        recent.drain(..recent.len() - RECENT_LARGE);
-    }
-}
-/// The rows of tables nothing else holds that `recent_large` may keep together,
-/// beyond the newest `LET_GO_NEWEST` of them.
-const LET_GO_ROWS: usize = 2048;
-/// Tables nothing else holds that `recent_large` keeps whatever their length:
-/// a write replaces a long list and what a computed made of it (a filter)
-/// together, and each one's next table is made from its last.
-const LET_GO_NEWEST: usize = 2;
 /// Small tables kept from their last conversions (`Converted::recent`).
 const RECENT: usize = 32;
-/// Large ones (`Converted::recent_large`).
-const RECENT_LARGE: usize = 8;
 /// `to_lua` for a small value, a table converted lately given again: a row's
 /// item read by its key and then by the row (`row:get()`), or by every
 /// function of the row, is converted once until it is written.
@@ -1960,6 +1883,7 @@ fn file_weighed(lua: &Lua, value: &Value, table: &Table, added: usize) -> mlua::
     let Some(cache) = lua.app_data_ref::<Converted>() else {
         return Ok(());
     };
+    FILED.set(FILED.get() + 1);
     let id = identity(value);
     // Held before it is filed, as in `raw_shared`: a filing that fails
     // part way (an allocation over the limit) must not leave `tables[id]`
@@ -1975,9 +1899,11 @@ fn file_weighed(lua: &Lua, value: &Value, table: &Table, added: usize) -> mlua::
     ids.raw_set(table, id_key(id))?;
     sweep(lua)
 }
-/// Sweep as the cache doubles in weight: amortized, each conversion pays a
-/// little, and what nothing else holds costs at most as much again as what
-/// is held.
+/// Sweep as the cache triples in weight: amortized, each conversion pays a
+/// little, and what nothing else holds costs at most twice what is held. (A
+/// sweep looks at every value held, a few times over as letting go of one
+/// lets go of its parts: as the cache doubled, a list replaced on every
+/// write paid that more often than it paid to convert.)
 fn sweep(lua: &Lua) -> mlua::Result<()> {
     sweep_when(lua, false)
 }
@@ -1986,7 +1912,7 @@ fn sweep_when(lua: &Lua, now: bool) -> mlua::Result<()> {
     let Some(cache) = lua.app_data_ref::<Converted>() else {
         return Ok(());
     };
-    if now || cache.weight.get() >= (cache.swept.get() * 2).max(SWEPT_FROM) {
+    if now || cache.weight.get() >= (cache.swept.get() * 3).max(SWEPT_FROM) {
         let (tables, ids) = (cache.tables.borrow().clone(), cache.ids.borrow().clone());
         let mut gone: Vec<usize> = Vec::new();
         {
@@ -2040,21 +1966,35 @@ fn sweep_when(lua: &Lua, now: bool) -> mlua::Result<()> {
     }
     Ok(())
 }
+/// The cache's tables held weakly until `sweep_idle`: as the host goes idle,
+/// before the collection that frees what only the cache still holds, which
+/// `sweep_idle` then lets go of and files strongly again. Only there, at a
+/// point the host fixes, so what a read costs never depends on when the
+/// collector ran.
+pub(crate) fn weaken_cache(lua: &Lua) {
+    let weakened = (|| {
+        let Some(cache) = lua.app_data_ref::<Converted>() else {
+            return Ok(());
+        };
+        // (`ids` is weak already.)
+        let tables = weak(lua, "v")?;
+        for pair in cache.tables.borrow().pairs::<mlua::Value, mlua::Value>() {
+            let (id, table) = pair?;
+            tables.raw_set(id, table)?;
+        }
+        *cache.tables.borrow_mut() = tables;
+        Ok::<_, mlua::Error>(())
+    })();
+    // (Left strong on an error: the next idle pass tries again.)
+    let _ = weakened;
+}
 /// Everything no script holds let go of now, whatever the cache weighs: as a
-/// host goes idle, after a collection has cleared what scripts dropped. The
-/// large tables kept for reads to come go too.
+/// host goes idle, after `weaken_cache` and a collection have cleared what
+/// only the cache held. Its tables are strong again after.
 pub(crate) fn sweep_idle(lua: &Lua) {
     let Some(cache) = lua.app_data_ref::<Converted>() else {
         return;
     };
-    let [others, lists] = &cache.recent_large;
-    others.tables.borrow_mut().clear();
-    // (A list a state still has stays, its table read at each wake: those let go
-    // are held here and by `held` alone.)
-    lists
-        .tables
-        .borrow_mut()
-        .retain(|(_, value, _)| matches!(value, Value::List(items) if Rc::strong_count(items) > 2));
     cache.bases.borrow_mut().clear();
     drop(cache);
     let _ = sweep_when(lua, true);
@@ -2066,18 +2006,15 @@ fn rebuild_cache(lua: &Lua) -> mlua::Result<()> {
     let Some(cache) = lua.app_data_ref::<Converted>() else {
         return Ok(());
     };
-    let weak = |mode: &str| -> mlua::Result<Table> {
-        let t = lua.create_table()?;
-        let meta = lua.create_table()?;
-        meta.raw_set("__mode", mode)?;
-        t.set_metatable(Some(meta))?;
-        Ok(t)
-    };
-    let (new_tables, new_ids) = (weak("v")?, weak("k")?);
+    let (new_tables, new_ids) = (lua.create_table()?, weak(lua, "k")?);
     let old = cache.tables.borrow().clone();
     {
         let mut held = cache.held.borrow_mut();
-        for id in held.keys() {
+        // In order of id, not of the map's hasher: the tables lay out the
+        // same on every run.
+        let mut ids: Vec<usize> = held.keys().copied().collect();
+        ids.sort_unstable();
+        for id in &ids {
             if let mlua::Value::Table(t) = old.raw_get::<mlua::Value>(id_key(*id))? {
                 new_tables.raw_set(id_key(*id), &t)?;
                 new_ids.raw_set(t, id_key(*id))?;
@@ -2230,7 +2167,6 @@ pub(crate) fn remember(lua: &Lua, table: &Table, value: &Value) -> mlua::Result<
     let copy: Table = clone.call(table)?;
     copy.set_readonly(true);
     file(lua, value, &copy)?;
-    keep_large(lua, value, &copy);
     Ok(())
 }
 /// How many values a VM's conversion cache holds.

@@ -11,6 +11,8 @@ mod async_handlers;
 mod calls;
 #[path = "../converted_at_idle.rs"]
 mod converted_at_idle;
+#[path = "../converted_with_collection.rs"]
+mod converted_with_collection;
 #[path = "../form_values.rs"]
 mod form_values;
 #[path = "../guard_doors.rs"]

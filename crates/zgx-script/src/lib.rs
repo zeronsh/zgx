@@ -111,7 +111,7 @@ pub fn window_size_value(width: f32, height: f32) -> Value {
 pub use rules::GuardKind;
 pub use value::{
     ElementHandle, Folded, PathKey, Shared, Store, Unfold, Value, tables_converted,
-    values_converted,
+    values_converted, values_filed,
 };
 pub use windows::{Window, WindowExtras};
 
@@ -2836,6 +2836,17 @@ impl ScriptHost {
     pub fn collect_garbage(&self) {
         collect_garbage(&self.0);
     }
+    /// A full collection in each VM and nothing else: one the scripts'
+    /// allocations bring on as they run, with none of what the host does as
+    /// it goes idle (`collect_garbage`). For tests: what scripts are given
+    /// must not depend on when one came.
+    #[doc(hidden)]
+    pub fn collect_luau_only(&self) {
+        let loaded = self.0.current.borrow().clone();
+        for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
+            collect_fully(&vm.lua);
+        }
+    }
     /// Bytes the loaded scripts' VMs hold now, garbage included (for tests:
     /// what a collection frees).
     #[doc(hidden)]
@@ -2845,7 +2856,10 @@ impl ScriptHost {
     }
     /// Bytes the loaded scripts' VMs hold after a full collection (each is
     /// capped at `Limits::memory` or `Limits::plugin_memory`): what a test reads over many updates to
-    /// check that nothing keeps what it no longer needs.
+    /// check that nothing keeps what it no longer needs. The conversion
+    /// cache's tables count until the host next goes idle (`collect_garbage`
+    /// lets go of what no script holds), so a number here is no leak until
+    /// it survives that.
     pub fn script_memory(&self) -> usize {
         let loaded = self.0.current.borrow().clone();
         loaded.map_or(0, |l| {
@@ -4402,8 +4416,11 @@ fn collect_garbage(inner: &Inner) {
     let loaded = inner.current.borrow().clone();
     for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
         collect_fully(&vm.lua);
-        // What that freed of the conversion cache's tables, its values too,
-        // and what only those held.
+        // The conversion cache's tables weak for one collection: what only
+        // the cache holds goes, then its values too, and what only those
+        // held.
+        value::weaken_cache(&vm.lua);
+        collect_fully(&vm.lua);
         value::sweep_idle(&vm.lua);
         collect_fully(&vm.lua);
     }
