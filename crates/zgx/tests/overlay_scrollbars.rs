@@ -80,6 +80,8 @@ fn a_scrollbar_shows_at_rest_unless_scrollbars_are_overlays() {
     assert!(thumb(&ui).0 > 0.);
 }
 
+// zgx's own timing; Windows' is WinUI's (below).
+#[cfg(not(windows))]
 #[test]
 fn an_overlay_scrollbar_shows_as_the_user_scrolls_then_fades() {
     let mut ui = Ui::new(300., 200.);
@@ -116,6 +118,8 @@ fn an_overlay_scrollbar_shows_as_the_user_scrolls_then_fades() {
     );
 }
 
+// zgx's own timing; Windows' is WinUI's (below).
+#[cfg(not(windows))]
 #[test]
 fn the_pointer_on_an_overlay_scrollbar_keeps_it() {
     let mut ui = Ui::new(300., 200.);
@@ -137,4 +141,53 @@ fn the_pointer_on_an_overlay_scrollbar_keeps_it() {
     ui.advance_interactions(deadline + Duration::from_millis(250))
         .unwrap();
     assert_eq!(thumb(&ui).0, 0.);
+}
+
+/// Windows' scrollbar (WinUI's): a thin indicator that widens 0.4 s after
+/// the pointer arrives and narrows 0.5 s after it leaves, each over 167 ms,
+/// and goes 2 s after scrolling stops; each wait a single wake, nothing
+/// scheduled at rest.
+#[cfg(windows)]
+#[test]
+fn a_windows_scrollbar_widens_under_the_pointer_and_narrows_after_it() {
+    let mut ui = Ui::new(300., 200.);
+    ui.set_overlay_scrollbars(true);
+    mount(&mut ui);
+    let start = Instant::now();
+    wheel(&mut ui);
+    let (thin, _, _) = thumb(&ui);
+    assert_eq!(thin, 2., "a thin indicator");
+    let bounds = ui.scene.borrow().bounds(bar(&ui));
+    let (x, y) = (bounds.x + bounds.width / 2., bounds.y + 5.);
+    ui.dispatch(InputEvent::PointerMove { x, y });
+    ui.prepare_frame();
+    let widen = ui.next_interaction_deadline().expect("it will widen");
+    assert!(widen >= start + Duration::from_millis(390), "after 0.4 s");
+    ui.advance_interactions(widen - Duration::from_millis(5))
+        .unwrap();
+    assert_eq!(thumb(&ui).0, 2., "not yet");
+    ui.advance_interactions(widen).unwrap();
+    ui.advance_interactions(widen + Duration::from_millis(80))
+        .unwrap();
+    let midway = thumb(&ui).0;
+    assert!(2. < midway && midway < 6., "widening: {midway}");
+    ui.advance_interactions(widen + Duration::from_millis(200))
+        .unwrap();
+    assert_eq!(thumb(&ui).0, 6., "wide");
+    assert_eq!(ui.next_interaction_deadline(), None, "held, at rest");
+    // Off it: narrows after 0.5 s, then goes after 2 s.
+    ui.dispatch(InputEvent::PointerMove { x: 50., y: 50. });
+    ui.prepare_frame();
+    let left = Instant::now();
+    let narrow = ui.next_interaction_deadline().expect("it will narrow");
+    assert!(narrow >= left + Duration::from_millis(490) - Duration::from_millis(20));
+    ui.advance_interactions(narrow).unwrap();
+    ui.advance_interactions(narrow + Duration::from_millis(200))
+        .unwrap();
+    assert_eq!(thumb(&ui).0, 2., "narrow again");
+    let hide = ui.next_interaction_deadline().expect("it will go");
+    ui.advance_interactions(hide + Duration::from_millis(100))
+        .unwrap();
+    assert_eq!(thumb(&ui).0, 0., "gone");
+    assert_eq!(ui.next_interaction_deadline(), None, "nothing scheduled");
 }

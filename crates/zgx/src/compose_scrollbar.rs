@@ -13,17 +13,81 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The thumb's thickness at rest and under the pointer (or dragged), and
-/// how far its rounded ends sit in from the track's.
-const THUMB: f32 = 6.;
-const THUMB_ACTIVE: f32 = 8.;
-const THUMB_INSET: f32 = 2.;
+/// How a scrollbar is drawn and timed: zgx's own, or Windows 11's.
+struct Look {
+    /// The thumb's thickness at rest and widened (under the pointer, or
+    /// dragged), how far its rounded ends sit in from the track's, and the
+    /// most its corners round.
+    thumb: f32,
+    thumb_wide: f32,
+    inset: f32,
+    radius: f32,
+    /// The track's thickness (where it takes the pointer), how far it sits
+    /// from the view's edge, and the shortest thumb.
+    track: f32,
+    margin: f32,
+    min_thumb: f64,
+    /// How long an overlay scrollbar stays once its view stops scrolling
+    /// (or the pointer leaves it), and how long it takes to fade out, a
+    /// step a refresh (`Ui::set_refresh_interval`).
+    linger: Duration,
+    fade: Duration,
+    /// Widening: how long the pointer rests on it first, how long after it
+    /// leaves it narrows, and how long either takes. `None`: at once.
+    widen: Option<(Duration, Duration, Duration)>,
+    /// Brighter under the pointer (zgx's), or the same colour (Windows').
+    brightens: bool,
+}
+/// zgx's: 6 across, 8 under the pointer, in an 8 track at the edge.
+const BUILT_IN: Look = Look {
+    thumb: 6.,
+    thumb_wide: 8.,
+    inset: 2.,
+    radius: f32::INFINITY,
+    track: 8.,
+    margin: 0.,
+    min_thumb: 24.,
+    linger: Duration::from_millis(1000),
+    fade: Duration::from_millis(200),
+    widen: None,
+    brightens: true,
+};
+/// Windows 11's, as WinUI 3 draws its ScrollBar (microsoft-ui-xaml's
+/// `ScrollBar_themeresources.xaml`, `ScrollViewer_themeresources.xaml`): a
+/// thin indicator (an 8 thumb inside a 6 transparent stroke) that widens
+/// to 6 in a 12 track (`ScrollBarSize`) 0.4 s after the pointer arrives
+/// (`ScrollBarExpandBeginTime`) and narrows 0.5 s after it leaves
+/// (`ScrollBarContractBeginTime`), each over 167 ms
+/// (`ScrollBarExpandDuration`), rounded 3 (`ScrollBarCornerRadius`), 1 from
+/// the edge (`ScrollViewerScrollBarMargin`), at least 30 long; hidden 2 s
+/// after scrolling stops (`ScrollViewerSeparatorContractDelay`), fading
+/// over 83 ms (`ScrollBarOpacityChangeDuration`). Its thumb keeps one
+/// colour under the pointer.
+const WINDOWS: Look = Look {
+    thumb: 2.,
+    thumb_wide: 6.,
+    inset: 2.,
+    radius: 3.,
+    track: 12.,
+    margin: 1.,
+    min_thumb: 30.,
+    linger: Duration::from_millis(2000),
+    fade: Duration::from_millis(83),
+    widen: Some((
+        Duration::from_millis(400),
+        Duration::from_millis(500),
+        Duration::from_millis(167),
+    )),
+    brightens: false,
+};
+const LOOK: Look = if cfg!(windows) { WINDOWS } else { BUILT_IN };
 
-/// How long an overlay scrollbar stays once its view stops scrolling (or
-/// the pointer leaves it), and how long it takes to fade out, a step a
-/// refresh (`Ui::set_refresh_interval`).
-const LINGER: Duration = Duration::from_millis(1000);
-const FADE: Duration = Duration::from_millis(200);
+/// WinUI's widening curve, `cubic-bezier(0, 0, 0, 1)`: x = t³ and
+/// y = 3t² − 2t³, so at progress `p`, t = ∛p.
+fn widen_curve(p: f32) -> f32 {
+    let t = p.clamp(0., 1.).cbrt();
+    t * t * (3. - 2. * t)
+}
 
 /// An overlay scrollbar's showing (`Ui::set_overlay_scrollbars`).
 pub(crate) struct Fade {
@@ -35,8 +99,42 @@ pub(crate) struct Fade {
     next: Cell<Option<Instant>>,
     /// In the document's list of fades.
     listed: Cell<bool>,
+    /// How far the thumb has widened, 0 to 1 (`Look::widen`); where it is
+    /// going and when that starts; and, while it moves, from where, since
+    /// when, and its next step.
+    widened: Signal<f32>,
+    aim: Cell<Option<(f32, Instant)>>,
+    moving: Cell<Option<(f32, f32, Instant)>>,
+    step: Cell<Option<Instant>>,
 }
 impl Fade {
+    /// Widen (`to` 1) or narrow (0) after `delay`, unless it is there or
+    /// going there already.
+    fn aim(&self, to: f32, delay: Duration, now: Instant) {
+        let going = match (self.moving.get(), self.aim.get()) {
+            (_, Some((aimed, _))) => aimed,
+            (Some((_, target, _)), None) => target,
+            (None, None) => self.widened.with_untracked(|w| *w),
+        };
+        if going == to {
+            return;
+        }
+        // Turned back before it started: it stays as it is.
+        if self.aim.get().is_some() && self.moving.get().is_none() {
+            self.aim.set(None);
+            if self.widened.with_untracked(|w| *w) == to {
+                return;
+            }
+        }
+        self.aim.set(Some((to, now + delay)));
+    }
+    /// When its widening next steps, if it does.
+    fn widen_due(&self) -> Option<Instant> {
+        match (self.aim.get(), self.step.get()) {
+            (Some((_, at)), Some(step)) => Some(at.min(step)),
+            (aim, step) => aim.map(|(_, at)| at).or(step),
+        }
+    }
     fn show(&self, now: Instant) {
         self.alpha.set(1.);
         self.linger(now);
@@ -48,7 +146,7 @@ impl Fade {
         self.next.set(None);
     }
     fn linger(&self, now: Instant) {
-        let at = now + LINGER;
+        let at = now + LOOK.linger;
         self.fade_at.set(Some(at));
         self.next.set(Some(at));
     }
@@ -67,7 +165,13 @@ pub(crate) fn next_fade(ui: &Ui) -> Option<Instant> {
     }
     fades
         .iter()
-        .filter_map(|fade| fade.upgrade()?.next.get())
+        .filter_map(|fade| {
+            let fade = fade.upgrade()?;
+            match (fade.next.get(), fade.widen_due()) {
+                (Some(next), Some(widen)) => Some(next.min(widen)),
+                (next, widen) => next.or(widen),
+            }
+        })
         .min()
 }
 
@@ -83,13 +187,16 @@ pub(crate) fn advance_fades(ui: &Ui, now: Instant) -> bool {
     };
     let mut stepped = false;
     for fade in fades {
+        if let Some((_, _, duration)) = LOOK.widen {
+            stepped |= step_widening(&fade, now, duration, ui.refresh_interval());
+        }
         let (Some(next), Some(at)) = (fade.next.get(), fade.fade_at.get()) else {
             continue;
         };
         if next > now {
             continue;
         }
-        let done = now.saturating_duration_since(at).as_secs_f32() / FADE.as_secs_f32();
+        let done = now.saturating_duration_since(at).as_secs_f32() / LOOK.fade.as_secs_f32();
         if done >= 1. {
             fade.hide();
         } else {
@@ -101,11 +208,40 @@ pub(crate) fn advance_fades(ui: &Ui, now: Instant) -> bool {
     stepped
 }
 
+/// Start or step `fade`'s widening due by `now` (`duration` long, a step
+/// each `interval`); whether it did.
+fn step_widening(fade: &Fade, now: Instant, duration: Duration, interval: Duration) -> bool {
+    if let Some((to, at)) = fade.aim.get()
+        && at <= now
+    {
+        fade.aim.set(None);
+        fade.moving
+            .set(Some((fade.widened.with_untracked(|w| *w), to, now)));
+    }
+    let Some((from, to, since)) = fade.moving.get() else {
+        fade.step.set(None);
+        return false;
+    };
+    if fade.step.get().is_some_and(|step| step > now) {
+        return false;
+    }
+    let p = now.saturating_duration_since(since).as_secs_f32() / duration.as_secs_f32();
+    if p >= 1. {
+        fade.widened.set(to);
+        fade.moving.set(None);
+        fade.step.set(None);
+    } else {
+        fade.widened.set(from + (to - from) * widen_curve(p));
+        fade.step.set(Some(now + interval));
+    }
+    true
+}
+
 /// A rounded thumb of `color`, `thickness` across.
 fn thumb_kind(color: Color, thickness: f32) -> NodeKind {
     NodeKind::Quad(QuadStyle {
         fill: color,
-        radius: thickness / 2.,
+        radius: (thickness / 2.).min(LOOK.radius),
         ..Default::default()
     })
 }
@@ -135,7 +271,7 @@ pub(crate) fn mount(
     );
     let thumb = ui.scene.borrow_mut().append(
         track,
-        thumb_kind(theme.color_untracked(tok::SCROLLBAR_THUMB), THUMB),
+        thumb_kind(theme.color_untracked(tok::SCROLLBAR_THUMB), LOOK.thumb),
         Style::default(),
     );
     let main = move |size: (f32, f32)| if horizontal { size.0 } else { size.1 };
@@ -186,7 +322,9 @@ pub(crate) fn mount(
         let length = main(event_size.get()) as f64;
         let total = event_extent.get() as f64;
         let limit = (total - length).max(0.);
-        let thumb_length = (length * length / total.max(1.)).max(24.).min(length);
+        let thumb_length = (length * length / total.max(1.))
+            .max(LOOK.min_thumb)
+            .min(length);
         let travel = (length - thumb_length).max(0.);
         // Right to left, a horizontal bar counts from its right end.
         let rtl = horizontal && scene.borrow().direction(owner) == crate::scene::Direction::Rtl;
@@ -298,6 +436,10 @@ pub(crate) fn mount(
         fade_at: Cell::new(None),
         next: Cell::new(None),
         listed: Cell::new(false),
+        widened: ui.signal(0.),
+        aim: Cell::new(None),
+        moving: Cell::new(None),
+        step: Cell::new(None),
     });
     let (weak, shown, mode) = (ui.downgrade(), fade.clone(), overlay_mode.clone());
     let (scrolled, held, focus) = (offset.clone(), active.clone(), focused.clone());
@@ -321,6 +463,14 @@ pub(crate) fn mount(
                 .push(Rc::downgrade(&shown));
         }
         let now = crate::clock::now();
+        // Windows': it widens a moment after the pointer arrives, narrows a
+        // moment after it leaves (or a drag ends), each a wake.
+        if let Some((widen, narrow, _)) = LOOK.widen {
+            match pointer {
+                true => shown.aim(1., widen, now),
+                false => shown.aim(0., narrow, now),
+            }
+        }
         match last.replace(value) {
             // Turned on: hidden until the user scrolls.
             None => shown.hide(),
@@ -381,7 +531,7 @@ pub(crate) fn mount(
                 ..fixed(0., 0.)
             },
         );
-        let thickness = if horizontal { height } else { width }.min(8.);
+        let thickness = if horizontal { height } else { width }.min(LOOK.track);
         // Hidden, the pointer reaches what is under it.
         let track_size = if !visible || alpha <= 0. {
             (0., 0.)
@@ -408,7 +558,7 @@ pub(crate) fn mount(
         );
         let thumb_length = if visible && alpha > 0. {
             ((length as f64 * length as f64 / total as f64)
-                .max(24.)
+                .max(LOOK.min_thumb)
                 .min(length as f64)) as f32
         } else {
             0.
@@ -416,9 +566,16 @@ pub(crate) fn mount(
         // Drawn slimmer than the track it hits in, centred across it, its
         // rounded ends inset along it.
         let active = active.get();
-        let across = (if active { THUMB_ACTIVE } else { THUMB }).min(thickness);
+        // How wide: under the pointer (zgx's), or as far as it has widened
+        // (Windows', always wide where scrollbars always show).
+        let widened = match LOOK.widen {
+            None => f32::from(active),
+            Some(_) if !overlay_mode => 1.,
+            Some(_) => fade.widened.get(),
+        };
+        let across = (LOOK.thumb + (LOOK.thumb_wide - LOOK.thumb) * widened).min(thickness);
         let along = if thumb_length > 0. {
-            (thumb_length - 2. * THUMB_INSET).max(across)
+            (thumb_length - 2. * LOOK.inset).max(across)
         } else {
             0.
         };
@@ -432,8 +589,13 @@ pub(crate) fn mount(
         scene.set_style(thumb, fixed(drawn.0, drawn.1));
         let faded =
             |Color(r, g, b, a): Color, alpha: f32| Color(r, g, b, (a as f32 * alpha).round() as u8);
-        // An overlay scrollbar's track shows under the pointer only.
-        let track_alpha = if overlay_mode && !active { 0. } else { alpha };
+        // An overlay scrollbar's track shows under the pointer only (as far
+        // as it has widened, Windows').
+        let track_alpha = match LOOK.widen {
+            Some(_) if overlay_mode => alpha * widened,
+            _ if overlay_mode && !active => 0.,
+            _ => alpha,
+        };
         scene.set_kind(
             background,
             NodeKind::Rect(faded(theme.color(tok::SCROLLBAR_TRACK), track_alpha)),
@@ -441,7 +603,7 @@ pub(crate) fn mount(
         let thumb_color = theme.color(tok::SCROLLBAR_THUMB);
         let color = if focused.get() {
             theme.color(tok::SCROLLBAR_THUMB_ACTIVE)
-        } else if active {
+        } else if active && LOOK.brightens {
             // Brighter: the colour's alpha raised by three quarters.
             let Color(r, g, b, a) = thumb_color;
             Color(r, g, b, (a as f32 * 1.75).min(255.) as u8)
@@ -460,7 +622,9 @@ pub(crate) fn mount(
         } else {
             position
         };
-        let (start, side) = (position + THUMB_INSET, (thickness - across) / 2.);
+        // Centred across the track, which sits `margin` in from the edge.
+        let side = (thickness - LOOK.margin * 2. - across) / 2. + LOOK.margin;
+        let (start, side) = (position + LOOK.inset, side.max(0.));
         scene.set_transform(
             thumb,
             if horizontal {

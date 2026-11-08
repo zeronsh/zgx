@@ -515,6 +515,8 @@ jobs:
       # Focus drawn as Windows' focus visual there (outside the control,
       # two rings), as the Linux and macOS jobs test it inside.
       - run: "cargo test -p zgx --test input --locked -- focus_visible::"
+      # And its scrollbars, as WinUI's: widening and narrowing on single wakes.
+      - run: "cargo test -p zgx --test lists --locked -- overlay_scrollbars::"
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # The swap chain's alpha (opaque windows aren't blended by DWM, #513)
