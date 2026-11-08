@@ -593,6 +593,93 @@ pub(crate) fn shared_texture(
     }
 }
 
+/// macOS: a texture copied into in parts and sampled straight after (a
+/// backdrop reader's copy of what lies behind it), without the GPU's lossless
+/// compression. On Apple GPUs draws sampling a compressed texture after a
+/// blit into part of it, in order on one queue (behind a fence, even), now
+/// and then read 16-pixel blocks of it as they were before the copy: cleared,
+/// or the last frame's. Uncompressed, every read sees the copy. Made through
+/// the HAL, wgpu takes it as initialized: the caller clears it (`written`).
+#[cfg(target_os = "macos")]
+pub(crate) fn uncompressed_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    label: &str,
+) -> wgpu::Texture {
+    use objc2_metal::{
+        MTLDevice, MTLPixelFormat, MTLStorageMode, MTLTextureDescriptor, MTLTextureType,
+        MTLTextureUsage,
+    };
+    // SAFETY: The raw device only makes a texture; nothing destroys it, and
+    // the guard is dropped before wgpu is called again.
+    let hal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }.expect("a Metal device");
+    // SAFETY: A plain 2D texture descriptor of this size.
+    let descriptor = unsafe {
+        MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+            MTLPixelFormat::BGRA8Unorm,
+            width.max(1) as usize,
+            height.max(1) as usize,
+            false,
+        )
+    };
+    descriptor.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget);
+    descriptor.setStorageMode(MTLStorageMode::Private);
+    descriptor.setAllowGPUOptimizedContents(false);
+    let metal = hal
+        .raw_device()
+        .newTextureWithDescriptor(&descriptor)
+        .expect("an uncompressed texture");
+    drop(hal);
+    // SAFETY: Metal made this texture on this device, in `FORMAT`, this size,
+    // one mip level and layer, readable by shaders and drawn into as the
+    // descriptor says (copies need no usage); wgpu takes ownership of it.
+    unsafe {
+        let raw = wgpu::hal::metal::Device::texture_from_raw(
+            metal,
+            crate::FORMAT,
+            MTLTextureType::Type2D,
+            1,
+            1,
+            wgpu::hal::CopyExtent {
+                width: width.max(1),
+                height: height.max(1),
+                depth: 1,
+            },
+        );
+        device.create_texture_from_hal::<wgpu::hal::api::Metal>(
+            raw,
+            &wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: width.max(1),
+                    height: height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: crate::FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+        )
+    }
+}
+
+/// Whether `texture`, made by `uncompressed_texture` or by wgpu, may be
+/// compressed by the GPU.
+#[cfg(target_os = "macos")]
+pub(crate) fn may_compress(texture: &wgpu::Texture) -> bool {
+    use objc2_metal::MTLTexture as _;
+    // SAFETY: Only reads a property of the raw texture, which the guard keeps.
+    let hal = unsafe { texture.as_hal::<wgpu::hal::api::Metal>() }.expect("a Metal texture");
+    hal.raw_handle().allowGPUOptimizedContents()
+}
+
 /// Write premultiplied RGBA texels (reordered in place to the texture's
 /// BGRA) to `(x, y, width, height)` of a `shared_texture`. No submission may
 /// still read that region: the caller writes only cells no submitted frame
