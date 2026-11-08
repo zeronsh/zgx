@@ -63,3 +63,24 @@ ended and every drain waited its five seconds (on WING-PC, 5 of 50
 immediate exits under load timed out on the exit). They are now closed once
 `CreatePseudoConsole` holds its own (Microsoft's ConPTY guidance), and the
 child's thread handle once `CreateProcessW` returns.
+
+## An emoji asked for with VS16 takes two cells
+
+A character shown as text by default that has an emoji presentation (❤,
+☺, ✔, ⚠) took one cell with VS16 (U+FE0F) after it, as the selector, a
+zero-width character, joined it. Ghostty, kitty and iTerm2 draw it as an
+emoji two cells wide (as do Windows Terminal and foot; WezTerm, Alacritty
+and VTE keep one), and so do the programs that measure text with Unicode's
+widths rather than `wcwidth`: Ink's string-width and ratatui's
+unicode-width count `❤️` as 2, so coding agents' lines with ✔️ or ⚠️ were
+out of step with what showed. `Term::input` hands VS16 to
+`emoji_presentation` (cold, out of line, reached only from the zero-width
+branch): when the pair is two wide (`unicode-width`'s `str` width) and the
+cell is the character just written, it becomes a wide character with its
+spacer, and the cursor goes past both (in insert mode the row after it
+shifts a cell first, as `input` shifts it); on the last column it starts
+the next line as a wide character does. Programs counting with `wcwidth`
+(readline) see one column, as in those terminals, so an edit across such an
+emoji puts their cursor a cell off. Mode 2027 (grapheme clustering) isn't
+recognized. zgx-terminal's `an_emoji_asked_for_with_vs16_takes_two_cells`
+checks the cells, the line's end and the cases left alone. Version 0.26.2.

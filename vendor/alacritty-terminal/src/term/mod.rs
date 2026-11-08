@@ -11,7 +11,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as Base64;
 use bitflags::bitflags;
 use log::{debug, trace};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::event::{Event, EventListener};
 use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
@@ -1096,6 +1096,99 @@ impl<T> Term<T> {
         cursor_cell.extra = extra;
     }
 
+    /// zgx: VS16 (U+FE0F) after a character shown as text by default (❤, ☺,
+    /// ✔, ⚠) that has an emoji presentation asks for that presentation, two
+    /// cells wide, as Ghostty, kitty and iTerm2 show it: the cell at `column`
+    /// becomes a wide character with its spacer after it, and the cursor goes
+    /// past both. With no room after it on its line it starts the next, as a
+    /// wide character does. False where it stays as it is, the selector then
+    /// kept with it.
+    #[cold]
+    #[inline(never)]
+    fn emoji_presentation(&mut self, line: Line, column: Column) -> bool
+    where
+        T: EventListener,
+    {
+        let columns = self.columns();
+        let cell = &self.grid[line][column];
+        // Only the character just written: before the cursor, or under it
+        // waiting to wrap (not the cell under a cursor moved to the start).
+        let written = self.grid.cursor.input_needs_wrap || column < self.grid.cursor.point.column;
+        if columns < 2
+            || !written
+            || cell.flags.intersects(
+                Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
+            )
+        {
+            return false;
+        }
+        let mut text = [0; 8];
+        let base = cell.c.encode_utf8(&mut text).len();
+        let sequence = base + '\u{fe0f}'.encode_utf8(&mut text[base..]).len();
+        if std::str::from_utf8(&text[..sequence]).map_or(true, |text| text.width() != 2) {
+            return false;
+        }
+        let mut glyph = cell.clone();
+        glyph.flags.insert(Flags::WIDE_CHAR);
+        glyph.push_zerowidth('\u{fe0f}');
+
+        if column + 1 >= columns {
+            // The last column, the cursor on it waiting to wrap.
+            if !self.mode.contains(TermMode::LINE_WRAP) {
+                return false;
+            }
+            self.grid
+                .cursor
+                .template
+                .flags
+                .insert(Flags::LEADING_WIDE_CHAR_SPACER);
+            self.write_at_cursor(' ');
+            self.grid
+                .cursor
+                .template
+                .flags
+                .remove(Flags::LEADING_WIDE_CHAR_SPACER);
+            self.wrapline();
+        } else {
+            self.grid.cursor.point.column = column;
+            self.grid.cursor.input_needs_wrap = false;
+        }
+
+        // The glyph, then its spacer, clearing what they cover; in insert
+        // mode the row after it shifts right a cell first, as `input` shifts
+        // it for a wide character.
+        self.write_at_cursor(' ');
+        *self.grid.cursor_cell() = glyph;
+        self.damage_cursor();
+        self.grid.cursor.point.column += 1;
+        let spacer = self.grid.cursor.point.column;
+        if self.mode.contains(TermMode::INSERT) && spacer + 1 < columns {
+            let line = self.grid.cursor.point.line;
+            let row = &mut self.grid[line][..];
+            for column in (spacer.0..columns - 1).rev() {
+                row.swap(column + 1, column);
+            }
+        }
+        self.grid
+            .cursor
+            .template
+            .flags
+            .insert(Flags::WIDE_CHAR_SPACER);
+        self.write_at_cursor(' ');
+        self.grid
+            .cursor
+            .template
+            .flags
+            .remove(Flags::WIDE_CHAR_SPACER);
+        self.damage_cursor();
+        if self.grid.cursor.point.column + 1 < columns {
+            self.grid.cursor.point.column += 1;
+        } else {
+            self.grid.cursor.input_needs_wrap = true;
+        }
+        true
+    }
+
     #[inline]
     fn damage_cursor(&mut self) {
         // The normal cursor coordinates are always in viewport.
@@ -1162,6 +1255,11 @@ impl<T: EventListener> Handler for Term<T> {
                 .contains(Flags::WIDE_CHAR_SPACER)
             {
                 column.0 = column.saturating_sub(1);
+            }
+
+            // zgx: VS16 may make the character before it an emoji, two cells wide.
+            if c == '\u{fe0f}' && self.emoji_presentation(line, column) {
+                return;
             }
 
             self.grid[line][column].push_zerowidth(c);
