@@ -2691,6 +2691,20 @@ impl UserData for State {
 /// so the app's states write without a check.
 #[derive(Clone)]
 pub(crate) struct ReadState(pub State, pub Rc<str>);
+/// What a state handle (`ui.state`'s, or a plugin's read-only one) holds,
+/// read as its `get` reads it: brought up to date, and followed by what
+/// reads it. `None` for anything else.
+pub(crate) fn state_value(value: &mlua::Value) -> Option<Value> {
+    let mlua::Value::UserData(ud) = value else {
+        return None;
+    };
+    if let Ok(state) = ud.borrow::<State>() {
+        return Some(state.fresh().get());
+    }
+    ud.borrow::<ReadState>()
+        .ok()
+        .map(|state| state.0.fresh().get())
+}
 /// What a `State` writes with: a `ReadState` refuses each.
 const WRITES: [&str; 10] = [
     "set", "update", "set_key", "append", "patch", "toggle", "add", "push", "insert", "remove",

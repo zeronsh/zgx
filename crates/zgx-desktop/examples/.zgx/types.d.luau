@@ -21558,7 +21558,7 @@ declare ui: {
 	-- table, img; runs `{ x, b?, i?, c?, s?, a?, f? }`). With `key` (a
 	-- reply's id), text growing under it parses only its new end, and its
 	-- earlier blocks are the same tables as before.
-	markdown: (text: string, opts: MarkdownOptions?) -> { MarkdownBlock },
+	markdown: (text: string | State<string> | ReadOnlyState<string>, opts: MarkdownOptions?) -> { MarkdownBlock },
 	-- Markdown drawn: paragraphs, headings, lists, quotes, tables, and code
 	-- blocks with a Copy button, in the theme's colours and sizes,
 	-- selectable. As its text changes it parses only what changed and

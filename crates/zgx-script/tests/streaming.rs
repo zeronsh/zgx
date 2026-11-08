@@ -205,3 +205,61 @@ fn a_streamed_markdown_chunk_converts_what_changed_not_what_it_holds() {
         "a chunk converts as much with 240 sections held as with 40"
     );
 }
+
+/// `ui.markdown` given the state holding a reply rather than its text: at
+/// every append the same blocks as a stream of its text, past where the
+/// string becomes a long one (`state:append` keeping its edits, which the
+/// stream then parses alone), and the computed around it follows the state
+/// (a stale answer would differ). A hanging `**` across chunks included.
+#[test]
+fn markdown_takes_the_state_holding_its_text() {
+    let mut h = Harness::inline(
+        r###"local reply = ui.state("reply", "")
+local chunks = ui.state("chunks", 0)
+local function same(a: any, b: any): boolean
+    if type(a) ~= type(b) then return false end
+    if type(a) ~= "table" then return a == b end
+    for k, v in a do if not same(v, b[k]) then return false end end
+    for k in b do if a[k] == nil then return false end end
+    return true
+end
+local by_state = ui.computed(function()
+    return ui.markdown(reply, { key = "state" })
+end)
+local by_text = ui.computed(function()
+    return ui.markdown(reply:get(), { key = "text" })
+end)
+local words = string.rep("Words of a long paragraph streaming in, ", 20)
+ui.command { id = "append", run = function()
+    local n = chunks:get() + 1
+    chunks:set(n)
+    local k = n % 6
+    reply:append(if k == 1 then "## Part " .. n .. "\n\n"
+        elseif k == 2 then words .. "with **bo"
+        elseif k == 3 then "ld** and `code`, " .. words
+        elseif k == 4 then "the end.\n\n- one\n- "
+        elseif k == 5 then "two\n\n"
+        else "```\nlet x = " .. n .. ";\n```\n\n")
+end }
+return ui.column {
+    ui.text { id = "same", function()
+        return if same(by_state:get(), by_text:get()) then "same" else "differ"
+    end },
+    ui.text { id = "blocks", function() return tostring(#by_state:get()) end },
+    ui.text { id = "length", function() return tostring(#reply:get()) end },
+}"###,
+    );
+    h.settle();
+    let mut blocks = 0;
+    for chunk in 1..=240 {
+        assert!(h.host.run_command("append"));
+        h.settle();
+        assert_eq!(h.text("same"), "same", "chunk {chunk}");
+        let now: usize = h.text("blocks").parse().unwrap();
+        assert!(now >= blocks, "chunk {chunk}: the blocks follow the state");
+        blocks = now;
+    }
+    // Long by the end: the stream followed `state:append`'s edits.
+    let length: usize = h.text("length").parse().unwrap();
+    assert!(length > 64 * 1024, "{length} bytes");
+}

@@ -393,9 +393,37 @@ impl Incremental {
 /// the same text answers with the same blocks.
 pub(crate) fn script(
     lua: &mlua::Lua,
-    (text, opts): (mlua::LuaString, Option<mlua::Table>),
+    (text, opts): (mlua::Value, Option<mlua::Table>),
 ) -> mlua::Result<Value> {
-    let text = text.to_str()?;
+    // A state holding the text is read as its `get` reads it (a computed
+    // around the call follows it), and its text never becomes a script's
+    // string: a keyed stream parses a long one (`state:append`'s) from what
+    // was appended alone, neither copying nor comparing what came before.
+    let held = crate::value::state_value(&text);
+    let borrowed = match (&held, &text) {
+        (None, mlua::Value::String(text)) => Some(text.to_str()?),
+        (None, _) => {
+            return Err(mlua::Error::runtime(
+                "ui.markdown takes a string, or a state holding one",
+            ));
+        }
+        (Some(Value::Nil | Value::Str(_) | Value::Text(_)), _) => None,
+        (Some(_), _) => {
+            return Err(mlua::Error::runtime(
+                "ui.markdown's state holds a string: the markdown",
+            ));
+        }
+    };
+    // The whole text, where a path needs it (a long text made one string
+    // only then).
+    let whole = || -> std::borrow::Cow<'_, str> {
+        match (&borrowed, &held) {
+            (Some(text), _) => std::borrow::Cow::Borrowed(&**text),
+            (None, Some(Value::Str(text))) => std::borrow::Cow::Borrowed(&**text),
+            (None, Some(Value::Text(text))) => text.to_cow(),
+            _ => std::borrow::Cow::Borrowed(""),
+        }
+    };
     let flag = |name: &str| -> mlua::Result<bool> {
         Ok(match &opts {
             Some(t) => t.get::<Option<bool>>(name)?.unwrap_or(false),
@@ -433,7 +461,7 @@ pub(crate) fn script(
     };
     // (The VM registers its cache when it starts: `install`.)
     let Some(parsed) = lua.app_data_ref::<Parsed>() else {
-        return Ok(Value::List(parse(&text, &options).into()));
+        return Ok(Value::List(parse(&whole(), &options).into()));
     };
     let flags = (options.breaks, options.paths);
     Ok(match key {
@@ -444,9 +472,10 @@ pub(crate) fn script(
                 streams.insert(key.clone(), (flags, Incremental::new(options), None, None));
             }
             let (_, stream, last, kept) = streams.get_mut(&key).expect("inserted above");
-            match lazy {
-                Some(threshold) => stream.set_text_lazy(&text, threshold),
-                None => stream.set_text(&text),
+            match (lazy, &held) {
+                (Some(threshold), _) => stream.set_text_lazy(&whole(), threshold),
+                (None, Some(held)) => stream.set_value(held),
+                (None, None) => stream.set_text(&whole()),
             }
             let pending = stream.has_pending();
             let blocks = Value::List(stream.blocks().into());
@@ -475,6 +504,7 @@ pub(crate) fn script(
         }
         None => {
             let mut texts = parsed.texts.borrow_mut();
+            let text = whole();
             let at = (text.to_string(), flags);
             if let Some(blocks) = texts.get(&at) {
                 return Ok(blocks.clone());

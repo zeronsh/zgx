@@ -23,7 +23,7 @@ local function runs(list: { MarkdownRun }): Node
 end
 
 local blocks = ui.computed(function()
-	return ui.markdown(reply:get(), { key = "reply" })
+	return ui.markdown(reply, { key = "reply" })
 end)
 
 ui.command { id = "append", run = function()
