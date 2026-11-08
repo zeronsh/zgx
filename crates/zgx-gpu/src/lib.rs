@@ -5616,7 +5616,13 @@ impl GpuRenderer {
         self.node_images.retain(|id, _| scene.contains(*id));
         self.node_ramps.retain(|id, _| scene.contains(*id));
         let shown: std::collections::HashSet<&RampKey> = self.node_ramps.values().collect();
-        self.ramps.retain(|key, _| shown.contains(key));
+        // A ramp no box shows stays while its texture does (kept with the
+        // images no node shows, until the window goes idle): the same
+        // gradient shown again, as a page pushed again shows its edge, takes
+        // that texture rather than a new one each time.
+        let images = &self.images;
+        self.ramps
+            .retain(|key, ramp| shown.contains(key) || images.contains_key(&ramp.id()));
         self.shapes.retain(|id, _| {
             scene.contains(*id)
                 && matches!(
@@ -5663,7 +5669,12 @@ impl GpuRenderer {
                 })
                 .collect();
             live_images.extend(self.canvases.image_ids());
-            live_images.extend(self.ramps.values().map(|ramp| ramp.id()));
+            // Only the ramps boxes show: the rest go as other unshown images do.
+            live_images.extend(
+                (self.node_ramps.values())
+                    .filter_map(|key| self.ramps.get(key))
+                    .map(|ramp| ramp.id()),
+            );
             live_images.extend(self.svgs.image_ids());
             // Boxes' background images.
             live_images.extend(scene.paint_items().filter_map(|item| match item.kind {
@@ -18304,7 +18315,7 @@ mod thread_safety_tests {
 #[cfg(test)]
 mod rest_tests {
     use super::*;
-    use zgx::scene::{Color, Layout, Style, Transform};
+    use zgx::scene::{Color, Layout, QuadStyle, Style, Transform};
 
     fn fixed(width: f32, height: f32) -> Style {
         Style {
@@ -18331,6 +18342,100 @@ mod rest_tests {
     fn draw(gpu: &mut GpuRenderer, scene: &mut Scene) {
         let report = scene.flush();
         gpu.render(scene, &report.damage).unwrap();
+    }
+
+    /// What wgpu holds now: textures, samplers and bind groups, as its HAL
+    /// counts them (each made, less each freed).
+    fn held(gpu: &GpuRenderer) -> (isize, isize, isize) {
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let counters = gpu.device.get_internal_counters();
+        (
+            counters.hal.textures.read(),
+            counters.hal.samplers.read(),
+            counters.hal.bind_groups.read(),
+        )
+    }
+
+    /// A page pushed and popped (a navigation stack's) shows an image, the
+    /// same one each time as a symbol is, or a new one, or a gradient along
+    /// one axis (the soft edge of a page coming over another), then leaves
+    /// it: the textures, samplers and bind groups that took come back to
+    /// where they were, and the same picture isn't uploaded again each time.
+    #[test]
+    fn a_page_pushed_and_popped_again_and_again_gives_its_image_textures_back() {
+        use zgx::decoration::{Background, Decoration};
+        let stops: Arc<[zgx::canvas::GradientStop]> = Arc::from(vec![
+            zgx::canvas::GradientStop {
+                offset: 0.,
+                color: Color(0, 0, 0, 24),
+            },
+            zgx::canvas::GradientStop {
+                offset: 1.,
+                color: Color(0, 0, 0, 0),
+            },
+        ]);
+        let symbol = Arc::new(zgx::image::ImageData::new(24, 24, vec![200; 24 * 24 * 4]).unwrap());
+        for what in ["symbol", "fresh", "gradient"] {
+            let mut gpu = GpuRenderer::new(400, 300).unwrap();
+            let mut scene = boxes(10);
+            let mut uploads = 0;
+            let push = |gpu: &mut GpuRenderer, scene: &mut Scene, cycle: usize| {
+                let kind = match what {
+                    "symbol" => NodeKind::Image(symbol.clone()),
+                    "fresh" => NodeKind::Image(Arc::new(
+                        zgx::image::ImageData::new(24, 24, vec![(cycle % 250) as u8; 24 * 24 * 4])
+                            .unwrap(),
+                    )),
+                    _ => NodeKind::Quad(QuadStyle {
+                        decoration: Some(Arc::new(Decoration {
+                            background: Some(Background::Linear {
+                                angle: std::f32::consts::PI,
+                                stops: stops.clone(),
+                            }),
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    }),
+                };
+                let page = scene.append(scene.root(), kind, fixed(9., 300.));
+                let report = scene.flush();
+                let stats = gpu.render(scene, &report.damage).unwrap();
+                scene.remove(page);
+                draw(gpu, scene);
+                stats.image_uploads
+            };
+            for cycle in 0..10 {
+                push(&mut gpu, &mut scene, cycle);
+            }
+            let warm = held(&gpu);
+            // Past the textures kept of images no node shows (256): what it
+            // keeps must stop somewhere, and give all back at rest.
+            for cycle in 10..400 {
+                uploads += push(&mut gpu, &mut scene, cycle);
+            }
+            let after = held(&gpu);
+            let kept = if what == "fresh" {
+                IMAGES_GONE_COUNT as isize
+            } else {
+                0
+            };
+            assert!(
+                after.0 <= warm.0 + kept && after.1 <= warm.1 + kept && after.2 <= warm.2 + kept,
+                "{what}: textures, samplers, bind groups {warm:?} warm, {after:?} after 390 pushes"
+            );
+            if what != "fresh" {
+                assert_eq!(
+                    uploads, 0,
+                    "{what}: the same picture uploaded again on pushes"
+                );
+            }
+            gpu.trim();
+            let rest = held(&gpu);
+            assert!(
+                rest.0 <= warm.0 && rest.1 <= warm.1 && rest.2 <= warm.2,
+                "{what}: {rest:?} at rest, {warm:?} warm"
+            );
+        }
     }
 
     /// A window that drew one big frame (a long list scrolled, a big page)
