@@ -1828,6 +1828,9 @@ struct Node {
     /// Writes to `style` so far: a caller that saw the count after its own
     /// write knows the style is still the one it gave (`set_box`).
     style_writes: u32,
+    /// Its style or kind changed since its result was stored: a column's
+    /// earlier children's places, kept from that result, may not stand.
+    restyled: bool,
 }
 /// A node's local transform and zoom (`Node::local`).
 #[derive(Clone, Copy, PartialEq)]
@@ -3254,6 +3257,7 @@ impl Scene {
                     align_logical: None,
                     layer_revision: 0,
                     style_writes: 0,
+                    restyled: true,
                 }),
             }],
             free: Vec::new(),
@@ -4911,6 +4915,7 @@ impl Scene {
             self.sync_cold(parent);
             let node = self.node_mut(parent);
             node.style_writes = node.style_writes.wrapping_add(1);
+            node.restyled = true;
             self.invalidate_layout(parent);
             let node = self.node(parent);
             at = node.parent.filter(|_| node.contents());
@@ -6464,6 +6469,7 @@ impl Scene {
         {
             let node = self.node_mut(id);
             node.kind = kind;
+            node.restyled = true;
             node.dirty |= CHANGED | PAINT_MIXED;
             return;
         }
@@ -6543,7 +6549,9 @@ impl Scene {
             self.geometry_revision = self.geometry_revision.wrapping_add(1);
         }
         let colour = paints_only(&self.node(id).kind, &kind);
-        self.node_mut(id).kind = kind;
+        let node = self.node_mut(id);
+        node.kind = kind;
+        node.restyled = true;
         self.invalidate(id, if colour { PAINT | PAINT_ONLY } else { PAINT });
         if !layout_unchanged {
             self.invalidate_layout(id);
@@ -6586,6 +6594,7 @@ impl Scene {
             "show_plane_frame requires a node showing the same view's frame at its size"
         );
         node.kind = NodeKind::Image(image);
+        node.restyled = true;
         crate::gpu_view::count_plane_frame();
     }
     /// Append a node of `kind` with `style` as `parent`'s last child.
@@ -6650,6 +6659,7 @@ impl Scene {
             align_logical: None,
             layer_revision: 0,
             style_writes: 0,
+            restyled: true,
         };
         let id = if let Some(index) = self.free.pop() {
             self.slots[index as usize].node = Some(node);
@@ -7496,6 +7506,7 @@ impl Scene {
         // What layout mapped from it is out of date.
         let node = self.node_mut(id);
         node.style_writes = node.style_writes.wrapping_add(1);
+        node.restyled = true;
         self.invalidate_layout(id);
     }
     /// The sizes `set_size_calcs` gave `id`.
@@ -7839,6 +7850,7 @@ impl Scene {
         self.sync_cold(id);
         let node = self.node_mut(id);
         node.style_writes = node.style_writes.wrapping_add(1);
+        node.restyled = true;
         self.invalidate_layout(id);
     }
     /// `id`'s place by name or line (`set_grid_place`).
@@ -7870,6 +7882,7 @@ impl Scene {
         self.sync_cold(id);
         let node = self.node_mut(id);
         node.style_writes = node.style_writes.wrapping_add(1);
+        node.restyled = true;
         self.invalidate_layout(id);
     }
     /// Whether `id` waits to be laid out again, for tests: what a change
@@ -7937,6 +7950,7 @@ impl Scene {
         }
         let node = self.tree_node_mut(id);
         node.style_writes = node.style_writes.wrapping_add(1);
+        node.restyled = true;
         *kept = Some(node.style_writes);
         let old = &mut node.style;
         // Sizes for sizes leave what it and its ancestors read (`read_bits`:
@@ -8160,6 +8174,7 @@ impl Scene {
         let node = self.node_mut(id);
         node.style = style;
         node.style_writes = node.style_writes.wrapping_add(1);
+        node.restyled = true;
         if paints {
             self.damage_subtree(id);
             self.invalidate(id, PAINT);
@@ -8567,7 +8582,9 @@ impl Scene {
             return self.set_kind(id, kind);
         }
         self.damage_subtree(id);
-        self.node_mut(id).kind = kind;
+        let node = self.node_mut(id);
+        node.kind = kind;
+        node.restyled = true;
         self.invalidate(id, PAINT);
         self.invalidate_content_layout(id);
     }
@@ -10422,13 +10439,32 @@ impl Scene {
         let pass = self.layout_pass;
         let node = self.tree_node_mut(id);
         let stale = node.dirty & LAYOUT != 0;
+        // A column whose height is its children's, its own style and the
+        // constraints it was laid out under unchanged: its earlier children
+        // that changed nothing keep their places (`prefix` below), and a
+        // reply streaming into its last child lays out that child alone.
+        let column = layout == Some(Layout::Column)
+            && !node.restyled
+            && !node.special.any()
+            && explicit_w.is_some()
+            && explicit_h.is_none()
+            && style.min_height.is_none()
+            && style.max_height.is_none()
+            && style.justify == Justify::Start
+            && style.align != Align::Baseline
+            && node
+                .measurement
+                .as_ref()
+                .is_some_and(|last| last.constraints == constraints);
         let mut children = match &mut node.measurement {
             Some(last) if layout.is_some() && stale && last.pass != pass => {
                 std::mem::take(&mut last.children)
             }
             _ => Vec::new(),
         };
-        children.clear();
+        if !column || self.children_raw(self.tree_node(id)).is_empty() {
+            children.clear();
+        }
         let (mut width, mut height) = match layout {
             None => self.leaf_size(id, &style, available_w),
             // An empty box (a bar, a swatch, a spacer): its padding and size,
@@ -10536,10 +10572,51 @@ impl Scene {
                         ..natural
                     }
                 }));
+                // The earlier children kept from its last result (`column`):
+                // asked as before, and changed nothing since.
+                let prefix = if absolute.is_empty() {
+                    children
+                        .iter()
+                        .zip(&ids)
+                        .take_while(|((child, placed, under), id)| {
+                            // Unchanged, and holding the result it was
+                            // placed with (a box moved alone keeps its own).
+                            let node = self.tree_node(**id);
+                            child == *id
+                                && node.dirty & LAYOUT == 0
+                                && node.measurement.as_ref().is_some_and(|held| {
+                                    held.constraints == *under
+                                        && held.size == (placed.width, placed.height)
+                                })
+                        })
+                        .count()
+                } else {
+                    0
+                };
+                children.truncate(prefix);
                 sizes.clear();
                 kept.clear();
                 for i in 0..ids.len() {
-                    let (size, under) = self.measure_kept(ids[i], asked[i]);
+                    let (size, under) = match children.get(i) {
+                        Some((_, placed, under)) => {
+                            let kept = ((placed.width, placed.height), *under);
+                            // Checked, not counted: a test counts the
+                            // layout's own measures.
+                            #[cfg(debug_assertions)]
+                            {
+                                #[cfg(test)]
+                                let calls = self.measure_calls;
+                                let answer = self.measure_kept(ids[i], asked[i]);
+                                #[cfg(test)]
+                                {
+                                    self.measure_calls = calls;
+                                }
+                                assert_eq!(answer, kept, "a column's kept child answers as it did");
+                            }
+                            kept
+                        }
+                        None => self.measure_kept(ids[i], asked[i]),
+                    };
                     sizes.push(size);
                     kept.push(under);
                 }
@@ -10870,11 +10947,12 @@ impl Scene {
                             (cross + m.left, down + m.top)
                         }
                     };
-                    children.push((
-                        *child,
-                        Rect::new(cx + padding.left, cy + padding.top, w, h),
-                        kept[i],
-                    ));
+                    let placed = Rect::new(cx + padding.left, cy + padding.top, w, h);
+                    match children.get(i) {
+                        // Kept: placed where it was.
+                        Some(kept) => debug_assert_eq!(kept.1, placed, "a column's kept child"),
+                        None => children.push((*child, placed, kept[i])),
+                    }
                     cursor += main(sizes[i]) + main_margin(s) + style.gap + extra_gap;
                 }
                 for &child in &absolute {
@@ -10974,6 +11052,7 @@ impl Scene {
             last.pass = pass;
             last.children.clear();
             node.arrange_dirty = true;
+            node.restyled = false;
             return Some(size);
         }
         let mut children = match &mut node.measurement {
@@ -11332,6 +11411,7 @@ impl Scene {
         }
         let overfull = node.alternates.len() == MEASUREMENT_ALTERNATES + 1;
         node.arrange_dirty = true;
+        node.restyled = false;
         node.measurement = Some(Measurement {
             constraints,
             size,
@@ -14007,6 +14087,76 @@ mod tests {
         assert_eq!(*limits.borrow(), [Some(220.0), Some(204.0)]);
         assert_eq!(scene.bounds(bullet).width, 10.0);
         assert_eq!(scene.bounds(item).width, 204.0);
+    }
+    /// A column whose height is its children's, a reply streaming into it:
+    /// its last child growing, or a child appended, is laid out alone, its
+    /// earlier children kept where they were, and every box is where a
+    /// column built at the end puts it.
+    #[test]
+    fn a_column_growing_at_its_end_lays_out_only_its_end() {
+        let build = |words: &[String]| {
+            let mut scene = Scene::new(300.0, 2000.0);
+            scene.set_text_measurer(|text: &str, _: f32, limit: Option<f32>| {
+                let width = text.len() as f32 * 7.0;
+                let room = limit.unwrap_or(width).max(7.0);
+                (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+            });
+            let column = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                Style {
+                    width: Some(200.0),
+                    gap: 8.0,
+                    padding: 4.0,
+                    ..Style::default()
+                },
+            );
+            let wrap = Style {
+                text_wrap: true,
+                ..Style::default()
+            };
+            let ids: Vec<_> = words
+                .iter()
+                .map(|w| scene.append(column, text(w), wrap.clone()))
+                .collect();
+            scene.flush();
+            (scene, column, ids, wrap)
+        };
+        let mut words: Vec<String> = (0..40)
+            .map(|i| format!("block {i} says a little"))
+            .collect();
+        let (mut scene, column, mut ids, wrap) = build(&words);
+        // The last block grows, again and again.
+        for more in 0..3 {
+            words
+                .last_mut()
+                .unwrap()
+                .push_str(" and then a good deal more of it");
+            let before = scene.measure_calls;
+            scene.set_text(*ids.last().unwrap(), words.last().unwrap().as_str());
+            scene.flush();
+            assert!(
+                scene.measure_calls - before < 10,
+                "grow {more}: {} measures for 41 nodes",
+                scene.measure_calls - before
+            );
+        }
+        // A block appended.
+        words.push("a new block arrives".to_string());
+        let before = scene.measure_calls;
+        ids.push(scene.append(column, text(words.last().unwrap()), wrap));
+        scene.flush();
+        assert!(
+            scene.measure_calls - before < 10,
+            "{} measures",
+            scene.measure_calls - before
+        );
+        // As a column built with all of it lays it out.
+        let (fresh, fresh_column, fresh_ids, _) = build(&words);
+        assert_eq!(scene.bounds(column), fresh.bounds(fresh_column));
+        for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
+            assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
+        }
     }
     #[test]
     fn text_sizes_survive_alternating_wrap_limits() {
