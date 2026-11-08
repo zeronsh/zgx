@@ -557,6 +557,13 @@ impl Parse {
                     *started = Some(Instant::now());
                     return;
                 }
+                Osc::Sixel(body) => {
+                    let size = *shared.size.lock().unwrap();
+                    let cell = (size.cell_width, size.cell_height);
+                    let Rgb { r, g, b } = shared.palette.lock().unwrap().background;
+                    graphics.sixel(&body, term, cell, [r, g, b], &shared.images);
+                    return;
+                }
                 Osc::Graphics(command) => {
                     let size = *shared.size.lock().unwrap();
                     let cell = (size.cell_width, size.cell_height);

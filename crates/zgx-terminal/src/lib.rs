@@ -27,6 +27,7 @@ mod paint;
 mod palette;
 mod process;
 mod session;
+mod sixel;
 mod view;
 
 pub use alacritty_terminal;

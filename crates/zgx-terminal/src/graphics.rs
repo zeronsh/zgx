@@ -8,6 +8,7 @@
 //! asking (`a=q`) is told, and sends the pixels in the codes instead. The
 //! screen model keeps where each placement is (`Term::place`) and moves it
 //! with its lines; the pictures' pixels are here, shared with the view.
+//! Sixel images (`crate::sixel`) are kept and placed here too.
 
 use alacritty_terminal::{
     Term,
@@ -126,6 +127,8 @@ struct Loading {
 /// What the session knows of the pictures it holds, beside their pixels.
 struct Held {
     number: u32,
+    /// A sixel image's, which nothing names: it goes once covered.
+    sixel: bool,
     bytes: usize,
     /// When it arrived, to let the oldest go first.
     serial: u64,
@@ -248,7 +251,7 @@ impl Graphics {
             id => id,
         };
         let image = Arc::new(image);
-        self.keep(id, keys.number, image.clone(), term, images);
+        self.keep(id, keys.number, false, image.clone(), term, images);
         if keys.action == b'T' {
             place(&keys, id, &image, term, cell);
         }
@@ -262,6 +265,78 @@ impl Graphics {
             ..keys
         };
         reply(&keys, Ok(()))
+    }
+
+    /// A sixel image (DCS `q`, `body` its parameters, `q` and data): kept
+    /// and placed at the cursor over the cells its pixels need, its pixels
+    /// that no sixel sets `background` unless asked to be clear. Pictures
+    /// it covers wholly go, as the cells it takes are its; the cursor goes
+    /// to the line of its last band of six pixels (the VT340's, as xterm,
+    /// foot and WezTerm have it), in the column it was in, scrolling as a
+    /// line feed does.
+    pub(crate) fn sixel<T: EventListener>(
+        &mut self,
+        body: &[u8],
+        term: &mut Term<T>,
+        cell: (u16, u16),
+        background: [u8; 3],
+        images: &Images,
+    ) {
+        let [r, g, b] = background;
+        let Some(decoded) = crate::sixel::decode(body, [r, g, b, 255], QUOTA) else {
+            return;
+        };
+        let (width, height) = (decoded.width, decoded.height);
+        let Ok(image) = ImageData::new(width, height, decoded.pixels) else {
+            return;
+        };
+        let id = self.give_id(images);
+        let point = term.grid().cursor.point;
+        let cells = |pixels: u32, cell: u16| match cell {
+            0 => 1,
+            cell => pixels.div_ceil(u32::from(cell)) as usize,
+        };
+        let (columns, lines) = (cells(width, cell.0), cells(height, cell.1));
+        let rows = point.line..point.line + lines;
+        let across = point.column..point.column + columns;
+        let mut covered = Vec::new();
+        term.retain_placements(|p| {
+            let lines = p.line_range();
+            let inside = rows.start <= lines.start
+                && lines.end <= rows.end
+                && across.start <= p.point.column
+                && p.point.column + p.columns <= across.end;
+            if inside {
+                covered.push(p.image);
+            }
+            !inside
+        });
+        for covered in covered {
+            let sixel = self.held.get(&covered).is_some_and(|held| held.sixel);
+            if sixel && !term.placements().iter().any(|p| p.image == covered) {
+                self.forget(covered, images);
+            }
+        }
+        self.keep(id, 0, true, Arc::new(image), term, images);
+        term.place(Placement {
+            image: id,
+            id: 0,
+            point,
+            lines,
+            columns,
+            z: 0,
+            source: [0, 0, width, height],
+            offset: [0, 0],
+            size: [width, height],
+        });
+        let last_band = (height - 1) / 6 * 6;
+        let down = match cell.1 {
+            0 => 0,
+            cell => last_band / u32::from(cell),
+        };
+        for _ in 0..down {
+            term.linefeed();
+        }
     }
 
     /// An id no picture has, from the top down.
@@ -288,6 +363,7 @@ impl Graphics {
         &mut self,
         id: u32,
         number: u32,
+        sixel: bool,
         image: Arc<ImageData>,
         term: &mut Term<T>,
         images: &Images,
@@ -296,6 +372,7 @@ impl Graphics {
         self.serial += 1;
         let held = Held {
             number,
+            sixel,
             bytes,
             serial: self.serial,
         };
@@ -822,6 +899,34 @@ mod tests {
         // Once all are gone, nothing is held for them.
         assert_eq!(fx.images.lock().unwrap().capacity(), 0);
         assert_eq!(fx.graphics.held.capacity(), 0);
+    }
+
+    /// A sixel image is placed at the cursor over the cells its pixels
+    /// need; the cursor goes to the line of its last band, in its column;
+    /// another over the same cells takes them, and the first image goes.
+    #[test]
+    fn a_sixel_image_takes_its_cells() {
+        let mut fx = Fixture::new();
+        fx.term.goto(1, 2);
+        // 20 by 30 pixels (raster attributes), its last band from pixel 24:
+        // line 1 of its 2.
+        let body = b"0;0;0q\"1;1;20;30#1;2;100;0;0!20~";
+        fx.graphics
+            .sixel(body, &mut fx.term, (10, 20), [0, 0, 0], &fx.images);
+        assert_eq!(fx.placed(), [(fx.placed()[0].0, 1, 2, 2, 2)]);
+        assert_eq!(fx.cursor(), Point::new(Line(2), Column(2)));
+        let first = fx.placed()[0].0;
+        let image = fx.images.lock().unwrap()[&first].clone();
+        assert_eq!((image.width(), image.height()), (20, 30));
+        // Unset pixels are the background.
+        assert_eq!(image.pixels()[..4], [255, 0, 0, 255]);
+        assert_eq!(image.pixels()[20 * 29 * 4..][..4], [0, 0, 0, 255]);
+        fx.term.goto(1, 2);
+        fx.graphics
+            .sixel(body, &mut fx.term, (10, 20), [0, 0, 0], &fx.images);
+        assert_eq!(fx.placed().len(), 1);
+        assert_ne!(fx.placed()[0].0, first);
+        assert_eq!(fx.images.lock().unwrap().len(), 1);
     }
 
     /// Output without pictures, read as a session reads it (the sniffer,
