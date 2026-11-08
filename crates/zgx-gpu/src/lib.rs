@@ -5988,6 +5988,13 @@ impl GpuRenderer {
         // What it draws: all of it, or magnified past what fits, what of it
         // shows, with a quarter of that around it to pan into before it is
         // drawn again; or just what shows.
+        // Moving with room to grow into, but no room for it: at the scale
+        // it shows at, as still.
+        if magnifying && moving && !fits(factor, content) && fits(magnification, content) {
+            factor = magnification;
+            step = ((2. * factor.log2()).round() as i32)
+                .clamp(*RASTER_STEPS.start(), *RASTER_STEPS.end());
+        }
         let mut area = content;
         let mut cropped = false;
         if magnifying
@@ -6220,6 +6227,25 @@ impl GpuRenderer {
                 .retain(|other, _| *other == id || scene.is_layer(*other));
             existing = self.layers.get(&id).map_or(0, |l| l.bytes);
             used = self.layers.values().map(|l| l.bytes).sum();
+        }
+        // Then layers this frame has not drawn (hidden, or not shown since),
+        // least lately drawn first: each draws again when it next shows.
+        // Kept while the budget lasts, they would leave the layers drawn now
+        // as coarse as a texel, their content gone.
+        if used - existing + bytes > budget {
+            let frame = self.layer_frame;
+            let mut idle: Vec<(u64, NodeId, usize)> = (self.layers.iter())
+                .filter(|(other, cache)| **other != id && cache.used != frame)
+                .map(|(other, cache)| (cache.used, *other, cache.bytes))
+                .collect();
+            idle.sort_unstable_by_key(|(drawn, ..)| *drawn);
+            for (_, other, held) in idle {
+                if used - existing + bytes <= budget {
+                    break;
+                }
+                self.layers.remove(&other);
+                used -= held;
+            }
         }
         // Past the budget or the texture limits: again, in the room left,
         // coarser. Once: a texture of one texel still takes its 64 by 64.
