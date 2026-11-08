@@ -2365,13 +2365,26 @@ fn relevant_to_in_place(node: &Node, bits: u8, constraints: &mut Constraints) {
 }
 /// Put `evicted` (most recent first) ahead of `sizes`' older entries, each
 /// constraint kept once, at most `PROBE_SIZES`.
-fn keep_sizes(sizes: &mut Vec<ProbeSize>, evicted: Vec<ProbeSize>) {
+fn keep_sizes(sizes: &mut Vec<ProbeSize>, mut evicted: Vec<ProbeSize>) {
     if evicted.is_empty() {
         return;
     }
-    sizes.retain(|kept| !evicted.iter().any(|m| m.constraints == kept.constraints));
+    // A constraint evicted is rarely among the sizes already (it was kept
+    // whole until now): looked for, and only then taken out.
+    if evicted
+        .iter()
+        .any(|m| sizes.iter().any(|kept| kept.constraints == m.constraints))
+    {
+        sizes.retain(|kept| !evicted.iter().any(|m| m.constraints == kept.constraints));
+    }
+    // The oldest past the few kept go first, so only the rest move.
+    if evicted.len() >= PROBE_SIZES {
+        evicted.truncate(PROBE_SIZES);
+        *sizes = evicted;
+        return;
+    }
+    sizes.truncate(PROBE_SIZES - evicted.len());
     sizes.splice(0..0, evicted);
-    sizes.truncate(PROBE_SIZES);
 }
 /// A size flex distribution gives, on a 1/256 point grid: sharing out the
 /// room in floats drifts (644.00073 where 644 fits), and the drift would
@@ -11330,8 +11343,14 @@ impl Scene {
                     .drain(PASS_RESULTS.min(node.alternates.len())..)
                     .map(|m| ProbeSize::from(&m)),
             );
-            node.sizes
-                .retain(|m| m.constraints != constraints && (m.pass == pass || !dirty));
+            if dirty {
+                node.sizes
+                    .retain(|m| m.constraints != constraints && m.pass == pass);
+            } else if node.sizes.iter().any(|m| m.constraints == constraints) {
+                // Clean, nothing is stale: only the new result's own size
+                // goes, rarely kept (looked for first).
+                node.sizes.retain(|m| m.constraints != constraints);
+            }
             keep_sizes(&mut node.sizes, evicted);
         }
         let overfull = node.alternates.len() == MEASUREMENT_ALTERNATES + 1;
@@ -14064,6 +14083,57 @@ mod tests {
         assert_eq!(*limits.borrow(), [Some(220.0), Some(204.0)]);
         assert_eq!(scene.bounds(bullet).width, 10.0);
         assert_eq!(scene.bounds(item).width, 204.0);
+    }
+    /// Sizes kept as results are evicted: the most recent first, each
+    /// constraint once, at most `PROBE_SIZES`, as dropping duplicates and
+    /// putting the evicted ahead did before it looked first.
+    #[test]
+    fn kept_sizes_are_the_most_recent_each_once() {
+        let size = |width: u32| ProbeSize {
+            constraints: Constraints {
+                width: Some(width as f32),
+                ..Constraints::default()
+            },
+            size: (width as f32, 1.),
+            pass: 0,
+        };
+        let widths = |sizes: &[ProbeSize]| -> Vec<u32> {
+            sizes
+                .iter()
+                .map(|m| m.constraints.width.unwrap() as u32)
+                .collect()
+        };
+        let before = |sizes: &mut Vec<ProbeSize>, evicted: Vec<ProbeSize>| {
+            if evicted.is_empty() {
+                return;
+            }
+            sizes.retain(|kept| !evicted.iter().any(|m| m.constraints == kept.constraints));
+            sizes.splice(0..0, evicted);
+            sizes.truncate(PROBE_SIZES);
+        };
+        for kept in [0, 5, 31, 32] {
+            for evicted in [
+                vec![],
+                vec![100],
+                vec![100, 101],
+                vec![3],
+                vec![100, 0, 4],
+                (100..131).collect(),
+                (100..140).collect(),
+                (0..40).rev().collect(),
+            ] {
+                let old: Vec<_> = (0..kept).map(size).collect();
+                let out: Vec<_> = evicted.iter().copied().map(size).collect();
+                let (mut ours, mut theirs) = (old.clone(), old);
+                keep_sizes(&mut ours, out.clone());
+                before(&mut theirs, out);
+                assert_eq!(
+                    widths(&ours),
+                    widths(&theirs),
+                    "{kept} kept, {evicted:?} evicted"
+                );
+            }
+        }
     }
     #[test]
     fn text_sizes_survive_alternating_wrap_limits() {
