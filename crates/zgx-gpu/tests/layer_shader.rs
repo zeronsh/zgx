@@ -786,3 +786,109 @@ fn drawn_glass_shows_what_the_systems_does_over_black_and_white() {
         }
     }
 }
+
+#[test]
+fn drawn_acrylic_is_winuis_recipe_over_black_and_white() {
+    use zgx::glass::{GlassStyle, GlassVariant};
+    let _gpu_fixture = gpu_fixture();
+    // WinUI's Acrylic over a flat colour: the luminosity blend makes it the
+    // tint's grey at the luminosity opacity, the colour blend keeps a grey,
+    // the noise moves it 2% toward mid grey.
+    let level = |backdrop: f32, tint: f32, luminosity: f32| {
+        let blended = backdrop + (tint - backdrop) * luminosity;
+        ((blended * 0.98 + 0.01) * 255.).round() as u8
+    };
+    for (variant, dark, tint, luminosity) in [
+        (GlassVariant::Regular, false, 0xF3 as f32 / 255., 0.9),
+        (GlassVariant::Regular, true, 0x20 as f32 / 255., 0.96),
+        (GlassVariant::Clear, false, 0xFC as f32 / 255., 0.85),
+        (GlassVariant::Clear, true, 0x2C as f32 / 255., 0.96),
+    ] {
+        let mut gpu = GpuRenderer::new(SIZE, SIZE).unwrap();
+        let mut scene = scene();
+        let root = scene.root();
+        // Wide halves: Acrylic's blur reaches 90 points.
+        scene.append(root, NodeKind::Rect(Color(0, 0, 0, 255)), fixed(100., 200.));
+        let white = scene.append(
+            root,
+            NodeKind::Rect(Color(255, 255, 255, 255)),
+            fixed(100., 200.),
+        );
+        scene.set_transform(white, Transform { x: 100., y: 0. });
+        let style = GlassStyle {
+            variant,
+            ..Default::default()
+        };
+        let pane = scene.append(
+            root,
+            NodeKind::Quad(QuadStyle {
+                radius: 16.,
+                ..Default::default()
+            }),
+            fixed(200., 120.),
+        );
+        scene.set_transform(pane, Transform { x: 0., y: 40. });
+        // Unblurred: the recipe's colour on each half is what's checked
+        // (Acrylic's 30-point blur would mix the halves at this size).
+        let mut drive = style.drawn_acrylic(dark);
+        drive.frost = 0.;
+        drive.apply(&mut scene, pane, 0.);
+        let (_, p) = render(&mut gpu, &mut scene);
+        let name = format!("{variant:?}, dark {dark}");
+        for (x, backdrop) in [(40, 0.), (160, 1.)] {
+            let want = level(backdrop, tint, luminosity);
+            let got = pixel(&p, x, 100);
+            assert!(
+                got[..3].iter().all(|v| v.abs_diff(want) <= 3),
+                "{name} at {x}: {got:?}, not {want}"
+            );
+        }
+    }
+}
+
+#[test]
+fn drawn_acrylic_over_the_systems_blur_lays_its_tint_alone() {
+    use zgx::glass::{GlassStyle, GlassVariant};
+    let _gpu_fixture = gpu_fixture();
+    // Nothing behind the box in a window that lets what's behind it show
+    // (a popup over the system's acrylic, a glass window): the system blurs
+    // and darkens that itself, so the drawn acrylic adds its tint alone,
+    // at its tint's opacity, and no blur or luminosity of its own.
+    for (dark, tint, opacity) in [(false, 0xF3, 0.), (true, 0x20, 0.5)] {
+        let mut gpu = GpuRenderer::new(SIZE, SIZE).unwrap();
+        gpu.set_background(Color(0, 0, 0, 0));
+        let mut scene = scene();
+        let root = scene.root();
+        let style = GlassStyle {
+            variant: GlassVariant::Regular,
+            ..Default::default()
+        };
+        let pane = scene.append(
+            root,
+            NodeKind::Quad(QuadStyle {
+                radius: 16.,
+                ..Default::default()
+            }),
+            fixed(160., 120.),
+        );
+        scene.set_transform(pane, Transform { x: 20., y: 40. });
+        style.drawn_acrylic(dark).apply(&mut scene, pane, 0.);
+        let (_, p) = render(&mut gpu, &mut scene);
+        let got = pixel(&p, 100, 100);
+        let alpha = (opacity * 255.) as u8;
+        assert!(
+            got[3].abs_diff(alpha) <= 2,
+            "dark {dark}: {got:?}, alpha not {alpha}"
+        );
+        if alpha > 0 {
+            let level = |v: u8| u32::from(v) * 255 / u32::from(got[3]);
+            // Straight or premultiplied, the tint's colour.
+            assert!(
+                got[..3]
+                    .iter()
+                    .all(|v| level(*v).abs_diff(tint) <= 3 || u32::from(*v).abs_diff(tint) <= 3),
+                "dark {dark}: {got:?}, not the tint #{tint:02x}"
+            );
+        }
+    }
+}
