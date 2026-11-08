@@ -996,7 +996,11 @@ fn copy_blocker(
         // One colour across the whole clip, however see-through (a card's
         // tint on the window's glass): the same under every pixel before
         // the move and after, so the copy carries it unchanged.
-        if uniform_across(item, clip) {
+        if let Some(corners) = uniform_across(item, clip) {
+            for corner in corners {
+                carried.push(corner);
+                carried.extend(carry(corner));
+            }
             continue;
         }
         if !repainted(rect) {
@@ -1006,12 +1010,14 @@ fn copy_blocker(
     }
     None
 }
-/// Whether `item` paints one colour over all of `clip`: a plain fill whose
-/// box holds the clip clear of its rounded corners and border, with any
-/// shadow under it at full strength there and nothing over its content.
-fn uniform_across(item: &zgx::scene::PaintItem<'_>, clip: Rect) -> bool {
+/// Whether `item` paints one colour over all of `clip` but its rounded
+/// corners: a plain fill whose box holds the clip inside its border, with any
+/// shadow under it at full strength there and nothing over its content. It
+/// gives the corners' squares within the clip, which the copy can't carry
+/// and so repaint (where they are and where the copy puts them).
+fn uniform_across(item: &zgx::scene::PaintItem<'_>, clip: Rect) -> Option<Vec<Rect>> {
     let (NodeKind::Quad(quad) | NodeKind::Panel { quad, .. }) = item.kind else {
-        return false;
+        return None;
     };
     let holds = |outer: Rect, inner: Rect| {
         const E: f32 = 1e-3;
@@ -1038,7 +1044,7 @@ fn uniform_across(item: &zgx::scene::PaintItem<'_>, clip: Rect) -> bool {
         || item.effects.blur_radius > 0.
         || !item.clip.is_some_and(|own| holds(own, clip))
     {
-        return false;
+        return None;
     }
     let b = item.bounds;
     let border = if quad.border_width > 0. && quad.border_color.3 > 0 {
@@ -1047,18 +1053,10 @@ fn uniform_across(item: &zgx::scene::PaintItem<'_>, clip: Rect) -> bool {
         0.
     };
     if !holds(inset(b, border), clip) {
-        return false;
+        return None;
     }
-    // Clear of the rounded corners: inside the box's straight run one way.
     let r = quad.radius.max(0.);
-    if r > 0. {
-        let across = clip.x >= b.x + r && clip.x + clip.width <= b.x + b.width - r;
-        let down = clip.y >= b.y + r && clip.y + clip.height <= b.y + b.height - r;
-        if !(across || down) {
-            return false;
-        }
-    }
-    quad.shadows().iter().all(|shadow| {
+    let shadows_full = quad.shadows().iter().all(|shadow| {
         let grown = b.expand(shadow.spread.max(0.));
         let moved = Rect::new(
             grown.x + shadow.offset.x,
@@ -1068,7 +1066,24 @@ fn uniform_across(item: &zgx::scene::PaintItem<'_>, clip: Rect) -> bool {
         );
         let full = inset(moved, shadow.blur_radius.max(0.) * 3. + r);
         holds(full, clip)
-    })
+    });
+    if !shadows_full {
+        return None;
+    }
+    // The rounded corners' squares the clip reaches.
+    let side = r + border;
+    Some(
+        [
+            Rect::new(b.x, b.y, side, side),
+            Rect::new(b.x + b.width - side, b.y, side, side),
+            Rect::new(b.x, b.y + b.height - side, side, side),
+            Rect::new(b.x + b.width - side, b.y + b.height - side, side, side),
+        ]
+        .into_iter()
+        .filter(|_| r > 0.)
+        .filter_map(|corner| corner.intersection(clip))
+        .collect(),
+    )
 }
 /// Whether rectangles spanning `clip` side to side (or top to bottom) cover
 /// it, meeting on whole device pixels: no seam lets anything beneath show.
