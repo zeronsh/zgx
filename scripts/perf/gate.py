@@ -154,6 +154,8 @@ SCENES = [
     # A split between six panes dragged, a width a frame: nested panes of
     # wrapping text, text areas and measured lists laid out again, undrawn.
     ('layout-drag', 'zgx', 'layout_drag_bench', {}),
+    # A pointer moving over a deep page with hover styles, undrawn.
+    ('pointer-move', 'zgx', 'pointer_bench', {}),
     # Effects' CPU work through the whole renderer, drawn by wgpu's no-op
     # backend: a scene of boxes as they are, then the same with an animated
     # layer shader painting past its box, and with one reading what's behind
