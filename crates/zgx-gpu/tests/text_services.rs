@@ -87,3 +87,41 @@ fn headless_words_stay_bounded_and_release_on_demand() {
     frame(15001);
     assert!(held().0 > 0);
 }
+
+/// On a grid of cells (`LetterSpacing::cells`, a terminal's), a run takes
+/// exactly its characters' cells, whichever fonts draw them: braille (wider
+/// than a cell in macOS's fallback), a letterlike symbol, Thai, a combining
+/// accent (no cell of its own) and plain letters alike. Off the grid the
+/// same text keeps its fonts' own advances.
+#[test]
+fn a_run_on_a_grid_takes_its_cells_whichever_font_draws_it() {
+    use std::sync::Arc;
+    use zgx::text_layout::{FontFamily, FontFeatures, FontStyle, LetterSpacing};
+    let mut scene = zgx::scene::Scene::new(800., 600.);
+    TextServices::new().install(&mut scene);
+    let mut font = FontStyle {
+        family: FontFamily::Monospace,
+        features: FontFeatures::new([(*b"liga", 0), (*b"calt", 0)]),
+        fallbacks: Arc::from([FontFamily::SansSerif]),
+        ..FontStyle::default()
+    };
+    let size = 13.;
+    let cell = scene
+        .measure_text_with_font("0000000000", size, None, &font)
+        .0
+        / 10.;
+    font.letter_spacing = LetterSpacing::cells(cell);
+    for (text, cells) in [
+        ("\u{280b}\u{2819}\u{2839}\u{2838}\u{283c} Loading", 13),
+        ("21\u{2103} \u{20b9}5", 6),
+        ("\u{e01}\u{e32}\u{e23} ok", 6),
+        ("cafe\u{301} 0123", 9),
+        ("plain text", 10),
+    ] {
+        let width = scene.measure_text_with_font(text, size, None, &font).0;
+        assert!(
+            (width - cells as f32 * cell).abs() < 0.05,
+            "{text:?}: {width} for {cells} cells of {cell}"
+        );
+    }
+}

@@ -331,6 +331,10 @@ pub struct Attrs<'a> {
     /// zgx: room added before a span's first glyph and after its last, in
     /// EM (CSS's inline padding: an inline code chip's)
     pub padding_opt: Option<LetterSpacing>,
+    /// zgx: a grid of cells this wide, in EM (a terminal's): each cluster
+    /// takes its characters' cells (their widths, as unicode-width tells
+    /// them) exactly, its glyphs centred in them, whichever font draws it.
+    pub cell_grid_opt: Option<LetterSpacing>,
     /// zgx: the optical size variable fonts shape and draw at (their
     /// `opsz` axis), in pixels: CSS's `font-optical-sizing: auto` sets it to
     /// the font size. 0 leaves the font's default.
@@ -358,6 +362,7 @@ impl<'a> Attrs<'a> {
             metrics_opt: None,
             letter_spacing_opt: None,
             padding_opt: None,
+            cell_grid_opt: None,
             optical: 0,
             masked: false,
             font_features: FontFeatures::new(),
@@ -434,6 +439,12 @@ impl<'a> Attrs<'a> {
     /// zgx: set the span's inline padding (in EM)
     pub const fn padding(mut self, padding: f32) -> Self {
         self.padding_opt = Some(LetterSpacing(padding));
+        self
+    }
+
+    /// zgx: set a grid of cells this wide (in EM) each cluster snaps to
+    pub const fn cell_grid(mut self, cell: f32) -> Self {
+        self.cell_grid_opt = Some(LetterSpacing(cell));
         self
     }
 
@@ -527,6 +538,7 @@ pub struct AttrsOwned {
     /// Letter spacing (tracking) in EM
     pub letter_spacing_opt: Option<LetterSpacing>,
     pub padding_opt: Option<LetterSpacing>,
+    pub cell_grid_opt: Option<LetterSpacing>,
     pub optical: u16,
     pub masked: bool,
     pub font_features: FontFeatures,
@@ -546,6 +558,7 @@ impl AttrsOwned {
             metrics_opt: attrs.metrics_opt,
             letter_spacing_opt: attrs.letter_spacing_opt,
             padding_opt: attrs.padding_opt,
+            cell_grid_opt: attrs.cell_grid_opt,
             optical: attrs.optical,
             masked: attrs.masked,
             font_features: attrs.font_features.clone(),
@@ -565,6 +578,7 @@ impl AttrsOwned {
             metrics_opt: self.metrics_opt,
             letter_spacing_opt: self.letter_spacing_opt,
             padding_opt: self.padding_opt,
+            cell_grid_opt: self.cell_grid_opt,
             optical: self.optical,
             masked: self.masked,
             font_features: self.font_features.clone(),

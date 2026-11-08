@@ -5115,7 +5115,7 @@ dependencies = [
 
 [[package]]
 name = "zgx-cosmic-text"
-version = "0.19.11"
+version = "0.19.12"
 dependencies = [
  "bitflags 2.13.2",
  "fontdb",
@@ -5132,6 +5132,7 @@ dependencies = [
  "unicode-linebreak",
  "unicode-script",
  "unicode-segmentation",
+ "unicode-width",
  "zgx-harfrust",
 ]
 

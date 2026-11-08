@@ -413,6 +413,19 @@ impl RichText {
 }
 #[cfg(test)]
 mod tests {
+    /// A run's estimate decodes a grid (no tracking), never its bits.
+    #[test]
+    fn an_estimate_on_a_grid_is_finite() {
+        let run = TextRun {
+            font: crate::text_layout::FontStyle {
+                letter_spacing: crate::text_layout::LetterSpacing::cells(7.),
+                ..Default::default()
+            },
+            ..TextRun::default()
+        };
+        assert_eq!(run.estimated_advance("a", 0), run.font_size * 0.6);
+    }
+
     use super::*;
     fn run(range: Range<usize>) -> TextRun {
         TextRun {

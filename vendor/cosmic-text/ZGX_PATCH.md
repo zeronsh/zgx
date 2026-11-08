@@ -411,3 +411,20 @@ is Common). The direction is set before, and the guess sets no language.
 dashboard's changing values (digits, a unit) were most of what the heavy
 dashboard shapes each frame: its flush is 0.78% shorter. Its test checks all
 128 ASCII characters and mixed runs against the guess.
+
+## A run on a grid of cells (zgx-cosmic-text 0.19.12)
+
+`Attrs::cell_grid` (`cell_grid_opt`, in EM, as tracking is): each cluster
+of a run takes exactly its characters' cells, their widths as
+unicode-width tells them (as a terminal places them), its glyphs moved
+together to sit centred in them (`snap_to_cells`, after shaping and the
+fallback fonts, beside the span padding pass). A fallback font's glyph a
+little wider or narrower than the grid's then moves nothing after it: in
+macOS's monospaced font, braille falls back to a font 1.14 cells wide, so
+a spinner (⠋ Loading) pushed every character after it off the grid. Unlike
+`Buffer::set_monospace_width`, which rounds each glyph's advance, a cluster
+of several characters (a conjunct) takes their cells, and a glyph is
+centred, not left at its cell's start. zgx-terminal draws its runs on the
+grid; zgx-gpu's `a_run_on_a_grid_takes_its_cells_whichever_font_draws_it`
+checks braille, a letterlike symbol, Thai, a combining accent and plain
+letters with the platform's fonts. The crate depends on `unicode-width`.

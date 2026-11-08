@@ -13,7 +13,7 @@ use std::sync::Arc;
 use zgx::{
     canvas::{Canvas, CanvasText, LineCap, LineJoin, Path, Stroke, TextAnchor, TextBaseline},
     scene::{Color, Rect},
-    text_layout::{FontFamily, FontFeatures, FontStyle, TextUnderline},
+    text_layout::{FontFamily, FontFeatures, FontStyle, LetterSpacing, TextUnderline},
 };
 
 /// A cell's size and the font, in points.
@@ -177,14 +177,13 @@ fn resolve(term: &Term, palette: &Palette, color: VtColor) -> Rgb {
 }
 
 /// Whether a character's glyph may come from a font other than the grid's
-/// (CJK, symbols, emoji, private-use icons): drawn alone at its cell, so its
-/// width can't move the characters after it off the grid.
+/// (CJK, symbols, emoji, private-use icons): drawn alone, centred on its
+/// cells. (A run is on the grid too, `LetterSpacing::cells`: a glyph there a
+/// little wider or narrower than a cell moves nothing after it.) Most text
+/// is out after a compare.
 fn alone(c: char) -> bool {
     let c = c as u32;
-    c >= 0x2e80
-        || (0x2190..0x2500).contains(&c)
-        || (0x25a0..0x2800).contains(&c)
-        || (0xe000..0xf900).contains(&c)
+    c >= 0x2190 && matches!(c, ..0x2500 | 0x25a0..0x2800 | 0x2e80..)
 }
 
 /// The row at viewport `row` (0 at the top of what shows).
@@ -574,6 +573,8 @@ pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canv
     }
     for run in &paint.runs {
         let mut font = font.clone();
+        // On the grid: each character its cells, whichever font draws it.
+        font.letter_spacing = LetterSpacing::cells(metrics.cell_width);
         if run.bold {
             font.weight = 700;
         }

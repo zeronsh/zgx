@@ -141,13 +141,15 @@ pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> 
         } else {
             cosmic_text::Style::Normal
         });
-    let spacing = font.letter_spacing.pixels();
-    if spacing == 0. {
+    if font.letter_spacing == zgx::text_layout::LetterSpacing::ZERO {
         attrs
+    } else if let Some(cell) = font.letter_spacing.cell() {
+        // A grid of cells (a terminal's), in EM as tracking is.
+        attrs.cell_grid(cell / size.max(1.))
     } else {
         // cosmic-text 0.14 accepts tracking in EM, while our public styles use
         // logical pixels. Use the same effective size as Buffer's metrics.
-        attrs.letter_spacing(spacing / size.max(1.))
+        attrs.letter_spacing(font.letter_spacing.pixels() / size.max(1.))
     }
 }
 pub(crate) fn alignment(font: &zgx::text_layout::FontStyle) -> Option<cosmic_text::Align> {
@@ -1381,6 +1383,14 @@ mod letter_spacing_tests {
                 );
             }
             assert!(attrs(&font(0.), size).letter_spacing_opt.is_none());
+            // A grid goes to cosmic-text as one, in EM, with no tracking.
+            let grid = FontStyle {
+                letter_spacing: LetterSpacing::cells(7.),
+                ..Default::default()
+            };
+            let on_grid = attrs(&grid, size);
+            assert!(on_grid.letter_spacing_opt.is_none());
+            assert_eq!(on_grid.cell_grid_opt.unwrap().0, 7. / size);
             assert_eq!(
                 attrs(&font(3.), size).letter_spacing_opt.unwrap().0,
                 3. / size

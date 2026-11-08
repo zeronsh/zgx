@@ -752,6 +752,12 @@ fn shape_run(
         }
     }
 
+    // zgx: on a grid of cells (a terminal's), each cluster takes exactly
+    // its cells, whichever font drew it.
+    if let Some(cell) = attrs.cell_grid_opt {
+        snap_to_cells(&mut glyphs[glyph_start..], line, cell.0);
+    }
+
     /*
     for glyph in glyphs.iter() {
         log::trace!("'{}': {}, {}, {}, {}", &line[glyph.start..glyph.end], glyph.x_advance, glyph.y_advance, glyph.x_offset, glyph.y_offset);
@@ -760,6 +766,33 @@ fn shape_run(
 
     // Restore the scripts buffer.
     font_system.shape_buffer.scripts = scripts;
+}
+
+/// zgx: `glyphs` (a run's, `line` its text) on a grid of cells `cell` EM
+/// wide: each cluster (the glyphs sharing a start) advances by its
+/// characters' cells, their widths as unicode-width tells them (as a
+/// terminal places them), its glyphs moved together to sit centred in them.
+/// A fallback font's glyph a little wider or narrower than the grid's (a
+/// braille pattern, a Thai letter) then moves nothing after it.
+fn snap_to_cells(glyphs: &mut [ShapeGlyph], line: &str, cell: f32) {
+    use unicode_width::UnicodeWidthChar;
+    let mut first = 0;
+    while first < glyphs.len() {
+        let start = glyphs[first].start;
+        let mut end = first + 1;
+        while end < glyphs.len() && glyphs[end].start == start {
+            end += 1;
+        }
+        let text = line.get(start..glyphs[first].end).unwrap_or("");
+        let cells: usize = text.chars().map(|c| c.width().unwrap_or(0)).sum();
+        let natural: f32 = glyphs[first..end].iter().map(|glyph| glyph.x_advance).sum();
+        let extra = cells as f32 * cell - natural;
+        for glyph in &mut glyphs[first..end] {
+            glyph.x_offset += extra / 2.;
+        }
+        glyphs[end - 1].x_advance += extra;
+        first = end;
+    }
 }
 
 #[cfg(feature = "shape-run-cache")]
