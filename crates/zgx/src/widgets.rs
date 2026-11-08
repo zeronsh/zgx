@@ -1236,7 +1236,8 @@ impl EditorHandle {
 pub(crate) type PasteHook = Rc<dyn Fn(Option<&str>) -> bool>;
 /// The layout and notification passes a frame takes to settle.
 const LAYOUT_PASSES: usize = 64;
-/// How much of a point a size may differ by and be the same (`resized`).
+/// How much of a point a size or a position may differ by and be the same
+/// (`resized`, `moved`).
 const SIZE_NOISE: f32 = 1. / 1024.;
 /// The passes it takes once layout has failed to settle
 /// (`Ui::contain_layout_feedback`): each change is tried again, cheaply.
@@ -4036,7 +4037,7 @@ impl Ui {
                     for (node, signal) in self.storage.observed_bounds.borrow().iter() {
                         if scene.contains(*node) {
                             let now = scene.world_bounds(*node);
-                            if signal.with_untracked(|told| *told != now) {
+                            if signal.with_untracked(|told| moved(*told, now)) {
                                 bounds.push((*node, signal.clone(), now));
                             }
                         }
@@ -4180,7 +4181,7 @@ impl Ui {
         let bounds = self.storage.observed_bounds.borrow();
         let bounds = bounds.iter().filter(|(node, signal)| {
             scene.contains(**node)
-                && signal.with_untracked(|bounds| *bounds != scene.world_bounds(**node))
+                && signal.with_untracked(|told| moved(*told, scene.world_bounds(**node)))
         });
         let mut moved = sizes;
         moved.extend(bounds.map(|(node, _)| *node));
@@ -7906,7 +7907,26 @@ mod ownership_tests {
 /// as this compares with what was told last.
 #[inline]
 fn resized(told: (f32, f32), now: (f32, f32)) -> bool {
-    !((told.0 - now.0).abs() < SIZE_NOISE && (told.1 - now.1).abs() < SIZE_NOISE)
+    !(same_length(told.0, now.0) && same_length(told.1, now.1))
+}
+
+/// Whether bounds have moved from what was told of them, as `resized`
+/// tells a size: a position summed at a window's scale lands on
+/// neighbouring floats as a size does.
+#[inline]
+fn moved(told: Rect, now: Rect) -> bool {
+    !(same_length(told.x, now.x)
+        && same_length(told.y, now.y)
+        && same_length(told.width, now.width)
+        && same_length(told.height, now.height))
+}
+
+/// Whether a length is the one told, to within `SIZE_NOISE`. Equal first:
+/// an unbounded size stays infinite, and infinity less itself is NaN, which
+/// is near nothing, so it was told again on every pass and never settled.
+#[inline]
+fn same_length(told: f32, now: f32) -> bool {
+    told == now || (told - now).abs() < SIZE_NOISE
 }
 
 fn allocated_content_size(scene: &Scene, node: NodeId) -> (f32, f32) {
@@ -8464,6 +8484,72 @@ mod bounds_observer_tests {
             ui.try_prepare_frame().unwrap();
         }
         assert!(seen.get().0 > base + 0.0009, "{:?}", seen.get());
+    }
+
+    /// Bounds are told as sizes are: a position flipping between
+    /// neighbouring floats, its reader moving it each time, settles, and a
+    /// move anyone could see is told.
+    #[test]
+    fn bounds_differing_only_by_rounding_settle_and_real_moves_are_told() {
+        let mut ui = Ui::new(400., 200.);
+        let node = ui.container(ui.root(), Layout::Overlay, fixed(100., 40.));
+        let bounds = ui.observe_bounds(node);
+        let (scene, seen) = (
+            Rc::downgrade(&ui.scene),
+            Rc::new(Cell::new(Rect::default())),
+        );
+        let (told, flips, wanted) = (seen.clone(), Rc::new(Cell::new(0)), Rc::new(Cell::new(10.)));
+        let (flipped, want) = (flips.clone(), wanted.clone());
+        ui.bind(node, move || {
+            told.set(bounds.get());
+            let nudge = if flipped.get() % 2 == 0 { 2e-5 } else { 0. };
+            flipped.set(flipped.get() + 1);
+            let scene = scene.upgrade().unwrap();
+            scene.borrow_mut().set_transform(
+                node,
+                Transform {
+                    x: want.get() + nudge,
+                    y: 0.,
+                },
+            );
+        });
+        ui.try_prepare_frame().unwrap();
+        assert!((seen.get().x - 10.).abs() < 0.001, "{:?}", seen.get());
+        assert!(flips.get() < 8, "{} readings", flips.get());
+        wanted.set(30.);
+        ui.scene
+            .borrow_mut()
+            .set_transform(node, Transform { x: 30., y: 0. });
+        ui.try_prepare_frame().unwrap();
+        assert_eq!(seen.get().x.round(), 30.);
+    }
+
+    /// An unbounded size is the same size on every pass: infinity less
+    /// itself is NaN, which no tolerance holds.
+    #[test]
+    fn an_unbounded_size_settles() {
+        let mut ui = Ui::new(400., 200.);
+        let node = ui.container(ui.root(), Layout::Overlay, fixed(f32::INFINITY, 40.));
+        let size = ui.observe_size(node);
+        let (scene, readings) = (Rc::downgrade(&ui.scene), Rc::new(Cell::new(0)));
+        let (read, seen) = (readings.clone(), Rc::new(Cell::new(0.)));
+        let width = seen.clone();
+        ui.bind(node, move || {
+            width.set(size.get().0);
+            // Its height only rounds differently, so each reading dirties
+            // layout without changing anything that is told.
+            read.set(read.get() + 1);
+            let height = if read.get() % 2 == 0 { 40.00001 } else { 40. };
+            let scene = scene.upgrade().unwrap();
+            scene
+                .borrow_mut()
+                .set_style(node, fixed(f32::INFINITY, height));
+        });
+        ui.try_prepare_frame().unwrap();
+        assert_eq!(seen.get(), f32::INFINITY);
+        assert!(readings.get() < 8, "{} readings", readings.get());
+        assert!(!resized((f32::INFINITY, 40.), (f32::INFINITY, 40.)));
+        assert!(resized((f32::INFINITY, 40.), (100., 40.)));
     }
 
     /// A hook can hold a script's whole VM: it goes with its editor.
