@@ -70,8 +70,10 @@ impl LineHeight {
 ///
 /// Or a grid of cells (`cells`, a terminal's): each character takes its
 /// cells exactly, whichever font draws it. The grid is kept in the same bits,
-/// a NaN's payload (which `px` never makes), so a font style is no bigger,
-/// and hashes and compares no slower, for it.
+/// as a negative subnormal (which `px` never makes: it flushes them to zero),
+/// so a font style is no bigger, and hashes and compares no slower, for it;
+/// read as tracking (`pixels`), a grid is less than 1e-38 of a pixel, which
+/// adds nothing to any width, so no reader needs to tell it apart.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct LetterSpacing(u32);
 impl std::fmt::Debug for LetterSpacing {
@@ -84,12 +86,12 @@ impl std::fmt::Debug for LetterSpacing {
         }
     }
 }
-/// A grid's bits: a positive quiet NaN, its payload the cell width in
+/// A grid's bits: a negative subnormal, its mantissa the cell width in
 /// 1/1024 logical pixels.
-const GRID: u32 = 0x7fc0_0000;
-const GRID_UNITS: u32 = 0x003f_ffff;
+const GRID: u32 = 0x8000_0000;
+const GRID_UNITS: u32 = 0x007f_ffff;
 impl LetterSpacing {
-    /// A grid of cells `width` logical pixels wide (up to 4,096; none at
+    /// A grid of cells `width` logical pixels wide (up to 8,192; none at
     /// zero or below): each cluster takes its characters' cells (their
     /// widths, as unicode-width tells them), its glyphs centred in them, so a
     /// fallback font's glyph a little wider or narrower than the grid's (a
@@ -103,32 +105,26 @@ impl LetterSpacing {
     }
     /// The grid's cell width in logical pixels, if it is one.
     pub fn cell(self) -> Option<f32> {
-        (self.0 & !GRID_UNITS == GRID).then(|| (self.0 & GRID_UNITS) as f32 / 1024.)
+        (self.0 & !GRID_UNITS == GRID && self.0 & GRID_UNITS != 0)
+            .then(|| (self.0 & GRID_UNITS) as f32 / 1024.)
     }
     /// No extra spacing.
     pub const ZERO: Self = Self(0);
     /// `value` logical pixels between characters, normalized as the type
     /// says.
     pub fn px(value: f32) -> Self {
-        if value.is_finite() && value != 0. {
+        // (A subnormal, less than 1e-38 of a pixel, is none: its bits are a
+        // grid's.)
+        if value.is_finite() && value.abs() >= f32::MIN_POSITIVE {
             Self(value.clamp(-1_000_000., 1_000_000.).to_bits())
         } else {
             Self::ZERO
         }
     }
-    /// The bits read as tracking, undecoded, as a rich run's estimate reads
-    /// them: only where a grid can't be (a rich run's spacing is tracking;
-    /// a grid there would read as a NaN its estimate's `max` makes no width).
-    pub(crate) fn raw_pixels(self) -> f32 {
-        f32::from_bits(self.0)
-    }
-    /// The tracking in logical pixels (none on a grid).
+    /// The tracking in logical pixels (a grid's reads as less than 1e-38,
+    /// none to any width).
     pub fn pixels(self) -> f32 {
-        if self.0 & !GRID_UNITS == GRID {
-            0.
-        } else {
-            f32::from_bits(self.0)
-        }
+        f32::from_bits(self.0)
     }
 }
 /// Whether `text` holds right-to-left letters (Hebrew, Arabic, Syriac,
@@ -754,7 +750,7 @@ impl FallbackTextLayout {
                         .iter()
                         .find(|r| r.range.contains(&index))
                         .map_or(0., |r| {
-                            (r.font_size * 0.6 + r.font.letter_spacing.raw_pixels()).max(0.)
+                            (r.font_size * 0.6 + r.font.letter_spacing.pixels()).max(0.)
                         });
                     while layout
                         .cells
@@ -1024,12 +1020,8 @@ impl FallbackTextLayout {
         let size = if size.is_finite() { size.max(1.) } else { 1. };
         // Extreme negative tracking collapses cells rather than reversing their
         // order. Include the final advance, consistently with native tracking.
-        // On a grid, each cell is the grid's.
-        let advance = match font.letter_spacing.cell() {
-            Some(cell) => cell,
-            None => (size as f64 * 0.6 + font.letter_spacing.pixels() as f64)
-                .clamp(0., f32::MAX as f64) as f32,
-        };
+        let advance = (size as f64 * 0.6 + font.letter_spacing.pixels() as f64)
+            .clamp(0., f32::MAX as f64) as f32;
         let height = font.line_height.resolve(size);
         let mut x = 0.;
         let mut y = 0.;
@@ -1397,7 +1389,12 @@ mod letter_spacing_tests {
     fn a_grid_is_kept_in_the_spacings_own_bits() {
         let grid = LetterSpacing::cells(7.826_66);
         assert!((grid.cell().unwrap() - 7.826_66).abs() <= 1. / 1024.);
-        assert_eq!(grid.pixels(), 0., "no tracking on a grid");
+        // Read as tracking, less than 1e-38 of a pixel: nothing to a width.
+        assert!(grid.pixels() <= 0. && grid.pixels().abs() < f32::MIN_POSITIVE);
+        assert_eq!(10. + grid.pixels(), 10.);
+        // A subnormal tracking is none (its bits would be a grid's).
+        assert_eq!(LetterSpacing::px(-1e-39), LetterSpacing::ZERO);
+        assert_eq!(LetterSpacing::px(1e-39), LetterSpacing::ZERO);
         assert_eq!(LetterSpacing::px(3.).cell(), None);
         assert_eq!(LetterSpacing::ZERO.cell(), None);
         assert_eq!(LetterSpacing::cells(0.), LetterSpacing::ZERO);
@@ -1407,7 +1404,16 @@ mod letter_spacing_tests {
             Some(GRID_UNITS as f32 / 1024.)
         );
         // No tracking value is a grid, and a font style is no bigger.
-        for spacing in [-1_000_000., -1., -0.5, 0.5, 1., 1_000_000.] {
+        for spacing in [
+            -1_000_000.,
+            -1.,
+            -0.5,
+            -f32::MIN_POSITIVE,
+            f32::MIN_POSITIVE,
+            0.5,
+            1.,
+            1_000_000.,
+        ] {
             assert_eq!(LetterSpacing::px(spacing).cell(), None);
         }
         assert_eq!(std::mem::size_of::<LetterSpacing>(), 4);
@@ -1421,23 +1427,28 @@ mod letter_spacing_tests {
         );
     }
 
-    /// Every reader of a font's spacing decodes a grid first: the fallback
-    /// layout (each cell the grid's), its spaced and ellipsis advances
-    /// (`pixels`, no tracking), so no NaN reaches any geometry.
+    /// Every reader of a font's spacing reads a grid as no tracking: the
+    /// fallback layout's estimate (0.6 em a cell, as a terminal measures
+    /// its cell without a shaper), its spaced and ellipsis advances, finite
+    /// and as without spacing.
     #[test]
-    fn readers_decode_a_grid_before_any_arithmetic() {
-        let font = FontStyle {
+    fn readers_read_a_grid_as_no_tracking() {
+        let grid = FontStyle {
             letter_spacing: LetterSpacing::cells(7.),
             ..FontStyle::default()
         };
-        let layout = FallbackTextLayout::with_font("ab\ncd", 10., None, &font);
-        assert_eq!(layout.size().0, 14.);
-        assert_eq!(layout.caret(1).x, 7.);
+        let plain = FontStyle::default();
+        for text in ["ab\ncd", "abc", "a\u{301}b"] {
+            assert_eq!(
+                FallbackTextLayout::with_font(text, 10., None, &grid).size(),
+                FallbackTextLayout::with_font(text, 10., None, &plain).size(),
+                "{text:?}"
+            );
+        }
         assert_eq!(
-            FallbackTextLayout::measure_with_font("abc", 10., Some(15.), &font).0,
-            14.
+            FallbackTextLayout::measure_with_font("abc", 10., Some(15.), &grid),
+            FallbackTextLayout::measure_with_font("abc", 10., Some(15.), &plain)
         );
-        assert_eq!(font.letter_spacing.pixels(), 0.);
     }
 
     #[test]

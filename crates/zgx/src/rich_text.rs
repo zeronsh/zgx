@@ -151,18 +151,12 @@ pub struct TextRun {
 impl TextRun {
     /// The approximate advance of `grapheme` at byte `at` (no shaper): 0.6
     /// em a cell, zero-width characters none, and the run's padding on its
-    /// first and last. A rich run's spacing is tracking (`LetterSpacing::px`):
-    /// a grid of cells (`LetterSpacing::cells`) is plain text's, and read
-    /// here would be no width (`max`), never a NaN.
+    /// first and last.
     pub(crate) fn estimated_advance(&self, grapheme: &str, at: usize) -> f32 {
-        debug_assert!(
-            self.font.letter_spacing.cell().is_none(),
-            "a grid of cells is plain text's, not a rich run's"
-        );
         let glyph = if matches!(grapheme, "\u{200B}" | "\u{2060}") {
             0.
         } else {
-            self.font_size * 0.6 + self.font.letter_spacing.raw_pixels()
+            self.font_size * 0.6 + self.font.letter_spacing.pixels()
         };
         let first = (at == self.range.start) as u8 as f32;
         let last = (at + grapheme.len() == self.range.end) as u8 as f32;
@@ -419,11 +413,9 @@ impl RichText {
 }
 #[cfg(test)]
 mod tests {
-    /// A rich run's spacing is tracking: a grid of cells there is refused
-    /// (in debug), and would be no width, never a NaN.
+    /// A grid in a rich run reads as no tracking: the estimate's 0.6 em.
     #[test]
-    #[should_panic(expected = "a grid of cells is plain text's")]
-    fn a_grid_in_a_rich_run_is_refused() {
+    fn an_estimate_on_a_grid_is_a_plain_cell() {
         let run = TextRun {
             font: crate::text_layout::FontStyle {
                 letter_spacing: crate::text_layout::LetterSpacing::cells(7.),
@@ -431,7 +423,7 @@ mod tests {
             },
             ..TextRun::default()
         };
-        run.estimated_advance("a", 0);
+        assert_eq!(run.estimated_advance("a", 0), run.font_size * 0.6);
     }
 
     use super::*;

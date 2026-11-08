@@ -115,6 +115,9 @@ fn font_features(settings: &[([u8; 4], u32)]) -> cosmic_text::FontFeatures {
     }
     features
 }
+// Inlined where it is called, as it was before `spaced` took the rare part
+// out of it (LTO had stopped inlining it into the text cache).
+#[inline(always)]
 pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> {
     use zgx::text_layout::FontFamily;
     let family = match &font.family {
