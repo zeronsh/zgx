@@ -441,9 +441,9 @@ pub(crate) fn script(
             let mut streams = parsed.streams.borrow_mut();
             let fresh = !matches!(streams.get(&key), Some((f, ..)) if *f == flags);
             if fresh {
-                streams.insert(key.clone(), (flags, Incremental::new(options), None));
+                streams.insert(key.clone(), (flags, Incremental::new(options), None, None));
             }
-            let (_, stream, last) = streams.get_mut(&key).expect("inserted above");
+            let (_, stream, last, kept) = streams.get_mut(&key).expect("inserted above");
             match lazy {
                 Some(threshold) => stream.set_text_lazy(&text, threshold),
                 None => stream.set_text(&text),
@@ -454,8 +454,13 @@ pub(crate) fn script(
             // but the end: only what's new is converted and weighed, not
             // the whole list each time a chunk lands (`value::derive`).
             if let Some(old) = last.replace(blocks.clone()) {
+                // The last answer's table, if the sweep left none kept: a
+                // script read it since.
+                if kept.is_none() {
+                    *kept = crate::value::table_of(lua, &old)?;
+                }
                 crate::value::derive(lua, &old, &blocks)?;
-                crate::value::hold(lua, &blocks)?;
+                *kept = crate::value::table_of(lua, &blocks)?;
             }
             touch(
                 &mut parsed.stream_order.borrow_mut(),
@@ -548,7 +553,7 @@ fn follow_lazy(lua: &mlua::Lua, key: String, first: Option<usize>) -> mlua::Resu
         };
         let first = wanted.take();
         let (more, asked) = match parsed.streams.borrow_mut().get_mut(&stream_key) {
-            Some((_, stream, _)) => {
+            Some((_, stream, ..)) => {
                 let more = stream.parse_pending(LAZY_BUDGET, first);
                 (more, first.is_some_and(|i| !stream.block_pending(i)))
             }
@@ -622,8 +627,11 @@ const KEPT: usize = 256;
 type Flags = (bool, bool);
 type Texts = std::collections::HashMap<(String, Flags), Value>;
 /// Each keyed stream: its flags, its parse, and its last answer (whose
-/// table the next one's is derived from).
-type Streams = std::collections::HashMap<String, (Flags, Incremental, Option<Value>)>;
+/// table the next one's is derived from), with that table once a script
+/// has it, kept so the host's idle sweep doesn't let it go (only scripts'
+/// holding counts there): a stream pausing between chunks goes idle.
+type Streams =
+    std::collections::HashMap<String, (Flags, Incremental, Option<Value>, Option<mlua::Table>)>;
 
 /// A VM's parsed markdown.
 #[derive(Default)]
