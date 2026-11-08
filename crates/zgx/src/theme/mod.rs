@@ -41,7 +41,7 @@ pub(crate) use bind::{
 };
 pub use bind::{Field, Themed};
 pub use file::{Theme, ThemeError, ThemeKind, ThemeOverride, TokenInput};
-pub use platform::windows_look;
+pub use platform::{linux_look, windows_look};
 pub(crate) use scope::Body;
 pub use scope::{Appearance, DARK, LIGHT, SystemPreferences, ThemeReader, ThemeScope, Themes};
 pub use tokens::{
