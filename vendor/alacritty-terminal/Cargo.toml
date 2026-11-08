@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.85.0"
 name = "zgx-alacritty-terminal"
-version = "0.26.2"
+version = "0.26.3"
 authors = [
     "Christian Duerr <contact@christianduerr.com>",
     "Joe Wilm <joe@jwilm.com>",
@@ -44,6 +44,7 @@ default = ["serde"]
 serde = [
     "dep:serde",
     "bitflags/serde",
+    "smallvec/serde",
     "vte/serde",
 ]
 
@@ -82,6 +83,12 @@ features = [
     "rc",
 ]
 optional = true
+
+[dependencies.smallvec]
+version = "1.13"
+
+[dependencies.unicode-segmentation]
+version = "1.13.3"
 
 [dependencies.unicode-width]
 version = "0.2.0"

@@ -477,3 +477,98 @@ fn an_emoji_asked_for_with_vs16_takes_two_cells() {
         "{line:?}"
     );
 }
+
+/// The top-left `count` characters of `line`: each cell's character with
+/// those joined to it, and whether it's wide (spacers left out).
+#[cfg(unix)]
+fn clusters(term: &Term, line: i32, count: usize) -> Vec<(String, bool)> {
+    let row = &term.grid()[Line(line)];
+    (0..term.grid().columns())
+        .map(|column| &row[Column(column)])
+        .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+        .take(count)
+        .map(|cell| {
+            let mut text = String::from(cell.c);
+            text.extend(cell.zerowidth().into_iter().flatten());
+            (text, cell.flags.contains(Flags::WIDE_CHAR))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn grapheme_clusters_take_one_cell_or_two_until_mode_2027_is_reset() {
+    // A family (ZWJ), a flag and ⌚ with VS15, then the same with mode 2027
+    // reset (`CSI ? 2027 l`).
+    let line = r"\360\237\221\250\342\200\215\360\237\221\251\342\200\215\360\237\221\247\360\237\207\272\360\237\207\270\342\214\232\357\270\216x";
+    let mut run = Scripted::run(
+        &format!("printf '{line}\\r\\n\\033[?2027l{line}\\r\\n'"),
+        20,
+        4,
+    );
+    assert_eq!(run.exited(), 0);
+    let term = run.session.term();
+    let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    assert_eq!(
+        clusters(&term, 0, 4),
+        [
+            (family.to_owned(), true),
+            ("\u{1f1fa}\u{1f1f8}".to_owned(), true),
+            ("\u{231a}\u{fe0e}".to_owned(), false),
+            ("x".to_owned(), false),
+        ]
+    );
+    // Reset: each character takes its own width (zero-width ones joined to
+    // the one before), as `wcwidth` counts them.
+    assert_eq!(
+        clusters(&term, 1, 7),
+        [
+            ("\u{1f468}\u{200d}".to_owned(), true),
+            ("\u{1f469}\u{200d}".to_owned(), true),
+            ("\u{1f467}".to_owned(), true),
+            ("\u{1f1fa}".to_owned(), false),
+            ("\u{1f1f8}".to_owned(), false),
+            ("\u{231a}\u{fe0e}".to_owned(), true),
+            ("x".to_owned(), false),
+        ]
+    );
+}
+
+/// readline counts with `wcwidth`: with mode 2027 reset its cursor stays on
+/// the character it edits across an emoji with VS16 (❤️, one column to it).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_readline_edit_across_an_emoji_keeps_its_cursor_with_mode_2027_reset() {
+    if std::process::Command::new("bash")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    const LEFT: &str = "\x1b[D";
+    for (lefts, shown) in [(4, "[aX\u{2764}bc]"), (5, "[Xa\u{2764}bc]")] {
+        let mut run = Scripted::run(
+            "printf '\\033[?2027l'; exec env LANG=C.UTF-8 LC_ALL=C.UTF-8 INPUTRC=/dev/null PS1='$ ' bash --norc --noprofile -i",
+            30,
+            6,
+        );
+        run.until("the prompt", |_, term| {
+            rows(term).iter().any(|row| row == "$")
+        });
+        run.session
+            .write("echo [a\u{2764}\u{fe0f}bc]".as_bytes().to_vec());
+        run.until("the line", |_, term| {
+            rows(term).iter().any(|row| row.ends_with("bc]"))
+        });
+        run.session
+            .write(format!("{}X", LEFT.repeat(lefts)).into_bytes());
+        let edited = format!("$ echo {shown}");
+        run.until("the edit", |_, term| rows(term)[0] == edited);
+        run.session.write(b"\r".as_slice());
+        run.until("bash's echo", |_, term| {
+            rows(term).iter().any(|row| row == shown)
+        });
+        run.session.write(b"exit\r".as_slice());
+    }
+}

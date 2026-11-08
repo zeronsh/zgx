@@ -5083,7 +5083,7 @@ dependencies = [
 
 [[package]]
 name = "zgx-alacritty-terminal"
-version = "0.26.2"
+version = "0.26.3"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.2",
@@ -5098,6 +5098,8 @@ dependencies = [
  "rustix 1.1.5",
  "rustix-openpty",
  "signal-hook",
+ "smallvec",
+ "unicode-segmentation",
  "unicode-width",
  "vte",
  "windows-sys 0.59.0",
