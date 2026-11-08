@@ -779,13 +779,37 @@ function video.audio(opts: any): any
 		return ui.div { absolute = true, w = 0, h = 0 }
 	end)
 end
+-- Where `time`'s frame 0 falls in the video now: its offset, or under a loop
+-- the start of the pass playing (a loop mounts its children again on each).
+-- Under a freeze, its offset: its frame stands still.
+local function start_of(time: any): number
+	if time.plain then
+		return time.offset
+	end
+	local wrapped = false
+	local t = time
+	while t do
+		if t.frozen ~= nil then
+			return time.offset
+		end
+		wrapped = wrapped or t.wrap ~= nil
+		t = t.parent
+	end
+	if not wrapped then
+		return time.offset
+	end
+	-- Whole frames: between them (motion blur's ticks) the frame is a fraction.
+	return math.floor(frame_state:peek() - local_frame(time, true) + 0.5)
+end
+
 function audio_in(time: any, opts: any)
+	local start = start_of(time)
 	local volume = opts.volume or 1
 	local volumes: { number }? = nil
 	if type(volume) == "function" then
 		-- Its loudness at each frame, from its start: the mix goes between them.
 		local lasts = opts.duration
-			or math.max((composition and composition.duration or 0) - time.offset - (opts.from or 0), 1)
+			or math.max((composition and composition.duration or 0) - start - (opts.from or 0), 1)
 		volumes = {}
 		for frame = 0, math.ceil(lasts) do
 			(volumes :: any)[frame + 1] = (volume :: any)(frame)
@@ -794,7 +818,7 @@ function audio_in(time: any, opts: any)
 	end
 	tell("zgx.video.audio", {
 		src = opts.src,
-		from = time.offset + (opts.from or 0),
+		from = start + (opts.from or 0),
 		duration = opts.duration or -1,
 		trim = opts.trim or 0,
 		volume = volume,
