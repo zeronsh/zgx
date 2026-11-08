@@ -103,6 +103,9 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 # Shaping with and without its kept advances (tests/variable_advances.rs).
 harfrust = { package = "zgx-harfrust", version = "0.5.3", path = "../../vendor/harfrust" }
+# wgpu's own counts of what it holds (textures, samplers, bind groups), for
+# tests that what a frame no longer shows is given back.
+wgpu = { version = "29.0.4", default-features = false, features = ["counters"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 # Every ready-made shader fill, drawn with Direct3D 11 (tests/d3d11_parity.rs).
