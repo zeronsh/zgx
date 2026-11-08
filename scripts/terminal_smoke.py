@@ -10,6 +10,8 @@ by colours the shell prints.
   editor at the cursor): green cells;
 - Ctrl+C interrupts the foreground program (`sleep 30`), and the shell
   takes the next command at once: blue cells;
+- a program's underline styles in colours of their own (SGR 4:3 and 4:2,
+  with 58) draw as a red wave and two green lines;
 - resizing the window resizes the grid the shell sees: a bar `tput cols`
   wide shrinks with the window;
 - an idle, focused terminal does no work: the process's CPU time stays put
@@ -50,6 +52,15 @@ def box(image, colour):
     """The box of `image`'s pixels of exactly `colour`, or None."""
     solid = Image.new("RGB", image.size, colour)
     return ImageChops.difference(image, solid).convert("L").point(lambda v: 255 if v == 0 else 0).getbbox()
+
+
+def rows_near(image, colour, tolerance=80, least=6):
+    """The rows of `image` with at least `least` pixels within `tolerance` of
+    `colour` in each channel."""
+    width, height = image.size
+    data = image.load()
+    near = lambda pixel: all(abs(c - t) < tolerance for c, t in zip(pixel, colour))
+    return {y for y in range(height) if sum(1 for x in range(width) if near(data[x, y])) >= least}
 
 
 def cpu_seconds(pid):
@@ -138,6 +149,23 @@ def main():
         type_line(bar(BLUE))
         until("Ctrl+C", BLUE, seconds=5)
         print("terminal: Ctrl+C interrupted sleep")
+
+        # A program's underline styles in colours of their own (SGR 4:3 and
+        # 4:2 with 58): a red wave over three rows or more, and two green lines
+        # with a row between.
+        type_line("clear; printf '\\033[4:3m\\033[58;2;255;0;0mcurly underline\\033[0m\\n"
+                  "\\033[4:2m\\033[58;2;0;200;0mdouble underline\\033[0m\\n'")
+        deadline = time.monotonic() + 10
+        while True:
+            shot = capture("underline-styles")
+            red, green = rows_near(shot, (255, 0, 0)), rows_near(shot, (0, 200, 0))
+            bands = [y for y in green if y - 1 not in green]
+            if len(red) >= 3 and len(bands) >= 2:
+                break
+            if time.monotonic() > deadline:
+                raise AssertionError(f"underline styles: red rows {sorted(red)}, green rows {sorted(green)}")
+            time.sleep(0.1)
+        print(f"terminal: a curly underline ({len(red)} rows) and a double one ({len(bands)} lines) in their colours")
 
         orange = "clear; printf '\\033[48;2;255;128;0m%*s\\033[0m\\n' $(tput cols) ''"
         type_line(orange)

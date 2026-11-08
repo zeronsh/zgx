@@ -96,6 +96,41 @@ impl Harness {
     }
 }
 
+/// What the rows' canvases draw a point high (underlines, a strike) and
+/// stroke (a curly underline), with their colours: `(colour, stroked)`.
+#[cfg(unix)]
+fn underline_marks(app: &Harness) -> Vec<(zgx::scene::Color, bool)> {
+    use zgx::canvas::{Brush, Draw, Shape};
+    let scene = app.ui.scene.borrow();
+    let mut marks = Vec::new();
+    for item in scene.paint_items() {
+        let NodeKind::Canvas(canvas) = item.kind else {
+            continue;
+        };
+        for draw in canvas.commands() {
+            match draw {
+                Draw::Fill {
+                    path,
+                    brush: Brush::Solid(color),
+                    ..
+                } => {
+                    if let Some(Shape::Rect { rect, .. }) = path.shape()
+                        && (rect.height - 1.).abs() < 0.01
+                    {
+                        marks.push((*color, false));
+                    }
+                }
+                Draw::Stroke {
+                    brush: Brush::Solid(color),
+                    ..
+                } => marks.push((*color, true)),
+                _ => {}
+            }
+        }
+    }
+    marks
+}
+
 fn session(command: &str) -> TerminalOptions {
     TerminalOptions {
         command: Some(command.into()),
@@ -803,4 +838,62 @@ fn a_program_reads_the_clipboard_when_the_app_allows_it() {
         });
         assert_eq!(asked.get(), 1, "the app's reader was asked once");
     }
+}
+
+/// A program's underline styles (SGR 4:2 to 4:5) and underline colour
+/// (SGR 58) are drawn as shapes under their cells, a curly one as a wave;
+/// a plain underline in the text's colour is still the text's own, with no
+/// shapes of its own.
+#[cfg(unix)]
+#[test]
+fn styled_and_coloured_underlines_are_drawn_under_their_cells() {
+    use zgx::scene::Color;
+    let mut app = Harness::new();
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(
+            r"printf '\033[4:3m\033[58;2;255;0;0mcurly\033[0m \033[4:2mdouble\033[0m \033[4:4mdotted\033[0m \033[4:5mdashed\033[0m\r\n\033[4mplain\033[0m\r\n'; sleep 30",
+        ),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    // Drawn by shapes, not their text, the four words are one run of it.
+    let styled = "curly double dotted dashed";
+    app.until("the output", |app| app.shows("plain") && app.shows(styled));
+    let marks = underline_marks(&app);
+    let red = Color(255, 0, 0, 255);
+    assert!(
+        marks.contains(&(red, true)),
+        "the curly underline, a red wave: {marks:?}"
+    );
+    let ink: Vec<_> = marks
+        .iter()
+        .filter(|(color, stroked)| !stroked && *color != red)
+        .collect();
+    // A double underline's two lines, a dotted one's dots and a dashed one's
+    // dashes, all in the text's colour.
+    assert!(
+        ink.len() > 8,
+        "the double, dotted and dashed underlines: {marks:?}"
+    );
+    // The plain one is the text's: underlined in its font, and nothing more.
+    let scene = app.ui.scene.borrow();
+    let plain = scene
+        .paint_items()
+        .find(|item| matches!(item.kind, NodeKind::Text { text, .. } if &**text == "plain"))
+        .expect("the plain line");
+    assert!(
+        plain.font.underline.is_some(),
+        "a plain underline is its text's"
+    );
+    let others = scene
+        .paint_items()
+        .filter(|item| matches!(item.kind, NodeKind::Text { text, .. } if &**text == styled))
+        .filter(|item| item.font.underline.is_some())
+        .count();
+    assert_eq!(others, 0, "a styled underline isn't drawn by its text too");
+    drop(term);
 }
