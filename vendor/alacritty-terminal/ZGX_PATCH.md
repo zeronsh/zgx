@@ -130,8 +130,8 @@ than two. Version 0.26.3, depending on `unicode-segmentation` and
 For the kitty graphics protocol, which zgx-terminal reads (vte passes APC
 strings over), each screen keeps the pictures placed on it
 (`term::graphics`): which picture, under what number, the rectangle of cells
-it covers (its top line a grid line, negative in the scrollback), its z and
-what part of it shows. `Term::place`, `placements` and `retain_placements`
+it covers (its top line a grid line, negative in the scrollback), its z,
+what part of it shows and the size it is drawn at. `Term::place`, `placements` and `retain_placements`
 are the embedder's. The placements move with the lines they sit on: a
 scroll from the top carries them into the scrollback and drops them once
 their last line leaves it; a scrolling region moves those starting in it

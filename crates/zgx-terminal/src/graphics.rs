@@ -529,13 +529,34 @@ fn place<T: EventListener>(
     } else {
         h.min(image.height() - y)
     };
-    let cells = |given: u32, offset: u32, pixels: u32, cell: u16| match (given, cell) {
+    // Given columns or rows, it stretches to them (one alone keeps its
+    // shape); given neither, it covers the cells its pixels need.
+    let (cell_width, cell_height) = (u32::from(cell.0), u32::from(cell.1));
+    let [offset_x, offset_y] = keys.offset;
+    let mut size = [width, height];
+    if cell_width != 0 && cell_height != 0 {
+        let across = |columns: u32| (columns * cell_width).saturating_sub(offset_x).max(1);
+        let down = |rows: u32| (rows * cell_height).saturating_sub(offset_y).max(1);
+        size = match (keys.columns, keys.rows) {
+            (0, 0) => size,
+            (0, rows) => [
+                (down(rows) as u64 * u64::from(width) / u64::from(height)) as u32,
+                down(rows),
+            ],
+            (columns, 0) => [
+                across(columns),
+                (across(columns) as u64 * u64::from(height) / u64::from(width)) as u32,
+            ],
+            (columns, rows) => [across(columns), down(rows)],
+        };
+    }
+    let cells = |given: u32, offset: u32, pixels: u32, cell: u32| match (given, cell) {
         (0, 0) => 1,
-        (0, cell) => (offset + pixels).div_ceil(u32::from(cell)).max(1),
+        (0, cell) => (offset + pixels).div_ceil(cell).max(1),
         (given, _) => given,
     };
-    let columns = cells(keys.columns, keys.offset[0], width, cell.0) as usize;
-    let lines = cells(keys.rows, keys.offset[1], height, cell.1) as usize;
+    let columns = cells(keys.columns, offset_x, size[0], cell_width) as usize;
+    let lines = cells(keys.rows, offset_y, size[1], cell_height) as usize;
     let point = term.grid().cursor.point;
     term.place(Placement {
         image: id,
@@ -546,6 +567,7 @@ fn place<T: EventListener>(
         z: keys.z,
         source: [x, y, width, height],
         offset: keys.offset,
+        size,
     });
     if !keys.stay {
         for _ in 1..lines {
@@ -671,6 +693,24 @@ mod tests {
         // A picture sent without a name is kept but not answered.
         assert_eq!(fx.run("a=T,f=32,s=1,v=1", &rgba(1, 1)), "");
         assert_eq!(fx.images.lock().unwrap().len(), 3);
+    }
+
+    /// Given columns and rows, a picture stretches over them; given one,
+    /// it keeps its shape.
+    #[test]
+    fn columns_or_rows_given_stretch_the_picture() {
+        let mut fx = Fixture::new();
+        fx.run("a=t,f=32,s=40,v=20,i=1,q=1", &rgba(40, 20));
+        let sizes = |fx: &mut Fixture, keys: &str| {
+            fx.run(&format!("a=p,i=1,C=1,{keys}"), &[]);
+            let p = fx.term.placements().last().unwrap().clone();
+            (p.size, p.columns, p.lines)
+        };
+        // Cells 10 by 20: its own 40 by 20 is 4 by 1.
+        assert_eq!(sizes(&mut fx, "z=0"), ([40, 20], 4, 1));
+        assert_eq!(sizes(&mut fx, "c=2,r=3"), ([20, 60], 2, 3));
+        assert_eq!(sizes(&mut fx, "c=8"), ([80, 40], 8, 2));
+        assert_eq!(sizes(&mut fx, "r=2,X=4"), ([80, 40], 9, 2));
     }
 
     /// Sent in chunks (each base64 of its own), compressed or as a PNG, a

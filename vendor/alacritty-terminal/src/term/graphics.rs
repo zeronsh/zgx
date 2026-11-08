@@ -32,6 +32,9 @@ pub struct Placement {
     pub source: [u32; 4],
     /// From the top-left cell's corner to the picture's, in pixels.
     pub offset: [u32; 2],
+    /// The size it is drawn at, in pixels: the part shown's own, or
+    /// stretched to the cells asked for.
+    pub size: [u32; 2],
 }
 
 impl Placement {
@@ -150,6 +153,7 @@ mod tests {
             z: 0,
             source: [0; 4],
             offset: [0; 2],
+            size: [1; 2],
         }
     }
 
