@@ -18,6 +18,9 @@ struct Fake {
     /// What the open dialog picks, and where the save dialog saves.
     opens: PathBuf,
     saves: PathBuf,
+    /// The files written, as the platform heard (`file_written`), with what
+    /// each held then.
+    written: RefCell<Vec<(PathBuf, String)>>,
 }
 impl Platform for Fake {
     fn clipboard_text(&self) -> Option<String> {
@@ -44,6 +47,10 @@ impl Platform for Fake {
     fn save_file(&self, _: FilePicker) -> Pending<Result<Option<PathBuf>, String>> {
         let path = self.saves.clone();
         Box::pin(async move { Ok(Some(path)) })
+    }
+    fn file_written(&self, path: &std::path::Path) {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        self.written.borrow_mut().push((path.to_path_buf(), text));
     }
 }
 
@@ -91,13 +98,22 @@ fn dir(name: &str) -> PathBuf {
     dir
 }
 fn app(dir: &std::path::Path, code: &'static str, plugin: Option<&'static str>) -> Harness {
+    app_with(dir, code, plugin).0
+}
+fn app_with(
+    dir: &std::path::Path,
+    code: &'static str,
+    plugin: Option<&'static str>,
+) -> (Harness, Rc<Fake>) {
     let fake = Rc::new(Fake {
         clipboard: RefCell::new(String::new()),
         image: RefCell::new(None),
         opens: dir.join("in.txt"),
         saves: dir.join("out.txt"),
+        written: RefCell::default(),
     });
-    Harness::wrapped(
+    let kept = fake.clone();
+    let harness = Harness::wrapped(
         move |runtime| {
             let host = ScriptHost::inline(runtime, "app", code);
             match plugin {
@@ -106,7 +122,8 @@ fn app(dir: &std::path::Path, code: &'static str, plugin: Option<&'static str>) 
             }
         },
         move |view| zgx::compose::provide(PlatformService(fake), view),
-    )
+    );
+    (harness, kept)
 }
 fn wait_for(h: &mut Harness, text: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -155,6 +172,92 @@ fn a_picked_file_reads_and_a_saved_one_is_written() {
         "saved text"
     );
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_platform_hears_a_saved_file_once_it_is_written_whole() {
+    // iOS saves in two steps: a file of the app's own, then the system's
+    // export picker with it, once it holds what the app wrote.
+    let dir = dir("written");
+    let (mut h, fake) = app_with(&dir, APP, None);
+    h.click("save");
+    wait_for(&mut h, "wrote out.txt");
+    assert_eq!(
+        fake.written.borrow().clone(),
+        vec![(dir.join("out.txt"), "saved text".to_string())],
+        "told once, with all of it written"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A dialog the person never answers, telling when the host drops it.
+struct Waiting(Rc<std::cell::Cell<bool>>);
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.0.set(true);
+    }
+}
+struct Unanswered(Rc<std::cell::Cell<bool>>);
+impl Platform for Unanswered {
+    fn clipboard_text(&self) -> Option<String> {
+        None
+    }
+    fn set_clipboard_text(&self, _: String) -> bool {
+        false
+    }
+    fn open_files(&self, _: FilePicker) -> Pending<Result<Vec<PathBuf>, String>> {
+        let waiting = Waiting(self.0.clone());
+        Box::pin(async move {
+            let _waiting = waiting;
+            std::future::pending::<()>().await;
+            Ok(Vec::new())
+        })
+    }
+    fn save_file(&self, _: FilePicker) -> Pending<Result<Option<PathBuf>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+#[test]
+fn a_dialog_the_script_cancels_is_dropped_where_it_waits() {
+    // iOS dismisses its picker as the request drops; a desktop's dialog closes.
+    let dropped = Rc::new(std::cell::Cell::new(false));
+    let platform = Rc::new(Unanswered(dropped.clone()));
+    let mut h = Harness::wrapped(
+        |runtime| {
+            ScriptHost::inline(
+                runtime,
+                "app",
+                r#"local shown = ui.state("shown", "")
+                local picking = nil
+                return ui.column {
+                    ui.text { id = "label", function() return shown:get() end },
+                    ui.button { id = "ask", w = 40, h = 20, "a", on_click = function()
+                        picking = ui.open_files({})
+                        shown:set("asked")
+                    end },
+                    ui.button { id = "cancel", w = 40, h = 20, "c", on_click = function()
+                        picking:cancel()
+                        shown:set("cancelled")
+                    end },
+                }"#,
+            )
+        },
+        move |view| zgx::compose::provide(PlatformService(platform), view),
+    );
+    h.frames(1);
+    h.click("ask");
+    wait_for(&mut h, "asked");
+    h.frames(2);
+    assert!(!dropped.get(), "waiting on the person");
+    h.click("cancel");
+    wait_for(&mut h, "cancelled");
+    h.frames(2);
+    assert!(
+        dropped.get(),
+        "the dialog dropped once the script cancelled it"
+    );
+    assert_eq!(h.error(), None);
 }
 
 #[test]

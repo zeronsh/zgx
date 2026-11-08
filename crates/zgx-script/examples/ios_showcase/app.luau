@@ -239,6 +239,33 @@ if ui.args[1] == "notify" then
 	end)
 end
 
+-- `files` (`ZGX_APP_ARGS`): the open picker shown at 2 s and cancelled by the
+-- script at 5 s (it is dismissed), then a save written at 7 s, which hands the
+-- file to the export picker. Nothing is tapped: a simulator check of the paths.
+if ui.args[1] == "files" then
+	local picking = nil
+	ui.after(2000, function()
+		picking = ui.open_files { title = "Open" }
+		print("FILES open asked")
+	end)
+	ui.after(5000, function()
+		if picking then
+			picking:cancel()
+			print("FILES open cancelled")
+		end
+	end)
+	ui.after(7000, function()
+		ui.task(function()
+			local file = ui.save_file({ name = "Showcase.txt" }):await()
+			print(string.format("FILES save %s", if file then file.name else "none"))
+			if file then
+				ui.write_file(file, "Written by the showcase\n"):await()
+				print("FILES written")
+			end
+		end)
+	end)
+end
+
 -- `composer_loop` (`ZGX_APP_ARGS`): the composer opens and closes ten times on its
 -- own, each frame logged, to compare with the keyboard on a phone.
 local composer_editor = ui.ref()

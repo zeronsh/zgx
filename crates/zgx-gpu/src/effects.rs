@@ -657,11 +657,11 @@ impl GpuRenderer {
         for job in jobs {
             if let Some(image) = job.mask
                 && let Some(texture) = self.images.get(&image).and_then(|entry| entry.2.clone())
-                && !self
+                && self
                     .effects
                     .as_ref()
                     .and_then(|atlas| atlas.masks.get(&image))
-                    .is_some_and(|(_, made_for)| *made_for == texture)
+                    .is_none_or(|(_, made_for)| *made_for != texture)
             {
                 let bind = self.mask_bind(&mask_layout, &texture.create_view(&Default::default()));
                 self.effects

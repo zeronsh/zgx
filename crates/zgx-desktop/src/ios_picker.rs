@@ -1,6 +1,10 @@
 //! Files and photos a person chooses on iOS: `UIDocumentPickerViewController`,
 //! and `PHPickerViewController` where only images are asked for. What is chosen
-//! comes as files of the app's own, which it may read as it likes.
+//! comes as files of the app's own, which it may read as it likes; a folder is
+//! opened where it lies, its security scope begun. A save is two steps: a file
+//! of the app's own (`select` for `Kind::Save`), then, once the app has written
+//! it (`written`), the system's export picker, the person choosing where it goes.
+//! A picker whose request is dropped (a script cancelling it) is dismissed.
 use crate::file_dialog::{FileDialogOptions, Kind};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
@@ -197,13 +201,101 @@ fn content_types(kind: &Kind, options: &FileDialogOptions) -> Retained<AnyObject
     }
 }
 
+thread_local! {
+    /// Saves waiting for the app to write them, then for the export picker.
+    static STAGED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Export pickers' delegates, kept while they show (a picker holds its
+    /// delegate weakly).
+    static EXPORTING: std::cell::RefCell<Vec<Retained<Delegate>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Where a save of `name` is written first: a folder of its own in the app's
+/// temporary files, so two saves of one name don't meet.
+fn staging(name: &str) -> Option<PathBuf> {
+    let base = std::env::temp_dir().join("zgx-exports");
+    let folder = (0u32..)
+        .map(|n| base.join(n.to_string()))
+        .find(|folder| !folder.exists())?;
+    std::fs::create_dir_all(&folder).ok()?;
+    Some(folder.join(name))
+}
+
+/// The app wrote `path`: a save's file goes to the system's export picker, the
+/// person choosing where (Files, iCloud Drive, another app's folder). Other
+/// files are the app's own business.
+pub(crate) fn written(path: &std::path::Path) {
+    let staged = STAGED.with(|staged| {
+        let mut staged = staged.borrow_mut();
+        let found = staged.iter().position(|p| p == path);
+        found.map(|index| staged.remove(index))
+    });
+    let Some(staged) = staged else { return };
+    let (Some(mtm), Some(controller)) = (
+        MainThreadMarker::new(),
+        crate::ios_system::root_controller(),
+    ) else {
+        return;
+    };
+    EXPORTING.with(|exporting| {
+        exporting.borrow_mut().retain(|delegate| {
+            delegate
+                .ivars()
+                .lock()
+                .expect("no panic holds it")
+                .done
+                .is_none()
+        });
+    });
+    // The export takes a copy: the app's file stays where its later writes
+    // go (an autosave), in temporary files the system clears.
+    let delegate = Delegate::alloc(mtm).set_ivars(Arc::default());
+    // SAFETY: Foundation's and UIKit's constructors and setters, on the main
+    // thread the app's write settles on.
+    unsafe {
+        let delegate: Retained<Delegate> = msg_send![super(delegate), init];
+        let text = crate::ios_system::ns_string(&staged.to_string_lossy());
+        let url: Retained<AnyObject> = msg_send![class!(NSURL), fileURLWithPath: &*text];
+        let urls: Retained<AnyObject> = msg_send![class!(NSArray), arrayWithObject: &*url];
+        let picker: Retained<AnyObject> = msg_send![msg_send![class!(UIDocumentPickerViewController), alloc],
+            initForExportingURLs: &*urls,
+            asCopy: true];
+        let _: () = msg_send![&*picker, setDelegate: &*delegate];
+        let _: () = msg_send![&*controller,
+            presentViewController: &*picker,
+            animated: true,
+            completion: std::ptr::null::<AnyObject>()];
+        EXPORTING.with(|exporting| exporting.borrow_mut().push(delegate));
+    }
+}
+
+/// The picker shown for a request, dismissed if the request goes before the
+/// person answers (a script cancelling it).
+struct Showing {
+    picker: Option<Retained<AnyObject>>,
+    shared: Arc<Mutex<Shared>>,
+}
+impl Drop for Showing {
+    fn drop(&mut self) {
+        let answered = self.shared.lock().map(|s| s.done.is_some()).unwrap_or(true);
+        if let (Some(picker), false) = (&self.picker, answered) {
+            // SAFETY: UIViewController's method, on the main thread the request
+            // was polled on.
+            unsafe {
+                let _: () = msg_send![&**picker, dismissViewControllerAnimated: true, completion: std::ptr::null::<AnyObject>()];
+            }
+        }
+    }
+}
+
 /// Ask the person; none chosen is no paths.
 pub(crate) async fn select(kind: Kind, options: FileDialogOptions) -> Option<Vec<PathBuf>> {
-    // Save: a file of the app's own, which the Files app shows.
+    // Save: a file of the app's own for now, handed to the export picker once
+    // the app has written it (`written`).
     if matches!(kind, Kind::Save) {
-        let home = std::env::var_os("HOME")?;
         let name = options.file_name.unwrap_or_else(|| "Untitled".into());
-        return Some(vec![PathBuf::from(home).join("Documents").join(name)]);
+        let path = staging(&name)?;
+        STAGED.with(|staged| staged.borrow_mut().push(path.clone()));
+        return Some(vec![path]);
     }
     let mtm = MainThreadMarker::new()?;
     let controller = crate::ios_system::root_controller()?;
@@ -211,7 +303,7 @@ pub(crate) async fn select(kind: Kind, options: FileDialogOptions) -> Option<Vec
     let delegate = Delegate::alloc(mtm).set_ivars(shared.clone());
     let many = matches!(kind, Kind::OpenFiles | Kind::Folders);
     // SAFETY: UIKit's and PhotosUI's constructors and setters, on the main thread.
-    let delegate = unsafe {
+    let (delegate, picker) = unsafe {
         let delegate: Retained<Delegate> = msg_send![super(delegate), init];
         let picker: Retained<AnyObject> = if only_images(&options) {
             let config: Retained<AnyObject> = msg_send![class!(PHPickerConfiguration), new];
@@ -236,9 +328,14 @@ pub(crate) async fn select(kind: Kind, options: FileDialogOptions) -> Option<Vec
             presentViewController: &*picker,
             animated: true,
             completion: std::ptr::null::<AnyObject>()];
-        delegate
+        (delegate, picker)
+    };
+    let showing = Showing {
+        picker: Some(picker),
+        shared: shared.clone(),
     };
     let paths = Wait(shared).await;
+    drop(showing);
     drop(delegate);
     Some(paths)
 }

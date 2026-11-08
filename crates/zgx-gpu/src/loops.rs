@@ -112,7 +112,7 @@ impl LoopSaid {
             let far = |at: (f64, f64)| (at.0 - want.0).abs() > 1. || (at.1 - want.1).abs() > 1.;
             return (self.showing && shown.on_screen.is_some_and(far)).then_some("on-screen");
         }
-        if shown.hidden != !self.showing {
+        if shown.hidden == self.showing {
             Some("shown")
         } else if self.showing && off(shown.at) {
             Some("place")
