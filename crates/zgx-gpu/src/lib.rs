@@ -2660,6 +2660,10 @@ struct LayerPresent {
     /// `debug_present_drawable`).
     #[cfg(target_os = "macos")]
     drawables: Option<bool>,
+    /// A scroll is live in the window (`GpuRenderer::set_scrolling`): its
+    /// full-rate frames draw into drawables (`SCROLL_DRAWABLES`).
+    #[cfg(target_os = "macos")]
+    scrolling: bool,
     /// Where this window is in the full-rate paths' trial (`PRESENT_AUTO`).
     #[cfg(target_os = "macos")]
     trial: Trial,
@@ -2791,7 +2795,15 @@ impl LayerPresent {
                 1 => false,
                 _ => matches!(self.trial, Trial::Drawables { .. }),
             };
-        (auto || self.drawables.unwrap_or(*PRESENT_DRAWABLE) && self.full_rate)
+        // A live scroll's frames present themselves: Metal shows each once
+        // its GPU work is done, where a tile is shown only after the main
+        // thread waited for that work (`finish_direct`), the next frame's
+        // input unread meanwhile. Not during the trial, which measures the
+        // paths as they are.
+        let scroll = self.scrolling
+            && *SCROLL_DRAWABLES
+            && !matches!(self.trial, Trial::Tiles { .. } | Trial::Drawables { .. });
+        (auto || self.drawables.unwrap_or(*PRESENT_DRAWABLE || scroll) && self.full_rate)
             && !self.plain_only
             && !self.with_natives
             && self
@@ -2908,6 +2920,12 @@ static DXGI_PRESENT: std::sync::LazyLock<bool> =
 static PRESENT_DRAWABLE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
     zgx::env::var_os("ZGX_PRESENT_DRAWABLE").is_some_and(|v| v != "0" && v != "auto")
 });
+/// `ZGX_SCROLL_DRAWABLES=0`: a live scroll's full-rate frames show as tiles,
+/// the main thread waiting for each frame's GPU work before handing it over,
+/// as they did before they drew into drawables (`LayerPresent::scrolling`).
+#[cfg(target_os = "macos")]
+static SCROLL_DRAWABLES: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_SCROLL_DRAWABLES").is_none_or(|v| v != "0"));
 /// `ZGX_PRESENT_DRAWABLE=auto`: full-rate frames take whichever path costs
 /// less on this machine (`TrialRule`), tried once per machine (`verdicts`);
 /// slower frames stay tiles.
@@ -14032,6 +14050,33 @@ impl GpuRenderer {
             }
             present.full_rate = full;
         }
+    }
+    /// Whether a scroll is live in the window (a gesture, its momentum or a
+    /// fling): on macOS its full-rate frames then draw into drawables, which
+    /// Metal presents once their GPU work is done, so the main thread never
+    /// waits for that work (`ZGX_SCROLL_DRAWABLES=0`: tiles, as at rest).
+    /// Elsewhere ignored.
+    pub fn set_scrolling(&mut self, #[allow(unused)] scrolling: bool) {
+        #[cfg(target_os = "macos")]
+        if let Some(present) = &mut self.layer_present {
+            present.scrolling = scrolling;
+        }
+    }
+    /// Whether the frame just rendered presents itself (macOS): drawn into a
+    /// drawable its own command buffer presents, it shows once the GPU is
+    /// done whatever the main thread does, so there is nothing to hand over
+    /// at a set time.
+    pub fn frame_presents_itself(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.layer_present.as_ref().is_some_and(|present| {
+                present
+                    .current
+                    .is_some_and(|index| present.buffers[index].0.drawable)
+            }) && self.metal_inflight.borrow().is_some()
+        }
+        #[cfg(not(target_os = "macos"))]
+        false
     }
     /// Encode plain frames with Metal directly (the default on macOS) or
     /// always through wgpu: for comparing the two. Elsewhere ignored.
