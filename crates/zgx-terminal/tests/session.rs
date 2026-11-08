@@ -410,11 +410,12 @@ fn cells(term: &Term, line: i32) -> Vec<(char, bool, bool)> {
 fn an_emoji_asked_for_with_vs16_takes_two_cells() {
     // ❤ (text by default) with VS16, then without; ✔ with VS16 at the end
     // of a line of 8; an emoji wide already (😀) with VS16; and VS16 after
-    // a letter, which has no emoji to show.
+    // a letter, which has no emoji to show; and ❤ with VS16 inserted (IRM)
+    // before `XY`.
     let mut run = Scripted::run(
-        "printf 'a\\342\\235\\244\\357\\270\\217b\\342\\235\\244c\\r\\n1234567\\342\\234\\224\\357\\270\\217z\\r\\n\\360\\237\\230\\200\\357\\270\\217d e\\357\\270\\217f\\r\\n\\342\\235\\244\\r\\357\\270\\217g\\r\\n'",
+        "printf 'a\\342\\235\\244\\357\\270\\217b\\342\\235\\244c\\r\\n1234567\\342\\234\\224\\357\\270\\217z\\r\\n\\360\\237\\230\\200\\357\\270\\217d e\\357\\270\\217f\\r\\n\\342\\235\\244\\r\\357\\270\\217g\\r\\nXY\\r\\033[4h\\342\\235\\244\\357\\270\\217\\033[4l\\r\\n'",
         8,
-        6,
+        7,
     );
     assert_eq!(run.exited(), 0);
     let term = run.session.term();
@@ -454,6 +455,19 @@ fn an_emoji_asked_for_with_vs16_takes_two_cells() {
         [('😀', true, false), (' ', false, true), ('d', false, false)]
     );
     assert_eq!(&line[4..6], [('e', false, false), ('f', false, false)]);
+    // Inserted: what the insert shifted along is shifted on past the
+    // spacer, not written over.
+    let line = cells(&term, 5);
+    assert_eq!(
+        &line[..4],
+        [
+            ('❤', true, false),
+            (' ', false, true),
+            ('X', false, false),
+            ('Y', false, false)
+        ],
+        "{line:?}"
+    );
     // VS16 after the cursor went back to the start: not the character just
     // written, so nothing widens (`g` then writes over the ❤).
     let line = cells(&term, 4);

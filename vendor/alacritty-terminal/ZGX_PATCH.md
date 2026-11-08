@@ -77,8 +77,9 @@ out of step with what showed. `Term::input` hands VS16 to
 `emoji_presentation` (cold, out of line, reached only from the zero-width
 branch): when the pair is two wide (`unicode-width`'s `str` width) and the
 cell is the character just written, it becomes a wide character with its
-spacer, and the cursor goes past both; on the last column it starts the
-next line as a wide character does. Programs counting with `wcwidth`
+spacer, and the cursor goes past both (in insert mode the row after it
+shifts a cell first, as `input` shifts it); on the last column it starts
+the next line as a wide character does. Programs counting with `wcwidth`
 (readline) see one column, as in those terminals, so an edit across such an
 emoji puts their cursor a cell off. Mode 2027 (grapheme clustering) isn't
 recognized. zgx-terminal's `an_emoji_asked_for_with_vs16_takes_two_cells`

@@ -1154,11 +1154,21 @@ impl<T> Term<T> {
             self.grid.cursor.input_needs_wrap = false;
         }
 
-        // The glyph, then its spacer, clearing what they cover.
+        // The glyph, then its spacer, clearing what they cover; in insert
+        // mode the row after it shifts right a cell first, as `input` shifts
+        // it for a wide character.
         self.write_at_cursor(' ');
         *self.grid.cursor_cell() = glyph;
         self.damage_cursor();
         self.grid.cursor.point.column += 1;
+        let spacer = self.grid.cursor.point.column;
+        if self.mode.contains(TermMode::INSERT) && spacer + 1 < columns {
+            let line = self.grid.cursor.point.line;
+            let row = &mut self.grid[line][..];
+            for column in (spacer.0..columns - 1).rev() {
+                row.swap(column + 1, column);
+            }
+        }
         self.grid
             .cursor
             .template
