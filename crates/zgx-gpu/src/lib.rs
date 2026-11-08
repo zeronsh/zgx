@@ -969,7 +969,15 @@ fn copy_blocker(
             continue;
         };
         if !repainted(rect) {
-            return Some(CopyBlocker::Over(item.id));
+            // Something that stays put over the view (a composer floating
+            // on a transcript): the copy moves the view's pixels, its among
+            // them, so it repaints where it is, as the copy left what was
+            // under it, and where the copy put it. Only a blur reads past
+            // its own box, so a blurred one still repaints the whole view.
+            if item.isolated || item.effects.blur_radius > 0. {
+                return Some(CopyBlocker::Over(item.id));
+            }
+            carried.push(rect);
         }
         carried.extend(carry(rect));
     }
