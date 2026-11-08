@@ -3442,8 +3442,8 @@ impl Host {
     }
     /// What a standard edit item does, as its shortcut does it: the
     /// clipboard's commands as `clipboard_command`, Select All on the
-    /// focused editor, Undo and Redo as their keys to it. Whether anything
-    /// took it.
+    /// focused editor, Undo and Redo as their keys to it; full screen
+    /// toggles the window. Whether anything took it.
     fn standard_edit(&mut self, item: crate::app_menu::StandardItem) -> bool {
         use crate::app_menu::StandardItem;
         let undo = |shift| InputEvent::KeyDown {
@@ -3471,6 +3471,15 @@ impl Host {
                     && self
                         .dispatch_prevented(undo(item == StandardItem::Redo))
                         .unwrap_or(false)
+            }
+            StandardItem::ToggleFullScreen => {
+                let Some(window) = &self.window else {
+                    return false;
+                };
+                self.context
+                    .window
+                    .set_fullscreen(window.fullscreen().is_none());
+                true
             }
         }
     }

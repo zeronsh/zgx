@@ -97,7 +97,7 @@ impl AppMenu {
     }
 }
 /// An edit command the platform implements for whatever has focus, native
-/// views included: on macOS it is AppKit's own item, sent to the first
+/// views included, or its full screen item (`ToggleFullScreen`): on macOS it is AppKit's own item, sent to the first
 /// responder (so a web page's selection copies). zgx's own view doesn't
 /// answer those actions, so there the item is disabled, and a disabled item
 /// still swallows its shortcut; while zgx's view has the keyboard, its
@@ -120,6 +120,10 @@ pub enum StandardItem {
     Paste,
     /// Selects everything in the focused view.
     SelectAll,
+    /// Enters or leaves full screen. On macOS AppKit's own item, sent to
+    /// the key window, which titles it Enter or Exit Full Screen as it is
+    /// (⌃⌘F); elsewhere it toggles the focused window.
+    ToggleFullScreen,
 }
 impl StandardItem {
     /// Its title, as the menu shows it.
@@ -131,6 +135,7 @@ impl StandardItem {
             Self::Copy => "Copy",
             Self::Paste => "Paste",
             Self::SelectAll => "Select All",
+            Self::ToggleFullScreen => "Toggle Full Screen",
         }
     }
     /// Its shortcut, as [`MenuAccelerator`] names one (macOS's).
@@ -142,16 +147,18 @@ impl StandardItem {
             Self::Copy => "Super+C",
             Self::Paste => "Super+V",
             Self::SelectAll => "Super+A",
+            Self::ToggleFullScreen => "Ctrl+Super+F",
         }
     }
     /// Every standard item.
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Undo,
         Self::Redo,
         Self::Cut,
         Self::Copy,
         Self::Paste,
         Self::SelectAll,
+        Self::ToggleFullScreen,
     ];
     /// The standard item whose action `action` is.
     pub(crate) fn of(action: &MenuAction) -> Option<Self> {
@@ -772,6 +779,10 @@ fn append_entries(menu: &muda::Submenu, entries: &[AppMenuEntry]) -> Result<(), 
                 StandardItem::Copy => muda::PredefinedMenuItem::copy(None),
                 StandardItem::Paste => muda::PredefinedMenuItem::paste(None),
                 StandardItem::SelectAll => muda::PredefinedMenuItem::select_all(None),
+                // AppKit retitles it Exit Full Screen while the window is.
+                StandardItem::ToggleFullScreen => {
+                    muda::PredefinedMenuItem::fullscreen(Some("Enter Full Screen"))
+                }
             }),
         };
         result.map_err(|e| AppMenuError(e.to_string()))?;
@@ -815,6 +826,9 @@ pub(crate) struct NativeMenu {
     /// The Window menu AppKit keeps: the app's own (titled "Window"), else
     /// a standard one after the app's menus.
     window: Option<muda::Submenu>,
+    /// The app's menu titled "Help", which AppKit makes its help menu: it
+    /// holds the menu bar's search.
+    help: Option<muda::Submenu>,
     /// The standard edit items it has, whose shortcuts zgx's view takes.
     standard: Vec<StandardItem>,
     /// The model it shows.
@@ -956,13 +970,35 @@ impl NativeMenu {
         menu.append(&application)
             .map_err(|e| AppMenuError(e.to_string()))?;
         let mut window = None;
+        let mut help = None;
         let find = !binds_find_keys(menus);
         let zoom = !binds_zoom_keys(menus);
         for model in menus {
             if model.label == APPLICATION_MENU {
                 continue;
             }
-            let submenu = native_submenu(model)?;
+            let submenu = if model.label == "Window" {
+                // The app's Window menu keeps AppKit's items around its own:
+                // Minimize and Zoom over them, Bring All to Front under.
+                let submenu = muda::Submenu::new("Window", true);
+                submenu
+                    .append_items(&[
+                        &muda::PredefinedMenuItem::minimize(None),
+                        &muda::PredefinedMenuItem::maximize(Some("Zoom")),
+                        &muda::PredefinedMenuItem::separator(),
+                    ])
+                    .map_err(|e| AppMenuError(e.to_string()))?;
+                append_entries(&submenu, &model.entries)?;
+                submenu
+                    .append_items(&[
+                        &muda::PredefinedMenuItem::separator(),
+                        &muda::PredefinedMenuItem::bring_all_to_front(None),
+                    ])
+                    .map_err(|e| AppMenuError(e.to_string()))?;
+                submenu
+            } else {
+                native_submenu(model)?
+            };
             // Find in page in the Edit menu, as AppKit apps have it.
             if model.label == "Edit" && find {
                 submenu
@@ -990,6 +1026,8 @@ impl NativeMenu {
                 .map_err(|e| AppMenuError(e.to_string()))?;
             if model.label == "Window" {
                 window = Some(submenu);
+            } else if model.label == "Help" {
+                help = Some(submenu);
             }
         }
         // Every Mac app has a Window menu: AppKit lists the app's windows in
@@ -1024,6 +1062,7 @@ impl NativeMenu {
         Ok(Self {
             menu,
             window,
+            help,
             standard,
             model: menus.to_vec(),
         })
@@ -1032,6 +1071,15 @@ impl NativeMenu {
         self.menu.init_for_nsapp();
         if let Some(window) = &self.window {
             window.set_as_windows_menu_for_nsapp();
+        }
+        match &self.help {
+            Some(help) => help.set_as_help_menu_for_nsapp(),
+            // Not the last bar's, gone from this one.
+            None => {
+                if let Some(mtm) = objc2::MainThreadMarker::new() {
+                    objc2_app_kit::NSApplication::sharedApplication(mtm).setHelpMenu(None);
+                }
+            }
         }
         services_menu_for_nsapp();
         list_open_windows();
@@ -1286,6 +1334,31 @@ pub fn debug_menu_bar_titles(menus: &[AppMenu]) -> Result<Vec<String>, AppMenuEr
         .map(|item| item.title().to_string())
         .collect())
 }
+/// Test hook: install `menus` as the application's menu bar, and the titles
+/// of the items in AppKit's Window menu, and of its help menu (where its
+/// menu search goes). Main thread only.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn debug_menu_bar_window_and_help(
+    menus: &[AppMenu],
+) -> Result<(Vec<String>, Option<String>), AppMenuError> {
+    let menu = NativeMenu::new(menus)?;
+    menu.install();
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return Ok((Vec::new(), None));
+    };
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    let window = app
+        .windowsMenu()
+        .map(|menu| {
+            (0..menu.numberOfItems())
+                .filter_map(|i| menu.itemAtIndex(i))
+                .map(|item| item.title().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((window, app.helpMenu().map(|menu| menu.title().to_string())))
+}
 /// Test hook: install `menus` as the application's menu bar, and whether
 /// AppKit then fills the Services submenu shown in it. Main thread only.
 #[cfg(target_os = "macos")]
@@ -1340,15 +1413,18 @@ mod edit_keys {
         static SHORTCUTS: RefCell<Vec<(&'static str, bool)>> = const { RefCell::new(Vec::new()) };
     }
 
-    fn shortcut(item: StandardItem) -> (&'static str, bool) {
-        match item {
+    /// The edit item's ⌘ key, and whether it takes Shift; `None` for full
+    /// screen, which the window answers itself, so its key stays the menu's.
+    fn shortcut(item: StandardItem) -> Option<(&'static str, bool)> {
+        Some(match item {
             StandardItem::Undo => ("z", false),
             StandardItem::Redo => ("z", true),
             StandardItem::Cut => ("x", false),
             StandardItem::Copy => ("c", false),
             StandardItem::Paste => ("v", false),
             StandardItem::SelectAll => ("a", false),
-        }
+            StandardItem::ToggleFullScreen => return None,
+        })
     }
 
     /// Whether `event` is one of the menu bar's standard edit shortcuts.
@@ -1439,8 +1515,9 @@ mod edit_keys {
     }
 
     pub(super) fn watch(items: &[StandardItem]) {
-        SHORTCUTS
-            .with(|keys| *keys.borrow_mut() = items.iter().map(|item| shortcut(*item)).collect());
+        SHORTCUTS.with(|keys| {
+            *keys.borrow_mut() = items.iter().filter_map(|item| shortcut(*item)).collect()
+        });
         if WATCHING.replace(true) {
             return;
         }
@@ -1493,7 +1570,7 @@ mod edit_keys {
             SHORTCUTS.with(|keys| {
                 *keys.borrow_mut() = [StandardItem::Paste, StandardItem::Copy, StandardItem::Redo]
                     .iter()
-                    .map(|i| shortcut(*i))
+                    .filter_map(|i| shortcut(*i))
                     .collect()
             });
             assert!(is_edit_shortcut(&key("v", command)));
