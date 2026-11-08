@@ -14642,7 +14642,8 @@ fn premultiply(pixel: &mut [u8; 4]) {
         return;
     }
     for channel in &mut pixel[..3] {
-        // ⌊x / 255⌋ for x below 2¹⁶ is (x + 1 + (x >> 8)) >> 8.
+        // ⌊x / 255⌋ is (x + 1 + (x >> 8)) >> 8 for every x up to 64,897,
+        // the most c · a + 127 comes to short of full alpha (not at 65,535).
         let x = u32::from(*channel) * alpha + 127;
         *channel = ((x + 1 + (x >> 8)) >> 8) as u8;
     }
