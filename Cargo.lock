@@ -5345,6 +5345,9 @@ name = "zgx-video"
 version = "0.1.10"
 dependencies = [
  "gif",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
  "png 0.18.1",
  "serde_json",
  "wgpu",

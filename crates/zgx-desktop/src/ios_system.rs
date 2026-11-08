@@ -597,6 +597,67 @@ pub(crate) fn dump_accessibility_later(window: &winit::window::Window) {
     }
 }
 
+/// `ZGX_IOS_ROTATE=3,6`: the app asks its own scene for landscape at the first
+/// time in seconds and for portrait at the next (and so on, turn about), by
+/// `requestGeometryUpdateWithPreferences:`, as an app that turns itself does:
+/// a check of a rotation where nothing may turn the simulator.
+pub(crate) fn rotate_later(window: &winit::window::Window) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(times) = zgx::env::var("ZGX_IOS_ROTATE") else {
+        return;
+    };
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::UiKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let view = handle.ui_view.as_ptr() as usize;
+    let times = times
+        .split(',')
+        .filter_map(|t| t.trim().parse::<f64>().ok());
+    for (turn, delay) in times.enumerate() {
+        // UIInterfaceOrientationMaskLandscapeRight, then …Portrait.
+        let (mask, name) = if turn % 2 == 0 {
+            (1u64 << 3, "landscape")
+        } else {
+            (1u64 << 1, "portrait")
+        };
+        let fire = block2::RcBlock::new(move |_: *mut AnyObject| {
+            // SAFETY: winit's view, alive with its window for the app's life
+            // on iOS; UIKit's scene geometry calls, on the main thread.
+            unsafe {
+                let view = &*(view as *const AnyObject);
+                let window: Option<Retained<AnyObject>> = msg_send![view, window];
+                let Some(window) = window else { return };
+                let scene: Option<Retained<AnyObject>> = msg_send![&*window, windowScene];
+                let Some(scene) = scene else { return };
+                let preferences: Retained<AnyObject> = msg_send![
+                    msg_send![class!(UIWindowSceneGeometryPreferencesIOS), alloc],
+                    initWithInterfaceOrientations: mask
+                ];
+                let controller: Option<Retained<AnyObject>> =
+                    msg_send![&*window, rootViewController];
+                if let Some(controller) = controller {
+                    let _: () =
+                        msg_send![&*controller, setNeedsUpdateOfSupportedInterfaceOrientations];
+                }
+                let _: () = msg_send![&*scene,
+                    requestGeometryUpdateWithPreferences: &*preferences,
+                    errorHandler: std::ptr::null::<AnyObject>()];
+                println!("ROTATE asked {name}");
+            }
+        });
+        // SAFETY: NSTimer's constructor; the run loop keeps it.
+        let _: Retained<AnyObject> = unsafe {
+            msg_send![class!(NSTimer),
+                scheduledTimerWithTimeInterval: delay,
+                repeats: false,
+                block: &*fire]
+        };
+    }
+}
+
 fn dump_element(element: &AnyObject, depth: usize) {
     let text = |value: Option<Retained<AnyObject>>| -> String {
         // SAFETY: an NSString's UTF-8 view, copied before it can go.

@@ -4343,6 +4343,7 @@ impl Host {
             // Listening before the first keyboard comes.
             let _ = crate::ios_system::keyboard_height();
             crate::ios_system::dump_accessibility_later(&window);
+            crate::ios_system::rotate_later(&window);
             crate::ios_system::audio_session_from_bundle();
             // A tap on a notification that launched the app reaches it.
             crate::notify::install();
