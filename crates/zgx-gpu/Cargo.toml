@@ -100,7 +100,7 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["
 # build these.
 [dev-dependencies]
 # Tests encode JPEGs, and check ours against `image`'s decode of them.
-image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 # Shaping with and without its kept advances (tests/variable_advances.rs).
 harfrust = { package = "zgx-harfrust", version = "0.5.3", path = "../../vendor/harfrust" }
 # wgpu's own counts of what it holds (textures, samplers, bind groups), for

@@ -2015,6 +2015,41 @@ pub fn overlay() -> View {
         .items_stretch()
         .justify_stretch()
 }
+/// How menus, popovers and tooltips are shaped: zgx's own, or (on
+/// Windows) WinUI 3's. Constants, chosen as zgx is built: a platform's shape
+/// costs nothing where it isn't, and a theme doesn't restyle them (a view's
+/// own styles do).
+pub(crate) struct OverlayLook {
+    /// A menu's panel: its corner radius and padding (across, down).
+    pub(crate) menu_radius: crate::theme::Themed<f32>,
+    pub(crate) menu_padding: (f32, f32),
+    /// A menu item: its padding, how far its highlight is inset from the
+    /// panel (across, down), and that highlight's corner radius.
+    pub(crate) menu_item_padding: (f32, f32),
+    pub(crate) menu_item_inset: (f32, f32),
+    pub(crate) menu_item_radius: f32,
+    /// A popover's panel's corner radius.
+    pub(crate) popover_radius: crate::theme::Themed<f32>,
+    /// A text tooltip: its padding (across, above, below), corner radius
+    /// and font size.
+    pub(crate) tooltip_padding: (f32, f32, f32),
+    pub(crate) tooltip_radius: crate::theme::Themed<f32>,
+    pub(crate) tooltip_font_size: crate::theme::Themed<f32>,
+}
+/// zgx's own.
+pub(crate) const BUILT_IN_OVERLAY: OverlayLook = OverlayLook {
+    menu_radius: crate::theme::Themed::Token(tok::RADIUS_MD.0),
+    menu_padding: (16., 16.),
+    menu_item_padding: (12., 8.),
+    menu_item_inset: (0., 0.),
+    menu_item_radius: 0.,
+    popover_radius: crate::theme::Themed::Token(tok::RADIUS_MD.0),
+    tooltip_padding: (8., 4., 4.),
+    tooltip_radius: crate::theme::Themed::Token(tok::RADIUS_SM.0),
+    tooltip_font_size: crate::theme::Themed::Token(tok::FONT_SIZE_XS.0),
+};
+pub(crate) const OVERLAY: OverlayLook = BUILT_IN_OVERLAY;
+
 /// A control's default focus ring: an accent border. Where the control has
 /// no border of its own it paints over the control (an inset stroke, taking
 /// no layout room), so focusing never moves its content; otherwise it
@@ -3904,18 +3939,27 @@ fn mount_portal_panel(
     let mut defaults = if is_layer {
         Styles::new()
     } else {
-        Styles::new()
-            .w(if anchored { 240. } else { 360. })
-            .p(16.)
-            .bg(if is_menu {
-                tok::MENU_BG
-            } else if anchored {
-                tok::POPOVER_BG
-            } else {
-                tok::SURFACE_OVERLAY
-            })
-            .rounded(tok::RADIUS_MD)
-            .overflow_hidden()
+        // A menu's and a popover's shape are the platform's (`OVERLAY`); a
+        // dialog keeps the card's.
+        let (padding, radius) = match (is_menu, anchored) {
+            (true, _) => (OVERLAY.menu_padding, OVERLAY.menu_radius),
+            (false, true) => ((16., 16.), OVERLAY.popover_radius),
+            (false, false) => ((16., 16.), crate::theme::Themed::Token(tok::RADIUS_MD.0)),
+        };
+        let card = Styles::new().w(if anchored { 240. } else { 360. });
+        let card = match padding {
+            (x, y) if x == y => card.p(x),
+            (x, y) => card.px(x).py(y),
+        };
+        card.bg(if is_menu {
+            tok::MENU_BG
+        } else if anchored {
+            tok::POPOVER_BG
+        } else {
+            tok::SURFACE_OVERLAY
+        })
+        .rounded(radius)
+        .overflow_hidden()
     };
     if is_menu {
         defaults = defaults.items_stretch();
@@ -4294,7 +4338,17 @@ impl WidgetStyles {
                 .border_color(tok::FOCUS_RING),
             // On the menu's panel: no fill of its own, so a translucent
             // panel (AppKit's material behind it) shows through.
-            menu_item: Styles::new().px(12.).py(8.).items_center(),
+            menu_item: {
+                let (x, y) = OVERLAY.menu_item_padding;
+                let item = Styles::new().px(x).py(y).items_center();
+                // Inset and rounded only where the platform's are.
+                let ((x, y), radius) = (OVERLAY.menu_item_inset, OVERLAY.menu_item_radius);
+                if (x, y, radius) == (0., 0., 0.) {
+                    item
+                } else {
+                    item.mx(x).my(y).rounded(radius)
+                }
+            },
             menu_hover: Styles::new().bg(tok::MENU_HOVER),
             menu_focus: Styles::new()
                 .bg(tok::MENU_HOVER)

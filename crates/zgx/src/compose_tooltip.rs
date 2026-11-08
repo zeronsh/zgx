@@ -169,17 +169,24 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
         };
         let content = match content {
             Content::View(view) => *view,
-            Content::Text(text) => crate::compose::column()
-                .px(8.)
-                .py(4.)
-                .max_w(320.)
-                .bg(tok::POPOVER_BG)
-                .border(0.5)
-                .border_color(tok::BORDER)
-                .rounded(tok::RADIUS_SM)
-                .text_size(tok::FONT_SIZE_XS)
-                .text_wrap(true)
-                .child(crate::compose::text(text)),
+            Content::Text(text) => {
+                let look = &crate::compose::OVERLAY;
+                let (x, above, below) = look.tooltip_padding;
+                let panel = crate::compose::column().px(x);
+                let panel = match above == below {
+                    true => panel.py(above),
+                    false => panel.pt(above).pb(below),
+                };
+                panel
+                    .max_w(320.)
+                    .bg(tok::POPOVER_BG)
+                    .border(0.5)
+                    .border_color(tok::BORDER)
+                    .rounded(look.tooltip_radius)
+                    .text_size(look.tooltip_font_size)
+                    .text_wrap(true)
+                    .child(crate::compose::text(text))
+            }
         };
         let open = runtime.signal(false);
         let shown = Rc::new(Cell::new(false));
