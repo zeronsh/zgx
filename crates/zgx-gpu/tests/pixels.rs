@@ -6874,3 +6874,71 @@ fn a_window_sized_layer_draws_at_its_scale() {
     );
     assert_eq!(line.bytes, Some(2944 * 1856 * 4));
 }
+
+#[test]
+fn reading_into_a_kept_buffer_reads_what_a_fresh_read_does() {
+    let _gpu = gpu_fixture();
+    let mut scene = Scene::new(64., 48.);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    // Red, green and blue a third each, and a translucent band over them:
+    // channels out of order, or alpha lost, would show.
+    for (i, fill) in [
+        Color(255, 0, 0, 255),
+        Color(0, 255, 0, 255),
+        Color(0, 0, 255, 255),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = scene.append(
+            root,
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad: QuadStyle {
+                    fill,
+                    ..Default::default()
+                },
+            },
+            fixed(21., 48.),
+        );
+        scene.set_transform(
+            id,
+            Transform {
+                x: i as f32 * 21.,
+                y: 0.,
+            },
+        );
+    }
+    let band = scene.append(
+        root,
+        NodeKind::Panel {
+            layout: Layout::Overlay,
+            quad: QuadStyle {
+                fill: Color(255, 255, 255, 128),
+                ..Default::default()
+            },
+        },
+        fixed(64., 8.),
+    );
+    scene.set_transform(band, Transform { x: 0., y: 20. });
+    scene.flush();
+    let mut gpu = GpuRenderer::new(64, 48).unwrap();
+    gpu.render(&scene, &[Rect::new(0., 0., 64., 48.)]).unwrap();
+    let fresh = gpu.readback().unwrap();
+    assert_eq!(&fresh[..4], &[255, 0, 0, 255], "RGBA, red first");
+    let green = (5 * 64 + 30) * 4;
+    assert_eq!(&fresh[green..green + 4], &[0, 255, 0, 255]);
+
+    let mut staging = zgx_gpu::Readback::default();
+    // Stale bytes of the right length, then of the wrong one: each read
+    // replaces them whole.
+    let mut kept = vec![0xAB; fresh.len()];
+    for _ in 0..2 {
+        gpu.readback_into(&mut kept, &mut staging).unwrap();
+        assert_eq!(kept, fresh);
+    }
+    let mut short = vec![7; 10];
+    gpu.readback_into(&mut short, &mut staging).unwrap();
+    assert_eq!(short, fresh);
+}
