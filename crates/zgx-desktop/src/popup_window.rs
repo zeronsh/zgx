@@ -116,6 +116,34 @@ fn report_popups<'a>(
     report.add("gpu", "popup windows", Some(count), Some(bytes));
 }
 
+/// Popup `root`'s panel: what it holds, or, through boxes that paint
+/// nothing and hold one thing (a node tooltip's clear layer and the column it
+/// fades), the one they hold: a hover card is its own panel, its shadow and
+/// its translucent fill seen as a menu's are. What the system's material
+/// goes behind (macOS) and DWM frames (Windows).
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+fn panel_of(scene: &zgx::scene::Scene, root: zgx::scene::NodeId) -> Option<zgx::scene::NodeId> {
+    use zgx::scene::NodeKind;
+    let mut panel = *scene.children(root).first()?;
+    for _ in 0..4 {
+        let clear = match scene.kind(panel) {
+            NodeKind::Container(_) => true,
+            NodeKind::Quad(quad) => {
+                quad.fill.3 == 0
+                    && quad.border_width == 0.
+                    && (quad.decoration.as_ref()).is_none_or(|d| d.background.is_none())
+                    && quad.shadows().iter().all(|shadow| shadow.color.3 == 0)
+            }
+            _ => false,
+        };
+        match scene.children(panel) {
+            [only] if clear => panel = *only,
+            _ => break,
+        }
+    }
+    Some(panel)
+}
+
 #[cfg(windows)]
 mod win32;
 #[cfg(windows)]
@@ -370,7 +398,7 @@ mod other {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::PopupInput;
+    use super::{PopupInput, panel_of};
     use objc2::{
         DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
         runtime::AnyObject,
@@ -740,30 +768,6 @@ mod macos {
             }
             _ => true,
         }
-    }
-    /// Popup `root`'s panel: what it holds, or, through boxes that paint
-    /// nothing and hold one thing (a node tooltip's clear layer and the
-    /// column it fades), the one they hold: a hover card is its own panel,
-    /// its shadow and its translucent fill seen as a menu's are.
-    fn panel_of(scene: &Scene, root: NodeId) -> Option<NodeId> {
-        let mut panel = *scene.children(root).first()?;
-        for _ in 0..4 {
-            let clear = match scene.kind(panel) {
-                NodeKind::Container(_) => true,
-                NodeKind::Quad(quad) => {
-                    quad.fill.3 == 0
-                        && quad.border_width == 0.
-                        && (quad.decoration.as_ref()).is_none_or(|d| d.background.is_none())
-                        && quad.shadows().iter().all(|shadow| shadow.color.3 == 0)
-                }
-                _ => false,
-            };
-            match scene.children(panel) {
-                [only] if clear => panel = *only,
-                _ => break,
-            }
-        }
-        Some(panel)
     }
     /// A mask of `material`'s shape (its rounded box and arrow), the size of
     /// its bounds, top-down.

@@ -100,7 +100,9 @@ pub struct DisplayInfo {
     pub primary: bool,
 }
 /// What this platform lets a window do, so an app can offer only what works.
+/// Apps read it; only zgx builds one, so it can gain fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WindowCapabilities {
     /// The window's position on the desktop can be read (not on Wayland).
     pub global_position: bool,
@@ -115,6 +117,31 @@ pub struct WindowCapabilities {
     /// X11, where zgx asks for none): glass there shows what is behind it
     /// sharp, so an app may draw solid. A Wayland session's is read once.
     pub blur_behind: bool,
+    /// The system blurs what is behind a popup's translucent panel (a menu,
+    /// a popover, a tooltip), in a window of its own: AppKit's material on
+    /// macOS, the acrylic accent on Windows 11 (`popup_window/win32.rs`).
+    /// False on Windows 10, whose blur is square past a rounded panel's
+    /// corners, and on Linux, whose popup windows have none: there a popup's
+    /// `backdrop_blur` blurs only its window's pixels, and what is past them
+    /// shows through its fill sharp, so an app may draw its popups solid.
+    /// True where popups stay inside their window (`ZGX_POPUP_WINDOWS=0`),
+    /// whose pixels they blur. As `blur_behind`, it says nothing of
+    /// Transparency effects or Reduce transparency
+    /// (`ui.prefers.reduced_transparency`).
+    pub popup_blur_behind: bool,
+    /// How much of what is behind the window its system blur lets through,
+    /// in thousandths, and what it adds (0–255, an sRGB channel's), where
+    /// `blur_behind`: what shows under a clear pixel of `glass` is about
+    /// `pass / 1000 · behind + lift`, channel by channel. A pure blur (macOS's
+    /// material, a Linux compositor's) is 1000 and 0. Windows' acrylic accent
+    /// is 831 and 8, measured over flat black, grey and white on Windows 11,
+    /// whatever its state (blur-behind or acrylic) or tint: its luminosity
+    /// pass darkens what it blurs, which no accent undoes. So an app whose
+    /// glass lays a scrim over the blur, as macOS's would read, can solve a
+    /// thinner one that comes out the same over anything.
+    pub blur_pass: u16,
+    /// See [`WindowCapabilities::blur_pass`].
+    pub blur_lift: u8,
 }
 /// A window going into or out of full screen, as AppKit animates it
 /// (macOS): `WindowContext::full_screen_transition`, `ui.window.full_screen_transition`.
@@ -272,6 +299,9 @@ impl WindowInfo {
             interactive_drag: true,
             native_fullscreen: true,
             blur_behind: blur_behind(wayland),
+            popup_blur_behind: popup_blur_behind(),
+            blur_pass: BLUR_TRANSFER.0,
+            blur_lift: BLUR_TRANSFER.1,
         });
         self.ready.set(true);
     }
@@ -284,6 +314,17 @@ fn blur_behind(wayland: bool) -> bool {
 #[cfg(not(target_os = "linux"))]
 fn blur_behind(_: bool) -> bool {
     true
+}
+/// `WindowCapabilities::blur_pass` and `blur_lift`: the acrylic accent's on
+/// Windows (`window_chrome::blur_behind`), a pure blur's elsewhere.
+const BLUR_TRANSFER: (u16, u8) = if cfg!(windows) { (831, 8) } else { (1000, 0) };
+/// `WindowCapabilities::popup_blur_behind`.
+fn popup_blur_behind() -> bool {
+    #[cfg(windows)]
+    let system = crate::window_chrome::popup_blur_behind();
+    #[cfg(not(windows))]
+    let system = cfg!(target_os = "macos");
+    system || !crate::popup_window::enabled()
 }
 /// A title bar's free area and its window's buttons, in points
 /// (`WindowInfo::titlebar_area`, `controls`).

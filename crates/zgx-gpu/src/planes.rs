@@ -107,6 +107,19 @@ impl GpuRenderer {
         }
         self.set_plane_rect(rect);
     }
+    /// Draw none of `panel`'s shadows (`None`: every node's again), for a
+    /// popup whose window the system shadows (Windows' acrylic popups,
+    /// whose window is their panel's box). The window cuts its shadow past
+    /// the panel, and under it, through a translucent fill (zgx draws a
+    /// box's shadow whole under it, not cut to what lies past it), the
+    /// shadow darkened what the system blurs behind the window: by half,
+    /// under a menu's shadow of alpha 0.5.
+    pub fn set_unshadowed(&mut self, panel: Option<NodeId>) {
+        if self.unshadowed != panel {
+            self.unshadowed = panel;
+            self.fresh = true;
+        }
+    }
     /// What this popup's backdrop filters blur: `window`'s last frame under
     /// its box, or (`None`) its own target, which holds nothing of the app's.
     /// A popup in a window of its own can't see the window under it; what
