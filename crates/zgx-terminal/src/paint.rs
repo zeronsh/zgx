@@ -571,10 +571,11 @@ pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canv
             fill.color,
         );
     }
+    // On the grid: each character its cells, whichever font draws it.
+    let grid = LetterSpacing::cells(metrics.cell_width);
     for run in &paint.runs {
         let mut font = font.clone();
-        // On the grid: each character its cells, whichever font draws it.
-        font.letter_spacing = LetterSpacing::cells(metrics.cell_width);
+        font.letter_spacing = grid;
         if run.bold {
             font.weight = 700;
         }
