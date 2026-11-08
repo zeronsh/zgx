@@ -24,6 +24,8 @@ pub(crate) enum Ask {
     Seek(u64),
     Play(bool),
     Loop(bool),
+    /// Whether what it draws is seen: unseen, it draws nothing.
+    Watch(bool),
     /// The script changed: build it again, staying at the frame it's at.
     Reload,
     Quit,
@@ -212,17 +214,32 @@ pub(crate) fn run(
     let mut at = 0u64;
     let mut playing: Option<(Instant, u64)> = None;
     let mut looping = true;
+    // Unseen (its box offscreen, scrolled away, its window covered), it
+    // draws nothing: its clock runs on, and seen again it draws the frame
+    // due then. `stale`: a frame it moved to and didn't draw.
+    let mut watched = true;
+    let mut stale = false;
     loop {
         // Until the next frame is due, or for ever: an idle preview waits.
-        let ask = match playing {
-            Some((started, from)) => {
-                let due = started + Duration::from_secs_f64((at + 1 - from) as f64 / preview.fps());
-                match asks.recv_timeout(due.saturating_duration_since(Instant::now())) {
-                    Ok(ask) => Some(ask),
-                    Err(RecvTimeoutError::Timeout) => None,
-                    Err(RecvTimeoutError::Disconnected) => return,
-                }
+        // Unseen and playing, only its end matters (not looping), or nothing.
+        let wait = match playing {
+            Some((started, from)) if watched => {
+                Some(started + Duration::from_secs_f64((at + 1 - from) as f64 / preview.fps()))
             }
+            Some((started, from)) if !looping => Some(
+                started
+                    + Duration::from_secs_f64(
+                        (preview.last_frame() + 1).saturating_sub(from) as f64 / preview.fps(),
+                    ),
+            ),
+            _ => None,
+        };
+        let ask = match wait {
+            Some(due) => match asks.recv_timeout(due.saturating_duration_since(Instant::now())) {
+                Ok(ask) => Some(ask),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => return,
+            },
             None => match asks.recv() {
                 Ok(ask) => Some(ask),
                 Err(_) => return,
@@ -281,6 +298,14 @@ pub(crate) fn run(
                     }
                 }
                 Ask::Loop(on) => looping = on,
+                Ask::Watch(on) => {
+                    // Seen again: playing, it draws the frame due now
+                    // (below); else the one it moved to unseen.
+                    if on && !watched && stale && playing.is_none() {
+                        seek = Some(at);
+                    }
+                    watched = on;
+                }
                 Ask::Reload => {
                     preview.cache.clear();
                     result = preview.build();
@@ -295,8 +320,17 @@ pub(crate) fn run(
                 let last = preview.last_frame();
                 if due > last {
                     if looping {
-                        playing = Some((Instant::now(), 0));
-                        seek = Some(0);
+                        // Around again, as far into it as time says (unseen
+                        // for longer than a pass, past several).
+                        let into = (due - last - 1) % (last + 1);
+                        let back = Duration::from_secs_f64(into as f64 / preview.fps());
+                        playing = Some((
+                            Instant::now()
+                                .checked_sub(back)
+                                .unwrap_or_else(Instant::now),
+                            0,
+                        ));
+                        seek = Some(into);
                     } else {
                         playing = None;
                         seek = Some(last);
@@ -312,7 +346,12 @@ pub(crate) fn run(
                         .last_frame()
                         .max(frame * u64::from(preview.composition.is_none())),
                 );
-                result = preview.show(at);
+                if watched {
+                    result = preview.show(at);
+                    stale = false;
+                } else {
+                    stale = true;
+                }
             }
         }
         if let Err(error) = result {
@@ -388,6 +427,14 @@ impl Player {
     pub fn play(&self, on: bool) {
         self.playing.set(on);
         let _ = self.asks.send(Ask::Play(on));
+    }
+    /// Whether what it shows is seen (true to begin with). Unseen, it draws
+    /// nothing, playing or not: its clock runs on, and seen again it draws
+    /// the frame due then. [`Player::view`] says so itself, from its box's
+    /// visibility and its window's; a script's player is told by
+    /// `"<name>.watch"`.
+    pub fn watch(&self, seen: bool) {
+        let _ = self.asks.send(Ask::Watch(seen));
     }
     /// Play again from its start at its end (true by default), or stop there.
     pub fn looping(&self, on: bool) {
@@ -466,8 +513,36 @@ impl Player {
             cx.tasks().spawn(this.listen(|_| {}));
             let image = this.image.clone();
             let blank = Arc::new(ImageData::new(1, 1, vec![0u8; 4]).expect("a pixel"));
+            // Seen while any of its box shows, in a window that shows: else
+            // its thread draws nothing (`Player::watch`).
+            let watching: Rc<RefCell<Option<zgx::reactive::Effect>>> = Rc::default();
+            cx.retain(watching.clone());
+            // Gone, unseen.
+            struct Unwatch(Rc<Player>);
+            impl Drop for Unwatch {
+                fn drop(&mut self) {
+                    self.0.watch(false);
+                }
+            }
+            cx.retain(Unwatch(this.clone()));
+            let (player, runtime) = (this.clone(), cx.runtime());
             zgx::compose::image_signal("Video", move || {
                 image.get().unwrap_or_else(|| blank.clone())
+            })
+            .on_mount(move |handle| {
+                let (Some(visible), Some(shown)) =
+                    (handle.observe_visibility(), handle.observe_shown())
+                else {
+                    return;
+                };
+                let mut told = None;
+                *watching.borrow_mut() = Some(runtime.effect_now(move || {
+                    let seen = visible.get() && shown.get();
+                    if told != Some(seen) {
+                        told = Some(seen);
+                        player.watch(seen);
+                    }
+                }));
             })
         })
     }
@@ -546,6 +621,10 @@ impl Player {
         let this = self.clone();
         host.action(format!("{name}.loop"), move |arg| {
             this.looping(json_of(&arg).as_bool().unwrap_or(true))
+        });
+        let this = self.clone();
+        host.action(format!("{name}.watch"), move |arg| {
+            this.watch(json_of(&arg).as_bool().unwrap_or(true))
         });
     }
 }
