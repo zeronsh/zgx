@@ -5215,6 +5215,78 @@ fn fractional_scrolls_on_the_pixel_grid_copy_and_match_a_fresh_render() {
     assert_eq!(copies, expected);
 }
 
+/// A clear box over a list (an overlay scrollbar's track away from the
+/// pointer is one) paints nothing: the list's scrolls still copy, and the
+/// frames match a fresh render.
+#[test]
+fn scrolls_under_a_clear_box_copy_and_match_a_fresh_render() {
+    let _gpu_fixture = gpu_fixture();
+    use zgx::{compose::prelude::*, widgets::Ui};
+    let mut gpu = GpuRenderer::new(160, 120).unwrap();
+    let mut ui = Ui::new(160., 120.);
+    ui.scene.borrow_mut().set_pixel_scale(1.);
+    let offset = ui.signal(0_f32);
+    ui.mount(
+        overlay()
+            .w(160.)
+            .h(120.)
+            .bg(rgb(0x000000))
+            .child(
+                virtual_list(
+                    offset.clone(),
+                    24.,
+                    2,
+                    || 1000,
+                    |i| i,
+                    |_, key, _| {
+                        div()
+                            .size(144., 24.)
+                            .bg(if key % 2 == 0 {
+                                rgb(0x223344)
+                            } else {
+                                rgb(0x334455)
+                            })
+                            .child(div().size(144., 1.).bg(rgb(0xffffff)))
+                    },
+                )
+                .w(160.)
+                .h(100.)
+                .p(8.)
+                .bg(rgb(0x101820)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(140.)
+                    .top(8.)
+                    .size(8., 84.)
+                    .bg(rgba(0xffffff00)),
+            ),
+    );
+    let mut copies = 0;
+    for scroll in [0., 14., 28., 31., 60.] {
+        offset.set(scroll);
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        copies += gpu
+            .render(&ui.scene.borrow(), &damage)
+            .unwrap()
+            .scroll_copies;
+        let mut fresh = GpuRenderer::new(160, 120).unwrap();
+        fresh
+            .render(&ui.scene.borrow(), &[Rect::new(0., 0., 160., 120.)])
+            .unwrap();
+        assert_eq!(
+            gpu.readback().unwrap(),
+            fresh.readback().unwrap(),
+            "scroll {scroll}"
+        );
+    }
+    // Texture blits cost Apple GPUs graphics memory; macOS repaints.
+    let expected = if cfg!(target_os = "macos") { 0 } else { 4 };
+    assert_eq!(copies, expected);
+}
+
 /// A rounded panel, overflow hidden, holding a scroll view beside a divider
 /// (an app's sidebar), scrolled down and back up in a wheel's uneven steps
 /// on a 2x pixel grid: a copy of the view's pixels must not carry the

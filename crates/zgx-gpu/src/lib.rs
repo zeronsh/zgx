@@ -896,6 +896,18 @@ fn copy_blocker(
             // A layer: all it holds, turned and scaled as it is.
             _ if item.isolated => scene.layer_ink(item)?,
             NodeKind::Container(_) if item.effects.blur_radius <= 0. => return None,
+            // Clear paints nothing: an overlay scrollbar's track away from
+            // the pointer, over every list it scrolls, or a clear box.
+            NodeKind::Rect(zgx::scene::Color(_, _, _, 0)) => return None,
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. }
+                if quad.fill.3 == 0
+                    && !quad.has_border()
+                    && quad.shadows().is_empty()
+                    && quad.decoration.is_none()
+                    && quad.outline.is_none() =>
+            {
+                return None;
+            }
             NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => quad.paint_bounds(item.bounds),
             _ => item.bounds,
         };
@@ -17687,10 +17699,17 @@ mod copy_blocker_tests {
 
     /// A node painting over a scroll view keeps its scroll from being a copy
     /// of the pixels drawn, and devtools' note names it; with nothing over
-    /// it, the same scroll copies.
+    /// it, the same scroll copies. A clear square, or a clear rectangle (an
+    /// overlay scrollbar's track away from the pointer), paints nothing:
+    /// the scroll copies as with nothing over it.
     #[test]
     fn a_node_over_a_scroll_view_is_named_as_what_keeps_it_from_copying() {
-        for covered in [false, true] {
+        for (covered, clear, rect) in [
+            (false, false, false),
+            (true, false, false),
+            (true, true, false),
+            (true, true, true),
+        ] {
             let mut ui = Ui::new(160., 120.);
             let offset = ui.signal(0_f32);
             let rows = virtual_list(
@@ -17719,11 +17738,16 @@ mod copy_blocker_tests {
                         .left(40.)
                         .top(40.)
                         .size(30., 30.)
-                        .bg(rgba(0xffffff80)),
+                        .bg(rgba(if clear { 0xffffff00 } else { 0xffffff80 })),
                 );
             }
             ui.mount(root);
             ui.prepare_frame();
+            if rect {
+                let mut scene = ui.scene.borrow_mut();
+                let square = *scene.children(scene.root()).last().unwrap();
+                scene.set_kind(square, NodeKind::Rect(zgx::scene::Color(255, 255, 255, 0)));
+            }
             ui.scene.borrow_mut().flush();
             offset.set(14.);
             ui.prepare_frame();
@@ -17731,7 +17755,7 @@ mod copy_blocker_tests {
             let scene = ui.scene.borrow();
             let scroll = scene.scroll_moves().last().expect("it moved").clone();
             let blocker = copy_blocker(&scene, &scroll, &damage, 1., &mut Vec::new(), &mut None);
-            if covered {
+            if covered && !clear {
                 let Some(blocker @ CopyBlocker::Over(_)) = blocker else {
                     panic!("the square over the list keeps it from copying: {blocker:?}");
                 };
