@@ -68,6 +68,13 @@ pub(crate) fn compile(job: &Job<'_>) -> Option<Result<Vec<u8>, String>> {
     Some(compiled)
 }
 
+/// `job` compiled in this process, where no child can be started (as
+/// wgpu's Direct3D 12 compiles an app's shader then).
+#[cfg(d3d11)]
+pub(crate) fn compile_here(job: &Job<'_>) -> Result<Vec<u8>, String> {
+    child_compile(fxc()?, &encode(job))
+}
+
 /// The job, as the child reads it: flags, target and entry point on lines of
 /// their own, then the source.
 fn encode(job: &Job<'_>) -> Vec<u8> {

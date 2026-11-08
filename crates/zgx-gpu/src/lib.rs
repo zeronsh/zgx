@@ -6340,6 +6340,12 @@ impl GpuRenderer {
         if let Some(Some(frame)) = self.metal_frame.get() {
             frame.start_fill(shader);
         }
+        #[cfg(d3d11)]
+        if let Some(state) = &self.d3d11 {
+            state
+                .device
+                .start_app_shader(shader, d3d11_frame::AppShader::Fill);
+        }
     }
     /// Start compiling the fills scripts declared since the last frame
     /// (`warm_fill_shader`), before anything draws them.
@@ -9386,6 +9392,8 @@ impl GpuRenderer {
         // from the same data `render_direct` takes.
         #[cfg(d3d11)]
         if self.d3d11.is_some() {
+            let mut draws = draws;
+            self.d3d11_app_shaders(&mut draws);
             if let Some(lacks) = self.d3d11_lacks(&draws, &batches, &effect_jobs) {
                 let message = format!(
                     "ZGX_D3D11 draws no {lacks}: the Direct3D 11 proof draws the Windows \
@@ -10152,8 +10160,45 @@ impl GpuRenderer {
         self.frame_draws = draws;
         stats
     }
-    /// What a frame needs that the Direct3D 11 proof does not draw, if
-    /// anything: it draws what the Windows suite's scenes do alone.
+    /// Shader fills and layer shaders (those not reading the backdrop)
+    /// drawn with Direct3D 11's pixel shaders for them
+    /// (`d3d11_frame::Device::app_shader`): one still compiling draws as
+    /// `Full` meanwhile (a fill its box's colour, a layer as painted) and the
+    /// window draws again once it is (`images_awaited`), as wgpu's frames go
+    /// without one; one that didn't compile draws so.
+    #[cfg(d3d11)]
+    fn d3d11_app_shaders(&mut self, draws: &mut [Draw]) {
+        use d3d11_frame::AppShader;
+        let Some(state) = &self.d3d11 else {
+            return;
+        };
+        let mut awaited = false;
+        for draw in draws {
+            let (shader, kind) = match draw.shading {
+                Shading::Fill(id) => (self.fill_shaders.get(&id), AppShader::Fill),
+                Shading::Filter(id) => (self.filter_shaders.get(&id), AppShader::Filter),
+                _ => continue,
+            };
+            // zgx's own colour filter waits, as wgpu's does
+            // (`prepare_filter`): it's what the view looks like.
+            let wait = self.waits_for_shaders()
+                || shader.is_some_and(|shader| {
+                    shader.source() == zgx::decoration::color_filter_shader().source()
+                });
+            match shader.map(|shader| state.device.app_shader(shader, kind, wait)) {
+                Some(Some(true)) => {}
+                Some(None) => {
+                    awaited = true;
+                    draw.shading = Shading::Full;
+                }
+                _ => draw.shading = Shading::Full,
+            }
+        }
+        self.images_awaited |= awaited;
+    }
+    /// What a frame needs that Direct3D 11 does not draw, if anything: it
+    /// draws what the Windows suite's scenes do, shader fills and layer
+    /// shaders not reading the backdrop.
     #[cfg(d3d11)]
     fn d3d11_lacks(
         &self,
@@ -10183,9 +10228,12 @@ impl GpuRenderer {
                     | Shading::Opaque
                     | Shading::Polyline
                     | Shading::SourceIn
-                    | Shading::Behind,
+                    | Shading::Behind
+                    // Compiled (`d3d11_app_shaders`).
+                    | Shading::Fill(_)
+                    | Shading::Filter(_),
                 ) => None,
-                _ => Some("shader fill, layer shader, blend mode or image effect"),
+                _ => Some("blend mode, layer shader reading the backdrop or image effect"),
             })
     }
     /// What a batch of `source` samples with Direct3D 11: the glyph atlas,
@@ -13900,6 +13948,12 @@ impl GpuRenderer {
         #[cfg(target_os = "macos")]
         if let Some(Some(frame)) = self.metal_frame.get() {
             frame.retain_fills(|id| fills.contains_key(&id));
+        }
+        #[cfg(d3d11)]
+        if let Some(state) = &self.d3d11 {
+            state
+                .device
+                .retain_app_shaders(|id| fills.contains_key(&id) || filters.contains_key(&id));
         }
     }
     /// Input arrived: if the window idled (`trim`) and has drawn nothing
