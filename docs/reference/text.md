@@ -156,6 +156,7 @@ To draw blocks your own way, take them from `ui.markdown`:
 
 ```luau
 ui.markdown(text: string, opts: MarkdownOptions?) -> { MarkdownBlock }
+ui.markdown(text: State<string>, opts: MarkdownOptions?) -> ReadOnlyState<{ MarkdownBlock }>
 ```
 
 `ui.markdown` parses markdown (CommonMark with tables, strikethrough and task lists; raw HTML dropped) into blocks for a script to draw its own way. A block has `t`: `p` (`s`: runs), `h` (`l`: level, `s`), `code` (`lang`, `text`), `ul` and `ol` (`start`, `items`: each item a list of blocks), `quote` (`b`: blocks), `hr`, `table` (`head`: cells, `rows`: rows of cells, a cell being runs) and `img` (`src`, `alt`). A picture on a line of its own (only blanks beside it) is an `img` block, splitting its paragraph there: the words before it a `p`, the picture, the words after it another, and no empty `p` where it took a paragraph's place. Among words it is a run with `img` (its source) and `x` its alt text. A tight list item's text is a `p` with `tight`. Quotes and lists nest 64 levels at most (a list level counts two); deeper ones show as the deepest level's blocks. A run is `{ x = text, b?, i?, c? (code), s? (strike), a? (link), f? (a file), img? (a picture's source) }`. The types say so: a `MarkdownBlock` is a union by `t`, so `if b.t == "code" then … b.lang … end` is checked, and a run is a `MarkdownRun`.
@@ -167,6 +168,8 @@ ui.markdown(text: string, opts: MarkdownOptions?) -> { MarkdownBlock }
 | `paths` | `boolean` | `false` | repository paths (`src/main.rs:12`), code spans that are a path whole and relative links that read as one are files: runs with `f` |
 | `lazy` | `boolean` \| `number` | `false` | with `key`: a text of 4 KB or more (`true`; a number sets the bytes) that lands whole, not by appends (a long reply opened at once), comes back at once with one entry a block, and is parsed over the next frames, the end first, so no frame parses all of it. A block not parsed yet is `{ t = "pending", hint, lines, from, to }`: what it is by its first line (`"p"`, `"h"`, `"code"`, `"list"`, `"quote"`, `"table"`, `"hr"`), its lines, and its bytes in the text as `string.sub` takes them, for holding its place (a windowed transcript's boxes) and finding text in it. A block keeps its index from the first answer, and one parsed stays the same table. A computed around the call runs again as blocks come in (the end's, a block asked for with `first`, all). Appends to it parse as ever; shorter texts, and text with link reference definitions, parse at once |
 | `first` | `number` | none | with `lazy`: parse block `first` (from 1) before the other pending ones (a search found something in it) |
+
+Given the state holding the text rather than the text (`local blocks = ui.markdown(reply, { key = "reply" })`), it answers a read-only state of the blocks, kept current as the text changes: draw it with `ui.each(blocks, …)` and read it with `blocks:get()`, with no `ui.computed` around it. That is how a streaming reply costs what each chunk adds: its appends (`reply:append(token)`) reach the parser as they are, the text never becomes a script string, no script table is made for each answer, and `ui.each` looks at the blocks after those it already has. A computed around it would make that state again each time it runs (`zgx lint` says so). Given a string (`reply:get()` in a computed), it answers the blocks as a table, as ever.
 
 Without a `key`, the same text gives the same blocks. Rust hosts parse with `zgx_script::markdown::parse` and stream with `zgx_script::markdown::Incremental`, which take a code block hook too (coloured lines, say).
 
@@ -181,9 +184,8 @@ local function runs(list: { MarkdownRun }): Node
 	return ui.rich(props)
 end
 
-local blocks = ui.computed(function()
-	return ui.markdown(reply:get(), { key = "reply" })
-end)
+-- A state of the blocks, kept current as the reply grows.
+local blocks = ui.markdown(reply, { key = "reply" })
 
 return ui.column {
 	gap = 8,

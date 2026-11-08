@@ -1629,6 +1629,51 @@ fn part_weight(value: &Value) -> usize {
     }
     if large(value) { 1 } else { all(value) }
 }
+thread_local! {
+    /// Lists made from another by changing its end alone (a streamed
+    /// reply's blocks, `ui.markdown`): each, the one it was made from, and
+    /// how many first items they share, the same values. Held weakly, so a
+    /// list gone leaves no address another could take; the last few only.
+    static GROWN: std::cell::RefCell<Vec<Grown>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// A list, the one it was made from, and how many first items they share.
+type Grown = (std::rc::Weak<[Value]>, std::rc::Weak<[Value]>, usize);
+/// Note that `list`'s first `shared` items are `from`'s own values: what
+/// reads both passes over them ([`shared_start`]).
+pub(crate) fn grown(list: &Rc<[Value]>, from: &Rc<[Value]>, shared: usize) {
+    GROWN.with_borrow_mut(|grown| {
+        // (One a pass of what reads them had no use for, gone with them.)
+        grown.retain(|(list, from, _)| list.strong_count() > 0 && from.strong_count() > 0);
+        if grown.len() >= 4 {
+            grown.remove(0);
+        }
+        grown.push((Rc::downgrade(list), Rc::downgrade(from), shared));
+    });
+}
+/// How many first items `list` shares with `from` as [`grown`] noted, if it
+/// did: each the same value, none compared.
+pub(crate) fn shared_start(list: &Value, from: &Value) -> Option<usize> {
+    let (Value::List(list), Value::List(from)) = (list, from) else {
+        return None;
+    };
+    GROWN.with_borrow(|grown| {
+        grown.iter().rev().find_map(|(l, f, shared)| {
+            (std::ptr::addr_eq(l.as_ptr(), Rc::as_ptr(list))
+                && std::ptr::addr_eq(f.as_ptr(), Rc::as_ptr(from)))
+            .then(|| (*shared).min(list.len()).min(from.len()))
+        })
+    })
+}
+/// Whether `a` (a state's value) and `b` are equal: a list noted as grown
+/// from the other compares its items after those they share alone.
+pub(crate) fn same(a: &Value, b: &Value) -> bool {
+    match (shared_start(b, a), a, b) {
+        (Some(shared), Value::List(a), Value::List(b)) => {
+            a.len() == b.len() && a[shared..] == b[shared..]
+        }
+        _ => a == b,
+    }
+}
 pub(crate) fn identity(value: &Value) -> usize {
     match value {
         Value::List(items) => Rc::as_ptr(items) as *const u8 as usize,
@@ -2406,6 +2451,11 @@ impl State {
     pub fn new(signal: Signal<Value>) -> Self {
         Self(signal, None)
     }
+    /// What it holds, as a script's `get` reads it: brought up to date,
+    /// and followed by what reads it.
+    pub(crate) fn read(&self) -> Value {
+        self.fresh().get()
+    }
     /// A computed's value is current when read, even in a handler or a
     /// batch, where its effect would otherwise run only afterwards.
     fn fresh(&self) -> &Signal<Value> {
@@ -2695,6 +2745,18 @@ impl UserData for State {
 /// so the app's states write without a check.
 #[derive(Clone)]
 pub(crate) struct ReadState(pub State, pub Rc<str>);
+/// The state a handle is (`ui.state`'s, a computed's, or a plugin's
+/// read-only one), to read as its `get` reads it ([`State::read`]); `None`
+/// for anything else.
+pub(crate) fn state_handle(value: &mlua::Value) -> Option<State> {
+    let mlua::Value::UserData(ud) = value else {
+        return None;
+    };
+    if let Ok(state) = ud.borrow::<State>() {
+        return Some(state.clone());
+    }
+    ud.borrow::<ReadState>().ok().map(|state| state.0.clone())
+}
 /// What a `State` writes with: a `ReadState` refuses each.
 const WRITES: [&str; 10] = [
     "set", "update", "set_key", "append", "patch", "toggle", "add", "push", "insert", "remove",

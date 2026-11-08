@@ -22,9 +22,8 @@ local function runs(list: { MarkdownRun }): Node
 	return ui.rich(props)
 end
 
-local blocks = ui.computed(function()
-	return ui.markdown(reply:get(), { key = "reply" })
-end)
+-- A state of the blocks, kept current as the reply grows.
+local blocks = ui.markdown(reply, { key = "reply" })
 
 ui.command { id = "append", run = function()
 	local n = chunks:get() + 1
