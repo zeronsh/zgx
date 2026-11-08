@@ -88,7 +88,11 @@ fn a_mouse_wheel_is_the_pages_until_the_pointer_moves_onto_the_view() {
     std::thread::sleep(std::time::Duration::from_millis(320));
     point(&mut h);
     wheel(&mut h, -40., false);
-    assert_eq!(h.text("state"), "0 0", "at its start, back up is the page's");
+    assert_eq!(
+        h.text("state"),
+        "0 0",
+        "at its start, back up is the page's"
+    );
     std::thread::sleep(std::time::Duration::from_millis(320));
     point(&mut h);
     wheel(&mut h, 40., false);
