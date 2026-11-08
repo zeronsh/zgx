@@ -159,6 +159,19 @@ impl EngineTerminal {
         runner: TaskRunner,
         platform: Option<Rc<PlatformService>>,
     ) -> std::io::Result<Self> {
+        Self::start(term, runtime, runner, platform, |options, wake| {
+            Session::spawn(options, GridSize::new(80, 24), wake)
+        })
+    }
+
+    /// As `new`, its session made by `session` from its options and wake.
+    fn start(
+        term: &Terminal,
+        runtime: Runtime,
+        runner: TaskRunner,
+        platform: Option<Rc<PlatformService>>,
+        session: impl FnOnce(&SessionOptions, Box<dyn Fn() + Send + Sync>) -> std::io::Result<Session>,
+    ) -> std::io::Result<Self> {
         let options = term.options();
         let font = paint::font();
         let engine = Rc::new(Engine {
@@ -223,19 +236,18 @@ impl EngineTerminal {
         });
         crate::front::register(Arc::downgrade(&engine.wake));
         let wake = engine.wake.clone();
-        let session = Session::spawn(
+        let session = session(
             &SessionOptions {
                 command: options.command.clone(),
                 working_directory: options.working_directory.clone().or_else(home_directory),
                 env: options.env.clone(),
                 ..SessionOptions::default()
             },
-            GridSize::new(80, 24),
-            move || {
+            Box::new(move || {
                 if let Some(wake) = &*wake.lock().unwrap() {
                     wake.send(());
                 }
-            },
+            }),
         )?;
         session.set_palette(engine.look.with_untracked(|look| look.palette.clone()));
         *engine.session.borrow_mut() = Some(session);
@@ -1458,6 +1470,39 @@ impl Drop for EngineTerminal {
         self.0.poll_task.borrow_mut().take();
         self.0.session.borrow_mut().take();
     }
+}
+
+/// A terminal fed output by the caller rather than a program, for benches:
+/// [`replay_terminal`].
+#[doc(hidden)]
+pub struct Replay(Rc<Engine>);
+impl Replay {
+    /// Parse `bytes` as the program's output, then read and draw it as the
+    /// view does when woken, all on this thread.
+    pub fn feed(&self, bytes: &[u8]) {
+        self.0.with_session(|session| session.feed(bytes));
+        self.0.refresh();
+    }
+}
+
+/// Give `term` a session replaying what [`Replay::feed`] is given (see
+/// `Session::replay`), drawn by [`terminal_view`] as any. Its view reads
+/// only when fed: mounted with no `TaskRunner`, nothing reads it on a
+/// timer or a wake, so what a bench counts is the same each run.
+#[doc(hidden)]
+pub fn replay_terminal(term: &Terminal, runtime: Runtime) -> Replay {
+    let executor = Rc::new(RefCell::new(zgx::task::LocalExecutor::new()));
+    let engine = EngineTerminal::start(
+        term,
+        runtime,
+        TaskRunner::from_executor(executor),
+        None,
+        |options, wake| Ok(Session::replay(options, GridSize::new(80, 24), wake)),
+    )
+    .expect("a replay starts");
+    let shared = engine.0.clone();
+    term.attach(Rc::new(engine));
+    Replay(shared)
 }
 
 /// `term` drawn by zgx (its session started on first showing): lay it out

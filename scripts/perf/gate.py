@@ -145,6 +145,12 @@ SCENES = [
     # by a keyed `ui.markdown` in a computed and drawn by `ui.each`.
     ('md-stream', 'zgx-script', 'md_stream_bench', {}),
     ('style', 'zgx', 'style_bench', {}),
+    # A terminal streaming a build log (16, 256 and true colours, styles,
+    # wrapping, a progress line rewritten), its output replayed on the
+    # main thread a 4 KB read at a time: parsed, rows worked out, laid out
+    # and measured, undrawn. Built apart (`ALONE`): its dev-dependencies
+    # would otherwise join the other benches' build.
+    ('terminal', 'zgx-terminal', 'terminal_bench', {}),
     # 3D frames' CPU work, drawn by wgpu's no-op backend (no driver, no JIT):
     # textured meshes alone, what a feature costs those not using it, then
     # those among skinned, morphing, cut-out and placed ones.
@@ -206,7 +212,7 @@ SCENES = [
 # that real time decides.
 SPREAD = {'app-chat': 0.2, '3d-textured': 0.06, '3d-mixed': 0.08, 'spans-md': 0.08}
 # Built apart from the rest, each: see `build`.
-ALONE = ('zgx-3d', 'zgx-video')
+ALONE = ('zgx-3d', 'zgx-video', 'zgx-terminal')
 
 # A Luau scene's count follows where the heap places things (the value
 # cache and Luau's tables hash by address, its collector marks in their
@@ -302,7 +308,8 @@ def build(checkout, target, into):
                CARGO_PROFILE_RELEASE_DEBUG='0')
     # Cargo turns a feature on for everything one build selects, and
     # zgx-3d's and zgx-video's benches take wgpu's no-op backend: each built
-    # apart, the other benches link the wgpu they always did.
+    # apart, the other benches link the wgpu they always did. zgx-terminal's
+    # bench brings dev-dependencies of its own, apart for the same reason.
     parts = [[s for s in scenes if s[1] not in ALONE]]
     parts += [[s for s in scenes if s[1] == alone] for alone in ALONE]
     for part in parts:
