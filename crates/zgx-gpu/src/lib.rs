@@ -12236,10 +12236,7 @@ impl GpuRenderer {
             None => {
                 let mut pixels = image.pixels().to_vec();
                 for pixel in pixels.as_chunks_mut::<4>().0 {
-                    let alpha = u16::from(pixel[3]);
-                    for channel in &mut pixel[..3] {
-                        *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
-                    }
+                    premultiply(pixel);
                 }
                 (pixels, (full_w, full_h))
             }
@@ -14631,8 +14628,24 @@ impl GpuRenderer {
 /// A BGRA pixel, as a little-endian word, swapped to RGBA: a few vector
 /// instructions a block of pixels.
 #[inline]
-fn bgra_to_rgba(word: u32) -> u32 {
+pub(crate) fn bgra_to_rgba(word: u32) -> u32 {
     (word & 0xFF00_FF00) | ((word >> 16) & 0xFF) | ((word & 0xFF) << 16)
+}
+
+/// A straight RGBA pixel made premultiplied: each colour times its alpha,
+/// `(c · a + 127) / 255`, exactly, as a multiply and two shifts. An opaque
+/// pixel (a photo's, a video's: nearly all) is as it was, and left so.
+#[inline]
+fn premultiply(pixel: &mut [u8; 4]) {
+    let alpha = u32::from(pixel[3]);
+    if alpha == 255 {
+        return;
+    }
+    for channel in &mut pixel[..3] {
+        // ⌊x / 255⌋ for x below 2¹⁶ is (x + 1 + (x >> 8)) >> 8.
+        let x = u32::from(*channel) * alpha + 127;
+        *channel = ((x + 1 + (x >> 8)) >> 8) as u8;
+    }
 }
 
 /// What [`GpuRenderer::readback_into`] reads through, kept by whoever reads
@@ -19183,5 +19196,20 @@ mod rest_tests {
         assert!(gpu.debug_cache_stats().atlas_bytes <= first.max(baseline.atlas_bytes));
         // And the next frame draws.
         draw(&mut gpu, &mut small);
+    }
+}
+
+#[cfg(test)]
+mod premultiply_tests {
+    #[test]
+    fn premultiplying_is_exact_for_every_colour_and_alpha() {
+        for alpha in 0..=255u8 {
+            for colour in 0..=255u8 {
+                let mut pixel = [colour, colour, colour, alpha];
+                super::premultiply(&mut pixel);
+                let exact = ((u16::from(colour) * u16::from(alpha) + 127) / 255) as u8;
+                assert_eq!(pixel, [exact, exact, exact, alpha], "{colour} at {alpha}");
+            }
+        }
     }
 }

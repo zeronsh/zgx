@@ -611,8 +611,9 @@ pub(crate) fn write_texels(
             && u64::from(y) + u64::from(height) <= u64::from(texture.height()),
         "texels within the texture"
     );
+    // RGBA to the texture's BGRA: red and blue swapped a pixel a word.
     for pixel in rgba.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
+        *pixel = crate::bgra_to_rgba(u32::from_le_bytes(*pixel)).to_le_bytes();
     }
     // SAFETY: The raw texture is only written through; nothing destroys it.
     let hal = unsafe { texture.as_hal::<wgpu::hal::api::Metal>() }.expect("a Metal texture");
