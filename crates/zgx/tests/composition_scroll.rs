@@ -288,3 +288,88 @@ fn a_moved_layer_repaints_what_changed_after_the_move_where_it_was() {
         "the bar: {damage:?}"
     );
 }
+
+/// A view following its end, its content `height` tall, 100 tall itself.
+fn following(ui: &mut Ui, height: f32) -> (zgx::reactive::Signal<f32>, zgx::reactive::Signal<f32>) {
+    let offset = ui.signal(0.);
+    let extent = ui.signal(height);
+    let read = extent.clone();
+    ui.mount(
+        scroll(offset.clone())
+            .follow_end(true)
+            .w(200.)
+            .h(100.)
+            .child(div().reactive_style(move || Styles::new().h(read.get()))),
+    );
+    ui.prepare_frame();
+    (offset, extent)
+}
+
+#[test]
+fn a_followed_view_left_by_the_wheel_stays_where_it_was_left_as_its_content_grows_and_shrinks() {
+    let mut ui = Ui::new(600., 400.);
+    let (offset, extent) = following(&mut ui, 500.);
+    assert_eq!(offset.get(), 400., "it starts at its end");
+    extent.set(600.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 500., "at its end, growth follows");
+
+    wheel(&mut ui, 10., 10., -40.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 460.);
+    extent.set(700.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 460., "left, growth doesn't move it");
+
+    // A fold closing under the reader: the end comes up to them and they
+    // are put at it, but they didn't ask to follow.
+    extent.set(520.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 420., "shrinking past it clamps");
+    extent.set(900.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 420., "a clamp doesn't start following again");
+
+    // A move of theirs to the end does.
+    wheel(&mut ui, 10., 10., 10000.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 800.);
+    extent.set(1000.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 900., "the wheel at the end follows again");
+}
+
+#[test]
+fn a_wheel_at_a_clamped_end_follows_again_without_moving() {
+    let mut ui = Ui::new(600., 400.);
+    let (offset, extent) = following(&mut ui, 500.);
+    wheel(&mut ui, 10., 10., -40.);
+    ui.prepare_frame();
+    extent.set(400.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 300., "clamped at the new end");
+    // Nowhere further to go: a notch down moves nothing, and still says to
+    // stay at the end.
+    wheel(&mut ui, 10., 10., 40.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 300.);
+    extent.set(600.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 500., "a notch down at the end follows again");
+}
+
+#[test]
+fn a_script_sending_a_followed_view_past_its_end_makes_it_follow() {
+    let mut ui = Ui::new(600., 400.);
+    let (offset, extent) = following(&mut ui, 500.);
+    wheel(&mut ui, 10., 10., -200.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 200.);
+    offset.set(f32::INFINITY);
+    extent.set(900.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 800., "at the end of what's there now");
+    extent.set(1000.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 900., "and following");
+}

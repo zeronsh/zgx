@@ -923,6 +923,8 @@ impl View {
     }
     /// Keep a scroll viewport at its end while its content grows, as long as
     /// it was at the end (a chat transcript); scrolling away releases it.
+    /// Moved back to the end, or a wheel down there, it follows again; its
+    /// content shrinking up to where it was left doesn't.
     pub fn follow_end(mut self, follow: bool) -> Self {
         self.rare_mut().follow_end = Some(follow);
         self
@@ -6514,6 +6516,14 @@ pub(crate) fn reveal_in_list(
         ui.prepare_frame();
     }
 }
+/// Where a `follow_end` scroll view was left: the position last applied,
+/// whether it stays at its end as its content changes, and whether a clamp
+/// waits for layout to settle.
+struct Follow {
+    applied: std::cell::Cell<f32>,
+    pinned: std::cell::Cell<bool>,
+    settling: std::cell::Cell<bool>,
+}
 #[allow(clippy::too_many_arguments)]
 fn mount_scroll(
     ui: &mut Ui,
@@ -6572,6 +6582,14 @@ fn mount_scroll(
             horizontal,
         );
     }
+    let follow = follow_end.then(|| {
+        std::rc::Rc::new(Follow {
+            applied: std::cell::Cell::new(0.),
+            pinned: std::cell::Cell::new(true),
+            settling: std::cell::Cell::new(false),
+        })
+    });
+    let wheel_follow = follow.clone();
     let wheel_size = size.clone();
     let wheel_extent = extent.clone();
     let wheel_offset = offset.clone();
@@ -6647,6 +6665,13 @@ fn mount_scroll(
             let limit =
                 (main_size(wheel_extent.get()) as f64 - main_size(wheel_size.get()) as f64).max(0.);
             let after = (before as f64 + delta as f64).clamp(0., limit) as f32;
+            // Down at its end, even with nowhere further to go: it stays there.
+            if let Some(follow) = &wheel_follow
+                && delta > 0.
+                && after as f64 >= limit - 0.5
+            {
+                follow.pinned.set(true);
+            }
             if before != after {
                 wheel_offset.set(after);
                 cx.scrolled(horizontal);
@@ -6658,31 +6683,67 @@ fn mount_scroll(
         }
     });
     let scene = ui.scene.clone();
-    // For `follow_end`: the position last applied, and whether it was the
-    // end. Only growth moves a pinned view; a new offset (a wheel, a script)
-    // is taken as it is and decides whether the view stays pinned.
-    let (applied, pinned) = (std::cell::Cell::new(0_f32), std::cell::Cell::new(true));
     let sized_by_content = std::cell::Cell::new(false);
     let pixel_scale = ui.pixel_scale();
+    let weak = ui.downgrade();
     ui.bind(root, move || {
         // Placed again from where it was asked to be at a new scale.
         let _ = pixel_scale.get();
         let (width, height) = size.get();
         let limit = (main_size(extent.get()) - main_size((width, height))).max(0.);
         let requested = offset.get();
+        // Followed, a new offset (a wheel, a script) is taken as it is, and
+        // alone decides whether the view stays at its end.
+        let moved = follow
+            .as_ref()
+            .is_some_and(|follow| requested != follow.applied.get());
         let position = if requested.is_nan() {
             0.
-        } else if follow_end && pinned.get() && requested == applied.get() {
+        } else if let Some(follow) = &follow
+            && follow.pinned.get()
+            && !moved
+        {
             limit
         } else {
             requested.clamp(0., limit)
         };
-        if follow_end {
-            applied.set(position);
-            pinned.set(position >= limit - 0.5);
-        }
-        if requested != position {
-            offset.set(position);
+        match &follow {
+            // Its content shrank under a view left short of its end. That
+            // clamp isn't asking to follow, and until layout settles it only
+            // shows: a frame's layout can pass through a shorter size on
+            // the way (a row measured before it eases open), and the view
+            // stays where it was put if the content comes back.
+            Some(follow) if !moved && !follow.pinned.get() && requested != position => {
+                if !follow.settling.replace(true)
+                    && let Some(ui) = weak.upgrade()
+                {
+                    let (follow, offset, extent, size) =
+                        (follow.clone(), offset.clone(), extent.clone(), size.clone());
+                    ui.after_settled(Box::new(move || {
+                        follow.settling.set(false);
+                        let limit = (extent.with_untracked(|extent| main_size(*extent))
+                            - size.with_untracked(|size| main_size(*size)))
+                        .max(0.);
+                        // Still clamped, and not moved since: the clamp stands.
+                        let left = offset.with_untracked(|offset| *offset);
+                        if left == follow.applied.get() && left > limit {
+                            follow.applied.set(limit);
+                            offset.set(limit);
+                        }
+                    }));
+                }
+            }
+            _ => {
+                if let Some(follow) = &follow {
+                    follow.applied.set(position);
+                    if moved {
+                        follow.pinned.set(position >= limit - 0.5);
+                    }
+                }
+                if requested != position {
+                    offset.set(position);
+                }
+            }
         }
         let mut scene = scene.borrow_mut();
         // Scrolling across with no height of its own, it is as tall as what

@@ -1626,6 +1626,8 @@ pub(crate) struct UiStorage {
     scroll_padding: RefCell<crate::scene::NodeMap<crate::scene::Insets>>,
     /// Run once after the next frame preparation's layout.
     after_layout: RefCell<Vec<Box<dyn FnOnce()>>>,
+    /// Run once the next frame preparation's layout settles.
+    after_settled: RefCell<Vec<Box<dyn FnOnce()>>>,
     /// Run after every layout pass that changes the layout, by owning node.
     layout_listeners: RefCell<crate::scene::NodeMap<Vec<LayoutListener>>>,
     /// Boxes views' container queries read (`View::container`).
@@ -1897,6 +1899,7 @@ impl Ui {
             observed_visibility: RefCell::default(),
             scroll_padding: RefCell::default(),
             after_layout: RefCell::new(Vec::new()),
+            after_settled: RefCell::new(Vec::new()),
             layout_listeners: RefCell::default(),
             containers: RefCell::default(),
             mount_initialization: RefCell::new(None),
@@ -2742,6 +2745,12 @@ impl Ui {
     pub(crate) fn after_layout(&self, f: Box<dyn FnOnce()>) {
         self.storage.after_layout.borrow_mut().push(f);
     }
+    /// Run `f` once when a frame preparation's layout settles: no pass left
+    /// to run and no after-layout work waiting on one. What it reads is
+    /// where layout came to rest, not a size a pass showed on the way.
+    pub(crate) fn after_settled(&self, f: Box<dyn FnOnce()>) {
+        self.storage.after_settled.borrow_mut().push(f);
+    }
     /// Run `f` after every layout pass that changes the layout, until `node`
     /// is removed.
     pub(crate) fn on_layout(&self, node: NodeId, f: Box<dyn FnMut()>) {
@@ -2754,7 +2763,14 @@ impl Ui {
     }
     /// Whether any after-layout work ran.
     fn run_after_layout(&self) -> bool {
-        let pending = std::mem::take(&mut *self.storage.after_layout.borrow_mut());
+        self.run_queued(&self.storage.after_layout)
+    }
+    /// Whether any after-settled work ran.
+    fn run_after_settled(&self) -> bool {
+        self.run_queued(&self.storage.after_settled)
+    }
+    fn run_queued(&self, queue: &RefCell<Vec<Box<dyn FnOnce()>>>) -> bool {
+        let pending = std::mem::take(&mut *queue.borrow_mut());
         if pending.is_empty() {
             return false;
         }
@@ -3970,7 +3986,8 @@ impl Ui {
             let geometry_changed =
                 self.storage.bounds_geometry_revision.get() != Some(geometry_revision);
             if !layout_changed && !geometry_changed {
-                if !self.run_after_layout() {
+                // What waits for layout to settle may change it again.
+                if !self.run_after_layout() && !self.run_after_settled() {
                     // Settled: a removed focused node's focus falls to its
                     // ancestor, unless something (a list revealing a row)
                     // focused since.
