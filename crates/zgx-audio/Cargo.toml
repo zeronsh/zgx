@@ -1,0 +1,29 @@
+[package]
+name = "zgx-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Sound for zgx: sounds from files played once or looped, with volume and pan, and a low-latency output stream a synth fills. Optional: an app that doesn't depend on it pays nothing."
+keywords = ["gui", "audio", "sound", "synth", "luau"]
+categories = ["multimedia::audio"]
+publish = false
+
+[features]
+# `require("@audio")` for scripts a zgx-script host runs (`script::install`).
+script = ["dep:zgx", "dep:zgx-script"]
+
+[dependencies]
+zgx = { path = "../zgx", version = "0.1.10", default-features = false, optional = true }
+zgx-script = { path = "../zgx-script", version = "0.1.10", default-features = false, optional = true }
+
+[[example]]
+name = "click"
+required-features = ["script"]
+
+# Counts the allocator's calls: a process of its own.
+[[test]]
+name = "no_alloc"
+path = "tests/no_alloc.rs"
+harness = false
