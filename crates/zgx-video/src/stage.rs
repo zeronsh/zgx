@@ -52,6 +52,8 @@ pub struct Setting<'a> {
 /// stage at a time.
 pub struct Stage {
     gpu: GpuRenderer,
+    /// What frames are read back through, kept from one to the next.
+    readback: zgx_gpu::Readback,
     handle: ViewHandle,
     ui: Ui,
     executor: Rc<RefCell<LocalExecutor>>,
@@ -125,6 +127,7 @@ impl Stage {
         ));
         let mut stage = Self {
             gpu,
+            readback: zgx_gpu::Readback::default(),
             handle,
             ui,
             executor,
@@ -222,7 +225,7 @@ impl Stage {
         let whole = [scene.bounds(scene.root())];
         self.gpu.render(&scene, &whole)?;
         drop(scene);
-        *pixels = self.gpu.readback()?;
+        self.gpu.readback_into(pixels, &mut self.readback)?;
         Ok(())
     }
     /// Draw the frame it stands at, whole, reading nothing back: what a frame
@@ -242,7 +245,7 @@ impl Stage {
         let report = scene.flush();
         self.gpu.render(&scene, &report.damage)?;
         drop(scene);
-        *pixels = self.gpu.readback()?;
+        self.gpu.readback_into(pixels, &mut self.readback)?;
         Ok(())
     }
     /// The size of what [`Stage::draw`] reads, in pixels.

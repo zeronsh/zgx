@@ -14413,6 +14413,18 @@ impl GpuRenderer {
     }
     /// The target's pixels, RGBA, a row at a time.
     pub fn readback(&self) -> Result<Vec<u8>, GpuError> {
+        let mut pixels = Vec::new();
+        self.readback_into(&mut pixels, &mut Readback::default())?;
+        Ok(pixels)
+    }
+    /// [`GpuRenderer::readback`] into `pixels`, its allocation reused, through
+    /// `staging`'s buffer (made at the first read, kept for the next): what a
+    /// video, reading every frame, calls.
+    pub fn readback_into(
+        &self,
+        pixels: &mut Vec<u8>,
+        staging: &mut Readback,
+    ) -> Result<(), GpuError> {
         if let Some(reason) = self.context.lost() {
             return Err(GpuError::device_lost(&reason));
         }
@@ -14424,29 +14436,48 @@ impl GpuRenderer {
             let views = (present.and_then(|present| present.chain.as_ref()))
                 .and_then(|chain| chain.d3d11_views());
             let drawing = present.is_some_and(|present| present.current.is_some());
-            return match (&views, &state.target) {
-                (Some(views), _) => state.device.read(&views[usize::from(!drawing)]),
-                (None, Some(target)) => state.device.read(target),
+            *pixels = match (&views, &state.target) {
+                (Some(views), _) => state.device.read(&views[usize::from(!drawing)])?,
+                (None, Some(target)) => state.device.read(target)?,
                 // Nothing drawn: what wgpu's target holds, cleared.
-                (None, None) => Ok(vec![0; (self.width * self.height * 4) as usize]),
+                (None, None) => vec![0; (self.width * self.height * 4) as usize],
             };
+            return Ok(());
         }
         self.flush_pending();
-        self.read_texture(&self.target)
+        self.read_texture_into(&self.target, pixels, staging)
     }
     fn read_texture(&self, texture: &wgpu::Texture) -> Result<Vec<u8>, GpuError> {
+        let mut pixels = Vec::new();
+        self.read_texture_into(texture, &mut pixels, &mut Readback::default())?;
+        Ok(pixels)
+    }
+    fn read_texture_into(
+        &self,
+        texture: &wgpu::Texture,
+        pixels: &mut Vec<u8>,
+        staging: &mut Readback,
+    ) -> Result<(), GpuError> {
         let stride = (self.width * 4).div_ceil(256) * 256;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: u64::from(stride) * u64::from(self.height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let size = u64::from(stride) * u64::from(self.height);
+        if staging
+            .0
+            .as_ref()
+            .is_none_or(|buffer| buffer.size() != size)
+        {
+            staging.0 = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("readback"),
+                size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }));
+        }
+        let buffer = staging.0.as_ref().expect("made above");
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
             texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
+                buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(stride),
@@ -14467,21 +14498,45 @@ impl GpuRenderer {
             .map_err(|e| GpuError(e.to_string()))?
             .map_err(|e| GpuError(e.to_string()))?;
         let mapped = buffer.get_mapped_range(..);
-        let mut pixels = Vec::with_capacity((self.width * self.height * 4) as usize);
-        for row in mapped.chunks(stride as usize) {
-            pixels.extend_from_slice(&row[..self.width as usize * 4]);
-        }
-        // Retained textures are BGRA (see `FORMAT`); callers read RGBA.
-        if texture.format() == wgpu::TextureFormat::Bgra8Unorm {
-            for pixel in pixels.as_chunks_mut::<4>().0 {
-                pixel.swap(0, 2);
+        let row = self.width as usize * 4;
+        // The same length as the last read leaves it as it is: nothing zeroed.
+        pixels.resize(row * self.height as usize, 0);
+        // Retained textures are BGRA (see `FORMAT`); callers read RGBA. Each
+        // row is copied and its red and blue swapped in one pass, a pixel a
+        // word, which the compiler makes a few vector instructions a block.
+        let bgra = texture.format() == wgpu::TextureFormat::Bgra8Unorm;
+        for (out, read) in pixels
+            .chunks_exact_mut(row)
+            .zip(mapped.chunks(stride as usize))
+        {
+            let read = &read[..row];
+            if bgra {
+                for (out, read) in out
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(read.as_chunks::<4>().0)
+                {
+                    let word = u32::from_le_bytes(*read);
+                    let swapped =
+                        (word & 0xFF00_FF00) | ((word >> 16) & 0xFF) | ((word & 0xFF) << 16);
+                    *out = swapped.to_le_bytes();
+                }
+            } else {
+                out.copy_from_slice(read);
             }
         }
         drop(mapped);
         buffer.unmap();
-        Ok(pixels)
+        Ok(())
     }
 }
+/// The staging buffer [`GpuRenderer::readback_into`] reads through, kept by
+/// whoever reads every frame (a video's stage) and made at its first read:
+/// an app that never reads back holds none.
+#[derive(Default)]
+pub struct Readback(Option<wgpu::Buffer>);
+
 /// A frame a window showed (`GpuRenderer::shown_frame`), its pixels
 /// readable while it is held.
 #[cfg(target_os = "macos")]
