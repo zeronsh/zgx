@@ -612,16 +612,15 @@ impl zgx::text_layout::TextLayout for ShapedText {
             };
             let end = clusters.iter().map(|c| c.1).max().unwrap_or(start);
             let mut carets = Vec::new();
-            for (i, _) in self.text[start..end].grapheme_indices(true) {
-                let at = start + i;
+            for grapheme in zgx::text_layout::grapheme_ranges(&self.text[start..end]) {
+                let at = start + grapheme.start;
                 let k = clusters.partition_point(|c| c.0 <= at);
                 let x = match k.checked_sub(1).map(|k| clusters[k]) {
                     Some((s, e, x, w, rtl)) if at < e => {
                         let cluster = &self.text[s..e];
-                        let count = cluster.graphemes(true).count().max(1);
-                        let before = cluster
-                            .grapheme_indices(true)
-                            .filter(|(i, _)| s + i < at)
+                        let count = zgx::text_layout::grapheme_ranges(cluster).count().max(1);
+                        let before = zgx::text_layout::grapheme_ranges(cluster)
+                            .filter(|range| s + range.start < at)
                             .count();
                         let fraction = before as f32 / count as f32;
                         if rtl {
