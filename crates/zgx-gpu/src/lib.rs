@@ -4077,6 +4077,11 @@ pub struct GpuRenderer {
     copy_present: bool,
     /// Frames whose damage was drawn by `present_single_pass`.
     single_pass_frames: u64,
+    /// Test hook: an offscreen renderer copies scroll moves' pixels where the
+    /// platform would repaint them (`debug_allow_scroll_copies`).
+    debug_scroll_copy: bool,
+    /// Scroll moves applied as a copy of their pixels, ever.
+    scroll_copied: std::cell::Cell<u64>,
     /// Frames presented to the drawable alone (`Deferred::direct`).
     direct_frames: u64,
     /// Frames encoded with Metal directly (`render_direct`).
@@ -4834,6 +4839,8 @@ impl GpuRenderer {
             present_unpremultiplies,
             copy_present,
             single_pass_frames: 0,
+            debug_scroll_copy: false,
+            scroll_copied: std::cell::Cell::new(0),
             direct_frames: 0,
             metal_frames: 0,
             warms: 0,
@@ -10943,6 +10950,7 @@ impl GpuRenderer {
         };
         #[cfg(not(own_surfaces))]
         let copyable = true;
+        let copyable = copyable || self.debug_scroll_copy;
         for scroll in scene.scroll_moves() {
             if scroll.serial != serial {
                 continue;
@@ -11042,6 +11050,7 @@ impl GpuRenderer {
                             }
                             repaint.append(&mut carried);
                             copies.push(copy);
+                            self.scroll_copied.set(self.scroll_copied.get() + 1);
                         }
                         None => {
                             zgx::profile::note(|| {
@@ -14549,6 +14558,16 @@ impl GpuRenderer {
     /// Frames drawn in one pass with their presentation.
     pub fn debug_single_pass_frames(&self) -> u64 {
         self.single_pass_frames
+    }
+    /// Test hook: copy scroll moves' pixels offscreen too, where the platform
+    /// would repaint them (macOS without a layer of its own), so a test can
+    /// check what a copy leaves on screen.
+    pub fn debug_allow_scroll_copies(&mut self) {
+        self.debug_scroll_copy = true;
+    }
+    /// How many scroll moves were applied as a copy of their pixels.
+    pub fn debug_scroll_copies(&self) -> u64 {
+        self.scroll_copied.get()
     }
     /// Test hook: full-rate frames draw into `CAMetalLayer` drawables, or
     /// not (`ZGX_PRESENT_DRAWABLE`); a `debug_for_layer` renderer then
