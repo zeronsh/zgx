@@ -1181,6 +1181,14 @@ impl QuadStyle {
             None => painted,
         }
     }
+    /// Whether it paints nothing at all: a box held for its layout or clip.
+    pub fn paints_nothing(&self) -> bool {
+        self.fill.3 == 0
+            && !self.has_border()
+            && self.shadow.is_none()
+            && self.decoration.is_none()
+            && !self.outline.is_some_and(|outline| outline.visible())
+    }
     /// Whether it paints a second time after its descendants (its border
     /// over them, its outline).
     pub fn paints_over(&self) -> bool {
@@ -3609,19 +3617,27 @@ impl Scene {
     /// cut by its clips, when nothing in its ancestry changes how it
     /// composites (no opacity below 1, filter, edge fade, blend, mask, layer
     /// shader, scale, rotation, skew, tilt or zoom; nor in `id` itself, but
-    /// for its opacity) and no rounded clip reaches it. A host drawing the node
+    /// for its opacity) and no rounded clip reaches it. (A backdrop blur blurs
+    /// what's behind, its own content sharp: a field on frosted glass is plain.)
+    /// A host drawing the node
     /// itself (the caret, `Ui::native_caret`) draws that rectangle, as the
     /// node's paint would show; `None` when it can't, or nothing shows.
     pub fn plain_box(&self, id: NodeId) -> Option<Rect> {
         let plain = |node: &Node| {
             !node.layered && !node.filtered() && !node.transformed() && own_visible(&node.style)
         };
+        let unchanged = |effects: Effects| {
+            Effects {
+                blur_radius: 0.,
+                ..effects
+            } == Effects::default()
+        };
         let node = self.node(id);
         let effects = Effects {
             opacity: 1.,
             ..node.effects
         };
-        if !plain(node) || effects != Effects::default() {
+        if !plain(node) || !unchanged(effects) {
             return None;
         }
         let bounds = self.bounds(id).intersection(self.world_clip(id)?)?;
@@ -3633,7 +3649,7 @@ impl Scene {
         };
         for ancestor in self.ancestors(id) {
             let node = self.tree_node(ancestor);
-            if !plain(node) || node.effects != Effects::default() {
+            if !plain(node) || !unchanged(node.effects) {
                 return None;
             }
             // A rounded clip cuts its corners: the box keeps clear of them.
@@ -3657,20 +3673,31 @@ impl Scene {
                     .map_or(0., |detail| detail.clip_feather);
                 if radius > 0. || feather > 0. {
                     let outer = self.bounds(ancestor);
-                    let inset = radius + feather + quad.border_width.max(0.);
-                    let across = Rect::new(
-                        outer.x + inset,
-                        outer.y,
-                        outer.width - 2. * inset,
-                        outer.height,
+                    let pad = feather + quad.border_width.max(0.);
+                    let inner = Rect::new(
+                        outer.x + pad,
+                        outer.y + pad,
+                        outer.width - 2. * pad,
+                        outer.height - 2. * pad,
                     );
-                    let down = Rect::new(
-                        outer.x,
-                        outer.y + inset,
-                        outer.width,
-                        outer.height - 2. * inset,
-                    );
-                    if !inside(across) && !inside(down) {
+                    if !inside(inner) {
+                        return None;
+                    }
+                    // Each corner of the box inside the curve, with a point to
+                    // spare (a continuous corner starts a little sooner).
+                    let arc = (radius - pad).max(0.);
+                    let clear = (arc - 1.).max(0.);
+                    let within = |x: f32, y: f32| {
+                        let dx = (inner.x + arc - x).max(x - (inner.x + inner.width - arc)).max(0.);
+                        let dy = (inner.y + arc - y).max(y - (inner.y + inner.height - arc)).max(0.);
+                        dx * dx + dy * dy <= clear * clear
+                    };
+                    let (right, bottom) = (bounds.x + bounds.width, bounds.y + bounds.height);
+                    if !(within(bounds.x, bounds.y)
+                        && within(right, bounds.y)
+                        && within(bounds.x, bottom)
+                        && within(right, bottom))
+                    {
                         return None;
                     }
                 }
@@ -3707,6 +3734,7 @@ impl Scene {
                 if self
                     .ink(*later)
                     .is_some_and(|ink| ink.translated(offset).intersects(rect))
+                    && self.paints(*later)
                 {
                     return true;
                 }
@@ -3714,6 +3742,23 @@ impl Scene {
             node = parent;
         }
         false
+    }
+    /// Whether `id` or anything it holds paints: its ink counts a box's bounds
+    /// whatever it fills them with, and a box empty but for its layout or clip
+    /// (a track waiting for what it unrolls) covers nothing.
+    fn paints(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        if node.effects.opacity <= 0.0 || !own_visible(&node.style) {
+            return false;
+        }
+        let empty = node.effects.blur_radius <= 0.0
+            && !self.platform_nodes.contains(&id)
+            && match &node.kind {
+                NodeKind::Container(_) => true,
+                NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => quad.paints_nothing(),
+                _ => false,
+            };
+        !empty || self.children_raw(node).iter().any(|child| crate::deep(0, || self.paints(*child)))
     }
     /// The part of `id`'s box that shows: inside its clips and not fully
     /// transparent; `None` when nothing does. Under a popup root
@@ -13560,6 +13605,137 @@ mod tests {
         assert!(ids.iter().all(|id| !scene.contains(*id)));
         scene.flush();
     }
+    #[test]
+    fn a_box_on_frosted_glass_is_plain_and_under_a_filter_is_not() {
+        let mut scene = Scene::new(100.0, 100.0);
+        let root = scene.root();
+        let panel = scene.append(
+            root,
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(50.),
+                height: Some(50.),
+                ..Style::default()
+            },
+        );
+        let caret = scene.append(
+            panel,
+            NodeKind::Rect(Color(0, 0, 0, 255)),
+            Style {
+                width: Some(2.),
+                height: Some(20.),
+                ..Style::default()
+            },
+        );
+        scene.flush();
+        assert!(scene.plain_box(caret).is_some());
+        // What's behind the panel blurs; the panel's content stays sharp.
+        scene.set_effects(
+            panel,
+            Effects {
+                blur_radius: 12.,
+                ..Effects::default()
+            },
+        );
+        scene.flush();
+        assert!(scene.plain_box(caret).is_some());
+        // These change how the content shows.
+        for changed in [
+            Effects { filter_blur: 2., ..Effects::default() },
+            Effects { opacity: 0.5, ..Effects::default() },
+            Effects { edge_fade: 4., ..Effects::default() },
+            Effects { saturate: 0.5, ..Effects::default() },
+        ] {
+            scene.set_effects(panel, changed);
+            scene.flush();
+            assert!(scene.plain_box(caret).is_none(), "{changed:?}");
+        }
+    }
+
+    #[test]
+    fn a_box_painting_nothing_covers_nothing() {
+        let mut scene = Scene::new(100.0, 100.0);
+        let sized = || Style {
+            width: Some(50.),
+            height: Some(50.),
+            absolute: true,
+            ..Style::default()
+        };
+        let root = scene.root();
+        let caret = scene.append(root, NodeKind::Rect(Color(0, 0, 0, 255)), sized());
+        let empty = NodeKind::Panel {
+            layout: Layout::Column,
+            quad: QuadStyle {
+                radius: 8.,
+                ..QuadStyle::default()
+            },
+        };
+        let track = scene.append(root, empty, sized());
+        scene.flush();
+        let rect = Rect::new(0., 0., 2., 20.);
+        assert!(!scene.painted_over(caret, rect));
+        // What it holds, once it holds something, does.
+        let voice = scene.append(track, NodeKind::Rect(Color(9, 9, 9, 255)), sized());
+        scene.flush();
+        assert!(scene.painted_over(caret, rect));
+        scene.remove(voice);
+        scene.flush();
+        assert!(!scene.painted_over(caret, rect));
+        // So does its own paint.
+        scene.set_kind(
+            track,
+            NodeKind::Panel {
+                layout: Layout::Column,
+                quad: QuadStyle {
+                    fill: Color(9, 9, 9, 255),
+                    ..QuadStyle::default()
+                },
+            },
+        );
+        scene.flush();
+        assert!(scene.painted_over(caret, rect));
+    }
+
+    #[test]
+    fn a_box_inside_a_rounded_corner_is_plain_and_one_it_cuts_is_not() {
+        let rounded = || NodeKind::Panel {
+            layout: Layout::Column,
+            quad: QuadStyle {
+                radius: 24.,
+                ..QuadStyle::default()
+            },
+        };
+        let in_panel = |padding: f32| {
+            let mut scene = Scene::new(300.0, 200.0);
+            let panel = scene.append(
+                scene.root(),
+                rounded(),
+                Style {
+                    width: Some(200.),
+                    height: Some(100.),
+                    clip: true,
+                    padding,
+                    ..Style::default()
+                },
+            );
+            let caret = scene.append(
+                panel,
+                NodeKind::Rect(Color(0, 0, 0, 255)),
+                Style {
+                    width: Some(2.),
+                    height: Some(20.),
+                    ..Style::default()
+                },
+            );
+            scene.flush();
+            scene.plain_box(caret)
+        };
+        // Within the corner's square, well inside its curve.
+        assert!(in_panel(17.).is_some());
+        // Past the curve: the corner would cut it.
+        assert!(in_panel(4.).is_none());
+    }
+
     #[test]
     fn slots_given_back_at_rest_leave_no_stale_id_alive() {
         let mut scene = Scene::new(100.0, 100.0);
