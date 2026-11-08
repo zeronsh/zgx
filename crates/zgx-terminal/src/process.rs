@@ -52,6 +52,7 @@ pub fn process_name(pid: u32) -> String {
 
 /// The first word of a command line some programs rewrite argv[0] into.
 #[cfg(unix)]
+#[cfg_attr(target_os = "ios", allow(dead_code))]
 fn first_word(arg: &str) -> Option<String> {
     let first = arg.trim().split(' ').next().unwrap_or("");
     (!first.is_empty()).then(|| first.to_owned())
