@@ -2388,31 +2388,46 @@ impl Host {
         // host, voice access) read names as they need them: for them names
         // and values are paced as geometry is, and a dashboard's live values
         // no longer rebuild the tree every frame.
+        let revealed = std::mem::take(&mut self.accessibility_revealed);
         let urgent = crate::accessibility::urgent(
             focused,
-            std::mem::take(&mut self.accessibility_revealed),
+            revealed,
             semantics,
             crate::accessibility::screen_reader,
         );
-        if !self.accessibility_pacer.update_now(
-            std::time::Instant::now(),
-            urgent,
-            geometry || semantics,
-        ) {
+        let now = std::time::Instant::now();
+        // A reveal moves what it shows: its geometry goes with it, at once.
+        let Some(kind) = (match revealed {
+            true => Some(self.accessibility_pacer.full(now)),
+            false => self
+                .accessibility_pacer
+                .update_kind(now, urgent, geometry || semantics),
+        }) else {
             return;
-        }
+        };
         self.last_accessibility = Some(state);
-        self.accessibility_geometry_dirty = false;
+        // Names alone: the geometry still to send stays to send.
+        let full = kind == crate::accessibility::TreeUpdateKind::Full;
+        if full {
+            self.accessibility_geometry_dirty = false;
+        }
         if let (Some(adapter), Some(_)) = (&mut self.adapter, &self.window) {
             let ui = &self.context.ui;
             adapter.update_if_active(|| {
-                self.tree.update(
-                    &ui.scene.borrow(),
-                    &ui.semantics.borrow(),
-                    ui.input.focused(),
-                    &self.options.title,
-                    self.scale_factor,
-                )
+                let (scene, semantics) = (ui.scene.borrow(), ui.semantics.borrow());
+                let (focused, title) = (ui.input.focused(), &self.options.title);
+                match full {
+                    true => self
+                        .tree
+                        .update(&scene, &semantics, focused, title, self.scale_factor),
+                    false => self.tree.update_names(
+                        &scene,
+                        &semantics,
+                        focused,
+                        title,
+                        self.scale_factor,
+                    ),
+                }
             });
         }
     }

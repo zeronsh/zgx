@@ -77,24 +77,55 @@ pub(crate) struct GeometryPacer {
     last: Option<std::time::Instant>,
     held: Option<std::time::Instant>,
 }
+/// What an update of the tree at a given moment does (`GeometryPacer`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TreeUpdateKind {
+    /// Everything that changed, geometry included.
+    Full,
+    /// Only what a reader hears changed (names, values, focus), while a
+    /// geometry change waits its turn: nodes that only moved keep what was
+    /// sent (`AccessibilityTree::update_names`).
+    Names,
+}
 impl GeometryPacer {
-    /// Whether to update the tree at `now`.
+    /// Whether to update the tree at `now` (`update_kind`, either kind).
+    #[cfg(test)]
     pub(crate) fn update_now(
         &mut self,
         now: std::time::Instant,
         changed: bool,
         geometry: bool,
     ) -> bool {
+        self.update_kind(now, changed, geometry).is_some()
+    }
+    /// How to update the tree at `now`, if at all: a change a reader hears
+    /// goes at once, but while geometry isn't due it goes alone (`Names`),
+    /// so a name changing every frame (a timer, a status) doesn't send
+    /// every frame's geometry too, nor put geometry off.
+    pub(crate) fn update_kind(
+        &mut self,
+        now: std::time::Instant,
+        changed: bool,
+        geometry: bool,
+    ) -> Option<TreeUpdateKind> {
         let due = self.last.is_none_or(|last| now >= last + GEOMETRY_EVERY);
-        if changed || ((geometry || self.held.is_some()) && due) {
+        let pending = geometry || self.held.is_some();
+        if (changed && !pending) || (pending && due) {
             self.last = Some(now);
             self.held = None;
-            return true;
+            return Some(TreeUpdateKind::Full);
         }
         if geometry && let Some(last) = self.last {
             self.held.get_or_insert(last + GEOMETRY_EVERY);
         }
-        false
+        changed.then_some(TreeUpdateKind::Names)
+    }
+    /// A full update at `now`, whatever is held (a reveal, which moves what
+    /// it shows).
+    pub(crate) fn full(&mut self, now: std::time::Instant) -> TreeUpdateKind {
+        self.last = Some(now);
+        self.held = None;
+        TreeUpdateKind::Full
     }
     /// When a held geometry change goes out, if one is held.
     pub(crate) fn deadline(&self) -> Option<std::time::Instant> {
@@ -332,6 +363,31 @@ impl AccessibilityTree {
         title: &str,
         scale: f64,
     ) -> TreeUpdate {
+        self.project(scene, semantics, focused, title, scale, true)
+    }
+    /// `update` for what a reader hears alone (names, values, focus, nodes
+    /// added and gone), while geometry waits its turn: a node whose
+    /// semantics are as sent, its children and state too, keeps what was
+    /// sent though it moved, its box and runs coming with the next `update`.
+    pub fn update_names(
+        &mut self,
+        scene: &Scene,
+        semantics: &Semantics,
+        focused: Option<NodeId>,
+        title: &str,
+        scale: f64,
+    ) -> TreeUpdate {
+        self.project(scene, semantics, focused, title, scale, false)
+    }
+    fn project(
+        &mut self,
+        scene: &Scene,
+        semantics: &Semantics,
+        focused: Option<NodeId>,
+        title: &str,
+        scale: f64,
+        geometry: bool,
+    ) -> TreeUpdate {
         let root = self.id(scene.root());
         if scene.language_revision() != self.language_revision {
             self.language_revision = scene.language_revision();
@@ -498,13 +554,32 @@ impl AccessibilityTree {
                 || scene
                     .ancestors(id)
                     .any(|ancestor| semantics.get(ancestor).is_some_and(|s| s.disabled));
+            let revision = semantics
+                .node_revision(id)
+                .expect("projected semantic node");
+            // Names alone: a node as sent keeps what was sent, before its
+            // geometry or text is looked at (moved, it goes with the next
+            // full update, as geometry does for any client).
+            if !geometry
+                && focused != Some(id)
+                && self.projection_revisions.get(&id) == Some(&revision)
+                && self.cache.get(&native).is_some_and(|cached| {
+                    let runs = self.text_runs.get(&id).map_or(&[][..], Vec::as_slice);
+                    cached.is_disabled() == disabled
+                        && cached.children().iter().eq(children
+                            .get(&id)
+                            .into_iter()
+                            .flatten()
+                            .chain(runs))
+                })
+            {
+                children.remove(&id);
+                continue;
+            }
             // Assistive bounds: the box around where it shows, or where an
             // animation is taking it with `hit = "target"` (as Core
             // Animation's model layer): a reader's highlight goes ahead.
             let r = scene.hit_bounds(id);
-            let revision = semantics
-                .node_revision(id)
-                .expect("projected semantic node");
             let bounds = accesskit::Rect::new(
                 r.x as f64 * scale,
                 r.y as f64 * scale,
@@ -3345,6 +3420,52 @@ mod vocabulary_tests {
         assert!(tree.run_boxes.is_empty(), "and goes with it");
     }
 
+    /// A names-only update (`update_names`) sends the node whose name
+    /// changed and leaves one that only moved as it was sent; the next full
+    /// update (`update`) sends where it went.
+    #[test]
+    fn a_names_only_update_sends_the_renamed_and_leaves_the_moved_for_later() {
+        let mut ui = Ui::new(400., 300.);
+        ui.set_assistive_technology(true);
+        let name = ui.signal("One".to_string());
+        let gap = ui.signal(0_f32);
+        let (read_name, read_gap) = (name.clone(), gap.clone());
+        ui.mount(
+            column()
+                .child(
+                    button()
+                        .accessible_label_when(move || read_name.get())
+                        .child(text("x")),
+                )
+                .child(div().reactive_style(move || Styles::new().h(read_gap.get())))
+                .child(button().accessible_label("Still").child(text("y"))),
+        );
+        let mut tree = AccessibilityTree::new();
+        let frame = |ui: &mut Ui| ui.prepare_frame();
+        frame(&mut ui);
+        let first = tree.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Test", 1.);
+        let still_box = |nodes: &[(accesskit::NodeId, Node)]| {
+            nodes
+                .iter()
+                .find(|(_, n)| n.label() == Some("Still"))
+                .and_then(|(_, n)| n.bounds())
+        };
+        let was = still_box(&first.nodes).expect("sent first");
+        // The first renamed, the second moved down.
+        name.set("Two".to_string());
+        gap.set(40.);
+        frame(&mut ui);
+        let names = tree.update_names(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Test", 1.);
+        assert!(
+            names.nodes.iter().any(|(_, n)| n.label() == Some("Two")),
+            "the new name goes"
+        );
+        assert_eq!(still_box(&names.nodes), None, "the moved node waits");
+        let full = tree.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Test", 1.);
+        let now = still_box(&full.nodes).expect("then it goes");
+        assert!(now.y0 > was.y0, "where it went: {was:?} then {now:?}");
+    }
+
     /// With a screen reader (`screen_reader()` true: VoiceOver or Switch
     /// Control on macOS, Narrator, NVDA or JAWS on Windows), a name changing
     /// frame after frame goes out on each frame it changes, never held for
@@ -3806,14 +3927,22 @@ mod pacing_tests {
         assert!(!pacer.update_now(at(96), false, true));
         assert!(pacer.update_now(at(112), false, true));
         assert_eq!(pacer.deadline(), None);
-        // A name changing mid-animation: at once.
-        assert!(pacer.update_now(at(128), true, true));
+        // A name changing mid-animation: at once, alone (the geometry not
+        // due yet keeps its own time, not put off by the name).
+        assert_eq!(
+            pacer.update_kind(at(128), true, true),
+            Some(super::TreeUpdateKind::Names)
+        );
         // The frames stop after one more move; nothing else comes but the
-        // wake at its deadline, which sends it.
+        // wake at its deadline, 100 ms after the last full update, which
+        // sends it.
         assert!(!pacer.update_now(at(144), false, true));
-        assert_eq!(pacer.deadline(), Some(at(228)));
+        assert_eq!(pacer.deadline(), Some(at(212)));
         assert!(!pacer.update_now(at(200), false, false));
-        assert!(pacer.update_now(at(228), false, false));
+        assert_eq!(
+            pacer.update_kind(at(212), false, false),
+            Some(super::TreeUpdateKind::Full)
+        );
         // Then quiet: nothing to send, nothing held.
         assert!(!pacer.update_now(at(400), false, false));
         assert_eq!(pacer.deadline(), None);
