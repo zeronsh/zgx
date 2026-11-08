@@ -34,7 +34,10 @@ impl VariableHeights {
     /// Keep a viewport resting at the end there through height and count
     /// changes, instead of anchoring its first visible row: a chat
     /// transcript that follows new messages and stays put while offscreen
-    /// estimates above it are measured.
+    /// estimates above it are measured. Only a move rests it at the end (a
+    /// wheel, a script, the scrollbar, or a wheel down there with nowhere
+    /// further to go): rows shrinking up to a view left above it clamp it
+    /// there without following.
     pub fn anchor_end(self) -> Self {
         self.end.set(true);
         self
@@ -119,7 +122,22 @@ struct Anchor {
     /// How far the view's top is below the anchor row's (negative when
     /// the row starts lower, in view).
     within: f32,
+    /// Left at the end: a move put it there (a clamp from content shrinking
+    /// under it isn't one).
     at_end: bool,
+    /// `index` and `within` are from before a clamp that waits for layout to
+    /// settle (`EndHold`).
+    held: bool,
+}
+/// What an end-anchored list's pass hears from outside it: a wheel down at
+/// its end with nowhere further to go, which says to stay there (`repin`),
+/// and that layout settled after a clamp it held its anchor through
+/// (`settled`, `waiting` until then).
+#[derive(Default)]
+struct EndHold {
+    repin: Cell<bool>,
+    settled: Cell<bool>,
+    waiting: Cell<bool>,
 }
 
 /// Mount only visible variable-height keyed rows and an overscan margin.
@@ -496,6 +514,8 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     heights.clone(),
                 )
             });
+            let hold = Rc::new(EndHold::default());
+            let wheel_hold = hold.clone();
             let wheel_offset = offset.clone();
             let wheel_size = size.clone();
             let wheel_extent = extent.clone();
@@ -528,9 +548,11 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         return;
                     }
                     let before = wheel_offset.get();
-                    let after = (before + delta_y)
-                        .max(0.0)
-                        .min((wheel_extent.get() - wheel_size.get().1).max(0.0));
+                    let limit = (wheel_extent.get() - wheel_size.get().1).max(0.0);
+                    let after = (before + delta_y).max(0.0).min(limit);
+                    if delta_y > 0. && limit - after <= 0.5 {
+                        wheel_hold.repin.set(true);
+                    }
                     if before != after {
                         wheel_offset.set(after);
                         cx.scrolled(false);
@@ -663,6 +685,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     return;
                 }
                 last_inputs = Some(inputs);
+                // (Taken past the return above: a pass with nothing to do
+                // mustn't drop them.)
+                let wheel_at_end = hold.repin.replace(false);
+                let settled = hold.settled.replace(false);
                 // Rows added or removed above the anchor row: it is as many
                 // rows on, and the view stays on it if its key is there
                 // (asked before the index is borrowed: `key` is the app's).
@@ -690,7 +716,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     .map(|(index, align, _, _, keys)| (index, align, keys));
                 let asked = (serial != handled_reveal).then_some((row, align, false));
                 handled_reveal = serial;
-                let (length, total, position, target, geometry, dragged, next_anchor) = {
+                let (length, total, position, target, geometry, dragged, next_anchor, holding) = {
                     let model = heights.index.borrow();
                     let length = model.count();
                     let total = model.content_height();
@@ -702,10 +728,30 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     } else {
                         requested.clamp(0., limit)
                     };
+                    // Whether it was left at its end: a move says, and only
+                    // a move (a wheel, a script, the scrollbar).
+                    let repositioned = anchor
+                        .as_ref()
+                        .is_none_or(|previous| requested != previous.position);
+                    let at_end = match &anchor {
+                        Some(previous) if !repositioned => wheel_at_end || previous.at_end,
+                        _ => limit - position <= 0.5,
+                    };
+                    // The anchor a clamp is held from, while layout settles.
+                    let mut holding = anchor
+                        .as_ref()
+                        .filter(|previous| {
+                            previous.held
+                                && !repositioned
+                                && !at_end
+                                && !settled
+                                && previous.revision == revision
+                        })
+                        .map(|previous| (previous.index, previous.within));
                     if let Some(previous) = &anchor
                         && previous.revision != revision
                         && requested == previous.position
-                        && previous.at_end
+                        && at_end
                         && heights.end.get()
                     {
                         position = limit;
@@ -721,11 +767,20 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         // Clamp the final coordinate, too: adding a sub-height
                         // intra-row offset can round up to the following row.
                         let last = bottom.next_down().max(top);
-                        position =
-                            ((top as f64 + previous.within as f64).clamp(0., f32::MAX as f64)
-                                as f32)
-                                .min(last)
-                                .min(limit);
+                        let wanted = ((top as f64 + previous.within as f64)
+                            .clamp(0., f32::MAX as f64)
+                            as f32)
+                            .min(last);
+                        position = wanted.min(limit);
+                        // End-anchored, the content shrank under a view left
+                        // short of its end. Until layout settles that clamp
+                        // only shows, and the anchor stays: a frame's layout
+                        // can pass through a shorter size on the way (a row
+                        // measured before it eases open), and the view goes
+                        // back where it was if the content comes back.
+                        if heights.end.get() && limit < wanted && !settled {
+                            holding = Some((previous.index, previous.within));
+                        }
                     }
                     // The part the view around it shows.
                     if let Some(window) = &window
@@ -841,7 +896,12 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             position,
                             index,
                             within: (position - model.row_offset(index)).max(0.),
-                            at_end: limit - position <= 0.5,
+                            // A row revealed moved it.
+                            at_end: match target {
+                                Some(_) => limit - position <= 0.5,
+                                None => at_end,
+                            },
+                            held: false,
                         }),
                         None if length == 0 => Some(Anchor {
                             revision,
@@ -850,6 +910,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             index: 0,
                             within: 0.,
                             at_end: true,
+                            held: false,
                         }),
                         None => None,
                     };
@@ -861,6 +922,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         geometry,
                         dragged,
                         next_anchor,
+                        holding,
                     )
                 };
                 // Release the index borrow before application key/build callbacks.
@@ -909,7 +971,11 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                                 })
                             })
                     };
-                    if measured
+                    if let Some((index, within)) = holding {
+                        anchor.index = index;
+                        anchor.within = within;
+                        anchor.held = true;
+                    } else if measured
                         && let Some((_, index, top, _)) =
                             keys.iter().find(|(key, _, top, row_height)| {
                                 top + row_height > anchor.position && measured_row(key)
@@ -948,6 +1014,16 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                 };
                 if !ui.scene.borrow().contains(root) {
                     return;
+                }
+                // Once layout settles, a pass anchors where the clamp left it,
+                // if it still holds.
+                if holding.is_some() && !hold.waiting.replace(true) {
+                    let (hold, mounted_revision) = (hold.clone(), mounted_revision.clone());
+                    ui.after_settled(Box::new(move || {
+                        hold.waiting.set(false);
+                        hold.settled.set(true);
+                        mounted_revision.update(|value| *value = value.wrapping_add(1));
+                    }));
                 }
                 runtime.untracked(|| {
                     let mut transaction = MountTransaction::new(&ui, content);

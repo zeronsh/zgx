@@ -743,6 +743,84 @@ fn end_anchored_lists_stay_at_the_end_through_measurement_and_growth() {
     assert!(offset.get() < heights.content_height() - 200.);
 }
 
+/// An end-anchored list of 60 rows 20 tall but the last, 600 tall to start:
+/// its offset, heights and the last row's height.
+fn end_anchored(
+    ui: &mut Ui,
+) -> (
+    zgx::reactive::Signal<f32>,
+    VariableHeights,
+    zgx::reactive::Signal<f32>,
+) {
+    let heights = VariableHeights::new(&ui.runtime, 60, 20.).anchor_end();
+    let offset = ui.signal(1e9_f32);
+    let last = ui.signal(600_f32);
+    let tall = last.clone();
+    ui.mount(
+        measured_virtual_list(
+            offset.clone(),
+            heights.clone(),
+            1,
+            |index| index,
+            move |_, index, _| {
+                let tall = tall.clone();
+                div().reactive_style(move || {
+                    Styles::new().h(if index == 59 { tall.get() } else { 20. })
+                })
+            },
+        )
+        .size(200., 200.),
+    );
+    settle(ui);
+    (offset, heights, last)
+}
+fn settle(ui: &mut Ui) {
+    for _ in 0..4 {
+        ui.try_prepare_frame().unwrap();
+    }
+}
+
+#[test]
+fn a_clamp_does_not_put_an_end_anchored_list_back_at_its_end() {
+    let mut ui = Ui::new(200., 300.);
+    let (offset, heights, last) = end_anchored(&mut ui);
+    assert_eq!(offset.get(), heights.content_height() - 200.);
+    // Scrolled up a little, then its last row folds: the end comes up to
+    // the view.
+    offset.set(offset.get() - 100.);
+    settle(&mut ui);
+    last.set(20.);
+    settle(&mut ui);
+    let clamped = offset.get();
+    assert_eq!(clamped, heights.content_height() - 200.);
+    // That wasn't asking to follow: growth leaves it where it is.
+    last.set(800.);
+    settle(&mut ui);
+    assert_eq!(offset.get(), clamped);
+    assert!(offset.get() < heights.content_height() - 200.);
+}
+
+#[test]
+fn a_wheel_down_at_the_end_follows_again_with_nowhere_to_go() {
+    let mut ui = Ui::new(200., 300.);
+    let (offset, heights, last) = end_anchored(&mut ui);
+    offset.set(offset.get() - 100.);
+    settle(&mut ui);
+    last.set(20.);
+    settle(&mut ui);
+    assert_eq!(offset.get(), heights.content_height() - 200.);
+    ui.dispatch(InputEvent::Scroll {
+        x: 100.,
+        y: 100.,
+        delta_x: 0.,
+        delta_y: 40.,
+    });
+    settle(&mut ui);
+    last.set(800.);
+    settle(&mut ui);
+    assert_eq!(offset.get(), heights.content_height() - 200.);
+}
+
 #[test]
 fn measured_rows_keep_heights_by_key_and_estimate_the_unmounted() {
     let mut ui = Ui::new(200., 300.);
