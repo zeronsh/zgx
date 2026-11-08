@@ -221,6 +221,48 @@ fn sounds_a_script_places_are_muxed() {
 }
 
 #[test]
+fn a_file_at_another_rate_keeps_every_frame_and_no_more_sound() {
+    if zgx_video::encode::ffmpeg().is_none() {
+        eprintln!("no ffmpeg here: skipped");
+        return;
+    }
+    let dir = temp_dir("rate");
+    let tone: Vec<f32> = (0..48000 * 2 * 2)
+        .map(|i| (i as f32 * 0.03).sin() * 0.5)
+        .collect();
+    zgx_video::audio::write_wav(&dir.join("tone.wav"), &tone).unwrap();
+    // 32 frames at 30 fps written at 24: 26 frames, 1.083 s. The mix in
+    // whole frames of the composition was rounded to 33 (1.1 s), longer
+    // than the frames; it's 32 now, and nothing is cut to fit.
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "R", w = 32, h = 32, fps = 30, duration = 32,
+            render = function()
+                return ui.div { w_full = true, h_full = true, bg = "#345",
+                    video.audio { src = "tone.wav" },
+                }
+            end,
+        } }
+        "##,
+    )
+    .unwrap();
+    let mut at_24 = options(&dir, "out.mp4");
+    at_24.fps = Some(24.);
+    assert_eq!(render(&at_24, |_| true).unwrap().frames, 26);
+    let out = dir.join("out.mp4");
+    assert_eq!(probe(&out, "nb_frames", "v").unwrap(), "26");
+    let video: f64 = probe(&out, "duration", "v").unwrap().parse().unwrap();
+    let audio: f64 = probe(&out, "duration", "a").unwrap().parse().unwrap();
+    assert!(
+        audio <= video + 0.001,
+        "sound {audio} s past frames {video} s"
+    );
+}
+
+#[test]
 fn a_missing_format_says_how_to_say_one() {
     let dir = app("format");
     let error = render(&options(&dir, "out.xyz"), |_| true).unwrap_err();
