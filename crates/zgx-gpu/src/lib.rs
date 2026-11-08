@@ -5474,6 +5474,16 @@ impl GpuRenderer {
         }
         awaited
     }
+    /// Whether each backdrop held (`backdrop`) may be compressed by the GPU.
+    /// For tests.
+    #[cfg(target_os = "macos")]
+    #[doc(hidden)]
+    pub fn debug_backdrops_compress(&self) -> Vec<bool> {
+        let backdrops = self.backdrops.values();
+        backdrops
+            .map(|(texture, _)| upload::may_compress(texture))
+            .collect()
+    }
     /// The size of `image`'s texture, if it has one. For tests and devtools.
     #[doc(hidden)]
     pub fn debug_image_size(&self, image: &zgx::image::ImageData) -> Option<(u32, u32)> {
@@ -6744,6 +6754,20 @@ impl GpuRenderer {
                         .values()
                         .any(|layer| (layer.texture.width(), layer.texture.height()) == held)
             });
+            // Copied into in parts and read straight after: uncompressed on
+            // Apple GPUs, where a read could miss part of the copy.
+            #[cfg(target_os = "macos")]
+            let texture = {
+                let texture =
+                    upload::uncompressed_texture(&self.device, size.0, size.1, "blend backdrop");
+                written(
+                    &self.device,
+                    &self.queue,
+                    &texture.create_view(&Default::default()),
+                );
+                texture
+            };
+            #[cfg(not(target_os = "macos"))]
             let texture = texture(&self.device, size.0, size.1, "blend backdrop");
             let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("blend backdrop"),
