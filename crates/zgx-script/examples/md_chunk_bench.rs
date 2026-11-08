@@ -1,9 +1,9 @@
 //! One chunk of a streamed Markdown reply, once the reply has grown to
 //! `SECTIONS` sections (100 by default): the reply set whole, a section
-//! streamed uncounted, then `CHUNKS` chunks (9) appended in `measured`, the
-//! function `scripts/perf/flat_chunks.py` counts (callgrind's
-//! `--toggle-collect`). A chunk should cost the same at 800 sections as at
-//! 100 (`tests/md_chunk_flat.rs` splits it by phase).
+//! streamed, then `CHUNKS` chunks (9) appended. `scripts/perf/flat_chunks.py`
+//! counts it whole with 9 chunks and with 27, a chunk the difference over
+//! 18. A chunk should cost the same at 800 sections as at 100
+//! (`tests/md_chunk_flat.rs` splits it by phase).
 //! Run: cargo run -p zgx-script --release --example md_chunk_bench
 #[path = "support/bench_limits.rs"]
 mod bench_limits;

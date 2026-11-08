@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Whether one chunk of a streamed Markdown reply costs the same however
-long the reply has grown: `md_chunk_bench`'s counted chunks (its `measured`,
-callgrind's `--toggle-collect`) at 100, 200, 400 and 800 sections, per
-chunk. Exits 1 when a chunk at the longest reply costs more than FLAT times
+long the reply has grown: `md_chunk_bench` counted whole under callgrind at
+100, 200, 400 and 800 sections, once with 9 chunks and once with 27, a
+chunk's cost the difference over 18 (what fills the reply and tears the
+window down is in both, so it drops out; `--toggle-collect` on the chunks'
+function went on counting the teardown). Exits 1 when a chunk at the longest reply costs more than FLAT times
 one at the shortest (`--report` only prints). Linux, with valgrind (CI's
 `perf` job); `tests/md_chunk_flat.rs` splits a chunk by phase.
 
@@ -17,7 +19,7 @@ import sys
 import tempfile
 
 SIZES = [100, 200, 400, 800]
-CHUNKS = 9
+CHUNKS = (9, 27)
 FLAT = 1.25
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -29,18 +31,22 @@ def build(target):
     return target / 'release' / 'examples' / 'md_chunk_bench'
 
 
-def per_chunk(binary, sections, scratch):
-    out = scratch / f'md-chunk-{sections}.out'
-    env = {**os.environ, 'SECTIONS': str(sections), 'CHUNKS': str(CHUNKS), 'ZGX_GATE': '1', 'ZGX_ASSISTIVE': '0'}
-    command = ['valgrind', '--tool=callgrind', '--collect-atstart=no', '--toggle-collect=*md_chunk_bench*measured*',
-               f'--callgrind-out-file={out}', str(binary)]
+def total(binary, sections, chunks, scratch):
+    out = scratch / f'md-chunk-{sections}-{chunks}.out'
+    env = {**os.environ, 'SECTIONS': str(sections), 'CHUNKS': str(chunks), 'ZGX_GATE': '1', 'ZGX_ASSISTIVE': '0'}
+    command = ['valgrind', '--tool=callgrind', f'--callgrind-out-file={out}', str(binary)]
     if subprocess.run(['which', 'setarch'], capture_output=True).returncode == 0:
         command = ['setarch', '-R', *command]
     subprocess.run(command, env=env, check=True, capture_output=True)
     for line in out.read_text().splitlines():
         if line.startswith('totals:') or line.startswith('summary:'):
-            return int(line.split()[1]) // CHUNKS
+            return int(line.split()[1])
     raise SystemExit(f'no totals in {out}')
+
+
+def per_chunk(binary, sections, scratch):
+    few, many = CHUNKS
+    return (total(binary, sections, many, scratch) - total(binary, sections, few, scratch)) // (many - few)
 
 
 def main():
