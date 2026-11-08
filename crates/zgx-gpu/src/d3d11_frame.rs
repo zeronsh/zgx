@@ -88,6 +88,24 @@ fn failed(what: &str) -> impl Fn(windows::core::Error) -> GpuError + '_ {
     move |error| GpuError(format!("Direct3D 11 {what}: {error}"))
 }
 
+/// What frames left out that Direct3D 11 doesn't draw
+/// (`GpuRenderer::d3d11_leave_out`), each kind once.
+static LEFT_OUT: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+
+/// A frame left out `what`: said once a process, on stderr.
+pub(crate) fn left_out(what: &'static str) {
+    let mut said = LEFT_OUT.lock().unwrap_or_else(|p| p.into_inner());
+    if !said.contains(&what) {
+        said.push(what);
+        eprintln!("zgx: ZGX_D3D11 draws no {what}: left out of the frame");
+    }
+}
+
+/// What frames have left out so far (tests).
+pub(crate) fn left_out_so_far() -> Vec<&'static str> {
+    LEFT_OUT.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
 /// What a draw binds: shaders, their input layout and blending.
 #[derive(Clone, Copy, PartialEq)]
 enum Bound {
