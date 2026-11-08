@@ -141,6 +141,9 @@ SCENES = [
     ('spans-follow', 'zgx-script', 'span_bench', {'SCENE': 'spans-follow', 'N': '10', 'REPS': '80'}),
     ('spans-md', 'zgx-script', 'span_bench', {'SCENE': 'spans-md', 'N': '10', 'REPS': '14'}),
     ('list-state', 'zgx-script', 'list_state_bench', {}),
+    # A 400-section Markdown reply streaming in a chunk at a time, parsed
+    # by a keyed `ui.markdown` in a computed and drawn by `ui.each`.
+    ('md-stream', 'zgx-script', 'md_stream_bench', {}),
     ('style', 'zgx', 'style_bench', {}),
     # 3D frames' CPU work, drawn by wgpu's no-op backend (no driver, no JIT):
     # textured meshes alone, what a feature costs those not using it, then
