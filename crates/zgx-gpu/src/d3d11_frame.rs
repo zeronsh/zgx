@@ -104,10 +104,64 @@ enum Bound {
 
 /// What an app's shader draws as: a shader fill (`Shading::Fill`) or a
 /// layer's composite through a layer shader (`Shading::Filter`).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum AppShader {
     Fill,
     Filter,
+}
+impl AppShader {
+    fn what(self) -> &'static str {
+        match self {
+            Self::Fill => "shader fill",
+            Self::Filter => "layer shader",
+        }
+    }
+}
+
+/// An app's shader's pixel stage: its DXBC compiling or compiled (`None`:
+/// it did not compile), and the shader made from it once ready (`None`
+/// until then; `Some(None)`: Direct3D made none).
+struct AppEntry {
+    compiled: crate::compile::Compiled<Vec<u8>>,
+    pixel: Option<Option<ID3D11PixelShader>>,
+    /// zgx's own colour filter: frames wait for it, as wgpu's do
+    /// (`GpuRenderer::prepare_filter`), as it's what the view looks like.
+    /// (Its shader is a thread's, so known by its source, once.)
+    waits: bool,
+}
+impl AppEntry {
+    fn start(shader: &zgx::decoration::FillShader, kind: AppShader) -> Self {
+        Self {
+            compiled: start_app_shader(shader, kind),
+            pixel: None,
+            waits: shader.source() == zgx::decoration::color_filter_shader().source(),
+        }
+    }
+}
+
+/// Start compiling `shader`'s pixel stage as `kind` on the compile thread.
+fn start_app_shader(
+    shader: &zgx::decoration::FillShader,
+    kind: AppShader,
+) -> crate::compile::Compiled<Vec<u8>> {
+    let (source, entry) = match kind {
+        AppShader::Fill => (crate::fill_source(shader.source()), "zgx_fill"),
+        AppShader::Filter => (crate::filter_source(shader.source()), "zgx_filter"),
+    };
+    let id = shader.id();
+    crate::compile::Compiled::Pending(crate::compile::spawn(move || {
+        if !crate::fill_validates(&source) {
+            return None;
+        }
+        fragment(&source, entry)
+            .map_err(|error| {
+                eprintln!(
+                    "zgx: {} {id} doesn't compile for Direct3D 11: {error}",
+                    kind.what()
+                )
+            })
+            .ok()
+    }))
 }
 
 struct Pipeline {
@@ -153,11 +207,8 @@ pub(crate) struct Device {
     /// The query `wait_idle` ends and waits for.
     idle: ID3D11Query,
     /// App shaders' pixel stages (shader fills', layer shaders') by shader
-    /// id: their DXBC compiling or compiled (`start_app_shader`; `None`: it
-    /// did not compile), and the shader made from it once a frame first
-    /// binds it.
-    app_shaders: std::cell::RefCell<rustc_hash::FxHashMap<u64, crate::compile::Compiled<Vec<u8>>>>,
-    pixel_shaders: std::cell::RefCell<rustc_hash::FxHashMap<u64, Option<ID3D11PixelShader>>>,
+    /// id and kind (one shader may be both, compiled from two modules).
+    app_shaders: std::cell::RefCell<rustc_hash::FxHashMap<(u64, AppShader), AppEntry>>,
 }
 
 /// A `Device` made on another thread (`GpuContext::prepare`), handed over.
@@ -325,14 +376,13 @@ impl Device {
             no_regions,
             idle,
             app_shaders: Default::default(),
-            pixel_shaders: Default::default(),
         })
     }
 
-    /// Whether app shader `shader` can be drawn here as `kind`: its pixel
-    /// shader, compiled from the same module as Direct3D 12's
-    /// (`crate::fill_source`, `crate::filter_source`), started compiling if
-    /// new. `None` while it compiles, unless it `wait`s for it (offscreen):
+    /// Whether app shader `shader` can be drawn here as `kind` (one lookup
+    /// a draw): its pixel shader, compiled from the same module as Direct3D
+    /// 12's (`crate::fill_source`, `crate::filter_source`), started
+    /// compiling if new. `None` while it compiles, unless it `wait`s for it (offscreen):
     /// the frame draws without it then, as wgpu's does
     /// (`GpuRenderer::prepare_fill`), and draws again once it is.
     pub(crate) fn app_shader(
@@ -341,72 +391,44 @@ impl Device {
         kind: AppShader,
         wait: bool,
     ) -> Option<bool> {
-        self.start_app_shader(shader, kind);
-        let ready = self
-            .app_shaders
-            .borrow_mut()
-            .get_mut(&shader.id())
-            .expect("started")
-            .ready(wait)?;
-        Some(ready && self.pixel_shader(shader.id()).is_some())
+        let mut shaders = self.app_shaders.borrow_mut();
+        let entry = shaders
+            .entry((shader.id(), kind))
+            .or_insert_with(|| AppEntry::start(shader, kind));
+        if !entry.compiled.ready(wait || entry.waits)? {
+            return Some(false);
+        }
+        if entry.pixel.is_none() {
+            let code = entry.compiled.get().expect("ready");
+            let mut pixel = None;
+            // SAFETY: DXBC FXC compiled for shader model 5.0 from the HLSL
+            // `translate` writes with the quads' registers.
+            let made = unsafe { self.device.CreatePixelShader(code, None, Some(&mut pixel)) };
+            if let Err(error) = made {
+                eprintln!(
+                    "zgx: Direct3D 11 made no pixel shader for {} {}: {error}",
+                    kind.what(),
+                    shader.id()
+                );
+            }
+            entry.pixel = Some(pixel);
+        }
+        Some(entry.pixel.as_ref().is_some_and(Option::is_some))
     }
 
     /// Start compiling `shader`'s pixel stage as `kind` off the frame
     /// (`crate::compile`), if not yet.
     pub(crate) fn start_app_shader(&self, shader: &zgx::decoration::FillShader, kind: AppShader) {
-        if self.app_shaders.borrow().contains_key(&shader.id()) {
-            return;
-        }
-        let (source, entry, what) = match kind {
-            AppShader::Fill => (
-                crate::fill_source(shader.source()),
-                "zgx_fill",
-                "shader fill",
-            ),
-            AppShader::Filter => (
-                crate::filter_source(shader.source()),
-                "zgx_filter",
-                "layer shader",
-            ),
-        };
-        let slot = crate::compile::spawn(move || {
-            if !crate::fill_validates(&source) {
-                return None;
-            }
-            fragment(&source, entry)
-                .map_err(|error| {
-                    eprintln!("zgx: a {what} doesn't compile for Direct3D 11: {error}")
-                })
-                .ok()
-        });
         self.app_shaders
             .borrow_mut()
-            .insert(shader.id(), crate::compile::Compiled::Pending(slot));
-    }
-
-    /// App shader `id`'s pixel shader, made from its DXBC the first time.
-    fn pixel_shader(&self, id: u64) -> Option<ID3D11PixelShader> {
-        if let Some(shader) = self.pixel_shaders.borrow().get(&id) {
-            return shader.clone();
-        }
-        let compiled = self.app_shaders.borrow();
-        let code = compiled.get(&id)?.get()?;
-        let mut shader = None;
-        // SAFETY: DXBC FXC compiled for shader model 5.0 from the HLSL
-        // `translate` writes with the quads' registers.
-        let made = unsafe { self.device.CreatePixelShader(code, None, Some(&mut shader)) };
-        if let Err(error) = made {
-            eprintln!("zgx: Direct3D 11 made no pixel shader for an app's shader: {error}");
-        }
-        self.pixel_shaders.borrow_mut().insert(id, shader.clone());
-        shader
+            .entry((shader.id(), kind))
+            .or_insert_with(|| AppEntry::start(shader, kind));
     }
 
     /// Keep only the app shaders `keep` names
     /// (`GpuRenderer::drop_unheld_shaders`).
     pub(crate) fn retain_app_shaders(&self, keep: impl Fn(u64) -> bool) {
-        self.app_shaders.borrow_mut().retain(|id, _| keep(*id));
-        self.pixel_shaders.borrow_mut().retain(|id, _| keep(*id));
+        self.app_shaders.borrow_mut().retain(|(id, _), _| keep(*id));
     }
 
     /// Wait until the GPU has run everything given it so far.
@@ -1254,16 +1276,28 @@ impl Frame<'_> {
         // own pixel stage, the full pipeline's vertex stage, layout and
         // blending (as wgpu's `fill_pipeline` builds both). Compiled, or its
         // draw would be `Full` (`GpuRenderer::d3d11_app_shaders`).
-        if let (Shading::Fill(id) | Shading::Filter(id), false) = (shading, clear)
-            && let Some(pixel) = self.device.pixel_shader(id)
-        {
-            self.bind(Bound::Full);
-            self.current = None;
-            // SAFETY: A pixel stage reading what the full vertex stage writes
-            // (the same `Out`, from draw.wgsl), in the registers it binds.
-            unsafe { self.device.context.PSSetShader(&pixel, None) };
-            self.draw(instances);
-            return;
+        let app = match (shading, clear) {
+            (Shading::Fill(id), false) => Some((id, AppShader::Fill)),
+            (Shading::Filter(id), false) => Some((id, AppShader::Filter)),
+            _ => None,
+        };
+        if let Some(key) = app {
+            let device = self.device;
+            let shaders = device.app_shaders.borrow();
+            if let Some(pixel) = shaders
+                .get(&key)
+                .and_then(|entry| entry.pixel.as_ref()?.as_ref())
+            {
+                self.bind(Bound::Full);
+                self.current = None;
+                // SAFETY: A pixel stage reading what the full vertex stage
+                // writes (the same `Out`, from draw.wgsl), in the registers it
+                // binds.
+                unsafe { device.context.PSSetShader(pixel, None) };
+                drop(shaders);
+                self.draw(instances);
+                return;
+            }
         }
         let bound = match (shading, clear) {
             (Shading::Basic | Shading::Opaque, true) => Bound::Opaque,

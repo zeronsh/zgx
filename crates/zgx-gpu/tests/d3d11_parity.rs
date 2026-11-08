@@ -312,10 +312,13 @@ fn fill_frames(scale: f32) -> Vec<Vec<u8>> {
         .filter(|(_, fx)| fx.kind() == zgx_fx::FxKind::Fill)
         .collect();
     assert!(fills.len() >= 20, "{} fills", fills.len());
+    // And a radial gradient's: zgx's own fill, compiled as an app's on
+    // Direct3D 11 (in the process, as a built-in, on Direct3D 12).
+    let names = fill_names();
     let (cell, columns) = (FILL_CELL, FILL_COLUMNS);
     let size = (
         cell.0 * columns as f32,
-        cell.1 * fills.len().div_ceil(columns) as f32,
+        cell.1 * names.len().div_ceil(columns) as f32,
     );
     let mut gpu = GpuRenderer::new((size.0 * scale) as u32, (size.1 * scale) as u32).unwrap();
     gpu.set_scale_factor(scale);
@@ -326,12 +329,17 @@ fn fill_frames(scale: f32) -> Vec<Vec<u8>> {
             let mut scene = Scene::new(size.0, size.1);
             let root = scene.root();
             scene.set_kind(root, NodeKind::Container(Layout::Overlay));
-            for (index, (_, fx)) in fills.iter().enumerate() {
+            let radial = zgx::decoration::radial_shader();
+            let shaders = fills
+                .iter()
+                .map(|(_, fx)| (fx.shader(), Some(fx)))
+                .chain([(radial, None)]);
+            for (index, (shader, fx)) in shaders.enumerate() {
                 let quad = QuadStyle {
                     radius: 8.,
                     fill: Color(0, 0, 0, 255),
                     decoration: Some(std::sync::Arc::new(zgx::decoration::Decoration {
-                        background: Some(zgx::decoration::Background::Shader(fx.shader())),
+                        background: Some(zgx::decoration::Background::Shader(shader)),
                         ..Default::default()
                     })),
                     ..Default::default()
@@ -355,7 +363,27 @@ fn fill_frames(scale: f32) -> Vec<Vec<u8>> {
                         y: (index / columns) as f32 * cell.1 + 3.,
                     },
                 );
-                fx.apply(&mut scene, id, time, false, now);
+                match fx {
+                    Some(fx) => fx.apply(&mut scene, id, time, false, now),
+                    None => scene.set_shader_uniforms(
+                        id,
+                        zgx::decoration::radial_uniforms(
+                            (0.3, 0.4),
+                            0.9,
+                            [
+                                zgx::canvas::GradientStop {
+                                    offset: 0.,
+                                    color: Color(255, 200, 80, 255),
+                                },
+                                zgx::canvas::GradientStop {
+                                    offset: 1.,
+                                    color: Color(40, 90, 220, 255),
+                                },
+                            ]
+                            .into(),
+                        ),
+                    ),
+                }
             }
             let report = scene.flush();
             gpu.render(&scene, &report.damage).unwrap();
@@ -363,7 +391,7 @@ fn fill_frames(scale: f32) -> Vec<Vec<u8>> {
             // Each box shows its fill, not the black under it (a fill that
             // failed to compile here and in Direct3D 12 alike would match).
             let width = (size.0 * scale) as usize;
-            for (index, (name, _)) in fills.iter().enumerate() {
+            for (index, name) in names.iter().enumerate() {
                 let (x0, y0) = (
                     ((index % columns) as f32 * cell.0 + 8.) * scale,
                     ((index / columns) as f32 * cell.1 + 8.) * scale,
@@ -452,6 +480,19 @@ fn layer_frames(scale: f32) -> Vec<Vec<u8>> {
                     quad: QuadStyle {
                         radius: 6.,
                         fill: Color(20, 24, 32, 200),
+                        // The colour filter's box takes its shader as its
+                        // fill too: one shader of both kinds, which Direct3D
+                        // 11 compiles from two modules. As a fill it doesn't
+                        // validate (no `fill`) and the box draws its colour;
+                        // as the layer's shader it must still draw.
+                        decoration: fx.is_none().then(|| {
+                            std::sync::Arc::new(zgx::decoration::Decoration {
+                                background: Some(zgx::decoration::Background::Shader(
+                                    color_filter_shader(),
+                                )),
+                                ..Default::default()
+                            })
+                        }),
                         ..Default::default()
                     },
                 },
@@ -671,11 +712,13 @@ const LAYER_CELL: (f32, f32) = (96., 72.);
 const LAYER_COLUMNS: usize = 6;
 #[cfg(windows)]
 fn fill_names() -> Vec<String> {
-    zgx_fx::catalog()
+    let mut names: Vec<String> = zgx_fx::catalog()
         .into_iter()
         .filter(|(_, fx)| fx.kind() == zgx_fx::FxKind::Fill)
         .map(|(name, _)| name)
-        .collect()
+        .collect();
+    names.push("radial".into());
+    names
 }
 #[cfg(windows)]
 fn layer_names() -> Vec<String> {
