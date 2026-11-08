@@ -1176,7 +1176,7 @@ static RENDER_WHEN_COVERED: std::sync::LazyLock<bool> = std::sync::LazyLock::new
 const TRIM_DELAY: std::time::Duration = std::time::Duration::from_millis(1500);
 /// A window idle this long past that gives back a glyph atlas it grew: what
 /// it costs is a slow first frame, for someone who has been away a while.
-const ATLAS_TRIM_DELAY: std::time::Duration = std::time::Duration::from_secs(6);
+const ATLAS_TRIM_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 /// A window's frame is saved this long after it last moved or resized
 /// (`frame_autosave`, Linux): once for a drag, not for each of its steps.
 #[cfg(target_os = "linux")]
