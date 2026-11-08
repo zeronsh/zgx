@@ -306,10 +306,12 @@ impl<T: 'static> EventLoop<T> {
             UIApplicationMain(
                 *_NSGetArgc(),
                 NonNull::new(*_NSGetArgv()).unwrap(),
-                // We intentionally override neither the application nor the delegate, to allow the
-                // user to do so themselves!
+                // zgx: its delegate, where the system says what to open
+                // (`zgx_desktop`'s `native_events`), when it has registered it.
                 None,
-                None,
+                objc2::runtime::AnyClass::get("ZgxAppDelegate")
+                    .map(|_| objc2_foundation::NSString::from_str("ZgxAppDelegate"))
+                    .as_deref(),
             )
         };
         unreachable!()

@@ -101,7 +101,7 @@ fn platform_families(fonts: &mut FontSystem) {
     // shaped anew (a terminal's every line), to settle on Menlo for Latin
     // text. Menlo, on every Mac, is now the family's face; characters it
     // lacks fall back to other faces as on Windows and Linux.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         let db = fonts.db_mut();
         if db
@@ -111,12 +111,24 @@ fn platform_families(fonts: &mut FontSystem) {
             db.set_monospace_family("Menlo");
         }
     }
+    // iOS's interface face, what UIKit's system font draws in.
+    #[cfg(target_os = "ios")]
+    {
+        let db = fonts.db_mut();
+        if db.faces().any(|face| {
+            face.families
+                .iter()
+                .any(|(family, _)| family == "System Font")
+        }) {
+            db.set_sans_serif_family("System Font");
+        }
+    }
     // cosmic-text's monospace is Noto Sans Mono, which few Linux systems
     // install: monospaced text then took any fixed-width face, and on one
     // with DejaVu that was DejaVu Sans Mono Oblique, slanting every code
     // block. A family with an upright face is taken instead, a common one
     // first.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
     {
         let db = fonts.db_mut();
         let upright = |name: &str| {
@@ -300,7 +312,7 @@ fn stale(files: &[(PathBuf, (u64, u64))]) -> bool {
 }
 
 fn cache_file() -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", target_os = "ios")) {
         Some(
             PathBuf::from(std::env::var_os("HOME")?)
                 .join("Library/Caches/zgx")
@@ -349,6 +361,11 @@ fn font_roots() -> (Vec<PathBuf>, Vec<PathBuf>) {
         if let Some(home) = std::env::var_os("HOME") {
             roots.push(Path::new(&home).join("Library/Fonts"));
         }
+    } else if cfg!(target_os = "ios") {
+        // A simulator's are under its runtime's root (zgx-cosmic-text's
+        // `load_ios_fonts`).
+        let root = std::env::var_os("IPHONE_SIMULATOR_ROOT").unwrap_or_default();
+        roots.push(Path::new(&root).join("System/Library/Fonts"));
     } else if cfg!(windows) {
         let system = std::env::var_os("SYSTEMROOT").map_or("C:\\Windows".into(), PathBuf::from);
         roots.push(system.join("Fonts"));
@@ -358,7 +375,10 @@ fn font_roots() -> (Vec<PathBuf>, Vec<PathBuf>) {
             roots.push(home.join("AppData\\Roaming\\Microsoft\\Windows\\Fonts"));
         }
     }
-    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
     {
         let var = |name| std::env::var(name).ok();
         fontconfig_roots(
@@ -377,7 +397,10 @@ fn font_roots() -> (Vec<PathBuf>, Vec<PathBuf>) {
 /// none), and as parents every configuration file read, the directories
 /// holding them (a file added to `conf.d`) and the files it would have read
 /// had they existed.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+))]
 fn fontconfig_roots(
     fontconfig_file: Option<String>,
     xdg_config_home: Option<String>,
@@ -755,7 +778,10 @@ mod tests {
     /// parents the files read (an included one too), the directories holding
     /// them and the file named whether it exists or not; none named, fontdb's.
     /// (fontconfig-parser expands a `~` itself, from the process's HOME.)
-    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
     #[test]
     fn the_cache_watches_what_fontconfig_read() {
         let dir = std::env::temp_dir().join(format!("zgx-fontconfig-{}", std::process::id()));

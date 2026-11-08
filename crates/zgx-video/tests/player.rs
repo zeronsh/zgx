@@ -128,3 +128,72 @@ fn a_script_plays_a_player_its_host_exposes() {
         .count();
     assert!((23..=27).contains(&red), "{red} red pixels");
 }
+
+#[test]
+fn a_stopped_player_tells_its_script_it_stopped() {
+    // Stopping sends no frame: the script hears it all the same.
+    let dir = temp_dir("player-stop");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let mut held = None;
+    let path = dir.to_path_buf();
+    let mut stage = Stage::new(
+        StageOptions {
+            width: 100.,
+            height: 50.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            let host = zgx_script::ScriptHost::inline(
+                setting.runtime,
+                "app",
+                r##"
+                local cmd = ui.shared("cmd", "")
+                ui.on_mount(function()
+                    ui.call("clip.listen", nil)
+                    ui.invoke("clip.open", { id = "Bar", props = {}, frame = 0 })
+                end)
+                ui.effect(function()
+                    local c = cmd:get()
+                    if c ~= "" then ui.invoke("clip.play", c == "play") end
+                end)
+                return ui.column { w = 100, h = 50 }
+                "##,
+            );
+            host.lint_strip(false);
+            player.expose(&host, "clip");
+            host.reload()?;
+            let view = host.view();
+            held = Some((player, host));
+            Ok(view)
+        },
+    )
+    .unwrap();
+    let (_player, host) = held.unwrap();
+    let state = host.shared("clip", zgx_script::Value::Nil);
+    let read = |key: &str| {
+        serde_json::from_str::<serde_json::Value>(&state.with_untracked(|v| v.to_json())).unwrap()
+            [key]
+            .clone()
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while read("frame") != json!(0) {
+        stage.step().unwrap();
+        assert!(Instant::now() < deadline, "no frame came");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let cmd = host.shared("cmd", zgx_script::Value::Nil);
+    cmd.set(zgx_script::Value::from_json("\"play\"").unwrap());
+    stage.step().unwrap();
+    assert_eq!(read("playing"), json!(true));
+    cmd.set(zgx_script::Value::from_json("\"stop\"").unwrap());
+    stage.step().unwrap();
+    assert_eq!(
+        read("playing"),
+        json!(false),
+        "told it stopped, with no frame to tell it by"
+    );
+}

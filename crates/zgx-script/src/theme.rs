@@ -427,10 +427,12 @@ pub(crate) fn install(
     let runtime = env(lua)?.runtime.clone();
     let shared = Themes::of(&runtime);
     type Setting = fn(zgx::theme::SystemPreferences) -> bool;
-    let settings: [(&str, Setting); 3] = [
+    let settings: [(&str, Setting); 5] = [
         ("reduced_motion", |p| p.reduced_motion),
         ("more_contrast", |p| p.increased_contrast),
         ("reduced_transparency", |p| p.reduced_transparency),
+        ("without_color", |p| p.differentiate_without_color),
+        ("inverted_colors", |p| p.inverted_colors),
     ];
     for (name, read) in settings {
         let initial = runtime.untracked(|| read(shared.system_preferences()));

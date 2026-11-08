@@ -70,6 +70,7 @@ pub mod markdown;
 mod meter;
 mod modifiers;
 mod motion;
+mod native;
 mod node;
 mod opens;
 mod paged;
@@ -98,6 +99,16 @@ mod windows;
 
 pub use bundle::{Bundle, BundleFile, build};
 pub use calls::{Body, Request, Response};
+/// `ui.window.safe_area`'s value, keys sorted as a `Value::Map`'s are.
+fn safe_area_value(insets: [f32; 4]) -> Value {
+    let n = |v: f32| Value::Num(f64::from(v));
+    Value::Map(Rc::from([
+        (Rc::from("bottom"), n(insets[2])),
+        (Rc::from("left"), n(insets[3])),
+        (Rc::from("right"), n(insets[1])),
+        (Rc::from("top"), n(insets[0])),
+    ]))
+}
 pub use command::{Command, DroppedShortcut};
 pub use design::DesignLint;
 pub use fetch_policy::{FetchPolicy, Url};
@@ -1631,6 +1642,7 @@ struct Inner {
     /// Keeps `ui.window.titlebar_area` and `controls` as the window's
     /// (`window_chrome`).
     chrome: RefCell<Option<zgx::reactive::Effect>>,
+    safe_area: RefCell<Option<zgx::reactive::Effect>>,
     window_size: RefCell<Option<zgx::reactive::Effect>>,
     /// `ui.window.full_screen` and `full_screen_transition` kept as the
     /// window says (`ScriptHost::window_full_screen`).
@@ -1837,6 +1849,7 @@ impl ScriptHost {
             locales: Rc::default(),
             shared: Rc::new(Store::new(runtime)),
             chrome: RefCell::default(),
+            safe_area: RefCell::default(),
             window_size: RefCell::default(),
             full_screen: RefCell::default(),
             zoom: RefCell::default(),
@@ -2553,6 +2566,28 @@ impl ScriptHost {
             buttons.set(rect(controls.get()));
         });
         *self.0.chrome.borrow_mut() = Some(effect);
+    }
+    /// Keep `ui.window.safe_area` as the window has it: pass its
+    /// `WindowInfo::safe_area` (top, right, bottom, left in points), shown as
+    /// `{ top, right, bottom, left }`.
+    pub fn window_safe_area(
+        &self,
+        safe_area: Signal<[f32; 4]>,
+        keyboard: Signal<f32>,
+        overscroll: Signal<f32>,
+    ) {
+        let covered = self.0.shared.state(windows::KEYBOARD, Value::Num(0.));
+        let stretched = self.0.shared.state(windows::OVERSCROLL, Value::Num(0.));
+        let state = self
+            .0
+            .shared
+            .state(windows::SAFE_AREA, safe_area_value([0.; 4]));
+        let effect = self.0.runtime.effect_now(move || {
+            state.set(safe_area_value(safe_area.get()));
+            covered.set(Value::Num(f64::from(keyboard.get())));
+            stretched.set(Value::Num(f64::from(overscroll.get())));
+        });
+        self.0.safe_area.replace(Some(effect));
     }
     /// Publish whether `ui`'s window is the active one and whether it
     /// shows (`Ui::observe_window_active`, `Ui::observe_shown`), as
@@ -4183,8 +4218,9 @@ impl ScriptHost {
         let ui: mlua::Table = lua.globals().get("ui").map_err(fail)?;
         // Each module made the first time a script names it (`lazy`).
         let lazy = lazy::Lazy::default();
+        native::install_glass(&lazy);
+        lazy.ui(&["ios", "scroll_edge", "keyboard_bar"], native::install_kit);
         lazy.ui(&["path", "linear"], canvas::install);
-        lazy.ui(&["glass"], node::install_glass);
         #[cfg(feature = "scene3d")]
         lazy.ui(
             &["scene3d", "mesh", "light", "group", "model"],

@@ -1538,6 +1538,7 @@ mod baked {
                 reduced_motion: true,
                 increased_contrast: false,
                 reduced_transparency: false,
+                ..Default::default()
             });
         h.run_ms(50.);
         assert!(h.baked().is_none());
@@ -1677,75 +1678,83 @@ fn a_tween_on_a_node_runs_none_of_its_functions_as_it_moves() {
     assert_eq!(width(&mut h), 200.);
 }
 
-/// A box bound to a spring of a keyboard's stiffness, from 0 to 100 on "go".
-fn keyboard_spring() -> Harness {
+/// `x` as it goes to `to` on a click of `go`, sampled every 17 ms for `samples`.
+fn spring_path(options: &str, samples: usize) -> Vec<f32> {
+    let mut h = Harness::inline(&format!(
+        r##"local at = ui.state("at", 0)
+        return ui.column {{
+            ui.div {{ id = "box", w = 20, h = 20, x = ui.spring(at, {options}) }},
+            ui.button {{ "Go", id = "go", on_click = function() at:set(100) end }},
+        }}"##
+    ));
+    h.frames(2);
+    h.click("go");
+    (0..samples)
+        .map(|_| {
+            h.run_ms(17.);
+            h.x("box")
+        })
+        .collect()
+}
+
+#[test]
+fn a_springs_bounce_decides_whether_it_overshoots() {
+    let still = spring_path("{ response = 300, bounce = 0 }", 120);
+    let top = still.iter().copied().fold(f32::MIN, f32::max);
+    assert!(top <= 100.01, "no bounce, no overshoot: {top}");
+    assert_eq!(*still.last().unwrap(), 100.);
+    let lively = spring_path("{ response = 300, bounce = 0.3 }", 120);
+    let top = lively.iter().copied().fold(f32::MIN, f32::max);
+    assert!((101. ..125.).contains(&top), "a little past: {top}");
+    assert_eq!(*lively.last().unwrap(), 100., "and it settles");
+}
+
+#[test]
+fn a_spring_named_is_the_same_spring_and_a_shorter_response_is_quicker() {
+    let named = spring_path("ui.springs.snappy", 40);
+    let said = spring_path("{ response = 350, bounce = 0.15 }", 40);
+    for (named, said) in named.iter().zip(&said) {
+        assert!((named - said).abs() < 1., "{named} {said}");
+    }
+    let slow = spring_path("{ response = 600 }", 10);
+    let quick = spring_path("{ response = 150 }", 10);
+    assert!(quick[9] > slow[9] * 1.5, "{} {}", quick[9], slow[9]);
+}
+
+#[test]
+fn a_spring_takes_the_side_it_goes_toward_and_waits_its_delay() {
+    let up = spring_path("{ response = 600, up = { response = 150 } }", 10);
+    let down = spring_path("{ response = 600, down = { response = 150 } }", 10);
+    assert!(up[9] > down[9] * 1.5, "{} {}", up[9], down[9]);
+    let held = spring_path("{ response = 150, delay = 60 }", 20);
+    assert!(held[1] == 0., "not yet: {}", held[1]);
+    assert!(held[19] > 10., "then it goes: {}", held[19]);
+}
+
+#[test]
+fn a_spring_turned_back_midway_carries_its_speed() {
     let mut h = Harness::inline(
-        r##"local open = ui.state("open", false)
+        r##"local at = ui.state("at", 0)
         return ui.column {
-            ui.div { id = "box", w = 20, h = 20, x = ui.spring(open, { from = 0, to = 100, stiffness = 555.0265, damping = 47.118 }) },
-            ui.button { "Go", id = "go", on_click = function() open:set(true) end },
+            ui.div { id = "box", w = 20, h = 20, x = ui.spring(at, { response = 400 }) },
+            ui.button { "Go", id = "go", on_click = function() at:set(100) end },
+            ui.button { "Back", id = "back", on_click = function() at:set(0) end },
         }"##,
     );
     h.frames(2);
     h.click("go");
-    h
-}
-
-#[test]
-fn a_bound_spring_keeps_time_when_the_display_says_a_shorter_interval() {
-    // iOS can report a refresh shorter than the time between its frames: a spring
-    // stepping by that interval ran a third as fast as the keyboard it followed.
-    let mut h = keyboard_spring();
-    h.report_interval(std::time::Duration::from_secs_f64(1. / 240.));
-    // 190 ms on: a critically damped spring of this stiffness has some 6% left.
-    h.frames(12);
-    let x = h.x("box");
-    assert!(x > 85., "only at {x} after 190 ms");
-}
-
-#[test]
-fn a_late_frame_doesnt_slow_a_bound_spring() {
-    let mut steady = keyboard_spring();
-    steady.frames(12);
-    let mut late = keyboard_spring();
-    late.frames(4);
-    late.skip_frames(3);
-    late.frames(5);
-    let (a, b) = (steady.x("box"), late.x("box"));
-    assert!((a - b).abs() < 3., "{b} with a late frame, {a} without");
-}
-
-#[test]
-fn a_slow_display_keeps_a_bound_springs_time() {
-    // 20 Hz: a frame every 50 ms, longer than a step may be.
-    let mut steady = keyboard_spring();
-    steady.frames(12);
-    let mut slow = keyboard_spring();
-    slow.report_interval(std::time::Duration::from_millis(50));
-    for _ in 0..4 {
-        slow.skip_frames(2);
-        slow.frames(1);
-    }
-    let (a, b) = (steady.x("box"), slow.x("box"));
-    assert!((a - b).abs() < 3., "{b} at 20 Hz, {a} at 60 Hz");
-}
-
-#[test]
-fn a_window_back_after_a_while_takes_no_huge_step() {
-    // Hidden two seconds mid-way, its next frame steps at most a thirtieth of a
-    // second, and it goes on to land.
-    let mut h = keyboard_spring();
-    h.frames(3);
+    h.run_ms(100.);
+    let at = h.x("box");
+    h.run_ms(17.);
+    let moved = h.x("box") - at;
+    assert!(moved > 0.);
+    h.click("back");
     let before = h.x("box");
-    h.skip_frames(120);
-    h.frames(1);
-    let after = h.x("box");
-    assert!(
-        after.is_finite() && after >= before && after <= 101.,
-        "{before} then {after}"
-    );
-    h.frames(60);
-    assert!((h.x("box") - 100.).abs() < 0.5);
+    h.run_ms(17.);
+    // A spring that forgot its speed would start back at once, at a rate its pull
+    // alone gives; this one is still carrying what it had.
+    let turned = h.x("box") - before;
+    assert!(turned.abs() < moved, "no jump: {moved} then {turned}");
 }
 
 /// What a state does run to 100 from 0, sampled each frame, and how long it went on.
@@ -1879,4 +1888,75 @@ fn a_state_given_a_speed_starts_with_it_and_stopping_says_it() {
     let at = h.x("box");
     h.run_ms(100.);
     assert_eq!(h.x("box"), at, "and it stays where it was stopped");
+}
+
+/// A box bound to a spring of a keyboard's stiffness, from 0 to 100 on "go".
+fn keyboard_spring() -> Harness {
+    let mut h = Harness::inline(
+        r##"local open = ui.state("open", false)
+        return ui.column {
+            ui.div { id = "box", w = 20, h = 20, x = ui.spring(open, { from = 0, to = 100, stiffness = 555.0265, damping = 47.118 }) },
+            ui.button { "Go", id = "go", on_click = function() open:set(true) end },
+        }"##,
+    );
+    h.frames(2);
+    h.click("go");
+    h
+}
+
+#[test]
+fn a_bound_spring_keeps_time_when_the_display_says_a_shorter_interval() {
+    // iOS can report a refresh shorter than the time between its frames: a spring
+    // stepping by that interval ran a third as fast as the keyboard it followed.
+    let mut h = keyboard_spring();
+    h.report_interval(std::time::Duration::from_secs_f64(1. / 240.));
+    // 190 ms on: a critically damped spring of this stiffness has some 6% left.
+    h.frames(12);
+    let x = h.x("box");
+    assert!(x > 85., "only at {x} after 190 ms");
+}
+
+#[test]
+fn a_late_frame_doesnt_slow_a_bound_spring() {
+    let mut steady = keyboard_spring();
+    steady.frames(12);
+    let mut late = keyboard_spring();
+    late.frames(4);
+    late.skip_frames(3);
+    late.frames(5);
+    let (a, b) = (steady.x("box"), late.x("box"));
+    assert!((a - b).abs() < 3., "{b} with a late frame, {a} without");
+}
+
+#[test]
+fn a_slow_display_keeps_a_bound_springs_time() {
+    // 20 Hz: a frame every 50 ms, longer than a step may be.
+    let mut steady = keyboard_spring();
+    steady.frames(12);
+    let mut slow = keyboard_spring();
+    slow.report_interval(std::time::Duration::from_millis(50));
+    for _ in 0..4 {
+        slow.skip_frames(2);
+        slow.frames(1);
+    }
+    let (a, b) = (steady.x("box"), slow.x("box"));
+    assert!((a - b).abs() < 3., "{b} at 20 Hz, {a} at 60 Hz");
+}
+
+#[test]
+fn a_window_back_after_a_while_takes_no_huge_step() {
+    // Hidden two seconds mid-way, its next frame steps at most a thirtieth of a
+    // second, and it goes on to land.
+    let mut h = keyboard_spring();
+    h.frames(3);
+    let before = h.x("box");
+    h.skip_frames(120);
+    h.frames(1);
+    let after = h.x("box");
+    assert!(
+        after.is_finite() && after >= before && after <= 101.,
+        "{before} then {after}"
+    );
+    h.frames(60);
+    assert!((h.x("box") - 100.).abs() < 0.5);
 }

@@ -112,7 +112,7 @@ video.captions {
 
 ## Video files
 
-`video.clip { src, from, duration, trim, w, h, volume, loop, … }` shows a video file within its sequence, from frame `from` for `duration` frames, skipping `trim` frames of the file. Each frame of the video shows exactly the frame of the file its time gives. The file is decoded by ffmpeg at the composition's rate and scaled to `w` × `h` (in points, times the render's scale), and the frame is decoded before it is drawn. Played on, the decoder streams; asked for a frame behind it, as a render of a range is, it starts again from there. A clip's other properties are an image's (`fit` is `"cover"` unless given). Its sound goes into the mix unless `volume = 0`.
+`video.clip { src, from, duration, trim, w, h, volume, loop, … }` shows a video file within its sequence, from frame `from` for `duration` frames, skipping `trim` frames of the file. Each frame of the video shows exactly the frame of the file its time gives. The file is decoded by ffmpeg at the composition's rate and scaled to `w` × `h` (in points, times the render's scale), and the frame is decoded before it is drawn. On iOS, where no ffmpeg runs, AVFoundation decodes it (`AVAssetReader`), turned as the file says (a phone's portrait recording) as ffmpeg turns it; from a start between two of the file's frames it shows the one on screen then, where ffmpeg's seek starts with the next. Played on, the decoder streams; asked for a frame behind it, as a render of a range is, it starts again from there. A clip's other properties are an image's (`fit` is `"cover"` unless given). Its sound goes into the mix unless `volume = 0`.
 
 ```lua
 -- Seconds 2 to 5 of a recording, from frame 30, in a rounded frame, without its sound.
@@ -189,7 +189,7 @@ On an Apple M-series Mac shared with other work, the showcase with 4-sample moti
 
 ## A player in any app
 
-`zgx_video::Player` plays a composition live inside any zgx app, as the studio's preview does. Its frames are made on a thread of its own, on that thread's virtual clock, through the code a render uses. While it's neither playing nor asked for a frame, that thread waits and does no work.
+`zgx_video::Player` plays a composition live inside any zgx app, as the studio's preview does. Its frames are made on a thread of its own, on that thread's virtual clock, through the code a render uses. While it's neither playing nor asked for a frame, that thread waits and does no work. It keeps drawn frames for scrubbing back: 512 MB of them on the desktop, 64 MB on iOS.
 
 ```rust
 let player = zgx_video::Player::new(&cx.ui.runtime, "videos/intro".as_ref(), 1.)?;

@@ -71,7 +71,7 @@ wgpu = { version = "29.0.4", default-features = false, features = ["vulkan"] }
 
 # fontconfig's configuration, read as fontdb reads it, for what the system
 # font cache watches (font_cache.rs); fontdb's own, already in the tree.
-[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
 fontconfig-parser = { version = "0.5.8", default-features = false }
 
 # DXGI frame statistics for ZGX_PRESENT_LOG (dxgi.rs); the version wgpu-hal uses.
@@ -80,6 +80,10 @@ windows = { version = "0.62", default-features = false, features = ["Win32_Found
 # wgpu's own (`wgpu::hal`), named so build.rs reads whether it is the
 # repository's (its `links` metadata: `preferred_dx12_adapter`).
 wgpu-hal = { version = "29.0.4", default-features = false }
+
+# A layer's `presentsWithTransaction` (planes.rs).
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

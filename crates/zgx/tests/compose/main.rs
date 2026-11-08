@@ -20,6 +20,8 @@ mod glass;
 mod lazy_removal;
 #[path = "../lifecycle_resources.rs"]
 mod lifecycle_resources;
+#[path = "../native_control.rs"]
+mod native_control;
 #[path = "../native_views.rs"]
 mod native_views;
 #[path = "../panic_recovery.rs"]
@@ -28,6 +30,8 @@ mod panic_recovery;
 mod reactive_dependencies;
 #[path = "../shader_drive.rs"]
 mod shader_drive;
+#[path = "../symbol.rs"]
+mod symbol;
 #[path = "../widgets.rs"]
 mod widgets;
 

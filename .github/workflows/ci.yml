@@ -430,6 +430,11 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The iOS target, for the simulator: the host, the kit and the example
+      # app, linted as the desktop is. A phone's build needs signing, and
+      # stays local (`scripts/ios/device.py`).
+      - run: rustup target add aarch64-apple-ios-sim
+      - run: cargo clippy -p zgx-run --example ios_app --target aarch64-apple-ios-sim --locked -- -D warnings
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload --all-targets --locked
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked

@@ -215,6 +215,11 @@ impl Platform for Desktop {
                 .map_err(|e| e.to_string())
         })
     }
+    /// iOS: a save's file, written, goes to the export picker.
+    #[cfg(target_os = "ios")]
+    fn file_written(&self, path: &std::path::Path) {
+        crate::ios_picker::written(path);
+    }
 }
 
 /// UTF-16 offset `units` into `text` as a UTF-8 byte offset: where the

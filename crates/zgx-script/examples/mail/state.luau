@@ -45,6 +45,8 @@ M.settings_open = ui.state("settings_open", false)
 M.root = ui.ref()
 -- The message list's mounted rows, to give one focus.
 M.rows = ui.ref()
+-- The draft's body, to type into (`soak.luau` gives it focus).
+M.body = ui.ref()
 M.layout = ui.computed(function(): Layout
 	local width = M.root.width or 1180
 	return if width >= 1000 then "wide" elseif width >= 680 then "medium" else "narrow"

@@ -922,3 +922,104 @@ fn downloads_go_to_the_apps_handler_and_are_cancelled_without_one() {
         "saved where it says; a dropped responder cancels"
     );
 }
+
+/// `native` (a view), then paint over it, a view over that paint, paint over
+/// that view; apart from them, another view with paint beside it.
+fn stacked(a: &WebView, b: &WebView, c: &WebView) -> View {
+    let boxed = |id: &'static str, x: f32, y: f32| div().id(id).absolute().left(x).top(y);
+    overlay()
+        .w(1000.)
+        .h(600.)
+        .child(
+            boxed("slot-a", 0., 0.)
+                .w(100.)
+                .h(100.)
+                .child(web_view(a).id("a").w_full().h_full()),
+        )
+        .child(boxed("cover", 0., 0.).w(300.).h(300.).bg(rgb(0xffffff)))
+        .child(
+            boxed("slot-b", 10., 10.)
+                .w(100.)
+                .h(100.)
+                .child(web_view(b).id("b").w_full().h_full()),
+        )
+        .child(boxed("badge", 20., 20.).w(20.).h(20.).bg(rgb(0xff0000)))
+        .child(boxed("beside", 50., 150.).w(20.).h(20.).bg(rgb(0x00ff00)))
+        .child(
+            boxed("slot-c", 600., 0.)
+                .w(100.)
+                .h(100.)
+                .child(web_view(c).id("c").w_full().h_full()),
+        )
+        .child(boxed("apart", 800., 0.).w(100.).h(100.).bg(rgb(0x0000ff)))
+}
+
+#[test]
+fn a_top_view_takes_a_level_of_its_own_and_what_it_covers_stays_below() {
+    let mut ui = Ui::new(1000., 600.);
+    let natives = supported();
+    let web = || WebView::new(&ui.runtime, WebViewOptions::default());
+    let (a, b, c) = (web(), web(), web());
+    let view = ui.mount(provide(natives.clone(), stacked(&a, &b, &c)));
+    ui.prepare_frame();
+    let id = |name: &str| view.find(name).unwrap();
+    let scene = ui.scene.borrow();
+    let top = [id("c")];
+    let (split, _) = PlaneSplit::compute_levels(
+        &scene,
+        &natives.nodes(),
+        &PlaneSplit::default(),
+        4,
+        &top,
+        &top,
+    );
+    let slot = |name: &str| split.native(id(name)).unwrap().slot;
+    assert_eq!(slot("c"), 2, "the level under the last, for its paint");
+    assert_eq!((slot("a"), slot("b")), (0, 1));
+    assert_eq!(
+        split.level(id("apart")),
+        0,
+        "paint apart from it stays in the base, so doesn't go with it"
+    );
+}
+
+#[test]
+fn stacked_planes_exist_only_where_views_and_paint_overlap() {
+    let mut ui = Ui::new(1000., 600.);
+    let natives = supported();
+    let web = || WebView::new(&ui.runtime, WebViewOptions::default());
+    let (a, b, c) = (web(), web(), web());
+    let view = ui.mount(provide(natives.clone(), stacked(&a, &b, &c)));
+    ui.prepare_frame();
+    let id = |name: &str| view.find(name).unwrap();
+    let scene = ui.scene.borrow();
+    let (split, _) = PlaneSplit::compute_levels(
+        &scene,
+        &natives.nodes(),
+        &PlaneSplit::default(),
+        4,
+        &[],
+        &[],
+    );
+    let slot = |name: &str| split.native(id(name)).unwrap().slot;
+    assert_eq!((slot("a"), slot("b"), slot("c")), (0, 1, 0));
+    assert_eq!(split.level(id("cover")), 1);
+    assert_eq!(split.level(id("badge")), 2);
+    assert_eq!(
+        split.level(id("beside")),
+        1,
+        "over the cover, under no view"
+    );
+    assert_eq!(split.level(id("apart")), 0, "over no view: the base");
+    assert_eq!(split.level_count(), 2, "nothing asks for a third");
+    let mut items = scene.layer_items(None);
+    split.filter(&mut items, Plane::Above(2));
+    assert!(items.iter().any(|item| item.id == id("badge")));
+    assert!(!items.iter().any(|item| item.id == id("cover")));
+
+    // One level, as every platform but iOS asks: the plane all such paint was on.
+    let (single, _) = PlaneSplit::compute(&scene, &natives.nodes(), &PlaneSplit::default());
+    assert_eq!(single.native(id("b")).unwrap().slot, 0);
+    assert_eq!(single.level(id("badge")), 1);
+    assert_eq!(single.level_count(), 1);
+}

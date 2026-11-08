@@ -1202,6 +1202,42 @@ return ui.column {
 "#;
 
 #[test]
+fn an_action_runs_to_its_end_when_its_task_is_cancelled() {
+    // What an action changes elsewhere isn't left half done: its future
+    // isn't dropped, only its answer goes unheard.
+    let finished = std::rc::Rc::new(std::cell::Cell::new(false));
+    let mut h = Harness::new({
+        let finished = finished.clone();
+        move |runtime| {
+            let host = ScriptHost::inline(runtime, "app", CANCEL_APP);
+            host.async_action("slow", move |arg| {
+                let finished = finished.clone();
+                async move {
+                    zgx::timer::sleep(Duration::from_millis(20)).await;
+                    if arg == Value::Num(1.) {
+                        finished.set(true);
+                    }
+                    Ok(Value::Str(format!("answer {arg}").into()))
+                }
+            });
+            host
+        }
+    });
+    wait_for(&mut h, "shown", "0 1 answer 1 false ");
+    finished.set(false);
+    h.click("start");
+    h.click("cancel");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !finished.get() && Instant::now() < deadline {
+        h.settle();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(finished.get(), "the cancelled task's action ran to its end");
+    h.frames(3);
+    assert_eq!(h.text("shown"), "0 1 answer 1 false ", "its answer unheard");
+}
+
+#[test]
 fn a_cancelled_task_stops_at_its_await() {
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::inline(runtime, "app", CANCEL_APP);

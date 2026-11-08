@@ -59,7 +59,13 @@ pub enum Event {
 
 /// How many bytes of drawn frames the thread keeps, for scrubbing back without
 /// playing the composition from its start.
+#[cfg(not(target_os = "ios"))]
 const CACHE_BYTES: usize = 512 << 20;
+/// On iOS, a phone's share: the whole desktop budget filled in six seconds
+/// of a 360×640 composition at 2×, and an app's memory is what the system
+/// ends it by.
+#[cfg(target_os = "ios")]
+const CACHE_BYTES: usize = 64 << 20;
 
 /// Frames drawn for this script, as they were.
 #[derive(Default)]
@@ -484,11 +490,28 @@ impl Player {
         let state = host.shared(name, Value::from_json("{}").unwrap_or_default());
         let json_of =
             |value: &Value| serde_json::from_str::<Json>(&value.to_json()).unwrap_or(Json::Null);
+        // What the script reads of it, told again as it changes: at each
+        // event, and as it's played or stopped (which sends none: a stopped
+        // player draws nothing more to tell it by).
+        let tell: Rc<dyn Fn()> = Rc::new({
+            let (player, state) = (self.clone(), state.clone());
+            move || {
+                let composition = player
+                    .composition
+                    .with_untracked(|c| c.as_ref().map(|c| c.id.clone()));
+                let told = json!({
+                    "frame": player.frame.with_untracked(|f| *f),
+                    "playing": player.playing.with_untracked(|p| *p),
+                    "composition": composition,
+                    "error": player.error.with_untracked(Clone::clone),
+                });
+                state.set(Value::from_json(&told.to_string()).unwrap_or_default());
+            }
+        });
         let (this, shown, image) = (self.clone(), host.clone(), name.to_owned());
-        let listening = state.clone();
+        let telling = tell.clone();
         host.async_action(format!("{name}.listen"), move |_| {
-            let (shown, image, state) = (shown.clone(), image.clone(), listening.clone());
-            let player = this.clone();
+            let (shown, image, tell) = (shown.clone(), image.clone(), telling.clone());
             let listen = this.listen(move |event| {
                 if let Event::Frame {
                     width,
@@ -500,16 +523,7 @@ impl Player {
                 {
                     shown.image(&image, Some(Arc::new(picture)));
                 }
-                let composition = player
-                    .composition
-                    .with_untracked(|c| c.as_ref().map(|c| c.id.clone()));
-                let told = json!({
-                    "frame": player.frame.with_untracked(|f| *f),
-                    "playing": player.playing.with_untracked(|p| *p),
-                    "composition": composition,
-                    "error": player.error.with_untracked(Clone::clone),
-                });
-                state.set(Value::from_json(&told.to_string()).unwrap_or_default());
+                tell();
             });
             async move {
                 listen.await;
@@ -531,7 +545,8 @@ impl Player {
         });
         let this = self.clone();
         host.action(format!("{name}.play"), move |arg| {
-            this.play(json_of(&arg).as_bool().unwrap_or(false))
+            this.play(json_of(&arg).as_bool().unwrap_or(false));
+            tell();
         });
         let this = self.clone();
         host.action(format!("{name}.loop"), move |arg| {

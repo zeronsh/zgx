@@ -24,6 +24,7 @@ return function(): Node
 		field("Subject", state.draft_subject),
 		ui.textarea {
 			id = "body",
+			ref = state.body,
 			value = state.draft_body,
 			label = "Message",
 			placeholder = "Write your message",

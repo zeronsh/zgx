@@ -22,6 +22,10 @@ mod gtk;
 pub(crate) mod webkitgtk;
 #[cfg(all(target_os = "macos", feature = "ghostty"))]
 pub(crate) use ghostty::processes_changed;
+#[cfg(target_os = "ios")]
+pub(crate) mod ios;
+#[cfg(target_os = "ios")]
+mod ios_web;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -51,6 +55,8 @@ pub(crate) type NativeDiagnosticsHandle = Rc<()>;
 
 #[cfg(all(windows, feature = "webview2"))]
 use dcomp as platform;
+#[cfg(target_os = "ios")]
+use ios as platform;
 #[cfg(target_os = "macos")]
 use macos as platform;
 
@@ -60,6 +66,16 @@ use macos as platform;
 #[cfg(target_os = "macos")]
 const SYNCED: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// An overlay above the first (`Plane::Above`).
+#[cfg(target_os = "ios")]
+struct AbovePlane {
+    renderer: zgx_gpu::GpuRenderer,
+    /// It drew this frame (present it).
+    drawn: bool,
+    /// Its view shows.
+    live: bool,
+}
+
 pub(crate) struct NativeHost {
     pub natives: NativeViews,
     /// Shared with the window's context (`WindowContext::native_diagnostics`).
@@ -67,26 +83,69 @@ pub(crate) struct NativeHost {
     split: Rc<PlaneSplit>,
     /// `split` in the zoomed window's points, where the platform places its
     /// views (`PlaneSplit::zoomed`); `split` itself at 100%.
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     placed: Rc<PlaneSplit>,
     /// The window's zoom (`Ui::zoom`) at the last plan.
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     zoom: f32,
     /// The window's DirectComposition tree, made with its renderer.
     #[cfg(all(windows, feature = "webview2"))]
     composition: Option<Rc<dcomp::Composition>>,
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     surfaces: Option<platform::Surfaces>,
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     overlay: Option<zgx_gpu::GpuRenderer>,
+    /// The overlays above it, from level 2, each made when first needed.
+    #[cfg(target_os = "ios")]
+    above: Vec<AbovePlane>,
+    /// The system's edge effects asked for (`native_control`), kept registered.
+    #[cfg(target_os = "ios")]
+    edge_effects: Vec<(zgx::scene::NodeId, zgx::native_view::NativeRegistration)>,
+    /// A plane's present found no drawable: another frame is owed.
+    #[cfg(target_os = "ios")]
+    plane_retry: bool,
+    /// Bars going with the keyboard (`ui.keyboard_bar`), held as those are.
+    #[cfg(target_os = "ios")]
+    keyboard_bars: Vec<(
+        zgx::native_control::KeyboardBar,
+        zgx::native_view::NativeRegistration,
+    )>,
     /// The overlay renderer drew this frame (present it).
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     overlay_drawn: bool,
     /// The scale the overlay renderer and its layer were made for.
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     overlay_scale: f32,
     /// The overlay layer shows its plane (it had paint at the last present).
-    #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(windows, feature = "webview2")
+    ))]
     overlay_live: bool,
     /// Native geometry changed and has not been applied yet.
     #[cfg_attr(
@@ -128,29 +187,68 @@ impl NativeHost {
                 backends.contains("dx12") || backends.contains("d3d12")
             });
         #[cfg(not(all(windows, feature = "webview2")))]
-        let supported = cfg!(target_os = "macos");
+        let supported = cfg!(any(target_os = "macos", target_os = "ios"));
         natives.set_supported(supported);
         #[cfg(target_os = "macos")]
         natives.set_glass_supported(macos::glass_available());
+        // UIGlassEffect: iOS 26, the oldest this target runs on.
+        #[cfg(target_os = "ios")]
+        natives.set_glass_supported(true);
         Self {
             natives,
             diagnostics: Default::default(),
             split: Rc::new(PlaneSplit::default()),
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             placed: Rc::new(PlaneSplit::default()),
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             zoom: 1.,
             #[cfg(all(windows, feature = "webview2"))]
             composition: None,
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             surfaces: None,
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(target_os = "ios")]
+            above: Vec::new(),
+            #[cfg(target_os = "ios")]
+            edge_effects: Vec::new(),
+            #[cfg(target_os = "ios")]
+            keyboard_bars: Vec::new(),
+            #[cfg(target_os = "ios")]
+            plane_retry: false,
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             overlay: None,
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             overlay_drawn: false,
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             overlay_scale: 0.,
-            #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(windows, feature = "webview2")
+            ))]
             overlay_live: false,
             pending: false,
             scene: Rc::downgrade(&ui.scene),
@@ -206,7 +304,18 @@ impl NativeHost {
         zgx_gpu::GpuRenderer::for_window_with_transparency(window, context, transparent)
     }
     /// Whether this window has native views to keep up (now or last frame).
+    /// The bar going with the keyboard, if the app has one.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn keyboard_bar(&self) -> Option<zgx::native_control::KeyboardBar> {
+        self.keyboard_bars.first().map(|(bar, _)| bar.clone())
+    }
     pub fn active(&self) -> bool {
+        #[cfg(target_os = "ios")]
+        if zgx::native_control::edge_effects_pending()
+            || zgx::native_control::keyboard_bars_pending()
+        {
+            return true;
+        }
         !self.natives.is_empty() || !self.split.is_empty()
     }
     /// Whether `node` is a native view's node (pointer over the page: the
@@ -253,10 +362,17 @@ impl NativeHost {
         None
     }
     /// The native views went away with the window (suspend/recreate).
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     pub fn suspend(&mut self) {
-        #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            all(windows, feature = "webview2")
+        ))]
         {
             self.overlay = None;
+            #[cfg(target_os = "ios")]
+            self.above.clear();
             self.surfaces = None;
             self.overlay_live = false;
             self.overlay_drawn = false;
@@ -266,7 +382,11 @@ impl NativeHost {
             self.composition = None;
         }
         self.split = Rc::new(PlaneSplit::default());
-        #[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            all(windows, feature = "webview2")
+        ))]
         {
             self.placed = self.split.clone();
         }
@@ -274,7 +394,11 @@ impl NativeHost {
     }
 }
 
-#[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(windows, feature = "webview2")
+))]
 impl NativeHost {
     /// After the scene's flush: split this frame's paint around native views
     /// and give each plane's renderer its part, at content `scale` in a
@@ -289,12 +413,43 @@ impl NativeHost {
         scale: f32,
         zoom: f32,
     ) -> Result<Vec<Rect>, zgx_gpu::GpuError> {
+        // Asked for by nodes mounted since: they make the host active.
+        #[cfg(target_os = "ios")]
+        {
+            self.edge_effects.retain(|(node, _)| scene.contains(*node));
+            for (node, effect) in zgx::native_control::take_edge_effects() {
+                let registration = self
+                    .natives
+                    .register(node, zgx::native_view::NativeContent::EdgeEffect(effect));
+                self.edge_effects.push((node, registration));
+            }
+            self.keyboard_bars
+                .retain(|(bar, _)| scene.contains(bar.node));
+            for bar in zgx::native_control::take_keyboard_bars() {
+                let registration = self
+                    .natives
+                    .register(bar.node, zgx::native_view::NativeContent::KeyboardBar);
+                self.keyboard_bars.push((bar, registration));
+            }
+        }
         // Frames go with native geometry, in one transaction, while there is any.
         renderer.present_with_native_views(self.active());
         // Unsupported (no runtime, no surfaces): native nodes paint placeholders.
         if !self.active() || !self.natives.supported() {
             return Ok(Vec::new());
         }
+        #[cfg(target_os = "ios")]
+        if self.surfaces.is_none() {
+            match ios::Surfaces::new(window) {
+                Ok(surfaces) => self.surfaces = Some(surfaces),
+                Err(error) => {
+                    eprintln!("zgx: native views unavailable: {error}");
+                    self.natives.set_supported(false);
+                    return Ok(Vec::new());
+                }
+            }
+        }
+        #[cfg(not(target_os = "ios"))]
         if self.surfaces.is_none() {
             let router = platform::Router {
                 scene: self.scene.clone(),
@@ -327,9 +482,30 @@ impl NativeHost {
                 }
             }
         }
+        #[cfg(target_os = "ios")]
+        let (split, damage) = {
+            let tops: Vec<_> = self.keyboard_bars.iter().map(|(bar, _)| bar.node).collect();
+            let barriers: Vec<_> = self
+                .edge_effects
+                .iter()
+                .map(|(node, _)| *node)
+                .chain(tops.iter().copied())
+                .collect();
+            PlaneSplit::compute_levels(
+                scene,
+                &self.natives.nodes(),
+                &self.split,
+                ios::LEVELS,
+                &barriers,
+                &tops,
+            )
+        };
+        #[cfg(not(target_os = "ios"))]
         let (split, damage) = PlaneSplit::compute(scene, &self.natives.nodes(), &self.split);
         let split = Rc::new(split);
         let surfaces = self.surfaces.as_mut().expect("made above");
+        #[cfg(target_os = "ios")]
+        surfaces.read_groups(scene, &self.natives);
         // A new zoom moves every view without the split changing.
         let rezoomed = self.zoom != zoom;
         if rezoomed {
@@ -357,6 +533,8 @@ impl NativeHost {
         if self.overlay.is_some() && self.overlay_scale != scale {
             self.overlay = None;
             self.overlay_live = false;
+            #[cfg(target_os = "ios")]
+            self.above.clear();
         }
         if split.has_overlay() && self.overlay.is_none() {
             self.overlay_scale = scale;
@@ -369,6 +547,11 @@ impl NativeHost {
             )?;
             #[cfg(all(windows, feature = "webview2"))]
             let overlay = surfaces.overlay_renderer(&renderer.context(), scale)?;
+            #[cfg(target_os = "ios")]
+            let mut overlay = surfaces.overlay_renderer(&renderer.context(), scale)?;
+            // Its drawables show in the frame's transaction, as the base's.
+            #[cfg(target_os = "ios")]
+            overlay.present_with_native_views(true);
             self.overlay = Some(overlay);
         }
         if let Some(overlay) = &mut self.overlay {
@@ -379,6 +562,39 @@ impl NativeHost {
                 overlay.set_plane_rect(rect);
                 if !self.overlay_live {
                     overlay.repaint_all();
+                }
+            }
+        }
+        #[cfg(target_os = "ios")]
+        {
+            while self.above.len() + 1 < usize::from(split.level_count()) {
+                let level = self.above.len() as u8 + 2;
+                let mut renderer = surfaces.level_renderer(level, &renderer.context(), scale)?;
+                renderer.present_with_native_views(true);
+                self.above.push(AbovePlane {
+                    renderer,
+                    drawn: false,
+                    live: false,
+                });
+            }
+            // In the transaction always: a surface made again starts without.
+            if let Some(overlay) = &mut self.overlay {
+                overlay.present_with_native_views(true);
+                overlay.keep_plane_contents_unscaled();
+            }
+            for (index, above) in self.above.iter_mut().enumerate() {
+                above.renderer.present_with_native_views(true);
+                above.renderer.keep_plane_contents_unscaled();
+                let level = index as u8 + 2;
+                let plane = zgx::native_view::Plane::Above(level);
+                above.renderer.set_plane(split.clone(), plane);
+                if let Some(needed) = split.bounds_at(level) {
+                    let viewport = scene.bounds(scene.root());
+                    let rect = plane_rect(above.renderer.plane_rect(), needed, viewport);
+                    above.renderer.set_plane_rect(rect);
+                    if !above.live {
+                        above.renderer.repaint_all();
+                    }
                 }
             }
         }
@@ -404,12 +620,21 @@ impl NativeHost {
             overlay.render(scene, damage)?;
             self.overlay_drawn = true;
         }
+        #[cfg(target_os = "ios")]
+        for (index, above) in self.above.iter_mut().enumerate() {
+            above.drawn = self.split.bounds_at(index as u8 + 2).is_some();
+            if above.drawn {
+                above.renderer.render(scene, damage)?;
+            }
+        }
         Ok(())
     }
     /// Open the transaction a frame's planes and native geometry commit in.
     pub fn begin(&self) -> Option<platform::Transaction> {
         #[cfg(target_os = "macos")]
         return self.active().then(macos::Transaction::begin);
+        #[cfg(target_os = "ios")]
+        return self.active().then(ios::Transaction::begin);
         // Also for the frame that takes the last page out (DirectComposition
         // shows nothing until it commits, where Core Animation commits itself).
         #[cfg(all(windows, feature = "webview2"))]
@@ -418,6 +643,33 @@ impl NativeHost {
             .as_ref()
             .filter(|_| self.active() || self.pending)
             .map(|composition| dcomp::Transaction::begin(composition.clone()));
+    }
+    /// Whether this frame shows, hides or moves a plane.
+    #[cfg(target_os = "ios")]
+    pub fn planes_changing(&self) -> bool {
+        let Some(surfaces) = &self.surfaces else {
+            return false;
+        };
+        let overlay = self.overlay.as_ref().and_then(|overlay| {
+            self.split
+                .has_overlay()
+                .then(|| overlay.plane_rect())
+                .flatten()
+        });
+        surfaces.level_needs_frame(1, overlay)
+            || self.above.iter().enumerate().any(|(index, above)| {
+                let level = index as u8 + 2;
+                let shown = self
+                    .split
+                    .bounds_at(level)
+                    .and_then(|_| above.renderer.plane_rect());
+                surfaces.level_needs_frame(level, shown)
+            })
+    }
+    /// Whether a plane's frame is owed a new try: its present found no drawable.
+    #[cfg(target_os = "ios")]
+    pub fn take_plane_retry(&mut self) -> bool {
+        std::mem::take(&mut self.plane_retry)
     }
     /// Within `begin`'s transaction: show the overlay plane's frame (before
     /// the base plane's, which waits for its refresh point).
@@ -429,10 +681,17 @@ impl NativeHost {
         if live != self.overlay_live {
             zgx_gpu::present_log::log(|| format!("overlay live={live}"));
         }
+        #[cfg(target_os = "ios")]
+        let mut overlay_shown = false;
         if let Some(overlay) = &mut self.overlay
             && live
             && self.overlay_drawn
         {
+            #[cfg(target_os = "ios")]
+            {
+                overlay_shown = plane_presented(overlay, 1, &mut self.plane_retry)?;
+            }
+            #[cfg(not(target_os = "ios"))]
             overlay.present()?;
         }
         if let Some(overlay) = &self.overlay {
@@ -442,9 +701,25 @@ impl NativeHost {
             });
             // In the window's points: the zoom's times the plane's.
             let zoom = self.zoom;
-            surfaces.show_overlay(
-                rect.map(|r| Rect::new(r.x * zoom, r.y * zoom, r.width * zoom, r.height * zoom)),
-            );
+            let shown =
+                rect.map(|r| Rect::new(r.x * zoom, r.y * zoom, r.width * zoom, r.height * zoom));
+            // Not in a new place, or back in view, without its frame: it would show
+            // an old one, stretched to the new size.
+            #[cfg(target_os = "ios")]
+            let held = shown.is_some() && !overlay_shown && surfaces.level_would_change(1, shown);
+            #[cfg(not(target_os = "ios"))]
+            let held = false;
+            if held {
+                #[cfg(target_os = "ios")]
+                {
+                    self.plane_retry = true;
+                    if let Some(overlay) = &mut self.overlay {
+                        overlay.repaint_all();
+                    }
+                }
+            } else {
+                surfaces.show_overlay(shown);
+            }
         }
         if self.overlay_live
             && !live
@@ -455,6 +730,27 @@ impl NativeHost {
         }
         self.overlay_live = live;
         self.overlay_drawn = false;
+        #[cfg(target_os = "ios")]
+        for (index, above) in self.above.iter_mut().enumerate() {
+            let level = index as u8 + 2;
+            let live = self.split.bounds_at(level).is_some();
+            let shown = live.then(|| above.renderer.plane_rect()).flatten();
+            let presented = live
+                && above.drawn
+                && plane_presented(&mut above.renderer, level, &mut self.plane_retry)?;
+            // As the overlay's, above.
+            if shown.is_some() && !presented && surfaces.level_would_change(level, shown) {
+                self.plane_retry = true;
+                above.renderer.repaint_all();
+            } else {
+                surfaces.show_level(level, shown);
+            }
+            if above.live && !live {
+                above.renderer.trim();
+            }
+            above.live = live;
+            above.drawn = false;
+        }
         Ok(())
     }
     /// Within the frame's transaction: move native views and backdrops to
@@ -488,10 +784,20 @@ impl NativeHost {
         {
             overlay.trim();
         }
+        #[cfg(target_os = "ios")]
+        for (index, above) in self.above.iter_mut().enumerate() {
+            if self.split.bounds_at(index as u8 + 2).is_none() {
+                above.renderer.trim();
+            }
+        }
     }
 }
 
-#[cfg(not(any(target_os = "macos", all(windows, feature = "webview2"))))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(windows, feature = "webview2")
+)))]
 impl NativeHost {
     pub fn plan(
         &mut self,
@@ -522,7 +828,11 @@ impl NativeHost {
 /// current one while it holds `needed` without being much larger, else
 /// `needed` with a margin to grow and move into (an animating popover
 /// keeps its surfaces), within the window.
-#[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(windows, feature = "webview2")
+))]
 fn plane_rect(current: Option<Rect>, needed: Rect, viewport: Rect) -> Rect {
     let needed = needed
         .intersection(viewport)
@@ -540,7 +850,39 @@ fn plane_rect(current: Option<Rect>, needed: Rect, viewport: Rect) -> Rect {
         .unwrap_or(needed)
 }
 
-#[cfg(any(target_os = "macos", all(windows, feature = "webview2")))]
+/// Present a plane's frame: whether it went out. If no drawable came, it says so
+/// in the gesture log, and it is drawn whole again next time.
+#[cfg(target_os = "ios")]
+fn plane_presented(
+    plane: &mut zgx_gpu::GpuRenderer,
+    level: u8,
+    retry: &mut bool,
+) -> Result<bool, zgx_gpu::GpuError> {
+    let status = plane.present_with_status()?;
+    let presented = status == zgx_gpu::PresentationStatus::Presented;
+    if !presented {
+        crate::ios_gestures::log(&format!("plane {level} not presented: {status:?}"));
+    }
+    let fits = plane.presented_fits_plane();
+    if presented && !fits {
+        crate::ios_gestures::log(&format!(
+            "plane {level} frame {:?} isn't for {:?}",
+            plane.presented_size(),
+            plane.plane_rect()
+        ));
+    }
+    if !presented || !fits {
+        plane.repaint_all();
+        *retry = true;
+    }
+    Ok(presented && fits)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(windows, feature = "webview2")
+))]
 fn contains(outer: Rect, inner: Rect) -> bool {
     outer.x <= inner.x + 0.01
         && outer.y <= inner.y + 0.01
