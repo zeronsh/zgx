@@ -403,6 +403,9 @@ impl ShapedText {
             return None;
         }
         let mut fallback = None;
+        // The trailing edge of the last glyph ending before the cursor: where
+        // a caret goes when the wrap dropped the whitespace it is after.
+        let mut after_last: Option<(usize, Rect)> = None;
         for run in self.buffer.layout_runs() {
             let offset = self.line_offsets[run.line_i];
             if run.glyphs.is_empty() && cursor.byte_index == offset {
@@ -411,6 +414,14 @@ impl ShapedText {
             for glyph in run.glyphs {
                 let start = offset + glyph.start;
                 let end = offset + glyph.end;
+                if end < cursor.byte_index && after_last.is_none_or(|(at, _)| end >= at) {
+                    let x = if glyph.level.is_rtl() {
+                        glyph.x
+                    } else {
+                        glyph.x + glyph.w
+                    };
+                    after_last = Some((end, Rect::new(x, run.line_top, 1., run.line_height)));
+                }
                 if cursor.byte_index < start || cursor.byte_index > end {
                     continue;
                 }
@@ -436,7 +447,10 @@ impl ShapedText {
                 fallback = Some(rect);
             }
         }
-        fallback
+        // Whitespace past the width that wrapping left in no line (the
+        // second of two spaces ending a full line) has no glyph: its caret
+        // is where the text before it ends, not the layout's origin.
+        fallback.or(after_last.map(|(_, rect)| rect))
     }
     /// Returns visual rectangles, including disjoint spans for mixed-direction text.
     pub fn selection(&self, range: Range<usize>) -> Vec<Rect> {
@@ -2722,5 +2736,39 @@ mod wash_tests {
         )
         .unwrap();
         assert_eq!(washes(&apart).len(), 2, "two spans side by side: two");
+    }
+}
+
+#[cfg(test)]
+mod trailing_space_caret_tests {
+    use super::*;
+    use zgx::text_layout::TextLayout;
+
+    /// A full line followed by spaces: wrapping leaves the spaces past its
+    /// width in no line, and the caret after them stays at the line's end
+    /// (not the layout's origin) at every width.
+    #[test]
+    fn a_caret_after_dropped_trailing_spaces_stays_at_the_end_of_the_text() {
+        let mut fonts = FontSystem::new();
+        let base = "This is an example of the issue that i am facing where the placement";
+        let full = ShapedText::new(&mut fonts, base, 14., None).size().0;
+        for k in -400..400 {
+            let width = full + k as f32 * 0.02;
+            for spaces in 1..4 {
+                let text = format!("{base}{}", " ".repeat(spaces));
+                let layout = ShapedText::new(&mut fonts, &*text, 14., Some(width));
+                let caret = TextLayout::caret(&layout, text.len());
+                let rows = layout.buffer.layout_runs().count() as f32;
+                assert!(
+                    caret.x > 0. && caret.y < rows * layout.line_height(),
+                    "{spaces} spaces at {width}: {caret:?}"
+                );
+                let before = TextLayout::caret(&layout, base.len());
+                assert!(
+                    caret.y >= before.y,
+                    "{spaces} spaces at {width}: {caret:?} {before:?}"
+                );
+            }
+        }
     }
 }
