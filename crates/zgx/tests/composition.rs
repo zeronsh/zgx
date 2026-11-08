@@ -205,6 +205,49 @@ fn keyed_rows_ahead_of_an_append_or_a_changed_last_key_stay_as_they_were() {
     assert_eq!(children(&ui), before);
     assert_eq!(ui.scene.borrow().len(), node_count);
     assert_eq!(builds.get(), 47);
+    // After it, the list goes on: those ahead kept, one more built.
+    keys.set(with(&[41, 44, 45, 46, 47]));
+    assert_eq!(builds.get(), 48);
+    assert_eq!(children(&ui)[..44], before[..]);
+    assert_eq!(content(&ui, row(2)), "42");
+}
+
+/// A key twice is refused before anything changes wherever it is: two of
+/// the rows shown, two new ones (a few, or many), at any length.
+#[test]
+fn keyed_duplicate_keys_are_refused_wherever_they_are() {
+    let mut ui = Ui::new(400., 200.);
+    let keys = ui.signal((0..12).collect::<Vec<i32>>());
+    let builds = Rc::new(Cell::new(0));
+    let handle = ui.mount(keyed(
+        {
+            let keys = keys.clone();
+            move || keys.get()
+        },
+        {
+            let builds = builds.clone();
+            move |key, _| {
+                builds.set(builds.get() + 1);
+                text(key.to_string())
+            }
+        },
+    ));
+    let children = |ui: &Ui| ui.scene.borrow().children(handle.node()).to_vec();
+    let before = children(&ui);
+    let shown: Vec<i32> = (0..12).collect();
+    for twice in [
+        vec![3, 1, 2, 3],
+        [&shown[..], &[20, 21, 20]].concat(),
+        [&shown[..], &(20..40).collect::<Vec<_>>(), &[25]].concat(),
+    ] {
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| keys.set(twice)));
+        assert!(failed.is_err());
+        assert_eq!(children(&ui), before);
+        assert_eq!(builds.get(), 12);
+    }
+    keys.set(vec![11, 0, 12]);
+    assert_eq!(builds.get(), 13);
+    assert_eq!(children(&ui)[..2], [before[11], before[0]]);
 }
 
 /// Rows whose keys go are removed in the order they were in, the same every
