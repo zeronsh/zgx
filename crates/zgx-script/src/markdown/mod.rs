@@ -439,17 +439,29 @@ pub(crate) fn script(
     Ok(match key {
         Some(key) => {
             let mut streams = parsed.streams.borrow_mut();
-            let fresh = !matches!(streams.get(&key), Some((f, _)) if *f == flags);
+            let fresh = !matches!(streams.get(&key), Some((f, ..)) if *f == flags);
             if fresh {
-                streams.insert(key.clone(), (flags, Incremental::new(options)));
+                streams.insert(key.clone(), (flags, Incremental::new(options), None, None));
             }
-            let (_, stream) = streams.get_mut(&key).expect("inserted above");
+            let (_, stream, last, kept) = streams.get_mut(&key).expect("inserted above");
             match lazy {
                 Some(threshold) => stream.set_text_lazy(&text, threshold),
                 None => stream.set_text(&text),
             }
             let pending = stream.has_pending();
             let blocks = Value::List(stream.blocks().into());
+            // Its table from the last answer's, which holds the same blocks
+            // but the end: only what's new is converted and weighed, not
+            // the whole list each time a chunk lands (`value::derive`).
+            if let Some(old) = last.replace(blocks.clone()) {
+                // The last answer's table, if the sweep left none kept: a
+                // script read it since.
+                if kept.is_none() {
+                    *kept = crate::value::table_of(lua, &old)?;
+                }
+                crate::value::derive(lua, &old, &blocks)?;
+                *kept = crate::value::table_of(lua, &blocks)?;
+            }
             touch(
                 &mut parsed.stream_order.borrow_mut(),
                 key.clone(),
@@ -541,7 +553,7 @@ fn follow_lazy(lua: &mlua::Lua, key: String, first: Option<usize>) -> mlua::Resu
         };
         let first = wanted.take();
         let (more, asked) = match parsed.streams.borrow_mut().get_mut(&stream_key) {
-            Some((_, stream)) => {
+            Some((_, stream, ..)) => {
                 let more = stream.parse_pending(LAZY_BUDGET, first);
                 (more, first.is_some_and(|i| !stream.block_pending(i)))
             }
@@ -614,7 +626,12 @@ const KEPT: usize = 256;
 /// `breaks` and `paths`, as a script asked for them.
 type Flags = (bool, bool);
 type Texts = std::collections::HashMap<(String, Flags), Value>;
-type Streams = std::collections::HashMap<String, (Flags, Incremental)>;
+/// Each keyed stream: its flags, its parse, and its last answer (whose
+/// table the next one's is derived from), with that table once a script
+/// has it, kept so the host's idle sweep doesn't let it go (only scripts'
+/// holding counts there): a stream pausing between chunks goes idle.
+type Streams =
+    std::collections::HashMap<String, (Flags, Incremental, Option<Value>, Option<mlua::Table>)>;
 
 /// A VM's parsed markdown.
 #[derive(Default)]
@@ -928,10 +945,30 @@ fn link_of(href: &str, paths: bool) -> Link {
 }
 
 fn map(fields: Vec<(&str, Value)>) -> Value {
-    let mut fields: Vec<(Rc<str>, Value)> =
-        fields.into_iter().map(|(k, v)| (Rc::from(k), v)).collect();
+    let mut fields: Vec<(Rc<str>, Value)> = fields.into_iter().map(|(k, v)| (key(k), v)).collect();
     fields.sort_by(|a, b| a.0.cmp(&b.0));
     Value::Map(fields.into())
+}
+
+thread_local! {
+    /// The field names blocks and runs are made with (`map`), each made
+    /// once: a document's every block and run named its fields anew, an
+    /// allocation each. At most `KEYS` (a code block's own fields add some).
+    static NAMES: std::cell::RefCell<Vec<Rc<str>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+const KEYS: usize = 64;
+/// `name` as the field name blocks share (`NAMES`).
+fn key(name: &str) -> Rc<str> {
+    NAMES.with_borrow_mut(|names| {
+        if let Some(kept) = names.iter().find(|kept| &***kept == name) {
+            return kept.clone();
+        }
+        let made: Rc<str> = Rc::from(name);
+        if names.len() < KEYS {
+            names.push(made.clone());
+        }
+        made
+    })
 }
 
 fn runs_value(runs: &[Run]) -> Value {

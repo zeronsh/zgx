@@ -76,8 +76,8 @@ pub struct Film {
     /// How many frames its file has.
     frames: u64,
     player: Player,
-    /// A motion-blurred frame's sum, and the sample being drawn.
-    sum: Vec<u32>,
+    /// A motion-blurred frame's sums, and the sample being drawn.
+    blend: crate::blend::Blend,
     sample: Vec<u8>,
 }
 impl Film {
@@ -95,7 +95,7 @@ impl Film {
             frames_per_tick: fps / ticks.stage_fps(),
             frames: (seconds * ticks.output_fps).round().max(1.) as u64,
             player,
-            sum: Vec::new(),
+            blend: Default::default(),
             sample: Vec::new(),
         };
         let mut film = film;
@@ -154,9 +154,6 @@ impl Film {
             self.wait_for_holds(hold_timeout)?;
             return self.stage.draw(pixels).map_err(|error| error.to_string());
         }
-        let (width, height) = self.stage.pixel_size();
-        self.sum.clear();
-        self.sum.resize(width as usize * height as usize * 4, 0);
         let mut sample = std::mem::take(&mut self.sample);
         for at in 0..u64::from(samples) {
             self.step_to_tick(first + at)?;
@@ -164,17 +161,10 @@ impl Film {
             self.stage
                 .draw(&mut sample)
                 .map_err(|error| error.to_string())?;
-            for (sum, value) in self.sum.iter_mut().zip(&sample) {
-                *sum += u32::from(*value);
-            }
+            self.blend.add(&sample, at == 0, samples);
         }
         self.sample = sample;
-        pixels.clear();
-        pixels.extend(
-            self.sum
-                .iter()
-                .map(|sum| ((sum + samples / 2) / samples) as u8),
-        );
+        self.blend.average_into(samples, pixels);
         Ok(())
     }
     /// Wait, in real time, for what the composition holds the render for

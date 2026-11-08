@@ -153,27 +153,52 @@ pub(crate) fn key_hasher() -> KeyHasher {
 /// looked at every fourth level, which costs less than the levels between;
 /// the room kept covers them.
 pub fn deep<R>(level: u32, f: impl FnOnce() -> R) -> R {
-    if stack_low(level) { on_segment(f) } else { f() }
+    #[cfg(any(target_os = "ios", all(test, unix)))]
+    if stack_low(level) {
+        on_segment(f)
+    } else {
+        f()
+    }
+    #[cfg(not(any(target_os = "ios", all(test, unix))))]
+    if stack_low(level) {
+        stacker::grow(STACK_SEGMENT, f)
+    } else {
+        f()
+    }
 }
 /// Whether level `level` of a recursion should go on a fresh stack segment
 /// (`deep`), for a caller that would rather not move what it passes into a
 /// closure on the common path.
 pub(crate) fn stack_low(level: u32) -> bool {
-    level.is_multiple_of(4) && segment::remaining().is_none_or(|left| left < 256 * 1024)
+    #[cfg(any(target_os = "ios", all(test, unix)))]
+    let left = segment::remaining;
+    #[cfg(not(any(target_os = "ios", all(test, unix))))]
+    let left = stacker::remaining_stack;
+    level.is_multiple_of(4) && left().is_none_or(|left| left < 256 * 1024)
 }
 /// The stack a recursion goes on when the thread's runs low (`deep`).
 pub(crate) const STACK_SEGMENT: usize = 2 * 1024 * 1024;
 /// Runs `f` on a segment of `STACK_SEGMENT`: the thread's kept one where it
 /// isn't in use already, so that the siblings of a level past the low mark
 /// (a list's thousand rows) share one, not each map, guard and free its own.
+#[cfg(any(target_os = "ios", all(test, unix)))]
 pub(crate) fn on_segment<R>(f: impl FnOnce() -> R) -> R {
     segment::run(f)
 }
+/// `on_segment` where no segment is kept: one of `stacker`'s own.
+#[cfg(not(any(target_os = "ios", all(test, unix))))]
+#[inline(always)]
+pub(crate) fn on_segment<R>(f: impl FnOnce() -> R) -> R {
+    stacker::grow(STACK_SEGMENT, f)
+}
 
-/// The segment each thread keeps for `deep`, where stacks can be switched to
-/// memory of its own (`psm`); elsewhere (Windows, whose `stacker` makes a
-/// fiber) a fresh one each time.
-#[cfg(unix)]
+/// The segment each thread keeps for `deep`, on iOS, whose main thread has
+/// 1 MB of stack and is well under the low mark by the time a flush runs:
+/// a fresh `stacker` segment for each of a list's rows mapped, guarded and
+/// freed one per row. Elsewhere (a desktop's roomy main thread, Windows'
+/// fibers) `stacker`'s own as it was, with nothing more read on the path
+/// every recursion takes; zgx's own tests run the kept one on any Unix.
+#[cfg(any(target_os = "ios", all(test, unix)))]
 mod segment {
     use std::cell::Cell;
 
@@ -194,6 +219,12 @@ mod segment {
     #[cfg(test)]
     thread_local! {
         static MADE: Cell<usize> = const { Cell::new(0) };
+        static GROWN: Cell<usize> = const { Cell::new(0) };
+    }
+    /// Segments `stacker` made this thread, the kept one being in use.
+    #[cfg(test)]
+    pub(crate) fn grown() -> usize {
+        GROWN.with(Cell::get)
     }
 
     fn page() -> usize {
@@ -241,12 +272,24 @@ mod segment {
     }
     /// The stack left: on the kept segment, down to its base; elsewhere as
     /// `stacker` counts it (the thread's own, or a segment it made).
+    #[inline(always)]
     pub(super) fn remaining() -> Option<usize> {
-        let at = psm::stack_pointer() as usize;
+        // Off the kept segment (always, where the thread's stack is roomy):
+        // as `stacker` counts it, with nothing more read.
         let base = KEPT.with(|kept| kept.busy.get().then(|| kept.base.get()));
-        match base {
-            Some(base) if (base..base + super::STACK_SEGMENT).contains(&at) => Some(at - base),
-            _ => stacker::remaining_stack(),
+        let Some(base) = base else {
+            return stacker::remaining_stack();
+        };
+        on_kept(base)
+    }
+    /// `remaining` with the kept segment in use: down to its base while on
+    /// it, else (a `stacker` segment grown past it) as `stacker` counts.
+    #[inline(never)]
+    fn on_kept(base: usize) -> Option<usize> {
+        let at = psm::stack_pointer() as usize;
+        match (base..base + super::STACK_SEGMENT).contains(&at) {
+            true => Some(at - base),
+            false => stacker::remaining_stack(),
         }
     }
     pub(super) fn run<R>(f: impl FnOnce() -> R) -> R {
@@ -254,6 +297,8 @@ mod segment {
         let Some(base) = free.then(base).flatten() else {
             // In use further up (a recursion deeper than a segment), or
             // none to be had: one of `stacker`'s own.
+            #[cfg(test)]
+            GROWN.with(|grown| grown.set(grown.get() + 1));
             return stacker::grow(super::STACK_SEGMENT, f);
         };
         struct Busy;
@@ -281,15 +326,6 @@ mod segment {
             std::panic::resume_unwind(panic);
         }
         out.expect("ran")
-    }
-}
-#[cfg(not(unix))]
-mod segment {
-    pub(super) fn remaining() -> Option<usize> {
-        stacker::remaining_stack()
-    }
-    pub(super) fn run<R>(f: impl FnOnce() -> R) -> R {
-        stacker::grow(super::STACK_SEGMENT, f)
     }
 }
 
@@ -342,6 +378,44 @@ mod segment_tests {
             .join()
             .unwrap();
         assert_eq!(got, (4000u32 as u8 as u32, 1));
+    }
+
+    /// Runs `f` with less than `left` of the thread's stack remaining, as a
+    /// flush runs deep in a platform's own calls.
+    fn with_stack_left<R>(left: usize, f: impl FnOnce() -> R) -> R {
+        let frame = std::hint::black_box([0u8; 4096]);
+        let out = match stacker::remaining_stack() {
+            Some(now) if now > left => with_stack_left(left, f),
+            _ => f(),
+        };
+        std::hint::black_box(&frame);
+        out
+    }
+
+    /// A thousand rows mounted and laid out on a thread of 1 MB (iOS's main
+    /// thread, and Windows'), with its stack already under the low mark:
+    /// one segment mapped for them all, none made beside it.
+    #[test]
+    fn a_deep_mount_on_a_small_stack_maps_one_segment() {
+        let (made, grown, nodes) = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                with_stack_left(200 * 1024, || {
+                    use crate::compose::prelude::*;
+                    let mut ui = crate::widgets::Ui::new(400., 800.);
+                    let rows = (0..1000).map(|i| row().px(16.).child(text(format!("Row {i}"))));
+                    let offset = ui.signal(0.);
+                    let _mounted = ui.mount(scroll(offset).child(column().children(rows)));
+                    ui.prepare_frame();
+                    let nodes = ui.scene.borrow().len();
+                    (super::segment::made(), super::segment::grown(), nodes)
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(nodes > 2000, "{nodes} nodes");
+        assert_eq!((made, grown), (1, 0), "one kept segment, none made per row");
     }
 
     #[test]

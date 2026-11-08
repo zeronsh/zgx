@@ -5252,6 +5252,146 @@ fn ui_glass_is_a_box_that_holds_children_drawn_with_no_system_glass() {
 }
 
 #[test]
+fn ui_glass_rounds_each_corner_it_is_given() {
+    let mut h = Harness::inline(
+        r##"return ui.glass { id = "pane", w = 200, h = 100,
+            corners = { tl = 56, tr = 56, br = 38, bl = 38 } }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.host.error().get(), None);
+    let pane = h.find("pane").unwrap();
+    let scene = h.ui.scene.borrow();
+    let backing = scene.children(pane)[0];
+    let corners = match scene.kind(backing) {
+        zgx::scene::NodeKind::Quad(quad) | zgx::scene::NodeKind::Panel { quad, .. } => {
+            quad.decoration.as_deref().and_then(|d| d.corners)
+        }
+        _ => None,
+    }
+    .expect("the backing's corners");
+    assert_eq!(
+        (
+            corners.top_left,
+            corners.top_right,
+            corners.bottom_right,
+            corners.bottom_left
+        ),
+        (56., 56., 38., 38.)
+    );
+}
+
+#[test]
+fn a_shaders_passes_and_tagged_boxes_are_read_from_the_script() {
+    let mut h = zgx_script::testing::TestApp::inline(
+        r##"
+        local shader = ui.layer_shader("fn layer(input: LayerInput) -> vec4<f32> { return zgx_state(input.p / input.size); }", {
+            geometry = "cards",
+            passes = {
+                { name = "state", shader = "fn run(input: PassInput) -> vec4<f32> { return zgx_state(input.uv); }", size = { 8, 8 }, format = "rgba16float", feedback = true, steps = 2 },
+            },
+        })
+        return ui.div {
+            ui.div { id = "fx", w = 40, h = 20, layer_shader = shader },
+            ui.div { id = "card", w = 30, h = 10, rounded = 4, bg = "#222222", geometry = "cards" },
+        }
+        "##,
+    );
+    let fx = h.target("fx").unwrap();
+    let scene = h.ui.scene.borrow();
+    let inputs = scene
+        .layer_shader(fx)
+        .and_then(|layer| layer.shader.clone())
+        .unwrap();
+    let inputs = inputs.inputs().unwrap();
+    assert_eq!(inputs.passes[0].name, "state");
+    assert_eq!(inputs.passes[0].steps, 2);
+    assert!(inputs.passes[0].feedback);
+    let mut boxes = Vec::new();
+    scene.geometry_of(inputs.geometry.unwrap(), &mut boxes);
+    assert_eq!(boxes.len(), 1);
+    assert_eq!((boxes[0].0.width, boxes[0].1[0]), (30., 4.));
+}
+#[test]
+fn the_lava_list_runs_no_script_per_frame_and_a_row_dropped_in_is_gone() {
+    use zgx::input::{InputEvent, Modifiers, PointerButton};
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/lava/app.luau");
+    let mut app =
+        zgx_script::testing::TestApp::new(|runtime| zgx_script::ScriptHost::new(runtime, path));
+    // Its window's size, which places the floor's line.
+    app.ui.scene.borrow_mut().resize(900., 800.);
+    app.frames(10);
+    let before = app.calls();
+    app.frames(120);
+    assert_eq!(app.calls(), before, "the fire and floor run with no script");
+    assert!(app.texts().iter().any(|text| text.starts_with("5 tasks")));
+    // Picked up, carried past the line, let go.
+    let button = PointerButton::Primary;
+    let send = |app: &mut zgx_script::testing::TestApp, event| {
+        app.ui.dispatch_with_modifiers(event, Modifiers::default());
+        app.settle();
+    };
+    let row = app.bounds("task2");
+    let (x, y) = (row.x + row.width / 2., row.y + row.height / 2.);
+    send(&mut app, InputEvent::PointerMove { x, y });
+    send(&mut app, InputEvent::PointerDown { x, y, button });
+    for step in 1..=20 {
+        let y = y + (600. - y) * step as f32 / 20.;
+        send(&mut app, InputEvent::PointerMove { x, y });
+        app.frames(2);
+    }
+    send(&mut app, InputEvent::PointerUp { x, y: 600., button });
+    app.frames(200);
+    let texts = app.texts();
+    assert!(
+        texts.iter().any(|text| text.starts_with("4 tasks")),
+        "{texts:?} {row:?}"
+    );
+}
+#[test]
+fn a_pass_that_does_not_compile_is_the_scripts_error_naming_it() {
+    let error = zgx_script::testing::TestApp::try_new(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r#"
+            local shader = ui.layer_shader("fn layer(input: LayerInput) -> vec4<f32> { return input.color; }", {
+                passes = { { name = "broken", shader = "fn run(input: PassInput) -> vec4<f32> { return nope; }" } },
+            })
+            return ui.div { layer_shader = shader }
+            "#,
+        )
+    })
+    .err()
+    .expect("it fails");
+    assert!(error.contains("pass `broken`"), "{error}");
+}
+#[test]
+fn each_call_with_inputs_is_its_own_effect() {
+    let mut h = zgx_script::testing::TestApp::inline(
+        r#"
+        local function fx()
+            return ui.layer_shader("fn layer(input: LayerInput) -> vec4<f32> { return zgx_a(vec2<f32>(0.0)); }", {
+                passes = { { name = "a", shader = "fn run(input: PassInput) -> vec4<f32> { return vec4<f32>(1.0); }" } },
+            })
+        end
+        return ui.div {
+            ui.div { id = "one", w = 4, h = 4, layer_shader = fx() },
+            ui.div { id = "two", w = 4, h = 4, layer_shader = fx() },
+        }
+        "#,
+    );
+    let (one, two) = (h.target("one").unwrap(), h.target("two").unwrap());
+    let scene = h.ui.scene.borrow();
+    let id = |node| {
+        scene
+            .layer_shader(node)
+            .and_then(|layer| layer.shader.clone())
+            .unwrap()
+            .id()
+    };
+    assert_ne!(id(one), id(two));
+}
+#[test]
 fn the_engine_keeps_a_layer_shader_up_with_no_script_per_frame() {
     let mut h = Harness::inline(
         r##"local on = ui.state("on", false)
@@ -5340,15 +5480,16 @@ fn a_pointer_event_says_where_and_the_keys_held() {
     });
     h.frames(2);
     let said = h.text("said");
-    let common = "alt=boolean,cmd=boolean,ctrl=boolean,local_x=number,local_y=number,meta=boolean,mine=boolean,shift=boolean,x=number,y=number";
+    // A move says how far it went (`dx`, `dy`) too, in its one table.
+    let moved = "alt=boolean,cmd=boolean,ctrl=boolean,dx=number,dy=number,local_x=number,local_y=number,meta=boolean,mine=boolean,shift=boolean,x=number,y=number";
     let at = format!(
         "{:.1} {:.1} 30.0 20.0 false false false false false true",
         x, y
     );
-    assert!(said.contains(&format!("move {at} [{common}];")), "{said}");
+    assert!(said.contains(&format!("move {at} [{moved}];")), "{said}");
     assert!(
         said.contains(&format!(
-            "move {:.1} {:.1} 31.0 20.0 false false false false false true [{common}];",
+            "move {:.1} {:.1} 31.0 20.0 false false false false false true [{moved}];",
             x + 1.,
             y
         )),

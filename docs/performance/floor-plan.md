@@ -174,6 +174,33 @@ The change:
 - **Render:** text shaping and layout per changed text (9.6 K each), and
   the TextCache trim and retire that walk every shaped text every frame.
 
+### E. Parked, with numbers
+
+**Draw calls by shading, across disjoint siblings.** The heavy dashboard
+breaks its batches 75 times a frame on shading alone: each card or cell
+goes full (border, shadow) → opaque (background) → basic (text), and the
+next card repeats. Draws whose clips differ already share a batch where
+neither is cut (#1654: 167.6 → 128.7 draw calls a frame, render −2%).
+
+- **The idea:** a container whose children's inks (`Scene::ink`, parent
+  space) are pairwise disjoint can paint their items in any merge that
+  keeps each child's own order. Interleaving them by position puts each
+  kind in one run.
+- **Measured** (scratch prototype, heavy on an M5, kept frames off): 23
+  groups a frame qualify. Draw calls fall 125.6 → 94.2 (both) and
+  120.0 → 87.1 (stream), and frames read back byte-identical. At about
+  1.6 K instructions per Metal draw call, that's about 51 K a frame:
+  1.8% of render, 0.8% of the frame.
+- **Why parked:** kept frames assume each subtree is one contiguous run of
+  items (`KeptItem::end`). A zipped group would have to splice as one,
+  and the zip's verdict must be cached per container until its children's
+  inks change: about 2–3 days of work, with risk in splices, for under 1%
+  of heavy's frame.
+- **Revisit when** an app shows many more qualifying groups than heavy's
+  23 (a card grid, a dashboard of tiles). The scratch diff is
+  `~/sol-tools/render/part2-zip-scratch.diff` (zip after the paint walk,
+  behind `ZIP=1`; `NOKEPT=1` paints whole frames).
+
 ## Order
 
 1. Cheap, exact, general cuts in each lane (C, D), each its own PR with

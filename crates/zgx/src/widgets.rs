@@ -715,10 +715,18 @@ impl EditorHandle {
         ))
     }
     /// Where an input method's candidates go, in the window's points: under
-    /// the clause it converts (`composition_area`), else at the caret.
+    /// the clause it converts (`composition_area`), else at the caret; an
+    /// empty rect once the editor is gone from the scene (Windows' input
+    /// method may still ask, before it hears focus moved).
     pub fn input_method_area(&self) -> Rect {
-        self.composition_area()
-            .unwrap_or_else(|| self.scene.borrow().transformed_bounds(self.caret))
+        self.composition_area().unwrap_or_else(|| {
+            let scene = self.scene.borrow();
+            if scene.contains(self.caret) {
+                scene.transformed_bounds(self.caret)
+            } else {
+                Rect::default()
+            }
+        })
     }
     /// Where bytes `range` of the text it shows (its committed text with
     /// any composition in place of the selection) are, in the window's
@@ -1617,6 +1625,9 @@ pub(crate) struct UiStorage {
     /// (`tab_into_next_row`).
     row_focus: Cell<Option<RowFocus>>,
     content_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
+    /// Bumped as any of those is published resized, once a measured list asks
+    /// for it (`Ui::content_size_revision`).
+    content_revision: RefCell<Option<Signal<u64>>>,
     /// Nodes' laid-out sizes (`observe_size`): read only when layout runs.
     observed_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
     observed_bounds: RefCell<crate::scene::NodeMap<Signal<Rect>>>,
@@ -1891,6 +1902,7 @@ impl Ui {
             refocus_trail: RefCell::new(None),
             row_focus: Cell::new(None),
             content_sizes: RefCell::default(),
+            content_revision: RefCell::default(),
             observed_sizes: RefCell::default(),
             observed_bounds: RefCell::default(),
             observed_visibility: RefCell::default(),
@@ -2667,6 +2679,29 @@ impl Ui {
             .insert(node, signal.clone());
         self.storage.editor_layout_revision.set(None);
         signal
+    }
+    /// `content_size_revision` bumped, if a measured list asked for it: out of
+    /// line, as most apps have none.
+    #[inline(never)]
+    fn content_sizes_published(&self) {
+        let revision = self.storage.content_revision.borrow().clone();
+        if let Some(revision) = revision {
+            revision.mutate(|serial| {
+                *serial = serial.wrapping_add(1);
+                true
+            });
+        }
+    }
+    /// A revision bumped after each publication of content sizes in which any
+    /// changed: what reads many nodes' sizes (a measured list's rows) reads
+    /// it, and theirs untracked, rather than tracking each one.
+    pub(crate) fn content_size_revision(&self) -> Signal<u64> {
+        if let Some(revision) = &*self.storage.content_revision.borrow() {
+            return revision.clone();
+        }
+        let revision = self.signal(0_u64);
+        *self.storage.content_revision.borrow_mut() = Some(revision.clone());
+        revision
     }
     /// Observe the node's laid-out size (its border box), published after
     /// each layout that runs: unlike `observe_bounds`, nothing an ancestor
@@ -4060,12 +4095,17 @@ impl Ui {
             // Publish outside every storage/scene borrow: geometry subscribers can
             // mount, dispose, translate, or reenter frame preparation.
             self.runtime.batch(|| {
+                let mut any = false;
                 for (node, signal, size) in sizes {
                     if self.scene.borrow().contains(node)
                         && signal.with_untracked(|told| resized(*told, size))
                     {
                         signal.set(size);
+                        any = true;
                     }
+                }
+                if any {
+                    self.content_sizes_published();
                 }
                 // Changed, as gathered above (what reads them runs after
                 // the batch): set without comparing again.
@@ -5094,7 +5134,7 @@ impl Ui {
             if !s.contains(root) {
                 return;
             }
-            if !draw_hint.laid_out.take() {
+            if !draw_hint.laid_out.take() && !DRAWS_LAID_OUT.get() {
                 s.prepare_layout();
             }
             let bounds = s.bounds(root);
@@ -7731,10 +7771,19 @@ pub(crate) fn finish_input_draws(scene: &Rc<RefCell<Scene>>) {
     let runtime = storage.runtime.clone();
     // Batched: an observer of a signal a shaper writes (unsupported) runs
     // after the draws, not inside an editor's borrow.
+    // Laid out once for all of them: each draw reads its editor's box from
+    // that layout, not a pass of its own (`DRAWS_LAID_OUT`), and the box it
+    // read is kept, so that one another's draw moves (a field growing with
+    // its text) is drawn again below.
     runtime.batch(|| {
+        scene.borrow_mut().prepare_layout();
+        DRAWS_LAID_OUT.set(true);
         for (_, effect, draw) in draws.waiting {
+            scene.borrow().read_geometry_for(Some(effect));
             runtime.run_as(effect, &*draw);
         }
+        scene.borrow().read_geometry_for(None);
+        DRAWS_LAID_OUT.set(false);
         scene.borrow_mut().prepare_layout();
     });
     let watch = |effect: u64, starts: bool| {
@@ -7757,6 +7806,12 @@ pub(crate) fn finish_input_draws(scene: &Rc<RefCell<Scene>>) {
         runtime.rerun_watched(&moved, watch);
         scene.borrow_mut().prepare_layout();
     }
+}
+thread_local! {
+    /// Whether the scene was laid out for the input draws running now, at
+    /// a mount's end (`finish_input_draws`): a draw then reads its box as
+    /// that layout left it rather than laying out again.
+    static DRAWS_LAID_OUT: Cell<bool> = const { Cell::new(false) };
 }
 /// Whether the mount deferring input draws has bound an input: without one
 /// its observers run as any batch's.
@@ -8721,4 +8776,116 @@ struct RowFocus {
     backward: bool,
     /// Where Tab would have gone: past the list's last row that way.
     otherwise: Option<NodeId>,
+}
+
+#[cfg(test)]
+mod layout_drag_tests {
+    use super::Ui;
+    mod layout_drag_page {
+        use crate as zgx;
+        include!("../examples/support/layout_drag_page.rs");
+    }
+
+    /// Passes and measures a frame as the split between six panes is dragged,
+    /// on `layout_drag_bench`'s page (which the gate counts as `layout-drag`).
+    fn drag() -> (f64, f64, usize) {
+        let mut ui = Ui::new(2000., 1100.);
+        let split = ui.signal(320_f32);
+        let runtime = ui.runtime.clone();
+        let _handle = ui.mount(layout_drag_page::page(split.clone(), &runtime));
+        for _ in 0..3 {
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush();
+        }
+        let (passes, measures) = {
+            let scene = ui.scene.borrow();
+            (scene.layout_passes(), scene.measure_calls)
+        };
+        let mut frames = 0;
+        for width in layout_drag_page::widths(30, 12.) {
+            split.set(width);
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush();
+            frames += 1;
+        }
+        let scene = ui.scene.borrow();
+        (
+            (scene.layout_passes() - passes) as f64 / frames as f64,
+            (scene.measure_calls - measures) as f64 / frames as f64,
+            scene.len(),
+        )
+    }
+
+    /// A frame of the drag takes no more passes and measures than it did when
+    /// `layout-drag` was added (3.13 and 2,170 over 630 nodes). Each pane
+    /// asks its nodes under several constraints a pass, and its lists' and
+    /// text areas' viewports resized ask for another: lower these as that
+    /// work goes.
+    #[test]
+    fn a_dragged_split_measures_within_its_budget() {
+        let (passes, measures, nodes) = drag();
+        eprintln!("drag: {passes:.2} passes, {measures:.0} measures a frame, {nodes} nodes");
+        assert!(passes <= 3.2, "{passes:.2} passes a frame");
+        assert!(measures <= 2200., "{measures:.0} measures a frame");
+    }
+}
+
+#[cfg(test)]
+mod input_draw_pass_tests {
+    use super::Ui;
+    use crate::compose::prelude::*;
+
+    /// Layout passes a mount of `n` rows, each a button and a text input,
+    /// takes, as `widget_bench` mounts them.
+    fn passes_to_mount(n: usize) -> u64 {
+        let mut ui = Ui::new(1200., 800.);
+        let values: Vec<_> = (0..n).map(|_| ui.signal(String::new())).collect();
+        let before = ui.scene.borrow().layout_passes();
+        let _handle = ui.mount(column().children(values.into_iter().map(|value| {
+            row()
+                .gap(8.)
+                .child(button().child(text("Button")))
+                .child(text_input("Name", value).w(160.))
+        })));
+        ui.scene.borrow_mut().flush();
+        ui.scene.borrow().layout_passes() - before
+    }
+
+    /// A mount draws its text inputs from one layout, not one each: as many
+    /// passes for 200 inputs as for 2. Each draw reading its box from a pass
+    /// of its own laid out the scene once per input.
+    #[test]
+    fn a_mounts_text_inputs_share_one_layout() {
+        let (few, many) = (passes_to_mount(2), passes_to_mount(200));
+        assert_eq!(few, many, "{few} passes for 2 inputs, {many} for 200");
+        assert!(many <= 3, "{many} passes");
+    }
+
+    /// Fields drawn from the one layout are drawn where it placed them: the
+    /// text of each inside its own box.
+    #[test]
+    fn a_mounts_text_inputs_draw_in_their_own_boxes() {
+        let mut ui = Ui::new(600., 800.);
+        let long = ui.signal("line\\n".repeat(12));
+        let below = ui.signal(String::from("below"));
+        let mounted = ui.mount(
+            column()
+                .child(text_area("Notes", long).id("notes").w(300.))
+                .child(text_input("Name", below).id("below").w(300.)),
+        );
+        ui.scene.borrow_mut().flush();
+        let notes = mounted.find("notes").unwrap();
+        let field = mounted.find("below").unwrap();
+        for node in [notes, field] {
+            let editor = ui.editor(node).unwrap();
+            let line = editor.text_area(0..1).unwrap();
+            let bounds = ui.scene.borrow().bounds(node);
+            assert!(
+                line.x >= bounds.x
+                    && line.y >= bounds.y
+                    && line.y + line.height <= bounds.y + bounds.height,
+                "{line:?} in {bounds:?}"
+            );
+        }
+    }
 }

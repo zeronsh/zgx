@@ -902,6 +902,18 @@ pub fn disable_cursor_rects(window: &winit::window::Window) {
     }
 }
 
+/// Hides the pointer or shows it again, for a locked pointer (`Host::
+/// sync_pointer_lock`). AppKit counts hides: each hide is matched by one
+/// show. winit's own hiding is an invisible cursor in a cursor rect, which
+/// does nothing with the window's rects off (`disable_cursor_rects`).
+pub fn show_cursor(shown: bool) {
+    if shown {
+        objc2_app_kit::NSCursor::unhide();
+    } else {
+        objc2_app_kit::NSCursor::hide();
+    }
+}
+
 /// Shows `cursor`, if the pointer is over this window (an app sets the cursor
 /// only for its own windows).
 pub fn set_cursor(window: &winit::window::Window, cursor: winit::window::CursorIcon) {

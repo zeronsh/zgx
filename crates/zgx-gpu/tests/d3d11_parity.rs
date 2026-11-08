@@ -7,8 +7,9 @@
 //! (a picture with straight alpha and a gradient's ramp), and canvas
 //! polylines (a moving sparkline, a translucent stroke over itself), and
 //! a truncated text's blurred shadow reaching past its box, and a counter
-//! filled with a gradient (source-in and behind blends), at
-//! 1×, 1.5× and 2×, byte for byte: both compile the same HLSL with FXC
+//! filled with a gradient (source-in and behind blends), and every
+//! ready-made shader fill (`zgx_fx`'s, its fragment stage compiled for each
+//! as an app's), at 1×, 1.5× and 2×, byte for byte: both compile the same HLSL with FXC
 //! (Direct3D 12 pinned to it, docs/windows.md). `ZGX_D3D11` is read once a
 //! process, so the test runs itself again with it and compares that run's
 //! frames with its own.
@@ -299,9 +300,279 @@ fn view(live: Signal<u32>, offset: Signal<f32>) -> View {
         .child(filled)
 }
 
-/// Each frame's pixels, RGBA, as this process draws them at `scale`.
+/// Every ready-made shader fill (`zgx_fx`, with its presets) in a box of
+/// its own with rounded corners, at a few moments, as this process draws
+/// them at `scale`: each fill's module through FXC (in a process of its own,
+/// `fxc_child`), as an app's would be.
+#[cfg(windows)]
+fn fill_frames(scale: f32) -> Vec<Vec<u8>> {
+    use zgx::scene::*;
+    let fills: Vec<_> = zgx_fx::catalog()
+        .into_iter()
+        .filter(|(_, fx)| fx.kind() == zgx_fx::FxKind::Fill)
+        .collect();
+    assert!(fills.len() >= 20, "{} fills", fills.len());
+    // And a radial gradient's: zgx's own fill, compiled as an app's on
+    // Direct3D 11 (in the process, as a built-in, on Direct3D 12).
+    let names = fill_names();
+    let (cell, columns) = (FILL_CELL, FILL_COLUMNS);
+    let size = (
+        cell.0 * columns as f32,
+        cell.1 * names.len().div_ceil(columns) as f32,
+    );
+    let mut gpu = GpuRenderer::new((size.0 * scale) as u32, (size.1 * scale) as u32).unwrap();
+    gpu.set_scale_factor(scale);
+    let now = std::time::Instant::now();
+    [0.3, 1.7, 4.1]
+        .into_iter()
+        .map(|time| {
+            let mut scene = Scene::new(size.0, size.1);
+            let root = scene.root();
+            scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+            let radial = zgx::decoration::radial_shader();
+            let shaders = fills
+                .iter()
+                .map(|(_, fx)| (fx.shader(), Some(fx)))
+                .chain([(radial, None)]);
+            for (index, (shader, fx)) in shaders.enumerate() {
+                let quad = QuadStyle {
+                    radius: 8.,
+                    fill: Color(0, 0, 0, 255),
+                    decoration: Some(std::sync::Arc::new(zgx::decoration::Decoration {
+                        background: Some(zgx::decoration::Background::Shader(shader)),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                };
+                let id = scene.append(
+                    root,
+                    NodeKind::Panel {
+                        layout: Layout::Overlay,
+                        quad,
+                    },
+                    Style {
+                        width: Some(cell.0 - 6.),
+                        height: Some(cell.1 - 6.),
+                        ..Default::default()
+                    },
+                );
+                scene.set_transform(
+                    id,
+                    Transform {
+                        x: (index % columns) as f32 * cell.0 + 3.,
+                        y: (index / columns) as f32 * cell.1 + 3.,
+                    },
+                );
+                match fx {
+                    Some(fx) => fx.apply(&mut scene, id, time, false, now),
+                    None => scene.set_shader_uniforms(
+                        id,
+                        zgx::decoration::radial_uniforms(
+                            (0.3, 0.4),
+                            0.9,
+                            [
+                                zgx::canvas::GradientStop {
+                                    offset: 0.,
+                                    color: Color(255, 200, 80, 255),
+                                },
+                                zgx::canvas::GradientStop {
+                                    offset: 1.,
+                                    color: Color(40, 90, 220, 255),
+                                },
+                            ]
+                            .into(),
+                        ),
+                    ),
+                }
+            }
+            let report = scene.flush();
+            gpu.render(&scene, &report.damage).unwrap();
+            let pixels = gpu.readback().unwrap();
+            // Each box shows its fill, not the black under it (a fill that
+            // failed to compile here and in Direct3D 12 alike would match).
+            let width = (size.0 * scale) as usize;
+            for (index, name) in names.iter().enumerate() {
+                let (x0, y0) = (
+                    ((index % columns) as f32 * cell.0 + 8.) * scale,
+                    ((index / columns) as f32 * cell.1 + 8.) * scale,
+                );
+                let (w, h) = ((cell.0 - 16.) * scale, (cell.1 - 16.) * scale);
+                let lit = (y0 as usize..(y0 + h) as usize)
+                    .flat_map(|y| (x0 as usize..(x0 + w) as usize).map(move |x| (x, y)))
+                    .filter(|&(x, y)| pixels[(y * width + x) * 4..][..3] != [0, 0, 0])
+                    .count();
+                assert!(
+                    lit as f32 > 0.1 * w * h,
+                    "{name} at {time}: {lit} pixels drawn of {}",
+                    w * h
+                );
+            }
+            pixels
+        })
+        .collect()
+}
+
+/// Every ready-made layer shader reading neither the backdrop nor a blur
+/// (`zgx_fx`'s, with presets, one-shots alive), and zgx's colour filter
+/// (`hue_rotate`), each over a box holding a bar on striped content, at a
+/// few moments, as this process draws them at `scale`; the plain scene
+/// first. Each must change its cell at one of the moments: drawn as
+/// painted in both processes (a shader that failed to compile in both),
+/// they would match.
+#[cfg(windows)]
+fn layer_frames(scale: f32) -> Vec<Vec<u8>> {
+    use std::time::{Duration, Instant};
+    use zgx::decoration::{ShaderUniforms, color_filter_shader};
+    use zgx::scene::*;
+    let start = Instant::now();
+    let mut layers: Vec<(String, Option<zgx_fx::Fx>)> = zgx_fx::catalog()
+        .into_iter()
+        .filter(|(_, fx)| {
+            fx.kind() == zgx_fx::FxKind::Layer && fx.frost() == 0. && !fx.shader().reads_backdrop()
+        })
+        .map(|(name, fx)| {
+            // A one-shot alive since `start`, seen a moment on.
+            let _ = fx.uniforms(0., false, start);
+            (name, Some(fx))
+        })
+        .collect();
+    assert!(layers.len() >= 10, "{} layer shaders", layers.len());
+    layers.push(("hue_rotate".into(), None));
+    let (cell, columns) = (LAYER_CELL, LAYER_COLUMNS);
+    let size = (
+        cell.0 * columns as f32,
+        cell.1 * layers.len().div_ceil(columns) as f32,
+    );
+    let mut gpu = GpuRenderer::new((size.0 * scale) as u32, (size.1 * scale) as u32).unwrap();
+    gpu.set_scale_factor(scale);
+    let later = start + Duration::from_millis(250);
+    let draw = |gpu: &mut GpuRenderer, time: Option<f32>| {
+        let mut scene = Scene::new(size.0, size.1);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        for i in 0..(size.1 / 12.).ceil() as usize {
+            let stripe = scene.append(
+                root,
+                NodeKind::Rect(if i % 2 == 0 {
+                    Color(30, 60, 200, 255)
+                } else {
+                    Color(230, 130, 30, 255)
+                }),
+                Style {
+                    width: Some(size.0),
+                    height: Some(12.),
+                    ..Default::default()
+                },
+            );
+            scene.set_transform(
+                stripe,
+                Transform {
+                    x: 0.,
+                    y: i as f32 * 12.,
+                },
+            );
+        }
+        for (index, (_, fx)) in layers.iter().enumerate() {
+            let id = scene.append(
+                root,
+                NodeKind::Panel {
+                    layout: Layout::Overlay,
+                    quad: QuadStyle {
+                        radius: 6.,
+                        fill: Color(20, 24, 32, 200),
+                        // The colour filter's box takes its shader as its
+                        // fill too: one shader of both kinds, which Direct3D
+                        // 11 compiles from two modules. As a fill it doesn't
+                        // validate (no `fill`) and the box draws its colour;
+                        // as the layer's shader it must still draw.
+                        decoration: fx.is_none().then(|| {
+                            std::sync::Arc::new(zgx::decoration::Decoration {
+                                background: Some(zgx::decoration::Background::Shader(
+                                    color_filter_shader(),
+                                )),
+                                ..Default::default()
+                            })
+                        }),
+                        ..Default::default()
+                    },
+                },
+                Style {
+                    width: Some(48.),
+                    height: Some(32.),
+                    ..Default::default()
+                },
+            );
+            scene.set_transform(
+                id,
+                Transform {
+                    x: (index % columns) as f32 * cell.0 + 24.,
+                    y: (index / columns) as f32 * cell.1 + 20.,
+                },
+            );
+            let bar = scene.append(
+                id,
+                NodeKind::Rect(Color(250, 250, 250, 255)),
+                Style {
+                    width: Some(24.),
+                    height: Some(8.),
+                    ..Default::default()
+                },
+            );
+            scene.set_transform(bar, Transform { x: 12., y: 12. });
+            match (time, fx) {
+                (None, _) => {}
+                (Some(time), Some(fx)) => fx.apply(&mut scene, id, time, false, later),
+                (Some(_), None) => {
+                    let matrix = hue_rotate_matrix(120.);
+                    scene.set_layer_shader(id, Some(color_filter_shader()));
+                    scene.set_layer_uniforms(
+                        id,
+                        ShaderUniforms {
+                            time: 0.,
+                            params: [matrix[0], matrix[1], matrix[2], [0.; 4]],
+                        },
+                    );
+                }
+            }
+        }
+        let report = scene.flush();
+        gpu.render(&scene, &report.damage).unwrap();
+        gpu.readback().unwrap()
+    };
+    let plain = draw(&mut gpu, None);
+    let mut all = vec![plain.clone()];
+    all.extend([0.1, 0.45, 0.8, 1.31].map(|time| draw(&mut gpu, Some(time))));
+    let width = (size.0 * scale) as usize;
+    for (index, (name, _)) in layers.iter().enumerate() {
+        let (x0, y0) = (
+            ((index % columns) as f32 * cell.0 * scale) as usize,
+            ((index / columns) as f32 * cell.1 * scale) as usize,
+        );
+        let (w, h) = ((cell.0 * scale) as usize, (cell.1 * scale) as usize);
+        let changed = all[1..].iter().any(|frame| {
+            (y0..y0 + h).any(|y| {
+                (x0..x0 + w)
+                    .any(|x| frame[(y * width + x) * 4..][..4] != plain[(y * width + x) * 4..][..4])
+            })
+        });
+        assert!(changed, "{name}: draws as painted at every moment");
+    }
+    all
+}
+
+/// Each frame's pixels, RGBA, as this process draws them at `scale`: the
+/// suite's view's, then the fills', then the layer shaders'.
 #[cfg(windows)]
 fn frames(scale: f32) -> Vec<Vec<u8>> {
+    let mut all = suite_frames(scale);
+    all.extend(fill_frames(scale));
+    all.extend(layer_frames(scale));
+    all
+}
+
+/// The suite's view's frames at `scale`.
+#[cfg(windows)]
+fn suite_frames(scale: f32) -> Vec<Vec<u8>> {
     let mut gpu = GpuRenderer::new((SIZE.0 * scale) as u32, (SIZE.1 * scale) as u32).unwrap();
     gpu.set_scale_factor(scale);
     FontData::new(GEIST.to_vec())
@@ -368,25 +639,98 @@ fn main() {
         "the Direct3D 11 run drew too few frames"
     );
     let mut rest = &theirs[..];
+    let mut failures = Vec::new();
     for (scale, frames) in &ours {
         for (frame, ours) in frames.iter().enumerate() {
             let (theirs, after) = rest.split_at(ours.len());
             rest = after;
             let (mut differ, mut most) = (0, 0);
-            for (a, b) in ours.iter().zip(theirs) {
-                differ += usize::from(a != b);
-                most = most.max(a.abs_diff(*b));
+            let mut first = Vec::new();
+            for (i, (a, b)) in ours.iter().zip(theirs).enumerate() {
+                if a != b {
+                    differ += 1;
+                    most = most.max(a.abs_diff(*b));
+                    if first.len() < 6 {
+                        first.push(where_(frame, *scale, i / 4));
+                    }
+                }
             }
-            assert_eq!(
-                differ, 0,
-                "{scale}×, frame {frame}: {differ} bytes differ between Direct3D 12 and 11, by up to {most}"
-            );
+            if differ > 0 {
+                failures.push(format!(
+                    "{scale}×, frame {frame}: {differ} bytes differ between Direct3D 12 and 11, by up to {most}, at {first:?}"
+                ));
+            }
         }
-        println!(
-            "d3d11_parity {scale}×: {} frames byte-identical",
-            frames.len()
-        );
+        println!("d3d11_parity {scale}×: {} frames compared", frames.len());
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// What pixel `pixel` of frame `frame` at `scale` shows: the suite's point,
+/// or the fill or layer shader whose cell it lies in.
+#[cfg(windows)]
+fn where_(frame: usize, scale: f32, pixel: usize) -> String {
+    let frame = frame as u32;
+    let (width, cells, columns, names) = if frame < FRAMES {
+        (SIZE.0, (0., 0.), 1, Vec::new())
+    } else if frame < FRAMES + 3 {
+        (
+            FILL_CELL.0 * FILL_COLUMNS as f32,
+            FILL_CELL,
+            FILL_COLUMNS,
+            fill_names(),
+        )
+    } else {
+        (
+            LAYER_CELL.0 * LAYER_COLUMNS as f32,
+            LAYER_CELL,
+            LAYER_COLUMNS,
+            layer_names(),
+        )
+    };
+    let width = (width * scale) as usize;
+    let (x, y) = (
+        (pixel % width) as f32 / scale,
+        (pixel / width) as f32 / scale,
+    );
+    if names.is_empty() {
+        return format!("({x}, {y})");
+    }
+    let index = (y / cells.1) as usize * columns + (x / cells.0) as usize;
+    format!(
+        "{} ({x}, {y})",
+        names.get(index).map_or("?", String::as_str)
+    )
+}
+#[cfg(windows)]
+const FILL_CELL: (f32, f32) = (56., 42.);
+#[cfg(windows)]
+const FILL_COLUMNS: usize = 7;
+#[cfg(windows)]
+const LAYER_CELL: (f32, f32) = (96., 72.);
+#[cfg(windows)]
+const LAYER_COLUMNS: usize = 6;
+#[cfg(windows)]
+fn fill_names() -> Vec<String> {
+    let mut names: Vec<String> = zgx_fx::catalog()
+        .into_iter()
+        .filter(|(_, fx)| fx.kind() == zgx_fx::FxKind::Fill)
+        .map(|(name, _)| name)
+        .collect();
+    names.push("radial".into());
+    names
+}
+#[cfg(windows)]
+fn layer_names() -> Vec<String> {
+    let mut names: Vec<String> = zgx_fx::catalog()
+        .into_iter()
+        .filter(|(_, fx)| {
+            fx.kind() == zgx_fx::FxKind::Layer && fx.frost() == 0. && !fx.shader().reads_backdrop()
+        })
+        .map(|(name, _)| name)
+        .collect();
+    names.push("hue_rotate".into());
+    names
 }
 
 #[cfg(not(windows))]

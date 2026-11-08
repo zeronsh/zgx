@@ -116,11 +116,27 @@ jobs:
       - run: cargo fmt --all -- --check
       # Every Luau script in the repository (examples and probes too), as
       # stylua.toml and .styluaignore have them.
-      - uses: JohnnyMorganz/stylua-action@v4
+      # StyLua and luau-lsp kept between runs, and fetched with retries when
+      # missing (`fetch_release.sh`): a release download that times out
+      # (HTTP 504) failed the job before a test ran.
+      - uses: actions/cache@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          version: 2.6.0
-          args: --check .
+          path: |
+            ~/.local/stylua-2.6.0
+            ~/.local/luau-lsp-1.70.1
+          key: luau-tools-stylua-2.6.0-luau-lsp-1.70.1-linux-x86_64
+      - name: Luau format
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dir="$HOME/.local/stylua-2.6.0"
+          if [ ! -x "$dir/stylua" ]; then
+            mkdir -p "$dir"
+            scripts/fetch_release.sh JohnnyMorganz/StyLua v2.6.0 stylua-linux-x86_64.zip "$dir.zip"
+            unzip -q -o "$dir.zip" -d "$dir"
+            chmod +x "$dir/stylua"
+          fi
+          "$dir/stylua" --check .
       - run: cargo clippy --workspace --all-targets --features zgx-desktop/webkitgtk --locked -- -D warnings
       # Feature gating stays honest: the crates build without their defaults,
       # on the oldest Rust they claim (`rust-version`): a check this job
@@ -139,13 +155,18 @@ jobs:
       # Every example script type checks (luau-lsp, the shipped ui/anime
       # types); zgx-script's check tests run with it too.
       - name: Script type check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          dir="$RUNNER_TEMP/luau-lsp-1.70.1"
-          mkdir -p "$dir"
-          curl -fsSL https://github.com/JohnnyMorganz/luau-lsp/releases/download/1.70.1/luau-lsp-linux-x86_64.zip -o "$dir.zip"
-          unzip -q -o "$dir.zip" -d "$dir"
+          dir="$HOME/.local/luau-lsp-1.70.1"
+          if [ ! -x "$dir/luau-lsp" ]; then
+            mkdir -p "$dir"
+            scripts/fetch_release.sh JohnnyMorganz/luau-lsp 1.70.1 luau-lsp-linux-x86_64.zip "$dir.zip"
+            unzip -q -o "$dir.zip" -d "$dir"
+            chmod +x "$dir/luau-lsp"
+          fi
           echo "LUAU_LSP=$dir/luau-lsp" >> "$GITHUB_ENV"
-          LUAU_LSP="$dir/luau-lsp" cargo run -q -p zgx-script --bin zgx --locked -- check crates/zgx-script/examples crates/zgx-desktop/examples
+          LUAU_LSP="$dir/luau-lsp" cargo run -q -p zgx-script --bin zgx --locked -- check crates/zgx-script/examples crates/zgx-desktop/examples crates/zgx-fx/examples/gallery
       # With 3D scenes (zgx-script's `scene3d`, off by default; the Windows
       # and macOS jobs test without it).
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload -p zgx-script --all-targets --features zgx-script/scene3d --locked
@@ -281,7 +302,9 @@ jobs:
   # against the commit before (no failure), which also keeps its cache.
   perf:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # With the base's binaries not cached, both sides build: the head's took
+    # 19 minutes and the base's was cut at 26 (Nov 7, as scenes grew).
+    timeout-minutes: 75
     permissions:
       contents: read
       pull-requests: write
@@ -407,6 +430,11 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The iOS target, for the simulator: the host, the kit and the example
+      # app, linted as the desktop is. A phone's build needs signing, and
+      # stays local (`scripts/ios/device.py`).
+      - run: rustup target add aarch64-apple-ios-sim
+      - run: cargo clippy -p zgx-run --example ios_app --target aarch64-apple-ios-sim --locked -- -D warnings
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload --all-targets --locked
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
@@ -495,6 +523,8 @@ jobs:
       - run: cargo test -p winit --lib --locked occlusion_area
       - run: cargo test -p winit --lib --locked hwnd_dpi_keeps_no_gdi_handles
       - run: cargo test -p winit --lib --locked a_deadline_already_armed_isnt_armed_again
+      # A mouse message's Shift and Control, to a window without focus.
+      - run: cargo test -p winit --lib --locked a_wheel_with_shift_down_has_shift_without_focus
       # The watchdog's budgets and memory limits, whose timing is each OS's,
       # one at a time: run together on the runner's three cores, five busy
       # tests kept the watchdog's thread off a core 130 ms (a runaway
@@ -522,3 +552,12 @@ jobs:
       # The app-shader HLSL generator's register map and the FXC child's
       # job and cache key (dx12_fill, fxc_child: Windows-only modules).
       - run: cargo test -p zgx-gpu --lib --locked -- dx12_fill fxc_child
+      # Direct3D 11 (the `d3d11` feature, on WARP) draws what Direct3D 12
+      # does, byte for byte: the suite's scenes and every ready-made shader
+      # fill and layer shader, each compiled cold by FXC in its child
+      # (`d3d11_parity`), optimized as apps ship them; and its ahead-compiled
+      # shaders are what naga writes now.
+      - run: cargo test -p zgx-gpu --features d3d11 --test d3d11_parity --test d3d11_left_out --release --locked
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}\zgx-cold-d3d11
+      - run: cargo test -p zgx-gpu --features d3d11 --lib --locked -- d3d11_frame

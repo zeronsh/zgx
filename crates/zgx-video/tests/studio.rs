@@ -56,6 +56,7 @@ end)
             fps: 60.,
             scale: 1.,
             background: Color(0, 0, 0, 255),
+            ..Default::default()
         },
         |setting| {
             let host = ScriptHost::new(setting.runtime, &app);
@@ -214,20 +215,38 @@ fn a_broken_script_shows_its_error_and_a_fixed_one_comes_back() {
 }
 
 #[test]
-fn its_render_button_writes_the_file_and_says_so() {
+fn its_renders_queue_run_in_turn_and_a_queued_one_can_be_stopped() {
     let dir = script_dir("render");
     let mut app = app(&dir);
     app.until("first frame", |state| state["frame"].as_u64() == Some(0));
-    let out = dir.join("frames");
-    app.invoke(
-        "studio.render",
-        json!({ "id": "Bars", "props": {}, "output": out }),
-    );
-    let state = app.until("the render", |state| {
-        state["render"]["state"]
-            .as_str()
-            .is_some_and(|said| said != "running")
+    for name in ["one", "two", "three"] {
+        app.invoke(
+            "studio.render",
+            json!({ "id": "Bars", "props": {}, "output": dir.join(name) }),
+        );
+        app.stage.step().unwrap();
+    }
+    // The third waits behind the others: stop it before its turn.
+    app.until("three queued", |state| {
+        state["renders"]
+            .as_array()
+            .is_some_and(|jobs| jobs.len() == 3)
     });
-    assert_eq!(state["render"]["state"], "done", "{state}");
-    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 60);
+    app.invoke("studio.cancel", json!(3));
+    let state = app.until("the queue run", |state| {
+        state["renders"].as_array().is_some_and(|jobs| {
+            jobs.iter()
+                .all(|job| matches!(job["state"].as_str(), Some("done" | "stopped")))
+        })
+    });
+    let states: Vec<&str> = state["renders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|job| job["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["done", "done", "stopped"], "{state}");
+    assert_eq!(std::fs::read_dir(dir.join("one")).unwrap().count(), 60);
+    assert_eq!(std::fs::read_dir(dir.join("two")).unwrap().count(), 60);
+    assert!(!dir.join("three").exists(), "a stopped one never started");
 }

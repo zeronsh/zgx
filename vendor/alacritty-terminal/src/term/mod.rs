@@ -28,6 +28,7 @@ use crate::vte::ansi::{
 
 pub mod cell;
 pub mod color;
+mod grapheme;
 pub mod search;
 
 /// Minimum number of columns.
@@ -49,6 +50,9 @@ const KEYBOARD_MODE_STACK_MAX_DEPTH: usize = TITLE_STACK_MAX_DEPTH;
 
 /// Default tab interval, corresponding to terminfo `it` value.
 const INITIAL_TABSTOPS: usize = 8;
+
+/// zgx: grapheme clustering's private mode, as Ghostty and WezTerm have it.
+const GRAPHEME_CLUSTERING_MODE: u16 = 2027;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,6 +81,8 @@ bitflags! {
         const REPORT_ALTERNATE_KEYS   = 1 << 20;
         const REPORT_ALL_KEYS_AS_ESC  = 1 << 21;
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
+        /// zgx: grapheme clustering (DEC mode 2027), on by default.
+        const GRAPHEME_CLUSTERING     = 1 << 23;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
@@ -116,6 +122,7 @@ impl Default for TermMode {
             | TermMode::LINE_WRAP
             | TermMode::ALTERNATE_SCROLL
             | TermMode::URGENCY_HINTS
+            | TermMode::GRAPHEME_CLUSTERING
     }
 }
 
@@ -1096,6 +1103,181 @@ impl<T> Term<T> {
         cursor_cell.extra = extra;
     }
 
+    /// zgx: `c` (above U+00FF, `width` cells) in grapheme clustering mode
+    /// (2027): joined to the cluster before the cursor where it continues it,
+    /// or dropped where it's zero-width and continues nothing (`None`), else
+    /// the cells it takes, a regional indicator's two.
+    #[cold]
+    #[inline(never)]
+    fn grapheme_input(&mut self, c: char, width: usize) -> Option<usize>
+    where
+        T: EventListener,
+    {
+        if self.join_grapheme(c, width) {
+            return None;
+        }
+        match width {
+            0 => None,
+            _ if grapheme::is_regional_indicator(c) => Some(2),
+            width => Some(width),
+        }
+    }
+
+    /// zgx: joins `c` to the cluster before the cursor (the character just
+    /// written: before the cursor, or under it waiting to wrap) if it
+    /// continues it, that cell made wide or narrow as `c` asks
+    /// (`grapheme::effect`). False where it doesn't continue it.
+    fn join_grapheme(&mut self, c: char, width: usize) -> bool
+    where
+        T: EventListener,
+    {
+        let cursor = &self.grid.cursor;
+        let line = cursor.point.line;
+        let mut column = cursor.point.column;
+        if !cursor.input_needs_wrap {
+            if column.0 == 0 {
+                return false;
+            }
+            column -= 1;
+        }
+        if self.grid[line][column]
+            .flags
+            .contains(Flags::WIDE_CHAR_SPACER)
+        {
+            if column.0 == 0 {
+                return false;
+            }
+            column -= 1;
+        }
+        let cell = &self.grid[line][column];
+        if cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+            return false;
+        }
+        let rest = cell.zerowidth().unwrap_or(&[]);
+        let last = rest.last().copied().unwrap_or(cell.c);
+        // Told without segmenting where it can be: a regional indicator
+        // continues one alone, most emoji only a ZWJ, a variation selector,
+        // ZWJ or skin tone anything.
+        let continues = if grapheme::is_regional_indicator(c) {
+            grapheme::is_regional_indicator(cell.c) && rest.is_empty()
+        } else if width > 0 && grapheme::pictographic(c) {
+            last == '\u{200d}' && grapheme::continues(cell.c, rest, c)
+        } else {
+            grapheme::always_continues(c) || grapheme::continues(cell.c, rest, c)
+        };
+        if !continues {
+            return false;
+        }
+        let wide = cell.flags.contains(Flags::WIDE_CHAR);
+        let at = match grapheme::effect(last, c) {
+            grapheme::Effect::Ignore => return true,
+            grapheme::Effect::Wide if !wide => match self.widen_cluster(column) {
+                Some(at) => at,
+                // No room, and no wrapping: dropped, as Ghostty drops it.
+                None => return true,
+            },
+            grapheme::Effect::Narrow if wide => {
+                self.narrow_cluster(column);
+                Point::new(line, column)
+            }
+            _ => Point::new(line, column),
+        };
+        self.grid[at.line][at.column].push_zerowidth(c);
+        self.damage
+            .damage_point(Point::new(at.line.0 as usize, at.column));
+        true
+    }
+
+    /// zgx: the cluster at `column` on the cursor's line, the character just
+    /// written, made two cells wide: a wide character with its spacer, the
+    /// cursor past both (in insert mode the row after it shifts right a cell
+    /// first, as `input` shifts it for a wide character). With no room after
+    /// it on its line it starts the next, as a wide character does. Where it
+    /// went, or `None` where it can't (no room, no wrapping).
+    fn widen_cluster(&mut self, column: Column) -> Option<Point>
+    where
+        T: EventListener,
+    {
+        let columns = self.columns();
+        if columns < 2 {
+            return None;
+        }
+        let line = self.grid.cursor.point.line;
+        let mut glyph = self.grid[line][column].clone();
+        glyph.flags.insert(Flags::WIDE_CHAR);
+
+        if column + 1 >= columns {
+            // The last column, the cursor on it waiting to wrap.
+            if !self.mode.contains(TermMode::LINE_WRAP) {
+                return None;
+            }
+            self.grid
+                .cursor
+                .template
+                .flags
+                .insert(Flags::LEADING_WIDE_CHAR_SPACER);
+            self.write_at_cursor(' ');
+            self.grid
+                .cursor
+                .template
+                .flags
+                .remove(Flags::LEADING_WIDE_CHAR_SPACER);
+            self.wrapline();
+        } else {
+            self.grid.cursor.point.column = column;
+            self.grid.cursor.input_needs_wrap = false;
+        }
+
+        // The glyph, then its spacer, clearing what they cover.
+        let at = self.grid.cursor.point;
+        self.write_at_cursor(' ');
+        *self.grid.cursor_cell() = glyph;
+        self.damage_cursor();
+        self.grid.cursor.point.column += 1;
+        let spacer = self.grid.cursor.point.column;
+        if self.mode.contains(TermMode::INSERT) && spacer + 1 < columns {
+            let row = &mut self.grid[at.line][..];
+            for column in (spacer.0..columns - 1).rev() {
+                row.swap(column + 1, column);
+            }
+        }
+        self.grid
+            .cursor
+            .template
+            .flags
+            .insert(Flags::WIDE_CHAR_SPACER);
+        self.write_at_cursor(' ');
+        self.grid
+            .cursor
+            .template
+            .flags
+            .remove(Flags::WIDE_CHAR_SPACER);
+        self.damage_cursor();
+        if self.grid.cursor.point.column + 1 < columns {
+            self.grid.cursor.point.column += 1;
+        } else {
+            self.grid.cursor.input_needs_wrap = true;
+        }
+        Some(at)
+    }
+
+    /// zgx: the wide cluster at `column` on the cursor's line made one cell
+    /// wide, its spacer cleared, the cursor after it.
+    fn narrow_cluster(&mut self, column: Column) {
+        let columns = self.columns();
+        let line = self.grid.cursor.point.line;
+        self.grid[line][column].flags.remove(Flags::WIDE_CHAR);
+        if column + 1 < columns {
+            let spacer = &mut self.grid[line][column + 1];
+            spacer.flags.remove(Flags::WIDE_CHAR_SPACER);
+            spacer.c = ' ';
+        }
+        let after = (column.0 + 1).min(columns - 1);
+        self.grid.cursor.input_needs_wrap = false;
+        self.grid.cursor.point.column = Column(after);
+        self.damage.damage_line(line.0 as usize, column.0, after);
+    }
+
     #[inline]
     fn damage_cursor(&mut self) {
         // The normal cursor coordinates are always in viewport.
@@ -1142,9 +1324,27 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline(never)]
     fn input(&mut self, c: char) {
         // Number of cells the char will occupy.
-        let width = match c.width() {
-            Some(width) => width,
-            None => return,
+        // zgx: printable ASCII as unicode-width has it; anything else above
+        // U+00FF that may continue a grapheme cluster goes through
+        // `grapheme_input` in grapheme clustering mode (2027).
+        let width = if (' '..'\u{7f}').contains(&c) {
+            1
+        } else {
+            let width = match c.width() {
+                Some(width) => width,
+                None => return,
+            };
+            if (width == 0 || grapheme::may_continue(c))
+                && c as u32 > 0xff
+                && self.mode.contains(TermMode::GRAPHEME_CLUSTERING)
+            {
+                match self.grapheme_input(c, width) {
+                    Some(width) => width,
+                    None => return,
+                }
+            } else {
+                width
+            }
         };
 
         // Handle zero-width characters.
@@ -2065,6 +2265,10 @@ impl<T: EventListener> Handler for Term<T> {
     fn set_private_mode(&mut self, mode: PrivateMode) {
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
+            PrivateMode::Unknown(GRAPHEME_CLUSTERING_MODE) => {
+                self.mode.insert(TermMode::GRAPHEME_CLUSTERING);
+                return;
+            }
             PrivateMode::Unknown(mode) => {
                 debug!("Ignoring unknown mode {mode} in set_private_mode");
                 return;
@@ -2130,6 +2334,10 @@ impl<T: EventListener> Handler for Term<T> {
     fn unset_private_mode(&mut self, mode: PrivateMode) {
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
+            PrivateMode::Unknown(GRAPHEME_CLUSTERING_MODE) => {
+                self.mode.remove(TermMode::GRAPHEME_CLUSTERING);
+                return;
+            }
             PrivateMode::Unknown(mode) => {
                 debug!("Ignoring unknown mode {mode} in unset_private_mode");
                 return;
@@ -2221,6 +2429,9 @@ impl<T: EventListener> Handler for Term<T> {
                 NamedPrivateMode::SyncUpdate => ModeState::Reset,
                 NamedPrivateMode::ColumnMode => ModeState::NotSupported,
             },
+            PrivateMode::Unknown(GRAPHEME_CLUSTERING_MODE) => {
+                self.mode.contains(TermMode::GRAPHEME_CLUSTERING).into()
+            }
             PrivateMode::Unknown(_) => ModeState::NotSupported,
         };
 
@@ -3714,5 +3925,178 @@ mod tests {
         assert_eq!(version_number("0.1.2-dev"), 1_02);
         assert_eq!(version_number("1.2.3-dev"), 1_02_03);
         assert_eq!(version_number("999.99.99"), 9_99_99_99);
+    }
+}
+
+/// zgx: grapheme clustering (mode 2027), as Ghostty has it.
+#[cfg(test)]
+mod grapheme_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::event::{Event, EventListener};
+    use crate::term::test::TermSize;
+    use crate::vte::ansi::Handler;
+
+    /// What the terminal answered.
+    #[derive(Clone, Default)]
+    struct Answers(Arc<Mutex<String>>);
+    impl EventListener for Answers {
+        fn send_event(&self, event: Event) {
+            if let Event::PtyWrite(text) = event {
+                self.0.lock().unwrap().push_str(&text);
+            }
+        }
+    }
+
+    fn term(columns: usize) -> (Term<Answers>, Answers) {
+        let answers = Answers::default();
+        let term = Term::new(
+            Config::default(),
+            &TermSize::new(columns, 3),
+            answers.clone(),
+        );
+        (term, answers)
+    }
+
+    fn print(term: &mut Term<Answers>, text: &str) {
+        for c in text.chars() {
+            term.input(c);
+        }
+    }
+
+    /// The top row's characters as (cluster, wide), spacers left out.
+    fn row(term: &Term<Answers>) -> Vec<(String, bool)> {
+        let line = &term.grid[Line(0)];
+        (0..term.columns())
+            .map(|column| &line[Column(column)])
+            .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+            .map(|cell| {
+                let mut cluster = String::from(cell.c);
+                cluster.extend(cell.zerowidth().into_iter().flatten());
+                (cluster, cell.flags.contains(Flags::WIDE_CHAR))
+            })
+            .collect()
+    }
+
+    fn cell(cluster: &str, wide: bool) -> (String, bool) {
+        (cluster.into(), wide)
+    }
+
+    #[test]
+    fn the_mode_is_on_and_answers_as_it_is() {
+        let (mut term, answers) = term(10);
+        term.report_private_mode(PrivateMode::Unknown(2027));
+        term.unset_private_mode(PrivateMode::Unknown(2027));
+        term.report_private_mode(PrivateMode::Unknown(2027));
+        term.set_private_mode(PrivateMode::Unknown(2027));
+        term.report_private_mode(PrivateMode::Unknown(2027));
+        assert_eq!(
+            *answers.0.lock().unwrap(),
+            "\x1b[?2027;1$y\x1b[?2027;2$y\x1b[?2027;1$y"
+        );
+        // A full reset turns it on again.
+        term.unset_private_mode(PrivateMode::Unknown(2027));
+        term.reset_state();
+        assert!(term.mode().contains(TermMode::GRAPHEME_CLUSTERING));
+    }
+
+    #[test]
+    fn a_cluster_takes_one_cell_or_two() {
+        for (text, cells) in [
+            // A family (ZWJ), then the cursor after its two cells.
+            (
+                "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}x",
+                vec![
+                    cell("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}", true),
+                    cell("x", false),
+                ],
+            ),
+            // Flags, and a regional indicator alone: two cells each.
+            (
+                "\u{1f1fa}\u{1f1f8}\u{1f1eb}\u{1f1f7}\u{1f1e8}x",
+                vec![
+                    cell("\u{1f1fa}\u{1f1f8}", true),
+                    cell("\u{1f1eb}\u{1f1f7}", true),
+                    cell("\u{1f1e8}", true),
+                    cell("x", false),
+                ],
+            ),
+            // A skin tone.
+            (
+                "\u{1f44d}\u{1f3fd}x",
+                vec![cell("\u{1f44d}\u{1f3fd}", true), cell("x", false)],
+            ),
+            // VS16 widens, VS15 narrows (an emoji by default).
+            (
+                "\u{2764}\u{fe0f}x",
+                vec![cell("\u{2764}\u{fe0f}", true), cell("x", false)],
+            ),
+            (
+                "\u{231a}\u{fe0e}x",
+                vec![cell("\u{231a}\u{fe0e}", false), cell("x", false)],
+            ),
+            // A selector after a letter, and a zero-width space continuing
+            // nothing: dropped.
+            (
+                "x\u{fe0f}y\u{200b}z",
+                vec![cell("x", false), cell("y", false), cell("z", false)],
+            ),
+            // A combining accent joins; a spacing mark and a conjunct (after a
+            // virama) widen.
+            ("e\u{301}x", vec![cell("e\u{301}", false), cell("x", false)]),
+            (
+                "\u{915}\u{93f}x",
+                vec![cell("\u{915}\u{93f}", true), cell("x", false)],
+            ),
+            (
+                "\u{915}\u{94d}\u{937}x",
+                vec![cell("\u{915}\u{94d}\u{937}", true), cell("x", false)],
+            ),
+        ] {
+            let (mut term, _) = term(10);
+            print(&mut term, text);
+            let shown = row(&term);
+            assert_eq!(&shown[..cells.len()], cells, "{text:?}: {shown:?}");
+        }
+    }
+
+    #[test]
+    fn reset_gives_each_character_its_own_width() {
+        let (mut term, _) = term(12);
+        term.unset_private_mode(PrivateMode::Unknown(2027));
+        print(
+            &mut term,
+            "\u{2764}\u{fe0f}\u{1f468}\u{200d}\u{1f469}\u{1f1fa}\u{1f1f8}x",
+        );
+        assert_eq!(
+            row(&term)[..6],
+            [
+                cell("\u{2764}\u{fe0f}", false),
+                cell("\u{1f468}\u{200d}", true),
+                cell("\u{1f469}", true),
+                cell("\u{1f1fa}", false),
+                cell("\u{1f1f8}", false),
+                cell("x", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cluster_narrowed_on_the_last_column_frees_it() {
+        let (mut term, _) = term(4);
+        print(&mut term, "ab\u{231a}");
+        assert!(term.grid.cursor.input_needs_wrap);
+        print(&mut term, "\u{fe0e}x");
+        assert_eq!(
+            row(&term),
+            [
+                cell("a", false),
+                cell("b", false),
+                cell("\u{231a}\u{fe0e}", false),
+                cell("x", false)
+            ]
+        );
+        assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(3)));
     }
 }

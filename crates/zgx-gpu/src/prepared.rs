@@ -1393,7 +1393,7 @@ impl TextCache {
             font_size,
             font,
         };
-        self.entry(fonts, source, true, need)
+        self.entry_hashed(fonts, source, true, need, Some(hash))
     }
     fn sized(&mut self, fonts: &mut FontSystem, hash: u64, width: Option<f32>) -> (f32, f32) {
         // Measuring changes no compact (`update` is not needed).
@@ -1519,6 +1519,18 @@ impl TextCache {
         caret_row: bool,
         need: Need,
     ) -> u64 {
+        self.entry_hashed(fonts, source, caret_row, need, None)
+    }
+    /// `entry`, with the key's hash if the caller worked it out
+    /// (`plain_entry`'s `Key::plain_hash`, which is the plain key's `hash`).
+    fn entry_hashed(
+        &mut self,
+        fonts: &mut FontSystem,
+        source: Source<'_>,
+        caret_row: bool,
+        need: Need,
+        hashed: Option<u64>,
+    ) -> u64 {
         self.clock += 1;
         let key = match source {
             Source::Rich(rich) => Key::of(rich, caret_row),
@@ -1528,7 +1540,8 @@ impl TextCache {
                 font,
             } => Key::plain(text, font_size, font, caret_row),
         };
-        let hash = key.hash();
+        let hash = hashed.unwrap_or_else(|| key.hash());
+        debug_assert_eq!(hash, key.hash());
         let cached = self.entries.get_mut(&hash).filter(|entry| entry.key == key);
         if let Some(entry) = &cached
             && (entry.shaped() || (need != Need::Layout && entry.compact.is_some()))

@@ -210,13 +210,21 @@ corners, shadows' shading), text, clip regions with their rounded corners
 and fades, kept frames, scroll copies, and isolated layers (translucent,
 nested, transformed), each drawn into a texture of its own and composited,
 images the CPU writes (pictures, gradients, canvases' and SVGs' images),
-and canvases' polyline strokes and filled areas. Images a GPU view draws,
-layer effects, backdrop blur and shader fills are not drawn yet (so
-neither are what they make: `radial`
-gradients, blurred inset shadows, masks, blends, content blur, and
-`hue_rotate`, `sepia` and `invert`, layer shaders): a frame
-needing one fails with an error naming it (and panics in a debug build),
-since there is no Direct3D 12 to fall back to. What it draws is Direct3D 12's
+and canvases' polyline strokes and filled areas, and shader fills and
+layer shaders that don't read the backdrop (`radial` gradients, `hue_rotate`,
+`sepia` and `invert`, and zgx-fx's fills and layer effects among them), each
+one's pixel stage compiled by FXC off the frame as Direct3D 12's is, in a
+process of its own. What it doesn't draw yet, it leaves out where what's
+left can't show a picture a user would wrongly trust, naming each kind once
+on stderr: drop shadows are left out; images a GPU view draws are left
+empty; a backdrop blur, or a layer shader reading the backdrop (glass),
+draws its box opaque in its own colour, as the system's Reduce transparency
+draws glass, so what's over it stays legible. The rest fails the frame
+with an error naming it (and panics in a debug build), since there is no
+Direct3D 12 to fall back to: content blur and masks (content meant hidden
+would show), blend modes and image effects (an inverted icon or a blended
+text could read as something else), and a backdrop over a box with no
+colour of its own. What it draws (all but the opaque boxes) is Direct3D 12's
 frame byte for byte (`tests/d3d11_parity.rs`, at 1×, 1.5× and 2×). Both run
 the same HLSL compiled by FXC: Direct3D 11 ahead of time (`dxbc/`, written
 again by `python scripts/d3d11_shaders.py`, on Windows), and zgx
@@ -430,7 +438,11 @@ backdrop: it is the acrylic blur of what is behind the window, untinted (the
 window's accent, `SetWindowCompositionAttribute`'s
 `ACCENT_ENABLE_ACRYLICBLURBEHIND` with a tint of alpha 1), as gpui's
 `WindowBackgroundAppearance::Blurred` is, for apps laying their own tint over
-it; Windows 10 1809 and later. Its frame is not extended under the client
+it; Windows 10 1809 and later. It is not a pure blur: its luminosity pass lets about 83% of what
+is behind through and adds 8 (831 thousandths and 8, measured over flat black, grey and
+white, whatever the accent's state or tint), so a scrim laid over it reads darker over
+something bright than over macOS's material; `WindowCapabilities::blur_pass` and
+`blur_lift` say so, for an app to solve a scrim that comes out as macOS's would. Its frame is not extended under the client
 (as gpui's is not): DWM would draw the frame over the blur. Mica tints with
 the wallpaper alone and blurs nothing behind the window. With Transparency effects off
 Windows stops that blur and shows the accent's black tint, so plain glass then
@@ -498,14 +510,29 @@ title bar is pressed, on Escape and on a press outside it.
 A menu or popover that is one rounded panel gets DWM's rounded corners, rim
 and shadow, as Windows 11 frames its menus.
 
-Known gap: menus and popovers keep the theme's flat background, where Windows
-11's own menus are acrylic. DWM draws a system backdrop
-(`DWMSBT_TRANSIENTWINDOW`) only behind an activated window, and a flat colour
-behind one never activated; a popup must not take activation from its window,
-which keeps the keyboard. The undocumented `SetWindowCompositionAttribute`
-acrylic is not used for popups (only for a window's plain glass).
+On Windows 11 a popup whose panel is translucent (a menu's tint) is acrylic,
+as Windows 11's own menus are: its window has the accent plain glass has
+(`SetWindowCompositionAttribute`'s `ACCENT_ENABLE_ACRYLICBLURBEHIND`, its
+tint of alpha 1), which blurs whatever is behind it, the app's window, other
+apps and the desktop, and the panel's tint lies over it. A system backdrop
+(`DWMSBT_TRANSIENTWINDOW`) would not do: DWM draws it only behind an activated
+window, and a flat colour behind one never activated, and a popup must not
+take activation from its window, which keeps the keyboard. The accent's blur
+fills the window, so the window is the panel's box alone, which DWM rounds
+and shadows. The panel's own shadow is not drawn (`GpuRenderer::
+set_unshadowed`): the window cut it past the panel, and zgx draws a box's
+shadow whole under it, so through the translucent fill it darkened the blur,
+by half under a menu's shadow of alpha 0.5. DWM's rim goes too (the panel
+draws its own edge). A small popup's blur takes in its window above it: over
+white, 204 where a large one far from it reads 218, as a plain window's. DWM's corners are 8 or 4 pixels at 100%, so a panel
+rounded otherwise shows a sliver of blur, or loses one, at its corners. A
+popover with an arrow, a drag preview and an opaque panel have no accent. The
+blur can't fade: through a popup's fade it shows whole. With Transparency
+effects off, or on Windows 10 (whose blur would be square past a rounded
+panel's corners), popups have none. `WindowCapabilities::popup_blur_behind`
+says whether they have it, so an app can draw its popups solid where not.
 
-A popup's `backdrop_blur` blurs the app's own pixels, as on Linux: what its window last drew
+Without the accent, a popup's `backdrop_blur` blurs the app's own pixels, as on Linux: what its window last drew
 under the popup, copied into a texture of the popup's size while it shows
 (`GpuRenderer::set_backdrop`), and copied and drawn again when the window
 repaints under it. Where the popup reaches past its window, that window's edge

@@ -2136,6 +2136,7 @@ fn quick(item: &Value) -> Quick {
         Value::Map(m) => Quick::At(Rc::as_ptr(m).cast::<()>() as usize),
         Value::Element(e) => Quick::At(e.address()),
         Value::Image(image) => Quick::At(std::sync::Arc::as_ptr(image).cast::<()>() as usize),
+        Value::Folded(folded) => Quick::At(Rc::as_ptr(folded).cast::<()>() as usize),
     }
 }
 /// Hashes items' contents to match rows (equal contents are compared
@@ -5377,6 +5378,8 @@ fn with_events(
     // script's own) keeps it until release, wherever it goes.
     let captures = press.is_some() && (moved.is_some() || release.is_some());
     let (vm, actions) = (vm.clone(), low.actions.clone());
+    // Where the last move was, for the next one's `dx`, `dy`.
+    let mut last: Option<(f32, f32)> = None;
     view.on_event(move |event| {
         let lua = &vm.lua;
         let local = |x: f32, y: f32| {
@@ -5386,7 +5389,7 @@ fn with_events(
                 .unwrap_or((x, y))
         };
         let held = event.pointer_modifiers();
-        let point = |x: f32, y: f32| -> mlua::Result<mlua::Table> {
+        let point_with = |x: f32, y: f32, motion| -> mlua::Result<mlua::Table> {
             let (lx, ly) = local(x, y);
             vm.point_table(
                 (x, y, lx, ly),
@@ -5397,8 +5400,10 @@ fn with_events(
                     held.meta,
                     held.primary_shortcut(),
                 ),
+                motion,
             )
         };
+        let point = |x: f32, y: f32| point_with(x, y, None);
         if captures
             && event.phase == EventPhase::Target
             && matches!(
@@ -5437,8 +5442,20 @@ fn with_events(
                     run(h, &vm, &actions, p);
                 }
             }
+            // `dx`, `dy`: how far it moved since the last move heard, in
+            // the window's points (the DOM's `movementX`).
             InputEvent::PointerMove { x, y } => {
-                if let (Some(h), Ok(p)) = (&moved, point(*x, *y)) {
+                let (dx, dy) = last.map_or((0., 0.), |(lx, ly)| (x - lx, y - ly));
+                last = Some((*x, *y));
+                if let (Some(h), Ok(p)) = (&moved, point_with(*x, *y, Some((dx, dy, false)))) {
+                    run(h, &vm, &actions, p);
+                }
+            }
+            // The mouse's motion while the pointer is locked: `dx`, `dy`
+            // as it moved, `x`, `y` where it stays.
+            InputEvent::PointerMotion { dx, dy } => {
+                let (x, y) = handle.get().and_then(|h| h.pointer()).unwrap_or_default();
+                if let (Some(h), Ok(p)) = (&moved, point_with(x, y, Some((*dx, *dy, true)))) {
                     run(h, &vm, &actions, p);
                 }
             }
@@ -5448,6 +5465,7 @@ fn with_events(
                 }
             }
             InputEvent::PointerLeave => {
+                last = None;
                 if let Some(h) = &hover {
                     run(h, &vm, &actions, false);
                 }
@@ -5553,6 +5571,9 @@ fn with_rare(
     }
     if let Some(handler) = &rare.double_click {
         view = with_double_click(view, handler.clone(), vm, low, handle.clone());
+    }
+    if let Some(handler) = &rare.pointer_lock {
+        view = with_pointer_lock(view, handler.clone(), vm, low);
     }
     if rare.capture_keys {
         view = view.capture_keys(true);
@@ -5750,6 +5771,20 @@ fn with_double_click(
             }
             InputEvent::PointerLeave => armed = false,
             _ => {}
+        }
+    })
+}
+
+/// `on_pointer_lock`: the node took the pointer's lock or lost it. Its own
+/// lock alone: a descendant's goes by.
+#[inline(never)]
+fn with_pointer_lock(view: View, handler: Handler, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
+    let (vm, actions) = (vm.clone(), low.actions.clone());
+    view.on_event(move |event| {
+        if event.phase == EventPhase::Target
+            && let InputEvent::PointerLockChange(locked) = event.event
+        {
+            run(&handler, &vm, &actions, locked);
         }
     })
 }
@@ -7640,6 +7675,7 @@ impl KeptKeys {
 
 /// An item's `field` as a list key: a number, string or boolean, else its
 /// index.
+#[inline]
 fn field_key(item: &Value, field: &str, index: usize) -> ListKey {
     item.field(field)
         .and_then(ListKey::of)
@@ -9009,6 +9045,7 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         }
         (FontFeatures, Lit::Str(v)) => s.font_features(font_features(v)),
         (Lang, Lit::Str(v)) => s.lang(&**v),
+        (Geometry, Lit::Str(v)) => geometry_of(s, v),
         _ => s,
     }
 }
@@ -9515,4 +9552,10 @@ fn a_rows_identity_and_key_read_as_formatted() {
         assert!(!displays_as(&value, &text[..text.len() - 1]));
         assert!(!displays_as(&value, "x"));
     }
+}
+/// `geometry = "tag"`: its box read by shaders asking for the tag.
+#[cold]
+#[inline(never)]
+fn geometry_of<S: Styled>(s: S, name: &str) -> S {
+    s.geometry_tag(zgx::decoration::geometry_tag(name))
 }

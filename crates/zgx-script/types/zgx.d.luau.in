@@ -819,6 +819,22 @@ declare extern type Bitmap with
 end
 declare extern type Shader with
 end
+export type ShaderPass = {
+	name: string,
+	shader: string,
+	size: { number }?,
+	scale: number?,
+	format: ("rgba8" | "rgba16float")?,
+	feedback: boolean?,
+	steps: number?,
+	once: boolean?,
+}
+export type LayerShaderOptions = {
+	fps: number?,
+	passes: { ShaderPass }?,
+	images: { [string]: Bitmap }?,
+	geometry: string?,
+}
 declare extern type LayerShader with
 end
 declare extern type Brush with
@@ -1169,6 +1185,15 @@ declare extern type Element with
 	function snapshot(self, max_width: number?): string?
 	-- Clear keyboard focus if it is on the element or inside it.
 	function blur(self): ()
+	-- Lock the pointer to the element, as the DOM's `requestPointerLock`
+	-- (a game's look about, a 3D view's orbit): hidden and held, every
+	-- press and wheel goes to it, and its `on_pointer_move` hears the
+	-- mouse's motion as `dx`, `dy`. Only in a press's, a release's or a
+	-- key's handler (or within a second of one); whether it holds it.
+	-- Escape always lets it go, as does the window losing focus.
+	function lock_pointer(self): boolean
+	-- Let the pointer go, if the element holds its lock.
+	function unlock_pointer(self): ()
 end
 
 -- `ref = r` on a node. Reading it in an effect or computed follows it: the
@@ -1629,6 +1654,9 @@ export type Child = Node | string | (() -> TextValue) | Message | { read [number
 export type Handler = () -> ...unknown
 -- `clicks` (on_press): the press's count, 2 for a double click's second, 3
 -- for a triple's, and on past it.
+-- `dx`, `dy` (on_pointer_move): how far it moved since the last move, in
+-- the window's points; while the pointer is locked (`locked`), the
+-- mouse's own motion, `x` and `y` staying where it locked.
 -- `shift`, `ctrl`, `alt`, `meta`: the keys held; `cmd`: the platform's
 -- command key (Command on macOS, Ctrl elsewhere), as `cmd` in keys.
 export type PointerEvent = {
@@ -1637,6 +1665,9 @@ export type PointerEvent = {
 	local_x: number,
 	local_y: number,
 	clicks: number?,
+	dx: number?,
+	dy: number?,
+	locked: boolean?,
 	shift: boolean,
 	ctrl: boolean,
 	alt: boolean,
@@ -1920,6 +1951,9 @@ export type Styles = {
 	underline_offset: Num?,
 	-- The language its text is in (HTML's `lang`): "ja", "zh-TW".
 	lang: string?,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: string?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: number?,
 	y: number?,
@@ -2107,6 +2141,9 @@ export type StyleProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Reactive<string>?,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: string?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -2202,6 +2239,9 @@ export type NodeProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: (string | ReadOnlyState<string> | (() -> string))?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Reactive<string>?,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: (string | Readable<string?> | (() -> string?))?,
@@ -2321,6 +2361,9 @@ export type NodeProps = {
 	on_file_hover: ((over: boolean) -> ...unknown)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: ((locked: boolean) -> ...unknown)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -2415,9 +2458,6 @@ export type ContainerProps = Merge<Props, {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 }>
@@ -4076,7 +4116,7 @@ declare ui: {
 	-- input.time, input.scale, input.params and input.radii (the box's corners);
 	-- `zgx_sample(p)` reads the layer at another point, and `zgx_backdrop(p)`
 	-- what lies behind the node there.
-	layer_shader: (source: string, opts: { fps: number? }?) -> LayerShader,
+	layer_shader: (source: string, opts: LayerShaderOptions?) -> LayerShader,
 	-- Sorts `list` in place, stably, by a field of each item (`"price"`) or
 	-- a function of it (called once an item); returns it. Use it over
 	-- `table.sort` with a comparator for long lists: that calls Luau some

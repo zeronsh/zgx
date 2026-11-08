@@ -198,6 +198,28 @@ pub fn measured_rows_watched<K: Eq + std::hash::Hash + Clone + 'static>(
         build,
     )
 }
+/// The keys of `entries`' rows that hold the node a drag under way (or
+/// starting) started from.
+fn dragged_rows<K: Clone>(
+    ui: &Ui,
+    entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
+) -> Vec<K> {
+    let Some(source) = ui.input.drag_source() else {
+        return Vec::new();
+    };
+    let scene = ui.scene.borrow();
+    if !scene.contains(source) {
+        return Vec::new();
+    }
+    entries
+        .iter()
+        .filter(|(_, entry)| {
+            entry.node == source || scene.ancestors(source).any(|a| a == entry.node)
+        })
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
 fn rows_of<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
     watch: W,
     offset: Signal<f32>,
@@ -388,6 +410,18 @@ impl WatchKind for Watched {
         self.0.pass(width, &mut mounted);
     }
 }
+/// What a measured list's pass read of its own inputs (`variable_list`):
+/// the same as its last full run's, and no row of its own resized, a run
+/// woken by sizes published elsewhere does nothing.
+#[derive(Clone, Copy, PartialEq)]
+struct PassInputs {
+    revision: u64,
+    mounted: u64,
+    size: (u32, u32),
+    requested: u32,
+    request: Option<(u64, usize)>,
+    reveal: u64,
+}
 fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
     watch: W,
     offset: Signal<f32>,
@@ -524,6 +558,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             let mut run = 0_u64;
             let mut order = Vec::new();
             let mounted_revision = ui.signal(0_u64);
+            let published = measured.then(|| ui.content_size_revision());
             let mut discovery: Option<(usize, usize, usize)> = None;
             let mut handled_request = 0;
             // Scroll-to-row requests (`NodeHandle::scroll_to_row`).
@@ -537,6 +572,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                 heights.index.borrow().estimate(),
             );
             let mut handled_reveal = 0;
+            // The pass's inputs as its last full run read them: a run woken
+            // by rows' sizes published elsewhere, with these the same and no
+            // row of its own resized, has nothing to do (`Ui::content_size_revision`).
+            let mut last_inputs: Option<PassInputs> = None;
             // A destination followed through measurement: the row, where it
             // shows, the position it was put at, the focus then, and whether
             // focus goes with it (the keyboard's, not a scroll's).
@@ -549,9 +588,20 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             let mut anchor_key: Option<K> = None;
             ui.bind(root, move || {
                 heights.revision.get();
-                mounted_revision.get();
+                let mounted = mounted_revision.get();
+                // Rows' sizes, as any is published resized: one read, not one
+                // a row (`Ui::content_size_revision`).
+                if let Some(published) = &published {
+                    published.get();
+                }
                 let (width, mut height) = size.get();
                 let requested = offset.get();
+                // Read here, before any return, so that the pass stays
+                // subscribed to them.
+                let request = navigation
+                    .as_ref()
+                    .map(|navigation| navigation.request.get());
+                let (serial, row, align) = reveal.get();
                 let mut pending_measurement = false;
                 let mut measurement_changed = false;
                 if measured {
@@ -562,8 +612,11 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         // (This pass alone writes it, and goes round again when
                         // it does: `reindexed`.)
                         let index = entry.index.with_untracked(|index| *index);
-                        let (observed_width, observed_height) =
-                            entry.measurement.as_ref().unwrap().get();
+                        let (observed_width, observed_height) = entry
+                            .measurement
+                            .as_ref()
+                            .unwrap()
+                            .with_untracked(|size| *size);
                         if observed_width != width || width <= 0. || !observed_height.is_finite() {
                             pending_measurement = true;
                             continue;
@@ -592,6 +645,25 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     runtime.untracked(|| watch.pass(width, &entries));
                 }
                 let revision = heights.revision.get();
+                let inputs = PassInputs {
+                    revision,
+                    mounted,
+                    size: (width.to_bits(), height.to_bits()),
+                    requested: requested.to_bits(),
+                    request,
+                    reveal: serial,
+                };
+                if measured
+                    && !W::ON
+                    && window.is_none()
+                    && pending_reveal.is_none()
+                    && !pending_measurement
+                    && !measurement_changed
+                    && last_inputs == Some(inputs)
+                {
+                    return;
+                }
+                last_inputs = Some(inputs);
                 // Rows added or removed above the anchor row: it is as many
                 // rows on, and the view stays on it if its key is there
                 // (asked before the index is borrowed: `key` is the app's).
@@ -617,13 +689,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                                 .is_some_and(|ui| ui.input.focused() == *focus)
                     })
                     .map(|(index, align, _, _, keys)| (index, align, keys));
-                let request = navigation
-                    .as_ref()
-                    .map(|navigation| navigation.request.get());
-                let (serial, row, align) = reveal.get();
                 let asked = (serial != handled_reveal).then_some((row, align, false));
                 handled_reveal = serial;
-                let (length, total, position, target, geometry, next_anchor) = {
+                let (length, total, position, target, geometry, dragged, next_anchor) = {
                     let model = heights.index.borrow();
                     let length = model.count();
                     let total = model.content_height();
@@ -748,7 +816,21 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     // it, one too thin to show isn't: rows folded away would
                     // otherwise all fit in the view, and all be built.
                     let mut geometry: Vec<_> = model.rows(range).collect();
-                    if !measured && model.may_have_thin_rows() {
+                    // (During a drag, the thin rows wait for their keys,
+                    // below: the dragged row's is kept.)
+                    let thin = !measured && model.may_have_thin_rows();
+                    // A row a drag started from stays built, thin or not: a
+                    // list's dragged row often folds its place away while
+                    // held, and dropped, it is the same node (its focus, hover
+                    // and accessible element with it). Only where a row can be
+                    // too thin to build: a list with none pays nothing for it.
+                    let dragged = if thin {
+                        weak.upgrade()
+                            .map_or_else(Vec::new, |ui| dragged_rows(&ui, &entries))
+                    } else {
+                        Vec::new()
+                    };
+                    if thin && dragged.is_empty() {
                         geometry.retain(|(_, _, row_height)| *row_height >= THINNEST_ROW);
                     }
                     // An empty list keeps whether it is at its end (it is):
@@ -772,13 +854,26 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         }),
                         None => None,
                     };
-                    (length, total, position, target, geometry, next_anchor)
+                    (
+                        length,
+                        total,
+                        position,
+                        target,
+                        geometry,
+                        dragged,
+                        next_anchor,
+                    )
                 };
                 // Release the index borrow before application key/build callbacks.
-                let keys: Vec<_> = geometry
+                let mut keys: Vec<_> = geometry
                     .into_iter()
                     .map(|(index, top, row_height)| (key(index), index, top, row_height))
                     .collect();
+                if !dragged.is_empty() {
+                    keys.retain(|(key, _, _, row_height)| {
+                        *row_height >= THINNEST_ROW || dragged.contains(key)
+                    });
+                }
                 // Rows kept are stamped with this run: one shown twice is a
                 // key repeated, and those left unstamped go below.
                 run += 1;

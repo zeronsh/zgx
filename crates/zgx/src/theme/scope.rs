@@ -237,6 +237,17 @@ fn scale_text(values: &mut [TokenValue], scale: f32) {
             *n *= scale;
         }
     }
+    // A control holds a line of body text and its padding, as a field does
+    // (6 above and below): grown to fit it, as iOS's hit targets grow with
+    // Dynamic Type, never shrunk below the theme's.
+    let size = match values.get(tok::FONT_SIZE_MD.0.index()) {
+        Some(TokenValue::Number(size)) => *size,
+        _ => return,
+    };
+    let line = crate::text_layout::LineHeight::NORMAL.resolve(size) + 12.;
+    if let Some(TokenValue::Number(height)) = values.get_mut(tok::CONTROL_HEIGHT.0.index()) {
+        *height = height.max(line);
+    }
 }
 fn evaluate(exprs: &[Option<Arc<Expr>>]) -> Vec<TokenValue> {
     let count = tokens::count().max(exprs.len());

@@ -2,13 +2,14 @@
 //! boxes, one of them changing each frame, under `SCENE`: `none`,
 //! as they are; `layer`, a card over them with an animated layer shader
 //! painting past its box; `reader`, one reading what's behind it (damage
-//! reaching what it reads, the backdrop's copy, a pass of its own). The first
+//! reaching what it reads, the backdrop's copy, a pass of its own); `passes`,
+//! one with a feedback pass and tagged boxes as inputs. The first
 //! is what a window with no effect pays, the rest show zero can be told from
 //! it. The gate runs them on wgpu's no-op backend (`ZGX_GPU_NOOP`).
 //! (Here for zgx-3d's wgpu with its no-op backend, not to build that into
 //! zgx-gpu's own tests.) Run: cargo run --release -p zgx-3d --example fx_bench
 use std::sync::Arc;
-use zgx::decoration::{FillShader, ShaderUniforms};
+use zgx::decoration::{FillShader, PassFormat, PassSize, ShaderInputs, ShaderPass, ShaderUniforms};
 use zgx::scene::*;
 use zgx_gpu::GpuRenderer;
 
@@ -35,7 +36,10 @@ fn fixed(width: f32, height: f32) -> Style {
 }
 
 fn main() {
-    let scene_name = std::env::var("SCENE").unwrap_or_else(|_| "reader".into());
+    run(std::env::var("SCENE").unwrap_or_else(|_| "reader".into()));
+}
+/// The frames of scene `scene_name`.
+pub fn run(scene_name: String) {
     let frames: usize = std::env::var("FRAMES")
         .ok()
         .and_then(|frames| frames.parse().ok())
@@ -72,6 +76,28 @@ fn main() {
     );
     let shader: Option<Arc<FillShader>> = match scene_name.as_str() {
         "layer" => Some(FillShader::new(GLOW, None)),
+        "passes" => Some(FillShader::with_inputs(
+            "fn layer(input: LayerInput) -> vec4<f32> {
+                return vec4(zgx_state(input.p / input.size).rgb, f32(zgx_rect_count()) * 0.1);
+            }",
+            None,
+            ShaderInputs {
+                passes: vec![ShaderPass {
+                    name: "state".into(),
+                    source: "fn run(input: PassInput) -> vec4<f32> {
+                        return zgx_state(input.uv) * 0.9 + vec4(input.dt);
+                    }"
+                    .into(),
+                    size: PassSize::Pixels(64, 64),
+                    format: PassFormat::Rgba16Float,
+                    feedback: true,
+                    steps: 4,
+                    once: false,
+                }],
+                geometry: Some(zgx::decoration::geometry_tag("rows")),
+                ..Default::default()
+            },
+        )),
         "reader" => Some(FillShader::new(HAZE, None)),
         _ => None,
     };
@@ -80,6 +106,11 @@ fn main() {
         "reader" => (0., 12.),
         _ => (0., 0.),
     };
+    if scene_name == "passes" {
+        for row in rows.iter().take(8) {
+            scene.set_geometry_tag(*row, zgx::decoration::geometry_tag("rows"));
+        }
+    }
     scene.set_layer_shader(card, shader.clone());
     scene.set_layer_extent(card, bleed, reach);
     for frame in 0..frames {

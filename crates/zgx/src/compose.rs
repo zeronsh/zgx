@@ -570,6 +570,25 @@ pub(crate) struct Rare {
     /// Conditional children (`child_when`), mounted after the others.
     conditional: Vec<RegionBuilder>,
 }
+/// `Rare::merge_into`'s part for assistive technology (a control a row already
+/// stands for, hidden from outside it): each part the outer view set wins.
+#[cold]
+#[inline(never)]
+fn merge_accessibility(
+    label: Option<String>,
+    accessibility: Option<Box<Accessibility>>,
+    inner: &mut Rare,
+) {
+    if label.is_some() {
+        inner.accessible_label = label;
+    }
+    if let Some(outer) = accessibility {
+        match &mut inner.accessibility {
+            Some(own) => (*outer).merge_into(own),
+            None => inner.accessibility = Some(outer),
+        }
+    }
+}
 impl Rare {
     /// `View::refine`'s part: what an outer view sets over its inner one.
     fn merge_into(self, inner: &mut Rare) {
@@ -671,16 +690,9 @@ impl Rare {
         inner.mount_flags |= self.mount_flags;
         inner.conditional.extend(self.conditional);
         // What it is to assistive technology, as set outside a component
-        // over what the component set (`aria_hidden` on a switch a row
-        // already stands for): each part the outer view set wins.
-        if self.accessible_label.is_some() {
-            inner.accessible_label = self.accessible_label;
-        }
-        if let Some(outer) = self.accessibility {
-            match &mut inner.accessibility {
-                Some(own) => (*outer).merge_into(own),
-                None => inner.accessibility = Some(outer),
-            }
+        // over what the component set: rare, so out of line.
+        if self.accessible_label.is_some() || self.accessibility.is_some() {
+            merge_accessibility(self.accessible_label, self.accessibility, inner);
         }
     }
 }
@@ -4281,6 +4293,7 @@ struct WidgetStyles {
     progress: Styles,
     slider: Styles,
     editor: Styles,
+    editor_line: Styles,
 }
 impl WidgetStyles {
     fn new() -> Self {
@@ -4328,6 +4341,17 @@ impl WidgetStyles {
                 .border(1.)
                 .border_color(tok::BORDER)
                 .border_over(true),
+            // A field one line high: a control's height, kept current (the
+            // theme's, and the system text size's: `Themes::set_system_text_scale`
+            // raises it to fit a line). Built once, a larger text would clip.
+            // Made here once, not added to `editor` at each mount.
+            editor_line: Styles::new()
+                .bg(tok::INPUT_BG)
+                .rounded(tok::RADIUS_MD)
+                .border(1.)
+                .border_color(tok::BORDER)
+                .border_over(true)
+                .h(tok::CONTROL_HEIGHT),
         }
     }
 }
@@ -4597,6 +4621,15 @@ fn paragraph_effect<const LOCATING: bool>(
     }
 }
 
+/// A paragraph's content before its first runs (`mount_rich`): one made
+/// a thread, not one a paragraph mounted.
+fn empty_rich_text() -> std::sync::Arc<crate::rich_text::RichText> {
+    thread_local! {
+        static EMPTY: std::sync::Arc<crate::rich_text::RichText> =
+            std::sync::Arc::new(crate::rich_text::RichText::new("", Vec::new()).unwrap());
+    }
+    EMPTY.with(std::sync::Arc::clone)
+}
 /// A paragraph of spans' content (`rich_text`): its runs, built again as
 /// they change, and its links' and icons' boxes. Out of line: few views
 /// are paragraphs, and `mount_element` stays as small as they need.
@@ -4615,7 +4648,7 @@ fn mount_rich(
         let locator = crate::compose_rich::SpanLocator {
             paragraph,
             content: ui.signal(crate::compose_rich::Content {
-                rich: std::sync::Arc::new(crate::rich_text::RichText::new("", Vec::new()).unwrap()),
+                rich: empty_rich_text(),
                 links: Vec::new(),
                 icons: Vec::new(),
             }),
@@ -4629,7 +4662,7 @@ fn mount_rich(
         Some(locator) => (locator.content.clone(), Some(locator.boxes.clone())),
         None => (
             ui.signal(crate::compose_rich::Content {
-                rich: std::sync::Arc::new(crate::rich_text::RichText::new("", Vec::new()).unwrap()),
+                rich: empty_rich_text(),
                 links: Vec::new(),
                 icons: Vec::new(),
             }),
@@ -5171,13 +5204,10 @@ fn open_element(
             multiline,
         } => {
             dim_when_disabled(&mut view);
-            let mut defaults = widget_style(|w| &w.editor);
-            // Its height follows Dynamic Type's token as it changes; built
-            // once, a larger text size would clip the text.
-            #[cfg(target_os = "ios")]
-            if !multiline {
-                defaults = defaults.h(tok::CONTROL_HEIGHT);
-            }
+            let mut defaults = widget_style(|w| match multiline {
+                true => &w.editor,
+                false => &w.editor_line,
+            });
             // The default outline is drawn over; a border the app gives
             // takes room, as CSS's does, unless it says otherwise.
             let own_border =
@@ -7933,6 +7963,28 @@ impl NodeHandle {
         if inside {
             ui.input.focus(&ui.scene, None);
         }
+    }
+    /// Lock the pointer to the node (`InputDispatcher::lock_pointer`): only
+    /// just after a press, a release or a key. Whether it holds it now.
+    pub fn lock_pointer(&self) -> bool {
+        let Some(ui) = self.ui.upgrade() else {
+            return false;
+        };
+        ui.input.lock_pointer(&ui.scene, self.node)
+    }
+    /// Let the pointer go, if the node holds its lock.
+    pub fn unlock_pointer(&self) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        if ui.input.pointer_lock(&ui.scene.borrow()) == Some(self.node) {
+            ui.input.unlock_pointer(&ui.scene);
+        }
+    }
+    /// Where the pointer last was over the window (where it stays while it
+    /// is locked), in the window's points; None outside it.
+    pub fn pointer(&self) -> Option<(f32, f32)> {
+        self.ui.upgrade()?.input.pointer()
     }
 }
 /// Reference to a Ui-owned component tree. Drop does not unmount; call `unmount`.

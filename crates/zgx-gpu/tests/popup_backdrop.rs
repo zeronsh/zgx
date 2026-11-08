@@ -249,3 +249,54 @@ fn a_rounded_popup_keeps_its_own_pixels_past_its_curve() {
         }
     }
 }
+
+/// A popup whose window the system shadows draws none of its panel's own
+/// (`GpuRenderer::set_unshadowed`): under a translucent fill, zgx's shadow,
+/// drawn whole under the box, darkened what the system blurs behind it.
+#[test]
+fn an_unshadowed_panel_shows_its_fill_alone() {
+    let _gpu_fixture = gpu_fixture();
+    let mut scene = Scene::new(WIDTH, WIDTH);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    let popup_root = scene.append(
+        root,
+        NodeKind::Container(Layout::Overlay),
+        fixed(100., 100.),
+    );
+    scene.set_transform(popup_root, Transform { x: 50., y: 50. });
+    let panel = scene.append(
+        popup_root,
+        NodeKind::Quad(QuadStyle {
+            fill: Color(255, 255, 255, 64),
+            radius: 8.,
+            shadow: Some(BoxShadow {
+                color: Color(0, 0, 0, 128),
+                offset: Transform { x: 0., y: 8. },
+                blur_radius: 8.,
+                spread: 0.,
+            }),
+            ..Default::default()
+        }),
+        fixed(100., 100.),
+    );
+    scene.set_popup(popup_root, true);
+    let _ = scene.flush();
+    let mut popup = GpuRenderer::new(1, 1).unwrap();
+    #[cfg(target_os = "macos")]
+    popup.set_direct_metal(false);
+    let mut alpha = |unshadowed: Option<NodeId>| {
+        popup.set_popup(popup_root, scene.bounds(panel));
+        popup.set_unshadowed(unshadowed);
+        popup.repaint_all();
+        popup.render(&scene, &[]).unwrap();
+        let width = popup.plane_rect().unwrap().width as usize;
+        let bytes = popup.readback().unwrap();
+        bytes[(50 * width + 50) * 4 + 3]
+    };
+    let shadowed = alpha(None);
+    assert!(shadowed > 100, "the shadow under the fill: {shadowed}");
+    let alone = alpha(Some(panel));
+    assert!((60..=68).contains(&alone), "the fill alone: {alone}");
+    assert!(alpha(None) > 100, "shadowed again");
+}

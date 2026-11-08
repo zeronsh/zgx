@@ -53,23 +53,26 @@ fn with_system_glass_a_native_view_stands_in_following_its_style() {
 }
 
 #[test]
-fn glass_rounds_each_corner_by_its_own_radius() {
-    // A sheet's: round on top, its bottom as the screen's corners less its inset.
+fn drawn_glass_rounds_each_corner_by_its_own_radius() {
+    // A sheet's: round on top, its bottom as a screen's corners less its inset.
     let corners = zgx::decoration::Corners {
         top_left: 56.,
         top_right: 56.,
         bottom_right: 38.,
         bottom_left: 38.,
     };
-    let style = move || GlassStyle {
-        corners: Some(corners),
-        ..Default::default()
-    };
-    // Drawn: the material's box has them.
     let natives = NativeViews::new();
     natives.set_supported(true);
     let mut ui = Ui::new(400., 300.);
-    ui.mount(provide(natives.clone(), glass(style).w(200.).h(200.)));
+    ui.mount(provide(
+        natives.clone(),
+        glass(move || GlassStyle {
+            corners: Some(corners),
+            ..Default::default()
+        })
+        .w(200.)
+        .h(200.),
+    ));
     ui.prepare_frame();
     let scene = ui.scene.borrow();
     let mut todo = vec![scene.root()];
@@ -84,16 +87,4 @@ fn glass_rounds_each_corner_by_its_own_radius() {
         }
     }
     assert_eq!(found, Some(corners));
-    drop(scene);
-    // The system's: its view is told them.
-    let natives = NativeViews::new();
-    natives.set_supported(true);
-    natives.set_glass_supported(true);
-    let mut ui = Ui::new(400., 300.);
-    ui.mount(provide(natives.clone(), glass(style).w(200.).h(200.)));
-    ui.prepare_frame();
-    let [(_, NativeContent::Glass(pane))] = &natives.views()[..] else {
-        panic!("one glass view")
-    };
-    assert_eq!(pane.style().corners, Some(corners));
 }

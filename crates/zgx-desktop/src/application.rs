@@ -1052,6 +1052,10 @@ impl Application {
             );
         }
         let event_loop = event_loop.build()?;
+        // zgx reads no device events (raw motion, keys and buttons beside a
+        // window's own): asked for, X11 sends each move twice, once raw
+        // (XInput2), and Windows posts a `WM_INPUT` for each move and key.
+        event_loop.listen_device_events(winit::event_loop::DeviceEvents::Never);
         zgx::profile::mark("event loop");
         zgx::memory::set_hosted();
         let proxy = event_loop.create_proxy();
@@ -1148,6 +1152,7 @@ impl Application {
             pending_move: HeldMove::default(),
             factory,
             active: false,
+            device_events: false,
             error: None,
             timers,
         };
@@ -1290,11 +1295,23 @@ const INPUT_FULL_RATE: std::time::Duration = std::time::Duration::from_millis(25
 /// makes that refresh, as a system scroll view's does, it's the frame's work
 /// and a few milliseconds old. One that runs long shows on the refresh after,
 /// no older than a frame started as the refresh began would be by then, and
-/// the frames after it start earlier.
+/// the frames after it start earlier. Ready, it still hands over at the grid's
+/// point (`Latch::decide`), as other steady frames do: handed over as soon as
+/// drawn, 6.5 ms before the refresh, each cost the window server 10-20% more
+/// (M1 Max at 60 Hz), the same frames held there the same as frames started
+/// as the refresh began.
+/// Whether a frame drawn now started late (`LateSample`): a scroll's, at a slow
+/// refresh. At a faster one (120 Hz) frames keep the grid's own timing.
+#[cfg(target_os = "macos")]
+fn starts_late(refresh: std::time::Duration, scrolling: bool) -> bool {
+    scrolling && refresh >= crate::scroll_resample::SLOW_REFRESH
+}
 #[cfg(target_os = "macos")]
 struct LateSample {
-    /// How long frames lately took from starting to handed over (the most,
-    /// forgotten over seconds).
+    /// How long frames lately took from starting to ready to hand over (the
+    /// most, forgotten over seconds): their wait at the grid's point not
+    /// counted, or it would start them ever earlier, until as the refresh
+    /// begins.
     work: std::time::Duration,
     started: Option<std::time::Instant>,
 }
@@ -1579,6 +1596,26 @@ fn appearance_of(theme: winit::window::Theme) -> zgx::theme::Appearance {
         winit::window::Theme::Dark => zgx::theme::Appearance::Dark,
     }
 }
+/// The pointer held for a node that locked it (`Host::sync_pointer_lock`).
+#[derive(Clone, Copy)]
+struct LockedPointer {
+    node: zgx::scene::NodeId,
+    /// Where it was as it locked, in the window's points: where it goes
+    /// back to as the lock ends.
+    at: (f32, f32),
+}
+/// Shows the pointer over `window` or hides it. On macOS zgx sets cursors
+/// through AppKit with the window's cursor rects off, where winit's hiding
+/// (an invisible cursor in a rect) would do nothing.
+fn show_pointer(window: &Window, shown: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window;
+        crate::native_host::show_cursor(shown);
+    }
+    #[cfg(not(target_os = "macos"))]
+    window.set_cursor_visible(shown);
+}
 struct Host {
     #[cfg(target_os = "linux")]
     file_surface: Option<u32>,
@@ -1781,6 +1818,12 @@ struct Host {
     #[cfg(target_os = "linux")]
     primary_revision: u64,
     native_cursor: Option<CursorIcon>,
+    /// The pointer held for a node that locked it (`sync_pointer_lock`):
+    /// grabbed and hidden, put back where it locked as it ends.
+    pointer_lock: Option<LockedPointer>,
+    /// The mouse's motion heard since it was last dispatched, while the
+    /// pointer is locked (`WindowManager::flush_motion`).
+    pending_motion: (f64, f64),
     /// A page's image cursor the window shows (`sync_cursor`).
     #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
     page_cursor: Option<crate::native_host::webkitgtk::WindowCursor>,
@@ -2216,6 +2259,8 @@ impl Host {
             #[cfg(target_os = "linux")]
             primary_revision: 0,
             native_cursor: None,
+            pointer_lock: None,
+            pending_motion: (0., 0.),
             #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
             page_cursor: None,
             #[cfg(target_os = "macos")]
@@ -2447,6 +2492,17 @@ impl Host {
         {
             self.input_arrived = true;
         }
+        // A person's press, release or key: what a pointer lock may come
+        // just after (`InputDispatcher::note_gesture`).
+        if matches!(
+            event,
+            InputEvent::PointerDown { .. }
+                | InputEvent::PointerUp { .. }
+                | InputEvent::KeyDown { repeat: false, .. }
+                | InputEvent::KeyUp { .. }
+        ) {
+            self.context.ui.input.note_gesture();
+        }
         // macOS: typing draws at once even mid-animation (see `process`);
         // pointer motion and scrolling keep the refresh's pace.
         #[cfg(target_os = "macos")]
@@ -2466,6 +2522,7 @@ impl Host {
         if result.focus_changed {
             self.ime_active = false;
         }
+        self.sync_pointer_lock();
         #[cfg(target_os = "linux")]
         self.publish_primary();
         Ok(result.default_prevented)
@@ -2514,31 +2571,46 @@ impl Host {
         // host, voice access) read names as they need them: for them names
         // and values are paced as geometry is, and a dashboard's live values
         // no longer rebuild the tree every frame.
+        let revealed = std::mem::take(&mut self.accessibility_revealed);
         let urgent = crate::accessibility::urgent(
             focused,
-            std::mem::take(&mut self.accessibility_revealed),
+            revealed,
             semantics,
             crate::accessibility::screen_reader,
         );
-        if !self.accessibility_pacer.update_now(
-            std::time::Instant::now(),
-            urgent,
-            geometry || semantics,
-        ) {
+        let now = std::time::Instant::now();
+        // A reveal moves what it shows: its geometry goes with it, at once.
+        let Some(kind) = (match revealed {
+            true => Some(self.accessibility_pacer.full(now)),
+            false => self
+                .accessibility_pacer
+                .update_kind(now, urgent, geometry || semantics),
+        }) else {
             return;
-        }
+        };
         self.last_accessibility = Some(state);
-        self.accessibility_geometry_dirty = false;
+        // Names alone: the geometry still to send stays to send.
+        let full = kind == crate::accessibility::TreeUpdateKind::Full;
+        if full {
+            self.accessibility_geometry_dirty = false;
+        }
         if let (Some(adapter), Some(_)) = (&mut self.adapter, &self.window) {
             let ui = &self.context.ui;
             adapter.update_if_active(|| {
-                self.tree.update(
-                    &ui.scene.borrow(),
-                    &ui.semantics.borrow(),
-                    ui.input.focused(),
-                    &self.options.title,
-                    self.scale_factor,
-                )
+                let (scene, semantics) = (ui.scene.borrow(), ui.semantics.borrow());
+                let (focused, title) = (ui.input.focused(), &self.options.title);
+                match full {
+                    true => self
+                        .tree
+                        .update(&scene, &semantics, focused, title, self.scale_factor),
+                    false => self.tree.update_names(
+                        &scene,
+                        &semantics,
+                        focused,
+                        title,
+                        self.scale_factor,
+                    ),
+                }
             });
         }
     }
@@ -2934,9 +3006,16 @@ impl Host {
                 window.request_redraw();
             } else {
                 // Steady frames render at a time of their own within their
-                // wait for the refresh point (`Latch::hold`).
+                // wait for the refresh point (`Latch::hold`); a scroll's at a
+                // slow refresh started late already (`LateSample`), and render
+                // at once.
                 #[cfg(target_os = "macos")]
-                if let Some((origin, period)) = self.refresh_grid() {
+                let started_late = starts_late(
+                    self.frame_interval,
+                    self.scroll.active(std::time::Instant::now()),
+                );
+                #[cfg(target_os = "macos")]
+                if let Some((origin, period)) = self.refresh_grid().filter(|_| !started_late) {
                     let at = self.latch.hold(std::time::Instant::now(), origin, period);
                     let _wait = zgx::profile::span(zgx::profile::Phase::Wait);
                     sleep_until(at);
@@ -3110,6 +3189,10 @@ impl Host {
                 {
                     self.latch_holding = hold.is_some();
                 }
+                // When the frame was ready to hand over, before any wait for
+                // the grid's point (`LateSample::handed_over`).
+                #[cfg(target_os = "macos")]
+                let ready_at = std::cell::Cell::new(None);
                 let status = renderer.present_with_notify(|| {
                     window.pre_present_notify();
                     #[cfg(windows)]
@@ -3119,6 +3202,7 @@ impl Host {
                     }
                     #[cfg(target_os = "macos")]
                     if let Some((origin, period)) = grid {
+                        ready_at.set(Some(std::time::Instant::now()));
                         let at = latch.decide(std::time::Instant::now(), origin, period);
                         let _wait = zgx::profile::span(zgx::profile::Phase::Wait);
                         sleep_until(at);
@@ -3185,7 +3269,8 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 {
                     self.presented_at = Some(std::time::Instant::now());
-                    self.late_sample.handed_over(std::time::Instant::now());
+                    self.late_sample
+                        .handed_over(ready_at.get().unwrap_or_else(std::time::Instant::now));
                     // What it shows now, for `Ui::snapshot` (the last frame's
                     // surface is the renderer's to reuse again).
                     *self.shown.borrow_mut() = renderer
@@ -3384,6 +3469,85 @@ impl Host {
             self.popups.set_cursor(cursor);
             self.native_cursor = Some(cursor);
         }
+    }
+    /// Hold the pointer for the node that locked it (`lock_pointer`), or
+    /// let it go: grabbed (locked in place where the platform can: macOS,
+    /// Windows, Wayland; kept in the window on X11, whose raw motion still
+    /// comes at its edges) and hidden, its moves no longer the content's
+    /// while its motion comes as `PointerMotion`; shown again where it
+    /// locked as it ends. After every input event and every turn of the
+    /// loop, so a lock a script ends from a timer, or a node gone, lets
+    /// it go.
+    #[inline]
+    fn sync_pointer_lock(&mut self) {
+        // No lock asked for or held, as nearly always: nothing to look at
+        // (inlined where every event calls it).
+        if self.pointer_lock.is_some() || self.context.ui.input.pointer_locked() {
+            self.sync_held_pointer_lock();
+        }
+    }
+    #[inline(never)]
+    fn sync_held_pointer_lock(&mut self) {
+        let ui = &self.context.ui;
+        let mut want = ui.input.pointer_lock(&ui.scene.borrow());
+        // A window without the keyboard doesn't take the pointer (a lock
+        // asked for as its focus went, or a seat with no keyboard); one
+        // losing it lets go (`Focused`).
+        if want.is_some() && !self.native_focused {
+            ui.input.refuse_pointer_lock(&ui.scene);
+            want = None;
+        }
+        if want.is_none() {
+            // Its node left or was disabled: the lock ends, heard if it can be.
+            ui.input.unlock_pointer(&ui.scene);
+        }
+        if want == self.pointer_lock.map(|held| held.node) {
+            return;
+        }
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        use winit::window::CursorGrabMode;
+        match (want, self.pointer_lock) {
+            (Some(node), Some(held)) => self.pointer_lock = Some(LockedPointer { node, ..held }),
+            (Some(node), None) => {
+                if window.set_cursor_grab(CursorGrabMode::Locked).is_err() {
+                    let _ = window.set_cursor_grab(CursorGrabMode::Confined);
+                }
+                show_pointer(&window, false);
+                self.pending_motion = (0., 0.);
+                self.pointer_lock = Some(LockedPointer {
+                    node,
+                    at: self.cursor,
+                });
+            }
+            (None, Some(held)) => {
+                // Put back before it's let go: Wayland moves a pointer only
+                // while it's locked (a hint to the compositor).
+                let (x, y) = held.at;
+                let _ =
+                    window.set_cursor_position(LogicalPosition::new(f64::from(x), f64::from(y)));
+                let _ = window.set_cursor_grab(CursorGrabMode::None);
+                show_pointer(&window, true);
+                self.pending_motion = (0., 0.);
+                // Shown again, it takes zgx's cursor afresh.
+                self.native_cursor = None;
+                self.pointer_lock = None;
+            }
+            (None, None) => {}
+        }
+    }
+    /// The mouse's motion heard while the pointer is locked, as one
+    /// `PointerMotion` (a turn of the loop can bring dozens).
+    fn flush_motion(&mut self) -> Result<(), zgx::widgets::LayoutFeedbackError> {
+        let (dx, dy) = std::mem::take(&mut self.pending_motion);
+        if self.pointer_lock.is_none() || (dx == 0. && dy == 0.) {
+            return Ok(());
+        }
+        self.dispatch(InputEvent::PointerMotion {
+            dx: dx as f32,
+            dy: dy as f32,
+        })
     }
     /// A page's cursor changed, maybe with no frame to come (WebKit sets it
     /// after its web process placed the pointer): its image, if it is one,
@@ -4977,6 +5141,10 @@ impl Host {
                     zgx::input::set_held_modifiers(&self.context.ui.runtime, self.modifiers);
                 }
             }
+            // Locked, the pointer stays where it was for the content: its
+            // motion comes raw (`flush_motion`), its moves go nowhere.
+            WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. }
+                if self.pointer_lock.is_some() => {}
             WindowEvent::CursorMoved { position, .. } => {
                 let p = position.to_logical::<f32>(self.scale_factor);
                 self.cursor = (p.x, p.y);
@@ -5237,7 +5405,11 @@ impl Host {
                     }
                     _ => step,
                 };
-                let (dx, dy) = wheel_delta(delta, self.scale_factor, step);
+                let (dx, dy) = shift_wheel(
+                    delta,
+                    wheel_delta(delta, self.scale_factor, step),
+                    self.modifiers.shift && !self.modifiers.control,
+                );
                 #[cfg(target_os = "macos")]
                 if self.trackpad == Trackpad::Fingers {
                     self.coast.scrolled((dx, dy), crate::coast::event_time());
@@ -5343,6 +5515,9 @@ impl Host {
             }
             WindowEvent::Focused(false) => {
                 zgx_gpu::present_log::log(|| "window-focus false".into());
+                // The pointer is the system's again, the lock heard ending.
+                self.context.ui.input.unlock_pointer(&self.context.ui.scene);
+                self.sync_pointer_lock();
                 #[cfg(target_os = "linux")]
                 if let Some(caption) = &mut self.caption {
                     caption.sync(&mut self.context.ui);
@@ -6526,12 +6701,6 @@ impl Host {
             self.latch = Latch::default();
             return None;
         }
-        // A scroll at a slow refresh starts each frame so late it makes the
-        // refresh it's for, with nothing to wait for (`LateSample`).
-        if self.frame_interval >= crate::scroll_resample::SLOW_REFRESH && self.scroll.active(now) {
-            self.latch = Latch::default();
-            return None;
-        }
         let steady = self
             .presented_at
             .is_some_and(|at| now.duration_since(at) < STEADY_GAP);
@@ -6779,6 +6948,14 @@ impl Drop for Host {
         if std::mem::take(&mut self.password) {
             crate::native_ime::secure_input(false);
         }
+        // A pointer it held goes back to the system: macOS's grab and its
+        // hiding are the whole app's, not the window's.
+        if self.pointer_lock.take().is_some()
+            && let Some(window) = &self.window
+        {
+            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+            show_pointer(window, true);
+        }
         // Closed before its last move settled: saved now.
         if self.frame_save_at.take().is_some() {
             self.save_frame();
@@ -6884,6 +7061,9 @@ struct WindowManager {
     pending_move: HeldMove<WindowId, WindowEvent>,
     factory: WindowFactory,
     active: bool,
+    /// Raw device events are listened for: only while a window holds a
+    /// locked pointer (`about_to_wait_turn`), for its motion.
+    device_events: bool,
     error: Option<String>,
     timers: zgx::timer::Hosted,
 }
@@ -6901,6 +7081,30 @@ impl WindowManager {
             let ui = &host.context.ui;
             ui.input.captures_keys(&ui.scene.borrow())
         }));
+    }
+    /// The locked pointer's motion heard so far, to its window
+    /// (`Host::flush_motion`).
+    #[inline]
+    fn flush_motion(&mut self, event_loop: &ActiveEventLoop) {
+        // Motion is heard only while a pointer is locked (inlined where
+        // every window event calls it).
+        if self.device_events {
+            self.flush_locked_motion(event_loop);
+        }
+    }
+    #[inline(never)]
+    fn flush_locked_motion(&mut self, event_loop: &ActiveEventLoop) {
+        let mut failed = None;
+        for host in self.hosts.values_mut() {
+            if host.pending_motion != (0., 0.)
+                && let Err(e) = host.flush_motion()
+            {
+                failed = Some(e);
+            }
+        }
+        if let Some(e) = failed {
+            self.fail(event_loop, e);
+        }
     }
     /// The pointer move held back (`pending_move`), handled now.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -7481,6 +7685,7 @@ impl WindowManager {
                 eprintln!("zgx: the standard menus: {error}");
             }
         }
+        crate::app_menu::settle_menu_bar();
     }
     fn resumed_turn(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
@@ -8093,11 +8298,35 @@ impl WindowManager {
             event_loop.exit();
             return;
         }
+        // The motion heard while a pointer is locked, then each lock held
+        // or let go. Raw motion is listened for only while one is: asked
+        // for always, X11 sends each move twice and Windows a message for
+        // each move and key.
+        self.flush_motion(event_loop);
+        let mut locked = false;
+        for host in self.hosts.values_mut() {
+            host.sync_pointer_lock();
+            locked |= host.pointer_lock.is_some();
+        }
+        // `Always` rather than `WhenFocused`: X11 applies that at the next
+        // change of focus, and a lock is taken in a focused window (and
+        // ends as it loses focus).
+        if locked != self.device_events {
+            self.device_events = locked;
+            event_loop.listen_device_events(if locked {
+                winit::event_loop::DeviceEvents::Always
+            } else {
+                winit::event_loop::DeviceEvents::Never
+            });
+        }
         let mut ready = false;
         for host in self.hosts.values_mut() {
             // A renderer lost with its GPU device, due another try; or a
             // plane's frame left for a tick.
             let now = std::time::Instant::now();
+            // The turn's presses and keys, at this time: what a pointer
+            // lock may come within a second of (`settle_gestures`).
+            host.context.ui.input.settle_gestures(now);
             #[cfg(target_os = "macos")]
             let plane_room = host.plane_retry.is_some()
                 && host
@@ -8202,7 +8431,28 @@ impl ApplicationHandler<Event> for WindowManager {
             this.user_event_turn(event_loop, event)
         });
     }
+    /// The mouse's raw motion, while a window holds a locked pointer (the
+    /// only time zgx listens for it): summed for that window until its
+    /// next event or the turn's end (`flush_motion`).
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event
+            && let Some(host) = self
+                .hosts
+                .values_mut()
+                .find(|host| host.pointer_lock.is_some() && host.native_focused)
+        {
+            host.pending_motion.0 += delta.0;
+            host.pending_motion.1 += delta.1;
+        }
+    }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // Motion before the press or key that came after it.
+        self.flush_motion(event_loop);
         // Pointer moves come as often as the mouse reports them (Wayland
         // and X11 pass each on, up to 1000 a second), and each is handled
         // on laid-out content: a move that changes layout (a pane's edge
@@ -8569,6 +8819,20 @@ fn wheel_delta(delta: MouseScrollDelta, scale: f64, step: (f32, f32)) -> (f32, f
             (-p.x, -p.y)
         }
     }
+}
+/// Shift with the wheel scrolls across, as in browsers: Windows and Linux
+/// report a vertical wheel with Shift held as vertical (AppKit turns it
+/// horizontal itself). Only lines swap: a touchpad's pixels carry both axes,
+/// and Control's zoom is not scrolling.
+fn shift_wheel(delta: MouseScrollDelta, (dx, dy): (f32, f32), shift: bool) -> (f32, f32) {
+    if cfg!(target_os = "macos")
+        || !shift
+        || dx != 0.
+        || !matches!(delta, MouseScrollDelta::LineDelta(..))
+    {
+        return (dx, dy);
+    }
+    (dy, 0.)
 }
 /// Whether wheel lines are continuous motion rather than notches. Windows
 /// reports a precision touchpad's (and a free-spinning wheel's) motion as
@@ -9468,6 +9732,28 @@ mod tests {
             (-10., 20.)
         );
     }
+    #[test]
+    fn shift_turns_a_vertical_wheel_across() {
+        let lines = MouseScrollDelta::LineDelta(0., -1.);
+        let pixels = MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0., -40.));
+        let swapped = if cfg!(target_os = "macos") {
+            (0., 30.)
+        } else {
+            (30., 0.)
+        };
+        assert_eq!(shift_wheel(lines, (0., 30.), true), swapped);
+        assert_eq!(shift_wheel(lines, (0., 30.), false), (0., 30.));
+        // Already across, or both ways: left as they are.
+        assert_eq!(
+            shift_wheel(MouseScrollDelta::LineDelta(1., 0.), (-30., 0.), true),
+            (-30., 0.)
+        );
+        assert_eq!(
+            shift_wheel(MouseScrollDelta::LineDelta(1., -1.), (-30., 30.), true),
+            (-30., 30.)
+        );
+        assert_eq!(shift_wheel(pixels, (0., 20.), true), (0., 20.));
+    }
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires an owned X11 display; run alone with --test-threads=1"]
@@ -9531,6 +9817,7 @@ mod tests {
             pending_move: HeldMove::default(),
             factory,
             active: false,
+            device_events: false,
             error: None,
             timers: zgx::timer::host(|| {}),
         };
@@ -9944,6 +10231,7 @@ mod tests {
             pending_move: HeldMove::default(),
             factory,
             active: false,
+            device_events: false,
             error: None,
             timers: zgx::timer::host(|| {}),
         };
@@ -10015,6 +10303,45 @@ mod tests {
                 ages.push(start + period * on - at);
             }
             (ages, shown)
+        }
+        /// A frame waits for the grid's point after it is ready: what it
+        /// counts as its work is until ready, or the wait would start the
+        /// frames after ever earlier, until as the refresh begins.
+        #[test]
+        fn a_frame_held_for_the_grid_counts_its_work_not_its_wait() {
+            let ages = |count_the_wait: bool| {
+                let start = Instant::now();
+                let mut late = LateSample::default();
+                let mut now = start;
+                let mut age = Duration::ZERO;
+                for _ in 0..600 {
+                    let refreshes = (now - start).as_secs_f64() / SIXTY.as_secs_f64();
+                    let next = start + SIXTY.mul_f64(refreshes.floor() + 1.);
+                    let at = late.deadline(now, next, SIXTY);
+                    late.start(at);
+                    let ready = at + ms(2);
+                    // Handed over at the grid's point, 2 ms before the refresh.
+                    let by = (ready + ms(2) - start).as_secs_f64() / SIXTY.as_secs_f64();
+                    let refresh = start + SIXTY * by.ceil() as u32;
+                    let point = refresh - ms(2);
+                    late.handed_over(if count_the_wait { point } else { ready });
+                    now = point;
+                    age = refresh - at;
+                }
+                age
+            };
+            assert!(ages(false) < ms(9), "late: {:?}", ages(false));
+            assert!(ages(true) > ms(14), "the wait counted: {:?}", ages(true));
+        }
+        #[test]
+        fn only_a_scroll_at_a_slow_refresh_starts_late() {
+            use super::super::starts_late;
+            assert!(starts_late(SIXTY, true), "a scroll at 60 Hz");
+            assert!(!starts_late(SIXTY, false), "no scroll");
+            assert!(
+                !starts_late(Duration::from_micros(8_333), true),
+                "a scroll at 120 Hz"
+            );
         }
         #[test]
         fn a_faster_refresh_starts_as_it_begins() {
@@ -10160,6 +10487,7 @@ mod tests {
             pending_move: HeldMove::default(),
             factory,
             active: false,
+            device_events: false,
             error: None,
             timers: zgx::timer::host(|| {}),
         };

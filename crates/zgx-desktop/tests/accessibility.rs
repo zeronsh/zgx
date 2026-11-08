@@ -931,3 +931,31 @@ fn an_unmounted_popover_leaves_no_name_behind() {
     ui.prepare_frame();
     assert_eq!(ui.semantics.borrow().labelled_by(panel), None);
 }
+
+#[test]
+fn an_accessible_modal_view_reaches_assistive_technology_as_modal() {
+    use zgx::compose::prelude::*;
+    let mut ui = Ui::new(500., 400.);
+    let mounted = ui.mount(
+        column().children([
+            text("Behind"),
+            column()
+                .role(Role::Dialog)
+                .accessible_modal()
+                .children([text("Options")]),
+            column().role(Role::Dialog).children([text("Panel")]),
+        ]),
+    );
+    let _ = mounted.node();
+    ui.prepare_frame();
+    let mut adapter = AccessibilityTree::new();
+    let update = adapter.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "App", 1.);
+    let dialogs: Vec<bool> = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == NativeRole::Dialog)
+        .map(|(_, node)| node.is_modal())
+        .collect();
+    // The one that says so is modal (aria-modal); a dialog that doesn't is not.
+    assert_eq!(dialogs, vec![true, false], "{dialogs:?}");
+}

@@ -31,7 +31,9 @@ written at a first launch is not charged to whichever scene runs first.
 A cold launch is the startup scene's to measure.
 
 With `ZGX_GATE_FUNCTIONS=DIR` (CI's perf job sets it), each cell that grew
-more than 0.01% (the largest ten, `ZGX_GATE_FUNCTIONS_MAX`) runs once more
+at least 0.02% and past its scene's spread (`ZGX_GATE_FUNCTIONS_FLOOR`; the
+largest ten, `ZGX_GATE_FUNCTIONS_MAX`; within `ZGX_GATE_FUNCTIONS_BUDGET`
+seconds, after the table and the verdict are out) runs once more
 on each side writing what it counted by function, and its difference
 (`cgdiff.py`) goes to the log and DIR, with totals by whose code it is
 (zgx's, Luau's, the C library's, other Rust) under the table: what the
@@ -55,6 +57,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -80,6 +83,13 @@ WORK = work_dir(ROOT)
 # cells explained, the largest first, each two more runs.
 FUNCTIONS = os.environ.get('ZGX_GATE_FUNCTIONS')
 FUNCTIONS_MAX = int(os.environ.get('ZGX_GATE_FUNCTIONS_MAX', '10'))
+# A cell is explained by function only past what the gate can see at all:
+# +0.02%, or a scene's own spread with no change. Each takes minutes (both
+# sides run again under cachegrind writing every function), and all of them
+# stop at a budget: a job printing them for every scene that moved ran into
+# its time limit after the table and ended with no verdict (#1534, #1586).
+FUNCTIONS_FLOOR = float(os.environ.get('ZGX_GATE_FUNCTIONS_FLOOR', '0.02'))
+FUNCTIONS_BUDGET = float(os.environ.get('ZGX_GATE_FUNCTIONS_BUDGET', '600'))
 
 # name, package, example, environment: sized to a few billion instructions.
 # The windowed scenes' headless twins run with RENDER=0: update, layout and
@@ -131,6 +141,9 @@ SCENES = [
     ('spans-follow', 'zgx-script', 'span_bench', {'SCENE': 'spans-follow', 'N': '10', 'REPS': '80'}),
     ('spans-md', 'zgx-script', 'span_bench', {'SCENE': 'spans-md', 'N': '10', 'REPS': '14'}),
     ('list-state', 'zgx-script', 'list_state_bench', {}),
+    # A 400-section Markdown reply streaming in a chunk at a time, parsed
+    # by a keyed `ui.markdown` in a computed and drawn by `ui.each`.
+    ('md-stream', 'zgx-script', 'md_stream_bench', {}),
     ('style', 'zgx', 'style_bench', {}),
     # 3D frames' CPU work, drawn by wgpu's no-op backend (no driver, no JIT):
     # textured meshes alone, what a feature costs those not using it, then
@@ -138,6 +151,11 @@ SCENES = [
     ('3d-textured', 'zgx-3d', 'world_bench', {'SCENE': 'textured', 'MESHES': '2000', 'FRAMES': '30'}),
     ('3d-mixed', 'zgx-3d', 'world_bench', {'SCENE': 'mixed', 'MESHES': '2000', 'FRAMES': '30'}),
     ('widgets', 'zgx', 'widget_bench', {}),
+    # A split between six panes dragged, a width a frame: nested panes of
+    # wrapping text, text areas and measured lists laid out again, undrawn.
+    ('layout-drag', 'zgx', 'layout_drag_bench', {}),
+    # A pointer moving over a deep page with hover styles, undrawn.
+    ('pointer-move', 'zgx', 'pointer_bench', {}),
     # Effects' CPU work through the whole renderer, drawn by wgpu's no-op
     # backend: a scene of boxes as they are, then the same with an animated
     # layer shader painting past its box, and with one reading what's behind
@@ -146,6 +164,7 @@ SCENES = [
     ('fx-none', 'zgx-3d', 'fx_bench', {'SCENE': 'none', 'ZGX_GPU_NOOP': '1'}),
     ('fx-layer', 'zgx-3d', 'fx_bench', {'SCENE': 'layer', 'ZGX_GPU_NOOP': '1'}),
     ('fx-reader', 'zgx-3d', 'fx_bench', {'SCENE': 'reader', 'ZGX_GPU_NOOP': '1'}),
+    ('fx-passes', 'zgx-3d', 'passes_bench', {'ZGX_GPU_NOOP': '1'}),
     # A video's frames (zgx-video's `examples/bench`): its script, animations,
     # timers and shader clock stepped on a virtual clock (`zgx::clock`), each
     # frame drawn whole by wgpu's no-op backend. What making video costs;
@@ -417,7 +436,18 @@ def compared(name, package, env, base, head):
     return before, after, statistics.median(deltas), deltas
 
 
-def by_function(rows, scenes, base):
+def worth_explaining(rows, floor=None, spread=None, most=None):
+    """The cells to explain by function: those that grew past the floor and
+    their scene's spread with no change, largest first, at most `most`."""
+    floor = FUNCTIONS_FLOOR if floor is None else floor
+    spread = SPREAD if spread is None else spread
+    most = FUNCTIONS_MAX if most is None else most
+    grew = [row for row in rows
+            if row[3] is not None and row[3] >= max(floor, spread.get(row[0], 0.0))]
+    return sorted(grew, key=lambda row: -row[3])[:most]
+
+
+def by_function(rows, scenes, base, budget=None, clock=time.monotonic):
     """For the cells that grew most, each side run again writing what it
     counted by function, and the difference (`cgdiff.py`) in the log and in
     `ZGX_GATE_FUNCTIONS`, with its totals by whose code it is for the
@@ -427,9 +457,16 @@ def by_function(rows, scenes, base):
     import cgdiff
     into = pathlib.Path(FUNCTIONS)
     into.mkdir(parents=True, exist_ok=True)
-    grew = sorted((row for row in rows if row[3] is not None and row[3] > 0.01), key=lambda row: -row[3])
+    budget = FUNCTIONS_BUDGET if budget is None else budget
+    start = clock()
     summary = []
-    for name, *_ in grew[:FUNCTIONS_MAX]:
+    chosen = worth_explaining(rows)
+    for at, (name, *_) in enumerate(chosen):
+        if clock() - start > budget:
+            left = ', '.join(row[0] for row in chosen[at:])
+            print(f'=== out of time ({budget:g} s) for: {left}', flush=True)
+            summary.append(f'| {left} | (out of time) |' + ' |' * len(cgdiff.GROUPS))
+            break
         _, package, example, env = scenes[name]
         try:
             for side, binary, checkout in (('base', WORK / 'gate-bin-base' / example, base),
@@ -562,12 +599,19 @@ def main():
                 spread += (f' (median of {", ".join(f"{d:+.3f}%" for d in deltas)} under '
                            f'{len(deltas)} heap placements{layout_of(deltas)})')
             table.append(f'| {name} | {before / 1e6:,.1f} M | {after / 1e6:,.1f} M | {delta:+.2f}%{flag}{spread} |')
-    if FUNCTIONS:
-        table += by_function(rows, {scene[0]: scene for scene in SCENES}, base)
+    # The table and the verdict first, whatever explaining the cells takes.
+    verdict = (f'GATE FAIL: more than +{args.threshold:g}% instructions: {", ".join(failed)}'
+               if failed else f'GATE PASS: no scene more than +{args.threshold:g}%')
+    print(verdict, flush=True)
     if args.markdown:
         args.markdown.write_text('\n'.join(table) + '\n')
+    if FUNCTIONS:
+        explained = by_function(rows, {scene[0]: scene for scene in SCENES}, base)
+        if args.markdown and explained:
+            with args.markdown.open('a') as out:
+                out.write('\n'.join(explained) + '\n')
     if failed:
-        sys.exit(f'more than +{args.threshold:g}% instructions: {", ".join(failed)}')
+        sys.exit(verdict)
 
 
 if __name__ == '__main__':

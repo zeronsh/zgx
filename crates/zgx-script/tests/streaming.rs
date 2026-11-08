@@ -152,3 +152,56 @@ fn rows_arriving_later_from_the_host_render() {
     assert_eq!(h.text("row-u1"), "hi", "a row whose id changed renders");
     assert_eq!(h.text("row-a1"), "Hello there", "a row that grew follows");
 }
+
+const MARKDOWN: &str = r###"local reply = ui.state("reply", "")
+local n = 0
+local blocks = ui.computed(function()
+    return ui.markdown(reply:get(), { key = "reply" })
+end)
+ui.command { id = "section", run = function()
+    n += 1
+    reply:append("## Section " .. n .. "\n\nWords of a reply, **bold** and `code`, as it streams.\n\n")
+end }
+ui.command { id = "word", run = function()
+    reply:append("more ")
+end }
+return ui.column {
+    ui.each(blocks, function(b)
+        return ui.text { b.t, literal = true }
+    end),
+}"###;
+
+/// Tables and values a chunk converts for the script, the reply holding
+/// `sections` sections when it lands.
+fn per_chunk(sections: usize) -> (u64, u64) {
+    let h = Harness::inline(MARKDOWN);
+    for _ in 0..sections {
+        assert!(h.host.run_command("section"));
+    }
+    h.settle();
+    let (tables, values) = (tables_converted(), zgx_script::values_converted());
+    let chunks = 20;
+    for _ in 0..chunks {
+        assert!(h.host.run_command("word"));
+        h.settle();
+        // However the collector runs between chunks, the next derives from
+        // this one (`value::hold`): a full collection each time.
+        h.host.collect_garbage();
+    }
+    (
+        (tables_converted() - tables) / chunks,
+        (zgx_script::values_converted() - values) / chunks,
+    )
+}
+
+/// A keyed `ui.markdown` stream's answer, read by a script, costs what is
+/// new in it: its last block and the list's few changed entries, not every
+/// block it holds. The list's table is derived from the last answer's.
+#[test]
+fn a_streamed_markdown_chunk_converts_what_changed_not_what_it_holds() {
+    let (short, long) = (per_chunk(40), per_chunk(240));
+    assert_eq!(
+        short, long,
+        "a chunk converts as much with 240 sections held as with 40"
+    );
+}

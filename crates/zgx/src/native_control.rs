@@ -570,3 +570,36 @@ mod keyboard_rise_tests {
         assert_eq!(keyboard_rise(335., 325., 335.), 10.);
     }
 }
+
+#[cfg(test)]
+mod keyboard_ride_tests {
+    use super::{ease_in_out, keyboard_attached, native_keyboard_scroll, spring_remaining};
+
+    #[test]
+    fn the_native_ride_is_uikits_ease_in_out_end_to_end() {
+        // kCAMediaTimingFunctionEaseInEaseOut: symmetric, slow from rest.
+        assert!((ease_in_out(0.5) - 0.5).abs() < 1e-6);
+        assert!((ease_in_out(0.25) - 0.1291).abs() < 0.001);
+        assert!((ease_in_out(0.25) + ease_in_out(0.75) - 1.).abs() < 1e-6);
+        let path = native_keyboard_scroll(100., 300., 0.3833, 120.);
+        assert_eq!(path.first(), Some(&100.));
+        assert_eq!(path.last(), Some(&300.));
+        assert!(path.windows(2).all(|w| w[1] >= w[0]));
+    }
+
+    #[test]
+    fn the_attached_ride_holds_the_gap_once_the_edge_reaches_the_field() {
+        // A field bottom at 700, 28 points of room, a keyboard rising 336 to 538.
+        let (bottom, room, end) = (700f32, 28f32, 538f64);
+        let start = end + 336.;
+        let plain = move |edge: f64| (f64::from(bottom + room) - edge).max(0.) as f32;
+        let page = keyboard_attached(plain, start, end);
+        for left in spring_remaining(1., 555.0265, 47.118, 0., 0.3833, 120.) {
+            let edge = end + 336. * left;
+            if (edge as f32) < bottom + room - 120. {
+                let field = bottom - page(edge);
+                assert!((edge as f32 - field - room).abs() < 0.01, "at {edge}");
+            }
+        }
+    }
+}

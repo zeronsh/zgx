@@ -95,6 +95,16 @@ pub fn warm_fill_shader(shader: &Arc<zgx::decoration::FillShader>) {
     DECLARED_COUNT.fetch_add(1, Ordering::Release);
 }
 
+/// Whether `shader` is one declared (`warm_fill_shader`) and still held.
+#[cfg(test)]
+pub(crate) fn is_declared(shader: &Arc<zgx::decoration::FillShader>) -> bool {
+    let declared = DECLARED.lock().unwrap_or_else(|p| p.into_inner());
+    declared.iter().any(|held| {
+        held.upgrade()
+            .is_some_and(|held| Arc::ptr_eq(&held, shader))
+    })
+}
+
 /// How many fill shaders scripts have declared (`declared_since`).
 #[inline]
 pub(crate) fn declared() -> u64 {

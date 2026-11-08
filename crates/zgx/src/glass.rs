@@ -40,8 +40,9 @@ pub struct GlassStyle {
     pub interactive: bool,
     /// Its corners' radius in points; `f32::INFINITY` for a capsule.
     pub radius: f32,
-    /// Each corner's own radius, over `radius` (iOS and the drawn glass;
-    /// macOS's takes one, `radius`).
+    /// Each corner's own radius, over `radius`: a sheet rounder on top than
+    /// at its bottom. The drawn glass rounds each; macOS's system glass takes
+    /// one, `radius`.
     pub corners: Option<crate::decoration::Corners>,
 }
 impl Default for GlassStyle {

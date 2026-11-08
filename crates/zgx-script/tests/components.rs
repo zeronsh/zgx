@@ -1405,3 +1405,21 @@ fn a_hint_from_state_follows_it() {
         Some("Double tap to collapse the sheet.")
     );
 }
+
+#[test]
+fn a_dialog_an_app_builds_itself_is_modal_when_it_says_so() {
+    // A sheet of the app's own: while it shows, assistive technology reads it
+    // alone (aria-modal), as it does `ui.modal`.
+    let mut h = Harness::inline(
+        r#"return ui.column {
+            ui.div { id = "sheet", role = "dialog", label = "Options", aria_modal = true,
+                ui.button { label = "Done" } },
+            ui.div { id = "panel", role = "dialog", label = "Panel" },
+        }"#,
+    );
+    h.ui.set_assistive_technology(true);
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    assert!(node(&mut h, "sheet").modal);
+    assert!(!node(&mut h, "panel").modal, "only when it says so");
+}

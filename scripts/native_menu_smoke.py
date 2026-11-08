@@ -69,8 +69,13 @@ def main():
             def key(name):xdo('key','--clearmodifiers',name)
             wait('READY');focus('zgx dynamic menus secondary')
             if a.wayland and not a.overlap_debug:
-                subprocess.run(['swaymsg','[title="^zgx dynamic menus$"]','move','position','20','40'],env=env,check=True,stdout=subprocess.DEVNULL)
-                subprocess.run(['swaymsg','[title="^zgx dynamic menus secondary$"]','move','position','600','40'],env=env,check=True,stdout=subprocess.DEVNULL)
+                # Each window as sway has it: the secondary's focus above
+                # doesn't mean the primary is mapped yet.
+                for title,x in [('zgx dynamic menus',20),('zgx dynamic menus secondary',600)]:
+                    deadline=time.monotonic()+10
+                    while subprocess.run(['swaymsg','[title="^'+title+'$"]','move','position',str(x),'40'],env=env,stdout=subprocess.DEVNULL).returncode:
+                        if time.monotonic()>deadline:raise RuntimeError('Missing native menu window '+title)
+                        time.sleep(.05)
             elif not a.overlap_debug:
                 for title,x in [('zgx dynamic menus',20),('zgx dynamic menus secondary',600)]:
                     target=subprocess.check_output(['xdotool','search','--onlyvisible','--name','^'+title+'$'],env=env,text=True).strip().splitlines()[0];xdo('windowmove',target,x,40)

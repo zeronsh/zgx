@@ -93,6 +93,7 @@ Further native Linux probes, each on a private Xvfb/Openbox desktop or a nested 
 - A covered window on X11 (`covered_window_smoke.py`, on zgx-run): covered whole by another window it stops drawing, its state still changing; with `ZGX_RENDER_WHEN_COVERED=1` it goes on.
 - A covered window on Windows (`windows_occlusion_smoke.py`, on zgx-run, on a real desktop, not in CI): opaque windows leaving none of it stop it, each confirmed above it; a pixel left, a framed window's corners, and layered, click-through, tool, acrylic, composed, shaped, cloaked and owned windows don't; it draws again however the cover goes, a change no event reports included. Snapped, maximized, minimized and on another virtual desktop too. Not run on more than one monitor: there it keeps drawing unless a window and its covers are whole on one monitor, all monitors of one scale at positive coordinates, by construction and unit tests on made-up layouts (`winit`'s `occlusion_area`).
 - A Luau board and a measured list, on X11 and as a Wayland client of Sway (`scripts/luau_views/app.luau` under the luau_probe example, read from screen captures and from what it prints): the canvas's `bg_grid` shows its 2-pixel dots every 20 points and `each`'s shapes where `draw_item` drew them, once each; wheel buttons (X11) or two fingers (Wayland) pan its `view` and the shapes and grid move by the view's offset to the pixel, nothing drawn again; doubling the zoom shows the shapes twice the size at twice their place and the grid's marks 40 pixels apart, still 2 across, nothing drawn again; a press recolouring one shape (`set_key`) draws that item alone. `el:scroll_to_row(2000, { align = "center" })` on a `measured = true` list of 3,000 rows, guessed 30 points, centres row 2000 to the pixel at its measured 108 pixels, its neighbours at theirs. A chip dragged (`on_drag`) onto the board and resting springs it open (`on_drag_spring`) 0.5 s after it came onto it, not before, once however it then moves within, and drops there (`on_drop`) (`luau_views_smoke.py`).
+- Pointer lock, on X11 and as a Wayland client of Sway (`scripts/pointer_lock/app.luau` under the luau_probe example, read from what it prints): a press locks the pointer (`el:lock_pointer()`, `on_pointer_lock(true)`); the mouse's motion arrives raw as `on_pointer_move`'s `dx`, `dy` with `locked` (X11's XInput2 raw motion, Wayland's relative pointer); on X11, which confines rather than locks, the pointer stays inside the window however far it moves; other keys still reach the focused element's `on_key`; Escape lets it go, reaches no `on_key`, and is no gesture to lock with (the unlock handler's own `lock_pointer` is refused); the pointer is back where it locked and motion stops; the next key reaches `on_key`. On Wayland (Sway nested on the Xvfb, with its keyboard and pointer) the lock is a `zwp_locked_pointer_v1` that holds, relative motion arrives as `dx`, `dy`, and Escape lets it go the same way, the locked pointer destroyed (`pointer_lock_smoke.py`).
 - A terminal zgx draws, on X11 (`terminal_pane` with the `terminal` feature: the login shell on openpty, read from screen captures by the colours it prints): a command the app types into its session (`Terminal::input`) runs; X11 keys typed into the window reach the shell through the hidden editor at its cursor; Ctrl+C interrupts `sleep 30` and the shell takes the next command at once; a bar `tput cols` wide shrinks with the window, so the grid follows its size; an idle, focused terminal spends no CPU in 2 s (`terminal_smoke.py`). zgx-terminal's own tests run programs on real ptys on all three platforms (openpty, ConPTY): exact cells (wide characters, true colour, SGR), input and echo, Ctrl+C, resizes reaching the program, exit codes, the order of titles, directories, progress and command reports, and, headless, output reaching the rows, typing reaching the program, a session outliving its view and an app's resolver naming what is in front.
 - Cursor styles as a native Wayland client: `wp_cursor_shape_v1` shapes for move, not-allowed, crosshair, a reactive wait and the default (`wayland_cursors_smoke.py`), beside the X11 cursor-image check.
 - An undecorated window's title bar (`Titlebar::Inset`): no window manager frame, its drawn buttons maximize, restore, minimize and close it, a press on its corner resizes it through the window manager, and on its drag strip a double click maximizes and restores it and a drag moves it (`window_buttons_smoke.py`).
@@ -1248,6 +1249,21 @@ Apple M5 Max (macOS 26.4); with the host's deactivation reset
 itself stays active: AppKit tells the window it lost key status the same way
 when another app takes it, but the application's own `resignActive` is not
 exercised.
+
+## macOS menu bar set to hide itself
+
+`scripts/macos_menu_bar_probe.py` (the `menu_bar_probe` example, launched with
+`-_HIHideMenuBar YES`, the process's own setting) posts 200 mouse moves to its
+own window and counts the views AppKit makes for the menu bar over them,
+through a hook on its private `_newMenuBarStackViewWithAppearance:` (the
+probe's, not the library's). An app that activated before its first main menu
+was in (zgx sets its bar after the first frame; the activation winit asks for
+at launch arrives at about the same time) had AppKit make the bar's windows
+again for every move: 400 views over 200 moves, about 0.3 ms of the app's CPU
+a move, in most launches of the mail example. With the host showing the bar
+as it already is once its first bar is in (`+[NSMenu setMenuBarVisible:]`),
+the probe's launches that activated first make none over their moves (Apple
+M5 Max, macOS 26.4); without it, the first such launch made 400.
 
 ## macOS cursors, Insert, held drags, file drops and title bars
 

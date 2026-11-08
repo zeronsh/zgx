@@ -831,6 +831,22 @@ declare extern type Bitmap with
 end
 declare extern type Shader with
 end
+export type ShaderPass = {
+	name: string,
+	shader: string,
+	size: { number }?,
+	scale: number?,
+	format: ("rgba8" | "rgba16float")?,
+	feedback: boolean?,
+	steps: number?,
+	once: boolean?,
+}
+export type LayerShaderOptions = {
+	fps: number?,
+	passes: { ShaderPass }?,
+	images: { [string]: Bitmap }?,
+	geometry: string?,
+}
 declare extern type LayerShader with
 end
 declare extern type Brush with
@@ -1181,6 +1197,15 @@ declare extern type Element with
 	function snapshot(self, max_width: number?): string?
 	-- Clear keyboard focus if it is on the element or inside it.
 	function blur(self): ()
+	-- Lock the pointer to the element, as the DOM's `requestPointerLock`
+	-- (a game's look about, a 3D view's orbit): hidden and held, every
+	-- press and wheel goes to it, and its `on_pointer_move` hears the
+	-- mouse's motion as `dx`, `dy`. Only in a press's, a release's or a
+	-- key's handler (or within a second of one); whether it holds it.
+	-- Escape always lets it go, as does the window losing focus.
+	function lock_pointer(self): boolean
+	-- Let the pointer go, if the element holds its lock.
+	function unlock_pointer(self): ()
 end
 
 -- `ref = r` on a node. Reading it in an effect or computed follows it: the
@@ -1648,6 +1673,9 @@ export type Child = Node | string | (() -> TextValue) | Message | { read [number
 export type Handler = () -> ...unknown
 -- `clicks` (on_press): the press's count, 2 for a double click's second, 3
 -- for a triple's, and on past it.
+-- `dx`, `dy` (on_pointer_move): how far it moved since the last move, in
+-- the window's points; while the pointer is locked (`locked`), the
+-- mouse's own motion, `x` and `y` staying where it locked.
 -- `shift`, `ctrl`, `alt`, `meta`: the keys held; `cmd`: the platform's
 -- command key (Command on macOS, Ctrl elsewhere), as `cmd` in keys.
 export type PointerEvent = {
@@ -1656,6 +1684,9 @@ export type PointerEvent = {
 	local_x: number,
 	local_y: number,
 	clicks: number?,
+	dx: number?,
+	dy: number?,
+	locked: boolean?,
 	shift: boolean,
 	ctrl: boolean,
 	alt: boolean,
@@ -1690,6 +1721,7 @@ export type WheelEvent = {
 	local_x: number,
 	local_y: number,
 	clicks: number?,
+	locked: boolean?,
 	shift: boolean,
 	ctrl: boolean,
 	alt: boolean,
@@ -1706,6 +1738,9 @@ export type AuxClickEvent = {
 	local_x: number,
 	local_y: number,
 	clicks: number?,
+	dx: number?,
+	dy: number?,
+	locked: boolean?,
 	shift: boolean,
 	ctrl: boolean,
 	alt: boolean,
@@ -1721,6 +1756,9 @@ export type PinchEvent = {
 	local_x: number,
 	local_y: number,
 	clicks: number?,
+	dx: number?,
+	dy: number?,
+	locked: boolean?,
 	shift: boolean,
 	ctrl: boolean,
 	alt: boolean,
@@ -1976,6 +2014,9 @@ export type Styles = {
 	underline_offset: Num?,
 	-- The language its text is in (HTML's `lang`): "ja", "zh-TW".
 	lang: string?,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: string?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: number?,
 	y: number?,
@@ -2163,6 +2204,9 @@ export type StyleProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Reactive<string>?,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: string?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -2258,6 +2302,9 @@ export type NodeProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: (string | ReadOnlyState<string> | (() -> string))?,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Reactive<string>?,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: (string | Readable<string?> | (() -> string?))?,
@@ -2377,6 +2424,9 @@ export type NodeProps = {
 	on_file_hover: ((over: boolean) -> ...unknown)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: ((locked: boolean) -> ...unknown)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -2613,6 +2663,9 @@ export type Props = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -2668,6 +2721,9 @@ export type Props = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -2787,6 +2843,9 @@ export type Props = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -2997,6 +3056,7 @@ export type Props_font_features = Reactive<string>?
 export type Props_underline = Reactive<boolean>?
 export type Props_underline_offset = Reactive<Num>?
 export type Props_lang = Reactive<string>?
+export type Props_geometry = string?
 export type Props_x = Reactive<number>?
 export type Props_y = Reactive<number>?
 export type Props_scale = Reactive<number>?
@@ -3025,6 +3085,7 @@ export type Props_checked = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_expanded = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_live = ("polite" | "assertive" | "off")?
 export type Props_description = (string | ReadOnlyState<string> | (() -> string))?
+export type Props_value_text = Reactive<string>?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
 export type Props_aria_hidden = boolean?
 export type Props_aria_modal = boolean?
@@ -3074,6 +3135,7 @@ export type Props_on_file_drop = ((files: { File }, e: PointerEvent) -> ...unkno
 export type Props_on_file_hover = ((over: boolean) -> ...unknown)?
 export type Props_on_hover = (((inside: boolean) -> ...unknown) | Action)?
 export type Props_on_pointer_move = (((e: PointerEvent) -> ...unknown) | Action)?
+export type Props_on_pointer_lock = ((locked: boolean) -> ...unknown)?
 export type Props_on_key = (((e: KeyEvent) -> ...boolean?) | Action)?
 export type Props_on_key_up = (((key: string) -> ...unknown) | Action)?
 export type Props_on_focus = (Handler | Action)?
@@ -3267,6 +3329,9 @@ export type ContainerProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -3322,6 +3387,9 @@ export type ContainerProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -3441,6 +3509,9 @@ export type ContainerProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -3522,9 +3593,6 @@ export type ContainerProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 }
@@ -3694,6 +3762,9 @@ export type ScrollProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -3749,6 +3820,9 @@ export type ScrollProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -3868,6 +3942,9 @@ export type ScrollProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -3949,9 +4026,6 @@ export type ScrollProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- The scroll position in points, both ways.
@@ -4142,6 +4216,9 @@ export type TextProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -4197,6 +4274,9 @@ export type TextProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -4316,6 +4396,9 @@ export type TextProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -4551,6 +4634,9 @@ export type MarkdownViewProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -4606,6 +4692,9 @@ export type MarkdownViewProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -4725,6 +4814,9 @@ export type MarkdownViewProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -5030,6 +5122,9 @@ export type RichProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -5085,6 +5180,9 @@ export type RichProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -5204,6 +5302,9 @@ export type RichProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -5433,6 +5534,9 @@ export type ImageProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -5488,6 +5592,9 @@ export type ImageProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -5607,6 +5714,9 @@ export type ImageProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -5853,6 +5963,9 @@ export type SvgProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -5908,6 +6021,9 @@ export type SvgProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -6027,6 +6143,9 @@ export type SvgProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -6361,6 +6480,9 @@ export type Scene3DProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -6416,6 +6538,9 @@ export type Scene3DProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -6535,6 +6660,9 @@ export type Scene3DProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -6787,6 +6915,9 @@ export type CanvasProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -6842,6 +6973,9 @@ export type CanvasProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -6961,6 +7095,9 @@ export type CanvasProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -7222,6 +7359,9 @@ export type CheckboxProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -7277,6 +7417,9 @@ export type CheckboxProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -7396,6 +7539,9 @@ export type CheckboxProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -7635,6 +7781,9 @@ export type InputProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -7690,6 +7839,9 @@ export type InputProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -7809,6 +7961,9 @@ export type InputProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -8149,6 +8304,9 @@ export type ProgressProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -8204,6 +8362,9 @@ export type ProgressProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -8323,6 +8484,9 @@ export type ProgressProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -8553,6 +8717,9 @@ export type SliderProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -8727,6 +8894,9 @@ export type SliderProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -8975,6 +9145,9 @@ export type SegmentedProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -9030,6 +9203,9 @@ export type SegmentedProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -9149,6 +9325,9 @@ export type SegmentedProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -9390,6 +9569,9 @@ export type StepperProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -9445,6 +9627,9 @@ export type StepperProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -9564,6 +9749,9 @@ export type StepperProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -9806,6 +9994,9 @@ export type DisclosureProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -9861,6 +10052,9 @@ export type DisclosureProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -9980,6 +10174,9 @@ export type DisclosureProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -10061,9 +10258,6 @@ export type DisclosureProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	open: State<boolean>,
@@ -10236,6 +10430,9 @@ export type AccordionProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -10291,6 +10488,9 @@ export type AccordionProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -10410,6 +10610,9 @@ export type AccordionProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -10639,6 +10842,9 @@ export type SectionProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -10692,6 +10898,9 @@ export type SectionProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -10811,6 +11020,9 @@ export type SectionProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -10892,9 +11104,6 @@ export type SectionProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	id: any,
@@ -11066,6 +11275,9 @@ export type SeparatorProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -11121,6 +11333,9 @@ export type SeparatorProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -11240,6 +11455,9 @@ export type SeparatorProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -11475,6 +11693,9 @@ export type TabsProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -11530,6 +11751,9 @@ export type TabsProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -11649,6 +11873,9 @@ export type TabsProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -11906,6 +12133,9 @@ export type TreeProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -11961,6 +12191,9 @@ export type TreeProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -12080,6 +12313,9 @@ export type TreeProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -12333,6 +12569,9 @@ export type DataGridProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -12388,6 +12627,9 @@ export type DataGridProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -12507,6 +12749,9 @@ export type DataGridProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -12756,6 +13001,9 @@ export type CalendarProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -12811,6 +13059,9 @@ export type CalendarProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -12930,6 +13181,9 @@ export type CalendarProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -13172,6 +13426,9 @@ export type DatePickerProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -13227,6 +13484,9 @@ export type DatePickerProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -13346,6 +13606,9 @@ export type DatePickerProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -13586,6 +13849,9 @@ export type TimeFieldProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -13641,6 +13907,9 @@ export type TimeFieldProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -13760,6 +14029,9 @@ export type TimeFieldProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -13999,6 +14271,9 @@ export type ComboboxProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -14054,6 +14329,9 @@ export type ComboboxProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -14173,6 +14451,9 @@ export type ComboboxProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -14420,6 +14701,9 @@ export type CommandPaletteProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -14475,6 +14759,9 @@ export type CommandPaletteProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -14594,6 +14881,9 @@ export type CommandPaletteProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -14829,6 +15119,9 @@ export type SelectProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -14884,6 +15177,9 @@ export type SelectProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -15003,6 +15299,9 @@ export type SelectProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -15245,6 +15544,9 @@ export type SplitProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -15300,6 +15602,9 @@ export type SplitProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -15419,6 +15724,9 @@ export type SplitProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -15498,9 +15806,6 @@ export type SplitProps = {
 	-- focusable.
 	value: (number | State<number> | () -> number)?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- The first pane's size in points, both ways: the divider writes it as
@@ -15720,6 +16025,9 @@ export type ListProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -15775,6 +16083,9 @@ export type ListProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -15894,6 +16205,9 @@ export type ListProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -16218,6 +16532,9 @@ export type LayerProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -16273,6 +16590,9 @@ export type LayerProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -16392,6 +16712,9 @@ export type LayerProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -16469,9 +16792,6 @@ export type LayerProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	open: State<boolean>?,
@@ -16644,6 +16964,9 @@ export type ModalProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -16699,6 +17022,9 @@ export type ModalProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -16818,6 +17144,9 @@ export type ModalProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -16895,9 +17224,6 @@ export type ModalProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- A state, written back as it closes; or, controlled, a function saying
@@ -17088,6 +17414,9 @@ export type PopoverProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -17143,6 +17472,9 @@ export type PopoverProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -17262,6 +17594,9 @@ export type PopoverProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -17339,9 +17674,6 @@ export type PopoverProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- A state, written back as it closes; or, controlled, a function saying
@@ -17542,6 +17874,9 @@ export type MenuItemProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -17593,6 +17928,9 @@ export type MenuItemProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -17712,6 +18050,9 @@ export type MenuItemProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -17950,6 +18291,9 @@ export type SubmenuProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -18005,6 +18349,9 @@ export type SubmenuProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -18124,6 +18471,9 @@ export type SubmenuProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -18201,9 +18551,6 @@ export type SubmenuProps = {
 	min: number?,
 	max: number?,
 	step: number?,
-	-- What it reads as besides its name (`aria-valuetext`): a slider's value
-	-- in words, or any element's, as a Settings row's detail.
-	value_text: Reactive<string>?,
 	on_change: ((value: number) -> ...unknown)?,
 	keyboard: boolean?,
 	-- A state, written back as it closes; or, controlled, a function saying
@@ -18382,6 +18729,9 @@ export type WebViewProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -18437,6 +18787,9 @@ export type WebViewProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -18553,6 +18906,9 @@ export type WebViewProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -18811,6 +19167,9 @@ export type TerminalProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -18866,6 +19225,9 @@ export type TerminalProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -18985,6 +19347,9 @@ export type TerminalProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -19212,6 +19577,9 @@ export type GlassProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -19267,6 +19635,9 @@ export type GlassProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -19386,6 +19757,9 @@ export type GlassProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -19627,6 +20001,9 @@ export type GlassGroupProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -19682,6 +20059,9 @@ export type GlassGroupProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -19801,6 +20181,9 @@ export type GlassGroupProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -20028,6 +20411,9 @@ export type SymbolProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -20083,6 +20469,9 @@ export type SymbolProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -20202,6 +20591,9 @@ export type SymbolProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -20438,6 +20830,9 @@ export type NativeSwitchProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -20493,6 +20888,9 @@ export type NativeSwitchProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -20612,6 +21010,9 @@ export type NativeSwitchProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -20923,6 +21324,9 @@ export type NativeTabsProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -20978,6 +21382,9 @@ export type NativeTabsProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -21097,6 +21504,9 @@ export type NativeTabsProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -21331,6 +21741,9 @@ export type SlotProps = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -21386,6 +21799,9 @@ export type SlotProps = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -21505,6 +21921,9 @@ export type SlotProps = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -21784,6 +22203,9 @@ export type EachOptions = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -21839,6 +22261,9 @@ export type EachOptions = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -21958,6 +22383,9 @@ export type EachOptions = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -22203,6 +22631,9 @@ export type PresenceOptions = {
 	-- in a Japanese app), over the app's locale and a line's kana, and
 	-- assistive technology reads it in that language.
 	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Props_x,
 	y: Props_y,
@@ -22258,6 +22689,9 @@ export type PresenceOptions = {
 	-- Read after its name, as a hint (`aria-description`); a state or a
 	-- function follows what it says (a sheet grabber's "expand" or "collapse").
 	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
 	-- What is wrong with its value (`aria-invalid`), followed: nil while it
 	-- is fine. Assistive technology hears it with the field.
 	error: Props_error,
@@ -22377,6 +22811,9 @@ export type PresenceOptions = {
 	on_file_hover: Props_on_file_hover,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -22958,7 +23395,7 @@ declare ui: {
 	-- input.time, input.scale, input.params and input.radii (the box's corners);
 	-- `zgx_sample(p)` reads the layer at another point, and `zgx_backdrop(p)`
 	-- what lies behind the node there.
-	layer_shader: (source: string, opts: { fps: number? }?) -> LayerShader,
+	layer_shader: (source: string, opts: LayerShaderOptions?) -> LayerShader,
 	-- Sorts `list` in place, stably, by a field of each item (`"price"`) or
 	-- a function of it (called once an item); returns it. Use it over
 	-- `table.sort` with a comparator for long lists: that calls Luau some

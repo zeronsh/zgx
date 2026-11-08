@@ -1,4 +1,4 @@
 ---
 section: fixed
 ---
-- What a component's caller says to assistive technology reaches the node it builds: `component(…).accessible_label(…)`, `.accessible_hidden()`, a role or a description set outside a component were dropped, and `aria_hidden` on a control built as one (`ui.native_switch`) was ignored.
+- What a component's caller says to assistive technology reaches the node it builds: a label, role, description or `accessible_hidden()` set on a `component(…)` from outside it was dropped, so a control a row already stands for still read as an element of its own.

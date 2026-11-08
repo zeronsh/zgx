@@ -236,3 +236,48 @@ fn what_is_said_outside_a_component_reaches_the_node_it_builds() {
     assert_eq!(inner("renamed").role, Role::Switch, "its own role kept");
     assert!(inner("hidden").hidden, "hidden as asked");
 }
+
+#[test]
+fn a_hint_from_state_said_outside_a_component_reaches_the_node_it_builds() {
+    // A sheet's grabber: what a double tap does depends on where the sheet
+    // rests, and whoever places the grabber knows that, not the grabber.
+    let mut ui = Ui::new(400., 200.);
+    ui.set_assistive_technology(true);
+    let large = ui.signal(false);
+    let read = large.clone();
+    let view = ui.mount(
+        column().child(
+            div().id("holder").child(
+                component(|_| {
+                    div()
+                        .role(Role::Button)
+                        .accessible_label("Sheet Grabber")
+                        .size(40., 10.)
+                })
+                .description_when(move || {
+                    if read.get() {
+                        "Double tap to collapse the sheet.".to_string()
+                    } else {
+                        "Double tap to expand the sheet.".to_string()
+                    }
+                }),
+            ),
+        ),
+    );
+    let hint = |ui: &mut Ui| {
+        ui.prepare_frame();
+        let semantics = ui.semantics.borrow();
+        let scene = ui.scene.borrow();
+        let node = scene.children(view.find("holder").unwrap())[0];
+        semantics.get(node).and_then(|n| n.description.clone())
+    };
+    assert_eq!(
+        hint(&mut ui).as_deref(),
+        Some("Double tap to expand the sheet.")
+    );
+    large.set(true);
+    assert_eq!(
+        hint(&mut ui).as_deref(),
+        Some("Double tap to collapse the sheet.")
+    );
+}

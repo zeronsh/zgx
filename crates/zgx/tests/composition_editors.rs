@@ -629,3 +629,56 @@ fn a_long_document_with_returns_is_made_canonical() {
     assert!(!editor.editor.borrow().text().contains('\n'));
     mounted.unmount();
 }
+
+/// A field one line high is as high as `control.height` says, and follows
+/// it, and the system text size, as they change: its line stays inside it.
+/// An app's own height holds, and a text area keeps its own.
+#[test]
+fn a_one_line_field_follows_the_control_height_and_text_size_live() {
+    use zgx::theme::{ThemeOverride, tok};
+    let mut ui = Ui::new(500., 400.);
+    let value = ui.signal(String::from("Hello"));
+    let height = ui.signal(36.0f32);
+    let read = height.clone();
+    let mounted = ui.mount(theme_scope_with(
+        move || ThemeOverride::new().with(tok::CONTROL_HEIGHT, read.get()),
+        column().children([
+            text_input("Name", value.clone()).id("name").w(240.),
+            text_input("Own", value.clone()).id("own").w(240.).h(30.),
+            text_area("Notes", value.clone()).id("notes").w(240.),
+        ]),
+    ));
+    ui.prepare_frame();
+    let [name, own, notes] = ["name", "own", "notes"].map(|id| mounted.find(id).unwrap());
+    let height_of = |ui: &Ui, node| ui.scene.borrow().bounds(node).height;
+    // The line, inside the field's box.
+    let fits = |ui: &Ui| {
+        let line = ui.editor(name).unwrap().text_area(0..1).unwrap();
+        let field = ui.scene.borrow().bounds(name);
+        assert!(
+            line.y >= field.y && line.y + line.height <= field.y + field.height,
+            "line {line:?} inside {field:?}"
+        );
+        line.height
+    };
+    assert_eq!(height_of(&ui, name), 36.);
+    let notes_height = height_of(&ui, notes);
+    let line = fits(&ui);
+    height.set(48.);
+    ui.prepare_frame();
+    assert_eq!(height_of(&ui, name), 48.);
+    fits(&ui);
+    // Twice the text: its line and padding, past the theme's 48.
+    ui.theme().set_system_text_scale(2.);
+    ui.prepare_frame();
+    let scaled = fits(&ui);
+    assert!(scaled > line * 1.8, "the line grew: {line} to {scaled}");
+    assert_eq!(height_of(&ui, name), scaled + 12.);
+    assert_eq!(height_of(&ui, own), 30., "the app's own height");
+    assert_eq!(height_of(&ui, notes), notes_height, "a text area's own");
+    // Back: the theme's again.
+    ui.theme().set_system_text_scale(1.);
+    ui.prepare_frame();
+    assert_eq!(height_of(&ui, name), 48.);
+    fits(&ui);
+}

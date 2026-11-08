@@ -399,3 +399,15 @@ is passed to the script fallbacks, as an exact-weight face is, so Chinese
 falls through to its fonts as before. zgx-gpu's
 `a_family_without_the_weight_asked_for_draws_in_its_nearest` checks it,
 under each platform's first fallback family's name.
+
+## An ASCII run's script read from its bytes (zgx-cosmic-text 0.19.11)
+
+`shape_fallback` asked harfrust to guess each run's segment properties,
+which looks up every character's script until it finds one that isn't
+Common, Inherited or Unknown. For an ASCII run the answer is known from its
+bytes: Latin if it has a letter, none otherwise (every other ASCII character
+is Common). The direction is set before, and the guess sets no language.
+`guess_script` sets that script, and still guesses any other run. A
+dashboard's changing values (digits, a unit) were most of what the heavy
+dashboard shapes each frame: its flush is 0.78% shorter. Its test checks all
+128 ASCII characters and mixed runs against the guess.

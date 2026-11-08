@@ -1945,10 +1945,14 @@ fn apply_resolved(
         },
         _ => scene.kind(node).clone(),
     };
+    // A text's font and kind in one call: one never laid out takes them as
+    // it was appended (`Scene::set_text_kind`).
     if matches!(kind, NodeKind::Text { .. }) {
-        scene.set_font(node, current.font.clone());
+        std::hint::cold_path();
+        scene.set_text_kind(node, current.font.clone(), kind);
+    } else {
+        scene.set_kind(node, kind);
     }
-    scene.set_kind(node, kind);
     // Read again past a barrier, not kept from the test above: the
     // compiler would merge the two reads, and a value live across all of a
     // style's application spilled others on x86 at every node (#1276).
@@ -1965,6 +1969,9 @@ fn apply_resolved(
         }
         if let Some((bleed, reach)) = cold.and_then(|cold| cold.layer_extent) {
             scene.set_layer_extent(node, bleed, reach);
+        }
+        if let Some(tag) = cold.and_then(|cold| cold.geometry_tag) {
+            scene.set_geometry_tag(node, tag);
         }
         if let Some(mode) = rare.blend {
             scene.set_blend(node, mode);

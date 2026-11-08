@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use bitflags::bitflags;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use crate::grid::{self, GridCell};
 use crate::index::Column;
@@ -128,7 +129,10 @@ impl ResetDiscriminant<Color> for Cell {
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct CellExtra {
-    zerowidth: Vec<char>,
+    /// zgx: the characters joined to the cell's, inline for as many as most
+    /// clusters have (a selector, a ZWJ and an emoji, a skin tone), so a
+    /// cell with them costs one allocation, not two.
+    zerowidth: SmallVec<[char; 4]>,
     underline_color: Option<Color>,
     hyperlink: Option<Hyperlink>,
 }
@@ -176,7 +180,7 @@ impl Cell {
     pub fn clear_wide(&mut self) {
         self.flags.remove(Flags::WIDE_CHAR);
         if let Some(extra) = self.extra.as_mut() {
-            Arc::make_mut(extra).zerowidth = Vec::new();
+            Arc::make_mut(extra).zerowidth = SmallVec::new();
         }
         self.c = ' ';
     }

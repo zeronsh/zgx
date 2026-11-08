@@ -985,30 +985,101 @@ impl FallbackTextLayout {
         let mut x = 0.;
         let mut y = 0.;
         let mut width = 0_f32;
-        for (index, grapheme) in text.grapheme_indices(true) {
-            if grapheme.contains(['\n', '\r']) {
-                cell(index..index + grapheme.len(), Rect::new(x, y, 0., height));
+        // Each grapheme in turn: its byte range, and whether it breaks the line.
+        let mut each = |range: Range<usize>, newline: bool| {
+            if newline {
+                cell(range, Rect::new(x, y, 0., height));
                 width = width.max(x);
                 x = 0.;
                 y = (y + height).min(f32::MAX);
-                continue;
+                return;
             }
             if max_width.is_some_and(|w| w > 0. && x > 0. && x + advance > w) {
                 width = width.max(x);
                 x = 0.;
                 y = (y + height).min(f32::MAX)
             }
-            cell(
-                index..index + grapheme.len(),
-                Rect::new(x, y, advance, height),
-            );
+            cell(range, Rect::new(x, y, advance, height));
             x = (x + advance).min(f32::MAX);
+        };
+        if text.is_ascii() {
+            for range in AsciiClusters::new(text.as_bytes()) {
+                let newline = matches!(text.as_bytes()[range.start], b'\n' | b'\r');
+                each(range, newline);
+            }
+        } else {
+            for (index, grapheme) in text.grapheme_indices(true) {
+                each(
+                    index..index + grapheme.len(),
+                    grapheme.contains(['\n', '\r']),
+                );
+            }
         }
         width = width.max(x);
         (
             Rect::new(x, y, 1., height),
             (width, (y + height).min(f32::MAX)),
         )
+    }
+}
+/// `text`'s graphemes as byte ranges, in order: what
+/// `grapheme_indices(true)` gives (each `(start, grapheme)` as
+/// `start..start + grapheme.len()`), an ASCII text's read from its bytes
+/// (`AsciiClusters`), anything else segmented. For a walk over every
+/// grapheme of a text (carets, a screen reader's runs).
+pub fn grapheme_ranges(text: &str) -> GraphemeRanges<'_> {
+    if text.is_ascii() {
+        GraphemeRanges::Ascii(AsciiClusters::new(text.as_bytes()))
+    } else {
+        GraphemeRanges::Unicode(text.grapheme_indices(true))
+    }
+}
+/// `grapheme_ranges`' iterator.
+pub enum GraphemeRanges<'a> {
+    #[doc(hidden)]
+    Ascii(AsciiClusters<'a>),
+    #[doc(hidden)]
+    Unicode(unicode_segmentation::GraphemeIndices<'a>),
+}
+impl Iterator for GraphemeRanges<'_> {
+    type Item = Range<usize>;
+    #[inline]
+    fn next(&mut self) -> Option<Range<usize>> {
+        match self {
+            Self::Ascii(bytes) => bytes.next(),
+            Self::Unicode(graphemes) => graphemes
+                .next()
+                .map(|(start, grapheme)| start..start + grapheme.len()),
+        }
+    }
+}
+/// An ASCII text's graphemes, without Unicode's segmentation: each byte is
+/// one, but a carriage return before a line feed, which joins it (UAX #29
+/// GB3; every other ASCII character, controls included, breaks from its
+/// neighbours). `grapheme_indices` gives the same ranges, a table lookup and
+/// state machine step a character slower.
+#[doc(hidden)]
+pub struct AsciiClusters<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+impl<'a> AsciiClusters<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, at: 0 }
+    }
+}
+impl Iterator for AsciiClusters<'_> {
+    type Item = Range<usize>;
+    fn next(&mut self) -> Option<Range<usize>> {
+        let start = self.at;
+        let byte = *self.bytes.get(start)?;
+        let len = if byte == b'\r' && self.bytes.get(start + 1) == Some(&b'\n') {
+            2
+        } else {
+            1
+        };
+        self.at = start + len;
+        Some(start..self.at)
     }
 }
 impl TextLayout for FallbackTextLayout {
@@ -1102,6 +1173,69 @@ impl TextLayout for FallbackTextLayout {
 }
 #[cfg(test)]
 mod tests {
+    /// `grapheme_ranges` is `grapheme_indices`' ranges, ASCII or not.
+    #[test]
+    fn grapheme_ranges_are_grapheme_indices() {
+        use unicode_segmentation::UnicodeSegmentation;
+        for text in [
+            "",
+            "Row 12 at 345",
+            "a\r\nb\rc\nd",
+            "caf\u{e9} na\u{ef}ve",
+            "e\u{301}\u{302}x",
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} family",
+            "\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}",
+            "\u{5e9}\u{5dc}\u{5d5}\u{5dd} hello",
+            "\u{915}\u{94d}\u{937} \r\n",
+        ] {
+            let ranges: Vec<_> = super::grapheme_ranges(text).collect();
+            let indices: Vec<_> = text
+                .grapheme_indices(true)
+                .map(|(at, grapheme)| at..at + grapheme.len())
+                .collect();
+            assert_eq!(ranges, indices, "{text:?}");
+        }
+    }
+
+    /// An ASCII text's graphemes are its bytes but CR LF, as Unicode's
+    /// segmentation finds them: every string of up to four bytes from an
+    /// alphabet of controls, line breaks, letters, digits and punctuation,
+    /// and longer mixed ones, give the same ranges either way.
+    #[test]
+    fn ascii_clusters_are_unicode_graphemes() {
+        use unicode_segmentation::UnicodeSegmentation;
+        let check = |text: &str| {
+            let fast: Vec<_> = super::AsciiClusters::new(text.as_bytes()).collect();
+            let slow: Vec<_> = text
+                .grapheme_indices(true)
+                .map(|(at, grapheme)| at..at + grapheme.len())
+                .collect();
+            assert_eq!(fast, slow, "{text:?}");
+        };
+        let alphabet = [
+            b'\r', b'\n', b'\t', 0, 1, 0x1b, 0x7f, b' ', b'a', b'Z', b'7', b'-', b'.', b'~',
+        ];
+        let mut text = Vec::new();
+        for len in 0..=4u32 {
+            for mut code in 0..alphabet.len().pow(len) {
+                text.clear();
+                for _ in 0..len {
+                    text.push(alphabet[code % alphabet.len()]);
+                    code /= alphabet.len();
+                }
+                check(std::str::from_utf8(&text).unwrap());
+            }
+        }
+        for text in [
+            "Row 12 at 345",
+            "line one\r\nline two\rthree\nfour\r\n\r\n",
+            "\r\r\n\n\r",
+            "tabs\tand\x00nulls\x7f",
+        ] {
+            check(text);
+        }
+    }
+
     use super::*;
     #[test]
     fn line_height_normalization_hashing_and_tight_pitch() {

@@ -32,8 +32,10 @@ pub(crate) fn urgent(
 }
 
 /// Whether a screen reader runs (Narrator, NVDA, JAWS set the system's flag,
-/// `SPI_GETSCREENREADER`): what it speaks goes out at once. Elsewhere,
-/// where no such flag is read, as if one always ran.
+/// `SPI_GETSCREENREADER`; on macOS VoiceOver or Switch Control, which
+/// `NSWorkspace` says live): what it speaks goes out at once. A launcher or
+/// window manager reading the tree isn't one. Elsewhere, where no such flag
+/// is read, as if one always ran.
 pub(crate) fn screen_reader() -> bool {
     #[cfg(windows)]
     {
@@ -55,7 +57,12 @@ pub(crate) fn screen_reader() -> bool {
         };
         read.is_err() || on.as_bool()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace();
+        workspace.isVoiceOverEnabled() || workspace.isSwitchControlEnabled()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         true
     }
@@ -70,24 +77,55 @@ pub(crate) struct GeometryPacer {
     last: Option<std::time::Instant>,
     held: Option<std::time::Instant>,
 }
+/// What an update of the tree at a given moment does (`GeometryPacer`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TreeUpdateKind {
+    /// Everything that changed, geometry included.
+    Full,
+    /// Only what a reader hears changed (names, values, focus), while a
+    /// geometry change waits its turn: nodes that only moved keep what was
+    /// sent (`AccessibilityTree::update_names`).
+    Names,
+}
 impl GeometryPacer {
-    /// Whether to update the tree at `now`.
+    /// Whether to update the tree at `now` (`update_kind`, either kind).
+    #[cfg(test)]
     pub(crate) fn update_now(
         &mut self,
         now: std::time::Instant,
         changed: bool,
         geometry: bool,
     ) -> bool {
+        self.update_kind(now, changed, geometry).is_some()
+    }
+    /// How to update the tree at `now`, if at all: a change a reader hears
+    /// goes at once, but while geometry isn't due it goes alone (`Names`),
+    /// so a name changing every frame (a timer, a status) doesn't send
+    /// every frame's geometry too, nor put geometry off.
+    pub(crate) fn update_kind(
+        &mut self,
+        now: std::time::Instant,
+        changed: bool,
+        geometry: bool,
+    ) -> Option<TreeUpdateKind> {
         let due = self.last.is_none_or(|last| now >= last + GEOMETRY_EVERY);
-        if changed || ((geometry || self.held.is_some()) && due) {
+        let pending = geometry || self.held.is_some();
+        if (changed && !pending) || (pending && due) {
             self.last = Some(now);
             self.held = None;
-            return true;
+            return Some(TreeUpdateKind::Full);
         }
         if geometry && let Some(last) = self.last {
             self.held.get_or_insert(last + GEOMETRY_EVERY);
         }
-        false
+        changed.then_some(TreeUpdateKind::Names)
+    }
+    /// A full update at `now`, whatever is held (a reveal, which moves what
+    /// it shows).
+    pub(crate) fn full(&mut self, now: std::time::Instant) -> TreeUpdateKind {
+        self.last = Some(now);
+        self.held = None;
+        TreeUpdateKind::Full
     }
     /// When a held geometry change goes out, if one is held.
     pub(crate) fn deadline(&self) -> Option<std::time::Instant> {
@@ -328,6 +366,31 @@ impl AccessibilityTree {
         title: &str,
         scale: f64,
     ) -> TreeUpdate {
+        self.project(scene, semantics, focused, title, scale, true)
+    }
+    /// `update` for what a reader hears alone (names, values, focus, nodes
+    /// added and gone), while geometry waits its turn: a node whose
+    /// semantics are as sent, its children and state too, keeps what was
+    /// sent though it moved, its box and runs coming with the next `update`.
+    pub fn update_names(
+        &mut self,
+        scene: &Scene,
+        semantics: &Semantics,
+        focused: Option<NodeId>,
+        title: &str,
+        scale: f64,
+    ) -> TreeUpdate {
+        self.project(scene, semantics, focused, title, scale, false)
+    }
+    fn project(
+        &mut self,
+        scene: &Scene,
+        semantics: &Semantics,
+        focused: Option<NodeId>,
+        title: &str,
+        scale: f64,
+        geometry: bool,
+    ) -> TreeUpdate {
         let root = self.id(scene.root());
         if scene.language_revision() != self.language_revision {
             self.language_revision = scene.language_revision();
@@ -453,6 +516,7 @@ impl AccessibilityTree {
             }
         }
         self.text_runs.retain(|owner, _| visible.contains(owner));
+        self.run_boxes.retain(|owner, _| visible.contains(owner));
         self.blocks.retain(|owner| visible.contains(owner));
         self.long_runs.retain(|owner, _| visible.contains(owner));
         // Fields saying what is wrong with them, and the text that shows it
@@ -493,13 +557,32 @@ impl AccessibilityTree {
                 || scene
                     .ancestors(id)
                     .any(|ancestor| semantics.get(ancestor).is_some_and(|s| s.disabled));
+            let revision = semantics
+                .node_revision(id)
+                .expect("projected semantic node");
+            // Names alone: a node as sent keeps what was sent, before its
+            // geometry or text is looked at (moved, it goes with the next
+            // full update, as geometry does for any client).
+            if !geometry
+                && focused != Some(id)
+                && self.projection_revisions.get(&id) == Some(&revision)
+                && self.cache.get(&native).is_some_and(|cached| {
+                    let runs = self.text_runs.get(&id).map_or(&[][..], Vec::as_slice);
+                    cached.is_disabled() == disabled
+                        && cached.children().iter().eq(children
+                            .get(&id)
+                            .into_iter()
+                            .flatten()
+                            .chain(runs))
+                })
+            {
+                children.remove(&id);
+                continue;
+            }
             // Assistive bounds: the box around where it shows, or where an
             // animation is taking it with `hit = "target"` (as Core
             // Animation's model layer): a reader's highlight goes ahead.
             let r = scene.hit_bounds(id);
-            let revision = semantics
-                .node_revision(id)
-                .expect("projected semantic node");
             let bounds = accesskit::Rect::new(
                 r.x as f64 * scale,
                 r.y as f64 * scale,
@@ -1175,7 +1258,8 @@ fn text_run_data_on(
     let mut runs = Vec::new();
     let mut run = fresh(0);
     let mut chars: Vec<Option<Edge>> = Vec::new();
-    for (offset, grapheme) in value.grapheme_indices(true) {
+    for range in zgx::text_layout::grapheme_ranges(value) {
+        let (offset, grapheme) = (range.start, &value[range]);
         let length = u8::try_from(grapheme.len()).ok()?;
         let (edge, wrap_start) = match &mut walk {
             Some(walk) => walk.edge(value, offset)?,
@@ -1255,9 +1339,8 @@ fn far_side(rect: accesskit::Rect, window: accesskit::Rect) -> Option<FarSide> {
 /// `value` as one line across `rect`, its graphemes spread evenly: where
 /// text far from the window is, near enough, without shaping it.
 fn estimated_line(value: &str, rect: zgx::scene::Rect) -> zgx::scene::TextLine {
-    use unicode_segmentation::UnicodeSegmentation;
     let text = value.trim_end_matches(['\n', '\r']);
-    let count = text.graphemes(true).count().max(1);
+    let count = zgx::text_layout::grapheme_ranges(text).count().max(1);
     let step = rect.width / count as f32;
     zgx::scene::TextLine {
         range: 0..text.len(),
@@ -3322,6 +3405,155 @@ mod vocabulary_tests {
     }
 
     #[test]
+    fn a_label_gone_from_the_scene_takes_its_runs_place_with_it() {
+        let mut ui = Ui::new(400., 300.);
+        ui.set_assistive_technology(true);
+        let count = ui.signal(2_usize);
+        let read = count.clone();
+        ui.mount(column().child(keyed(
+            move || (0..read.get()).collect(),
+            |i: usize, _| text(format!("Row {i}")),
+        )));
+        let mut tree = AccessibilityTree::new();
+        let project = |ui: &mut Ui, tree: &mut AccessibilityTree| {
+            ui.prepare_frame();
+            tree.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Test", 1.);
+        };
+        project(&mut ui, &mut tree);
+        assert!(!tree.run_boxes.is_empty(), "their runs' place is kept");
+        count.set(0);
+        project(&mut ui, &mut tree);
+        assert!(tree.run_boxes.is_empty(), "and goes with it");
+    }
+
+    /// A names-only update (`update_names`) sends the node whose name
+    /// changed and leaves one that only moved as it was sent; the next full
+    /// update (`update`) sends where it went.
+    #[test]
+    fn a_names_only_update_sends_the_renamed_and_leaves_the_moved_for_later() {
+        let mut ui = Ui::new(400., 300.);
+        ui.set_assistive_technology(true);
+        let name = ui.signal("One".to_string());
+        let gap = ui.signal(0_f32);
+        let (read_name, read_gap) = (name.clone(), gap.clone());
+        ui.mount(
+            column()
+                .child(
+                    button()
+                        .accessible_label_when(move || read_name.get())
+                        .child(text("x")),
+                )
+                .child(div().reactive_style(move || Styles::new().h(read_gap.get())))
+                .child(button().accessible_label("Still").child(text("y"))),
+        );
+        let mut tree = AccessibilityTree::new();
+        let frame = |ui: &mut Ui| ui.prepare_frame();
+        frame(&mut ui);
+        let first = tree.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Test", 1.);
+        let still_box = |nodes: &[(accesskit::NodeId, Node)]| {
+            nodes
+                .iter()
+                .find(|(_, n)| n.label() == Some("Still"))
+                .and_then(|(_, n)| n.bounds())
+        };
+        let was = still_box(&first.nodes).expect("sent first");
+        // The first renamed, the second moved down.
+        name.set("Two".to_string());
+        gap.set(40.);
+        frame(&mut ui);
+        let names = tree.update_names(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Test", 1.);
+        assert!(
+            names.nodes.iter().any(|(_, n)| n.label() == Some("Two")),
+            "the new name goes"
+        );
+        assert_eq!(still_box(&names.nodes), None, "the moved node waits");
+        let full = tree.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Test", 1.);
+        let now = still_box(&full.nodes).expect("then it goes");
+        assert!(now.y0 > was.y0, "where it went: {was:?} then {now:?}");
+    }
+
+    /// With a screen reader (`screen_reader()` true: VoiceOver or Switch
+    /// Control on macOS, Narrator, NVDA or JAWS on Windows), a name changing
+    /// frame after frame goes out on each frame it changes, never held for
+    /// the pacer: what it speaks is never late.
+    #[test]
+    fn a_screen_reader_hears_each_name_on_the_frame_it_changes() {
+        use super::{GEOMETRY_EVERY, GeometryPacer, urgent};
+        let mut ui = Ui::new(400., 300.);
+        ui.set_assistive_technology(true);
+        let name = ui.signal("Name 0".to_string());
+        let read = name.clone();
+        ui.mount(
+            column().child(
+                button()
+                    .accessible_label_when(move || read.get())
+                    .child(text("x")),
+            ),
+        );
+        let label = |nodes: &[Node]| {
+            find(nodes, accesskit::Role::Button)[0]
+                .label()
+                .map(str::to_owned)
+        };
+        let start = std::time::Instant::now();
+        let mut pacer = GeometryPacer::default();
+        assert!(pacer.update_now(start, true, true), "the first tree");
+        assert_eq!(label(&project(&mut ui)).as_deref(), Some("Name 0"));
+        // A frame apart, well inside the pacer's interval each time.
+        let frame = GEOMETRY_EVERY / 12;
+        for n in 1..=6 {
+            name.set(format!("Name {n}"));
+            let at = start + frame * n;
+            let now = urgent(false, false, true, || true);
+            assert!(now, "a name change is urgent to a screen reader");
+            assert!(pacer.update_now(at, now, true), "sent on frame {n}");
+            assert_eq!(
+                label(&project(&mut ui)).as_deref(),
+                Some(format!("Name {n}").as_str()),
+                "the tree on frame {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_client_that_is_no_screen_reader_hears_a_name_late_but_right() {
+        use super::{GEOMETRY_EVERY, GeometryPacer, urgent};
+        let mut ui = Ui::new(400., 300.);
+        ui.set_assistive_technology(true);
+        let name = ui.signal("One".to_string());
+        let read = name.clone();
+        ui.mount(
+            column().child(
+                button()
+                    .accessible_label_when(move || read.get())
+                    .child(text("x")),
+            ),
+        );
+        let label = |nodes: &[Node]| {
+            find(nodes, accesskit::Role::Button)[0]
+                .label()
+                .map(str::to_owned)
+        };
+        let start = std::time::Instant::now();
+        let mut pacer = GeometryPacer::default();
+        assert!(pacer.update_now(start, true, true), "the first tree");
+        assert_eq!(label(&project(&mut ui)).as_deref(), Some("One"));
+        // With no screen reader, the new name waits its turn; with one, it
+        // would go at once.
+        name.set("Two".to_string());
+        let soon = start + GEOMETRY_EVERY / 2;
+        assert!(urgent(false, false, true, || true));
+        let now = urgent(false, false, true, || false);
+        assert!(!pacer.update_now(soon, now, true));
+        let due = pacer.deadline().expect("held for its deadline");
+        assert!(due <= start + GEOMETRY_EVERY);
+        // Nothing more comes but the wake at the deadline, and it's the
+        // tree as it is then.
+        assert!(pacer.update_now(due, false, false));
+        assert_eq!(label(&project(&mut ui)).as_deref(), Some("Two"));
+    }
+
+    #[test]
     fn an_invalid_field_is_flagged_and_says_why() {
         let mut ui = Ui::new(400., 300.);
         ui.set_assistive_technology(true);
@@ -3701,14 +3933,22 @@ mod pacing_tests {
         assert!(!pacer.update_now(at(96), false, true));
         assert!(pacer.update_now(at(112), false, true));
         assert_eq!(pacer.deadline(), None);
-        // A name changing mid-animation: at once.
-        assert!(pacer.update_now(at(128), true, true));
+        // A name changing mid-animation: at once, alone (the geometry not
+        // due yet keeps its own time, not put off by the name).
+        assert_eq!(
+            pacer.update_kind(at(128), true, true),
+            Some(super::TreeUpdateKind::Names)
+        );
         // The frames stop after one more move; nothing else comes but the
-        // wake at its deadline, which sends it.
+        // wake at its deadline, 100 ms after the last full update, which
+        // sends it.
         assert!(!pacer.update_now(at(144), false, true));
-        assert_eq!(pacer.deadline(), Some(at(228)));
+        assert_eq!(pacer.deadline(), Some(at(212)));
         assert!(!pacer.update_now(at(200), false, false));
-        assert!(pacer.update_now(at(228), false, false));
+        assert_eq!(
+            pacer.update_kind(at(212), false, false),
+            Some(super::TreeUpdateKind::Full)
+        );
         // Then quiet: nothing to send, nothing held.
         assert!(!pacer.update_now(at(400), false, false));
         assert_eq!(pacer.deadline(), None);

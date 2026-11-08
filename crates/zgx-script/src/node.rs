@@ -482,6 +482,66 @@ pub(crate) struct DriveProps {
 pub(crate) struct LayerShaderUd(pub Arc<zgx::decoration::FillShader>);
 impl UserData for LayerShaderUd {}
 
+/// `ui.layer_shader`'s `passes`, `images` and `geometry`, if any.
+fn shader_inputs(opts: &Table) -> mlua::Result<Option<zgx::decoration::ShaderInputs>> {
+    use zgx::decoration::{PassFormat, PassSize, ShaderInputs, ShaderPass};
+    let wrong = |message: String| mlua::Error::runtime(format!("ui.layer_shader: {message}"));
+    let passes: Option<Table> = opts.get("passes")?;
+    let images: Option<Table> = opts.get("images")?;
+    let geometry: Option<String> = opts.get("geometry")?;
+    if passes.is_none() && images.is_none() && geometry.is_none() {
+        return Ok(None);
+    }
+    let mut inputs = ShaderInputs {
+        geometry: geometry.as_deref().map(zgx::decoration::geometry_tag),
+        ..Default::default()
+    };
+    for pass in passes
+        .iter()
+        .flat_map(|passes| passes.sequence_values::<Table>())
+    {
+        let pass = pass?;
+        let name: String = pass
+            .get::<Option<String>>("name")?
+            .ok_or_else(|| wrong("a pass needs a `name`".into()))?;
+        let source: String = pass
+            .get::<Option<String>>("shader")?
+            .ok_or_else(|| wrong(format!("pass `{name}` needs a `shader`")))?;
+        let size = match (
+            pass.get::<Option<Table>>("size")?,
+            pass.get::<Option<f32>>("scale")?,
+        ) {
+            (Some(size), _) => PassSize::Pixels(size.get(1)?, size.get(2)?),
+            (None, scale) => PassSize::OfBox(scale.unwrap_or(1.).clamp(0.01, 4.)),
+        };
+        let format = match pass.get::<Option<String>>("format")?.as_deref() {
+            None | Some("rgba8") => PassFormat::Rgba8,
+            Some("rgba16float") => PassFormat::Rgba16Float,
+            Some(other) => return Err(wrong(format!("no format `{other}`"))),
+        };
+        inputs.passes.push(ShaderPass {
+            name,
+            source,
+            size,
+            format,
+            feedback: pass.get::<Option<bool>>("feedback")?.unwrap_or(false),
+            steps: pass.get::<Option<u32>>("steps")?.unwrap_or(1).clamp(1, 128),
+            once: pass.get::<Option<bool>>("once")?.unwrap_or(false),
+        });
+    }
+    if let Some(images) = images {
+        for pair in images.pairs::<String, mlua::AnyUserData>() {
+            let (name, image) = pair?;
+            let image = image
+                .borrow::<BitmapUd>()
+                .map_err(|_| wrong(format!("image `{name}` isn't a ui.bitmap")))?
+                .0
+                .clone();
+            inputs.images.push((name, image));
+        }
+    }
+    Ok(Some(inputs))
+}
 /// `shader_params` and `layer_params`: up to four vec4s, lists of numbers
 /// or colors (0 to 1); theme colours (`"$accent"`) bind to `tokens`' slots
 /// where it has them.
@@ -842,6 +902,10 @@ pub(crate) struct RareEvents {
     /// on one spot, as the DOM's `dblclick`, heard as the second is let go;
     /// the innermost node with one takes it.
     pub double_click: Option<Handler>,
+    /// `fn(locked)`: the node took the pointer's lock (`el:lock_pointer()`,
+    /// `true`) or lost it (`false`): let go, Escape, the window losing
+    /// focus, the node leaving or another taking it.
+    pub pointer_lock: Option<Handler>,
     /// `capture_keys = true`: while focus is in it, every key goes to what
     /// is focused, no shortcut or menu taking one (a shortcut recorder).
     pub capture_keys: bool,
@@ -1773,6 +1837,7 @@ props! {
     "lang" => Lang: Str,
     "drop_shadow" => DropShadow: Shadow,
     "slice" => Slice: Corners,
+    "geometry" => Geometry: Str,
     // Transforms: after layout, about `origin` (fractions of the node).
     // Last, so that `is_transform` is a single comparison.
     "x" => X: Num, "y" => Y: Num,
@@ -3715,6 +3780,7 @@ fn set_handler(
         "on_release" => &mut events.release,
         "on_aux_click" => &mut events.rare.get_or_insert_default().aux_click,
         "on_double_click" => &mut events.rare.get_or_insert_default().double_click,
+        "on_pointer_lock" => &mut events.rare.get_or_insert_default().pointer_lock,
         "on_navigate" => &mut events.rare.get_or_insert_default().navigate,
         "on_file_drop" => &mut events.rare.get_or_insert_default().file_drop,
         "on_file_hover" => &mut events.rare.get_or_insert_default().file_hover,
@@ -4392,6 +4458,13 @@ fn fill_from(
             "focus_group" => {
                 let axis: String = lua.unpack(value)?;
                 node.a11y.get_or_insert_default().focus_group = Some(focus_group(&axis)?);
+            }
+            // What it reads as besides its name (`aria-valuetext`), any
+            // element's: read here, among the keys a table has, so elements
+            // without one never look it up. A slider's range reads it again.
+            "value_text" => {
+                let range = (node.a11y.get_or_insert_default().range).get_or_insert_default();
+                range.value_text = Some(source(lua, Ty::Str, "value_text", value)?);
             }
             name if WIDGET_FIELDS.contains(&name) => {}
             name => {
@@ -6268,6 +6341,14 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(t) => t.get::<Option<f32>>("fps")?,
                 None => None,
             };
+            if let Some(inputs) = opts.as_ref().map(shader_inputs).transpose()?.flatten() {
+                // A running effect of its own: textures aren't shared.
+                zgx_gpu::check_layer_inputs(&source, &inputs)
+                    .map_err(|e| mlua::Error::runtime(format!("ui.layer_shader: {e}")))?;
+                let shader = zgx::decoration::FillShader::with_inputs(source, fps, inputs);
+                zgx::decoration::declare_layer_shader(&shader);
+                return Ok(LayerShaderUd(shader));
+            }
             // One shader per source and rate: rebuilding a view does not
             // compile it again.
             type Shaders =

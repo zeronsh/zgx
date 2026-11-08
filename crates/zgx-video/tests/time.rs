@@ -194,6 +194,83 @@ fn a_picture_is_there_on_the_first_frame() {
 }
 
 #[test]
+fn a_large_picture_is_there_on_the_first_frame() {
+    // Large enough that its pixels decode off the thread at the size it's
+    // drawn, as a window's would, rather than with the file.
+    let dir = temp_dir("large-png");
+    let (width, height) = (2400, 800);
+    let file = std::fs::File::create(dir.join("wide.png")).unwrap();
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    writer
+        .write_image_data(&[0, 0, 255, 255].repeat((width * height) as usize))
+        .unwrap();
+    drop(writer);
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "P", w = 60, h = 20, fps = 30, duration = 3,
+            render = function() return ui.image { src = "wide.png", w = 60, h = 20 } end,
+        } }
+        "##,
+    )
+    .unwrap();
+    // As a render or still makes it: what the script waits on, waited for.
+    let options = zgx_video::RenderOptions {
+        script: dir.to_path_buf(),
+        output: dir.join("unused"),
+        ..Default::default()
+    };
+    let still = zgx_video::render_still(&options, 0, None).unwrap();
+    assert_eq!(pixel(&still.pixels, 60, 30, 10)[..3], [0, 0, 255]);
+}
+
+#[test]
+fn a_composition_names_the_fonts_beside_it() {
+    let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../zgx-gpu/tests/fonts/GeistVariable-subset.ttf");
+    let script = |family: &str| {
+        format!(
+            r##"
+            local video = require("@video")
+            return video.compositions {{ video.composition {{
+                id = "F", w = 200, h = 60, fps = 30, duration = 1,
+                render = function()
+                    return ui.div {{ w = 200, h = 60, bg = "#000",
+                        ui.text {{ "Hello", font = "{family}", text_size = 40, color = "#fff" }} }}
+                end,
+            }} }}
+            "##
+        )
+    };
+    let drawn = |dir: &std::path::Path, family: &str| {
+        std::fs::write(dir.join("video.luau"), script(family)).unwrap();
+        let mut pixels = Vec::new();
+        script_stage(dir, json!({})).draw(&mut pixels).unwrap();
+        hash(&pixels)
+    };
+    let dir = temp_dir("fonts");
+    // Without the font, its family falls back to the system's, as an unknown
+    // one does.
+    let fallback = drawn(&dir, "No Such Family");
+    assert_eq!(drawn(&dir, "Geist"), fallback);
+    std::fs::create_dir_all(dir.join("fonts")).unwrap();
+    std::fs::copy(&font, dir.join("fonts/Geist.ttf")).unwrap();
+    std::fs::write(dir.join("fonts/notes.txt"), "not a font").unwrap();
+    // Named as a font but not one: said, and left out.
+    std::fs::write(dir.join("fonts/broken.ttf"), "not a font either").unwrap();
+    let fonts = zgx_video::script::fonts_beside(&dir.join("video.luau"));
+    assert_eq!(fonts.len(), 1);
+    assert!(fonts[0].families().iter().any(|family| family == "Geist"));
+    assert_ne!(drawn(&dir, "Geist"), fallback);
+    assert_eq!(drawn(&dir, "No Such Family"), fallback);
+}
+
+#[test]
 fn a_looping_animation_keeps_the_frames_time() {
     // A loop a window's renderer might play by itself, off the wall clock.
     let script = r##"
@@ -340,4 +417,19 @@ fn repainting_what_changed_draws_what_painting_it_all_draws() {
             "frame {frame}: {count} pixels differ, first at {first:?}"
         );
     }
+}
+
+#[test]
+fn a_stage_leaves_its_thread_decoding_large_pictures_as_it_was() {
+    // A stage made on an app's own thread (a still from a window's): its
+    // frames decode every picture, and the thread's go back to what they were.
+    assert!(!zgx::image::whole_frames_on_this_thread());
+    let stage = inline("return ui.div { w = 10, h = 10 }", 10., 10., 30.);
+    assert!(zgx::image::whole_frames_on_this_thread(), "while it lives");
+    drop(stage);
+    assert!(!zgx::image::whole_frames_on_this_thread(), "and back after");
+    // Even when it fails to be made.
+    let failed = zgx_video::Stage::new(Default::default(), |_| Err("no view".to_owned()));
+    assert!(failed.is_err());
+    assert!(!zgx::image::whole_frames_on_this_thread());
 }

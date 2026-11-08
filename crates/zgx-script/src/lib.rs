@@ -120,7 +120,10 @@ pub fn window_size_value(width: f32, height: f32) -> Value {
     windows::size(width, height)
 }
 pub use rules::GuardKind;
-pub use value::{ElementHandle, PathKey, Shared, Store, Value, tables_converted, values_converted};
+pub use value::{
+    ElementHandle, Folded, PathKey, Shared, Store, Unfold, Value, tables_converted,
+    values_converted, values_filed,
+};
 pub use windows::{Window, WindowExtras};
 
 use mlua::Lua;
@@ -450,14 +453,18 @@ pub(crate) struct Vm {
 }
 impl Vm {
     /// A pointer event's table for a handler: `x`, `y`, `local_x`,
-    /// `local_y` and the keys held. Built in one call into the state: field
-    /// by field from Rust, each `set` (and each key's string) was a
-    /// protected call of its own while a memory limit is set, and a pointer
-    /// move makes one of these for every handler on its way.
+    /// `local_y` and the keys held, and a move's `dx`, `dy` (and `locked`,
+    /// while the pointer is). Built in one call into the state: field by
+    /// field from Rust, each `set` (and each key's string) was a protected
+    /// call of its own while a memory limit is set, and a pointer move
+    /// makes one of these for every handler on its way. One maker for
+    /// every event, compiled once: an event that isn't a move leaves the
+    /// move's arguments off, and its table has no such fields.
     pub(crate) fn point_table(
         &self,
         (x, y, local_x, local_y): (f32, f32, f32, f32),
         (shift, ctrl, alt, meta, cmd): (bool, bool, bool, bool, bool),
+        motion: Option<(f32, f32, bool)>,
     ) -> mlua::Result<mlua::Table> {
         let make = match self.point.get() {
             Some(make) => make,
@@ -465,16 +472,25 @@ impl Vm {
                 let made = self
                     .lua
                     .load(
-                        "local x, y, local_x, local_y, shift, ctrl, alt, meta, cmd = ...\n\
+                        "local x, y, local_x, local_y, shift, ctrl, alt, meta, cmd, dx, dy, locked = ...\n\
                          return { x = x, y = y, local_x = local_x, local_y = local_y, shift = shift, \
-                         ctrl = ctrl, alt = alt, meta = meta, cmd = cmd }",
+                         ctrl = ctrl, alt = alt, meta = meta, cmd = cmd, dx = dx, dy = dy, \
+                         locked = locked }",
                     )
                     .set_name("=zgx pointer event")
                     .into_function()?;
                 self.point.get_or_init(|| made)
             }
         };
-        make.call((x, y, local_x, local_y, shift, ctrl, alt, meta, cmd))
+        match motion {
+            None => make.call((x, y, local_x, local_y, shift, ctrl, alt, meta, cmd)),
+            Some((dx, dy, false)) => {
+                make.call((x, y, local_x, local_y, shift, ctrl, alt, meta, cmd, dx, dy))
+            }
+            Some((dx, dy, true)) => make.call((
+                x, y, local_x, local_y, shift, ctrl, alt, meta, cmd, dx, dy, true,
+            )),
+        }
     }
     /// Runs `f` with its own budget. A nested call (a component built
     /// while a handler runs) stops the outer call's clock meanwhile.
@@ -2855,6 +2871,17 @@ impl ScriptHost {
     pub fn collect_garbage(&self) {
         collect_garbage(&self.0);
     }
+    /// A full collection in each VM and nothing else: one the scripts'
+    /// allocations bring on as they run, with none of what the host does as
+    /// it goes idle (`collect_garbage`). For tests: what scripts are given
+    /// must not depend on when one came.
+    #[doc(hidden)]
+    pub fn collect_luau_only(&self) {
+        let loaded = self.0.current.borrow().clone();
+        for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
+            collect_fully(&vm.lua);
+        }
+    }
     /// Bytes the loaded scripts' VMs hold now, garbage included (for tests:
     /// what a collection frees).
     #[doc(hidden)]
@@ -2864,7 +2891,10 @@ impl ScriptHost {
     }
     /// Bytes the loaded scripts' VMs hold after a full collection (each is
     /// capped at `Limits::memory` or `Limits::plugin_memory`): what a test reads over many updates to
-    /// check that nothing keeps what it no longer needs.
+    /// check that nothing keeps what it no longer needs. The conversion
+    /// cache's tables count until the host next goes idle (`collect_garbage`
+    /// lets go of what no script holds), so a number here is no leak until
+    /// it survives that.
     pub fn script_memory(&self) -> usize {
         let loaded = self.0.current.borrow().clone();
         loaded.map_or(0, |l| {
@@ -4421,7 +4451,13 @@ async fn wake(
 fn collect_garbage(inner: &Inner) {
     let loaded = inner.current.borrow().clone();
     for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
-        let _ = value::trim_converted(&vm.lua);
+        collect_fully(&vm.lua);
+        // The conversion cache's tables weak for one collection: what only
+        // the cache holds goes, then its values too, and what only those
+        // held.
+        value::weaken_cache(&vm.lua);
+        collect_fully(&vm.lua);
+        value::sweep_idle(&vm.lua);
         collect_fully(&vm.lua);
     }
 }

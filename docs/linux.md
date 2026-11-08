@@ -440,7 +440,8 @@ drawn in the window's own text, on X11 and Wayland alike. Input methods
 (XIM, IBus or Fcitx over Wayland's text input) compose at the cursor. See
 [native surfaces](native-surfaces.md#terminals) for what they show and
 what they can't do yet. `scripts/terminal_smoke.py` checks one on X11:
-typed keys and the app's input reach the shell, Ctrl+C interrupts, the
+typed keys and the app's input reach the shell, Ctrl+C interrupts, a
+curly and a double underline draw in the colours a program gives them, the
 grid follows the window's size, and an idle, focused terminal spends no
 CPU.
 

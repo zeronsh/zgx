@@ -159,6 +159,7 @@ SMOKES = [
     ("image-fit", "python3 scripts/image_fit_smoke.py {bin}/image_fit --output {out}", False),
     ("effects", "python3 scripts/effects_smoke.py {bin}/effects --output {out}", False),
     ("pointer-chords", "python3 scripts/pointer_chords_smoke.py {bin}/pointer_chords --output {out}", False),
+    ("pointer-lock", "python3 scripts/pointer_lock_smoke.py {bin}/luau_probe --output {out}", False),
     ("keyboard-chords", "python3 scripts/keyboard_chords_smoke.py {bin}/keyboard_chords --output {out}", False),
     ("disabled-interaction", "python3 scripts/disabled_interaction_smoke.py {bin}/disabled_interaction --output {out}", False),
     ("history-limits", "python3 scripts/history_limits_smoke.py {bin}/history_limits --output {out}", False),

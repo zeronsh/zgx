@@ -161,6 +161,13 @@ pub fn mix(
                 at %= length;
             }
             let mut gain = clip.volume as f32;
+            if let Some(volumes) = clip.volumes.as_deref().filter(|v| !v.is_empty()) {
+                let at = i as f64 * fps / f64::from(SAMPLE_RATE);
+                let (whole, part) = (at.floor() as usize, at.fract() as f32);
+                let here = volumes[whole.min(volumes.len() - 1)];
+                let next = volumes[(whole + 1).min(volumes.len() - 1)];
+                gain *= here + (next - here) * part;
+            }
             if i < fade_in {
                 gain *= i as f32 / fade_in as f32;
             }
@@ -220,10 +227,13 @@ pub fn mixed_file(clips: &[AudioClip], fps: f64, frames: u64) -> Result<Option<P
         }
     }
     let mixed = mix(clips, fps, frames, |path| sounds.get(path).cloned());
+    // A name of its own: renders in one process at once (a host's, a test
+    // run's) each mix to a file the others don't remove.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
-        "zgx-video-mix-{}-{:x}.wav",
+        "zgx-video-mix-{}-{}.wav",
         std::process::id(),
-        mixed.len()
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     write_wav(&path, &mixed).map_err(|error| error.to_string())?;
     Ok(Some(path))

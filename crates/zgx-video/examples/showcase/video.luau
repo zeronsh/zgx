@@ -588,21 +588,6 @@ local function particles(t)
 				end
 			end,
 		},
-		ui.column {
-			absolute = true,
-			left = 0,
-			right = 0,
-			bottom = 84,
-			items = "center",
-			gap = 6,
-			opacity = t:map({ 70, 86, 170, 186 }, { 0, 1, 1, 0 }),
-			ui.text { `{#PARTICLES} particles. No state between frames.`, text_size = 40, weight = 700, color = CREAM },
-			ui.text {
-				"Each one is a function of its seed and the frame: scrub anywhere.",
-				text_size = 24,
-				color = "#c9c5e8",
-			},
-		},
 	}
 end
 
@@ -869,6 +854,93 @@ local function finale(t)
 		)
 	end
 	local command = "zgx video render . film.mp4"
+	-- A ring on every beat behind the name: one pass of a loop, played again.
+	local rings = video.sequence {
+		from = LAND,
+		video.loop {
+			duration = BEAT,
+			function(beat)
+				return ui.div {
+					absolute = true,
+					top = 0,
+					left = 0,
+					right = 0,
+					bottom = 0,
+					items = "center",
+					justify = "center",
+					ui.div {
+						w = 520,
+						h = 520,
+						rounded = 260,
+						border = 3,
+						border_color = SAFFRON,
+						scale = beat:map({ 0, BEAT - 1 }, { 0.55, 1.7 }, { ease = "outCubic" }),
+						opacity = beat:map({ 0, BEAT - 1 }, { 0.45, 0 }),
+					},
+				}
+			end,
+		},
+	}
+	-- The film so far, as stills: each act held at one frame of its own time.
+	local strip =
+		{ direction = "row", gap = 18, absolute = true, left = 0, right = 0, bottom = 118, justify = "center" }
+	for i, held in { { spark, 200 }, { shaders, 300 }, { glass, 150 }, { an_app, 300 } } do
+		local delay = LAND + 70 + (i - 1) * 6
+		table.insert(
+			strip,
+			ui.div {
+				w = 1920 * 0.11,
+				h = 1080 * 0.11,
+				rounded = 10,
+				overflow = "hidden",
+				border = 1,
+				border_color = "#ffffff33",
+				opacity = t:map({ delay, delay + 10 }, { 0, 1 }),
+				y = t:spring { from = 40, to = 0, delay = delay, stiffness = 170, damping = 16 },
+				ui.div {
+					-- Out of the box's flow (which would shrink it to the box)
+					-- and the containing block of the act's own insets.
+					absolute = true,
+					left = 0,
+					top = 0,
+					overflow = "hidden",
+					w = 1920,
+					h = 1080,
+					scale = 0.11,
+					origin = { 0, 0 },
+					video.freeze { frame = held[2], held[1] },
+				},
+			}
+		)
+	end
+	-- The score, as it plays, in bars along the floor.
+	local score = (function()
+		local ok, data = pcall(video.audio_data, "score.wav")
+		return if ok then data else nil
+	end)()
+	local floor =
+		{ direction = "row", items = "end", gap = 6, absolute = true, left = 120, right = 120, bottom = 0, h = 110 }
+	if score then
+		local COUNT = 56
+		local bars = ui.computed(function()
+			return score:bars { count = COUNT, floor_db = -84 }
+		end)
+		for i = 1, COUNT do
+			table.insert(
+				floor,
+				ui.div {
+					grow = 1,
+					rounded_tl = 4,
+					rounded_tr = 4,
+					h = function()
+						return 3 + math.sqrt(bars:get()[i]) * 104
+					end,
+					gradient = { angle = 0, stops = { CORAL .. "ee", SAFFRON .. "66" } },
+					opacity = t:map({ LAND + 20, LAND + 50 }, { 0, 1 }),
+				}
+			)
+		end
+	end
 	return ui.div {
 		absolute = true,
 		top = 0,
@@ -889,6 +961,9 @@ local function finale(t)
 			),
 		},
 		ui.div(lines),
+		rings,
+		ui.div(floor),
+		ui.div(strip),
 		-- The name lands.
 		ui.column {
 			absolute = true,
@@ -963,12 +1038,45 @@ return video.compositions {
 		fps = 60,
 		duration = video.series_length(film),
 		render = function()
+			-- The pill under the captions shows while one does.
+			local cues = video.captions_of("captions.srt")
+			local now = video.frame()
+			local speaking = function()
+				return if video.caption_at(cues, now:get() / 60) then 1 else 0
+			end
 			return ui.div {
 				w_full = true,
 				h_full = true,
 				bg = "#000",
 				video.series(film),
 				video.audio { src = "score.wav", fade_out = 60 },
+				-- What it says, a word at a time.
+				ui.row {
+					absolute = true,
+					left = 0,
+					right = 0,
+					bottom = 54,
+					justify = "center",
+					ui.div {
+						px = 26,
+						py = 12,
+						opacity = ui.tween(ui.computed(speaking), { duration = 160 }),
+						rounded = 18,
+						bg = "#07051a99",
+						backdrop_blur = 18,
+						border = 1,
+						border_color = "#ffffff1f",
+						video.captions {
+							cues = cues,
+							words = true,
+							text_size = 34,
+							weight = 600,
+							color = "#ffffffee",
+							active_color = SAFFRON,
+							upcoming_color = "#ffffff59",
+						},
+					},
+				},
 				ui.div(fx.with(fx.grain { amount = 0.035, fps = 24 }, fill { pointer_events = "none" })),
 				finish(),
 			}

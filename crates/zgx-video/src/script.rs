@@ -76,6 +76,9 @@ pub struct AudioClip {
     pub looped: bool,
     /// A video's sound: silence if it has none.
     pub optional: bool,
+    /// Its volume at each frame from its start (`volume` given as a function),
+    /// gone between; `volume` scales it.
+    pub volumes: Option<Vec<f32>>,
 }
 
 /// The source of the Luau side, for `require("@video")`.
@@ -111,6 +114,39 @@ fn write_packages() -> std::io::Result<(PathBuf, PathBuf)> {
         std::fs::rename(&partial, &file)?;
     }
     Ok((video, fx))
+}
+
+/// The fonts in the `fonts` folder beside a composition's script (`.ttf`,
+/// `.otf`, `.ttc`), for its text to name by family. One that isn't a font is
+/// said on stderr and left out.
+pub fn fonts_beside(entry: &Path) -> Vec<zgx_gpu::text::FontData> {
+    let Some(dir) = entry.parent().map(|dir| dir.join("fonts")) else {
+        return Vec::new();
+    };
+    let Ok(files) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = files
+        .filter_map(|file| file.ok().map(|file| file.path()))
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    matches!(ext.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc")
+                })
+        })
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let font = std::fs::read(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|bytes| zgx_gpu::text::FontData::new(bytes).map_err(str::to_owned));
+            font.map_err(|error| eprintln!("zgx-video: {}: {error}", path.display()))
+                .ok()
+        })
+        .collect()
 }
 
 /// The file a directory's app starts at: `app.luau` or `main.luau`, or a file itself.
@@ -223,11 +259,33 @@ fn host(
             fade_out: frames("fade_out"),
             looped: clip["loop"].as_bool().unwrap_or(false),
             optional: false,
+            volumes: clip["volumes"].as_array().map(|volumes| {
+                volumes
+                    .iter()
+                    .map(|v| v.as_f64().unwrap_or(1.) as f32)
+                    .collect()
+            }),
         };
         let audio = &mut heard.borrow_mut().audio;
         if !audio.contains(&clip) {
             audio.push(clip);
         }
+    });
+    // A caption file's cues (`video.captions_of`).
+    let caption_dir = entry.parent().map(Path::to_owned).unwrap_or_default();
+    host.function("zgx.video.captions", move |arg| {
+        let arg = json_of(&arg);
+        let src = caption_dir.join(arg["src"].as_str().unwrap_or_default());
+        let answer = match std::fs::read_to_string(&src) {
+            Ok(text) => json!(
+                crate::captions::parse(&text)
+                    .into_iter()
+                    .map(|cue| json!({ "start": cue.start, "end": cue.end, "text": cue.text }))
+                    .collect::<Vec<_>>()
+            ),
+            Err(error) => json!({ "error": format!("{}: {error}", src.display()) }),
+        };
+        Value::from_json(&answer.to_string()).unwrap_or_default()
     });
     let heard = told.clone();
     let base_dir = entry.parent().map(Path::to_owned).unwrap_or_default();
@@ -264,6 +322,7 @@ fn host(
                 fade_out: 0,
                 looped: placed.looped,
                 optional: true,
+                volumes: None,
             };
             if !told.audio.contains(&sound) {
                 told.audio.push(sound);
@@ -457,6 +516,7 @@ impl ScriptStage {
             fps: ticks.stage_fps(),
             scale,
             background,
+            fonts: fonts_beside(&entry),
         };
         let mut hosted = None;
         let id = composition.id.clone();

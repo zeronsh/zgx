@@ -17,9 +17,11 @@
 //! images and polylines: quads, text and clip regions, kept frames, scroll
 //! copies and catch-up, layers drawn into textures of their own and
 //! composited, images (gradients' ramps, canvases and SVGs among them) the
-//! CPU wrote, and canvases' polyline strokes and filled areas. A frame
-//! needing more fails, naming what it lacks: there is no Direct3D 12 to
-//! fall back to.
+//! CPU wrote, and canvases' polyline strokes and filled areas; and shader
+//! fills and layer shaders not reading the backdrop, their pixel stage
+//! compiled off the frame (`Device::start_app_shader`) from the module
+//! Direct3D 12's is. A frame needing more fails, naming
+//! what it lacks: there is no Direct3D 12 to fall back to.
 //!
 //! The shaders are draw.wgsl, copy_offset.wgsl and polyline.wgsl (after
 //! draw.wgsl, as `crate::polyline_source` joins them, without areas: FXC
@@ -86,6 +88,24 @@ fn failed(what: &str) -> impl Fn(windows::core::Error) -> GpuError + '_ {
     move |error| GpuError(format!("Direct3D 11 {what}: {error}"))
 }
 
+/// What frames left out that Direct3D 11 doesn't draw
+/// (`GpuRenderer::d3d11_leave_out`), each kind once.
+static LEFT_OUT: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+
+/// A frame left out `what`: said once a process, on stderr.
+pub(crate) fn left_out(what: &'static str) {
+    let mut said = LEFT_OUT.lock().unwrap_or_else(|p| p.into_inner());
+    if !said.contains(&what) {
+        said.push(what);
+        eprintln!("zgx: ZGX_D3D11 draws no {what}: left out of the frame");
+    }
+}
+
+/// What frames have left out so far (tests).
+pub(crate) fn left_out_so_far() -> Vec<&'static str> {
+    LEFT_OUT.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
 /// What a draw binds: shaders, their input layout and blending.
 #[derive(Clone, Copy, PartialEq)]
 enum Bound {
@@ -98,6 +118,68 @@ enum Bound {
     /// Gradient text's (`Shading::SourceIn`, `Shading::Behind`).
     SourceIn,
     Behind,
+}
+
+/// What an app's shader draws as: a shader fill (`Shading::Fill`) or a
+/// layer's composite through a layer shader (`Shading::Filter`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AppShader {
+    Fill,
+    Filter,
+}
+impl AppShader {
+    fn what(self) -> &'static str {
+        match self {
+            Self::Fill => "shader fill",
+            Self::Filter => "layer shader",
+        }
+    }
+}
+
+/// An app's shader's pixel stage: its DXBC compiling or compiled (`None`:
+/// it did not compile), and the shader made from it once ready (`None`
+/// until then; `Some(None)`: Direct3D made none).
+struct AppEntry {
+    compiled: crate::compile::Compiled<Vec<u8>>,
+    pixel: Option<Option<ID3D11PixelShader>>,
+    /// zgx's own colour filter: frames wait for it, as wgpu's do
+    /// (`GpuRenderer::prepare_filter`), as it's what the view looks like.
+    /// (Its shader is a thread's, so known by its source, once.)
+    waits: bool,
+}
+impl AppEntry {
+    fn start(shader: &zgx::decoration::FillShader, kind: AppShader) -> Self {
+        Self {
+            compiled: start_app_shader(shader, kind),
+            pixel: None,
+            waits: shader.source() == zgx::decoration::color_filter_shader().source(),
+        }
+    }
+}
+
+/// Start compiling `shader`'s pixel stage as `kind` on the compile thread.
+fn start_app_shader(
+    shader: &zgx::decoration::FillShader,
+    kind: AppShader,
+) -> crate::compile::Compiled<Vec<u8>> {
+    let (source, entry) = match kind {
+        AppShader::Fill => (crate::fill_source(shader.source()), "zgx_fill"),
+        AppShader::Filter => (crate::filter_source(shader.source()), "zgx_filter"),
+    };
+    let id = shader.id();
+    crate::compile::Compiled::Pending(crate::compile::spawn(move || {
+        if !crate::fill_validates(&source) {
+            return None;
+        }
+        fragment(&source, entry)
+            .map_err(|error| {
+                eprintln!(
+                    "zgx: {} {id} doesn't compile for Direct3D 11: {error}",
+                    kind.what()
+                )
+            })
+            .ok()
+    }))
 }
 
 struct Pipeline {
@@ -142,6 +224,9 @@ pub(crate) struct Device {
     no_regions: ID3D11ShaderResourceView,
     /// The query `wait_idle` ends and waits for.
     idle: ID3D11Query,
+    /// App shaders' pixel stages (shader fills', layer shaders') by shader
+    /// id and kind (one shader may be both, compiled from two modules).
+    app_shaders: std::cell::RefCell<rustc_hash::FxHashMap<(u64, AppShader), AppEntry>>,
 }
 
 /// A `Device` made on another thread (`GpuContext::prepare`), handed over.
@@ -308,7 +393,60 @@ impl Device {
             nearest: std::cell::OnceCell::new(),
             no_regions,
             idle,
+            app_shaders: Default::default(),
         })
+    }
+
+    /// Whether app shader `shader` can be drawn here as `kind` (one lookup
+    /// a draw): its pixel shader, compiled from the same module as Direct3D
+    /// 12's (`crate::fill_source`, `crate::filter_source`), started
+    /// compiling if new. `None` while it compiles, unless it `wait`s for it (offscreen):
+    /// the frame draws without it then, as wgpu's does
+    /// (`GpuRenderer::prepare_fill`), and draws again once it is.
+    pub(crate) fn app_shader(
+        &self,
+        shader: &zgx::decoration::FillShader,
+        kind: AppShader,
+        wait: bool,
+    ) -> Option<bool> {
+        let mut shaders = self.app_shaders.borrow_mut();
+        let entry = shaders
+            .entry((shader.id(), kind))
+            .or_insert_with(|| AppEntry::start(shader, kind));
+        if !entry.compiled.ready(wait || entry.waits)? {
+            return Some(false);
+        }
+        if entry.pixel.is_none() {
+            let code = entry.compiled.get().expect("ready");
+            let mut pixel = None;
+            // SAFETY: DXBC FXC compiled for shader model 5.0 from the HLSL
+            // `translate` writes with the quads' registers.
+            let made = unsafe { self.device.CreatePixelShader(code, None, Some(&mut pixel)) };
+            if let Err(error) = made {
+                eprintln!(
+                    "zgx: Direct3D 11 made no pixel shader for {} {}: {error}",
+                    kind.what(),
+                    shader.id()
+                );
+            }
+            entry.pixel = Some(pixel);
+        }
+        Some(entry.pixel.as_ref().is_some_and(Option::is_some))
+    }
+
+    /// Start compiling `shader`'s pixel stage as `kind` off the frame
+    /// (`crate::compile`), if not yet.
+    pub(crate) fn start_app_shader(&self, shader: &zgx::decoration::FillShader, kind: AppShader) {
+        self.app_shaders
+            .borrow_mut()
+            .entry((shader.id(), kind))
+            .or_insert_with(|| AppEntry::start(shader, kind));
+    }
+
+    /// Keep only the app shaders `keep` names
+    /// (`GpuRenderer::drop_unheld_shaders`).
+    pub(crate) fn retain_app_shaders(&self, keep: impl Fn(u64) -> bool) {
+        self.app_shaders.borrow_mut().retain(|(id, _), _| keep(*id));
     }
 
     /// Wait until the GPU has run everything given it so far.
@@ -1152,6 +1290,33 @@ impl Frame<'_> {
     /// Draw `instances` quads of `shading`; `clear` for the pipeline that
     /// replaces rather than blends (a region's background).
     pub(crate) fn quads(&mut self, shading: Shading, clear: bool, instances: std::ops::Range<u32>) {
+        // A shader fill or a layer's composite through its layer shader: its
+        // own pixel stage, the full pipeline's vertex stage, layout and
+        // blending (as wgpu's `fill_pipeline` builds both). Compiled, or its
+        // draw would be `Full` (`GpuRenderer::d3d11_app_shaders`).
+        let app = match (shading, clear) {
+            (Shading::Fill(id), false) => Some((id, AppShader::Fill)),
+            (Shading::Filter(id), false) => Some((id, AppShader::Filter)),
+            _ => None,
+        };
+        if let Some(key) = app {
+            let device = self.device;
+            let shaders = device.app_shaders.borrow();
+            if let Some(pixel) = shaders
+                .get(&key)
+                .and_then(|entry| entry.pixel.as_ref()?.as_ref())
+            {
+                self.bind(Bound::Full);
+                self.current = None;
+                // SAFETY: A pixel stage reading what the full vertex stage
+                // writes (the same `Out`, from draw.wgsl), in the registers it
+                // binds.
+                unsafe { device.context.PSSetShader(pixel, None) };
+                drop(shaders);
+                self.draw(instances);
+                return;
+            }
+        }
         let bound = match (shading, clear) {
             (Shading::Basic | Shading::Opaque, true) => Bound::Opaque,
             (_, true) => Bound::FullClear,
@@ -1160,7 +1325,7 @@ impl Frame<'_> {
             (Shading::Polyline, false) => Bound::Polyline,
             (Shading::SourceIn, false) => Bound::SourceIn,
             (Shading::Behind, false) => Bound::Behind,
-            // The proof draws nothing else (`GpuRenderer::d3d11_lacks`).
+            // Nothing else is drawn here (`GpuRenderer::d3d11_lacks`).
             (_, false) => Bound::Full,
         };
         self.bind(bound);
@@ -1206,7 +1371,6 @@ impl Frame<'_> {
 /// and the sampler in s0. naga writes samplers through Direct3D 12's
 /// sampler heap, which shader model 5.0 has none of: its declarations are
 /// replaced with the plain sampler the module binds.
-#[cfg(test)]
 fn translate(source: &str, copies: bool) -> Result<(String, Vec<(String, String)>), String> {
     use naga::back::hlsl;
     use wgpu::naga;
@@ -1285,6 +1449,43 @@ fn translate(source: &str, copies: bool) -> Result<(String, Vec<(String, String)
         ));
     }
     Ok((out, names))
+}
+
+/// The DXBC of an app's shader's fragment stage, `entry` of the WGSL module
+/// `source` (draw.wgsl's quads and the app's part, `crate::fill_source`),
+/// for shader model 5.0 with the quads' registers: compiled by FXC as the
+/// ahead-compiled shaders are, in a process of its own where it can be
+/// (`crate::fxc_child`: FXC's optimizer has overflowed every stack on some
+/// modules), else here.
+fn fragment(source: &str, entry: &str) -> Result<Vec<u8>, String> {
+    let (hlsl, names) = translate(source, false)?;
+    let name = names
+        .iter()
+        .find(|(wgsl, _)| wgsl == entry)
+        .map(|(_, hlsl)| hlsl.as_str())
+        .ok_or_else(|| format!("no entry point `{entry}`"))?;
+    // As Direct3D 12 compiles an app's shader (`GpuRenderer::app_fragment`):
+    // strict, and unoptimized with debug info under the instance's `DEBUG`
+    // (a debug build's), so both draw the same bytes in either build. (FXC's
+    // optimizer moves the last bit of a level here and there.)
+    const STRICTNESS: u32 = 1 << 11;
+    const DEBUG_SKIP_OPTIMIZATION: u32 = (1 << 0) | (1 << 2);
+    let debug = crate::APP_SHADER_FXC
+        .get()
+        .map_or(cfg!(debug_assertions), |&(_, debug)| debug);
+    let job = crate::fxc_child::Job {
+        source: &hlsl,
+        entry_point: name,
+        target: "ps_5_0",
+        flags: STRICTNESS | if debug { DEBUG_SKIP_OPTIMIZATION } else { 0 },
+    };
+    if crate::fxc_child::available() {
+        std::hint::black_box(crate::fxc_child::keep());
+        if let Some(compiled) = crate::fxc_child::compile(&job) {
+            return compiled;
+        }
+    }
+    crate::fxc_child::compile_here(&job)
 }
 
 /// FXC's DXBC for `entry` (an HLSL name) of `hlsl`, as wgpu's Direct3D 12

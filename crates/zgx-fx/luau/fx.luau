@@ -10,6 +10,14 @@
 -- `effect:fire(x, y)` starts its next, and goes on the node `fx.with` made.
 local fx = {}
 
+-- What an effect takes, all optional: `preset`, `seed`, `intensity`, and any of
+-- its own parameters by name (`fx.glow { preset = "neon", radius = 12 }`),
+-- checked by name as it's made.
+export type Options = { [string]: any }
+-- An effect made: its spec, options and state, read by `fx.with`, and a
+-- one-shot's `fire(x, y)`.
+export type Effect = { [string]: any }
+
 local function channel(text, at)
 	return (tonumber(string.sub(text, at, at + 1), 16) or 0) / 255
 end
@@ -60,8 +68,8 @@ local function lanes(spec, o, seed, intensity)
 	return p
 end
 
-local function make(spec, opts)
-	opts = opts or {}
+local function make(spec, opts: Options?): Effect
+	local opts: Options = opts or {}
 	local o = {}
 	for name, field in spec.fields do
 		o[name] = field[4]
@@ -125,7 +133,8 @@ local function make(spec, opts)
 end
 
 -- `props` with `effect`'s.
-function fx.with(effect, props)
+-- (Any element's props, handed back to it: typed by the element they go to.)
+function fx.with(effect: Effect, props: any): any
 	local spec = effect.spec
 	if effect.idle then
 		return props
@@ -319,7 +328,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.glow(opts)
+function fx.glow(opts: Options?): Effect
 	return make(glow_spec, opts)
 end
 
@@ -475,7 +484,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.pulse(opts)
+function fx.pulse(opts: Options?): Effect
 	return make(pulse_spec, opts)
 end
 
@@ -603,7 +612,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return o.life
 	end,
 }
-function fx.ripple(opts)
+function fx.ripple(opts: Options?): Effect
 	return make(ripple_spec, opts)
 end
 
@@ -737,7 +746,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.shimmer(opts)
+function fx.shimmer(opts: Options?): Effect
 	return make(shimmer_spec, opts)
 end
 
@@ -891,7 +900,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.sparkles(opts)
+function fx.sparkles(opts: Options?): Effect
 	return make(sparkles_spec, opts)
 end
 
@@ -1025,7 +1034,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.aurora(opts)
+function fx.aurora(opts: Options?): Effect
 	return make(aurora_spec, opts)
 end
 
@@ -1145,7 +1154,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.grain(opts)
+function fx.grain(opts: Options?): Effect
 	return make(grain_spec, opts)
 end
 
@@ -1297,7 +1306,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.electric(opts)
+function fx.electric(opts: Options?): Effect
 	return make(electric_spec, opts)
 end
 
@@ -1458,7 +1467,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.fire(opts)
+function fx.fire(opts: Options?): Effect
 	return make(fire_spec, opts)
 end
 
@@ -1576,7 +1585,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.motion_blur(opts)
+function fx.motion_blur(opts: Options?): Effect
 	return make(motion_blur_spec, opts)
 end
 
@@ -1690,7 +1699,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.heat_haze(opts)
+function fx.heat_haze(opts: Options?): Effect
 	return make(heat_haze_spec, opts)
 end
 
@@ -1831,7 +1840,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return o.life
 	end,
 }
-function fx.shockwave(opts)
+function fx.shockwave(opts: Options?): Effect
 	return make(shockwave_spec, opts)
 end
 
@@ -1993,7 +2002,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.lens(opts)
+function fx.lens(opts: Options?): Effect
 	return make(lens_spec, opts)
 end
 
@@ -2122,7 +2131,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.crt(opts)
+function fx.crt(opts: Options?): Effect
 	return make(crt_spec, opts)
 end
 
@@ -2236,7 +2245,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.chroma_split(opts)
+function fx.chroma_split(opts: Options?): Effect
 	return make(chroma_split_spec, opts)
 end
 
@@ -2367,7 +2376,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.fluted_glass(opts)
+function fx.fluted_glass(opts: Options?): Effect
 	return make(fluted_glass_spec, opts)
 end
 
@@ -2533,7 +2542,7 @@ fn fill(input: FillInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.liquid_metal(opts)
+function fx.liquid_metal(opts: Options?): Effect
 	return make(liquid_metal_spec, opts)
 end
 
@@ -2701,7 +2710,7 @@ fn fill(input: FillInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.mesh_gradient(opts)
+function fx.mesh_gradient(opts: Options?): Effect
 	return make(mesh_gradient_spec, opts)
 end
 
@@ -2866,7 +2875,7 @@ fn fill(input: FillInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.dither(opts)
+function fx.dither(opts: Options?): Effect
 	return make(dither_spec, opts)
 end
 
@@ -3031,7 +3040,7 @@ fn fill(input: FillInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.grain_gradient(opts)
+function fx.grain_gradient(opts: Options?): Effect
 	return make(grain_gradient_spec, opts)
 end
 
@@ -3160,9 +3169,13 @@ fn fill(input: FillInput) -> vec4<f32> {
         field += w;
         mixed += w * fx_rand(n, seed + 13u);
     }
-    // Its edge a pixel wide, from the field's slope.
-    let slope = max(length(vec2(dpdx(field), dpdy(field))), 0.0001);
-    let edge = clamp((field - 1.0) / slope + 0.5, 0.0, 1.0);
+    // Its edge a pixel wide, from the slope of the field held under 1: as the
+    // field is at the edge, where it crosses 0, and flat where the field
+    // climbs without bound at a blob's centre (its own slope there would
+    // mix the background into pixels around it).
+    let held = 1.0 - 1.0 / max(field, 0.0001);
+    let slope = max(length(vec2(dpdx(held), dpdy(held))), 0.0001);
+    let edge = clamp(held / slope + 0.5, 0.0, 1.0);
     let body = mix(input.params[0].rgb, input.params[1].rgb, clamp(mixed / max(field, 0.001), 0.0, 1.0));
     let rim = exp(-pow((field - 1.25) / 0.25, 2.0)) * gloss;
     let color = mix(input.params[2].rgb, body + vec3(rim * 0.6), edge);
@@ -3201,7 +3214,7 @@ fn fill(input: FillInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.metaballs(opts)
+function fx.metaballs(opts: Options?): Effect
 	return make(metaballs_spec, opts)
 end
 
@@ -3358,7 +3371,7 @@ fn fill(input: FillInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.swirl(opts)
+function fx.swirl(opts: Options?): Effect
 	return make(swirl_spec, opts)
 end
 
@@ -3546,7 +3559,7 @@ fn fill(input: FillInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.voronoi(opts)
+function fx.voronoi(opts: Options?): Effect
 	return make(voronoi_spec, opts)
 end
 
@@ -3709,7 +3722,7 @@ fn fill(input: FillInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.waves(opts)
+function fx.waves(opts: Options?): Effect
 	return make(waves_spec, opts)
 end
 
@@ -3876,7 +3889,7 @@ fn fill(input: FillInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.halftone(opts)
+function fx.halftone(opts: Options?): Effect
 	return make(halftone_spec, opts)
 end
 
@@ -4041,7 +4054,7 @@ fn fill(input: FillInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.plastic(opts)
+function fx.plastic(opts: Options?): Effect
 	return make(plastic_spec, opts)
 end
 
@@ -4174,7 +4187,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 2
 	end,
 }
-function fx.wave(opts)
+function fx.wave(opts: Options?): Effect
 	return make(wave_spec, opts)
 end
 
@@ -4309,7 +4322,7 @@ fn layer(input: LayerInput) -> vec4<f32> {
 		return 0
 	end,
 }
-function fx.rim_lens(opts)
+function fx.rim_lens(opts: Options?): Effect
 	return make(rim_lens_spec, opts)
 end
 
