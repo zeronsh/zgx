@@ -6792,6 +6792,9 @@ impl GpuRenderer {
         // kept must lie in one.
         let mut splices: Vec<(usize, usize, NodeId)> = Vec::new();
         let (mut leaving, mut entering) = (Vec::new(), Vec::new());
+        // The viewport snapped out to device pixels, as `patch_box_moved`
+        // culls a box whose clip is the viewport against it: once a frame.
+        let limit = snap_out(viewport, self.scale);
         for &(id, flags) in repaints {
             let first = kept.by_node.get(id, &kept.items);
             if !scene.contains(id) {
@@ -6818,7 +6821,7 @@ impl GpuRenderer {
                 let (bounds, kind) = scene.box_in(id, &kept.items[first].inherited);
                 if plain_quad(kind) {
                     boxes += 1;
-                    if self.patch_box_moved(&mut kept, first, bounds, boxed.clip, viewport) {
+                    if self.patch_box_moved(&mut kept, first, bounds, boxed.clip, viewport, limit) {
                         continue;
                     }
                     let parts = PlainBox {
@@ -7106,6 +7109,7 @@ impl GpuRenderer {
         bounds: Rect,
         clip: Option<Rect>,
         viewport: Rect,
+        viewport_limit: Rect,
     ) -> bool {
         let kept_item = &kept.items[place];
         if kept_item.len != 1 || kept_item.draws.end - kept_item.draws.start != 1 {
@@ -7127,7 +7131,10 @@ impl GpuRenderer {
             return false;
         };
         let rect = quad_rect(&quad);
-        let limit = snap_out(clip, self.scale);
+        let limit = match whole_clip {
+            true => viewport_limit,
+            false => snap_out(clip, self.scale),
+        };
         if rect_outside(rect, limit) {
             return false;
         }
