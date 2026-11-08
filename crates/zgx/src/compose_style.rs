@@ -971,7 +971,14 @@ pub(crate) fn mount_style_with_intrinsic(
     let mut parent_subscribed = false;
     // Static: it reads no layout, so a mount need not draw its inputs first.
     let mount_pure = dynamic.is_none() && reactive.is_none() && disabled.is_none();
-    ui.bind_marked(node, mount_pure, move || {
+    // A view whose properties transition (`crate::transition`): read once,
+    // here, so a view without one binds its effect as it always has.
+    let transition = base
+        .rare()
+        .cold
+        .as_ref()
+        .and_then(|cold| cold.transition.clone());
+    let restyle = move || {
         let _span = crate::profile::nested(crate::profile::Phase::Style);
         // A `Ui` only for a full application: a run that changes paint or a
         // box alone needs just the scene and themes.
@@ -1600,7 +1607,40 @@ pub(crate) fn mount_style_with_intrinsic(
             memo.shown = Some(style);
             memo.boxed = None;
         }
-    });
+    };
+    match transition {
+        None => ui.bind_marked(node, mount_pure, restyle),
+        Some(transition) => {
+            // What is drawn before the style is written, and after it the
+            // eased properties put back as they ease.
+            let mut restyle = restyle;
+            let weak = ui.downgrade();
+            // The first style is drawn as it is: nothing to ease from.
+            let mut mounted = false;
+            ui.bind_marked(node, mount_pure, move || {
+                if !std::mem::replace(&mut mounted, true) {
+                    restyle();
+                    return;
+                }
+                let before = weak
+                    .upgrade_storage()
+                    .map(|storage| crate::transition::drawn(&storage.scene.borrow(), node));
+                restyle();
+                if let (Some(storage), Some(before)) = (weak.upgrade_storage(), before)
+                    && storage.scene.borrow().contains(node)
+                {
+                    let theme = storage.themes.root().clone();
+                    storage.transitions.settle(
+                        &mut storage.scene.borrow_mut(),
+                        &theme,
+                        node,
+                        &transition,
+                        before,
+                    );
+                }
+            });
+        }
+    }
     typography
 }
 

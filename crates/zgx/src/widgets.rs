@@ -1685,6 +1685,8 @@ pub(crate) struct UiStorage {
     listening: Cell<bool>,
     /// Overlay scrollbars shown, to fade once their view stops scrolling.
     scrollbar_fades: RefCell<Vec<std::rc::Weak<crate::compose_scrollbar::Fade>>>,
+    /// Styles transitioning (`crate::transition`).
+    pub(crate) transitions: crate::transition::Transitions,
     /// Input is being dispatched: what scrolls now, the user scrolled.
     dispatching: Cell<bool>,
     /// A platform's wheel is being dispatched (`Ui::wheel_in_window`).
@@ -1924,6 +1926,7 @@ impl Ui {
             elastic: Default::default(),
             paging: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
+            transitions: Default::default(),
             dispatching: Cell::new(false),
             wheel_in_window: Cell::new(false),
             document_listeners: RefCell::new(Vec::new()),
@@ -4434,6 +4437,7 @@ impl Ui {
             self.next_editor_interaction_deadline(),
             self.next_selection_deadline(),
             crate::compose_scrollbar::next_fade(self),
+            self.storage.transitions.next(),
             crate::elastic::next_step(self),
             crate::paging::next_step(self),
             crate::caret_blink::next(self),
@@ -4496,6 +4500,18 @@ impl Ui {
         };
         // A drag resting on a destination long enough to spring it open.
         let keys = if self.input.advance_spring(&self.scene, now) {
+            self.try_prepare_frame()?;
+            true
+        } else {
+            keys
+        };
+        // Styles transitioning (`crate::transition`).
+        let stepped = self.storage.transitions.advance(
+            &mut self.scene.borrow_mut(),
+            now,
+            self.refresh_interval(),
+        );
+        let keys = if stepped {
             self.try_prepare_frame()?;
             true
         } else {

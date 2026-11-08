@@ -171,6 +171,9 @@ SCENES = [
     ('layout-drag', 'zgx', 'layout_drag_bench', {}),
     # A pointer moving over a deep page with hover styles, undrawn.
     ('pointer-move', 'zgx', 'pointer_bench', {}),
+    # Style transitions running: rows easing their background and opacity
+    # as a pointer moves down them, a frame's steps as the host takes them.
+    ('transition-run', 'zgx', 'transition_bench', {}),
     # Effects' CPU work through the whole renderer, drawn by wgpu's no-op
     # backend: a scene of boxes as they are, then the same with an animated
     # layer shader painting past its box, and with one reading what's behind
