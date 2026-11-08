@@ -529,14 +529,7 @@ impl GpuRenderer {
             };
             let reading = shader.reads_backdrop();
             let id = shader.id();
-            self.filter_shaders.insert(id, shader.clone());
-            let started = match reading {
-                true => self.blend_pipelines.contains_key(&id),
-                false => self.filter_pipelines.contains_key(&id),
-            };
-            if !started {
-                self.start_with_inputs(&shader, inputs, reading);
-            }
+            self.start_inputs(&shader, inputs);
             // Out of the window: no passes, as no frame shows it.
             if !bounds.intersects(viewport) {
                 continue;
@@ -551,6 +544,20 @@ impl GpuRenderer {
                     self.parked_inputs.push((reading, id, compiled));
                 }
             }
+        }
+    }
+    /// `shader`'s layer pipeline with its inputs' bindings, started if it
+    /// isn't yet: by the frame's pre-pass, or as a script declares it.
+    pub(crate) fn start_inputs(&mut self, shader: &Arc<FillShader>, inputs: &ShaderInputs) {
+        let reading = shader.reads_backdrop();
+        let id = shader.id();
+        self.filter_shaders.insert(id, shader.clone());
+        let started = match reading {
+            true => self.blend_pipelines.contains_key(&id),
+            false => self.filter_pipelines.contains_key(&id),
+        };
+        if !started {
+            self.start_with_inputs(shader, inputs, reading);
         }
     }
     /// Start compiling `shader`'s layer pipeline (blended, if it reads the
