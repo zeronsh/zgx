@@ -438,6 +438,30 @@ impl ShapedText {
         }
         fallback
     }
+    /// The caret after the glyph that ends nearest before `byte_index`:
+    /// where an offset no glyph covers on either side shows. Spaces a wrap
+    /// leaves hanging past the line's end have no glyph (a word that fills
+    /// the line, then two spaces); the caret stays after the line's last,
+    /// where they hang, as AppKit's text views keep it, not at the text's
+    /// start.
+    fn caret_after_nearest(&self, byte_index: usize) -> Option<Rect> {
+        let mut before: Option<(usize, Rect)> = None;
+        for run in self.buffer.layout_runs() {
+            let offset = self.line_offsets[run.line_i];
+            for glyph in run.glyphs {
+                let end = offset + glyph.end;
+                if end <= byte_index && before.is_none_or(|(at, _)| end >= at) {
+                    let x = if glyph.level.is_rtl() {
+                        glyph.x
+                    } else {
+                        glyph.x + glyph.w
+                    };
+                    before = Some((end, Rect::new(x, run.line_top, 1., run.line_height)));
+                }
+            }
+        }
+        before.map(|(_, rect)| rect)
+    }
     /// Returns visual rectangles, including disjoint spans for mixed-direction text.
     pub fn selection(&self, range: Range<usize>) -> Vec<Rect> {
         let start = range.start.min(range.end);
@@ -738,6 +762,7 @@ impl zgx::text_layout::TextLayout for ShapedText {
                 },
             )
         })
+        .or_else(|| self.caret_after_nearest(offset))
         .unwrap_or(Rect::new(0., 0., 1., self.line_height))
     }
     fn visual_line_range(
@@ -921,6 +946,62 @@ mod visual_line_tests {
             .sum();
         assert!(selected > 0.);
         assert!(shaped.hit_test(0., 0.).is_some());
+    }
+
+    /// A word that fills the line, then spaces: they hang past its end, as
+    /// AppKit's text views hang them, and the caret after them stays at the
+    /// line's end (it went to the text's start once the second space had no
+    /// glyph). Typed on, the next word starts the next line.
+    #[test]
+    fn spaces_after_a_word_that_fills_the_line_keep_the_caret_at_its_end() {
+        let mut fonts = FontSystem::new();
+        let word = "sdfjsfkjdhsfjkdshfkjsdhfjdksfh";
+        let w = ShapedText::new(&mut fonts, word, 14., None).size().0;
+        let end_of_word = |shaped: &ShapedText| {
+            shaped.caret_position(TextPosition {
+                byte_offset: word.len(),
+                affinity: TextAffinity::Before,
+            })
+        };
+        for extra in [0., 0.5, 2., 3.5] {
+            for spaces in 1..=3 {
+                let text = format!("{word}{}", " ".repeat(spaces));
+                let shaped = ShapedText::new(&mut fonts, text.as_str(), 14., Some(w + extra));
+                let word_end = end_of_word(&shaped);
+                for affinity in [TextAffinity::Before, TextAffinity::After] {
+                    let caret = shaped.caret_position(TextPosition {
+                        byte_offset: text.len(),
+                        affinity,
+                    });
+                    // After the word on its line, where the spaces hang, or
+                    // on a line the spaces wrapped to; never back before
+                    // the word's end on its own line.
+                    let after = caret.y == word_end.y && caret.x >= word_end.x - 0.5;
+                    assert!(
+                        after || caret.y > word_end.y,
+                        "{spaces} space(s), width +{extra}: caret at ({}, {}), the word ends at ({}, {})",
+                        caret.x,
+                        caret.y,
+                        word_end.x,
+                        word_end.y
+                    );
+                    if spaces == 1 {
+                        assert!(after, "one space hangs on the word's line (width +{extra})");
+                    }
+                }
+            }
+            // Typed on after two spaces: the next word starts the next line.
+            let text = format!("{word}  x");
+            let shaped = ShapedText::new(&mut fonts, text.as_str(), 14., Some(w + extra));
+            let caret = shaped.caret_position(TextPosition {
+                byte_offset: text.len(),
+                affinity: TextAffinity::After,
+            });
+            assert!(
+                caret.y > end_of_word(&shaped).y,
+                "width +{extra}: the next word wraps"
+            );
+        }
     }
 
     #[test]
