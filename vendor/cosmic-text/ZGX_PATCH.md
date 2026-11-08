@@ -414,11 +414,13 @@ dashboard shapes each frame: its flush is 0.78% shorter. Its test checks all
 
 ## A run on a grid of cells (zgx-cosmic-text 0.19.12)
 
-`Attrs::cell_grid` (in EM, as tracking is; kept in `letter_spacing_opt`
-as a NaN's payload, `LetterSpacing::grid`, which tracking never is, so
-`Attrs` is no bigger and copies, compares and hashes as before: a field of
-its own made every attribute copy, comparison and hash dearer, +0.31% in
-zgx's mount-text gate cell): each cluster
+`Attrs::cell_grid` (in EM, as tracking is; kept in `padding_opt` as a
+NaN's payload, `LetterSpacing::grid`, which no padding is, so `Attrs` is
+no bigger and copies, compares and hashes as before, and only a run with
+padding reads it: a field of its own made every attribute copy, comparison
+and hash dearer, +0.31% in zgx's mount-text gate cell, and decoding it from
+`letter_spacing_opt` masked every glyph's tracking, +0.25% in lab-stream):
+each cluster
 of a run takes exactly its characters' cells, their widths as
 unicode-width tells them (as a terminal places them), its glyphs moved
 together to sit centred in them (`snap_to_cells`, after shaping and the
@@ -431,6 +433,5 @@ of several characters (a conjunct) takes their cells, and a glyph is
 centred, not left at its cell's start. zgx-terminal draws its runs on the
 grid; zgx-gpu's `a_run_on_a_grid_takes_its_cells_whichever_font_draws_it`
 checks braille, a letterlike symbol, Thai, a combining accent and plain
-letters with the platform's fonts. Tracking reads none on a grid
-(`LetterSpacing::tracking`), and a NaN compares and hashes by its bits, so
-grids of other cells are other keys. The crate depends on `unicode-width`.
+letters with the platform's fonts. The padding pass skips a grid, and a NaN
+compares and hashes by its bits, so grids of other cells are other keys. The crate depends on `unicode-width`.

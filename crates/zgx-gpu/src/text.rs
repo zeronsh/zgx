@@ -143,13 +143,23 @@ pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> 
         });
     if font.letter_spacing == zgx::text_layout::LetterSpacing::ZERO {
         attrs
-    } else if let Some(cell) = font.letter_spacing.cell() {
-        // A grid of cells (a terminal's), in EM as tracking is.
-        attrs.cell_grid(cell / size.max(1.))
     } else {
-        // cosmic-text 0.14 accepts tracking in EM, while our public styles use
-        // logical pixels. Use the same effective size as Buffer's metrics.
-        attrs.letter_spacing(font.letter_spacing.pixels() / size.max(1.))
+        spaced(attrs, font.letter_spacing, size)
+    }
+}
+/// `attrs` with `spacing`, tracking or a grid of cells (a terminal's), both
+/// in EM: out of line, so text without spacing (most) pays nothing for it.
+#[inline(never)]
+fn spaced(
+    attrs: cosmic_text::Attrs<'_>,
+    spacing: zgx::text_layout::LetterSpacing,
+    size: f32,
+) -> cosmic_text::Attrs<'_> {
+    match spacing.cell() {
+        Some(cell) => attrs.cell_grid(cell / size.max(1.)),
+        // cosmic-text 0.14 accepts tracking in EM, while our public styles
+        // use logical pixels. Use the same effective size as Buffer's metrics.
+        None => attrs.letter_spacing(spacing.pixels() / size.max(1.)),
     }
 }
 pub(crate) fn alignment(font: &zgx::text_layout::FontStyle) -> Option<cosmic_text::Align> {
@@ -1389,11 +1399,10 @@ mod letter_spacing_tests {
                 ..Default::default()
             };
             let on_grid = attrs(&grid, size);
-            let cell = on_grid
-                .letter_spacing_opt
-                .and_then(|spacing| spacing.cell());
+            // In the padding, a NaN no padding is; no tracking with it.
+            let cell = on_grid.padding_opt.and_then(|spacing| spacing.cell());
             assert!((cell.unwrap() - 7. / size).abs() < 1e-5);
-            assert_eq!(on_grid.letter_spacing_opt.unwrap().tracking(), 0.);
+            assert!(on_grid.letter_spacing_opt.is_none());
             assert_eq!(
                 attrs(&font(3.), size).letter_spacing_opt.unwrap().0,
                 3. / size

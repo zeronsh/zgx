@@ -227,8 +227,9 @@ impl FontFeatures {
 
 /// A wrapper for letter spacing to get around that f32 doesn't implement Eq and Hash
 ///
-/// zgx: or a grid of cells (`LetterSpacing::grid`, `Attrs::cell_grid`), kept as
-/// a NaN's payload, which tracking never is: an attribute no bigger for it.
+/// zgx: or a grid of cells (`LetterSpacing::grid`, `Attrs::cell_grid`), kept in
+/// `padding_opt` as a NaN's payload, which no padding is: an attribute no
+/// bigger for it, and read only where a run has padding.
 #[derive(Clone, Copy, Debug)]
 pub struct LetterSpacing(pub f32);
 
@@ -256,10 +257,6 @@ impl LetterSpacing {
             .then(|| (bits & GRID_UNITS) as f32 / GRID_SCALE)
     }
 
-    /// zgx: the tracking in EM (none on a grid).
-    pub fn tracking(self) -> f32 {
-        if self.0.is_nan() { 0.0 } else { self.0 }
-    }
 }
 
 impl PartialEq for LetterSpacing {
@@ -474,10 +471,11 @@ impl<'a> Attrs<'a> {
 
     /// zgx: set a grid of cells this wide (in EM, a terminal's) each cluster
     /// takes its characters' cells on, its glyphs centred in them, whichever
-    /// font draws it; kept in `letter_spacing_opt` (`LetterSpacing::grid`),
-    /// no tracking with it.
+    /// font draws it; kept in `padding_opt` (`LetterSpacing::grid`, a NaN no
+    /// padding is), so text without padding (most) reads nothing more for it,
+    /// and no padding with it.
     pub fn cell_grid(mut self, cell: f32) -> Self {
-        self.letter_spacing_opt = LetterSpacing::grid(cell);
+        self.padding_opt = LetterSpacing::grid(cell);
         self
     }
 
