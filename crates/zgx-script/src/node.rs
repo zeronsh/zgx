@@ -6846,7 +6846,14 @@ pub(crate) fn derived_state(
     let (vm, out) = (env.vm.clone(), signal.clone());
     let effect = env.runtime.effect_now(move || match body() {
         Ok(value) => {
-            out.set(value);
+            // (A list grown from the last compares its end alone.)
+            out.mutate(|old| {
+                let changed = !crate::value::same(old, &value);
+                if changed {
+                    *old = value;
+                }
+                changed
+            });
         }
         Err(error) => {
             if let Some(vm) = vm.upgrade() {

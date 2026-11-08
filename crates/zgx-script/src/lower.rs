@@ -2200,18 +2200,23 @@ fn content_hash(item: &Value, hasher: &mut impl std::hash::Hasher) {
 struct Unkeyed {
     order: Vec<Rc<str>>,
     next: u64,
-    /// The last pass's items and their rows' identities, in list order: a
+    /// The last pass's list and its rows' identities, in list order: a
     /// list starting with the same items (a stream's, growing at its end)
     /// passes over the rest alone (`unkeyed_rows`'s `from`).
-    items: Vec<Value>,
+    items: Value,
     identities: Vec<Rc<str>>,
 }
 impl Unkeyed {
-    /// How many of `list`'s first items are the last pass's own: the same
-    /// table (by allocation) or an equal value, each a glance.
-    fn kept(&self, list: &[Value]) -> usize {
-        list.iter()
-            .zip(&self.items)
+    /// How many of `list`'s first items are the last pass's own: as noted
+    /// where it was made from that list (`value::grown`, a stream's), else
+    /// the same table (by allocation) or an equal value, each a glance.
+    fn kept(&self, list: &Value) -> usize {
+        if let Some(shared) = crate::value::shared_start(list, &self.items) {
+            return shared;
+        }
+        list.list()
+            .iter()
+            .zip(self.items.list())
             .take_while(|(now, then)| {
                 let id = crate::value::identity(now);
                 if id != 0 {
@@ -3438,12 +3443,13 @@ fn kind_view(
                             return identities;
                         }
                         if key_fn.is_none() {
-                            let list = list.list();
                             let mut unkeyed = unkeyed.borrow_mut();
                             // Those the last pass left as they were keep their
                             // rows, notes and identities: the rest is passed over
                             // (a stream's last item, and those appended).
                             let from = unkeyed.kept(list);
+                            unkeyed.items = list.clone();
+                            let list = list.list();
                             if from == 0 {
                                 noted.clear();
                                 unkeyed.identities.clear();
@@ -3459,8 +3465,6 @@ fn kind_view(
                                 noted.insert(identity.clone(), (from + i, row));
                                 unkeyed.identities.push(identity);
                             }
-                            unkeyed.items.truncate(from);
-                            unkeyed.items.extend_from_slice(&list[from..]);
                             return unkeyed.identities.clone();
                         }
                         noted.clear();
@@ -9587,11 +9591,12 @@ fn a_list_keeping_its_first_items_passes_over_the_rest_as_the_full_pass_does() {
                     _ => {}
                 }
                 let names = unkeyed_rows(&list, &mut full_rows, &mut full, 0, live, &runtime);
-                full.items = list.clone();
-                let from = state.kept(&list);
+                let value = Value::List(list.clone().into());
+                full.items = value.clone();
+                let from = state.kept(&value);
                 skipped += from;
                 let rest = unkeyed_rows(&list, &mut rows, &mut state, from, live, &runtime);
-                state.items = list.clone();
+                state.items = value;
                 assert_eq!(rest[..], names[from..], "seed {seed} step {step}: names");
                 assert_eq!(state.order, full.order, "seed {seed} step {step}: order");
                 assert_eq!(state.next, full.next, "seed {seed} step {step}: next");
