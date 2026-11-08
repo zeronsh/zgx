@@ -40,6 +40,16 @@ struct Scratch {
     weights: Vec<f32>,
     margins: Vec<Insets>,
 }
+/// What flex distribution's rounds need of their container
+/// (`Scene::flex_rounds`).
+#[derive(Clone, Copy)]
+struct FlexRounds {
+    id: NodeId,
+    horizontal: bool,
+    /// The room along the main axis, and the gaps' share of it.
+    limit: f32,
+    gaps: f32,
+}
 /// A map keyed by node. Ids are small integers with a generation: a
 /// multiplicative hash beats SipHash on them, and mounting or removing a
 /// node touches several such maps.
@@ -4505,8 +4515,9 @@ impl Scene {
     /// `min-width: auto` / `min-height: auto`): the smaller of its own size
     /// (when it sets one) and its content's min-content size, or 0 for one
     /// that clips, as CSS gives a scroll container.
-    // `ALONE`: `floor_dropped`'s copy, so the flex loop's stays its only
-    // caller and inlines as it did.
+    // `ALONE`: `floor_dropped`'s copy (and the cold rounds',
+    // `flex_rounds_clamped`), so the flex loop's stays its only caller and
+    // inlines as it did.
     fn automatic_minimum<const ALONE: bool>(
         &mut self,
         id: NodeId,
@@ -10021,6 +10032,252 @@ impl Scene {
         let size = self.measured(id, &mut constraints, false);
         (size, constraints)
     }
+    /// Flex distribution's rounds over a container's children, from their
+    /// sizes now (`bases` as they began): each round shares the room left
+    /// out by weight (grow, or shrink times basis) and stops a child at its
+    /// minimum or maximum; a round that stops none is the last. `start`:
+    /// the round in progress (from that child, with its room and weight).
+    /// `DEFER`: each child given a share is measured once, at its share as
+    /// the rounds end (`pending` until then), and this says whether each
+    /// measured at it. Otherwise each round's are measured as it gives them.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn flex_rounds<const DEFER: bool>(
+        &mut self,
+        rounds: FlexRounds,
+        ids: &[NodeId],
+        asked: &mut [Constraints],
+        sizes: &mut [(f32, f32)],
+        kept: &mut [Constraints],
+        allocated: &mut [bool],
+        bases: &[f32],
+        frozen: &mut [bool],
+        floors: &mut [Option<f32>],
+        weights: &mut Vec<f32>,
+        pending: &mut [bool],
+        mut start: Option<(usize, f32, f32)>,
+    ) -> bool {
+        let FlexRounds {
+            id,
+            horizontal,
+            limit,
+            gaps,
+        } = rounds;
+        let main = |size: (f32, f32)| if horizontal { size.0 } else { size.1 };
+        let main_margin = |s: &Style| {
+            if horizontal {
+                s.margin.left + s.margin.right
+            } else {
+                s.margin.top + s.margin.bottom
+            }
+        };
+        let mut shared = false;
+        for _ in 0..=ids.len() {
+            let (from, remaining, weight) = match start.take() {
+                Some(round) => round,
+                None => {
+                    let used: f32 = sizes
+                        .iter()
+                        .enumerate()
+                        .map(|(i, size)| main(*size) + main_margin(&self.tree_node(ids[i]).style))
+                        .sum::<f32>()
+                        + gaps;
+                    let remaining = limit - used;
+                    if remaining.abs() < 0.001 {
+                        break;
+                    }
+                    weights.clear();
+                    weights.extend(ids.iter().enumerate().map(|(i, child)| {
+                        let s = &self.node(*child).style;
+                        if frozen[i] {
+                            0.0
+                        } else if remaining > 0.0 {
+                            s.flex_grow.max(0.0)
+                        } else {
+                            s.flex_shrink.max(0.0) * bases[i]
+                        }
+                    }));
+                    let weight: f32 = weights.iter().sum();
+                    if weight <= 0.0 {
+                        break;
+                    }
+                    (0, remaining, weight)
+                }
+            };
+            let mut clamped = false;
+            for (i, child) in ids.iter().enumerate().skip(from) {
+                if weights[i] == 0.0 {
+                    continue;
+                }
+                let wanted = flexed(main(sizes[i]) + remaining * weights[i] / weight);
+                let (own_min, set_elsewhere) = {
+                    let s = &self.node(*child).style;
+                    let options = s.layout_options.as_deref();
+                    if horizontal {
+                        (s.min_width, options.is_some_and(|o| o.min_width.is_some()))
+                    } else {
+                        (
+                            s.min_height,
+                            options.is_some_and(|o| o.min_height.is_some()),
+                        )
+                    }
+                };
+                // A minimum the child sets (in points or as a percentage) is
+                // its own; only an unset one is automatic.
+                let min = if remaining < 0.0 && own_min.is_none() && !set_elsewhere {
+                    let floor = match floors[i] {
+                        Some(floor) => floor,
+                        None => {
+                            let floor = self
+                                .automatic_minimum::<true>(*child, asked[i], horizontal, bases[i]);
+                            floors[i] = Some(floor);
+                            floor
+                        }
+                    };
+                    Some(floor)
+                } else {
+                    own_min
+                };
+                let s = &self.node(*child).style;
+                let size = if horizontal {
+                    dimension(wanted, min, s.max_width)
+                } else {
+                    dimension(wanted, min, s.max_height)
+                };
+                if (size - wanted).abs() > 0.001 {
+                    frozen[i] = true;
+                    clamped = true;
+                    // Held at its floor as it shrinks: see `floor_dropped`.
+                    if remaining < 0.0 {
+                        self.mark_shrank(id);
+                    }
+                }
+                // Held where it is (a column's text at its content's height):
+                // as laid out, not again.
+                if !allocated[i] && (size - main(sizes[i])).abs() < 0.001 {
+                    continue;
+                }
+                if horizontal {
+                    asked[i].force_width = Some(size);
+                } else {
+                    asked[i].force_height = Some(size);
+                }
+                allocated[i] = true;
+                if !DEFER {
+                    (sizes[i], kept[i]) = self.measure_kept(*child, asked[i]);
+                    continue;
+                }
+                if horizontal {
+                    sizes[i].0 = size;
+                } else {
+                    sizes[i].1 = size;
+                }
+                pending[i] = true;
+                shared = true;
+            }
+            if !clamped {
+                break;
+            }
+        }
+        // Every child given a share is measured at it (`DEFER`: none was
+        // as the rounds ran).
+        !shared || self.measure_shares(ids, asked, sizes, kept, pending, horizontal)
+    }
+    /// The children flex distribution gave a share not yet measured
+    /// (`pending`) measured at it; whether each measured at its share along
+    /// the main axis.
+    #[inline(never)]
+    fn measure_shares(
+        &mut self,
+        ids: &[NodeId],
+        asked: &[Constraints],
+        sizes: &mut [(f32, f32)],
+        kept: &mut [Constraints],
+        pending: &mut [bool],
+        horizontal: bool,
+    ) -> bool {
+        let main = |size: (f32, f32)| if horizontal { size.0 } else { size.1 };
+        let mut held = true;
+        for i in 0..ids.len() {
+            if !std::mem::take(&mut pending[i]) {
+                continue;
+            }
+            let share = main(sizes[i]);
+            (sizes[i], kept[i]) = self.measure_kept(ids[i], asked[i]);
+            held &= (main(sizes[i]) - share).abs() <= 0.001;
+        }
+        held
+    }
+    /// Round `remaining`/`weight` of flex distribution stopped child `at` at
+    /// its minimum or maximum: the others' shares in it are given again, and
+    /// what they'd be measured at thrown away. From that child on, the
+    /// rounds go on measuring each child once, at its share as they settle.
+    /// A child that measures other than its share (its padding and border
+    /// wider) changes the rounds after it: then they run again from the
+    /// natural sizes, measured as they go.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn flex_rounds_clamped(
+        &mut self,
+        rounds: FlexRounds,
+        ids: &[NodeId],
+        asked: &mut [Constraints],
+        sizes: &mut [(f32, f32)],
+        kept: &mut [Constraints],
+        allocated: &mut [bool],
+        bases: &[f32],
+        frozen: &mut Vec<bool>,
+        floors: &mut [Option<f32>],
+        weights: &mut Vec<f32>,
+        (at, remaining, weight): (usize, f32, f32),
+    ) {
+        let mut pending: smallvec::SmallVec<[bool; 16]> = smallvec::smallvec![false; ids.len()];
+        if self.flex_rounds::<true>(
+            rounds,
+            ids,
+            asked,
+            sizes,
+            kept,
+            allocated,
+            bases,
+            frozen,
+            floors,
+            weights,
+            &mut pending,
+            Some((at, remaining, weight)),
+        ) {
+            return;
+        }
+        // Each child at its natural size, given no share. (Rounds force only
+        // the main axis, which a row's or a column's children are not forced
+        // on as they start.)
+        for i in 0..ids.len() {
+            if rounds.horizontal {
+                asked[i].force_width = None;
+            } else {
+                asked[i].force_height = None;
+            }
+            (sizes[i], kept[i]) = self.measure_kept(ids[i], asked[i]);
+            allocated[i] = false;
+        }
+        frozen.clear();
+        frozen.resize(ids.len(), false);
+        self.flex_rounds::<false>(
+            rounds,
+            ids,
+            asked,
+            sizes,
+            kept,
+            allocated,
+            bases,
+            frozen,
+            floors,
+            weights,
+            &mut pending,
+            None,
+        );
+    }
     /// `id` laid out under `constraints`, the result it then holds (with its
     /// children's places) for `arrange`.
     fn measure_full(&mut self, id: NodeId, mut constraints: Constraints) -> (f32, f32) {
@@ -10327,7 +10584,9 @@ impl Scene {
                     // clips (a scroll container's is 0) or sets its own.
                     floors.clear();
                     floors.resize(ids.len(), None);
-                    for _ in 0..=ids.len() {
+                    // One round: a round that stops no child is the
+                    // last, and one that stops a child goes on out of line.
+                    'round: {
                         let used: f32 = sizes
                             .iter()
                             .enumerate()
@@ -10338,7 +10597,7 @@ impl Scene {
                             + gaps;
                         let remaining = limit - used;
                         if remaining.abs() < 0.001 {
-                            break;
+                            break 'round;
                         }
                         weights.clear();
                         weights.extend(ids.iter().enumerate().map(|(i, child)| {
@@ -10353,9 +10612,8 @@ impl Scene {
                         }));
                         let weight: f32 = weights.iter().sum();
                         if weight <= 0.0 {
-                            break;
+                            break 'round;
                         }
-                        let mut clamped = false;
                         for (i, child) in ids.iter().enumerate() {
                             if weights[i] == 0.0 {
                                 continue;
@@ -10398,13 +10656,29 @@ impl Scene {
                                 dimension(wanted, min, s.max_height)
                             };
                             if (size - wanted).abs() > 0.001 {
-                                frozen[i] = true;
-                                clamped = true;
-                                // Held at its floor as it shrinks: see
-                                // `floor_dropped`.
-                                if remaining < 0.0 {
-                                    self.mark_shrank(id);
-                                }
+                                // The others' shares this round are given
+                                // again: out of line, measured once, from
+                                // this child (held there, and marked shrunk,
+                                // as a round that stops it is).
+                                self.flex_rounds_clamped(
+                                    FlexRounds {
+                                        id,
+                                        horizontal,
+                                        limit,
+                                        gaps,
+                                    },
+                                    &ids,
+                                    &mut asked,
+                                    &mut sizes,
+                                    &mut kept,
+                                    &mut allocated,
+                                    &bases,
+                                    &mut frozen,
+                                    &mut floors,
+                                    &mut weights,
+                                    (i, remaining, weight),
+                                );
+                                break 'round;
                             }
                             // Held where it is (a column's text at its
                             // content's height): as laid out, not again.
@@ -10414,9 +10688,6 @@ impl Scene {
                             asked[i] = along(asked[i], size);
                             allocated[i] = true;
                             (sizes[i], kept[i]) = self.measure_kept(*child, asked[i]);
-                        }
-                        if !clamped {
-                            break;
                         }
                     }
                 }
@@ -13636,6 +13907,57 @@ mod tests {
         scene.resize(50.0, 300.0);
         scene.flush();
         assert_eq!(scene.bounds(a).height, 80.0);
+    }
+    /// A row whose bullet stops at its floor as the row narrows shares the
+    /// room out again: its wrapping item is measured at the width it ends
+    /// up with, not also at the share the first round gave it.
+    #[test]
+    fn a_flex_round_that_clamps_measures_its_siblings_once() {
+        let limits = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = limits.clone();
+        let mut scene = Scene::new(300.0, 100.0);
+        scene.set_text_measurer(move |text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 10.0;
+            if text.len() > 1 {
+                seen.borrow_mut().push(limit);
+            }
+            let room = limit.unwrap_or(width).max(10.0);
+            (width.min(room), (width / room).ceil() * 20.0)
+        });
+        let row = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Row),
+            Style {
+                width: Some(300.0),
+                gap: 6.0,
+                ..Style::default()
+            },
+        );
+        let bullet = scene.append(row, text("*"), Style::default());
+        let item = scene.append(
+            row,
+            text(&"abcdefghij".repeat(5)),
+            Style {
+                text_wrap: true,
+                flex_grow: 1.0,
+                min_width: Some(0.0),
+                ..Style::default()
+            },
+        );
+        scene.flush();
+        let style = |width| Style {
+            width: Some(width),
+            gap: 6.0,
+            ..Style::default()
+        };
+        scene.set_style(row, style(220.0));
+        limits.borrow_mut().clear();
+        scene.flush();
+        // Its basis at the row's room, then the width it ends up with: the
+        // first round's 204.7 is shared out again once the bullet holds.
+        assert_eq!(*limits.borrow(), [Some(220.0), Some(204.0)]);
+        assert_eq!(scene.bounds(bullet).width, 10.0);
+        assert_eq!(scene.bounds(item).width, 204.0);
     }
     #[test]
     fn text_sizes_survive_alternating_wrap_limits() {
