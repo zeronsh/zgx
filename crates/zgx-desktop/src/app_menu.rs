@@ -474,26 +474,17 @@ fn entries(
                 checked,
                 accelerator,
             } => {
-                let label = format!(
-                    "{}{}{}",
-                    if checked == Some(true) {
-                        "✓ "
-                    } else if checked.is_some() {
-                        "  "
-                    } else {
-                        ""
-                    },
-                    label,
-                    accelerator
-                        .map(|a| format!("    {}", a.label()))
-                        .unwrap_or_default()
-                );
                 let dispatch = dispatch.clone();
+                // Its check is the menu's gutter (`menu_checked`), its
+                // shortcut at its end in the menu's own style (`shortcut`).
                 let item = compose::menu_item(label);
-                let item = if let Some(checked) = checked {
-                    item.menu_checked(checked)
-                } else {
-                    item
+                let item = match checked {
+                    Some(checked) => item.menu_checked(checked),
+                    None => item,
+                };
+                let item = match accelerator {
+                    Some(accelerator) => item.shortcut(accelerator.label()),
+                    None => item,
                 };
                 item.h(30.)
                     .p(6.)
@@ -502,9 +493,11 @@ fn entries(
             }
             AppMenuEntry::Submenu(menu) => compose::submenu(menu.label, cx.state(false))
                 .children(self::entries(cx, menu.entries, dispatch.clone())),
+            // As zgx's separator draws one, in the theme's divider colour.
             AppMenuEntry::Separator => compose::row()
                 .h(1.)
-                .bg(zgx::scene::Color(100, 100, 100, 255)),
+                .my(4.)
+                .bg(zgx::theme::tok::BORDER_SUBTLE),
             AppMenuEntry::Standard(item) => {
                 let dispatch = dispatch.clone();
                 compose::menu_item(item.label())
@@ -1679,6 +1672,74 @@ mod tests {
             ui.prepare_frame();
         }
         assert_eq!(*actions.borrow(), vec![MenuAction::from("save")]);
+    }
+    #[test]
+    fn rendered_items_show_their_shortcut_and_check_as_menus_do() {
+        use zgx::{
+            input::{InputEvent, Key, Modifiers},
+            semantics::Role,
+            widgets::Ui,
+        };
+        let mut ui = Ui::new(600., 400.);
+        let ctrl = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        let menus = vec![AppMenu::new(
+            "View",
+            [
+                AppMenuEntry::item("Word wrap", "wrap")
+                    .checked(true)
+                    .accelerator(MenuAccelerator::new(Key::Character("w".into()), ctrl)),
+                AppMenuEntry::Separator,
+                AppMenuEntry::item("Zoom", "zoom"),
+            ],
+        )];
+        let _view = ui.mount(app_menu_bar(menus, |_| {}).unwrap());
+        ui.prepare_frame();
+        for key in [Key::Tab, Key::Enter] {
+            ui.dispatch(InputEvent::KeyDown {
+                key,
+                modifiers: Modifiers::default(),
+                repeat: false,
+            });
+            ui.prepare_frame();
+        }
+        fn walk(
+            scene: &zgx::scene::Scene,
+            id: zgx::scene::NodeId,
+            out: &mut Vec<zgx::scene::NodeId>,
+        ) {
+            out.push(id);
+            for &child in scene.children(id) {
+                walk(scene, child, out);
+            }
+        }
+        let mut nodes = Vec::new();
+        let root = ui.scene.borrow().root();
+        walk(&ui.scene.borrow(), root, &mut nodes);
+        let semantics = ui.semantics.borrow();
+        let items: Vec<_> = nodes
+            .iter()
+            .filter_map(|&id| semantics.get(id))
+            .filter(|node| node.role == Role::MenuItem)
+            .collect();
+        let wrap = items
+            .iter()
+            .find(|node| node.label.contains("Word wrap"))
+            .expect("the item, its menu open");
+        // Its label alone: the check in the menu's gutter, the shortcut at
+        // its end and told as one, not written into the label.
+        assert_eq!(wrap.label, "Word wrap");
+        assert_eq!(wrap.checked, Some(true));
+        assert_eq!(
+            wrap.shortcut.as_deref(),
+            Some(
+                MenuAccelerator::new(Key::Character("w".into()), ctrl)
+                    .label()
+                    .as_str()
+            )
+        );
     }
     #[test]
     fn duplicate_nested_actions_are_rejected_before_mount_or_native_creation() {
