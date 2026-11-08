@@ -523,8 +523,10 @@ impl<T> Term<T> {
         self.damage.reset(self.columns());
     }
 
+    /// Mark the whole screen damaged (zgx: public, for a picture changed
+    /// under its placements).
     #[inline]
-    fn mark_fully_damaged(&mut self) {
+    pub fn mark_fully_damaged(&mut self) {
         self.damage.full = true;
     }
 

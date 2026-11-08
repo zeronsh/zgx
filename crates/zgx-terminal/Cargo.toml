@@ -19,6 +19,11 @@ alacritty_terminal = { package = "zgx-alacritty-terminal", version = "=0.26.3", 
 polling = "3"
 # Escapes found in the output a word at a time, not a byte.
 memchr = "2.7"
+# Pictures programs send (the kitty graphics protocol): base64 in the
+# escape codes, zlib-compressed or PNG.
+base64 = "0.22"
+flate2 = "1"
+png = "0.18"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

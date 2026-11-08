@@ -1,6 +1,7 @@
 //! A session: the pseudoterminal, the thread doing its I/O, and the screen.
 use crate::{
     Progress,
+    graphics::{Graphics, Images},
     osc::{Osc, Sniffer},
 };
 use alacritty_terminal::{
@@ -164,6 +165,8 @@ struct Shared {
     size: Mutex<GridSize>,
     palette: Mutex<crate::Palette>,
     colors_asked: Mutex<Vec<ColorRequest>>,
+    /// The pictures programs sent (the kitty graphics protocol), by id.
+    images: Images,
     tx: Sender<Msg>,
     poller: Arc<Poller>,
 }
@@ -231,8 +234,9 @@ pub struct Session {
     #[cfg(unix)]
     controller: Option<std::os::fd::OwnedFd>,
     exited: Arc<Mutex<Option<i32>>>,
-    /// A replay's parsing: output fed (`feed`) rather than read.
-    replay: Option<Mutex<Parse>>,
+    /// A replay's parsing: output fed (`feed`) rather than read. Boxed:
+    /// only a replay has one, and every view holds its session.
+    replay: Option<Box<Mutex<Parse>>>,
 }
 
 /// Bytes read before the screen is let go of for the app to draw.
@@ -293,6 +297,7 @@ impl Session {
             size: Mutex::new(size),
             palette: Mutex::new(crate::Palette::default()),
             colors_asked: Mutex::new(Vec::new()),
+            images: Images::default(),
             tx,
             poller: poller.clone(),
         });
@@ -353,6 +358,7 @@ impl Session {
             size: Mutex::new(size),
             palette: Mutex::new(crate::Palette::default()),
             colors_asked: Mutex::new(Vec::new()),
+            images: Images::default(),
             tx,
             poller: Arc::new(Poller::new().expect("a poller")),
         });
@@ -370,7 +376,7 @@ impl Session {
             #[cfg(unix)]
             controller: None,
             exited: Arc::new(Mutex::new(None)),
-            replay: Some(Mutex::new(Parse::default())),
+            replay: Some(Box::new(Mutex::new(Parse::default()))),
         }
     }
     /// Parse `bytes` as a replay's output (see `replay`); nothing for a
@@ -420,6 +426,10 @@ impl Session {
     /// defaults: the ones the app draws with.
     pub fn set_palette(&self, palette: crate::Palette) {
         *self.shared.palette.lock().unwrap() = palette;
+    }
+    /// The picture placements (`Term::placements`) show, by its id.
+    pub fn image(&self, id: u32) -> Option<Arc<zgx::image::ImageData>> {
+        self.shared.images.lock().unwrap().get(&id).cloned()
     }
     /// The screen, locked: what to draw, the selection, the modes. Keep it
     /// briefly: the session's thread waits for it to parse more.
@@ -521,6 +531,7 @@ struct Io {
 struct Parse {
     parser: Processor<StdSyncHandler>,
     sniffer: Sniffer,
+    graphics: Graphics,
     /// When the running command started (OSC 133;C).
     command_started: Option<Instant>,
 }
@@ -532,7 +543,11 @@ impl Parse {
         // order the program wrote them: parse up to each command's end
         // before reporting it.
         let mut parsed = 0;
-        let (started, parser) = (&mut self.command_started, &mut self.parser);
+        let (started, parser, graphics) = (
+            &mut self.command_started,
+            &mut self.parser,
+            &mut self.graphics,
+        );
         self.sniffer.feed(bytes, |end, osc| {
             parser.advance(term, &bytes[parsed..end]);
             parsed = end;
@@ -540,6 +555,14 @@ impl Parse {
                 Osc::Pwd(path) => SessionEvent::Pwd(path),
                 Osc::CommandStarted => {
                     *started = Some(Instant::now());
+                    return;
+                }
+                Osc::Graphics(command) => {
+                    let size = *shared.size.lock().unwrap();
+                    let cell = (size.cell_width, size.cell_height);
+                    if let Some(answer) = graphics.command(&command, term, cell, &shared.images) {
+                        shared.send(Msg::Input(answer.into()));
+                    }
                     return;
                 }
                 Osc::CommandFinished(exit_code) => SessionEvent::CommandFinished {
