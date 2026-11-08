@@ -866,3 +866,88 @@ fn a_moving_layer_waiting_on_a_picture_draws_each_frame_once() {
         assert!(stats.layer_repaints <= 1, "frame {frame}: {stats:?}");
     }
 }
+
+#[test]
+fn layers_not_drawn_give_way_to_a_moving_layer_and_its_new_text() {
+    let _gpu_fixture = gpu_fixture();
+    // Layers drawn once and hidden since (still layers, their textures
+    // kept) holding all of the 64 MB budget; then a magnified board in
+    // motion, blurred a little (so not drawn in part), a word appearing in
+    // it midway. The hidden layers give way: the board is drawn at its
+    // scale, its word there the frame it appears.
+    const WINDOW: u32 = 400;
+    let (mut gpu, mut scene) = window(WINDOW);
+    let root = scene.root();
+    let whole = [Rect::new(0., 0., WINDOW as f32, WINDOW as f32)];
+    let old: Vec<NodeId> = (0..16)
+        .map(|_| {
+            let id = scene.append(
+                root,
+                NodeKind::Container(Layout::Overlay),
+                fixed(1000., 1000.),
+            );
+            scene.set_isolated(id, true);
+            rect(&mut scene, id, 0., 0., (1000., 1000.), Color(0, 0, 30, 255));
+            id
+        })
+        .collect();
+    scene.flush();
+    gpu.render(&scene, &whole).unwrap();
+    for id in &old {
+        scene.set_effects(
+            *id,
+            Effects {
+                opacity: 0.,
+                ..Default::default()
+            },
+        );
+    }
+    let board = scene.append(
+        root,
+        NodeKind::Container(Layout::Overlay),
+        fixed(600., 400.),
+    );
+    scene.set_effects(
+        board,
+        Effects {
+            filter_blur: 0.25,
+            ..Default::default()
+        },
+    );
+    let word = scene.append(
+        board,
+        NodeKind::Text {
+            text: "Zeron".into(),
+            color: Color(255, 255, 255, 255),
+            font_size: 30.,
+        },
+        fixed(600., 400.),
+    );
+    scene.set_effects(
+        word,
+        Effects {
+            opacity: 0.,
+            ..Default::default()
+        },
+    );
+    for frame in 0..20 {
+        let s = 1.3 + frame as f32 * 0.01;
+        scene.set_local_transform(
+            board,
+            LocalTransform {
+                scale: (s, s),
+                origin: (0., 0.),
+                ..LocalTransform::IDENTITY
+            },
+        );
+        if frame == 10 {
+            scene.set_effects(word, Effects::default());
+        }
+        scene.flush();
+        gpu.render(&scene, &whole).unwrap();
+        let p = gpu.readback().unwrap();
+        let ink = p.chunks(4).filter(|c| c[0] > 160).count();
+        assert_eq!(ink > 200, frame >= 10, "frame {frame}: {ink} pixels of ink");
+        assert_eq!(gpu.debug_cache_stats().layers_coarser, 0, "frame {frame}");
+    }
+}
