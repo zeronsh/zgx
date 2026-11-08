@@ -93,6 +93,7 @@ pub fn install(host: ScriptHost, base: &Path) -> (ScriptHost, Audio) {
             pan: number(&arg, "pan").unwrap_or(0.) as f32,
             looped: false,
             delay: number(&arg, "delay").unwrap_or(0.),
+            at: number(&arg, "at"),
         };
         let played = playing.with(|engine| {
             let sound = engine.load(&path)?;
@@ -102,6 +103,15 @@ pub fn install(host: ScriptHost, base: &Path) -> (ScriptHost, Audio) {
         if let Some(Err(error)) = played {
             eprintln!("zgx-audio: {error}");
         }
+    });
+    // The clock doesn't open the device: before the first sound it stands
+    // at its start, 0, where the device's first buffer will begin.
+    let clock = audio.clone();
+    host.function("zgx.audio.now", move |_| {
+        let now = clock.0.borrow().as_ref().map_or(0., |engine| {
+            engine.as_ref().map_or(0., |engine| engine.now())
+        });
+        Value::Num(now)
     });
     (host, audio)
 }

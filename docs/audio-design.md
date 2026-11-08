@@ -148,6 +148,13 @@ ui.sound {
 	fade = 0.3,
 }
 
+-- In time: one clock for every sound and note, read once, with offsets.
+-- Each starts on its exact sample, however the calls are spaced.
+local t = ui.sound.now() + 0.05
+for beat = 0, 3 do
+	ui.sound.play("tick.wav", { at = t + beat * 0.5 })
+end
+
 -- Read ahead of a first play (decoding a long file takes a moment):
 ui.sound.preload { "click.wav", "pop.wav" }
 
@@ -155,6 +162,16 @@ ui.sound.preload { "click.wav", "pop.wav" }
 -- something reads it and something plays.
 local level = ui.sound.level()
 ```
+
+### One clock
+
+Sounds and notes are scheduled on one audio clock: `ui.sound.now()`, in seconds, is where the mixer's next buffer begins. `at = t` starts a sound on the frame at `t`. Sounds scheduled on the clock keep their spacing exactly however their calls are spaced, which a synth's notes and a sequencer's beats need.
+
+- **Where it counts from.** The clock is the mixer's own count of frames, and it starts at the first command the mixer takes, not when the device opens. A script that reads it before its first sound gets 0, and that holds however long the device and the first file take to open. The clock stands still while the device is closed after silence.
+- **How far ahead.** Schedule a little ahead of `now()`: a buffer, a few milliseconds. A sound whose time has passed when it arrives starts at once and is counted late (`Reading::late`). That's a mistake for a test to catch, not a wait.
+- **Delays.** `delay` still counts from when the command reaches the mixer. It's for one sound on its own, not for several in time.
+
+`synth:note` and its kin take `at` the same way.
 
 This is zgx's usual shape. A component declares a sound with states for what changes, and Rust re-runs only what reads a state that changed. A `ui.sound` element is a mount-scoped effect, like `video.audio`: it adds no node, and its lifetime is its component's.
 
@@ -198,7 +215,7 @@ The prototype's bridge is smaller: a package, `require("@audio")`, whose `audio.
 
 | Platform | Output | Prototype | Notes |
 | --- | --- | --- | --- |
-| macOS | AudioUnit, default output (`auou`/`def `) | plays; closes after silence | Follows the default device as it changes (headphones in or out). |
+| macOS | AudioUnit, default output (`auou`/`def `) | plays; closes after silence; follows a change of default device | The default output unit moves to the new default by itself, measured below. |
 | iOS | AudioUnit, Remote I/O (`rioc`) | plays in the simulator | Needs the session below. The prototype runs under the default session. |
 | Windows | WASAPI, shared, event-driven | written; type-checked; CI runs it if the runner has an endpoint | Through the `windows` crate zgx already uses. |
 | Linux | ALSA's API, loaded with `dlopen` | plays through ALSA into a file (container and CI); closes after silence | Plays on PipeWire, PulseAudio and plain ALSA alike. The binary doesn't link libasound. PipeWire's own API later, for lower latency. |
@@ -286,12 +303,22 @@ With zgx-audio:
   - the next sound opens it, and that sound plays.
 
   It passes on the M5 MacBook Pro and in the container. Where there's no output it says so and passes.
-- A delay counts from when its command reaches the mixer. In the container the null device runs the loop unpaced, so the clicks landed 0.22 s and 0.205 s apart, not 0.2 s: the script's three calls were a moment apart and the device didn't wait. A device that paces the loop takes commands once a buffer, so calls a moment apart land together. Even so, sounds a script means to keep in time should share a time base: `ui.sound.play(src, { at = t })`, with `t` read once from the audio clock.
+- **The clock, measured.** Clicks scheduled with `at` land on their exact samples.
+  - The mixer's own test sends three sounds 0, 3 and 7 buffers apart. They start on frames 2,912, 12,512 and 22,112 of its output: exactly 9,600 apart at 48 kHz, none late.
+  - `tests/capture.rs`, on Linux, reads back what ALSA was given (its file plugin, `ZGX_AUDIO_CAPTURE`). Three clicks scheduled 0.2 s apart are at frames 960,000, 969,600 and 979,200 in 5 runs of 5, as CI's Linux job checks.
+  - The Luau click example (`t = audio.now() + 0.05`, then `at = t + (i - 1) * 0.2`) wrote clicks exactly 9,600 frames apart in 8 runs of 8.
+  - Before the clock started at the first command, the first sound's file decoding ran into the schedule: 2 runs of 3 were wrong.
+  - The null device doesn't wait: it writes about 20 million frames a second. The capture test therefore schedules 20 s ahead, which is about 50 ms there.
+- **Device change on macOS, measured.** `examples/device_change.rs`:
+  - It plays silence and switches the system's default output from the Studio Display speakers to the MacBook Pro speakers, then back.
+  - The unit's device went 102 → 80 → 102, and it pulled 19,456, 18,944 and 18,944 frames in each 0.4 s: full rate, short of at most one 512-frame buffer at the switch.
+  - The original default is restored however the run ends, short of the process being killed.
+  - It's an example rather than a test because it changes a system setting.
 
 Not yet:
 - **Windows output, run:** it's only type-checked here. CI shows whether a hosted runner has an endpoint. Running it there for sure means installing a virtual sound card in CI (VB-Cable, as LABSN/sound-ci-helpers does: a third-party driver downloaded at each run), which is a choice for review.
 - **Buffer-size requests and real-time priority on Linux** (rtkit).
-- **Moving a playing stream** when the device changes.
+- **Moving a playing stream when the device changes, on Windows and Linux.** macOS follows by itself. Windows and Linux open the new default at the next sound after a close; WASAPI could follow at once through `IMMNotificationClient`.
 - **Decoders** beyond WAV and `afconvert`.
 - **iOS's session.**
 

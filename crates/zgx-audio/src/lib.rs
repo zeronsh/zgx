@@ -91,9 +91,21 @@ impl Engine {
     pub fn close_after(&mut self, seconds: f64) {
         self.control.close_after(seconds);
     }
+    /// The mix's clock, in seconds: where the next buffer begins. Sounds
+    /// scheduled on it ([`Play::at`]) start on their frames; schedule a
+    /// little ahead of it (a buffer, a few milliseconds).
+    pub fn now(&self) -> f64 {
+        self.control.now()
+    }
     /// Whether the device is open and playing (not closed after silence).
     pub fn is_running(&self) -> bool {
         self.output.is_running()
+    }
+    /// The device it plays on (an `AudioObjectID`), for tests.
+    #[cfg(target_os = "macos")]
+    #[doc(hidden)]
+    pub fn device(&self) -> Option<u32> {
+        self.output.device()
     }
     /// What the audio thread has done since it started.
     pub fn reading(&mut self) -> Reading {

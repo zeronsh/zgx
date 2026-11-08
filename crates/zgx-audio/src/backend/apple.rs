@@ -282,6 +282,24 @@ impl Output {
     pub fn is_running(&self) -> bool {
         self.gate.is_running()
     }
+    /// The device the unit plays on (an `AudioObjectID`), for tests.
+    #[cfg(target_os = "macos")]
+    pub fn device(&self) -> Option<u32> {
+        const CURRENT_DEVICE: u32 = 2000;
+        let mut device = 0u32;
+        let mut size = size_of::<u32>() as u32;
+        let status = unsafe {
+            AudioUnitGetProperty(
+                self.unit,
+                CURRENT_DEVICE,
+                0,
+                0,
+                (&raw mut device).cast(),
+                &mut size,
+            )
+        };
+        (status == 0).then_some(device)
+    }
 }
 
 impl Drop for Output {

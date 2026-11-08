@@ -60,6 +60,11 @@ pub struct Play {
     pub looped: bool,
     /// Starts this many seconds after the command arrives, to the frame.
     pub delay: f64,
+    /// Starts at this time on the mix's clock ([`Controller::now`]), to the
+    /// frame, over `delay`: sounds scheduled on one clock keep their spacing
+    /// however their commands are spaced. One whose time has passed when it
+    /// arrives starts at once, and is counted late ([`Reading::late`]).
+    pub at: Option<f64>,
 }
 impl Default for Play {
     fn default() -> Self {
@@ -68,6 +73,7 @@ impl Default for Play {
             pan: 0.,
             looped: false,
             delay: 0.,
+            at: None,
         }
     }
 }
@@ -78,7 +84,7 @@ pub(crate) enum Command {
         sound: Arc<[f32]>,
         gain: [f32; 2],
         looped: bool,
-        delay: u64,
+        start: Start,
     },
     Set {
         voice: Voice,
@@ -88,6 +94,14 @@ pub(crate) enum Command {
         voice: Voice,
     },
     Stream(Option<Box<dyn Stream>>),
+}
+
+/// When a sound starts: frames after its command is taken, or at a frame
+/// of the mix's clock.
+#[derive(Clone, Copy)]
+pub(crate) enum Start {
+    After(u64),
+    At(u64),
 }
 
 pub(crate) enum Garbage {
@@ -113,8 +127,10 @@ const COMMANDS: usize = 1024;
 /// What the audio thread did, for a host to read.
 #[derive(Default)]
 pub struct Stats {
+    /// The mix's clock: frames rendered since the first command.
     frames: AtomicU64,
     started: AtomicU64,
+    late: AtomicU64,
     peak: AtomicU32,
     /// Commands the controller has queued, and the mixer has taken: the
     /// same when none waits.
@@ -145,10 +161,12 @@ impl Watch {
 /// A reading of [`Stats`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Reading {
-    /// Frames rendered.
+    /// The clock: frames rendered since the first command.
     pub frames: u64,
     /// Voices that began to sound.
     pub started: u64,
+    /// Sounds whose time ([`Play::at`]) had passed when they arrived.
+    pub late: u64,
     /// The loudest sample since the last reading.
     pub peak: f32,
 }
@@ -177,6 +195,8 @@ pub struct Mixer {
     voices: Vec<Playing>,
     stream: Option<Box<dyn Stream>>,
     stream_frame: u64,
+    /// A command has come: the clock runs.
+    begun: bool,
 }
 
 /// The side that sends it sounds, and frees what it lets go of.
@@ -215,6 +235,7 @@ pub fn pair(rate: u32) -> (Controller, Mixer) {
             voices: Vec::with_capacity(VOICES),
             stream: None,
             stream_frame: 0,
+            begun: false,
         },
     )
 }
@@ -253,9 +274,18 @@ impl Controller {
             sound: sound.0.clone(),
             gain: gain(play.volume, play.pan),
             looped: play.looped,
-            delay: (play.delay.max(0.) * f64::from(self.rate)).round() as u64,
+            start: match play.at {
+                Some(at) => Start::At((at.max(0.) * f64::from(self.rate)).round() as u64),
+                None => Start::After((play.delay.max(0.) * f64::from(self.rate)).round() as u64),
+            },
         });
         voice
+    }
+    /// The mix's clock, in seconds: where the next buffer begins. It starts
+    /// at the first command and stands still while the device is closed. A sound scheduled at `now()` plus
+    /// a buffer or more ([`Play::at`]) starts on its frame.
+    pub fn now(&self) -> f64 {
+        self.stats.frames.load(Ordering::Acquire) as f64 / f64::from(self.rate)
     }
     /// Moves `voice` to `volume` and `pan`, smoothly over the next buffer.
     pub fn set(&mut self, voice: Voice, volume: f32, pan: f32) {
@@ -278,6 +308,7 @@ impl Controller {
         Reading {
             frames: self.stats.frames.load(Ordering::Relaxed),
             started: self.stats.started.load(Ordering::Relaxed),
+            late: self.stats.late.load(Ordering::Relaxed),
             peak: f32::from_bits(self.stats.peak.swap(0, Ordering::Relaxed)),
         }
     }
@@ -287,14 +318,25 @@ impl Mixer {
     fn take_commands(&mut self) {
         while let Some(command) = self.commands.pop() {
             self.stats.taken.fetch_add(1, Ordering::SeqCst);
+            self.begun = true;
             match command {
                 Command::Play {
                     voice,
                     sound,
                     gain,
                     looped,
-                    delay,
+                    start,
                 } => {
+                    let delay = match start {
+                        Start::After(frames) => frames,
+                        Start::At(frame) => {
+                            let clock = self.stats.frames.load(Ordering::Relaxed);
+                            if frame < clock {
+                                self.stats.late.fetch_add(1, Ordering::Relaxed);
+                            }
+                            frame.saturating_sub(clock)
+                        }
+                    };
                     if self.voices.len() == VOICES || sound.len() < 2 {
                         let _ = self.garbage.push(Garbage::Sound(sound));
                         continue;
@@ -398,9 +440,14 @@ impl Mixer {
         }
         let peak = out.iter().fold(0f32, |peak, s| peak.max(s.abs()));
         self.stats.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
-        self.stats
-            .frames
-            .fetch_add(frames as u64, Ordering::Relaxed);
+        // The clock starts at the first command, not when the device
+        // opened: a script reading it before its first sound (0) gets a time
+        // that holds however long the device and that sound take to open.
+        if self.begun {
+            self.stats
+                .frames
+                .fetch_add(frames as u64, Ordering::Release);
+        }
     }
 }
 
@@ -461,6 +508,63 @@ mod tests {
         let start = second.iter().position(|s| *s != 0.).unwrap() / 2;
         assert_eq!(start, 100 - 64);
         assert_eq!(second.iter().filter(|s| **s != 0.).count(), 20);
+    }
+
+    #[test]
+    fn sounds_scheduled_on_the_clock_start_on_their_frames_however_they_arrive() {
+        let (mut control, mut mixer) = pair(48_000);
+        let click = Sound::from_stereo(vec![1., 1.]);
+        let mut out = vec![0.; 512 * 2];
+        let mut heard = Vec::new();
+        let mut buffer = 0;
+        let mut render = |mixer: &mut Mixer, heard: &mut Vec<u64>| {
+            mixer.render(&mut out);
+            for (i, frame) in out.chunks_exact(2).enumerate() {
+                if frame[0] != 0. {
+                    heard.push(buffer * 512 + i as u64);
+                }
+            }
+            buffer += 1;
+        };
+        render(&mut mixer, &mut heard);
+        let t = control.now() + 0.05;
+        assert_eq!(t, 0.05, "no command yet: the clock hasn't started");
+        // Each command a few buffers after the last: their own arrival
+        // would space them unevenly.
+        for (i, wait) in [0, 3, 7].into_iter().enumerate() {
+            for _ in 0..wait {
+                render(&mut mixer, &mut heard);
+            }
+            let at = Some(t + i as f64 * 0.2);
+            control.play(
+                &click,
+                Play {
+                    at,
+                    ..Play::default()
+                },
+            );
+        }
+        while mixer.voices.len() + heard.len() < 3 || !mixer.voices.is_empty() {
+            render(&mut mixer, &mut heard);
+        }
+        // The clock began with the buffer that took the first command, the
+        // second rendered.
+        let first = 512 + 2400;
+        assert_eq!(heard, [first, first + 9600, first + 19_200]);
+        assert_eq!(control.reading().late, 0);
+
+        // One whose time has passed starts at once, counted late.
+        control.play(
+            &click,
+            Play {
+                at: Some(0.),
+                ..Play::default()
+            },
+        );
+        let clock = (control.now() * 48_000.).round() as u64;
+        render(&mut mixer, &mut heard);
+        assert_eq!(heard.last(), Some(&(512 + clock)));
+        assert_eq!(control.reading().late, 1);
     }
 
     #[test]
