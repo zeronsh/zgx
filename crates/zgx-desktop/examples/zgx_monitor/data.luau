@@ -2,7 +2,16 @@
 -- sidebar's order, and the last minute of each process a panel shows.
 local state = require("./state")
 
-export type Proc = { pid: number, ppid: number?, name: string, label: string?, cpu: number, gpu: number, mem: number, smooth: number }
+export type Proc = {
+	pid: number,
+	ppid: number?,
+	name: string,
+	label: string?,
+	cpu: number,
+	gpu: number,
+	mem: number,
+	smooth: number,
+}
 -- A process with others under it, as the Attach menu offers it.
 export type App = { name: string, count: number, mem: number }
 -- The attached tree's totals.
@@ -130,7 +139,7 @@ function M.apps(): { App }
 			table.insert(apps, tree)
 		end
 	end
-	table.sort(apps, function(a, b)
+	table.sort(apps, function(a: App, b: App)
 		if a.mem ~= b.mem then
 			return a.mem > b.mem
 		end

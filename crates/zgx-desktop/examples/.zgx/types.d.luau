@@ -20406,7 +20406,7 @@ export type SlotProps = {
 -- offer.
 -- The hooks this app declares (`hook = "…"`).
 export type HookName = never
-export type HookTarget = "#agent:" | "#ask" | "#best" | "#consent-allow" | "#consent-deny" | "#consent-later" | "#cta" | "#editor-new" | "#editor-open" | "#editor-text" | "#hn-" | "#new" | "#open:" | "#palette-query" | "#portal" | "#show" | "#sidebar_toggle" | "#slot" | "#top" | ".agent" | ".scene" | ".word"
+export type HookTarget = "#agent:" | "#ask" | "#attach" | "#best" | "#consent-allow" | "#consent-deny" | "#consent-later" | "#cta" | "#editor-new" | "#editor-open" | "#editor-text" | "#hn-" | "#new" | "#open:" | "#palette-query" | "#portal" | "#show" | "#sidebar_toggle" | "#slot" | "#top" | ".agent" | ".scene" | ".word"
 -- A target inside others (`"#sidebar >> .session-row"`): any text, since a
 -- chain's parts combine freely; `zgx lint` checks each `#id` and `hook:`.
 export type HookChain = string
