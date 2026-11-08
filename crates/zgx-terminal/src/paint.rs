@@ -177,14 +177,13 @@ fn resolve(term: &Term, palette: &Palette, color: VtColor) -> Rgb {
 }
 
 /// Whether a character's glyph may come from a font other than the grid's
-/// (CJK, symbols, emoji, private-use icons): drawn alone at its cell, so its
-/// width can't move the characters after it off the grid.
+/// (CJK, symbols, emoji, private-use icons): drawn alone, centred on its
+/// cells. (A run is on the grid too, `LetterSpacing::cells`: a glyph there a
+/// little wider or narrower than a cell moves nothing after it.) Most text
+/// is out after a compare.
 fn alone(c: char) -> bool {
     let c = c as u32;
-    c >= 0x2e80
-        || (0x2190..0x2500).contains(&c)
-        || (0x25a0..0x2800).contains(&c)
-        || (0xe000..0xf900).contains(&c)
+    c >= 0x2190 && matches!(c, ..0x2500 | 0x25a0..0x2800 | 0x2e80..)
 }
 
 /// The row at viewport `row` (0 at the top of what shows).
@@ -554,7 +553,8 @@ pub(crate) fn font() -> FontStyle {
     }
 }
 
-/// `paint` drawn on a row's canvas.
+/// `paint` drawn on a row's canvas, in `font`: the grid's, on its cells
+/// (`LetterSpacing::cells`, set once with the cell, `view::row_view`).
 pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canvas {
     let mut canvas = Canvas::new();
     for fill in paint.fills.iter().chain(&paint.lines) {

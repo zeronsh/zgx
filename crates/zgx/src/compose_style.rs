@@ -1884,6 +1884,7 @@ fn apply_resolved(
             {
                 outline.offset = offset;
             }
+
             if quad.decoration.is_some()
                 || resolved.paint_background.is_some()
                 || resolved.corners.is_some()
@@ -2024,6 +2025,12 @@ fn apply_rare(
             node,
             cold.and_then(|cold| cold.outline_style).unwrap_or_default(),
         );
+        // Inner rings are rare (Windows' focus): nothing to do unless this
+        // style sets one or the scene holds one to take away.
+        let inner = cold.and_then(|cold| cold.outline_inner).flatten();
+        if inner.is_some() || scene.has_outline_inners() {
+            scene.set_outline_inner(node, inner);
+        }
         scene.set_mask_gradient(node, cold.and_then(|cold| cold.mask_gradient().cloned()));
         let gradient = cold.and_then(|cold| cold.text_gradient().cloned());
         if gradient.is_some() || scene.has_text_gradients() {

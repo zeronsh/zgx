@@ -753,6 +753,8 @@ pub(crate) struct ColdStyles {
     pub(crate) image_slice: Option<std::sync::Arc<crate::image::ImageSlice>>,
     /// `Styled::outline_style`.
     pub(crate) outline_style: Option<crate::decoration::BorderStyle>,
+    /// `Styled::outline_inner` (width and colour; `Some(None)`: none).
+    pub(crate) outline_inner: Option<Option<(f32, Color)>>,
     /// `Styled::mask_gradient`, `text_gradient` and `drop_shadow`.
     pub(crate) layers: Option<std::sync::Arc<LayerStyles>>,
     /// `Styled::w_calc` and the like.
@@ -959,6 +961,7 @@ impl RareStyles {
         if other.outline_offset.is_some() {
             self.outline_offset = other.outline_offset;
         }
+
         if let Some(theirs) = &other.cold {
             let mine = self.cold.get_or_insert_default();
             if theirs.shader_uniforms.is_some() {
@@ -993,6 +996,9 @@ impl RareStyles {
             }
             if theirs.outline_style.is_some() {
                 mine.outline_style = theirs.outline_style;
+            }
+            if theirs.outline_inner.is_some() {
+                mine.outline_inner = theirs.outline_inner;
             }
             if let Some(theirs) = &theirs.layers {
                 let mine = std::sync::Arc::make_mut(mine.layers.get_or_insert_default());
@@ -2331,6 +2337,31 @@ pub trait Styled: Sized {
     /// negative draws it over the box's edge.
     fn outline_offset(mut self, offset: f32) -> Self {
         self.styles_mut().rare_mut().outline_offset = Some(offset);
+        self
+    }
+    /// A second ring `width` wide inside the outline, between it and the
+    /// box, in `color` (a value or a theme token): a contrasting band under
+    /// the outline, as Windows draws keyboard focus. It sits within the
+    /// outline's offset, so give the outline an offset at least as wide.
+    fn outline_inner(mut self, width: f32, color: impl Into<crate::theme::Themed<Color>>) -> Self {
+        value_or_token!(self, color, crate::theme::Field::OutlineInnerColor);
+        self.styles_mut()
+            .rare_mut()
+            .cold
+            .get_or_insert_default()
+            .outline_inner = Some(Some((width.max(0.), color)));
+        self
+    }
+    /// The inner ring's colour (`outline_inner`), keeping its width (1
+    /// point if none was set).
+    fn outline_inner_color(mut self, value: impl Into<crate::theme::Themed<Color>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::OutlineInnerColor);
+        let cold = self.styles_mut().rare_mut().cold.get_or_insert_default();
+        let width = match cold.outline_inner {
+            Some(Some((width, _))) => width,
+            _ => 1.,
+        };
+        cold.outline_inner = Some(Some((width, value)));
         self
     }
     /// Draw its image in nine pieces (a nine-patch, CSS's `border-image`

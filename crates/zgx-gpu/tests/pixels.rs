@@ -5215,6 +5215,78 @@ fn fractional_scrolls_on_the_pixel_grid_copy_and_match_a_fresh_render() {
     assert_eq!(copies, expected);
 }
 
+/// A clear box over a list (an overlay scrollbar's track away from the
+/// pointer is one) paints nothing: the list's scrolls still copy, and the
+/// frames match a fresh render.
+#[test]
+fn scrolls_under_a_clear_box_copy_and_match_a_fresh_render() {
+    let _gpu_fixture = gpu_fixture();
+    use zgx::{compose::prelude::*, widgets::Ui};
+    let mut gpu = GpuRenderer::new(160, 120).unwrap();
+    let mut ui = Ui::new(160., 120.);
+    ui.scene.borrow_mut().set_pixel_scale(1.);
+    let offset = ui.signal(0_f32);
+    ui.mount(
+        overlay()
+            .w(160.)
+            .h(120.)
+            .bg(rgb(0x000000))
+            .child(
+                virtual_list(
+                    offset.clone(),
+                    24.,
+                    2,
+                    || 1000,
+                    |i| i,
+                    |_, key, _| {
+                        div()
+                            .size(144., 24.)
+                            .bg(if key % 2 == 0 {
+                                rgb(0x223344)
+                            } else {
+                                rgb(0x334455)
+                            })
+                            .child(div().size(144., 1.).bg(rgb(0xffffff)))
+                    },
+                )
+                .w(160.)
+                .h(100.)
+                .p(8.)
+                .bg(rgb(0x101820)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(140.)
+                    .top(8.)
+                    .size(8., 84.)
+                    .bg(rgba(0xffffff00)),
+            ),
+    );
+    let mut copies = 0;
+    for scroll in [0., 14., 28., 31., 60.] {
+        offset.set(scroll);
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        copies += gpu
+            .render(&ui.scene.borrow(), &damage)
+            .unwrap()
+            .scroll_copies;
+        let mut fresh = GpuRenderer::new(160, 120).unwrap();
+        fresh
+            .render(&ui.scene.borrow(), &[Rect::new(0., 0., 160., 120.)])
+            .unwrap();
+        assert_eq!(
+            gpu.readback().unwrap(),
+            fresh.readback().unwrap(),
+            "scroll {scroll}"
+        );
+    }
+    // Texture blits cost Apple GPUs graphics memory; macOS repaints.
+    let expected = if cfg!(target_os = "macos") { 0 } else { 4 };
+    assert_eq!(copies, expected);
+}
+
 /// A rounded panel, overflow hidden, holding a scroll view beside a divider
 /// (an app's sidebar), scrolled down and back up in a wheel's uneven steps
 /// on a 2x pixel grid: a copy of the view's pixels must not carry the
@@ -6085,48 +6157,89 @@ fn find_marks_are_rounded_whichever_shader_draws_the_text() {
     assert_eq!(changed, 0, "find marks differ from the full shader's");
 }
 
-/// A page of large text grows the glyph atlas past its first size. A pause
-/// keeps it (the next frame would rasterize everything again); a long idle
-/// gives it back, and the next frame draws the same picture, the atlas back
-/// at the size it had in one step. (Fourteen letters a line, none twice: a
-/// letter repeated on whole pixels is one image, below 2x.)
+/// Five lines of large text, fourteen letters a line, none twice (a letter
+/// repeated on whole pixels is one image, below 2x): enough to grow the
+/// glyph atlas past its first size.
+fn large_letters(scene: &mut Scene) -> Vec<NodeId> {
+    (0..5)
+        .map(|line| {
+            let text: String = (0..14)
+                .map(|i| (b'A' + (line * 5 + i) % 26) as char)
+                .collect();
+            scene.append(
+                scene.root(),
+                NodeKind::Text {
+                    text: text.as_str().into(),
+                    font_size: 120. + f32::from(line) * 7.,
+                    color: Color(255, 255, 255, 255),
+                },
+                fixed(1200., 170.),
+            )
+        })
+        .collect()
+}
+
+/// A screen of large text fills a grown atlas. A long idle keeps it (none
+/// of it could go without being rasterized again as the user comes back),
+/// and the next frame draws the same picture from it, uploading nothing.
 #[test]
-fn a_grown_atlas_goes_back_at_idle_and_draws_the_same() {
+fn a_grown_atlas_its_screen_fills_stays_at_idle() {
     let _gpu = gpu_fixture();
     let mut scene = Scene::new(1200., 900.);
-    let lines: Vec<String> = (0..5)
-        .map(|line| {
-            (0..14)
-                .map(|i| (b'A' + (line * 5 + i) % 26) as char)
-                .collect()
-        })
-        .collect();
-    for (i, text) in lines.iter().enumerate() {
-        scene.append(
-            scene.root(),
-            NodeKind::Text {
-                text: text.as_str().into(),
-                font_size: 120. + i as f32 * 7.,
-                color: Color(255, 255, 255, 255),
-            },
-            fixed(1200., 170.),
-        );
-    }
+    large_letters(&mut scene);
     let mut gpu = GpuRenderer::new(1200, 900).unwrap();
     let damage = scene.flush().damage;
     gpu.render(&scene, &damage).unwrap();
     let first_size = 512 * 512 * 4;
-    assert!(gpu.debug_cache_stats().atlas_bytes > first_size);
-    let before = gpu.readback().unwrap();
     let grown = gpu.debug_cache_stats().atlas_bytes;
+    assert!(grown > first_size);
+    let before = gpu.readback().unwrap();
+    gpu.trim();
+    gpu.trim_atlas();
+    assert_eq!(gpu.debug_cache_stats().atlas_bytes, grown);
+    let whole = [Rect::new(0., 0., 1200., 900.)];
+    let stats = gpu.render(&scene, &whole).unwrap();
+    assert_eq!(stats.glyph_uploads, 0);
+    assert!(gpu.readback().unwrap() == before, "the same picture");
+}
+
+/// Large text grows the atlas, then gives way to a line of small text. A
+/// pause keeps the grown atlas; a long idle shrinks it to what the screen
+/// draws, its glyphs copied across: the next frame draws the same picture
+/// without rasterizing any of them again.
+#[test]
+fn a_grown_atlas_shrinks_at_idle_to_what_its_screen_draws() {
+    let _gpu = gpu_fixture();
+    let mut scene = Scene::new(1200., 900.);
+    let large = large_letters(&mut scene);
+    let mut gpu = GpuRenderer::new(1200, 900).unwrap();
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    let first_size = 512 * 512 * 4;
+    let grown = gpu.debug_cache_stats().atlas_bytes;
+    assert!(grown > first_size);
+    for id in large {
+        scene.remove(id);
+    }
+    scene.append(
+        scene.root(),
+        NodeKind::Text {
+            text: "The quick brown fox jumps over the lazy dog".into(),
+            font_size: 16.,
+            color: Color(255, 255, 255, 255),
+        },
+        fixed(1200., 40.),
+    );
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    let before = gpu.readback().unwrap();
     gpu.trim();
     assert_eq!(gpu.debug_cache_stats().atlas_bytes, grown);
-    assert!(gpu.atlas_grown());
     gpu.trim_atlas();
     assert_eq!(gpu.debug_cache_stats().atlas_bytes, first_size);
     let whole = [Rect::new(0., 0., 1200., 900.)];
-    gpu.render(&scene, &whole).unwrap();
-    assert_eq!(gpu.debug_cache_stats().atlas_bytes, grown);
+    let stats = gpu.render(&scene, &whole).unwrap();
+    assert_eq!(stats.glyph_uploads, 0, "drawn from the glyphs copied");
     assert!(gpu.readback().unwrap() == before, "the same picture");
 }
 

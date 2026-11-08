@@ -72,7 +72,7 @@ pub(super) struct WordCache {
 pub(super) fn qualifies(font: &FontStyle) -> bool {
     font.fallbacks.is_empty()
         && !font.masked
-        && font.letter_spacing.pixels() == 0.
+        && font.letter_spacing == zgx::text_layout::LetterSpacing::ZERO
         && !font
             .features
             .settings()
@@ -482,5 +482,27 @@ impl Words {
     pub fn bytes(&self) -> usize {
         let glyphs: usize = self.words.iter().map(|(_, word)| word.glyphs.len()).sum();
         256 + self.words.len() * 16 + glyphs * size_of::<cosmic_text::LayoutGlyph>()
+    }
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::*;
+    use zgx::text_layout::LetterSpacing;
+
+    /// A font on a grid of cells is shaped whole, as tracking is, not word
+    /// by word from the cache (its words' advances are the grid's).
+    #[test]
+    fn a_grid_is_shaped_whole() {
+        let grid = FontStyle {
+            letter_spacing: LetterSpacing::cells(7.),
+            fallbacks: std::sync::Arc::from([]),
+            ..FontStyle::default()
+        };
+        assert!(!qualifies(&grid));
+        assert!(qualifies(&FontStyle {
+            letter_spacing: LetterSpacing::ZERO,
+            ..grid
+        }));
     }
 }

@@ -6,6 +6,7 @@
 //! first shared subtree. Scripts see values as read-only tables and change
 //! state through its methods: `set`, `set_key`, `patch`, `update`, `insert`.
 use mlua::{FromLua, IntoLua, Lua, Table, UserData, UserDataMethods};
+use rustc_hash::FxHashMap;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -841,8 +842,9 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
     use mlua::ffi;
     use std::ffi::c_int;
     struct Cx<'a> {
-        held: Option<std::cell::Ref<'a, HashMap<usize, (Value, usize)>>>,
-        strings: HashMap<usize, Rc<str>>,
+        held: Option<std::cell::Ref<'a, FxHashMap<usize, (Value, usize)>>>,
+        /// By the Luau string's address (no script chooses it, so Fx).
+        strings: FxHashMap<usize, Rc<str>>,
     }
     const TABLE: c_int = 1;
     const IDS: c_int = 2;
@@ -896,7 +898,7 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
     fn string(cx: &mut Cx, at: usize, bytes: &[u8]) -> Rc<str> {
         cx.strings
             .entry(at)
-            .or_insert_with(|| String::from_utf8_lossy(bytes).into())
+            .or_insert_with(|| str_of(bytes))
             .clone()
     }
     unsafe fn read_table(
@@ -1014,7 +1016,7 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
     let ids = cache.as_ref().map(|c| c.ids.borrow().clone());
     let mut cx = Cx {
         held: cache.as_ref().map(|c| c.held.borrow()),
-        strings: HashMap::new(),
+        strings: FxHashMap::default(),
     };
     let mut out = Err(Unread::General);
     // SAFETY: `exec_raw` runs the closure as a C function inside a protected
@@ -1571,8 +1573,10 @@ fn weak(lua: &Lua, mode: &str) -> mlua::Result<Table> {
 /// not as the collector happened to have run, and what a delta costs would
 /// vary from run to run.
 struct Converted {
-    /// id → the value and its `weight`.
-    held: std::cell::RefCell<HashMap<usize, (Value, usize)>>,
+    /// id → the value and its `weight`. (Ids are addresses, which no
+    /// script chooses: hashed by a multiply, not SipHash, which guards
+    /// against keys made to collide.)
+    held: std::cell::RefCell<FxHashMap<usize, (Value, usize)>>,
     /// id → table, while `held` holds its value. Strong: a long list's rows
     /// no script holds any more go as the host goes idle (`weaken_cache`),
     /// not as the collector happens to run. (Handles, not registry keys:
@@ -1587,7 +1591,7 @@ struct Converted {
     clone: mlua::Function,
     /// id → the value a list was written from (`derives_from`), whose
     /// table its own is derived from when a script reads it.
-    bases: std::cell::RefCell<HashMap<usize, Value>>,
+    bases: std::cell::RefCell<FxHashMap<usize, Value>>,
     /// The `weight` of what is held.
     weight: std::cell::Cell<usize>,
     /// The `weight` of what was held after the last sweep.

@@ -430,7 +430,10 @@ standard terms, which a theme may set: `button.bg` (`{surface.raised}`),
 (`{surface.overlay}`, popovers' and tooltips' panels). On macOS, where menus
 and popovers show in windows of their own over AppKit's material, the system
 sets `menu.bg` and `popover.bg` clear and `menu.hover` to the accent, as an
-app theme setting them overrides.
+app theme setting them overrides. Keyboard focus is an accent ring inside the control (`focus.ring`); on
+Windows, as WinUI's focus visual, a ring 2 wide 1 outside it in `focus.ring`
+(the text's colour there) over a ring 1 wide in the window's background,
+with `Styled::outline_inner`.
 
 Text shows `text.primary`, `font.size.md` and `font.sans` unless a view sets
 its own. The built-in `zgx-dark` theme, the default, keeps zgx's original

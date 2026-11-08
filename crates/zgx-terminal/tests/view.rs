@@ -897,3 +897,33 @@ fn styled_and_coloured_underlines_are_drawn_under_their_cells() {
     assert_eq!(others, 0, "a styled underline isn't drawn by its text too");
     drop(term);
 }
+
+/// Every run is drawn on the grid of cells (`LetterSpacing::cells`, the
+/// cell measured for the font), so a glyph from a fallback font a little
+/// wider or narrower than a cell (a braille spinner on macOS) moves nothing
+/// after it; the spinner stays in the run.
+#[test]
+#[cfg(unix)]
+fn runs_are_drawn_on_the_grid_of_cells() {
+    let mut app = Harness::new();
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(r"printf '\342\240\213 Loading 21\342\204\203 done\r\n'; sleep 30"),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    let line = "\u{280b} Loading 21\u{2103} done";
+    app.until("the output", |app| app.shows(line));
+    let spacing = {
+        let scene = app.ui.scene.borrow();
+        scene.paint_items().find_map(|item| match item.kind {
+            NodeKind::Text { text, .. } if &**text == line => Some(item.font.letter_spacing),
+            _ => None,
+        })
+    };
+    let cell = spacing.and_then(|spacing| spacing.cell());
+    assert!(cell.is_some_and(|cell| cell > 0.), "on a grid: {spacing:?}");
+}

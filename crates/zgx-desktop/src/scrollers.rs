@@ -1,6 +1,7 @@
 //! The system's scrolling settings: overlay scrollbars, hidden until a view
 //! scrolls (`Ui::set_overlay_scrollbars`), where the user has them, and on
-//! Windows how far a wheel notch scrolls.
+//! Windows how far a wheel notch scrolls, and (read with them) when
+//! tooltips show.
 
 #[cfg(windows)]
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -118,7 +119,50 @@ pub(crate) fn sync(ui: &zgx::widgets::Ui) {
         ui.set_overlay_scrollbars(overlay);
     }
     #[cfg(windows)]
-    read_wheel();
+    {
+        read_wheel();
+        // Read with them: when tooltips show, from the mouse hover time.
+        zgx::compose::set_tooltip_timing(windows_tooltip_timing(hover_time()));
+    }
+}
+
+/// Windows' mouse hover time (`SPI_GETMOUSEHOVERTIME`; 400 ms, its
+/// default, if it can't be read).
+#[cfg(windows)]
+fn hover_time() -> std::time::Duration {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETMOUSEHOVERTIME, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut value = 0u32;
+    // SAFETY: fills one UINT.
+    let read = unsafe {
+        SystemParametersInfoW(
+            SPI_GETMOUSEHOVERTIME,
+            0,
+            Some(&mut value as *mut _ as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    let ms = if read.is_ok() && value > 0 {
+        value
+    } else {
+        400
+    };
+    std::time::Duration::from_millis(ms.into())
+}
+
+/// When tooltips show on Windows, as WinUI's `ToolTipService` times them
+/// for the mouse: after twice the hover time, and within 200 ms of another
+/// opening after the hover time (its one and a half times, in integers,
+/// truncates to one).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_tooltip_timing(hover: std::time::Duration) -> zgx::compose::TooltipTiming {
+    zgx::compose::TooltipTiming {
+        delay: hover * 2,
+        reshow_within: std::time::Duration::from_millis(200),
+        reshow_delay: hover,
+        reshow_from_open: true,
+    }
 }
 
 /// macOS's scroll bar style changed since the last call ("Show scroll bars",
@@ -172,5 +216,19 @@ mod tests {
         assert_eq!(step(Some(0), 600.), 0.);
         // "One screen at a time" (WHEEL_PAGESCROLL).
         assert_eq!(step(Some(u32::MAX), 600.), 525.);
+    }
+}
+
+#[cfg(test)]
+mod tooltip_timing_tests {
+    use super::windows_tooltip_timing;
+    use std::time::Duration;
+    #[test]
+    fn windows_tooltips_wait_twice_the_hover_time_and_reshow_sooner() {
+        let timing = windows_tooltip_timing(Duration::from_millis(400));
+        assert_eq!(timing.delay, Duration::from_millis(800));
+        assert_eq!(timing.reshow_within, Duration::from_millis(200));
+        assert_eq!(timing.reshow_delay, Duration::from_millis(400));
+        assert!(timing.reshow_from_open);
     }
 }

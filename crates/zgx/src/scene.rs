@@ -1894,6 +1894,8 @@ struct ColdMaps {
     image_slices: NodeMap<crate::image::ImageSlice>,
     /// Outlines drawn dashed or dotted (`set_outline_style`).
     outline_styles: NodeMap<crate::decoration::BorderStyle>,
+    /// Outlines' inner rings (`set_outline_inner`).
+    outline_inners: NodeMap<(f32, Color)>,
     /// Boxes whose width their content doesn't size (`set_contained`).
     contained: NodeMap<Contained>,
     /// Text filled with a gradient (`set_text_gradient`).
@@ -2363,13 +2365,26 @@ fn relevant_to_in_place(node: &Node, bits: u8, constraints: &mut Constraints) {
 }
 /// Put `evicted` (most recent first) ahead of `sizes`' older entries, each
 /// constraint kept once, at most `PROBE_SIZES`.
-fn keep_sizes(sizes: &mut Vec<ProbeSize>, evicted: Vec<ProbeSize>) {
+fn keep_sizes(sizes: &mut Vec<ProbeSize>, mut evicted: Vec<ProbeSize>) {
     if evicted.is_empty() {
         return;
     }
-    sizes.retain(|kept| !evicted.iter().any(|m| m.constraints == kept.constraints));
+    // A constraint evicted is rarely among the sizes already (it was kept
+    // whole until now): looked for, and only then taken out.
+    if evicted
+        .iter()
+        .any(|m| sizes.iter().any(|kept| kept.constraints == m.constraints))
+    {
+        sizes.retain(|kept| !evicted.iter().any(|m| m.constraints == kept.constraints));
+    }
+    // The oldest past the few kept go first, so only the rest move.
+    if evicted.len() >= PROBE_SIZES {
+        evicted.truncate(PROBE_SIZES);
+        *sizes = evicted;
+        return;
+    }
+    sizes.truncate(PROBE_SIZES - evicted.len());
     sizes.splice(0..0, evicted);
-    sizes.truncate(PROBE_SIZES);
 }
 /// A size flex distribution gives, on a 1/256 point grid: sharing out the
 /// room in floats drifts (644.00073 where 644 fits), and the drift would
@@ -7045,6 +7060,7 @@ impl Scene {
                 || cold.image_rendering.contains_key(&id)
                 || cold.image_slices.contains_key(&id)
                 || cold.outline_styles.contains_key(&id)
+                || cold.outline_inners.contains_key(&id)
                 || cold.contained.contains_key(&id)
                 || cold.mask_gradients.contains_key(&id)
                 || cold.text_gradients.contains_key(&id)
@@ -7740,6 +7756,7 @@ impl Scene {
             maps.image_rendering.remove(&id);
             maps.image_slices.remove(&id);
             maps.outline_styles.remove(&id);
+            maps.outline_inners.remove(&id);
             maps.steps.remove(&id);
             maps.contained.remove(&id);
             maps.mask_gradients.remove(&id);
@@ -11326,8 +11343,14 @@ impl Scene {
                     .drain(PASS_RESULTS.min(node.alternates.len())..)
                     .map(|m| ProbeSize::from(&m)),
             );
-            node.sizes
-                .retain(|m| m.constraints != constraints && (m.pass == pass || !dirty));
+            if dirty {
+                node.sizes
+                    .retain(|m| m.constraints != constraints && m.pass == pass);
+            } else if node.sizes.iter().any(|m| m.constraints == constraints) {
+                // Clean, nothing is stale: only the new result's own size
+                // goes, rarely kept (looked for first).
+                node.sizes.retain(|m| m.constraints != constraints);
+            }
             keep_sizes(&mut node.sizes, evicted);
         }
         let overfull = node.alternates.len() == MEASUREMENT_ALTERNATES + 1;
@@ -11383,7 +11406,13 @@ impl Scene {
         if changed || arrange_dirty {
             report.layout_nodes += 1;
         }
-        let damage = changed && !covered;
+        // Grown or shrunk where it stands, painting nothing of its own (a
+        // streamed reply's column, every chunk): its subtree paints as it
+        // did but where its children move, and each child whose box changes
+        // damages itself, so its subtree is neither damaged nor covered.
+        let resized = changed && !childless && self.resized_in_place(node, bounds);
+        let changed_paint = changed && !resized;
+        let damage = changed_paint && !covered;
         // A leaf, nothing transformed or filtered: what it painted is damaged
         // with what it will paint, once it is placed (see `leaf_damage`).
         let leaf = damage && childless && self.transformed + self.filtered.get() == 0;
@@ -11444,11 +11473,11 @@ impl Scene {
             // would outline what it inlines (`add_moved_leaf_damage`).
             if CELLS && self.children_raw(self.tree_node(child)).is_empty() {
                 let (x, y) = (x + rect.x, y + rect.y);
-                self.place_leaf(child, x, y, report, covered || changed, &mut children);
+                self.place_leaf(child, x, y, report, covered || changed_paint, &mut children);
                 continue;
             }
             crate::deep(level + 1, || {
-                let covered = covered || changed;
+                let covered = covered || changed_paint;
                 let (x, y) = (x + rect.x, y + rect.y);
                 self.arrange::<CELLS>(child, x, y, report, covered, level + 1, &mut children)
             });
@@ -11459,6 +11488,23 @@ impl Scene {
         let node = self.tree_node_mut(id);
         node.dirty &= !LAYOUT;
         node.arrange_dirty = false;
+    }
+    /// Whether `node`, laid out at `bounds` where its box was elsewhere,
+    /// only grew or shrank in place, and nothing it paints itself depends
+    /// on its size: a plain container (no backdrop blur), its corner where
+    /// it was, clipping and fading nothing, outside every layer. Then only
+    /// its children's own changes change what its subtree paints.
+    #[inline(always)]
+    fn resized_in_place(&self, node: &Node, bounds: Rect) -> bool {
+        node.bounds.x == bounds.x
+            && node.bounds.y == bounds.y
+            && matches!(node.kind, NodeKind::Container(_))
+            && node.effects.blur_radius <= 0.
+            && clip_axes(&node.style) == (false, false)
+            && !fades(&node.style)
+            && !node.style.fade_overflow
+            && !node.layered
+            && self.transformed + self.filtered.get() == 0
     }
     /// `arrange::<true>` for a leaf: placed, its damage added, with no
     /// children to walk. The same work in the same order.
@@ -13404,6 +13450,36 @@ impl<'a> Iterator for PaintIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A block appended to a column that grows where it stands (a streamed
+    /// reply's, inside another) damages its own box alone: neither column
+    /// paints anything of its own, and no other block moves.
+    #[test]
+    fn an_append_to_a_growing_column_damages_only_what_it_adds() {
+        let mut scene = Scene::new(400., 1000.);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        let outer = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        let column = scene.append(outer, NodeKind::Container(Layout::Column), Style::default());
+        let block = |scene: &mut Scene, n: u8| {
+            scene.append(
+                column,
+                NodeKind::Rect(Color(n, 40, 80, 255)),
+                Style {
+                    width: Some(200.),
+                    height: Some(20.),
+                    ..Style::default()
+                },
+            )
+        };
+        for n in 0..30 {
+            block(&mut scene, n);
+        }
+        scene.flush();
+        let added = block(&mut scene, 30);
+        let damage = scene.flush().damage;
+        assert_eq!(scene.bounds(added), Rect::new(0., 600., 200., 20.));
+        assert_eq!(damage, [Rect::new(0., 600., 200., 20.)]);
+    }
     /// A move under the parent the last move was under takes that parent's
     /// context as kept (`move_context`): the damage of every frame is, to
     /// the bit, what working each move's context out again gives, as rows
@@ -14007,6 +14083,57 @@ mod tests {
         assert_eq!(*limits.borrow(), [Some(220.0), Some(204.0)]);
         assert_eq!(scene.bounds(bullet).width, 10.0);
         assert_eq!(scene.bounds(item).width, 204.0);
+    }
+    /// Sizes kept as results are evicted: the most recent first, each
+    /// constraint once, at most `PROBE_SIZES`, as dropping duplicates and
+    /// putting the evicted ahead did before it looked first.
+    #[test]
+    fn kept_sizes_are_the_most_recent_each_once() {
+        let size = |width: u32| ProbeSize {
+            constraints: Constraints {
+                width: Some(width as f32),
+                ..Constraints::default()
+            },
+            size: (width as f32, 1.),
+            pass: 0,
+        };
+        let widths = |sizes: &[ProbeSize]| -> Vec<u32> {
+            sizes
+                .iter()
+                .map(|m| m.constraints.width.unwrap() as u32)
+                .collect()
+        };
+        let before = |sizes: &mut Vec<ProbeSize>, evicted: Vec<ProbeSize>| {
+            if evicted.is_empty() {
+                return;
+            }
+            sizes.retain(|kept| !evicted.iter().any(|m| m.constraints == kept.constraints));
+            sizes.splice(0..0, evicted);
+            sizes.truncate(PROBE_SIZES);
+        };
+        for kept in [0, 5, 31, 32] {
+            for evicted in [
+                vec![],
+                vec![100],
+                vec![100, 101],
+                vec![3],
+                vec![100, 0, 4],
+                (100..131).collect(),
+                (100..140).collect(),
+                (0..40).rev().collect(),
+            ] {
+                let old: Vec<_> = (0..kept).map(size).collect();
+                let out: Vec<_> = evicted.iter().copied().map(size).collect();
+                let (mut ours, mut theirs) = (old.clone(), old);
+                keep_sizes(&mut ours, out.clone());
+                before(&mut theirs, out);
+                assert_eq!(
+                    widths(&ours),
+                    widths(&theirs),
+                    "{kept} kept, {evicted:?} evicted"
+                );
+            }
+        }
     }
     #[test]
     fn text_sizes_survive_alternating_wrap_limits() {

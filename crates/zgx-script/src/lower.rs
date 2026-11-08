@@ -2200,6 +2200,28 @@ fn content_hash(item: &Value, hasher: &mut impl std::hash::Hasher) {
 struct Unkeyed {
     order: Vec<Rc<str>>,
     next: u64,
+    /// The last pass's items and their rows' identities, in list order: a
+    /// list starting with the same items (a stream's, growing at its end)
+    /// passes over the rest alone (`unkeyed_rows`'s `from`).
+    items: Vec<Value>,
+    identities: Vec<Rc<str>>,
+}
+impl Unkeyed {
+    /// How many of `list`'s first items are the last pass's own: the same
+    /// table (by allocation) or an equal value, each a glance.
+    fn kept(&self, list: &[Value]) -> usize {
+        list.iter()
+            .zip(&self.items)
+            .take_while(|(now, then)| {
+                let id = crate::value::identity(now);
+                if id != 0 {
+                    id == crate::value::identity(then)
+                } else {
+                    now == then
+                }
+            })
+            .count()
+    }
 }
 /// The rows of a `ui.each` without a `key` for `list`: each item keeps the
 /// row of the same item last pass, wherever it moved (an insert or removal
@@ -2208,27 +2230,35 @@ struct Unkeyed {
 /// `quick`, then by their contents (a list built afresh from state holds
 /// equal tables, new ones). An item still unmatched takes the free row at
 /// its place, built again if its item differs (or, `live`, given the new
-/// item), as rows keyed by position were. Returns each item's row name;
-/// `rows` keeps the rows still shown.
+/// item), as rows keyed by position were. Returns each item's row name
+/// from `from` on; `rows` keeps the rows still shown, their marks cleared.
+///
+/// The first `from` items are the last pass's own, at the same places
+/// (`Unkeyed::kept`): each matches its row where it was, first, as the full
+/// pass would, so no row of theirs is free and none of them unmatched, and
+/// what follows looks at the rest alone (a stream's last item and those
+/// appended). With `from` 0, the full pass.
 fn unkeyed_rows(
     list: &[Value],
     rows: &mut Rows,
     state: &mut Unkeyed,
+    from: usize,
     live: bool,
     runtime: &zgx::reactive::Runtime,
 ) -> Vec<Rc<str>> {
-    let mut names: Vec<Option<Rc<str>>> = vec![None; list.len()];
-    for (index, item) in list.iter().enumerate() {
+    let mut names: Vec<Option<Rc<str>>> = vec![None; list.len() - from];
+    for (index, item) in list.iter().enumerate().skip(from) {
         if let Some(name) = state.order.get(index)
             && rows[name].last == *item
         {
             rows.get_mut(name).unwrap().seen = true;
-            names[index] = Some(name.clone());
+            names[index - from] = Some(name.clone());
         }
     }
     let free: Vec<&Rc<str>> = state
         .order
         .iter()
+        .skip(from)
         .filter(|name| !rows[*name].seen)
         .collect();
     if !free.is_empty() && names.iter().any(Option::is_none) {
@@ -2240,7 +2270,7 @@ fn unkeyed_rows(
                 .or_default()
                 .push((*name).clone());
         }
-        for (item, name) in list.iter().zip(names.iter_mut()) {
+        for (item, name) in list[from..].iter().zip(names.iter_mut()) {
             if name.is_none()
                 && let Some(found) = by_item.get_mut(&quick(item)).and_then(Vec::pop)
             {
@@ -2260,7 +2290,7 @@ fn unkeyed_rows(
                 .or_default()
                 .push((*name).clone());
         }
-        for (item, name) in list.iter().zip(names.iter_mut()) {
+        for (item, name) in list[from..].iter().zip(names.iter_mut()) {
             if name.is_some() || by_contents.is_empty() {
                 continue;
             }
@@ -2273,8 +2303,8 @@ fn unkeyed_rows(
             }
         }
     }
-    for (index, item) in list.iter().enumerate() {
-        if names[index].is_some() {
+    for (index, item) in list.iter().enumerate().skip(from) {
+        if names[index - from].is_some() {
             continue;
         }
         let name = match state.order.get(index).filter(|name| !rows[*name].seen) {
@@ -2299,10 +2329,29 @@ fn unkeyed_rows(
                 name
             }
         };
-        names[index] = Some(name);
+        names[index - from] = Some(name);
     }
-    state.order = names.into_iter().flatten().collect();
-    state.order.clone()
+    let names: Vec<Rc<str>> = names.into_iter().flatten().collect();
+    // Rows gone from the list go: of the prefix's none, so only those that
+    // were after it are looked at (with `from` 0, every row).
+    if from == 0 {
+        rows.retain(|_, row| std::mem::take(&mut row.seen));
+    } else {
+        for name in state.order.drain(from..) {
+            if rows.get(&name).is_some_and(|row| !row.seen) {
+                rows.remove(&name);
+            }
+        }
+        // Their marks cleared, as the full pass's `retain` does.
+        for name in &names {
+            if let Some(row) = rows.get_mut(name) {
+                row.seen = false;
+            }
+        }
+    }
+    state.order.truncate(from);
+    state.order.extend(names.iter().cloned());
+    names
 }
 pub(crate) fn build_scoped(
     vm: &Rc<Vm>,
@@ -3388,26 +3437,33 @@ fn kind_view(
                         {
                             return identities;
                         }
-                        noted.clear();
                         if key_fn.is_none() {
-                            let names = unkeyed_rows(
-                                list.list(),
-                                &mut rows,
-                                &mut unkeyed.borrow_mut(),
-                                live,
-                                &runtime,
-                            );
-                            rows.retain(|_, state| std::mem::take(&mut state.seen));
-                            return names
-                                .into_iter()
-                                .enumerate()
-                                .map(|(i, row)| {
-                                    let identity = rows[&row].identity.clone();
-                                    noted.insert(identity.clone(), (i, row));
-                                    identity
-                                })
-                                .collect();
+                            let list = list.list();
+                            let mut unkeyed = unkeyed.borrow_mut();
+                            // Those the last pass left as they were keep their
+                            // rows, notes and identities: the rest is passed over
+                            // (a stream's last item, and those appended).
+                            let from = unkeyed.kept(list);
+                            if from == 0 {
+                                noted.clear();
+                                unkeyed.identities.clear();
+                            } else {
+                                for identity in unkeyed.identities.drain(from..) {
+                                    noted.remove(&identity);
+                                }
+                            }
+                            let names =
+                                unkeyed_rows(list, &mut rows, &mut unkeyed, from, live, &runtime);
+                            for (i, row) in names.into_iter().enumerate() {
+                                let identity = rows[&row].identity.clone();
+                                noted.insert(identity.clone(), (from + i, row));
+                                unkeyed.identities.push(identity);
+                            }
+                            unkeyed.items.truncate(from);
+                            unkeyed.items.extend_from_slice(&list[from..]);
+                            return unkeyed.identities.clone();
                         }
+                        noted.clear();
                         let mut seen: HashMap<String, usize> = HashMap::new();
                         let keys = key_fn
                             .as_ref()
@@ -9474,4 +9530,86 @@ fn a_rows_identity_and_key_read_as_formatted() {
 #[inline(never)]
 fn geometry_of<S: Styled>(s: S, name: &str) -> S {
     s.geometry_tag(zgx::decoration::geometry_tag(name))
+}
+
+/// A list keeping its first items (a stream's, growing at its end or its
+/// last item changing) passes over the rest alone, and every row, name and
+/// mark comes out as the full pass makes them, through any mix of edits:
+/// appends, last items changed, equal items in new tables, inserts,
+/// removals and swaps, rows live or built again.
+#[cfg(test)]
+#[test]
+fn a_list_keeping_its_first_items_passes_over_the_rest_as_the_full_pass_does() {
+    let runtime = zgx::reactive::Runtime::new();
+    // A table item: `n` its contents, a new allocation each call.
+    let table = |n: u64| Value::Map(Rc::from(vec![(Rc::from("n"), Value::Num(n as f64))]));
+    for live in [false, true] {
+        for seed in 1..=40_u64 {
+            let mut random = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut next = || {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                random
+            };
+            let (mut full_rows, mut full) = (Rows::default(), Unkeyed::default());
+            let (mut rows, mut state) = (Rows::default(), Unkeyed::default());
+            let mut list: Vec<Value> = Vec::new();
+            let mut skipped = 0;
+            for step in 0..120 {
+                let at = |len: usize, r: u64| (r % (len.max(1) as u64)) as usize;
+                match next() % 10 {
+                    0..=2 => list.push(table(next() % 6)),
+                    3 => list.push(Value::Num((next() % 4) as f64)),
+                    4 if !list.is_empty() => {
+                        let last = list.len() - 1;
+                        list[last] = table(next() % 6);
+                    }
+                    5 if !list.is_empty() => {
+                        // Equal contents, a new table.
+                        let i = at(list.len(), next());
+                        if let Value::Map(m) = &list[i] {
+                            list[i] = Value::Map(Rc::from(m.to_vec()));
+                        }
+                    }
+                    6 => {
+                        let i = at(list.len() + 1, next());
+                        list.insert(i.min(list.len()), table(next() % 6));
+                    }
+                    7 if !list.is_empty() => {
+                        let i = at(list.len(), next());
+                        list.remove(i);
+                    }
+                    8 if list.len() > 1 => {
+                        let (i, j) = (at(list.len(), next()), at(list.len(), next()));
+                        list.swap(i, j);
+                    }
+                    _ => {}
+                }
+                let names = unkeyed_rows(&list, &mut full_rows, &mut full, 0, live, &runtime);
+                full.items = list.clone();
+                let from = state.kept(&list);
+                skipped += from;
+                let rest = unkeyed_rows(&list, &mut rows, &mut state, from, live, &runtime);
+                state.items = list.clone();
+                assert_eq!(rest[..], names[from..], "seed {seed} step {step}: names");
+                assert_eq!(state.order, full.order, "seed {seed} step {step}: order");
+                assert_eq!(state.next, full.next, "seed {seed} step {step}: next");
+                assert_eq!(rows.len(), full_rows.len(), "seed {seed} step {step}: rows");
+                for (name, row) in &full_rows {
+                    let ours = &rows[name];
+                    assert!(
+                        ours.last == row.last
+                            && ours.generation == row.generation
+                            && ours.identity == row.identity
+                            && ours.seen == row.seen
+                            && !row.seen,
+                        "seed {seed} step {step}: row {name}"
+                    );
+                }
+            }
+            // The prefix was taken, not only the full pass run twice.
+            assert!(skipped > 0, "seed {seed}");
+        }
+    }
 }

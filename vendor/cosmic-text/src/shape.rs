@@ -6,7 +6,7 @@ use crate::fallback::FontFallbackIter;
 use crate::{
     math, Align, Attrs, AttrsList, AttrsOwned, CacheKeyFlags, Color, DecorationMetrics,
     DecorationSpan, Ellipsize, EllipsizeHeightLimit, Family, Font, FontFeatures, FontSystem,
-    GlyphDecorationData, Hinting,
+    GlyphDecorationData, Hinting, LetterSpacing,
     LayoutGlyph, LayoutLine, Metrics, Wrap,
 };
 #[cfg(not(feature = "std"))]
@@ -735,21 +735,11 @@ fn shape_run(
     font_iter.check_missing(&line[start_run..end_run]);
 
     // zgx: a span's padding widens its first glyph (before it) and its
-    // last (after it), so wrapping, hit testing and backgrounds all count it.
-    // Most text has none: then no glyph's attributes are looked up again.
-    let padded = attrs_list.has_padding();
-    for glyph in glyphs[glyph_start..].iter_mut().filter(|_| padded) {
-        let attrs = attrs_list.get_span(glyph.start);
-        let Some(padding) = attrs.padding_opt else {
-            continue;
-        };
-        if glyph.start == 0 || attrs_list.get_span(glyph.start - 1) != attrs {
-            glyph.x_advance += padding.0;
-            glyph.x_offset += padding.0;
-        }
-        if glyph.end >= line.len() || attrs_list.get_span(glyph.end) != attrs {
-            glyph.x_advance += padding.0;
-        }
+    // last (after it), and a grid of cells (kept in the padding) gives each
+    // cluster its cells: out of line, for a run with padding only. Most text
+    // has none: then no glyph's attributes are looked up again.
+    if attrs_list.has_padding() {
+        pad(&mut glyphs[glyph_start..], line, attrs_list, &attrs);
     }
 
     /*
@@ -760,6 +750,69 @@ fn shape_run(
 
     // Restore the scripts buffer.
     font_system.shape_buffer.scripts = scripts;
+}
+
+/// zgx: a padded run's `glyphs` (`line` its text, `attrs` its first
+/// span's): each span's padding widens its first glyph (before it) and its
+/// last (after it), so wrapping, hit testing and backgrounds all count it;
+/// on a grid of cells (a terminal's, `Attrs::cell_grid`, kept in the padding
+/// as a NaN no padding is), each cluster takes exactly its cells.
+#[inline(never)]
+fn pad(glyphs: &mut [ShapeGlyph], line: &str, attrs_list: &AttrsList, attrs: &Attrs) {
+    if let Some(spacing) = attrs.padding_opt {
+        if spacing.0.is_nan() {
+            snap_to_cells(glyphs, line, spacing);
+            return;
+        }
+    }
+    for glyph in glyphs.iter_mut() {
+        let attrs = attrs_list.get_span(glyph.start);
+        let Some(padding) = attrs.padding_opt else {
+            continue;
+        };
+        if padding.0.is_nan() {
+            continue;
+        }
+        if glyph.start == 0 || attrs_list.get_span(glyph.start - 1) != attrs {
+            glyph.x_advance += padding.0;
+            glyph.x_offset += padding.0;
+        }
+        if glyph.end >= line.len() || attrs_list.get_span(glyph.end) != attrs {
+            glyph.x_advance += padding.0;
+        }
+    }
+}
+
+/// zgx: `glyphs` (a run's, `line` its text) on the grid of cells `spacing`
+/// holds (`LetterSpacing::grid`, `cell` EM wide; rare, out of line): each cluster (the glyphs sharing a start) advances by its
+/// characters' cells, their widths as unicode-width tells them (as a
+/// terminal places them), its glyphs moved together to sit centred in them.
+/// A fallback font's glyph a little wider or narrower than the grid's (a
+/// braille pattern, a Thai letter) then moves nothing after it.
+#[cold]
+#[inline(never)]
+fn snap_to_cells(glyphs: &mut [ShapeGlyph], line: &str, spacing: LetterSpacing) {
+    use unicode_width::UnicodeWidthChar;
+    let Some(cell) = spacing.cell() else {
+        return;
+    };
+    let mut first = 0;
+    while first < glyphs.len() {
+        let start = glyphs[first].start;
+        let mut end = first + 1;
+        while end < glyphs.len() && glyphs[end].start == start {
+            end += 1;
+        }
+        let text = line.get(start..glyphs[first].end).unwrap_or("");
+        let cells: usize = text.chars().map(|c| c.width().unwrap_or(0)).sum();
+        let natural: f32 = glyphs[first..end].iter().map(|glyph| glyph.x_advance).sum();
+        let extra = cells as f32 * cell - natural;
+        for glyph in &mut glyphs[first..end] {
+            glyph.x_offset += extra / 2.;
+        }
+        glyphs[end - 1].x_advance += extra;
+        first = end;
+    }
 }
 
 #[cfg(feature = "shape-run-cache")]

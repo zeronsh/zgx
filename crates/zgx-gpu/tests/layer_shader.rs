@@ -275,6 +275,32 @@ fn a_layer_shader_reads_what_lies_behind_it() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn a_backdrop_is_never_compressed_on_apple_gpus() {
+    // Draws sampling a compressed backdrop after a blit into part of it now
+    // and then read 16-pixel blocks of it from before the copy: a reader
+    // moving into what it had not read before showed them black, or bright
+    // where dividing by their alpha blew up (zgx-video's
+    // `repainting_what_changed_draws_what_painting_it_all_draws`).
+    let _gpu_fixture = gpu_fixture();
+    let mut gpu = GpuRenderer::new(SIZE, SIZE).unwrap();
+    let mut scene = scene();
+    let root = scene.root();
+    behind(&mut scene, root);
+    let id = reader(&mut scene, root);
+    scene.set_layer_extent(id, 0., 30.);
+    scene.set_layer_uniforms(id, shift(20.));
+    let (_, p) = render(&mut gpu, &mut scene);
+    // What it reads is the copy's, from a backdrop that started cleared.
+    assert_eq!(pixel(&p, 70, 100), [255, 0, 0, 255]);
+    assert_eq!(pixel(&p, 90, 100), [0, 255, 0, 255]);
+    assert_eq!(pixel(&p, 135, 100), [0, 255, 0, 255]);
+    let held = gpu.debug_backdrops_compress();
+    assert!(!held.is_empty(), "a backdrop is held");
+    assert!(held.iter().all(|compress| !compress), "{held:?}");
+}
+
+#[test]
 fn a_backdrop_reader_repaints_when_what_is_behind_it_changes() {
     let _gpu_fixture = gpu_fixture();
     let mut gpu = GpuRenderer::new(SIZE, SIZE).unwrap();

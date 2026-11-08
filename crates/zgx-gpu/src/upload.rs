@@ -593,6 +593,93 @@ pub(crate) fn shared_texture(
     }
 }
 
+/// macOS: a texture copied into in parts and sampled straight after (a
+/// backdrop reader's copy of what lies behind it), without the GPU's lossless
+/// compression. On Apple GPUs draws sampling a compressed texture after a
+/// blit into part of it, in order on one queue (behind a fence, even), now
+/// and then read 16-pixel blocks of it as they were before the copy: cleared,
+/// or the last frame's. Uncompressed, every read sees the copy. Made through
+/// the HAL, wgpu takes it as initialized: the caller clears it (`written`).
+#[cfg(target_os = "macos")]
+pub(crate) fn uncompressed_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    label: &str,
+) -> wgpu::Texture {
+    use objc2_metal::{
+        MTLDevice, MTLPixelFormat, MTLStorageMode, MTLTextureDescriptor, MTLTextureType,
+        MTLTextureUsage,
+    };
+    // SAFETY: The raw device only makes a texture; nothing destroys it, and
+    // the guard is dropped before wgpu is called again.
+    let hal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }.expect("a Metal device");
+    // SAFETY: A plain 2D texture descriptor of this size.
+    let descriptor = unsafe {
+        MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+            MTLPixelFormat::BGRA8Unorm,
+            width.max(1) as usize,
+            height.max(1) as usize,
+            false,
+        )
+    };
+    descriptor.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget);
+    descriptor.setStorageMode(MTLStorageMode::Private);
+    descriptor.setAllowGPUOptimizedContents(false);
+    let metal = hal
+        .raw_device()
+        .newTextureWithDescriptor(&descriptor)
+        .expect("an uncompressed texture");
+    drop(hal);
+    // SAFETY: Metal made this texture on this device, in `FORMAT`, this size,
+    // one mip level and layer, readable by shaders and drawn into as the
+    // descriptor says (copies need no usage); wgpu takes ownership of it.
+    unsafe {
+        let raw = wgpu::hal::metal::Device::texture_from_raw(
+            metal,
+            crate::FORMAT,
+            MTLTextureType::Type2D,
+            1,
+            1,
+            wgpu::hal::CopyExtent {
+                width: width.max(1),
+                height: height.max(1),
+                depth: 1,
+            },
+        );
+        device.create_texture_from_hal::<wgpu::hal::api::Metal>(
+            raw,
+            &wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: width.max(1),
+                    height: height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: crate::FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+        )
+    }
+}
+
+/// Whether `texture`, made by `uncompressed_texture` or by wgpu, may be
+/// compressed by the GPU.
+#[cfg(target_os = "macos")]
+pub(crate) fn may_compress(texture: &wgpu::Texture) -> bool {
+    use objc2_metal::MTLTexture as _;
+    // SAFETY: Only reads a property of the raw texture, which the guard keeps.
+    let hal = unsafe { texture.as_hal::<wgpu::hal::api::Metal>() }.expect("a Metal texture");
+    hal.raw_handle().allowGPUOptimizedContents()
+}
+
 /// Write premultiplied RGBA texels (reordered in place to the texture's
 /// BGRA) to `(x, y, width, height)` of a `shared_texture`. No submission may
 /// still read that region: the caller writes only cells no submitted frame
@@ -611,8 +698,9 @@ pub(crate) fn write_texels(
             && u64::from(y) + u64::from(height) <= u64::from(texture.height()),
         "texels within the texture"
     );
+    // RGBA to the texture's BGRA: red and blue swapped a pixel a word.
     for pixel in rgba.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
+        *pixel = crate::bgra_to_rgba(u32::from_le_bytes(*pixel)).to_le_bytes();
     }
     // SAFETY: The raw texture is only written through; nothing destroys it.
     let hal = unsafe { texture.as_hal::<wgpu::hal::api::Metal>() }.expect("a Metal texture");
@@ -638,6 +726,67 @@ pub(crate) fn write_texels(
                 region,
                 0,
                 std::ptr::NonNull::from(&mut *rgba).cast(),
+                (width * 4) as usize,
+            )
+    };
+}
+
+/// Copy `(x, y, width, height)` of one `shared_texture` to `to` in another,
+/// on the CPU, as the texels are: what a GPU copy would do, for textures the
+/// CPU writes in place (`write_texels`), which have no copy usage.
+#[cfg(target_os = "macos")]
+pub(crate) fn copy_texels(
+    from: &wgpu::Texture,
+    into: &wgpu::Texture,
+    (x, y, width, height): (u32, u32, u32, u32),
+    (to_x, to_y): (u32, u32),
+) {
+    use objc2_metal::{MTLOrigin, MTLRegion, MTLSize, MTLTexture};
+    assert!(
+        u64::from(x) + u64::from(width) <= u64::from(from.width())
+            && u64::from(y) + u64::from(height) <= u64::from(from.height())
+            && u64::from(to_x) + u64::from(width) <= u64::from(into.width())
+            && u64::from(to_y) + u64::from(height) <= u64::from(into.height()),
+        "texels within both textures"
+    );
+    let region = |x: u32, y: u32| MTLRegion {
+        origin: MTLOrigin {
+            x: x as usize,
+            y: y as usize,
+            z: 0,
+        },
+        size: MTLSize {
+            width: width as usize,
+            height: height as usize,
+            depth: 1,
+        },
+    };
+    let mut texels = vec![0_u8; (width * height * 4) as usize];
+    // SAFETY: The raw textures are only read and written through; nothing
+    // destroys them meanwhile.
+    let from = unsafe { from.as_hal::<wgpu::hal::api::Metal>() }.expect("a Metal texture");
+    // SAFETY: A region within the shared texture's bounds (asserted), of
+    // BGRA8 texels, into `texels`, `height` rows of `width * 4` bytes; the
+    // CPU wrote it, and no GPU work writes it.
+    unsafe {
+        from.raw_handle()
+            .getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                std::ptr::NonNull::from(&mut *texels).cast(),
+                (width * 4) as usize,
+                region(x, y),
+                0,
+            )
+    };
+    drop(from);
+    // SAFETY: as above, for the texture written: a new one no frame samples.
+    let into = unsafe { into.as_hal::<wgpu::hal::api::Metal>() }.expect("a Metal texture");
+    // SAFETY: A region within its bounds (asserted), from `texels`.
+    unsafe {
+        into.raw_handle()
+            .replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                region(to_x, to_y),
+                0,
+                std::ptr::NonNull::from(&mut *texels).cast(),
                 (width * 4) as usize,
             )
     };

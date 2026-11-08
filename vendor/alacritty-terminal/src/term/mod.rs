@@ -19,6 +19,7 @@ use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange, SelectionType};
 use crate::term::cell::{Cell, Flags, LineLength};
 use crate::term::color::Colors;
+use crate::term::graphics::{Placement, Placements};
 use crate::vi_mode::{ViModeCursor, ViMotion};
 use crate::vte::ansi::{
     self, Attr, CharsetIndex, Color, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
@@ -29,6 +30,7 @@ use crate::vte::ansi::{
 pub mod cell;
 pub mod color;
 mod grapheme;
+pub mod graphics;
 pub mod search;
 
 /// Minimum number of columns.
@@ -307,6 +309,10 @@ pub struct Term<T> {
     /// primary grid. Otherwise it is the alternate screen buffer.
     inactive_grid: Grid<Cell>,
 
+    /// Pictures placed on the active grid, and on the inactive one.
+    placements: Placements,
+    inactive_placements: Placements,
+
     /// Index into `charsets`, pointing to what ASCII is currently being mapped to.
     active_charset: CharsetIndex,
 
@@ -449,6 +455,8 @@ impl<T> Term<T> {
 
         Term {
             inactive_grid,
+            placements: Placements::default(),
+            inactive_placements: Placements::default(),
             scroll_region,
             event_proxy,
             damage,
@@ -534,11 +542,15 @@ impl<T> Term<T> {
 
         self.event_proxy.send_event(title_event);
 
-        if self.mode.contains(TermMode::ALT_SCREEN) {
-            self.inactive_grid
-                .update_history(self.config.scrolling_history);
+        let (grid, placements) = if self.mode.contains(TermMode::ALT_SCREEN) {
+            (&mut self.inactive_grid, &mut self.inactive_placements)
         } else {
-            self.grid.update_history(self.config.scrolling_history);
+            (&mut self.grid, &mut self.placements)
+        };
+        grid.update_history(self.config.scrolling_history);
+        // A shorter scrollback drops what its lost lines showed.
+        if !placements.is_empty() {
+            placements.shift(0, grid.history_size(), grid.screen_lines());
         }
 
         if self.config.kitty_keyboard != old_config.kitty_keyboard {
@@ -703,6 +715,26 @@ impl<T> Term<T> {
         &mut self.grid
     }
 
+    /// The pictures placed on the active screen, in the order placed.
+    #[inline]
+    pub fn placements(&self) -> &[Placement] {
+        self.placements.as_slice()
+    }
+
+    /// Place a picture on the active screen (moving the placement with its
+    /// picture and nonzero number, if there is one).
+    pub fn place(&mut self, placement: Placement) {
+        self.placements.place(placement);
+        self.mark_fully_damaged();
+    }
+
+    /// Keep the active screen's placements `keep` says to.
+    pub fn retain_placements(&mut self, keep: impl FnMut(&Placement) -> bool) {
+        if self.placements.retain(keep) {
+            self.mark_fully_damaged();
+        }
+    }
+
     /// Resize terminal to new dimensions.
     pub fn resize<S: Dimensions>(&mut self, size: S) {
         let old_cols = self.columns();
@@ -726,8 +758,22 @@ impl<T> Term<T> {
         self.vi_mode_cursor.point.line += delta;
 
         let is_alt = self.mode.contains(TermMode::ALT_SCREEN);
+        let inactive_history = self.inactive_grid.history_size();
         self.grid.resize(!is_alt, num_lines, num_cols);
         self.inactive_grid.resize(is_alt, num_lines, num_cols);
+        if !self.placements.is_empty() {
+            let after = self.history_size();
+            self.placements
+                .shift(history_size as i32 - after as i32, after, num_lines);
+        }
+        if !self.inactive_placements.is_empty() {
+            let after = self.inactive_grid.history_size();
+            self.inactive_placements.shift(
+                inactive_history as i32 - after as i32,
+                after,
+                num_lines,
+            );
+        }
 
         // Invalidate selection and tabs only when necessary.
         if old_cols != num_cols {
@@ -773,6 +819,7 @@ impl<T> Term<T> {
 
             // Reset alternate screen contents.
             self.inactive_grid.reset_region(..);
+            self.inactive_placements.clear();
         }
 
         mem::swap(
@@ -788,6 +835,7 @@ impl<T> Term<T> {
         self.set_keyboard_mode(keyboard_mode, KeyboardModesApplyBehavior::Replace);
 
         mem::swap(&mut self.grid, &mut self.inactive_grid);
+        mem::swap(&mut self.placements, &mut self.inactive_placements);
         self.mode ^= TermMode::ALT_SCREEN;
         self.selection = None;
         self.mark_fully_damaged();
@@ -823,6 +871,9 @@ impl<T> Term<T> {
 
         // Scroll between origin and bottom
         self.grid.scroll_down(&region, lines);
+        if !self.placements.is_empty() {
+            self.placements.scroll_down(&region, lines);
+        }
         self.mark_fully_damaged();
     }
 
@@ -848,6 +899,10 @@ impl<T> Term<T> {
             .and_then(|s| s.rotate(self, &region, lines as i32));
 
         self.grid.scroll_up(&region, lines);
+        if !self.placements.is_empty() {
+            self.placements
+                .scroll_up(&region, lines, self.grid.history_size());
+        }
 
         // Scroll vi mode cursor.
         let viewport_top = Line(-(self.grid.display_offset() as i32));
@@ -2108,12 +2163,25 @@ impl<T: EventListener> Handler for Term<T> {
                 self.selection = self.selection.take().filter(|s| !s.intersects_range(range));
             }
             ansi::ClearMode::All => {
+                // What the screen shows goes with it.
+                if !self.placements.is_empty() {
+                    let screen = Line(0)..Line(screen_lines as i32);
+                    self.placements.retain(|placement| {
+                        let lines = placement.line_range();
+                        lines.end <= screen.start || lines.start >= screen.end
+                    });
+                }
                 if self.mode.contains(TermMode::ALT_SCREEN) {
                     self.grid.reset_region(..);
                 } else {
                     let old_offset = self.grid.display_offset();
 
-                    self.grid.clear_viewport();
+                    let pushed = self.grid.clear_viewport();
+                    if !self.placements.is_empty() {
+                        let region = Line(0)..Line(screen_lines as i32);
+                        let history = self.grid.history_size();
+                        self.placements.scroll_up(&region, pushed, history);
+                    }
 
                     // Compute number of lines scrolled by clearing the viewport.
                     let lines = self.grid.display_offset().saturating_sub(old_offset);
@@ -2126,6 +2194,10 @@ impl<T: EventListener> Handler for Term<T> {
             }
             ansi::ClearMode::Saved if self.history_size() > 0 => {
                 self.grid.clear_history();
+                if !self.placements.is_empty() {
+                    self.placements
+                        .retain(|placement| placement.point.line >= 0);
+                }
 
                 self.vi_mode_cursor.point.line = self
                     .vi_mode_cursor
@@ -2168,6 +2240,8 @@ impl<T: EventListener> Handler for Term<T> {
         self.cursor_style = None;
         self.grid.reset();
         self.inactive_grid.reset();
+        self.placements.clear();
+        self.inactive_placements.clear();
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
         self.tabs = TabStops::new(self.columns());
         self.title_stack = Vec::new();

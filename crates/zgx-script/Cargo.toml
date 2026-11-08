@@ -113,6 +113,11 @@ name = "compile_ahead"
 path = "tests/compile_ahead.rs"
 
 [[test]]
+# Its own process: the packages' compiled modules are the process's.
+name = "package_bytecode"
+path = "tests/package_bytecode.rs"
+
+[[test]]
 name = "anime"
 path = "tests/anime/main.rs"
 
