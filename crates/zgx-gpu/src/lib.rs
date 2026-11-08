@@ -12392,7 +12392,10 @@ impl GpuRenderer {
             Some(source) => (source.pixels.to_vec(), (source.width, source.height)),
             None => {
                 let mut pixels = image.pixels().to_vec();
-                premultiply(&mut pixels);
+                // A frame read back from a renderer is premultiplied already.
+                if !image.is_premultiplied() {
+                    premultiply(&mut pixels);
+                }
                 (pixels, (full_w, full_h))
             }
         };
