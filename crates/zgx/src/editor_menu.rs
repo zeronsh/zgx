@@ -95,5 +95,5 @@ fn separator() -> crate::compose::View {
         .h(1.)
         .my(4.)
         .mx(8.)
-        .bg(crate::theme::tok::BORDER_SUBTLE)
+        .bg(crate::theme::tok::BORDER_STRONG)
 }

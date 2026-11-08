@@ -497,7 +497,7 @@ fn entries(
             AppMenuEntry::Separator => compose::row()
                 .h(1.)
                 .my(4.)
-                .bg(zgx::theme::tok::BORDER_SUBTLE),
+                .bg(zgx::theme::tok::BORDER_STRONG),
             AppMenuEntry::Standard(item) => {
                 let dispatch = dispatch.clone();
                 compose::menu_item(item.label())
