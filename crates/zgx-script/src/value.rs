@@ -2026,13 +2026,13 @@ fn rebuild_cache(lua: &Lua) -> mlua::Result<()> {
     *cache.ids.borrow_mut() = new_ids;
     Ok(())
 }
-/// The cached table of `value`, if it has one.
 /// `value`'s table for scripts, if it has one now (`cached`): for a holder
 /// outside the VM to keep it past the host's idle sweeps (`markdown`'s
 /// stream, deriving each answer from the last).
 pub(crate) fn table_of(lua: &Lua, value: &Value) -> mlua::Result<Option<Table>> {
     cached(lua, value)
 }
+/// The cached table of `value`, if it has one.
 fn cached(lua: &Lua, value: &Value) -> mlua::Result<Option<Table>> {
     let Some(cache) = lua.app_data_ref::<Converted>() else {
         return Ok(None);
