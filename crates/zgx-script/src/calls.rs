@@ -499,8 +499,31 @@ pub(crate) fn settle_with(
     kind: Kind,
     future: impl Future<Output = Result<Value, String>> + 'static,
 ) -> mlua::Result<()> {
+    // Cancelled (`p:cancel()`), the host's work is dropped where it waits: a
+    // dialog's request (Linux's portal closes its picker; macOS's sheet and
+    // Windows's dialog stay up, their answer unheard), a read no longer
+    // waited on. An action goes on, its answer unheard: what it changes
+    // elsewhere isn't left half done.
+    let stop = Rc::new(Stop::default());
+    if kind != Kind::Action && promise.abort.borrow().is_none() {
+        *promise.abort.borrow_mut() = Some(Box::new({
+            let stop = stop.clone();
+            move || stop.stop()
+        }));
+    }
     settle_failing(lua, promise, async move {
-        future.await.map_err(|message| Failure::new(kind, message))
+        let mut future = std::pin::pin!(future);
+        std::future::poll_fn(move |cx| {
+            if stop.stopped.get() {
+                return std::task::Poll::Ready(Err(Failure::cancelled()));
+            }
+            *stop.waker.borrow_mut() = Some(cx.waker().clone());
+            future
+                .as_mut()
+                .poll(cx)
+                .map(|done| done.map_err(|message| Failure::new(kind, message)))
+        })
+        .await
     })
 }
 /// As `settle_with`, for a future that tells its failures apart (a fetch:
