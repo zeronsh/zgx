@@ -70,6 +70,23 @@ type function Item(t)
 	return types.never
 end
 
+-- What a function taking a string or the state holding one answers:
+-- `text` given a string, `state` given a state, `any` given `any`. (Not two
+-- overloads: luau-lsp checks a table literal against neither, so
+-- `ui.markdown(s, { key = "reply" })` would fail either way.)
+type function TextOrState(given, text, state)
+	if given:is("any") or given:is("unknown") then
+		return types.any
+	end
+	if given:is("string") or (given:is("singleton") and type(given:value()) == "string") then
+		return text
+	end
+	if given:is("table") and given:readproperty(types.singleton("get")) then
+		return state
+	end
+	error("takes a string or a State<string> holding one")
+end
+
 -- What a `ui.variants` definition's axes accept, the choosing table its
 -- recipe is called with: each axis its options' names (a boolean for an
 -- on-off axis, `[true]` / `[false]`), or `extra` (a state or a function
@@ -21428,7 +21445,7 @@ declare ui: {
 	-- table, img; runs `{ x, b?, i?, c?, s?, a?, f? }`). With `key` (a
 	-- reply's id), text growing under it parses only its new end, and its
 	-- earlier blocks are the same tables as before.
-	markdown: ((text: string, opts: MarkdownOptions?) -> { MarkdownBlock }) & ((text: State<string> | ReadOnlyState<string>, opts: MarkdownOptions?) -> ReadOnlyState<{ MarkdownBlock }>),
+	markdown: <T>(text: T, opts: MarkdownOptions?) -> TextOrState<T, { MarkdownBlock }, ReadOnlyState<{ MarkdownBlock }>>,
 	-- Markdown drawn: paragraphs, headings, lists, quotes, tables, and code
 	-- blocks with a Copy button, in the theme's colours and sizes,
 	-- selectable. As its text changes it parses only what changed and
