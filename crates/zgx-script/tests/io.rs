@@ -202,18 +202,18 @@ impl Platform for Unanswered {
     }
 }
 
-#[test]
-fn a_dialog_the_script_cancels_is_dropped_where_it_waits() {
-    // A dropped request closes Linux's portal picker and iOS's document picker.
-    let dropped = Rc::new(std::cell::Cell::new(false));
-    let platform = Rc::new(Unanswered(dropped.clone()));
-    let mut h = Harness::wrapped(
+/// An app asking for a dialog its person never answers, by a promise
+/// (`ask`, `cancel`) or a task awaiting one (`ask_task`, `cancel_task`).
+fn unanswered(dropped: Rc<std::cell::Cell<bool>>) -> Harness {
+    let platform = Rc::new(Unanswered(dropped));
+    Harness::wrapped(
         |runtime| {
             ScriptHost::inline(
                 runtime,
                 "app",
                 r#"local shown = ui.state("shown", "")
                 local picking = nil
+                local running = nil
                 return ui.column {
                     ui.text { id = "label", function() return shown:get() end },
                     ui.button { id = "ask", w = 40, h = 20, "a", on_click = function()
@@ -224,11 +224,29 @@ fn a_dialog_the_script_cancels_is_dropped_where_it_waits() {
                         picking:cancel()
                         shown:set("cancelled")
                     end },
+                    ui.button { id = "ask_task", w = 40, h = 20, "t", on_click = function()
+                        running = ui.task(function()
+                            ui.open_files({}):await()
+                            shown:set("answered")
+                        end)
+                        shown:set("asked")
+                    end },
+                    ui.button { id = "cancel_task", w = 40, h = 20, "k", on_click = function()
+                        running:cancel()
+                        shown:set("cancelled")
+                    end },
                 }"#,
             )
         },
         move |view| zgx::compose::provide(PlatformService(platform), view),
-    );
+    )
+}
+
+#[test]
+fn a_dialog_the_script_cancels_is_dropped_where_it_waits() {
+    // A dropped request closes Linux's portal picker.
+    let dropped = Rc::new(std::cell::Cell::new(false));
+    let mut h = unanswered(dropped.clone());
     h.frames(1);
     h.click("ask");
     wait_for(&mut h, "asked");
@@ -258,6 +276,23 @@ fn the_platform_hears_a_saved_file_once_it_is_written_whole() {
         "told once, with all of it written"
     );
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_task_cancelled_at_a_dialog_drops_the_dialog() {
+    let dropped = Rc::new(std::cell::Cell::new(false));
+    let mut h = unanswered(dropped.clone());
+    h.frames(1);
+    h.click("ask_task");
+    wait_for(&mut h, "asked");
+    h.frames(2);
+    assert!(!dropped.get(), "waiting on the person");
+    h.click("cancel_task");
+    wait_for(&mut h, "cancelled");
+    h.frames(2);
+    assert!(dropped.get(), "the dialog the task awaited dropped with it");
+    assert_eq!(h.text("label"), "cancelled", "the task never went on");
+    assert_eq!(h.error(), None);
 }
 
 #[test]

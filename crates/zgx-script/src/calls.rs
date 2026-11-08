@@ -499,32 +499,22 @@ pub(crate) fn settle_with(
     kind: Kind,
     future: impl Future<Output = Result<Value, String>> + 'static,
 ) -> mlua::Result<()> {
-    // Cancelled (`p:cancel()`), the host's work is dropped where it waits: a
-    // dialog's request (Linux's portal closes its picker; macOS's sheet and
-    // Windows's dialog stay up, their answer unheard), a read no longer
-    // waited on. An action goes on, its answer unheard: what it changes
-    // elsewhere isn't left half done.
-    let stop = Rc::new(Stop::default());
-    if kind != Kind::Action && promise.abort.borrow().is_none() {
-        *promise.abort.borrow_mut() = Some(Box::new({
-            let stop = stop.clone();
-            move || stop.stop()
-        }));
+    // Cancelled (`p:cancel()`), the host's future is dropped where it
+    // waits: a dialog's request (Linux's portal closes its picker; macOS's
+    // sheet and Windows's dialog stay up, their answer unheard), a read no
+    // longer waited on (its thread finishes on its own). An action goes on,
+    // its answer unheard: what it changes elsewhere isn't left half done.
+    if kind == Kind::Action || promise.abort.borrow().is_some() {
+        return settle_failing(lua, promise, async move {
+            future.await.map_err(|message| Failure::new(kind, message))
+        });
     }
-    settle_failing(lua, promise, async move {
-        let mut future = std::pin::pin!(future);
-        std::future::poll_fn(move |cx| {
-            if stop.stopped.get() {
-                return std::task::Poll::Ready(Err(Failure::cancelled()));
-            }
-            *stop.waker.borrow_mut() = Some(cx.waker().clone());
-            future
-                .as_mut()
-                .poll(cx)
-                .map(|done| done.map_err(|message| Failure::new(kind, message)))
-        })
-        .await
-    })
+    let stop = Rc::new(Stop::default());
+    *promise.abort.borrow_mut() = Some(Box::new({
+        let stop = stop.clone();
+        move || stop.stop()
+    }));
+    settle_failing(lua, promise, stop.or_stopped(kind, future))
 }
 /// As `settle_with`, for a future that tells its failures apart (a fetch:
 /// the transport, a cancel, a status).
@@ -836,8 +826,11 @@ impl Stop {
             waker.wake();
         }
     }
+    /// `future`, unless stopped first: then cancelled, the future dropped.
+    /// What it says failed is a failure of `kind`.
     async fn or_stopped<T>(
         self: Rc<Self>,
+        kind: Kind,
         future: impl Future<Output = Result<T, String>>,
     ) -> Result<T, Failure> {
         let mut future = std::pin::pin!(future);
@@ -846,11 +839,10 @@ impl Stop {
                 return std::task::Poll::Ready(Err(Failure::cancelled()));
             }
             *self.waker.borrow_mut() = Some(cx.waker().clone());
-            // What the transport says failed: no answer came.
             future
                 .as_mut()
                 .poll(cx)
-                .map(|done| done.map_err(|message| Failure::new(Kind::Network, message)))
+                .map(|done| done.map_err(|message| Failure::new(kind, message)))
         })
         .await
     }
@@ -1188,7 +1180,8 @@ pub(crate) fn install(
                 }
             }));
             settle_failing(lua, &promise, async move {
-                let mut response = stop.or_stopped(future).await?;
+                // What the transport says failed: no answer came.
+                let mut response = stop.or_stopped(Kind::Network, future).await?;
                 response.body = match listener {
                     // Heard in pieces: the body only to tell a failure.
                     Some(listener) => {
