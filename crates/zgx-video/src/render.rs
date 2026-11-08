@@ -161,12 +161,19 @@ pub(crate) trait Playing {
     /// `output_fps`, and the composition's rate: it steps on, drawing
     /// nothing, through the last frame of the composition their mix covers.
     fn heard(&mut self, output_fps: f64, first: u64, end: u64) -> Result<Heard, String>;
+    /// The sounds a pass of their own places ([`placed_audio`]): for a
+    /// stage that skips frames ([`Film::skips_frames`]), which may never
+    /// mount a sound placed on one.
+    fn placed(&mut self, options: &RenderOptions) -> Result<Heard, String>;
 }
 impl Playing for Film {
     fn film(&mut self) -> &mut Film {
         self
     }
     fn heard(&mut self, _: f64, _: u64, _: u64) -> Result<Heard, String> {
+        Ok(None)
+    }
+    fn placed(&mut self, _: &RenderOptions) -> Result<Heard, String> {
         Ok(None)
     }
 }
@@ -180,6 +187,9 @@ impl Playing for ScriptStage {
         self.film
             .step_to_composition_frame((skip + frames as i64 - 1).max(0) as u64)?;
         Ok(Some((self.audio(), fps)))
+    }
+    fn placed(&mut self, options: &RenderOptions) -> Result<Heard, String> {
+        placed_audio(options).map(Some)
     }
 }
 
@@ -285,7 +295,10 @@ pub(crate) fn render_film<P: Playing>(
         }
         Ok(())
     })();
+    // A stage that skips frames may not have mounted a sound placed on one:
+    // a pass of their own places them then, as before.
     let heard = match &result {
+        Ok(()) if takes_sound && playing.film().skips_frames() => playing.placed(options),
         Ok(()) => playing.heard(ticks.output_fps, first, end),
         Err(_) => Ok(None),
     };
@@ -519,7 +532,11 @@ fn render_chunks(
                         let _ = tell.send(Ok(()));
                     }
                     if k == last && encoded && !options.mute {
-                        let sounds = stage.heard(ticks.output_fps, first, end)?;
+                        let sounds = if stage.film.skips_frames() {
+                            stage.placed(&options)?
+                        } else {
+                            stage.heard(ticks.output_fps, first, end)?
+                        };
                         *last_heard
                             .lock()
                             .unwrap_or_else(|poison| poison.into_inner()) = sounds;

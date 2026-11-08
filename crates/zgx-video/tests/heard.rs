@@ -36,6 +36,11 @@ return video.compositions { video.composition {
             video.sequence { from = 50, duration = 30, video.loop { duration = 9, function()
                 return video.audio { src = "c.wav", fade_out = 2 }
             end } },
+            -- One frame long, on frame 9: a stage ticking at 24 fps of a 30 fps
+            -- composition stands at 8.75 and 10, never in it.
+            video.sequence { from = 9, duration = 1, function()
+                return video.audio { src = "c.wav", volume = 0.25 }
+            end },
             -- Placed on the last frame alone: a render skipping frames, or at a
             -- lower rate, still hears it.
             video.sequence { from = 89, function() return video.audio { src = "a.wav" } end },
