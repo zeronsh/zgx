@@ -135,6 +135,54 @@ fn main() {
         // A bar without one has no help menu, not the last bar's.
         let (_, help) = debug_menu_bar_window_and_help(&menus[..2]).unwrap();
         assert_eq!(help, None);
+        // An item the app put in its Window menu itself is shown once: by
+        // its title, or (Minimize's) by its ⌘M; no separator is left at an
+        // end or doubled.
+        let window_of = |entries: Vec<AppMenuEntry>| {
+            debug_menu_bar_window_and_help(&[AppMenu::new("Window", entries)])
+                .unwrap()
+                .0
+        };
+        let count = |window: &[String], title: &str| window.iter().filter(|t| *t == title).count();
+        let tidy = |window: &[String]| {
+            window.first().is_some_and(|t| !t.is_empty())
+                && window.last().is_some_and(|t| !t.is_empty())
+                && !window
+                    .windows(2)
+                    .any(|pair| pair[0].is_empty() && pair[1].is_empty())
+        };
+        let minimize_key = MenuAccelerator::primary(Key::Character("m".into()));
+        let window = window_of(vec![
+            AppMenuEntry::item("Minimize", "minimize").accelerator(minimize_key.clone()),
+            AppMenuEntry::item("Zoom", "zoom"),
+            AppMenuEntry::item("Bring All to Front", "front"),
+        ]);
+        assert!(
+            ["Minimize", "Zoom", "Bring All to Front"]
+                .iter()
+                .all(|title| count(&window, title) == 1)
+                && tidy(&window),
+            "{window:?}"
+        );
+        let window = window_of(vec![
+            AppMenuEntry::item("Shrink", "shrink").accelerator(minimize_key),
+        ]);
+        assert!(
+            count(&window, "Minimize") == 0
+                && count(&window, "Zoom") == 1
+                && count(&window, "Bring All to Front") == 1
+                && tidy(&window),
+            "{window:?}"
+        );
+        // A bar without a Window menu of its own gets AppKit's, whole.
+        let window = window_of(Vec::new());
+        assert!(
+            ["Minimize", "Zoom", "Bring All to Front"]
+                .iter()
+                .all(|title| count(&window, title) == 1)
+                && tidy(&window),
+            "{window:?}"
+        );
         println!("menu_services: the app's Window and Help menus are AppKit's");
 
         // The app's menus changing only their items' titles and states are

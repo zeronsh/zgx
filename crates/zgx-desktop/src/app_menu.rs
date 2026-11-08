@@ -96,16 +96,19 @@ impl AppMenu {
         }
     }
 }
-/// An edit command the platform implements for whatever has focus, native
-/// views included, or its full screen item (`ToggleFullScreen`): on macOS it is AppKit's own item, sent to the first
-/// responder (so a web page's selection copies). zgx's own view doesn't
-/// answer those actions, so there the item is disabled, and a disabled item
-/// still swallows its shortcut; while zgx's view has the keyboard, its
-/// shortcut goes straight to the view instead (see `edit_keys`), for zgx's
-/// editors to handle. Its shortcut (⌘C for Copy) and its action
-/// (`standard:copy`) are its own: no other item may have them. Elsewhere
-/// it is an ordinary item in zgx's menu bar, whose choosing reaches the
-/// app as that action.
+/// A command the platform implements for whatever has focus, native views
+/// included: an edit command, or full screen. On macOS it is AppKit's own
+/// item. An edit item is sent to the first responder (so a web page's
+/// selection copies); zgx's own view doesn't answer those actions, so there
+/// the item is disabled, and a disabled item still swallows its shortcut;
+/// while zgx's view has the keyboard, its shortcut goes straight to the
+/// view instead (see `edit_keys`), for zgx's editors to handle. Full screen
+/// is sent to the key window, which answers it whatever has focus. Its
+/// shortcut (⌘C for Copy) and its action (`standard:copy`) are its own: no
+/// other item may have them. Elsewhere it is an ordinary item in zgx's menu
+/// bar: choosing it does what its shortcut does to what has focus (an
+/// editor's copy; full screen toggles the window), and with nothing to take
+/// it, it reaches the app as that action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StandardItem {
     /// Undoes the last edit.
@@ -732,6 +735,52 @@ fn native_submenu(model: &AppMenu) -> Result<muda::Submenu, AppMenuError> {
     Ok(menu)
 }
 
+/// A Window menu holding `entries`, AppKit's items around them: Minimize
+/// and Zoom over them, Bring All to Front under, as AppKit apps have them.
+/// One the app put there itself (by its title, or Minimize's ⌘M) is left
+/// to the app's, not shown twice.
+#[cfg(target_os = "macos")]
+fn window_submenu(entries: &[AppMenuEntry]) -> Result<muda::Submenu, AppMenuError> {
+    let has = |title: &str, shortcut: Option<&str>| {
+        entries.iter().any(|entry| {
+            matches!(entry, AppMenuEntry::Item { label, accelerator, .. }
+            if label == title
+                || shortcut.is_some_and(|shortcut| {
+                    accelerator.as_ref().is_some_and(|a| a.label() == shortcut)
+                }))
+        })
+    };
+    let mut over = Vec::new();
+    if !has("Minimize", Some("Super+M")) {
+        over.push(muda::PredefinedMenuItem::minimize(None));
+    }
+    if !has("Zoom", None) {
+        over.push(muda::PredefinedMenuItem::maximize(Some("Zoom")));
+    }
+    let under = (!has("Bring All to Front", None))
+        .then(|| muda::PredefinedMenuItem::bring_all_to_front(None));
+    let menu = muda::Submenu::new("Window", true);
+    let separator = |menu: &muda::Submenu| {
+        menu.append(&muda::PredefinedMenuItem::separator())
+            .map_err(|e| AppMenuError(e.to_string()))
+    };
+    for item in &over {
+        menu.append(item).map_err(|e| AppMenuError(e.to_string()))?;
+    }
+    if !over.is_empty() && !entries.is_empty() {
+        separator(&menu)?;
+    }
+    append_entries(&menu, entries)?;
+    if let Some(under) = under {
+        if !over.is_empty() || !entries.is_empty() {
+            separator(&menu)?;
+        }
+        menu.append(&under)
+            .map_err(|e| AppMenuError(e.to_string()))?;
+    }
+    Ok(menu)
+}
+
 /// `entries` added to `menu`, in order.
 #[cfg(target_os = "macos")]
 fn append_entries(menu: &muda::Submenu, entries: &[AppMenuEntry]) -> Result<(), AppMenuError> {
@@ -978,24 +1027,7 @@ impl NativeMenu {
                 continue;
             }
             let submenu = if model.label == "Window" {
-                // The app's Window menu keeps AppKit's items around its own:
-                // Minimize and Zoom over them, Bring All to Front under.
-                let submenu = muda::Submenu::new("Window", true);
-                submenu
-                    .append_items(&[
-                        &muda::PredefinedMenuItem::minimize(None),
-                        &muda::PredefinedMenuItem::maximize(Some("Zoom")),
-                        &muda::PredefinedMenuItem::separator(),
-                    ])
-                    .map_err(|e| AppMenuError(e.to_string()))?;
-                append_entries(&submenu, &model.entries)?;
-                submenu
-                    .append_items(&[
-                        &muda::PredefinedMenuItem::separator(),
-                        &muda::PredefinedMenuItem::bring_all_to_front(None),
-                    ])
-                    .map_err(|e| AppMenuError(e.to_string()))?;
-                submenu
+                window_submenu(&model.entries)?
             } else {
                 native_submenu(model)?
             };
@@ -1033,15 +1065,7 @@ impl NativeMenu {
         // Every Mac app has a Window menu: AppKit lists the app's windows in
         // it (with its tabs' commands, and tiling), and ⌘` cycles them.
         if window.is_none() {
-            let standard = muda::Submenu::new("Window", true);
-            standard
-                .append_items(&[
-                    &muda::PredefinedMenuItem::minimize(None),
-                    &muda::PredefinedMenuItem::maximize(Some("Zoom")),
-                    &muda::PredefinedMenuItem::separator(),
-                    &muda::PredefinedMenuItem::bring_all_to_front(None),
-                ])
-                .map_err(|e| AppMenuError(e.to_string()))?;
+            let standard = window_submenu(&[])?;
             menu.append(&standard)
                 .map_err(|e| AppMenuError(e.to_string()))?;
             window = Some(standard);
@@ -1086,8 +1110,9 @@ impl NativeMenu {
         edit_keys::watch(&self.standard);
     }
 }
-/// Make the menu bar's Services submenu (the application menu's first item,
-/// `NativeMenu::new`) the one AppKit fills with the system's services.
+/// Make the menu bar's Services submenu (the application menu's item so
+/// titled, after the app's own items: `NativeMenu::new`) the one AppKit
+/// fills with the system's services.
 /// AppKit keeps the first menu it is given, so a menu bar made later (the
 /// app's menus changed) takes that one over from the last.
 #[cfg(target_os = "macos")]
