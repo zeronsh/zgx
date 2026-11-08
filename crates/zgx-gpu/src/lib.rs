@@ -13740,6 +13740,10 @@ impl GpuRenderer {
             self.images.remove(&id);
             self.image_drawn.remove(&id);
         }
+        // The ramps whose textures just went: their pixels too, now, not at
+        // the next frame's prune.
+        let images = &self.images;
+        self.ramps.retain(|_, ramp| images.contains_key(&ramp.id()));
         self.spare = None;
         self.layers.retain(|_, cache| !cache.parked);
         self.retain_views();
@@ -18434,6 +18438,13 @@ mod rest_tests {
             assert!(
                 rest.0 <= warm.0 && rest.1 <= warm.1 && rest.2 <= warm.2,
                 "{what}: {rest:?} at rest, {warm:?} warm"
+            );
+            // No box shows a gradient now: at rest no ramp is kept, pixels
+            // included.
+            assert!(
+                gpu.ramps.is_empty(),
+                "{what}: {} ramps kept at rest",
+                gpu.ramps.len()
             );
         }
     }
