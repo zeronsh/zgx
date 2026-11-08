@@ -478,20 +478,24 @@ impl EventContext {
         self.prevented_by.get_or_insert(self.current_target);
     }
     /// A scroll view moved along its axis (`horizontal` or not) for this
-    /// wheel event: the event is used, unless it also moves along the other
-    /// axis, which goes on to the views around it (a vertical swipe over a
-    /// horizontal carousel still scrolls the page).
+    /// wheel event: the event is used, and the gesture latches to the view,
+    /// when that is the swipe's main axis. Otherwise the other axis goes on
+    /// to the views around it (a vertical swipe over a horizontal carousel
+    /// still scrolls the page), while a trackpad's sideways jitter on a
+    /// vertical swipe over a list neither reaches the page nor stretches it.
     pub(crate) fn scrolled(&mut self, horizontal: bool) {
         if let InputEvent::Scroll {
             delta_x, delta_y, ..
         } = &mut self.event
         {
+            // The swipe's main axis, as the latch reads it (`dispatch_impl`).
+            let main = (delta_x.abs() > delta_y.abs()) == horizontal;
             let (own, other) = if horizontal {
                 (delta_x, delta_y)
             } else {
                 (delta_y, delta_x)
             };
-            if *other != 0. && other.is_finite() {
+            if !main && *other != 0. && other.is_finite() {
                 *own = 0.;
                 return;
             }
