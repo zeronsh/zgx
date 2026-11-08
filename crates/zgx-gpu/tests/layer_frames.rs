@@ -1135,6 +1135,10 @@ fn main() {
         println!("layer_frames: faded scrolls copy their interior and match drawing whole");
         rounded_corners_scrolled_by_a_copy_match_drawing_whole();
         println!("layer_frames: rounded corners scrolled by a copy match drawing whole");
+        a_scroll_under_a_composer_copies_and_matches_drawing_whole();
+        println!("layer_frames: a scroll under a composer copies and matches drawing whole");
+        a_scroll_on_a_see_through_card_copies_and_matches_drawing_whole();
+        println!("layer_frames: a scroll on a see-through card copies and matches drawing whole");
     }
 }
 
@@ -1253,6 +1257,121 @@ fn a_scroll_under_glass_copies_beside_it_and_matches_drawing_whole() {
     for scale in [2., 1., 1.5] {
         let copies = scrolled_matches_drawing_whole_at(under_glass, &steps, scale);
         assert!(copies > 0, "scale {scale}: no copy beside the glass");
+    }
+}
+/// Rows of text on the page's dark fill, narrower than the view, scrolled.
+#[cfg(target_os = "macos")]
+fn text_rows() -> View {
+    let mut rows = column().gap(6.).p(10.);
+    for i in 0..60 {
+        rows = rows.child(
+            div()
+                .w(420.)
+                .h(30.)
+                .rounded(6.)
+                .bg(Color(40 + (i * 23 % 90) as u8, 60, 110, 255))
+                .child(
+                    text(format!("Part {i}: it reads, checks, writes"))
+                        .text_color(Color(235, 235, 235, 255)),
+                ),
+        );
+    }
+    rows
+}
+/// A composer floating over a transcript: a translucent rounded panel with
+/// an edge, a shadow and a line of text, over a scroll view, staying put.
+#[cfg(target_os = "macos")]
+fn composer_over(offset: Signal<f32>) -> View {
+    overlay()
+        .size(SIZE.0, SIZE.1)
+        .bg(Color(17, 17, 17, 255))
+        .child(
+            scroll(offset)
+                .w(SIZE.0)
+                .h(SIZE.1)
+                .bg(Color(17, 17, 17, 255))
+                .child(text_rows()),
+        )
+        .child(
+            div()
+                .w(360.)
+                .h(56.)
+                .left(120.)
+                .top(SIZE.1 - 90.)
+                .rounded(14.)
+                .border(1.)
+                .border_color(Color(255, 255, 255, 60))
+                .bg(Color(40, 40, 48, 200))
+                .shadow(zgx::scene::BoxShadow {
+                    color: Color(0, 0, 0, 120),
+                    offset: zgx::scene::Transform { x: 0., y: 4. },
+                    blur_radius: 10.,
+                    spread: 0.,
+                })
+                .p(14.)
+                .child(text("Ask anything, @ to mention").text_color(Color(200, 200, 210, 255))),
+        )
+}
+/// Something staying put over a scroll view (a composer over a transcript)
+/// lets it copy: each frame as the scene drawn whole, the composer drawn
+/// again where it is and where the copy took its pixels.
+#[cfg(target_os = "macos")]
+fn a_scroll_under_a_composer_copies_and_matches_drawing_whole() {
+    let steps = [0., 3., 7., 30., 31., 90., 89., 200., 0.];
+    for scale in [2., 1., 1.5] {
+        let copies = scrolled_matches_drawing_whole_at(composer_over, &steps, scale);
+        assert!(copies > 0, "scale {scale}: no copy under the composer");
+    }
+}
+/// A transcript on the page's card: a see-through tint with a 1 pt edge and
+/// rounded corners, on the window's own (translucent) fill; the card
+/// clipping it (its corners then the clip's, `Scene::scroll_corners`) or
+/// not (the card's own corners show in the view).
+#[cfg(target_os = "macos")]
+fn see_through_card(offset: Signal<f32>, clipping: bool) -> View {
+    // (Its inside on whole device pixels at 1, 1.5 and 2: 12 pt in.)
+    let mut card = div()
+        .w(SIZE.0 - 22.)
+        .h(SIZE.1 - 22.)
+        .rounded(12.)
+        .border(1.)
+        .border_color(Color(255, 255, 255, 40))
+        .bg(Color(255, 255, 255, 18));
+    if clipping {
+        card = card.overflow_hidden();
+    }
+    overlay()
+        .size(SIZE.0, SIZE.1)
+        .bg(Color(30, 30, 36, 120))
+        .p(11.)
+        .child(
+            card.child(
+                scroll(offset)
+                    .w(SIZE.0 - 24.)
+                    .h(SIZE.1 - 24.)
+                    .child(text_rows()),
+            ),
+        )
+}
+#[cfg(target_os = "macos")]
+fn on_a_clipping_card(offset: Signal<f32>) -> View {
+    see_through_card(offset, true)
+}
+#[cfg(target_os = "macos")]
+fn on_a_card(offset: Signal<f32>) -> View {
+    see_through_card(offset, false)
+}
+/// A scroll view over one see-through colour (the card under it) copies,
+/// the card's rounded corners in the view repainting: each frame as the
+/// scene drawn whole, the card clipping the view or not.
+#[cfg(target_os = "macos")]
+fn a_scroll_on_a_see_through_card_copies_and_matches_drawing_whole() {
+    let steps = [0., 3., 7., 30., 31., 90., 89., 200., 0.];
+    for view in [on_a_clipping_card as fn(Signal<f32>) -> View, on_a_card] {
+        for scale in [2., 1., 1.5] {
+            let copies = scrolled_matches_drawing_whole_at(view, &steps, scale);
+            assert!(copies > 0, "scale {scale}: no copy on the card");
+        }
     }
 }
 /// A faded scroll copies its interior and repaints its bands and what it

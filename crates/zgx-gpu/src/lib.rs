@@ -892,7 +892,9 @@ fn copy_blocker(
             _ if item.isolated => scene.layer_ink(item)?,
             NodeKind::Container(_) if item.effects.blur_radius <= 0. => return None,
             NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => quad.paint_bounds(item.bounds),
-            _ => item.bounds,
+            // Text by its glyphs' reach (an overhang past its box), images
+            // and drawings with their shadows: what damage covers of them.
+            _ => scene.item_ink(item).unwrap_or(item.bounds),
         };
         if item.effects.opacity <= 0. {
             return None;
@@ -951,9 +953,12 @@ fn copy_blocker(
             // Something that stays put over the view (a composer floating
             // on a transcript): the copy moves the view's pixels, its among
             // them, so it repaints where it is, as the copy left what was
-            // under it, and where the copy put it. Only a blur reads past
-            // its own box, so a blurred one still repaints the whole view.
-            if item.isolated || item.effects.blur_radius > 0. {
+            // under it, and where the copy put it. A backdrop blur too: it
+            // samples only its own visible pixels, all of them drawn again
+            // here (and the frame's damage grows through every filter it
+            // touches, `blur_damage`). A layer's composite may reach past
+            // what its ink says (a shader's), so it still repaints the view.
+            if item.isolated {
                 return Some(CopyBlocker::Over(item.id));
             }
             carried.push(rect);
@@ -1070,19 +1075,39 @@ fn uniform_across(item: &zgx::scene::PaintItem<'_>, clip: Rect) -> Option<Vec<Re
     if !shadows_full {
         return None;
     }
-    // The rounded corners' squares the clip reaches.
-    let side = r + border;
-    Some(
+    // The rounded corners' squares the clip reaches, its own and those of
+    // the rounded clips around it (an ancestor's curve cuts its fill too),
+    // a pixel more for their antialiased edge, as `Scene::scroll_corners`.
+    let squares = |r: Rect, radii: [f32; 4]| {
+        let [top_left, top_right, bottom_right, bottom_left] = radii;
+        let square = |x: f32, y: f32, side: f32| {
+            (side > 0.).then(|| Rect::new(x - 1., y - 1., side + 2., side + 2.))
+        };
         [
-            Rect::new(b.x, b.y, side, side),
-            Rect::new(b.x + b.width - side, b.y, side, side),
-            Rect::new(b.x, b.y + b.height - side, side, side),
-            Rect::new(b.x + b.width - side, b.y + b.height - side, side, side),
+            square(r.x, r.y, top_left),
+            square(r.x + r.width - top_right, r.y, top_right),
+            square(
+                r.x + r.width - bottom_right,
+                r.y + r.height - bottom_right,
+                bottom_right,
+            ),
+            square(r.x, r.y + r.height - bottom_left, bottom_left),
         ]
-        .into_iter()
-        .filter(|_| r > 0.)
-        .filter_map(|corner| corner.intersection(clip))
-        .collect(),
+    };
+    let side = if r > 0. { r + border } else { 0. };
+    let mut corners: Vec<Rect> = squares(b, [side; 4]).into_iter().flatten().collect();
+    for around in item.rounded().into_iter().flatten() {
+        // Feathered, its fade runs along its whole edge: no corner holds it.
+        if around.feather != zgx::scene::Feather::NONE {
+            return None;
+        }
+        corners.extend(squares(around.rect, around.radii).into_iter().flatten());
+    }
+    Some(
+        corners
+            .into_iter()
+            .filter_map(|corner| corner.intersection(clip))
+            .collect(),
     )
 }
 /// Whether rectangles spanning `clip` side to side (or top to bottom) cover
@@ -17306,81 +17331,214 @@ mod copy_blocker_tests {
         widgets::Ui,
     };
 
-    /// A node painting over a scroll view keeps its scroll from being a copy
-    /// of the pixels drawn, and devtools' note names it; with nothing over
-    /// it, the same scroll copies.
+    /// A list of 1000 striped rows, 120 pt wide in a 160 x 100 view (rows
+    /// don't cover it), over `under` if given (else on its own dark fill),
+    /// with `over` placed on top, scrolled 14 pt: what keeps the scroll from
+    /// copying, what the copy left to repaint, the move, devtools' note and
+    /// the frame's damage.
+    #[allow(clippy::type_complexity)]
+    fn scrolled(
+        under: Option<View>,
+        over: Option<View>,
+    ) -> (
+        Option<CopyBlocker>,
+        Vec<Rect>,
+        zgx::scene::ScrollMove,
+        String,
+        Vec<Rect>,
+    ) {
+        let mut ui = Ui::new(160., 120.);
+        let offset = ui.signal(0_f32);
+        let rows = virtual_list(
+            offset.clone(),
+            24.,
+            2,
+            || 1000,
+            |i| i,
+            |_, key, _| {
+                div().size(120., 24.).bg(if key % 2 == 0 {
+                    rgb(0x223344)
+                } else {
+                    rgb(0x334455)
+                })
+            },
+        )
+        .w(160.)
+        .h(100.)
+        .p(8.);
+        let list = match under {
+            Some(card) => card.child(rows),
+            None => rows.bg(rgb(0x101820)),
+        };
+        let mut root = overlay().w(160.).h(120.).bg(rgb(0x000000)).child(list);
+        if let Some(over) = over {
+            root = root.child(over);
+        }
+        ui.mount(root);
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        offset.set(14.);
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        let scene = ui.scene.borrow();
+        let scroll = scene.scroll_moves().last().expect("it moved").clone();
+        let mut carried = Vec::new();
+        let blocker = copy_blocker(&scene, &scroll, &damage, 1., &mut carried, &mut None);
+        let said = blocker.map(|b| b.describe(&scene)).unwrap_or_default();
+        if std::env::var_os("COPY_DEBUG").is_some() {
+            for item in scene.layer_items_within(None, Some(&[scroll.clip])) {
+                eprintln!(
+                    "item @{} {} iso={} blur={} bounds={:?} clip={:?} within={} damage={:?}",
+                    item.id.number(),
+                    zgx::inspect::kind_name(&scene, item.id),
+                    item.isolated,
+                    item.effects.blur_radius,
+                    item.bounds,
+                    item.clip,
+                    scene.is_within(item.id, scroll.node),
+                    damage
+                );
+            }
+            eprintln!(
+                "clip {:?} d=({}, {}) blocker {blocker:?}",
+                scroll.clip, scroll.dx, scroll.dy
+            );
+        }
+        (blocker, carried, scroll, said, damage)
+    }
+    /// A 30 pt square at (40, 40) over the list.
+    fn square() -> View {
+        div()
+            .absolute()
+            .left(40.)
+            .top(40.)
+            .size(30., 30.)
+            .bg(rgba(0xffffff80))
+    }
+    fn has(r: &Rect, x: f32, y: f32) -> bool {
+        x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height
+    }
+    fn moved(rect: Rect, scroll: &zgx::scene::ScrollMove) -> Option<Rect> {
+        Rect::new(
+            rect.x + scroll.dx,
+            rect.y + scroll.dy,
+            rect.width,
+            rect.height,
+        )
+        .intersection(scroll.clip)
+    }
+
+    /// Something that stays put over a scroll view (a composer over a
+    /// transcript, here a translucent square) no longer keeps it from
+    /// copying: it repaints where it is and where the copy took its pixels.
+    /// With nothing over it, the copy leaves nothing of the sort.
     #[test]
-    fn a_node_over_a_scroll_view_is_named_as_what_keeps_it_from_copying() {
-        for covered in [false, true] {
-            let mut ui = Ui::new(160., 120.);
-            let offset = ui.signal(0_f32);
-            let rows = virtual_list(
-                offset.clone(),
-                24.,
-                2,
-                || 1000,
-                |i| i,
-                |_, key, _| {
-                    div().size(144., 24.).bg(if key % 2 == 0 {
-                        rgb(0x223344)
-                    } else {
-                        rgb(0x334455)
-                    })
-                },
-            )
-            .w(160.)
-            .h(100.)
-            .p(8.)
-            .bg(rgb(0x101820));
-            let mut root = overlay().w(160.).h(120.).bg(rgb(0x000000)).child(rows);
-            if covered {
-                root = root.child(
-                    div()
-                        .absolute()
-                        .left(40.)
-                        .top(40.)
-                        .size(30., 30.)
-                        .bg(rgba(0xffffff80)),
-                );
-            }
-            ui.mount(root);
-            ui.prepare_frame();
-            ui.scene.borrow_mut().flush();
-            offset.set(14.);
-            ui.prepare_frame();
-            let damage = ui.scene.borrow_mut().flush().damage;
-            let scene = ui.scene.borrow();
-            let scroll = scene.scroll_moves().last().expect("it moved").clone();
-            let blocker = copy_blocker(&scene, &scroll, &damage, 1., &mut Vec::new(), &mut None);
-            if covered {
-                let Some(blocker @ CopyBlocker::Over(_)) = blocker else {
-                    panic!("the square over the list keeps it from copying: {blocker:?}");
-                };
-                let said = blocker.describe(&scene);
-                assert!(
-                    said.contains("draws over it") && said.starts_with('@'),
-                    "{said}"
-                );
-            } else {
-                assert_eq!(blocker, None);
-            }
+    fn a_node_over_a_scroll_view_repaints_where_it_is_and_where_the_copy_put_it() {
+        let at = Rect::new(40., 40., 30., 30.);
+        let (blocker, carried, scroll, _, _) = scrolled(None, Some(square()));
+        assert_eq!(blocker, None);
+        assert!(carried.contains(&at), "where it is: {carried:?}");
+        let to = moved(at, &scroll).expect("in the view");
+        assert!(
+            carried.contains(&to),
+            "where the copy put it ({to:?}): {carried:?}"
+        );
+        let (blocker, carried, _, _, _) = scrolled(None, None);
+        assert_eq!(blocker, None);
+        assert!(!carried.contains(&at), "{carried:?}");
+    }
+    /// A backdrop blur over a scroll view: the scene leaves its columns,
+    /// as far as the blur reaches, out of the move (they repaint, the blur
+    /// drawn again over what's now behind it), and the rest copies.
+    #[test]
+    fn a_blur_over_a_scroll_view_repaints_as_far_as_it_reaches_and_the_rest_copies() {
+        let at = Rect::new(40., 40., 30., 30.);
+        let (blocker, _, scroll, _, damage) = scrolled(None, Some(square().backdrop_blur(6.)));
+        assert_eq!(blocker, None);
+        assert!(
+            scroll.clip.intersection(at).is_none(),
+            "the copied part is clear of it: {:?}",
+            scroll.clip
+        );
+        let reach = at
+            .expand(6. * 3.)
+            .intersection(Rect::new(8., 8., 144., 84.))
+            .expect("in the view");
+        let covered = |x: f32, y: f32| damage.iter().any(|d| has(d, x, y));
+        for (x, y) in [
+            (reach.x, reach.y),
+            (reach.x + reach.width - 1., reach.y + reach.height - 1.),
+        ] {
+            assert!(covered(x, y), "({x}, {y}) repaints: {damage:?}");
         }
     }
-}
-
-#[cfg(test)]
-mod raised_copy_tests {
-    use super::*;
-    use zgx::{
-        compose::prelude::{rgba, *},
-        widgets::Ui,
-    };
-
-    /// A node raised over a scroll view keeps its scroll from copying, as
-    /// a later sibling does, though it comes first in the document; not
-    /// raised it lies under the list, and the same scroll copies.
+    /// A layer over a scroll view still keeps it from copying (its
+    /// composite may reach past its ink), and devtools' note names it.
     #[test]
-    fn a_raised_node_over_a_scroll_view_keeps_it_from_copying() {
+    fn a_layer_over_a_scroll_view_is_named_as_what_keeps_it_from_copying() {
+        let (blocker, _, _, said, _) = scrolled(None, Some(square().rotate(0.1)));
+        assert!(matches!(blocker, Some(CopyBlocker::Over(_))), "{blocker:?}");
+        assert!(
+            said.contains("draws over it") && said.starts_with('@'),
+            "{said}"
+        );
+    }
+    /// A see-through card under the list (a tint on the window's glass,
+    /// rounded, with a 1 pt edge): one colour under every pixel of the view,
+    /// so the scroll copies; its corners in the view repaint, where they are
+    /// and where the copy put them. A card that doesn't fill the view
+    /// shows under it, and the view repaints.
+    #[test]
+    fn a_see_through_rounded_card_under_a_scroll_view_lets_it_copy_but_its_corners() {
+        let card = || {
+            div()
+                .w(160.)
+                .h(100.)
+                .rounded(10.)
+                .border(1.)
+                .border_color(rgba(0xffffff30))
+                .bg(rgba(0xffffff20))
+                .overflow_hidden()
+        };
+        let (blocker, carried, scroll, _, _) = scrolled(Some(card()), None);
+        assert_eq!(blocker, None);
+        // The view is the card's inside: each of its corners there repaints.
+        let clip = scroll.clip;
+        for (x, y) in [
+            (clip.x, clip.y),
+            (clip.x + clip.width - 1., clip.y),
+            (clip.x, clip.y + clip.height - 1.),
+            (clip.x + clip.width - 1., clip.y + clip.height - 1.),
+        ] {
+            assert!(
+                carried.iter().any(|r| has(r, x, y)),
+                "the corner at ({x}, {y}) repaints: {carried:?}"
+            );
+        }
+        // Its middle copies.
+        let (mx, my) = (clip.x + clip.width / 2., clip.y + clip.height / 2.);
+        assert!(!carried.iter().any(|r| has(r, mx, my)), "{carried:?}");
+        // Narrower than the view, the card shows under it only in part.
+        let (blocker, _, _, _, _) = scrolled(
+            Some(
+                div()
+                    .w(160.)
+                    .h(100.)
+                    .child(div().absolute().size(60., 100.).bg(rgba(0xffffff20))),
+            ),
+            None,
+        );
+        assert!(
+            matches!(blocker, Some(CopyBlocker::Under(_))),
+            "a part-way card can't be carried: {blocker:?}"
+        );
+    }
+    /// A node raised over a scroll view counts as over it, as a later
+    /// sibling does, though it comes first in the document: it repaints
+    /// where it is. Not raised, it lies under the list's fill, unseen.
+    #[test]
+    fn a_raised_node_over_a_scroll_view_counts_as_over_it() {
+        let at = Rect::new(40., 40., 30., 30.);
         for raised in [false, true] {
             let mut ui = Ui::new(160., 120.);
             let offset = ui.signal(0_f32);
@@ -17402,12 +17560,7 @@ mod raised_copy_tests {
             .h(100.)
             .p(8.)
             .bg(rgb(0x101820));
-            let mut badge = div()
-                .absolute()
-                .left(40.)
-                .top(40.)
-                .size(30., 30.)
-                .bg(rgba(0xffffff80));
+            let mut badge = square();
             if raised {
                 badge = badge.z(1);
             }
@@ -17426,15 +17579,14 @@ mod raised_copy_tests {
             let damage = ui.scene.borrow_mut().flush().damage;
             let scene = ui.scene.borrow();
             let scroll = scene.scroll_moves().last().expect("it moved").clone();
-            let blocker = copy_blocker(&scene, &scroll, &damage, 1., &mut Vec::new(), &mut None);
-            if raised {
-                assert!(
-                    matches!(blocker, Some(CopyBlocker::Over(_))),
-                    "the raised square keeps it from copying: {blocker:?}"
-                );
-            } else {
-                assert_eq!(blocker, None);
-            }
+            let mut carried = Vec::new();
+            let blocker = copy_blocker(&scene, &scroll, &damage, 1., &mut carried, &mut None);
+            assert_eq!(blocker, None, "raised {raised}");
+            assert_eq!(
+                carried.contains(&at),
+                raised,
+                "raised {raised}: {carried:?}"
+            );
         }
     }
 }

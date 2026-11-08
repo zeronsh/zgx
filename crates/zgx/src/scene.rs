@@ -3859,6 +3859,19 @@ impl Scene {
             y: item.bounds.y - node.bounds.y - node.transform.y,
         }))
     }
+    /// Where an item of the window's paint walk can paint itself, in window
+    /// points: its own ink alone (a text's glyphs past its box, a box's
+    /// shadow), what damage covers of it; `None` for a container that paints
+    /// nothing of its own. Renderer plumbing, not a stable API.
+    #[doc(hidden)]
+    pub fn item_ink(&self, item: &PaintItem<'_>) -> Option<Rect> {
+        let node = self.node(item.id);
+        let ink = self.own_ink(item.id)?;
+        Some(ink.translated(Transform {
+            x: item.bounds.x - node.bounds.x,
+            y: item.bounds.y - node.bounds.y,
+        }))
+    }
     /// `transformed_bounds`, read by the scene's and the frame's own work:
     /// noted by no mount.
     pub(crate) fn transformed_world_bounds(&self, id: NodeId) -> Rect {
