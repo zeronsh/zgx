@@ -6,7 +6,7 @@
 //! the system's audio thread. The mix ([`mixer::Mixer`]) takes what it needs
 //! by lock-free queues and gives back what it lets go of, so the audio thread
 //! never allocates, locks or runs a script. `docs/audio-design.md` is the
-//! design; this is its prototype, with output on macOS and iOS.
+//! design; this is its prototype, with output on macOS, iOS, Windows and Linux.
 pub mod mixer;
 pub mod ring;
 #[cfg(feature = "script")]
@@ -26,7 +26,7 @@ pub struct Engine {
     control: mixer::Controller,
     sounds: HashMap<PathBuf, Sound>,
     // Dropped last: stops the audio thread before the queues go.
-    _output: backend::Output,
+    output: backend::Output,
 }
 
 impl Engine {
@@ -34,11 +34,11 @@ impl Engine {
     pub fn open() -> Result<Self, String> {
         let device = backend::Device::open()?;
         let (control, mixer) = mixer::pair(device.rate());
-        let output = device.start(mixer)?;
+        let output = device.start(mixer, control.watch())?;
         Ok(Self {
             control,
             sounds: HashMap::new(),
-            _output: output,
+            output,
         })
     }
     /// Frames a second, the device's.
@@ -62,23 +62,38 @@ impl Engine {
     }
     /// Plays `sound`.
     pub fn play(&mut self, sound: &Sound, play: Play) -> Voice {
-        self.control.play(sound, play)
+        let voice = self.control.play(sound, play);
+        self.output.wake();
+        voice
     }
     /// Moves `voice` to `volume` and `pan`.
     pub fn set(&mut self, voice: Voice, volume: f32, pan: f32) {
         self.control.set(voice, volume, pan);
+        self.output.wake();
     }
     /// Fades `voice` out and ends it.
     pub fn stop(&mut self, voice: Voice) {
         self.control.stop(voice);
+        self.output.wake();
     }
     /// `stream` fills the output from now on, under the voices.
     pub fn stream(&mut self, stream: impl Stream) {
         self.control.stream(Some(Box::new(stream)));
+        self.output.wake();
     }
     /// Silence under the voices again.
     pub fn end_stream(&mut self) {
         self.control.stream(None);
+        self.output.wake();
+    }
+    /// The device closes after `seconds` of silence (3 to begin with), and
+    /// opens again at the next sound.
+    pub fn close_after(&mut self, seconds: f64) {
+        self.control.close_after(seconds);
+    }
+    /// Whether the device is open and playing (not closed after silence).
+    pub fn is_running(&self) -> bool {
+        self.output.is_running()
     }
     /// What the audio thread has done since it started.
     pub fn reading(&mut self) -> Reading {

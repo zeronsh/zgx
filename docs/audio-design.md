@@ -198,11 +198,29 @@ The prototype's bridge is smaller: a package, `require("@audio")`, whose `audio.
 
 | Platform | Output | Prototype | Notes |
 | --- | --- | --- | --- |
-| macOS | AudioUnit, default output (`auou`/`def `) | yes | Follows the default device as it changes (headphones in or out). |
+| macOS | AudioUnit, default output (`auou`/`def `) | plays; closes after silence | Follows the default device as it changes (headphones in or out). |
 | iOS | AudioUnit, Remote I/O (`rioc`) | plays in the simulator | Needs the session below. The prototype runs under the default session. |
-| Windows | WASAPI, shared, event-driven | no | Through the `windows` crate zgx already uses. Reopen on a device change (`IMMNotificationClient`). |
-| Linux | ALSA's API, loaded with `dlopen` | no | Plays on PipeWire, PulseAudio and plain ALSA alike. A binary still starts where there's no libasound. PipeWire's own API later, for lower latency. |
+| Windows | WASAPI, shared, event-driven | written; type-checked; CI runs it if the runner has an endpoint | Through the `windows` crate zgx already uses. |
+| Linux | ALSA's API, loaded with `dlopen` | plays through ALSA into a file (container and CI); closes after silence | Plays on PipeWire, PulseAudio and plain ALSA alike. The binary doesn't link libasound. PipeWire's own API later, for lower latency. |
 | Android | AAudio, loaded with `dlopen` | no | When zgx runs there. |
+
+**How each runs.**
+
+- **macOS and iOS:** the system calls the mixer on its own real-time thread.
+- **Windows:** the mix runs on a thread of zgx-audio's own, in MMCSS's "Pro Audio" class. The audio engine wakes it by an event each time its buffer has room, and it fills exactly that room. All COM is made and used on that thread, in the multithreaded apartment, never on the app's thread, whose apartment is its own.
+- **Linux:** a thread of ours writes one period at a time. The write blocks until the device has room, which paces it.
+
+**Closing after silence.** After 3 seconds of silence (no voice, no stream; `Engine::close_after` changes it) the device closes:
+
+- **macOS:** the unit stops, and with it the system's audio thread. A keeper thread does the stopping: it looks four times a second while the unit runs, and parks while it's stopped.
+- **Windows:** the client is stopped and released.
+- **Linux:** the PCM is closed.
+
+The next command opens it again. Windows and Linux open the default device afresh at that point, so a device changed while closed is followed.
+
+A small gate (`backend/mod.rs`) makes this race-free. Closing goes running → closing → closed, then checks for a command queued meanwhile. Waking goes closed → running. Whichever side sees the other first acts, so a sound sent just as the device closes still plays.
+
+On Windows, losing the device while playing (unplugged, or the default changed) also closes it, to open the new default at the next sound. `IMMNotificationClient` could move a playing stream at once; that's later.
 
 **cpal or our own?** cpal covers all of these behind one API, and would be quicker to land. Against it:
 
@@ -210,7 +228,11 @@ The prototype's bridge is smaller: a package, `require("@audio")`, whose `audio.
 - It leaves iOS's audio session to the app.
 - It gives less control over buffer size, stopping when idle, and device changes.
 
-Our own backends are small. The macOS and iOS one in the prototype is 250 lines of AudioToolbox calls and adds no dependency. WASAPI and ALSA would be a few hundred lines each. This matches how zgx keeps its dependencies few and its own. The recommendation is our own, with cpal as the fallback if time matters more.
+Our own backends are small, and none adds a dependency:
+- macOS and iOS: 328 lines of AudioToolbox calls.
+- Windows: 285 lines of WASAPI.
+- Linux: 268 lines of ALSA.
+- Their shared open-and-close gate: 110 lines. This matches how zgx keeps its dependencies few and its own. The recommendation is our own, with cpal as the fallback if time matters more.
 
 **iOS: the audio session.** An app says what its sound is through `AVAudioSession`'s category, before the output starts:
 
@@ -244,7 +266,7 @@ With zgx-audio:
   - `ring.rs`: the lock-free queue.
   - `mixer.rs`: voices, stream, ramps, delays and pan.
   - `wav.rs`: WAV reading and resampling.
-  - `backend/apple.rs`: AudioUnit output.
+  - `backend/`: AudioUnit (`apple.rs`), WASAPI (`wasapi.rs`) and ALSA (`alsa.rs`) output, and the gate that closes and opens them (`mod.rs`).
   - `lib.rs`: the engine, decoding and caching.
   - `script.rs` and `luau/audio.luau`: `require("@audio")` for a script host, behind the `script` feature.
 - `examples/click.rs`: headless, with no window. A script (`examples/click/app.luau`) plays a click three times, left, middle and right, a fifth of a second apart, timed on the audio thread. Then a stream plays a 440 Hz tone with an envelope. On an M5 MacBook Pro, `cargo run -p zgx-audio --features script --example click` printed `script: 3 clicks sounded, peak 0.78, 33792 frames at 48000 Hz` and `stream: peak 0.19, 24064 frames`.
@@ -253,13 +275,35 @@ With zgx-audio:
 - The same example in the iOS simulator (built for `aarch64-apple-ios-sim`, run with `xcrun simctl spawn`) printed `script: 3 clicks sounded, peak 0.78, 33280 frames at 48000 Hz` and `stream: peak 0.19, 23552 frames`.
 - zgx-run's `audio` feature, off by default, installs `@audio` for an app's script. It exists for the measurements above. zgx-run can't be published with it until zgx-audio is.
 
-Not yet: buffer-size requests, device changes, the idle stop, decoders beyond WAV and `afconvert`, iOS's session, and Windows and Linux. Nothing in zgx-script changes yet.
+- Linux, in the zgx-linux container (Ubuntu 24.04, arm64):
+  - ALSA's default device was its file plugin over the null device, so the output went to a file.
+  - The click example wrote three clicks: left only, both sides, right only, each peaking at 0.784.
+  - `readelf` shows the binary doesn't need libasound. It's opened with `dlopen` at the first sound.
+  - CI's Linux job does the same and requires the device (`ZGX_AUDIO_REQUIRE_DEVICE`).
+- `tests/device.rs`, on any system with an output, plays silence and checks that:
+  - the device closes after 0.3 s of silence;
+  - it pulls no buffers while closed;
+  - the next sound opens it, and that sound plays.
+
+  It passes on the M5 MacBook Pro and in the container. Where there's no output it says so and passes.
+- A delay counts from when its command reaches the mixer. In the container the null device runs the loop unpaced, so the clicks landed 0.22 s and 0.205 s apart, not 0.2 s: the script's three calls were a moment apart and the device didn't wait. A device that paces the loop takes commands once a buffer, so calls a moment apart land together. Even so, sounds a script means to keep in time should share a time base: `ui.sound.play(src, { at = t })`, with `t` read once from the audio clock.
+
+Not yet:
+- **Windows output, run:** it's only type-checked here. CI shows whether a hosted runner has an endpoint. Running it there for sure means installing a virtual sound card in CI (VB-Cable, as LABSN/sound-ci-helpers does: a third-party driver downloaded at each run), which is a choice for review.
+- **Buffer-size requests and real-time priority on Linux** (rtkit).
+- **Moving a playing stream** when the device changes.
+- **Decoders** beyond WAV and `afconvert`.
+- **iOS's session.**
+
+Nothing in zgx-script changes yet.
 
 ## Phases
 
 1. **zgx-audio on Apple systems.** Harden the prototype: buffer size, device changes, idle stop, ExtAudioFile, streaming long files.
 2. **`ui.sound` in zgx-script** behind `audio`: the lazy module, types, lint rules, `docs/reference/sound.md`, tests through the headless harness with an offline mixer.
-3. **Windows and Linux.** WASAPI, ALSA through `dlopen`. A Linux probe in `scripts/linux_smokes.py` plays into a PipeWire null sink, records it and compares it with the expected mix. A Windows run does the same through a loopback capture.
+3. **Windows and Linux.** WASAPI and ALSA are written. To come:
+   - a Linux probe in `scripts/linux_smokes.py` playing into a PipeWire null sink and comparing the recording with the expected mix;
+   - a Windows run doing the same through a loopback capture, on a machine with an endpoint (WING-PC, or a runner with a virtual sound card).
 4. **iOS.** The session, interruptions and route changes, checked on a phone.
 5. **`ui.synth`.** Its instruments, note events timed to the frame, and later MIDI input (CoreMIDI, Windows MIDI, ALSA sequencer).
 6. **zgx-video.** Shared decoding, and the player's sound.

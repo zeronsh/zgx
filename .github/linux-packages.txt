@@ -14,6 +14,7 @@ hunspell-en-us
 ibus
 ibus-libpinyin
 imagemagick
+libasound2t64
 libdbus-1-dev
 libenchant-2-2
 libfontconfig1-dev

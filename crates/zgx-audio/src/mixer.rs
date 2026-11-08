@@ -116,6 +116,31 @@ pub struct Stats {
     frames: AtomicU64,
     started: AtomicU64,
     peak: AtomicU32,
+    /// Commands the controller has queued, and the mixer has taken: the
+    /// same when none waits.
+    sent: AtomicU64,
+    taken: AtomicU64,
+    /// Frames rendered since anything sounded (no voice, no stream).
+    silent: AtomicU64,
+    /// Frames of silence after which the device may close.
+    close_after: AtomicU64,
+}
+
+/// What a device's thread reads to know when it may close, and whether a
+/// command waits for it (to open again).
+#[derive(Clone)]
+pub struct Watch(Arc<Stats>);
+
+impl Watch {
+    /// A command is queued that the mixer hasn't taken.
+    pub fn pending(&self) -> bool {
+        self.0.sent.load(Ordering::SeqCst) != self.0.taken.load(Ordering::SeqCst)
+    }
+    /// Silent long enough to close, with nothing waiting.
+    pub fn idle(&self) -> bool {
+        self.0.silent.load(Ordering::Relaxed) >= self.0.close_after.load(Ordering::Relaxed)
+            && !self.pending()
+    }
 }
 /// A reading of [`Stats`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -171,6 +196,9 @@ pub fn pair(rate: u32) -> (Controller, Mixer) {
     // Room for every voice and every command's leftovers: never full.
     let (to_controller, garbage) = ring(VOICES + COMMANDS);
     let stats = Arc::new(Stats::default());
+    stats
+        .close_after
+        .store(u64::from(rate) * 3, Ordering::Relaxed);
     (
         Controller {
             rate,
@@ -199,7 +227,18 @@ impl Controller {
     fn send(&mut self, command: Command) {
         self.collect();
         // Full only if the audio thread has stopped taking: dropped then.
-        let _ = self.commands.push(command);
+        if self.commands.push(command).is_ok() {
+            self.stats.sent.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    /// What a device's thread watches.
+    pub fn watch(&self) -> Watch {
+        Watch(self.stats.clone())
+    }
+    /// The device may close after `seconds` of silence (3 to begin with).
+    pub fn close_after(&mut self, seconds: f64) {
+        let frames = (seconds.max(0.) * f64::from(self.rate)) as u64;
+        self.stats.close_after.store(frames, Ordering::Relaxed);
     }
     /// Frees what the audio thread let go of.
     pub fn collect(&mut self) {
@@ -247,6 +286,7 @@ impl Controller {
 impl Mixer {
     fn take_commands(&mut self) {
         while let Some(command) = self.commands.pop() {
+            self.stats.taken.fetch_add(1, Ordering::SeqCst);
             match command {
                 Command::Play {
                     voice,
@@ -348,6 +388,13 @@ impl Mixer {
             } else {
                 i += 1;
             }
+        }
+        if self.voices.is_empty() && self.stream.is_none() {
+            self.stats
+                .silent
+                .fetch_add(frames as u64, Ordering::Relaxed);
+        } else {
+            self.stats.silent.store(0, Ordering::Relaxed);
         }
         let peak = out.iter().fold(0f32, |peak, s| peak.max(s.abs()));
         self.stats.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
@@ -451,6 +498,26 @@ mod tests {
             out.iter().all(|s| *s == 4.),
             "its second buffer starts at frame 4"
         );
+    }
+
+    #[test]
+    fn it_is_idle_after_its_silence_and_not_while_a_command_waits() {
+        let (mut control, mut mixer) = pair(1000);
+        control.close_after(0.1);
+        let watch = control.watch();
+        let mut out = vec![0.; 100];
+        mixer.render(&mut out);
+        assert!(!watch.idle(), "50 frames of the 100");
+        mixer.render(&mut out);
+        assert!(watch.idle());
+        control.play(&ones(60), Play::default());
+        assert!(watch.pending() && !watch.idle(), "a sound waits for it");
+        mixer.render(&mut out);
+        assert!(!watch.pending() && !watch.idle());
+        mixer.render(&mut out);
+        assert!(!watch.idle(), "it ended in this buffer");
+        mixer.render(&mut out);
+        assert!(watch.idle());
     }
 
     #[test]

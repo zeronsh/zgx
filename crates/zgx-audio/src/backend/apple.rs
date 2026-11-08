@@ -2,8 +2,18 @@
 //! device's on macOS, Remote I/O on iOS), pulling float stereo from the mixer
 //! on its own real-time thread. AudioToolbox is called directly: it's a few
 //! functions, and every Mac and iPhone has it.
-use crate::mixer::Mixer;
-use std::ffi::c_void;
+//!
+//! After the mixer's silence the unit is stopped (the system's audio thread
+//! with it) by a keeper thread, which looks four times a second while the
+//! unit runs and parks while it's stopped. The next command starts it again.
+use super::Gate;
+use crate::mixer::{Mixer, Watch};
+use std::{
+    ffi::c_void,
+    sync::Arc,
+    thread::{JoinHandle, Thread},
+    time::Duration,
+};
 
 type OsStatus = i32;
 type AudioUnit = *mut c_void;
@@ -116,7 +126,15 @@ pub struct Device {
 pub struct Output {
     unit: AudioUnit,
     mixer: *mut Mixer,
+    gate: Arc<Gate>,
+    keeper: Option<JoinHandle<()>>,
+    keeper_thread: Option<Thread>,
 }
+
+/// The unit, for the keeper to stop and start: AudioOutputUnitStart and
+/// Stop may be called from any thread.
+struct Unit(AudioUnit);
+unsafe impl Send for Unit {}
 
 impl Device {
     pub fn open() -> Result<Self, String> {
@@ -184,11 +202,17 @@ impl Device {
     pub fn rate(&self) -> u32 {
         self.rate
     }
-    pub fn start(self, mixer: Mixer) -> Result<Output, String> {
+    pub fn start(self, mixer: Mixer, watch: Watch) -> Result<Output, String> {
         let unit = self.unit;
         std::mem::forget(self);
         let mixer = Box::into_raw(Box::new(mixer));
-        let output = Output { unit, mixer };
+        let mut output = Output {
+            unit,
+            mixer,
+            gate: Arc::new(Gate::default()),
+            keeper: None,
+            keeper_thread: None,
+        };
         let callback = RenderCallback {
             proc_: render,
             context: mixer.cast(),
@@ -208,6 +232,14 @@ impl Device {
             check(AudioUnitInitialize(unit), "starting the output")?;
             check(AudioOutputUnitStart(unit), "starting the output")?;
         }
+        let gate = output.gate.clone();
+        let keeping = Unit(unit);
+        let keeper = std::thread::Builder::new()
+            .name("zgx-audio-keeper".into())
+            .spawn(move || keep(keeping, &gate, &watch))
+            .map_err(|e| e.to_string())?;
+        output.keeper_thread = Some(keeper.thread().clone());
+        output.keeper = Some(keeper);
         Ok(output)
     }
 }
@@ -217,8 +249,50 @@ impl Drop for Device {
     }
 }
 
+/// Stops the unit after the mixer's silence; parks while it's stopped.
+fn keep(unit: Unit, gate: &Gate, watch: &Watch) {
+    loop {
+        if gate.quitting() {
+            return;
+        }
+        if !gate.is_running() {
+            std::thread::park();
+            continue;
+        }
+        std::thread::park_timeout(Duration::from_millis(250));
+        if watch.idle() && gate.begin_close() {
+            unsafe { AudioOutputUnitStop(unit.0) };
+            if gate.closed(watch) {
+                unsafe { AudioOutputUnitStart(unit.0) };
+            }
+        }
+    }
+}
+
+impl Output {
+    /// Starts it again if it stopped: a command is waiting.
+    pub fn wake(&self) {
+        if self.gate.reopen() {
+            unsafe { AudioOutputUnitStart(self.unit) };
+            if let Some(keeper) = &self.keeper_thread {
+                keeper.unpark();
+            }
+        }
+    }
+    pub fn is_running(&self) -> bool {
+        self.gate.is_running()
+    }
+}
+
 impl Drop for Output {
     fn drop(&mut self) {
+        self.gate.quit();
+        if let Some(keeper) = self.keeper_thread.take() {
+            keeper.unpark();
+        }
+        if let Some(keeper) = self.keeper.take() {
+            let _ = keeper.join();
+        }
         unsafe {
             // Stopped returns once the callback has finished: the mixer is
             // ours again.

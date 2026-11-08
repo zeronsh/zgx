@@ -1,7 +1,7 @@
 //! A script plays a click through zgx-audio: `cargo run -p zgx-audio
 //! --features script --example click`. Headless: no window, only the
 //! script's host. Then a synth's stream plays a short tone, filled on the
-//! audio thread.
+//! audio thread (unless the first argument is `script`: the clicks alone).
 use std::time::Duration;
 use zgx_audio::{Engine, Info};
 
@@ -26,6 +26,12 @@ fn main() -> Result<(), String> {
         reading.frames,
         audio.with(|engine| engine.rate()).unwrap_or(0)
     );
+
+    if std::env::args().nth(1).as_deref() == Some("script") {
+        // The clicks alone (a capture of the output holds only them).
+        drop(audio);
+        return Ok(());
+    }
 
     // A synth: a sine filled on the audio thread, its envelope from the
     // frame count alone (no allocation, no lock, no script).

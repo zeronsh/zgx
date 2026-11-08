@@ -5107,6 +5107,7 @@ dependencies = [
 name = "zgx-audio"
 version = "0.1.10"
 dependencies = [
+ "windows",
  "zgx",
  "zgx-script",
 ]
