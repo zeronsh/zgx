@@ -4179,8 +4179,9 @@ pub struct GpuRenderer {
     outlines: Option<Box<OutlineRasters>>,
     svgs: svg::SvgCache,
     /// Small untransformed SVG rasters packed into the glyph atlas by image
-    /// id, so icons batch with text instead of binding a texture each.
-    image_cells: FxHashMap<u64, (u32, u32)>,
+    /// id, so icons batch with text instead of binding a texture each: each
+    /// cell's origin and size (a shrunk atlas packs them again).
+    image_cells: FxHashMap<u64, (u32, u32, u32, u32)>,
     /// Frame of the last atlas recycle, to detect thrashing.
     atlas_recycled_at: u64,
     /// Compiled on the first backdrop filter.
@@ -4922,21 +4923,151 @@ impl GpuRenderer {
     pub fn atlas_grown(&self) -> bool {
         self.atlas_size > INITIAL_ATLAS
     }
-    /// Back to the glyph atlas's first size, for a window idle a long while:
-    /// up to 16 MB of the GPU's memory, grown for a page's peak. The next
-    /// frame rasterizes every glyph it draws again (28 ms for 4,000 glyphs
-    /// over a whole window, against 3), so not at every pause (`trim`).
+    /// The glyph atlas down to the smallest that holds what the window's
+    /// text and icons draw now, for a window idle a long while: up to 16 MB
+    /// of the GPU's memory, grown for a page's peak. The glyphs its text
+    /// holds (`shapes`) and its icons' cells are copied across, not
+    /// rasterized again, so the next frame draws from them as before; what
+    /// went with pages since gone is dropped. An atlas its screen fills is
+    /// kept. (Rasterizing a dense page again took 9 to 18 ms on an M5 for a
+    /// screen of CJK text, a hitch on the frame after the user came back.)
     pub fn trim_atlas(&mut self) {
         if !self.atlas_grown() {
             return;
         }
         self.flush_pending();
-        self.atlas_grew_to = self.atlas_size;
-        self.kept = None;
-        self.reset_atlas(INITIAL_ATLAS);
-        self.atlas_recycled_at = self.frame;
+        if !self.shrink_atlas() {
+            // No copy here (Direct3D 11, uploads still queued): started over.
+            self.atlas_grew_to = self.atlas_size;
+            self.kept = None;
+            self.reset_atlas(INITIAL_ATLAS);
+            self.atlas_recycled_at = self.frame;
+        }
         // No frame comes to let the old one go: the device, polled, does.
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    /// `trim_atlas`'s copy into a smaller atlas: false where it can't copy,
+    /// true when done or when no smaller atlas holds what is live.
+    fn shrink_atlas(&mut self) -> bool {
+        #[cfg(d3d11)]
+        if self.d3d11.is_some() {
+            return false;
+        }
+        if !self.texture_uploads.is_empty() {
+            return false;
+        }
+        // Live: the glyphs of the text the renderer holds, and every icon
+        // and wave tile (few, and not told apart by who shows them).
+        let mut live: FxHashMap<AtlasKey, Option<AtlasEntry>> = FxHashMap::default();
+        for shaped in self.shapes.values() {
+            for glyph in &shaped.glyphs {
+                let key = AtlasKey::from(glyph.key);
+                if let Some(entry) = self.entries.get(&key) {
+                    live.insert(key, *entry);
+                }
+            }
+        }
+        let glyphs: Vec<(AtlasKey, AtlasEntry)> = live
+            .iter()
+            .filter_map(|(key, entry)| entry.map(|entry| (*key, entry)))
+            .collect();
+        let icons: Vec<(u64, (u32, u32, u32, u32))> = self
+            .image_cells
+            .iter()
+            .map(|(id, cell)| (*id, *cell))
+            .collect();
+        let sizes: Vec<(u32, u32)> = glyphs
+            .iter()
+            .map(|(_, e)| (e.width, e.height))
+            .chain(icons.iter().map(|(_, (_, _, w, h))| (*w, *h)))
+            .collect();
+        let Some(Packed {
+            size,
+            origins,
+            cursor,
+        }) = pack_cells(&sizes, self.atlas_size)
+        else {
+            return true;
+        };
+        let atlas = sampled_texture(&self.device, self.unified, size, size, "glyph atlas");
+        // Each cell with its one-texel gutter, as `atlas_cell` wrote it.
+        let cells = glyphs
+            .iter()
+            .map(|(_, e)| (e.x, e.y))
+            .chain(icons.iter().map(|(_, (x, y, _, _))| (*x, *y)))
+            .zip(&sizes)
+            .zip(&origins)
+            .map(|(((x, y), (w, h)), (to_x, to_y))| {
+                (x - 1, y - 1, w + 2, h + 2, to_x - 1, to_y - 1)
+            });
+        #[cfg(target_os = "macos")]
+        let copied_on_cpu = self.unified;
+        #[cfg(not(target_os = "macos"))]
+        let copied_on_cpu = false;
+        if copied_on_cpu {
+            // Shared textures the CPU writes: read and written in place.
+            #[cfg(target_os = "macos")]
+            for (x, y, w, h, to_x, to_y) in cells {
+                upload::copy_texels(&self.atlas, &atlas, (x, y, w, h), (to_x, to_y));
+            }
+        } else {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glyph atlas shrunk"),
+                });
+            for (x, y, w, h, to_x, to_y) in cells {
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.atlas,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x, y, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &atlas,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: to_x,
+                            y: to_y,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            self.queue.submit([encoder.finish()]);
+        }
+        let mut entries: FxHashMap<AtlasKey, Option<AtlasEntry>> =
+            live.into_iter().filter(|(_, e)| e.is_none()).collect();
+        let mut origins = origins.into_iter();
+        for ((key, entry), (x, y)) in glyphs.into_iter().zip(origins.by_ref()) {
+            entries.insert(key, Some(AtlasEntry { x, y, ..entry }));
+        }
+        self.image_cells = icons
+            .into_iter()
+            .zip(origins)
+            .map(|((id, (_, _, w, h)), (x, y))| (id, (x, y, w, h)))
+            .collect();
+        self.entries = entries;
+        if let Some(blurred) = &mut self.blurred {
+            blurred.glyphs.clear();
+        }
+        self.atlas_grew_to = self.atlas_size;
+        self.atlas = atlas;
+        self.atlas_size = size;
+        self.bind = self.texture_bind(&self.atlas.create_view(&Default::default()), "glyph atlas");
+        self.cursor = cursor;
+        // Every placed quad's cell moved: placed again from `entries`.
+        self.atlas_epoch = self.atlas_epoch.wrapping_add(1);
+        self.kept = None;
+        self.atlas_recycled_at = self.frame;
+        true
     }
     /// What its caches hold now.
     pub fn debug_cache_stats(&self) -> DebugCacheStats {
@@ -8430,13 +8561,14 @@ impl GpuRenderer {
                             && image.height() <= ATLAS_IMAGE_MAX
                         {
                             let (x, y) = match self.image_cells.get(&image.id()) {
-                                Some(cell) => *cell,
+                                Some(&(x, y, _, _)) => (x, y),
                                 None => {
                                     let (width, height) = (image.width(), image.height());
                                     let cell = self.atlas_cell(width, height, |rgba| {
                                         premultiply_into_cell(rgba, image.pixels(), width);
                                     })?;
-                                    self.image_cells.insert(image.id(), cell);
+                                    self.image_cells
+                                        .insert(image.id(), (cell.0, cell.1, width, height));
                                     stats.image_uploads += 1;
                                     cell
                                 }
@@ -12461,7 +12593,7 @@ impl GpuRenderer {
                 let (period, height) = ((line * 6.).round() as u32, (line * 4.).ceil() as u32 + 2);
                 let key = WAVE_CELL | (line * 16.).round() as u64;
                 let (x, y) = match self.image_cells.get(&key) {
-                    Some(cell) => *cell,
+                    Some(&(x, y, _, _)) => (x, y),
                     None => {
                         let cell = self.atlas_cell(period, height, |rgba| {
                             let row = (period + 2) as usize * 4;
@@ -12479,7 +12611,8 @@ impl GpuRenderer {
                                 texel.fill((coverage * 255.).round() as u8);
                             }
                         })?;
-                        self.image_cells.insert(key, cell);
+                        self.image_cells
+                            .insert(key, (cell.0, cell.1, period, height));
                         stats.glyph_uploads += 1;
                         cell
                     }
@@ -14853,6 +14986,46 @@ fn keep_room<T>(vec: &mut Vec<T>, peak: &mut usize) {
     if vec.capacity() > 2 * *peak && vec.capacity() * std::mem::size_of::<T>() > 64 << 10 {
         vec.shrink_to(*peak);
     }
+}
+/// `pack_cells`' atlas: its size, each cell's origin, and the packer's
+/// cursor after them (`GpuRenderer::cursor`).
+struct Packed {
+    size: u32,
+    origins: Vec<(u32, u32)>,
+    cursor: (u32, u32, u32),
+}
+/// Cells `(width, height)` packed as `atlas_cell` packs them (in shelves,
+/// each a texel of gutter round it), tallest first, into the smallest square
+/// atlas of a power of two from `INITIAL_ATLAS` and below `below`: its size,
+/// each cell's origin in the order given, and the packer's cursor after
+/// them. `None` when only `below` or more holds them.
+fn pack_cells(cells: &[(u32, u32)], below: u32) -> Option<Packed> {
+    let mut order: Vec<usize> = (0..cells.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse((cells[i].1, cells[i].0)));
+    let mut size = INITIAL_ATLAS;
+    'sizes: while size < below {
+        let mut origins = vec![(0, 0); cells.len()];
+        let mut cursor = (0, 0, 0);
+        for &i in &order {
+            let (cell_width, cell_height) = (cells[i].0 + 2, cells[i].1 + 2);
+            if cursor.0 + cell_width > size {
+                cursor = (0, cursor.1 + cursor.2, 0);
+            }
+            if cursor.1 + cell_height > size || cell_width > size {
+                size *= 2;
+                continue 'sizes;
+            }
+            origins[i] = (cursor.0 + 1, cursor.1 + 1);
+            cursor.0 += cell_width;
+            cursor.2 = cursor.2.max(cell_height);
+        }
+        return Some(Packed {
+            size,
+            origins,
+            cursor,
+        });
+    }
+    None
 }
 fn sampled_texture(
     device: &wgpu::Device,
@@ -19196,5 +19369,45 @@ mod rest_tests {
         assert!(gpu.debug_cache_stats().atlas_bytes <= first.max(baseline.atlas_bytes));
         // And the next frame draws.
         draw(&mut gpu, &mut small);
+    }
+
+    /// A shrunk atlas's packing: every cell inside it with its gutter, none
+    /// overlapping, in the smallest size that holds them; none when only
+    /// the size it has does.
+    #[test]
+    fn shrunk_atlas_cells_fit_and_never_overlap() {
+        let cells: Vec<(u32, u32)> = (0..300).map(|i| (8 + i % 23, 10 + i % 17)).collect();
+        let Packed {
+            size,
+            origins,
+            cursor,
+        } = pack_cells(&cells, MAX_ATLAS).unwrap();
+        assert_eq!(size, INITIAL_ATLAS);
+        let boxes: Vec<(u32, u32, u32, u32)> = origins
+            .iter()
+            .zip(&cells)
+            .map(|((x, y), (w, h))| (x - 1, y - 1, x + w + 1, y + h + 1))
+            .collect();
+        for (i, a) in boxes.iter().enumerate() {
+            assert!(a.2 <= size && a.3 <= size, "inside: {a:?}");
+            assert!(
+                a.3 <= cursor.1 + cursor.2,
+                "under the cursor's shelf: {a:?}"
+            );
+            for b in &boxes[i + 1..] {
+                assert!(
+                    a.2 <= b.0 || b.2 <= a.0 || a.3 <= b.1 || b.3 <= a.1,
+                    "{a:?} {b:?}"
+                );
+            }
+        }
+        // Too many for the first size: the next.
+        let many: Vec<(u32, u32)> = vec![(40, 40); 400];
+        assert_eq!(
+            pack_cells(&many, MAX_ATLAS).unwrap().size,
+            INITIAL_ATLAS * 2
+        );
+        // Only the size it has holds them: nothing smaller.
+        assert!(pack_cells(&many, INITIAL_ATLAS * 2).is_none());
     }
 }

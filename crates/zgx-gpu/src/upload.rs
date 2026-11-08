@@ -643,6 +643,67 @@ pub(crate) fn write_texels(
     };
 }
 
+/// Copy `(x, y, width, height)` of one `shared_texture` to `to` in another,
+/// on the CPU, as the texels are: what a GPU copy would do, for textures the
+/// CPU writes in place (`write_texels`), which have no copy usage.
+#[cfg(target_os = "macos")]
+pub(crate) fn copy_texels(
+    from: &wgpu::Texture,
+    into: &wgpu::Texture,
+    (x, y, width, height): (u32, u32, u32, u32),
+    (to_x, to_y): (u32, u32),
+) {
+    use objc2_metal::{MTLOrigin, MTLRegion, MTLSize, MTLTexture};
+    assert!(
+        u64::from(x) + u64::from(width) <= u64::from(from.width())
+            && u64::from(y) + u64::from(height) <= u64::from(from.height())
+            && u64::from(to_x) + u64::from(width) <= u64::from(into.width())
+            && u64::from(to_y) + u64::from(height) <= u64::from(into.height()),
+        "texels within both textures"
+    );
+    let region = |x: u32, y: u32| MTLRegion {
+        origin: MTLOrigin {
+            x: x as usize,
+            y: y as usize,
+            z: 0,
+        },
+        size: MTLSize {
+            width: width as usize,
+            height: height as usize,
+            depth: 1,
+        },
+    };
+    let mut texels = vec![0_u8; (width * height * 4) as usize];
+    // SAFETY: The raw textures are only read and written through; nothing
+    // destroys them meanwhile.
+    let from = unsafe { from.as_hal::<wgpu::hal::api::Metal>() }.expect("a Metal texture");
+    // SAFETY: A region within the shared texture's bounds (asserted), of
+    // BGRA8 texels, into `texels`, `height` rows of `width * 4` bytes; the
+    // CPU wrote it, and no GPU work writes it.
+    unsafe {
+        from.raw_handle()
+            .getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                std::ptr::NonNull::from(&mut *texels).cast(),
+                (width * 4) as usize,
+                region(x, y),
+                0,
+            )
+    };
+    drop(from);
+    // SAFETY: as above, for the texture written: a new one no frame samples.
+    let into = unsafe { into.as_hal::<wgpu::hal::api::Metal>() }.expect("a Metal texture");
+    // SAFETY: A region within its bounds (asserted), from `texels`.
+    unsafe {
+        into.raw_handle()
+            .replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                region(to_x, to_y),
+                0,
+                std::ptr::NonNull::from(&mut *texels).cast(),
+                (width * 4) as usize,
+            )
+    };
+}
+
 /// Texture writes queued while building a frame: glyph cells, images and
 /// rasterized canvases. A render pass per target texture draws them from a
 /// CPU-mapped buffer, so uploads never open a transfer encoder.
