@@ -2,7 +2,7 @@
 //! on it. Both are rare, kept beside the nodes: a scene without selectable
 //! text pays a length check for them.
 use super::{
-    COMPOSITE, Color, NodeId, NodeKind, PAINTED, Rect, Scene, Transform, clipped_bounds,
+    COMPOSITE, Color, NodeId, NodeKind, PAINT, PAINTED, Rect, Scene, Transform, clipped_bounds,
     own_visible,
 };
 use std::collections::HashMap;
@@ -502,6 +502,40 @@ impl Scene {
         self.cold
             .as_ref()
             .is_some_and(|cold| !cold.outline_styles.is_empty())
+    }
+    /// Draw node `id`'s outline with a second ring inside it, between it
+    /// and the box: `.0` wide in `.1`, just within the outline's inner edge
+    /// (Windows' focus visual); `None`: one ring. Solid outlines only.
+    pub fn set_outline_inner(&mut self, id: NodeId, inner: Option<(f32, crate::scene::Color)>) {
+        let held = self
+            .cold
+            .as_ref()
+            .and_then(|cold| cold.outline_inners.get(&id))
+            .copied();
+        if !self.contains(id) || held == inner {
+            return;
+        }
+        let maps = self.cold.get_or_insert_default();
+        match inner {
+            Some(inner) => maps.outline_inners.insert(id, inner),
+            None => maps.outline_inners.remove(&id),
+        };
+        self.sync_cold(id);
+        // Its own paint changed (where the outline is): damaged there.
+        self.invalidate(id, PAINT);
+    }
+    /// Whether any node has an outline's inner ring (`set_outline_inner`).
+    pub fn has_outline_inners(&self) -> bool {
+        self.cold
+            .as_ref()
+            .is_some_and(|cold| !cold.outline_inners.is_empty())
+    }
+    /// Node `id`'s outline's inner ring (`set_outline_inner`).
+    pub fn outline_inner(&self, id: NodeId) -> Option<(f32, crate::scene::Color)> {
+        self.cold
+            .as_ref()
+            .and_then(|cold| cold.outline_inners.get(&id))
+            .copied()
     }
     /// How node `id`'s outline is drawn (`set_outline_style`).
     pub fn outline_style(&self, id: NodeId) -> crate::decoration::BorderStyle {

@@ -52,6 +52,8 @@ pub enum Field {
     InsetShadow,
     /// `Styled::outline_color`.
     OutlineColor,
+    /// `Styled::outline_inner`'s colour.
+    OutlineInnerColor,
     /// The opacity, `Styled::opacity`; 1 when the value is not a number.
     Opacity,
     /// Backdrop blur (frosted glass).
@@ -392,6 +394,9 @@ pub(crate) fn apply(styles: &mut Styles, field: Field, value: &TokenValue) {
         Field::OutlineColor => {
             s.outline_color(color());
         }
+        Field::OutlineInnerColor => {
+            s.outline_inner_color(color());
+        }
         Field::Opacity => {
             s.opacity(value.number().unwrap_or(1.));
         }
@@ -472,6 +477,11 @@ fn sets(styles: &Styles, field: Field) -> u8 {
         Field::Shadow => all(styles.rare().shadow.is_some() || styles.rare().shadows.is_some()),
         Field::InsetShadow => all(styles.rare().inset_shadows.is_some()),
         Field::OutlineColor => all(styles.rare().outline.is_some()),
+        Field::OutlineInnerColor => all(styles
+            .rare()
+            .cold
+            .as_ref()
+            .is_some_and(|cold| cold.outline_inner.is_some())),
         Field::Opacity => all(styles.opacity.is_some()),
         Field::Blur => all(styles.overflow().blur.is_some()),
         Field::Width => all(styles.width.is_some() || styles.width_percent.is_some()),

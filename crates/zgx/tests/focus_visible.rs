@@ -443,3 +443,55 @@ fn a_popover_its_triggers_click_opens_runs_that_click_once() {
     assert!(!open.get());
     assert_eq!((clicks.get(), ups.get()), (1, 1), "no second handler");
 }
+
+/// Keyboard focus draws Windows' focus visual there, bordered control or
+/// not: a ring 2 wide, 1 outside the control, and a contrasting ring 1 wide
+/// in that gap, taking no room (the control's border as it was). Elsewhere
+/// the ring is inside the control as before: an inset stroke, or its own
+/// border recoloured.
+#[test]
+fn keyboard_focus_rings_the_control_as_its_platform_does() {
+    use zgx::scene::NodeKind;
+    let mut ui = Ui::new(300., 200.);
+    let view = ui.mount(
+        column()
+            .child(button().id("plain").size(80., 30.).child(text("A")))
+            .child(
+                button()
+                    .id("bordered")
+                    .size(80., 30.)
+                    .border(1.)
+                    .child(text("B")),
+            ),
+    );
+    settle(&mut ui);
+    for id in ["plain", "bordered"] {
+        let node = view.find(id).unwrap();
+        let resting = match ui.scene.borrow().kind(node) {
+            NodeKind::Panel { quad, .. } => quad.clone(),
+            other => panic!("{id}: {other:?}"),
+        };
+        // Tabbed to: the first, then the next.
+        press(&mut ui, Key::Tab, Modifiers::default());
+        assert_eq!(ui.input.focused(), Some(node), "{id} tabbed to");
+        let scene = ui.scene.borrow();
+        let NodeKind::Panel { quad, .. } = scene.kind(node) else {
+            unreachable!()
+        };
+        if cfg!(windows) {
+            let outline = quad.outline.expect("an outline");
+            assert_eq!((outline.width, outline.offset), (2., 1.), "{id}");
+            assert_eq!(
+                scene.outline_inner(node).map(|(width, _)| width),
+                Some(1.),
+                "{id}"
+            );
+            assert_eq!(quad.border_width, resting.border_width, "{id}");
+            assert_eq!(quad.border_over, resting.border_over, "{id}");
+        } else {
+            assert_eq!(quad.outline, None, "{id}");
+            assert_eq!(scene.outline_inner(node), None, "{id}");
+            assert_ne!(*quad, resting, "{id}: the ring drawn");
+        }
+    }
+}
