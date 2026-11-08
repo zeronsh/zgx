@@ -5,3 +5,5 @@
 #![allow(clippy::duplicate_mod)]
 #[path = "../anime.rs"]
 mod anime;
+#[path = "../still_tracks.rs"]
+mod still_tracks;

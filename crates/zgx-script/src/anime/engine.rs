@@ -10,6 +10,20 @@ use super::{
     value::V,
 };
 use crate::{Vm, element::Element};
+
+thread_local! {
+    /// Whether tracks still at what their property holds skip their frames
+    /// (`Engine::holds`): off, for tests comparing them with writing.
+    static STILL_SKIPS: Cell<bool> = const { Cell::new(true) };
+    /// Frames still tracks skipped on this thread, for tests.
+    static STILL_SKIPPED: Cell<u64> = const { Cell::new(0) };
+}
+pub(crate) fn set_still_skips(skip: bool) {
+    STILL_SKIPS.with(|s| s.set(skip));
+}
+pub(crate) fn still_skipped() -> u64 {
+    STILL_SKIPPED.with(Cell::get)
+}
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -90,6 +104,12 @@ pub(crate) struct Track {
     /// an earlier tween where a later one begins. Meanwhile it is marked
     /// `overridden`, so frames skip it as they skip a replaced track.
     pub deferred: bool,
+    /// Found not still (`still`): a tween between different values, a
+    /// modifier, an ease calling a script. Never asked again: should its
+    /// tweens change to still ones after (a left-out `from` read in, a
+    /// timeline trimming it), that only misses skips. A still track is asked
+    /// again every frame, so one changed to moving is seen at once.
+    pub moving: Cell<bool>,
 }
 impl Track {
     /// The value at clip time `t`: the first tween's start before it, the
@@ -119,6 +139,43 @@ impl Track {
     }
     pub fn end(&self) -> f64 {
         self.segs.iter().map(|s| s.end).fold(0., f64::max)
+    }
+    /// The number it is at every time, if one: each tween from that number
+    /// to it, nothing reshaping it (a modifier, a motion path), and no ease
+    /// calling a script (whose call each frame is a frame's work). A list's
+    /// rows moving up and down hold their offset across like this.
+    pub fn still(&self) -> Option<f64> {
+        if self.moving.get() {
+            return None;
+        }
+        let still = self.still_now();
+        if still.is_none() {
+            self.moving.set(true);
+        }
+        still
+    }
+    fn still_now(&self) -> Option<f64> {
+        fn calls_script(ease: &Ease) -> bool {
+            match ease {
+                Ease::Script(_) => true,
+                Ease::Mirror(inner) => calls_script(inner),
+                _ => false,
+            }
+        }
+        if self.modifier.is_some() || self.path.is_some() {
+            return None;
+        }
+        let first = match &self.segs.first()?.from {
+            V::Num(n) => *n,
+            _ => return None,
+        };
+        self.segs
+            .iter()
+            .all(|seg| {
+                matches!((&seg.from, &seg.to), (V::Num(a), V::Num(b)) if *a == first && *b == first)
+                    && !calls_script(&seg.ease)
+            })
+            .then_some(first)
     }
 }
 
@@ -712,6 +769,15 @@ impl Clip {
         }
         for track in self.tracks.borrow().iter() {
             if !engine.writes(self.id, track) {
+                continue;
+            }
+            // Still at what its property holds already: writing it again
+            // would change nothing (`Engine::holds`).
+            if let Some(value) = track.still()
+                && STILL_SKIPS.with(Cell::get)
+                && engine.holds(track, value)
+            {
+                STILL_SKIPPED.with(|n| n.set(n.get() + 1));
                 continue;
             }
             if let Some(value) = track.at(t, vm.as_deref()) {
@@ -1340,6 +1406,7 @@ impl Engine {
                 path: None,
                 implicit_from: false,
                 deferred: Default::default(),
+                moving: Default::default(),
             })
             .collect();
         let clip = Clip::new(
@@ -1629,6 +1696,26 @@ impl Engine {
         }
     }
 
+    /// Whether writing `value` for `track` would leave everything as it is:
+    /// a layout animation's offset already at it (as `write_element` stores
+    /// it), the track not additive and no additive slot to set a base in.
+    /// The element is then neither changed nor queued: its queue entry
+    /// would flush nothing, as everything that changes an element queues it.
+    pub(crate) fn holds(&self, track: &Track, value: f64) -> bool {
+        let Target::Element(element) = &track.target else {
+            return false;
+        };
+        if track.composition == Composition::Add || !self.adds.borrow().is_empty() {
+            return false;
+        }
+        let animated = element.animated.borrow();
+        let value = value as f32;
+        match (&track.key, animated.offset, animated.translate) {
+            (Key::OffsetX, Some((x, _)), _) | (Key::X, _, Some((x, _))) => x == value,
+            (Key::OffsetY, Some((_, y)), _) | (Key::Y, _, Some((_, y))) => y == value,
+            _ => false,
+        }
+    }
     /// Writes one value: additive values collect per property and frame.
     pub(crate) fn write(&self, track: &Track, value: V) {
         if track.composition != Composition::Add && self.adds.borrow().is_empty() {

@@ -1474,6 +1474,19 @@ pub fn compile_ahead_counts() -> (usize, bool, bool, usize, usize) {
     sources::ahead_counts()
 }
 
+/// Let animation tracks still at what their property holds skip their
+/// frames (the default), or write every frame as before. For tests: what
+/// an app shows is the same either way.
+#[doc(hidden)]
+pub fn still_tracks_skip(skip: bool) {
+    anime::engine::set_still_skips(skip);
+}
+/// Frames animation tracks skipped this way on this thread. For tests.
+#[doc(hidden)]
+pub fn still_tracks_skipped() -> u64 {
+    anime::engine::still_skipped()
+}
+
 /// Hold [`compile_ahead`]'s workers before their next file, or let them go.
 /// For tests: a `require` meanwhile compiles its own.
 #[doc(hidden)]
