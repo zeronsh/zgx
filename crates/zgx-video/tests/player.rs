@@ -197,3 +197,60 @@ fn a_stopped_player_tells_its_script_it_stopped() {
         "told it stopped, with no frame to tell it by"
     );
 }
+
+#[test]
+fn a_players_translucent_picture_shows_over_what_is_behind_it_as_drawn() {
+    let dir = temp_dir("player-translucent");
+    // Half-transparent red over nothing: its frame, premultiplied, is
+    // (128, 0, 0, 128).
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "Half", w = 100, h = 50, fps = 30, duration = 10,
+            render = function()
+                return ui.div { w_full = true, h_full = true, bg = "#ff000080" }
+            end,
+        } }
+        "##,
+    )
+    .unwrap();
+    let mut held = None;
+    let path = dir.to_path_buf();
+    let mut stage = Stage::new(
+        StageOptions {
+            width: 100.,
+            height: 50.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            player.open("Half", json!({}), 0);
+            let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
+            held = Some(player);
+            Ok(view)
+        },
+    )
+    .unwrap();
+    let player = held.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while player.image.with_untracked(Option::is_none) {
+        stage.step().unwrap();
+        assert!(Instant::now() < deadline, "no frame came");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    stage.step().unwrap();
+    let mut pixels = Vec::new();
+    stage.draw(&mut pixels).unwrap();
+    // Half red over white: (255, 127, 127). Premultiplied twice, its red
+    // fell to about 191.
+    let [r, g, b, _] = pixel(&pixels, 100, 50, 25);
+    assert!(
+        r >= 250 && (124..=131).contains(&g) && (124..=131).contains(&b),
+        "{r} {g} {b}"
+    );
+}

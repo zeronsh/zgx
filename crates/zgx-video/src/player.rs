@@ -437,7 +437,7 @@ impl Player {
                 height,
                 pixels,
             } => {
-                if let Ok(image) = ImageData::new(*width, *height, pixels.clone()) {
+                if let Ok(image) = ImageData::new_premultiplied(*width, *height, pixels.clone()) {
                     self.image.set(Some(Arc::new(image)));
                 }
                 self.frame.set(*frame);
@@ -513,7 +513,8 @@ impl Player {
                     pixels,
                     ..
                 } = event
-                    && let Ok(picture) = ImageData::new(*width, *height, pixels.clone())
+                    && let Ok(picture) =
+                        ImageData::new_premultiplied(*width, *height, pixels.clone())
                 {
                     shown.image(&image, Some(Arc::new(picture)));
                 }

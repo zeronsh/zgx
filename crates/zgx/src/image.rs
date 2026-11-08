@@ -37,6 +37,8 @@ impl ImageEffect {
 #[derive(Debug)]
 struct Pixels {
     decoded: Arc<[u8]>,
+    /// `decoded` is premultiplied already (`ImageData::new_premultiplied`).
+    premultiplied: bool,
     /// Dropped by `drop_kept`, which can't unwind: dropped inline, its glue
     /// (out of line) gave every drop of a node's kind a cleanup path, +0.1%
     /// on scenes that show no image.
@@ -221,6 +223,7 @@ impl ImageData {
             height,
             pixels: Arc::new(Pixels {
                 decoded: pixels,
+                premultiplied: false,
                 kept: std::mem::ManuallyDrop::new(None),
                 animation: std::mem::ManuallyDrop::new(None),
             }),
@@ -228,6 +231,25 @@ impl ImageData {
             effect: ImageEffect::Plain,
             gpu: None,
         })
+    }
+    /// [`ImageData::new`] from RGBA8 `pixels` already premultiplied by their
+    /// alpha (a frame read back from a renderer): drawn as they are, not
+    /// premultiplied again. [`ImageData::pixels`] gives them as they are.
+    pub fn new_premultiplied(
+        width: u32,
+        height: u32,
+        pixels: impl Into<Arc<[u8]>>,
+    ) -> Result<Self, &'static str> {
+        let mut image = Self::new(width, height, pixels)?;
+        Arc::get_mut(&mut image.pixels)
+            .expect("made just now")
+            .premultiplied = true;
+        Ok(image)
+    }
+    /// Whether its pixels are premultiplied already
+    /// ([`ImageData::new_premultiplied`]); else straight.
+    pub fn is_premultiplied(&self) -> bool {
+        self.pixels.premultiplied
     }
     /// A frame of a GPU view, its pixels left to the renderer, which asks the
     /// view to draw them (`crate::gpu_view`).
@@ -238,6 +260,7 @@ impl ImageData {
             height: frame.height.ceil() as u32,
             pixels: Arc::new(Pixels {
                 decoded: Arc::from(&[][..]),
+                premultiplied: false,
                 kept: std::mem::ManuallyDrop::new(None),
                 animation: std::mem::ManuallyDrop::new(None),
             }),
@@ -274,7 +297,8 @@ impl ImageData {
     pub fn height(&self) -> u32 {
         self.height
     }
-    /// Its RGBA8 bytes, four per pixel; none for a GPU view's frame
+    /// Its RGBA8 bytes, four per pixel, straight unless it was made
+    /// premultiplied (`is_premultiplied`); none for a GPU view's frame
     /// (`gpu_frame`).
     pub fn pixels(&self) -> &[u8] {
         match &*self.pixels.kept {
@@ -322,6 +346,7 @@ impl ImageData {
         // identity.
         still.pixels = Arc::new(Pixels {
             decoded: first.pixels.decoded.clone(),
+            premultiplied: first.pixels.premultiplied,
             kept: std::mem::ManuallyDrop::new(None),
             animation: std::mem::ManuallyDrop::new(Some(animation)),
         });
@@ -450,6 +475,7 @@ impl ImageData {
         }
         let pixels = Arc::new(Pixels {
             decoded: Arc::from(&[][..]),
+            premultiplied: false,
             kept: std::mem::ManuallyDrop::new(Some(Kept {
                 encoded,
                 decode,
