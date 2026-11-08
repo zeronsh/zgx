@@ -69,8 +69,9 @@ impl Tooltip {
         self.interactive = interactive;
         self
     }
-    /// How long the pointer rests on the view before it shows: 300 ms by
-    /// default, AppKit's; once one shows, the next shows at once.
+    /// How long the pointer rests on the view before it shows: the
+    /// system's by default (`TooltipTiming`: 300 ms, AppKit's; on Windows
+    /// twice the mouse hover time); once one shows, the next shows sooner.
     pub fn delay(mut self, delay: Duration) -> Self {
         self.delay = Some(delay);
         self
@@ -92,6 +93,8 @@ thread_local! {
     /// Tooltips showing, and when the last one closed: within a second of
     /// one, the next opens at once.
     static TOOLTIPS: Cell<(usize, Option<Instant>)> = const { Cell::new((0, None)) };
+    /// When the last tooltip opened (`TooltipTiming::reshow_from_open`).
+    static OPENED: Cell<Option<Instant>> = const { Cell::new(None) };
     /// The tooltip showing (one at most): its number, and what closes it.
     static SHOWING: RefCell<Option<Showing>> = const { RefCell::new(None) };
     static NEXT: Cell<u64> = const { Cell::new(0) };
@@ -132,6 +135,44 @@ fn hide(open: &crate::reactive::Signal<bool>, shown: &Cell<bool>) {
     open.set(false);
 }
 
+/// When tooltips show (`set_tooltip_timing`): after resting `delay` on a
+/// view; within `reshow_within` of another tooltip, after `reshow_delay`
+/// (zero: at once). zgx's: 300 ms, AppKit's, and at once within a second of
+/// another; Windows': twice the system's mouse hover time, and the hover
+/// time within 200 ms of another opening (WinUI's `ToolTipService`, whose
+/// one and a half times truncates to one).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TooltipTiming {
+    /// How long the pointer rests on a view before its tooltip shows.
+    pub delay: Duration,
+    /// How soon after another tooltip the next is a reshow.
+    pub reshow_within: Duration,
+    /// How long a reshow waits; zero, none.
+    pub reshow_delay: Duration,
+    /// Whether `reshow_within` counts from when the last tooltip opened
+    /// (WinUI's) rather than from when it closed or while one shows (zgx's).
+    pub reshow_from_open: bool,
+}
+impl Default for TooltipTiming {
+    fn default() -> Self {
+        Self {
+            delay: Duration::from_millis(300),
+            reshow_within: Duration::from_secs(1),
+            reshow_delay: Duration::ZERO,
+            reshow_from_open: false,
+        }
+    }
+}
+thread_local! {
+    static TIMING: Cell<TooltipTiming> = Cell::new(TooltipTiming::default());
+}
+/// Show tooltips with `timing` on this thread from now on (a desktop host
+/// sets the system's: Windows' hover time). A tooltip's own `delay` still
+/// waits its own.
+pub fn set_tooltip_timing(timing: TooltipTiming) {
+    TIMING.with(|t| t.set(timing));
+}
+
 /// `f` after `delay` on `runner`'s tasks; at once without one.
 fn after(
     runner: &Option<Rc<TaskRunner>>,
@@ -160,7 +201,8 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             interactive,
             delay,
         } = tip;
-        let delay = delay.unwrap_or(Duration::from_millis(300));
+        let timing = TIMING.with(Cell::get);
+        let delay = delay.unwrap_or(timing.delay);
         // A text tip describes the view to assistive technology, which
         // doesn't see the tip itself; a view tip is the app's to name.
         let description = match &content {
@@ -272,6 +314,7 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
                     let first = TOOLTIPS.with(|t| {
                         let (count, last) = t.get();
                         t.set((count + 1, last));
+                        OPENED.with(|o| o.set(Some(crate::clock::now())));
                         count == 0
                     });
                     if first && let Some(ui) = ui.get().and_then(WeakUi::upgrade) {
@@ -323,15 +366,26 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
                     match cx.event {
                         InputEvent::PointerEnter if cx.target == cx.current_target => {
                             over_anchor.set(true);
-                            let now = shown.get()
-                                || TOOLTIPS.with(|t| {
+                            // Back while it shows, or another just showed: a
+                            // reshow, at once or after its own wait.
+                            let reshow = match timing.reshow_from_open {
+                                true => OPENED.with(Cell::get).is_some_and(|at| {
+                                    crate::clock::since(at) < timing.reshow_within
+                                }),
+                                false => TOOLTIPS.with(|t| {
                                     let (count, last) = t.get();
                                     count > 0
                                         || last.is_some_and(|at| {
-                                            crate::clock::since(at) < Duration::from_secs(1)
+                                            crate::clock::since(at) < timing.reshow_within
                                         })
-                                });
-                            if now || runner.is_none() {
+                                }),
+                            };
+                            let now = shown.get() || (reshow && timing.reshow_delay.is_zero());
+                            if reshow && !now && runner.is_some() {
+                                let set = set.clone();
+                                *waiting.borrow_mut() =
+                                    after(&runner, timing.reshow_delay, move || set(true, false));
+                            } else if now || runner.is_none() {
                                 // Taking over from another (or back while it
                                 // fades): no fade in from nothing.
                                 waiting.borrow_mut().take();
