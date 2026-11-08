@@ -3904,9 +3904,32 @@ fn mount_portal_panel(
     let mut defaults = if is_layer {
         Styles::new()
     } else {
-        Styles::new()
+        use crate::theme::Themed;
+        // A menu's and a popover's shape and border are their tokens'
+        // (`menu.radius`, `popover.border`…); a dialog keeps the card's.
+        let (padding, radius, border): (_, Themed<f32>, Option<(Themed<f32>, _)>) = if is_menu {
+            (
+                (tok::MENU_PADDING_X.into(), tok::MENU_PADDING_Y.into()),
+                tok::MENU_RADIUS.into(),
+                Some((tok::MENU_BORDER.into(), tok::MENU_BORDER_COLOR)),
+            )
+        } else if anchored {
+            (
+                (Themed::from(16.), Themed::from(16.)),
+                tok::POPOVER_RADIUS.into(),
+                Some((tok::POPOVER_BORDER.into(), tok::POPOVER_BORDER_COLOR)),
+            )
+        } else {
+            (
+                (Themed::from(16.), Themed::from(16.)),
+                tok::RADIUS_MD.into(),
+                None,
+            )
+        };
+        let card = Styles::new()
             .w(if anchored { 240. } else { 360. })
-            .p(16.)
+            .px(padding.0)
+            .py(padding.1)
             .bg(if is_menu {
                 tok::MENU_BG
             } else if anchored {
@@ -3914,8 +3937,12 @@ fn mount_portal_panel(
             } else {
                 tok::SURFACE_OVERLAY
             })
-            .rounded(tok::RADIUS_MD)
-            .overflow_hidden()
+            .rounded(radius)
+            .overflow_hidden();
+        match border {
+            Some((width, color)) => card.border(width).border_color(color),
+            None => card,
+        }
     };
     if is_menu {
         defaults = defaults.items_stretch();
@@ -4294,7 +4321,13 @@ impl WidgetStyles {
                 .border_color(tok::FOCUS_RING),
             // On the menu's panel: no fill of its own, so a translucent
             // panel (AppKit's material behind it) shows through.
-            menu_item: Styles::new().px(12.).py(8.).items_center(),
+            menu_item: Styles::new()
+                .px(tok::MENU_ITEM_PADDING_X)
+                .py(tok::MENU_ITEM_PADDING_Y)
+                .mx(tok::MENU_ITEM_INSET_X)
+                .my(tok::MENU_ITEM_INSET_Y)
+                .rounded(tok::MENU_ITEM_RADIUS)
+                .items_center(),
             menu_hover: Styles::new().bg(tok::MENU_HOVER),
             menu_focus: Styles::new()
                 .bg(tok::MENU_HOVER)

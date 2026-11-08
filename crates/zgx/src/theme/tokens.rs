@@ -282,6 +282,46 @@ schema! {
     MENU_HOVER: Color = "menu.hover" => "over({menu.bg}, {hover})",
     /// Popovers' and tooltips' panels (modals keep `surface.overlay`).
     POPOVER_BG: Color = "popover.bg" => "{surface.overlay}",
+    // Menus', popovers' and tooltips' shapes, each the built-in look by
+    // default: a platform's theme draws them as its own (Windows' WinUI
+    // flyouts: `system_colors`).
+    /// Menus' panels' corner radius.
+    MENU_RADIUS: Number = "menu.radius" => "{radius.md}",
+    /// Menus' panels' padding across.
+    MENU_PADDING_X: Number = "menu.padding.x" => "16",
+    /// Menus' panels' padding down.
+    MENU_PADDING_Y: Number = "menu.padding.y" => "16",
+    /// The width of the border around menus' panels (none built in).
+    MENU_BORDER: Number = "menu.border" => "0",
+    /// The colour of the border around menus' panels.
+    MENU_BORDER_COLOR: Color = "menu.border.color" => "{border}",
+    /// A menu item's padding across.
+    MENU_ITEM_PADDING_X: Number = "menu.item.padding.x" => "12",
+    /// A menu item's padding down.
+    MENU_ITEM_PADDING_Y: Number = "menu.item.padding.y" => "8",
+    /// How far a menu item (its highlight) sits in from the panel's padding,
+    /// across.
+    MENU_ITEM_INSET_X: Number = "menu.item.inset.x" => "0",
+    /// How far a menu item sits in from its neighbours, down.
+    MENU_ITEM_INSET_Y: Number = "menu.item.inset.y" => "0",
+    /// A menu item's (its highlight's) corner radius.
+    MENU_ITEM_RADIUS: Number = "menu.item.radius" => "0",
+    /// Popovers' panels' corner radius.
+    POPOVER_RADIUS: Number = "popover.radius" => "{radius.md}",
+    /// The width of the border around popovers' panels (none built in).
+    POPOVER_BORDER: Number = "popover.border" => "0",
+    /// The colour of the border around popovers' panels.
+    POPOVER_BORDER_COLOR: Color = "popover.border.color" => "{border}",
+    /// A text tooltip's padding across.
+    TOOLTIP_PADDING_X: Number = "tooltip.padding.x" => "8",
+    /// A text tooltip's padding down.
+    TOOLTIP_PADDING_Y: Number = "tooltip.padding.y" => "4",
+    /// The width of a text tooltip's border (its colour is `border`).
+    TOOLTIP_BORDER: Number = "tooltip.border" => "0.5",
+    /// A text tooltip's corner radius.
+    TOOLTIP_RADIUS: Number = "tooltip.radius" => "{radius.sm}",
+    /// A text tooltip's font size.
+    TOOLTIP_FONT_SIZE: Number = "tooltip.font.size" => "{font.size.xs}",
     /// What a modal dims the window with behind it.
     BACKDROP: Color = "backdrop" => "#00000082",
     /// Selected text while its window is in the background.

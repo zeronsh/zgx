@@ -427,7 +427,15 @@ cannot be passed for a length. zgx's widgets declare tokens of their own in
 standard terms, which a theme may set: `button.bg` (`{surface.raised}`),
 `button.hover` (`over({button.bg}, {hover})`), `button.pressed`, `input.bg`,
 `menu.bg` (`{surface.overlay}`), `menu.hover`, and `popover.bg`
-(`{surface.overlay}`, popovers' and tooltips' panels). On macOS, where menus
+(`{surface.overlay}`, popovers' and tooltips' panels). Their shapes are
+tokens too, each the built-in look by default: `menu.radius`
+(`{radius.md}`), `menu.padding.x` and `.y` (16), `menu.border` (0) and
+`menu.border.color`, `menu.item.padding.x` (12) and `.y` (8),
+`menu.item.inset.x` and `.y` (0, how far an item's highlight sits in),
+`menu.item.radius` (0); `popover.radius`, `popover.border` (0) and
+`popover.border.color`; `tooltip.padding.x` (8) and `.y` (4),
+`tooltip.border` (0.5), `tooltip.radius` (`{radius.sm}`) and
+`tooltip.font.size` (`{font.size.xs}`). On macOS, where menus
 and popovers show in windows of their own over AppKit's material, the system
 sets `menu.bg` and `popover.bg` clear and `menu.hover` to the accent, as an
 app theme setting them overrides.

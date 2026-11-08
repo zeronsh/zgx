@@ -192,6 +192,8 @@ export type ColorToken =
 	| "$menu.bg"
 	| "$menu.hover"
 	| "$popover.bg"
+	| "$menu.border.color"
+	| "$popover.border.color"
 	| "$backdrop"
 	| "$selection.inactive"
 	| "$selection.text"
@@ -264,6 +266,22 @@ export type NumberToken =
 	| "$motion.duration.fast"
 	| "$motion.duration.normal"
 	| "$motion.duration.slow"
+	| "$menu.radius"
+	| "$menu.padding.x"
+	| "$menu.padding.y"
+	| "$menu.border"
+	| "$menu.item.padding.x"
+	| "$menu.item.padding.y"
+	| "$menu.item.inset.x"
+	| "$menu.item.inset.y"
+	| "$menu.item.radius"
+	| "$popover.radius"
+	| "$popover.border"
+	| "$tooltip.padding.x"
+	| "$tooltip.padding.y"
+	| "$tooltip.border"
+	| "$tooltip.radius"
+	| "$tooltip.font.size"
 	| "$selection.radius"
 	| "$mark.radius"
 export type FontToken = "$font.sans"
@@ -353,6 +371,24 @@ export type TokenName =
 	| "menu.bg"
 	| "menu.hover"
 	| "popover.bg"
+	| "menu.radius"
+	| "menu.padding.x"
+	| "menu.padding.y"
+	| "menu.border"
+	| "menu.border.color"
+	| "menu.item.padding.x"
+	| "menu.item.padding.y"
+	| "menu.item.inset.x"
+	| "menu.item.inset.y"
+	| "menu.item.radius"
+	| "popover.radius"
+	| "popover.border"
+	| "popover.border.color"
+	| "tooltip.padding.x"
+	| "tooltip.padding.y"
+	| "tooltip.border"
+	| "tooltip.radius"
+	| "tooltip.font.size"
 	| "backdrop"
 	| "selection.inactive"
 	| "selection.text"
@@ -490,7 +526,27 @@ export type Tokens = {
 	},
 	menu: {
 		bg: string,
+		border: {
+			color: string,
+			value: string,
+		},
 		hover: string,
+		item: {
+			inset: {
+				x: string,
+				y: string,
+			},
+			padding: {
+				x: string,
+				y: string,
+			},
+			radius: string,
+		},
+		padding: {
+			x: string,
+			y: string,
+		},
+		radius: string,
 	},
 	motion: {
 		duration: {
@@ -506,6 +562,11 @@ export type Tokens = {
 	},
 	popover: {
 		bg: string,
+		border: {
+			color: string,
+			value: string,
+		},
+		radius: string,
 	},
 	pressed: string,
 	radius: {
@@ -559,6 +620,17 @@ export type Tokens = {
 		primary: string,
 		secondary: string,
 		tertiary: string,
+	},
+	tooltip: {
+		border: string,
+		font: {
+			size: string,
+		},
+		padding: {
+			x: string,
+			y: string,
+		},
+		radius: string,
 	},
 	warning: string,
 }

@@ -170,14 +170,14 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
         let content = match content {
             Content::View(view) => *view,
             Content::Text(text) => crate::compose::column()
-                .px(8.)
-                .py(4.)
+                .px(tok::TOOLTIP_PADDING_X)
+                .py(tok::TOOLTIP_PADDING_Y)
                 .max_w(320.)
                 .bg(tok::POPOVER_BG)
-                .border(0.5)
+                .border(tok::TOOLTIP_BORDER)
                 .border_color(tok::BORDER)
-                .rounded(tok::RADIUS_SM)
-                .text_size(tok::FONT_SIZE_XS)
+                .rounded(tok::TOOLTIP_RADIUS)
+                .text_size(tok::TOOLTIP_FONT_SIZE)
                 .text_wrap(true)
                 .child(crate::compose::text(text)),
         };
