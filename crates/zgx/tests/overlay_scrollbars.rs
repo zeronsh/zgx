@@ -225,3 +225,47 @@ fn a_windows_scrollbars_arrow_buttons_step_it() {
     assert_eq!(offset.get(), 0., "and up");
     assert_eq!(ui.next_interaction_deadline(), None, "nothing scheduled");
 }
+
+/// Windows' arrow buttons held (WinUI's RepeatButton): a step at once, the
+/// next after 500 ms, then one each 50 ms, each a single wake, until let go.
+#[cfg(windows)]
+#[test]
+fn a_windows_scrollbars_arrow_button_held_repeats() {
+    use zgx::input::PointerButton;
+    let mut ui = Ui::new(300., 200.);
+    let offset = mount(&mut ui);
+    let bounds = ui.scene.borrow().bounds(bar(&ui));
+    let (x, y) = (bounds.x + bounds.width / 2., bounds.y + bounds.height - 4.);
+    let pressed = Instant::now();
+    ui.dispatch(InputEvent::PointerDown {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 40., "a step at once");
+    let first = ui.next_interaction_deadline().expect("it will repeat");
+    assert!(
+        first >= pressed + Duration::from_millis(490),
+        "after 500 ms"
+    );
+    ui.advance_interactions(first).unwrap();
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 80., "again");
+    let next = ui.next_interaction_deadline().expect("and again");
+    assert!(next <= first + Duration::from_millis(60), "each 50 ms");
+    ui.advance_interactions(next).unwrap();
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 120.);
+    ui.dispatch(InputEvent::PointerUp {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    ui.prepare_frame();
+    assert_eq!(
+        ui.next_interaction_deadline(),
+        None,
+        "let go: nothing scheduled"
+    );
+}

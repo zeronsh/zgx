@@ -40,6 +40,9 @@ struct Look {
     /// Arrow buttons at its ends, each this long, shown as it widens
     /// (Windows'); `None`, none.
     arrows: Option<f32>,
+    /// An arrow button held: how long until it repeats its step, and how
+    /// often after.
+    repeat: (Duration, Duration),
 }
 /// zgx's: 6 across, 8 under the pointer, in an 8 track at the edge.
 const BUILT_IN: Look = Look {
@@ -55,6 +58,7 @@ const BUILT_IN: Look = Look {
     widen: None,
     brightens: true,
     arrows: None,
+    repeat: (Duration::ZERO, Duration::ZERO),
 };
 /// Windows 11's, as WinUI 3 draws its ScrollBar (microsoft-ui-xaml's
 /// `ScrollBar_themeresources.xaml`, `ScrollViewer_themeresources.xaml`): a
@@ -86,6 +90,9 @@ const WINDOWS: Look = Look {
     )),
     brightens: false,
     arrows: Some(12.),
+    // RepeatButton's `Delay` (500, its default) and the scrollbar's
+    // `Interval` (50).
+    repeat: (Duration::from_millis(500), Duration::from_millis(50)),
 };
 const LOOK: Look = if cfg!(windows) { WINDOWS } else { BUILT_IN };
 
@@ -95,6 +102,9 @@ fn widen_curve(p: f32) -> f32 {
     let t = p.clamp(0., 1.).cbrt();
     t * t * (3. - 2. * t)
 }
+
+/// An arrow button's step, run again while it is held.
+type Step = Rc<dyn Fn()>;
 
 /// An overlay scrollbar's showing (`Ui::set_overlay_scrollbars`).
 pub(crate) struct Fade {
@@ -113,6 +123,9 @@ pub(crate) struct Fade {
     aim: Cell<Option<(f32, Instant)>>,
     moving: Cell<Option<(f32, f32, Instant)>>,
     step: Cell<Option<Instant>>,
+    /// An arrow button held (`Look::repeat`): when it next steps, and the
+    /// step.
+    repeat: std::cell::RefCell<Option<(Instant, Step)>>,
 }
 impl Fade {
     /// Widen (`to` 1) or narrow (0) after `delay`, unless it is there or
@@ -174,10 +187,11 @@ pub(crate) fn next_fade(ui: &Ui) -> Option<Instant> {
         .iter()
         .filter_map(|fade| {
             let fade = fade.upgrade()?;
-            match (fade.next.get(), fade.widen_due()) {
-                (Some(next), Some(widen)) => Some(next.min(widen)),
-                (next, widen) => next.or(widen),
-            }
+            let repeat = fade.repeat.borrow().as_ref().map(|(at, _)| *at);
+            [fade.next.get(), fade.widen_due(), repeat]
+                .into_iter()
+                .flatten()
+                .min()
         })
         .min()
 }
@@ -194,6 +208,20 @@ pub(crate) fn advance_fades(ui: &Ui, now: Instant) -> bool {
     };
     let mut stepped = false;
     for fade in fades {
+        // An arrow button held: its step again, and again after `repeat.1`.
+        let due = fade
+            .repeat
+            .borrow()
+            .as_ref()
+            .filter(|(at, _)| *at <= now)
+            .map(|(_, step)| step.clone());
+        if let Some(step) = due {
+            step();
+            if let Some((at, _)) = fade.repeat.borrow_mut().as_mut() {
+                *at = now + LOOK.repeat.1;
+            }
+            stepped = true;
+        }
         if let Some((_, _, duration)) = LOOK.widen {
             stepped |= step_widening(&fade, now, duration, ui.refresh_interval());
         }
@@ -224,6 +252,15 @@ fn thumb_geometry(length: f64, total: f64, reserve: f64) -> (f64, f64, f64) {
         .max(LOOK.min_thumb)
         .min(room);
     ((thumb).max(0.), (room - thumb).max(0.), reserve)
+}
+
+/// An arrow button's wash under the pointer (`SubtleFillColorSecondary`).
+fn wash_kind(color: Color) -> NodeKind {
+    NodeKind::Quad(QuadStyle {
+        fill: color,
+        radius: LOOK.radius,
+        ..Default::default()
+    })
 }
 
 /// An arrow button's caret, a triangle `width` across pointing `toward`
@@ -330,11 +367,19 @@ pub(crate) fn mount(
     let arrows = LOOK.arrows.map(|cell| {
         let mut scene = ui.scene.borrow_mut();
         let color = Color(0, 0, 0, 0);
-        [
-            scene.append(track, caret(color, cell, 0), Style::default()),
-            scene.append(track, caret(color, cell, 2), Style::default()),
-        ]
+        let mut button = |toward| {
+            // Its wash under the pointer, then its caret.
+            let wash = scene.append(track, wash_kind(color), Style::default());
+            (
+                wash,
+                scene.append(track, caret(color, cell, toward), Style::default()),
+            )
+        };
+        [button(0), button(2)]
     });
+    // Which arrow button the pointer is on: 0 none, 1 decrease, 2 increase.
+    let arrow_hover = ui.signal(0u8);
+    let event_hover = arrow_hover.clone();
     let thumb = ui.scene.borrow_mut().append(
         track,
         thumb_kind(theme.color_untracked(tok::SCROLLBAR_THUMB), LOOK.thumb),
@@ -349,6 +394,19 @@ pub(crate) fn mount(
     let event_size = size.clone();
     let event_extent = extent.clone();
     let event_offset = offset.clone();
+    // As an overlay scrollbar: shown as the user scrolls, then fading.
+    let overlay_mode = ui.overlay_scrollbars();
+    let fade = Rc::new(Fade {
+        alpha: ui.signal(1.),
+        fade_at: Cell::new(None),
+        next: Cell::new(None),
+        listed: Cell::new(false),
+        widened: ui.signal(0.),
+        aim: Cell::new(None),
+        moving: Cell::new(None),
+        step: Cell::new(None),
+        repeat: Default::default(),
+    });
     let scene = ui.scene.clone();
     let focused = ui.signal(false);
     let write_focus = focused.clone();
@@ -356,6 +414,7 @@ pub(crate) fn mount(
     let active = ui.signal(false);
     let write_active = active.clone();
     let mut grab = None;
+    let (event_fade, event_ui) = (fade.clone(), ui.downgrade());
     ui.on_event(track, true, move |cx| {
         if cx.phase == EventPhase::Capture {
             return;
@@ -413,6 +472,20 @@ pub(crate) fn mount(
         if position.is_some_and(|position| !position.is_finite()) {
             return;
         }
+        // On which arrow button the pointer is, for its wash.
+        if reserve > 0. {
+            let on = match (&cx.event, position) {
+                (InputEvent::PointerMove { .. }, Some(at)) if at < reserve => Some(1),
+                (InputEvent::PointerMove { .. }, Some(at)) if at > length - reserve => Some(2),
+                (InputEvent::PointerMove { .. }, Some(_)) | (InputEvent::PointerLeave, _) => {
+                    Some(0)
+                }
+                _ => None,
+            };
+            if let Some(on) = on {
+                event_hover.set(on);
+            }
+        }
         let before = event_offset.get() as f64;
         let next = match &cx.event {
             InputEvent::PointerDown {
@@ -422,11 +495,33 @@ pub(crate) fn mount(
                 cx.focus();
                 let pointer = position.unwrap();
                 let thumb_start = from + before / limit * travel;
-                // On an arrow button: a step (as an arrow key's).
-                if reserve > 0. && pointer < reserve {
-                    Some(before - 40.)
-                } else if reserve > 0. && pointer > length - reserve {
-                    Some(before + 40.)
+                // On an arrow button: a step (as an arrow key's), again and
+                // again while it is held (`Look::repeat`), each a wake.
+                if reserve > 0. && (pointer < reserve || pointer > length - reserve) {
+                    let step = if pointer < reserve { -40. } else { 40. };
+                    if !LOOK.repeat.0.is_zero() {
+                        let (offset, size, extent) = (
+                            event_offset.clone(),
+                            event_size.clone(),
+                            event_extent.clone(),
+                        );
+                        let again: Step = Rc::new(move || {
+                            let length = main(size.get()) as f64;
+                            let limit = (extent.get() as f64 - length).max(0.);
+                            offset.set((offset.get() as f64 + step).clamp(0., limit) as f32);
+                        });
+                        *event_fade.repeat.borrow_mut() =
+                            Some((crate::clock::now() + LOOK.repeat.0, again));
+                        if !event_fade.listed.replace(true)
+                            && let Some(ui) = event_ui.upgrade()
+                        {
+                            ui.scrollbar_fades()
+                                .borrow_mut()
+                                .push(Rc::downgrade(&event_fade));
+                        }
+                        cx.capture_pointer();
+                    }
+                    Some(before + step)
                 } else if pointer >= thumb_start && pointer <= thumb_start + thumb_length {
                     grab = Some(pointer - thumb_start);
                     cx.capture_pointer();
@@ -454,6 +549,7 @@ pub(crate) fn mount(
             | InputEvent::PointerCancel
             | InputEvent::Blur => {
                 grab = None;
+                event_fade.repeat.borrow_mut().take();
                 cx.release_pointer();
                 None
             }
@@ -502,18 +598,6 @@ pub(crate) fn mount(
             cx.prevent_default();
             cx.stop_propagation();
         }
-    });
-    // As an overlay scrollbar: shown as the user scrolls, then fading.
-    let overlay_mode = ui.overlay_scrollbars();
-    let fade = Rc::new(Fade {
-        alpha: ui.signal(1.),
-        fade_at: Cell::new(None),
-        next: Cell::new(None),
-        listed: Cell::new(false),
-        widened: ui.signal(0.),
-        aim: Cell::new(None),
-        moving: Cell::new(None),
-        step: Cell::new(None),
     });
     let (weak, shown, mode) = (ui.downgrade(), fade.clone(), overlay_mode.clone());
     let (scrolled, held, focus) = (offset.clone(), active.clone(), focused.clone());
@@ -708,44 +792,52 @@ pub(crate) fn mount(
         // Its carets, shown as it widens, in the thumb's colour: the
         // decrease one at its start (right to left, a horizontal bar's at
         // its right), each pointing that way.
-        if let (Some(cell), Some([decrease, increase])) = (LOOK.arrows, arrows) {
-            let shown = if arrow_room > 0. && visible && alpha > 0. {
-                faded(
-                    theme.color(tok::SCROLLBAR_THUMB),
-                    alpha * (arrow_room / cell),
-                )
+        if let (Some(cell), Some([(decrease_wash, decrease), (increase_wash, increase)])) =
+            (LOOK.arrows, arrows)
+        {
+            let hovered = arrow_hover.get();
+            let strength = if arrow_room > 0. && visible && alpha > 0. {
+                alpha * (arrow_room / cell)
             } else {
-                Color(0, 0, 0, 0)
+                0.
             };
+            let shown = faded(theme.color(tok::SCROLLBAR_THUMB), strength);
             let (start, end) = if horizontal {
                 if rtl { (1, 3) } else { (3, 1) }
             } else {
                 (0, 2)
             };
             let across = (thickness - cell) / 2.;
-            for (node, toward, at) in [
-                (
-                    decrease,
-                    start,
-                    if rtl && horizontal { length - cell } else { 0. },
-                ),
-                (
-                    increase,
-                    end,
-                    if rtl && horizontal { 0. } else { length - cell },
-                ),
+            let (first, last) = match rtl && horizontal {
+                true => (length - cell, 0.),
+                false => (0., length - cell),
+            };
+            for (wash, node, toward, at, which) in [
+                (decrease_wash, decrease, start, first, 1),
+                (increase_wash, increase, end, last, 2),
             ] {
-                let size = if shown.3 > 0 { cell } else { 0. };
+                let size = if strength > 0. { cell } else { 0. };
+                // Under the pointer: a wash (the text at 5%), its caret in
+                // the secondary text's colour
+                // (`ScrollBarButtonArrowForegroundPointerOver`).
+                let (wash_color, caret_color) = match hovered == which && size > 0. {
+                    true => (
+                        faded(theme.color(tok::TEXT_PRIMARY), 0.05 * strength),
+                        faded(theme.color(tok::TEXT_SECONDARY), strength),
+                    ),
+                    false => (Color(0, 0, 0, 0), shown),
+                };
+                let place = if horizontal {
+                    Transform { x: at, y: across }
+                } else {
+                    Transform { x: across, y: at }
+                };
+                scene.set_style(wash, fixed(size, size));
+                scene.set_kind(wash, wash_kind(wash_color));
+                scene.set_transform(wash, place);
                 scene.set_style(node, fixed(size, size));
-                scene.set_kind(node, caret(shown, cell, toward));
-                scene.set_transform(
-                    node,
-                    if horizontal {
-                        Transform { x: at, y: across }
-                    } else {
-                        Transform { x: across, y: at }
-                    },
-                );
+                scene.set_kind(node, caret(caret_color, cell, toward));
+                scene.set_transform(node, place);
             }
         }
         // Centred across the track, which sits `margin` in from the edge.
