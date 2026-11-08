@@ -387,3 +387,79 @@ fn usize_compares_only_with_itself() {
     let range: std::ops::Range<i32> = 0..2;
     assert_eq!(lines.iter().filter(|line| range.contains(line)).count(), 1);
 }
+
+/// The cells of `line` as (character, wide, spacer) up to the first blank
+/// run of three.
+#[cfg(unix)]
+fn cells(term: &Term, line: i32) -> Vec<(char, bool, bool)> {
+    let row = &term.grid()[Line(line)];
+    (0..term.grid().columns())
+        .map(|column| {
+            let cell = &row[Column(column)];
+            (
+                cell.c,
+                cell.flags.contains(Flags::WIDE_CHAR),
+                cell.flags.contains(Flags::WIDE_CHAR_SPACER),
+            )
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn an_emoji_asked_for_with_vs16_takes_two_cells() {
+    // ❤ (text by default) with VS16, then without; ✔ with VS16 at the end
+    // of a line of 8; an emoji wide already (😀) with VS16; and VS16 after
+    // a letter, which has no emoji to show.
+    let mut run = Scripted::run(
+        "printf 'a\\342\\235\\244\\357\\270\\217b\\342\\235\\244c\\r\\n1234567\\342\\234\\224\\357\\270\\217z\\r\\n\\360\\237\\230\\200\\357\\270\\217d e\\357\\270\\217f\\r\\n\\342\\235\\244\\r\\357\\270\\217g\\r\\n'",
+        8,
+        6,
+    );
+    assert_eq!(run.exited(), 0);
+    let term = run.session.term();
+    let grid = term.grid();
+    let line = cells(&term, 0);
+    assert_eq!(line[0], ('a', false, false));
+    assert_eq!(line[1], ('❤', true, false), "{line:?}");
+    assert_eq!(line[2], (' ', false, true));
+    assert_eq!(
+        line[3],
+        ('b', false, false),
+        "the cursor went past both cells"
+    );
+    assert_eq!(line[4], ('❤', false, false), "without VS16, one cell");
+    assert_eq!(line[5], ('c', false, false));
+    let heart = &grid[Point::new(Line(0), Column(1))];
+    assert_eq!(heart.zerowidth(), Some(&['\u{fe0f}'][..]));
+    // No room at the end of the line: it starts the next, a spacer where
+    // it was.
+    let line = cells(&term, 1);
+    assert_eq!(line[7].0, ' ');
+    assert!(
+        grid[Point::new(Line(1), Column(7))]
+            .flags
+            .contains(Flags::LEADING_WIDE_CHAR_SPACER),
+        "{line:?}"
+    );
+    let line = cells(&term, 2);
+    assert_eq!(
+        &line[..3],
+        [('✔', true, false), (' ', false, true), ('z', false, false)]
+    );
+    // Wide already: as it was. After a letter: nothing changes.
+    let line = cells(&term, 3);
+    assert_eq!(
+        &line[..3],
+        [('😀', true, false), (' ', false, true), ('d', false, false)]
+    );
+    assert_eq!(&line[4..6], [('e', false, false), ('f', false, false)]);
+    // VS16 after the cursor went back to the start: not the character just
+    // written, so nothing widens (`g` then writes over the ❤).
+    let line = cells(&term, 4);
+    assert_eq!(
+        &line[..2],
+        [('g', false, false), (' ', false, false)],
+        "{line:?}"
+    );
+}
