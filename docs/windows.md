@@ -430,7 +430,11 @@ backdrop: it is the acrylic blur of what is behind the window, untinted (the
 window's accent, `SetWindowCompositionAttribute`'s
 `ACCENT_ENABLE_ACRYLICBLURBEHIND` with a tint of alpha 1), as gpui's
 `WindowBackgroundAppearance::Blurred` is, for apps laying their own tint over
-it; Windows 10 1809 and later. Its frame is not extended under the client
+it; Windows 10 1809 and later. It is not a pure blur: its luminosity pass lets about 83% of what
+is behind through and adds 8 (831 thousandths and 8, measured over flat black, grey and
+white, whatever the accent's state or tint), so a scrim laid over it reads darker over
+something bright than over macOS's material; `WindowCapabilities::blur_pass` and
+`blur_lift` say so, for an app to solve a scrim that comes out as macOS's would. Its frame is not extended under the client
 (as gpui's is not): DWM would draw the frame over the blur. Mica tints with
 the wallpaper alone and blurs nothing behind the window. With Transparency effects off
 Windows stops that blur and shows the accent's black tint, so plain glass then

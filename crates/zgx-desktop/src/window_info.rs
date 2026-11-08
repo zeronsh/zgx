@@ -127,6 +127,19 @@ pub struct WindowCapabilities {
     /// Transparency effects or Reduce transparency
     /// (`ui.prefers.reduced_transparency`).
     pub popup_blur_behind: bool,
+    /// How much of what is behind the window its system blur lets through,
+    /// in thousandths, and what it adds (0–255, an sRGB channel's), where
+    /// `blur_behind`: what shows under a clear pixel of `glass` is about
+    /// `pass / 1000 · behind + lift`, channel by channel. A pure blur (macOS's
+    /// material, a Linux compositor's) is 1000 and 0. Windows' acrylic accent
+    /// is 831 and 8, measured over flat black, grey and white on Windows 11,
+    /// whatever its state (blur-behind or acrylic) or tint: its luminosity
+    /// pass darkens what it blurs, which no accent undoes. So an app whose
+    /// glass lays a scrim over the blur, as macOS's would read, can solve a
+    /// thinner one that comes out the same over anything.
+    pub blur_pass: u16,
+    /// See [`WindowCapabilities::blur_pass`].
+    pub blur_lift: u8,
 }
 /// A window going into or out of full screen, as AppKit animates it
 /// (macOS): `WindowContext::full_screen_transition`, `ui.window.full_screen_transition`.
@@ -285,6 +298,8 @@ impl WindowInfo {
             native_fullscreen: true,
             blur_behind: blur_behind(wayland),
             popup_blur_behind: popup_blur_behind(),
+            blur_pass: BLUR_TRANSFER.0,
+            blur_lift: BLUR_TRANSFER.1,
         });
         self.ready.set(true);
     }
@@ -298,6 +313,9 @@ fn blur_behind(wayland: bool) -> bool {
 fn blur_behind(_: bool) -> bool {
     true
 }
+/// `WindowCapabilities::blur_pass` and `blur_lift`: the acrylic accent's on
+/// Windows (`window_chrome::blur_behind`), a pure blur's elsewhere.
+const BLUR_TRANSFER: (u16, u8) = if cfg!(windows) { (831, 8) } else { (1000, 0) };
 /// `WindowCapabilities::popup_blur_behind`.
 fn popup_blur_behind() -> bool {
     #[cfg(windows)]
