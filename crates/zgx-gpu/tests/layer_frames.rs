@@ -968,6 +968,32 @@ fn input_after_idle_wakes_the_gpu_once() {
     assert_eq!(window.gpu.debug_warms(), 2, "the next idle");
 }
 
+/// A frame shows once its work is scheduled (`schedule_direct`), not done:
+/// the next frame waits for it as it encodes, so its GPU time comes then,
+/// and what it showed matches drawing whole.
+#[cfg(target_os = "macos")]
+fn a_frame_shows_once_scheduled_and_the_next_waits_for_it() {
+    let mut window = Window::new(1);
+    window.show();
+    window.live.set(2);
+    let shown = window.show();
+    assert!(shown == Window::new(2).show(), "the frame shown differs");
+    let _ = window.gpu.take_gpu_time();
+    assert_eq!(window.gpu.take_gpu_time(), None, "shown, not waited for");
+    window.live.set(3);
+    window.ui.prepare_frame();
+    let damage = window.ui.scene.borrow_mut().flush().damage;
+    window
+        .gpu
+        .render(&window.ui.scene.borrow(), &damage)
+        .unwrap();
+    assert!(
+        window.gpu.take_gpu_time().is_some(),
+        "the next frame waits for the one shown as it encodes"
+    );
+    window.gpu.present().unwrap();
+}
+
 /// A pixelated image presented through the Metal frame's own pipelines
 /// (`metal_frame`, its inline sampler nearest): a 2 by 2 checker drawn at
 /// 100 points is black or white, where a smooth one blends along the middle.
@@ -1119,6 +1145,8 @@ fn main() {
         println!("layer_frames: full-rate frames show as tiles without a video layer");
         input_after_idle_wakes_the_gpu_once();
         println!("layer_frames: input after idle wakes the GPU once");
+        a_frame_shows_once_scheduled_and_the_next_waits_for_it();
+        println!("layer_frames: a frame shows once scheduled and the next waits for it");
         rounded_panel_scrolled_through_surfaces_matches_drawing_whole();
         println!("layer_frames: a rounded panel scrolled through surfaces matches drawing whole");
         still_over_a_scroll_repainted_where_it_is_leaves_no_ghost();

@@ -3225,7 +3225,7 @@ impl Host {
                 drop(transaction);
                 #[cfg(target_os = "macos")]
                 {
-                    self.presented_at = Some(std::time::Instant::now());
+                    let previous = self.presented_at.replace(std::time::Instant::now());
                     self.late_sample
                         .handed_over(ready_at.get().unwrap_or_else(std::time::Instant::now));
                     // What it shows now, for `Ui::snapshot` (the last frame's
@@ -3233,7 +3233,12 @@ impl Host {
                     *self.shown.borrow_mut() = renderer
                         .shown_frame()
                         .map(|frame| (frame, self.scale_factor));
-                    if let Some(gpu) = renderer.take_gpu_time() {
+                    // The frame presented before this one (`take_gpu_time`):
+                    // after a pause, one from before it, which says nothing
+                    // of the GPU now.
+                    if let Some(gpu) = renderer.take_gpu_time()
+                        && previous.is_some_and(|at| at.elapsed() < STEADY_GAP)
+                    {
                         zgx::profile::gpu_time(gpu);
                         if grid.is_some() {
                             self.latch.ran(gpu);

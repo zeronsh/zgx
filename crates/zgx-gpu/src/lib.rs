@@ -3378,6 +3378,12 @@ static WARM_AFTER_IDLE: std::sync::LazyLock<bool> =
 #[cfg(windows)]
 static DXGI_PRESENT: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_DXGI_PRESENT").is_none_or(|v| v != "0"));
+/// `ZGX_PRESENT_COMPLETED=1`: a surface's frame is waited for until it
+/// completes before it shows, as before `schedule_direct`; to compare.
+#[cfg(target_os = "macos")]
+static PRESENT_COMPLETED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    zgx::env::var_os("ZGX_PRESENT_COMPLETED").is_some_and(|v| v != "0")
+});
 /// `ZGX_PRESENT_DRAWABLE`: full-rate frames draw into `CAMetalLayer`
 /// drawables, which Metal presents (`layer_present::Layer::next_drawable`),
 /// instead of surfaces of the renderer's own shown as tiles.
@@ -4841,7 +4847,8 @@ pub struct GpuRenderer {
     /// (`warm_up`).
     #[cfg(target_os = "macos")]
     idle: bool,
-    /// How long the GPU took to run the last direct frame (`take_gpu_time`).
+    /// How long the GPU took to run the last direct frame waited for
+    /// (`take_gpu_time`).
     #[cfg(target_os = "macos")]
     gpu_time: std::cell::Cell<Option<std::time::Duration>>,
     /// The viewport uniform `select_viewport` chose last, for direct frames.
@@ -12557,6 +12564,25 @@ impl GpuRenderer {
         self.frame_draws = draws;
         Ok(stats)
     }
+    /// Wait for a directly encoded frame (`render_direct`) to be scheduled on
+    /// the GPU, not to complete, and the main thread goes on with the next
+    /// frame meanwhile. Its completion is waited for when its ring buffers
+    /// are written again (`finish_direct` at the next encode).
+    /// The window server's composite reads the surface after the scheduled
+    /// work that writes it: the driver orders a surface's writers and
+    /// readers, as ANGLE and Chromium take it for IOSurfaces Core Animation
+    /// shows. Tests read frames back themselves and wait for them, so they
+    /// can't show that on screen; `ZGX_PRESENT_COMPLETED=1` waits as before.
+    #[cfg(target_os = "macos")]
+    fn schedule_direct(&self) -> bool {
+        use objc2_metal::MTLCommandBuffer;
+        let inflight = self.metal_inflight.borrow();
+        let Some(buffer) = inflight.as_ref() else {
+            return false;
+        };
+        buffer.waitUntilScheduled();
+        true
+    }
     /// Wait for a directly encoded frame (`render_direct`) to complete.
     #[cfg(target_os = "macos")]
     fn finish_direct(&self) -> bool {
@@ -15506,9 +15532,14 @@ impl GpuRenderer {
         // A drawable's frame encoded directly presented as it committed.
         let presented = present.buffers[index].0.drawable && self.metal_inflight.borrow().is_some();
         // The window server reads the surface from its next composite: the
-        // frame must be complete by then.
+        // frame's work must be scheduled by then (`schedule_direct`).
         // (A drawable's direct frame is not waited for: it presents itself.)
-        if presented || self.finish_direct() {
+        let handed = if *PRESENT_COMPLETED {
+            self.finish_direct()
+        } else {
+            self.schedule_direct()
+        };
+        if presented || handed {
             // wgpu still frees what was dropped once its own work is done.
             if present.frame.is_multiple_of(64) {
                 let _ = self.device.poll(wgpu::PollType::Poll);
@@ -16018,7 +16049,8 @@ impl GpuRenderer {
     #[cfg(target_os = "macos")]
     pub fn shown_pixels(&self) -> Option<(u32, u32, Vec<u8>)> {
         let frame = self.shown_frame()?;
-        // Direct frames are waited for before they are shown; wgpu's here.
+        // A direct frame is waited for by `read` (`ShownFrame::pending`);
+        // wgpu's here.
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         frame.read(0, 0, u32::MAX, u32::MAX)
     }
@@ -16032,8 +16064,7 @@ impl GpuRenderer {
         let (buffer, _) = present.buffers.get(present.shown?)?;
         Some(ShownFrame {
             surface: buffer.surface.clone(),
-            pending: buffer
-                .drawable
+            pending: (buffer.drawable || !*PRESENT_COMPLETED)
                 .then(|| self.metal_inflight.borrow().clone())
                 .flatten(),
             over: self.over_frames(),
@@ -16055,10 +16086,13 @@ impl GpuRenderer {
     pub fn debug_take_pass_times(&self) -> Vec<(&'static str, f64)> {
         metal_frame::take_pass_times()
     }
-    /// How long the GPU took to run the frame last presented, when it was
+    /// How long the GPU took to run the last frame waited for, when it was
     /// encoded with Metal directly: the frame's own work, plus however long
     /// other work on the GPU (the window server's compositing, other apps)
-    /// held it up. Taken: `None` until another such frame presents.
+    /// held it up. A frame shows once it is scheduled (`schedule_direct`)
+    /// and is waited for at the next encode, so after a present this is the
+    /// frame before it (the one presented, with `ZGX_PRESENT_COMPLETED=1`).
+    /// Taken: `None` until another such frame completes.
     #[cfg(target_os = "macos")]
     pub fn take_gpu_time(&mut self) -> Option<std::time::Duration> {
         self.gpu_time.take()
