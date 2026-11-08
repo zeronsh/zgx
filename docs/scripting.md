@@ -133,7 +133,7 @@ The component library's elements (`ui.data_grid`, `ui.tree`, `ui.calendar`, `ui.
 | Function | |
 | --- | --- |
 | `column`, `row`, `div`, `overlay`, `button`, `grid` | containers (`grid` sets `grid = true`) |
-| `scroll`, `scroll_x` | scroll views; `offset = state` binds the position in points; `follow = true` keeps the view at its end while the content grows, until it is scrolled away (a transcript) |
+| `scroll`, `scroll_x` | scroll views; `offset = state` binds the position in points; `follow = true` keeps the view at its end while the content grows, until it is scrolled away (a transcript); `wheel_across = true` lets a mouse wheel move a `scroll_x`: with Shift always, without once the pointer has been moved onto it |
 | `text "…"`, `text { "…", … }`, `text(fn)` | `{name}` interpolates state in Rust; `{{` `}}` are literal braces |
 | `rich { "plain", span { "bold", bold = true, on_click = … } }` | inline runs: `color bg text_size weight bold italic underline strike font on_click href` |
 | `markdown_view { text, breaks, paths, copy }` | markdown drawn (code blocks with Copy, the theme's colours), parsed as its text changes and only its changed blocks built again: a streaming reply's view ([reference](reference/text.md#markdown)) |

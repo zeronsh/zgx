@@ -478,9 +478,12 @@ impl EventContext {
         self.prevented_by.get_or_insert(self.current_target);
     }
     /// A scroll view moved along its axis (`horizontal` or not) for this
-    /// wheel event: the event is used, unless it also moves along the other
-    /// axis, which goes on to the views around it (a vertical swipe over a
-    /// horizontal carousel still scrolls the page).
+    /// wheel event: the event is used, unless it moves further along the
+    /// other axis, which goes on to the views around it (a vertical swipe over
+    /// a horizontal carousel still scrolls the page). What drifts off a swipe
+    /// mostly along this axis goes with it: passed on, it would move the view
+    /// around this one and, being what that view moved last, latch the
+    /// gesture there (`scroll_latch`), leaving this one stopped.
     pub(crate) fn scrolled(&mut self, horizontal: bool) {
         if let InputEvent::Scroll {
             delta_x, delta_y, ..
@@ -491,7 +494,7 @@ impl EventContext {
             } else {
                 (delta_y, delta_x)
             };
-            if *other != 0. && other.is_finite() {
+            if other.is_finite() && other.abs() > own.abs() {
                 *own = 0.;
                 return;
             }
@@ -563,6 +566,48 @@ thread_local! {
     /// with a load. (A count, not a dispatcher's own flag: one more field
     /// in `InputDispatcher` cost every clone and drop of it.)
     static LOCKS_ENGAGED: Cell<u32> = const { Cell::new(0) };
+}
+
+/// How far a scroll must move along the other axis to be a turn rather than a
+/// finger's drift.
+const SCROLL_TURN: f32 = 8.;
+
+/// Whether a scroll has left a gesture along `horizontal`: clearly moving the
+/// other way, at least twice as far as along it.
+fn axis_turned(horizontal: bool, delta_x: f32, delta_y: f32) -> bool {
+    let (own, other) = if horizontal {
+        (delta_x, delta_y)
+    } else {
+        (delta_y, delta_x)
+    };
+    other.abs() >= SCROLL_TURN && other.abs() >= 2. * own.abs()
+}
+
+thread_local! {
+    /// A mouse wheel's notches being dispatched (`mouse_wheel`): whether
+    /// Shift is held. `None` for a trackpad's motion, or anything else.
+    static MOUSE_WHEEL: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `dispatch`, a mouse wheel's scroll going to the nodes, with `shift`
+/// saying whether Shift is held. `InputEvent::Scroll` is points alone: this
+/// is what tells a wheel, which has no sideways axis, from a trackpad, for
+/// a scroll view that takes one (`View::wheel_across`).
+#[doc(hidden)]
+pub fn mouse_wheel<R>(shift: bool, dispatch: impl FnOnce() -> R) -> R {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            MOUSE_WHEEL.with(|wheel| wheel.set(None));
+        }
+    }
+    MOUSE_WHEEL.with(|wheel| wheel.set(Some(shift)));
+    let _reset = Reset;
+    dispatch()
+}
+/// The mouse wheel being dispatched, if one is: whether Shift is held.
+pub(crate) fn mouse_wheel_shift() -> Option<bool> {
+    MOUSE_WHEEL.with(std::cell::Cell::get)
 }
 /// How a node takes input.
 #[derive(Clone, Copy, Debug, Default)]
@@ -773,9 +818,10 @@ struct State {
     spring_delay: Option<Option<std::time::Duration>>,
     /// The physical key of the key event being dispatched (`set_key_code`).
     key_code: Option<Rc<str>>,
-    /// The scroll view a wheel gesture is latched to, the axis it moves
-    /// along (horizontal or not) and when it last scrolled: the rest of the
-    /// gesture along that axis goes to it alone.
+    /// The scroll view a wheel gesture is latched to, the axis it began along
+    /// (horizontal or not) and when it last scrolled: the rest of the gesture
+    /// goes to it alone, its drift included, until it clearly turns
+    /// (`axis_turned`).
     scroll_latch: Option<(NodeId, bool, Instant)>,
     /// The modifier keys last known held (from the platform's pointer and
     /// key events): what an activation (a click) was made with.
@@ -3028,9 +3074,9 @@ impl InputDispatcher {
         } = &event
         {
             let now = Instant::now();
-            let horizontal = delta_x.abs() > delta_y.abs();
+            let (delta_x, delta_y) = (*delta_x, *delta_y);
             let latched = self.state.borrow().scroll_latch.filter(|(node, axis, at)| {
-                *axis == horizontal
+                !axis_turned(*axis, delta_x, delta_y)
                     && now.saturating_duration_since(*at) < SCROLL_LATCH
                     && scene.borrow().contains(*node)
                     && self.enabled(&scene.borrow(), *node)
@@ -3038,7 +3084,9 @@ impl InputDispatcher {
             if let Some((node, ..)) = latched {
                 let ctx =
                     self.route_pointer(scene, node, event, modifiers.unwrap_or_default(), 0, true);
-                self.state.borrow_mut().scroll_latch = Some((node, horizontal, now));
+                let axis = self.state.borrow().scroll_latch.map(|(_, axis, _)| axis);
+                self.state.borrow_mut().scroll_latch =
+                    Some((node, axis.unwrap_or(false), now));
                 return DispatchResult {
                     target: Some(node),
                     default_prevented: ctx.prevented,
