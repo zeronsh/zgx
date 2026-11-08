@@ -422,3 +422,39 @@ fn a_player_whose_box_is_clipped_away_draws_nothing() {
         "drew offscreen: {meanwhile:?}"
     );
 }
+
+#[test]
+fn a_player_unseen_past_its_end_shows_its_last_frame_stopped() {
+    let dir = temp_dir("player-unseen-end");
+    // One second, not looping.
+    std::fs::write(dir.join("video.luau"), RUN.replace("DURATION", "30")).unwrap();
+    let mut shown = shown(&dir, |view| view);
+    shown.player.open("Run", json!({}), 0);
+    shown.player.looping(false);
+    shown.player.play(true);
+    shown.until(|frame| frame.is_some_and(|f| f >= 3));
+    shown.player.watch(false);
+    // Past its end while unseen: it stops there, drawing nothing.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while shown_playing(&shown) {
+        shown.stage.step().unwrap();
+        assert!(Instant::now() < deadline, "it never stopped");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let held = shown.frame();
+    let meanwhile = shown.watch_for(Duration::from_millis(300));
+    assert!(
+        meanwhile.iter().all(|f| *f == held),
+        "drew unseen: {meanwhile:?}"
+    );
+    // Seen again: its last frame, and still stopped.
+    shown.player.watch(true);
+    let last = shown.until(|frame| frame == Some(29));
+    assert_eq!(last, Some(29));
+    assert!(!shown_playing(&shown), "playing again");
+    let after = shown.watch_for(Duration::from_millis(200));
+    assert!(after.iter().all(|f| *f == Some(29)), "moved on: {after:?}");
+}
+fn shown_playing(shown: &Shown) -> bool {
+    shown.player.playing.with_untracked(|p| *p)
+}
