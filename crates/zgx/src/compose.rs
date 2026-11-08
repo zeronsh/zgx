@@ -4595,6 +4595,15 @@ fn paragraph_effect<const LOCATING: bool>(
     }
 }
 
+/// A paragraph's content before its first runs (`mount_rich`): one made
+/// a thread, not one a paragraph mounted.
+fn empty_rich_text() -> std::sync::Arc<crate::rich_text::RichText> {
+    thread_local! {
+        static EMPTY: std::sync::Arc<crate::rich_text::RichText> =
+            std::sync::Arc::new(crate::rich_text::RichText::new("", Vec::new()).unwrap());
+    }
+    EMPTY.with(std::sync::Arc::clone)
+}
 /// A paragraph of spans' content (`rich_text`): its runs, built again as
 /// they change, and its links' and icons' boxes. Out of line: few views
 /// are paragraphs, and `mount_element` stays as small as they need.
@@ -4613,7 +4622,7 @@ fn mount_rich(
         let locator = crate::compose_rich::SpanLocator {
             paragraph,
             content: ui.signal(crate::compose_rich::Content {
-                rich: std::sync::Arc::new(crate::rich_text::RichText::new("", Vec::new()).unwrap()),
+                rich: empty_rich_text(),
                 links: Vec::new(),
                 icons: Vec::new(),
             }),
@@ -4627,7 +4636,7 @@ fn mount_rich(
         Some(locator) => (locator.content.clone(), Some(locator.boxes.clone())),
         None => (
             ui.signal(crate::compose_rich::Content {
-                rich: std::sync::Arc::new(crate::rich_text::RichText::new("", Vec::new()).unwrap()),
+                rich: empty_rich_text(),
                 links: Vec::new(),
                 icons: Vec::new(),
             }),

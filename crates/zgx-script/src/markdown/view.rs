@@ -40,26 +40,69 @@ fn flag(run: &Value, name: &str) -> bool {
     matches!(run.field(name), Some(Value::Bool(true)))
 }
 
+/// A run's fields (`markdown::runs_value`): its text, its flags and its
+/// link.
+#[derive(Default)]
+struct RunFields<'a> {
+    text: Option<&'a Value>,
+    bold: bool,
+    italic: bool,
+    strike: bool,
+    code: bool,
+    link: Option<&'a Value>,
+}
+impl<'a> RunFields<'a> {
+    /// Read in one pass over its fields, a run being a small map: not a
+    /// search for each of six names, a document's every run.
+    fn of(run: &'a Value) -> Self {
+        let Value::Map(fields) = run else {
+            return Self {
+                text: run.field("x"),
+                bold: flag(run, "b"),
+                italic: flag(run, "i"),
+                strike: flag(run, "s"),
+                code: flag(run, "c"),
+                link: run.field("a"),
+            };
+        };
+        let mut out = Self::default();
+        for (key, value) in fields.iter() {
+            let on = matches!(value, Value::Bool(true));
+            match &**key {
+                "x" => out.text = Some(value),
+                "b" => out.bold = on,
+                "i" => out.italic = on,
+                "s" => out.strike = on,
+                "c" => out.code = on,
+                "a" => out.link = Some(value),
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
 /// A run of text as a span: bold, italic, struck, code or a link.
 fn span(run: &Value, bold: bool) -> zgx::compose::TextSpan {
-    let mut out = zgx::compose::text_span(text_of(run.field("x")));
-    if bold || flag(run, "b") {
+    let fields = RunFields::of(run);
+    let mut out = zgx::compose::text_span(text_of(fields.text));
+    if bold || fields.bold {
         out = out.font_bold();
     }
-    if flag(run, "i") {
+    if fields.italic {
         out = out.italic(true);
     }
-    if flag(run, "s") {
+    if fields.strike {
         out = out.strikethrough(Default::default());
     }
-    if flag(run, "c") {
+    if fields.code {
         out = out
             .font_family(FontFamily::Monospace)
             .background(themed("surface.sunken"))
             .padding(3., 0.5)
             .radius(3.);
     }
-    if let Some(Value::Str(href)) = run.field("a") {
+    if let Some(Value::Str(href)) = fields.link {
         out = out.text_color(themed("accent"));
         // Still streaming its address: styled as a link, going nowhere.
         if &**href != PENDING_LINK_URL {
