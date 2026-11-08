@@ -3136,6 +3136,10 @@ pub struct Scene {
     pub(crate) no_move_context: bool,
     #[cfg(test)]
     pub(crate) move_context_kept: u64,
+    /// Tests: damage subtrees by the walks as they were before they took
+    /// unchecked lookups and the node in hand (`damage_subtree_in_reference`).
+    #[cfg(test)]
+    pub(crate) reference_walks: bool,
     /// The last point hit tested, the revisions it was hit at and what it
     /// hit (`hit_test_all`): a pointer move's dispatch and its cursor ask the
     /// same, and most moves between frames ask where nothing changed.
@@ -3351,6 +3355,8 @@ impl Scene {
             no_move_context: false,
             #[cfg(test)]
             move_context_kept: 0,
+            #[cfg(test)]
+            reference_walks: false,
             hit_memo: Default::default(),
             cursor_styles: 0,
             contents_styles: Default::default(),
@@ -9389,10 +9395,118 @@ impl Scene {
         parent_clip: Option<Rect>,
         level: u32,
     ) {
-        let node = self.node(id);
+        // Below the walk's first node (`CHECK`), `id` is a child read from
+        // its parent's list in this walk: in the scene by the tree's
+        // invariant, so `tree_node` (generation checked in debug builds).
+        // The first comes from the caller: checked.
+        #[cfg(test)]
+        if self.reference_walks {
+            return self.damage_subtree_in_reference::<CHECK>(id, parent, parent_clip);
+        }
+        let node = match CHECK {
+            true => self.tree_node(id),
+            false => self.node(id),
+        };
         // Not laid out since it was appended, so never painted: nothing to
         // repaint yet (a mounting row styles each node before its first
         // layout, which damages where it lands). Nor are its descendants.
+        if CHECK {
+            let unplaced = node.measurement.is_none() && node.bounds == Rect::default();
+            if !own_visible(&node.style) || unplaced || self.damage_is_full() {
+                return;
+            }
+        }
+        let transform = Transform {
+            x: parent.x + node.transform.x,
+            y: parent.y + node.transform.y,
+        };
+        let bounds = node.bounds.translated(transform);
+        let clip = if clip_axes(&node.style) != (false, false) {
+            clipped_bounds(parent_clip, bounds, &node.style)
+        } else {
+            parent_clip
+        };
+        let own = match paints_past_clip_of(node) {
+            true => parent_clip,
+            false => clip,
+        };
+        let painted = self.painted_of(id, node, bounds, node.effects.blur_radius);
+        self.damage_within(painted, own);
+        // `id`, looked up above in this walk: `tree_node`.
+        for index in 0..self.children_raw(self.tree_node(id)).len() {
+            let child = self.children_raw(self.tree_node(id))[index];
+            crate::deep(level + 1, || {
+                self.damage_subtree_in::<true>(child, transform, clip, level + 1)
+            });
+        }
+    }
+    /// `damage_subtree_in` where local transforms exist (see `descend`).
+    #[inline(never)]
+    fn damage_subtree_placed<const CHECK: bool>(
+        &mut self,
+        id: NodeId,
+        parent: Transform,
+        parent_clip: Option<Rect>,
+        placement: Option<Placement>,
+        level: u32,
+    ) {
+        #[cfg(test)]
+        if self.reference_walks {
+            return self.damage_subtree_placed_reference::<CHECK>(
+                id,
+                parent,
+                parent_clip,
+                placement,
+            );
+        }
+        // As in `damage_subtree_in`: a child read from its parent's list in
+        // this walk (`CHECK`) by `tree_node`, the caller's first checked.
+        let node = match CHECK {
+            true => self.tree_node(id),
+            false => self.node(id),
+        };
+        if CHECK {
+            let unplaced = node.measurement.is_none() && node.bounds == Rect::default();
+            if !own_visible(&node.style) || unplaced || self.damage_is_full() {
+                return;
+            }
+        }
+        let (transform, bounds, clip, placement) =
+            self.descend_of(id, node, parent, parent_clip, placement);
+        // Inside a layer it starts, nothing cuts its own paint.
+        let (own, painted) = match node.layered && node.layer_shaded() {
+            // A layer shader paints its box, a box of no colour too (as a
+            // backdrop blur does: `painted_of`), cut by the clips around it.
+            true => (parent_clip, node.effects.blur_radius.max(1.)),
+            false => (
+                match paints_past_clip_of(node) {
+                    true if node.transformed() || node.filtered() => None,
+                    true => parent_clip,
+                    false => clip,
+                },
+                node.effects.blur_radius,
+            ),
+        };
+        let painted = self.painted_of(id, node, bounds, painted);
+        self.damage_within_placed(painted, own, placement);
+        // `id`, looked up above in this walk: `tree_node`.
+        for index in 0..self.children_raw(self.tree_node(id)).len() {
+            let child = self.children_raw(self.tree_node(id))[index];
+            crate::deep(level + 1, || {
+                self.damage_subtree_placed::<true>(child, transform, clip, placement, level + 1)
+            });
+        }
+    }
+    /// Tests: `damage_subtree_in` as it was, every node looked up checked
+    /// (`reference_walks`).
+    #[cfg(test)]
+    fn damage_subtree_in_reference<const CHECK: bool>(
+        &mut self,
+        id: NodeId,
+        parent: Transform,
+        parent_clip: Option<Rect>,
+    ) {
+        let node = self.node(id);
         if CHECK {
             let unplaced = node.measurement.is_none() && node.bounds == Rect::default();
             if !own_visible(&node.style) || unplaced || self.damage_is_full() {
@@ -9416,20 +9530,17 @@ impl Scene {
         self.damage_painted(id, bounds, node.effects.blur_radius, own);
         for index in 0..self.children_raw(self.node(id)).len() {
             let child = self.children_raw(self.node(id))[index];
-            crate::deep(level + 1, || {
-                self.damage_subtree_in::<true>(child, transform, clip, level + 1)
-            });
+            self.damage_subtree_in_reference::<true>(child, transform, clip);
         }
     }
-    /// `damage_subtree_in` where local transforms exist (see `descend`).
-    #[inline(never)]
-    fn damage_subtree_placed<const CHECK: bool>(
+    /// Tests: `damage_subtree_placed` as it was (`reference_walks`).
+    #[cfg(test)]
+    fn damage_subtree_placed_reference<const CHECK: bool>(
         &mut self,
         id: NodeId,
         parent: Transform,
         parent_clip: Option<Rect>,
         placement: Option<Placement>,
-        level: u32,
     ) {
         let node = self.node(id);
         if CHECK {
@@ -9439,10 +9550,7 @@ impl Scene {
             }
         }
         let (transform, bounds, clip, placement) = self.descend(id, parent, parent_clip, placement);
-        // Inside a layer it starts, nothing cuts its own paint.
         let (own, painted) = match node.layered && node.layer_shaded() {
-            // A layer shader paints its box, a box of no colour too (as a
-            // backdrop blur does: `painted_of`), cut by the clips around it.
             true => (parent_clip, node.effects.blur_radius.max(1.)),
             false => (
                 match self.paints_past_clip(id) {
@@ -9456,9 +9564,7 @@ impl Scene {
         self.damage_painted_placed(id, bounds, painted, own, placement);
         for index in 0..self.children_raw(self.node(id)).len() {
             let child = self.children_raw(self.node(id))[index];
-            crate::deep(level + 1, || {
-                self.damage_subtree_placed::<true>(child, transform, clip, placement, level + 1)
-            });
+            self.damage_subtree_placed_reference::<true>(child, transform, clip, placement);
         }
     }
     /// What `node` paints under, given what its parent passes on: its
@@ -9473,7 +9579,18 @@ impl Scene {
         parent_clip: Option<Rect>,
         placement: Option<Placement>,
     ) -> (Transform, Rect, Option<Rect>, Option<Placement>) {
-        let node = self.node(id);
+        self.descend_of(id, self.node(id), parent, parent_clip, placement)
+    }
+    /// `descend` for `id` whose node the caller has.
+    #[inline(always)]
+    fn descend_of(
+        &self,
+        id: NodeId,
+        node: &Node,
+        parent: Transform,
+        parent_clip: Option<Rect>,
+        placement: Option<Placement>,
+    ) -> (Transform, Rect, Option<Rect>, Option<Placement>) {
         // A drop shadow spreads what its layer paints too (`set_drop_shadow`),
         // as a layer shader's bleed does.
         let spreads = match node.layered {
@@ -9844,7 +9961,13 @@ impl Scene {
         self.damage_painted(id, bounds, effects.blur_radius, clip);
     }
     fn damage_painted(&mut self, id: NodeId, bounds: Rect, blur_radius: f32, clip: Option<Rect>) {
-        if let Some(bounds) = self.painted(id, bounds, blur_radius)
+        let painted = self.painted(id, bounds, blur_radius);
+        self.damage_within(painted, clip);
+    }
+    /// Damage `painted`, what a node paints, within `clip`.
+    #[inline(always)]
+    fn damage_within(&mut self, painted: Option<Rect>, clip: Option<Rect>) {
+        if let Some(bounds) = painted
             // A backdrop filter samples only inside its bounds.
             && let Some(bounds) = clip.and_then(|clip| bounds.intersection(clip))
         {
@@ -9862,11 +9985,21 @@ impl Scene {
         clip: Option<Rect>,
         placement: Option<Placement>,
     ) {
+        let painted = self.painted(id, bounds, blur_radius);
+        self.damage_within_placed(painted, clip, placement);
+    }
+    /// `damage_painted_placed` for what a node paints, `painted`.
+    #[inline(always)]
+    fn damage_within_placed(
+        &mut self,
+        painted: Option<Rect>,
+        clip: Option<Rect>,
+        placement: Option<Placement>,
+    ) {
         let Some(placement) = placement else {
-            return self.damage_painted(id, bounds, blur_radius, clip);
+            return self.damage_within(painted, clip);
         };
-        if let Some(bounds) = self
-            .painted(id, bounds, blur_radius)
+        if let Some(bounds) = painted
             .and_then(|bounds| bounds.intersection(clip.unwrap_or(UNCLIPPED)))
             .and_then(|visible| placement.shows(visible))
         {
@@ -9877,9 +10010,7 @@ impl Scene {
     /// shadows and outline reach past its overflow clip as the paint walks
     /// draw them. Its own paint is damaged within its parent's clip then.
     fn paints_past_clip(&self, id: NodeId) -> bool {
-        let node = self.node(id);
-        matches!(node.kind, NodeKind::Quad(_) | NodeKind::Panel { .. })
-            && clip_axes(&node.style) != (false, false)
+        paints_past_clip_of(self.node(id))
     }
     /// What `id` itself paints when laid out at `bounds`, if anything.
     #[inline]
@@ -13349,6 +13480,12 @@ fn clips_both(style: &Style) -> bool {
         }
     }
 }
+/// `Scene::paints_past_clip` for a node in hand.
+#[inline(always)]
+fn paints_past_clip_of(node: &Node) -> bool {
+    matches!(node.kind, NodeKind::Quad(_) | NodeKind::Panel { .. })
+        && clip_axes(&node.style) != (false, false)
+}
 fn clip_axes(style: &Style) -> (bool, bool) {
     let options = style.layout_options.as_deref();
     (
@@ -13540,6 +13677,197 @@ mod tests {
         let damage = scene.flush().damage;
         assert_eq!(scene.bounds(added), Rect::new(0., 600., 200., 20.));
         assert_eq!(damage, [Rect::new(0., 600., 200., 20.)]);
+    }
+    /// The damage walks, taking children read from their parent's list by
+    /// `tree_node` and the node in hand to what they ask of it, damage every
+    /// frame to the bit what they did before (`reference_walks`), plain
+    /// (`damage_subtree_in`) and through local transforms, content blurs
+    /// and layer shaders (`damage_subtree_placed`): groups moved,
+    /// restyled, hidden, reordered and emptied.
+    #[test]
+    fn damage_walks_damage_what_they_did_before_to_the_bit() {
+        let boxed = |w: f32, h: f32, clip: bool| Style {
+            width: Some(w),
+            height: Some(h),
+            clip,
+            ..Style::default()
+        };
+        let run = |reference: bool| {
+            let mut scene = Scene::new(400., 300.);
+            scene.reference_walks = reference;
+            let root = scene.root();
+            scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+            scene.append(
+                root,
+                NodeKind::Rect(Color(4, 4, 4, 255)),
+                boxed(400., 300., false),
+            );
+            let shadow = BoxShadow {
+                color: Color(0, 0, 0, 128),
+                offset: Transform { x: 3., y: 5. },
+                blur_radius: 6.,
+                spread: 1.,
+            };
+            // A group of a plain box, a clipping panel with a shadow (its own
+            // paint past its clip) holding an overflowing child, a backdrop
+            // blur and a clipping column of rows.
+            let group = |scene: &mut Scene, x: f32| {
+                let group = scene.append(
+                    root,
+                    NodeKind::Container(Layout::Column),
+                    boxed(150., 260., false),
+                );
+                scene.set_transform(group, Transform { x, y: 10. });
+                let mut children = vec![scene.append(
+                    group,
+                    NodeKind::Rect(Color(200, 9, 9, 255)),
+                    boxed(120., 20., false),
+                )];
+                let panel = scene.append(
+                    group,
+                    NodeKind::Panel {
+                        layout: Layout::Overlay,
+                        quad: QuadStyle {
+                            fill: Color(9, 200, 9, 255),
+                            radius: 6.,
+                            shadow: Some(shadow),
+                            ..Default::default()
+                        },
+                    },
+                    boxed(100., 40., true),
+                );
+                scene.append(
+                    panel,
+                    NodeKind::Rect(Color(9, 9, 200, 255)),
+                    boxed(160., 70., false),
+                );
+                children.push(panel);
+                let frost = scene.append(
+                    group,
+                    NodeKind::Container(Layout::Overlay),
+                    boxed(90., 30., false),
+                );
+                scene.set_effects(
+                    frost,
+                    Effects {
+                        opacity: 1.,
+                        blur_radius: 8.,
+                        ..Effects::default()
+                    },
+                );
+                children.push(frost);
+                let column = scene.append(
+                    group,
+                    NodeKind::Container(Layout::Column),
+                    boxed(130., 80., true),
+                );
+                for n in 0..5 {
+                    scene.append(
+                        column,
+                        NodeKind::Quad(QuadStyle {
+                            fill: Color(n * 40, 90, 90, 255),
+                            border_color: Color(255, 255, 255, 255),
+                            border_width: 1.,
+                            ..Default::default()
+                        }),
+                        boxed(110., 22., false),
+                    );
+                }
+                children.push(column);
+                (group, children)
+            };
+            let (plain, plain_children) = group(&mut scene, 10.);
+            let (placed, placed_children) = group(&mut scene, 200.);
+            scene.flush();
+            let mut frames = Vec::new();
+            fn frame(scene: &mut Scene, frames: &mut Vec<Vec<[u32; 4]>>) {
+                frames.push(
+                    scene
+                        .flush()
+                        .damage
+                        .iter()
+                        .map(|r| [r.x, r.y, r.width, r.height].map(f32::to_bits))
+                        .collect::<Vec<_>>(),
+                );
+            }
+            let changes = |scene: &mut Scene,
+                           frames: &mut Vec<Vec<[u32; 4]>>,
+                           group: NodeId,
+                           children: &[NodeId],
+                           step: f32| {
+                scene.set_transform(
+                    group,
+                    Transform {
+                        x: 10. + step * 1.5,
+                        y: 10. + step / 3.,
+                    },
+                );
+                frame(scene, frames);
+                scene.set_style(group, boxed(150. - step, 260., true));
+                frame(scene, frames);
+                let hidden = Style {
+                    layout_options: Some(Arc::new(crate::layout::LayoutOptions {
+                        visible: Some(false),
+                        ..Default::default()
+                    })),
+                    ..boxed(150., 260., false)
+                };
+                scene.set_style(group, hidden);
+                frame(scene, frames);
+                scene.set_style(group, boxed(150., 260., false));
+                frame(scene, frames);
+                let mut order = children.to_vec();
+                order.reverse();
+                scene.reorder_children(group, &order);
+                frame(scene, frames);
+                scene.set_transform(children[3], Transform { x: step, y: -step });
+                frame(scene, frames);
+            };
+            // Plain: no local transform anywhere.
+            for step in [1., 2.5] {
+                changes(&mut scene, &mut frames, plain, &plain_children, step);
+            }
+            // Through local transforms: the second group turns and scales,
+            // its column blurs its content and its panel takes a layer
+            // shader.
+            scene.set_local_transform(
+                placed,
+                LocalTransform {
+                    scale: (1.25, 0.8),
+                    rotate: 0.3,
+                    ..LocalTransform::IDENTITY
+                },
+            );
+            scene.set_effects(
+                placed_children[3],
+                Effects {
+                    opacity: 1.,
+                    filter_blur: 4.,
+                    ..Effects::default()
+                },
+            );
+            scene.set_layer_shader(
+                placed_children[1],
+                Some(crate::decoration::FillShader::new(
+                    "fn layer(input: LayerInput) -> vec4<f32> { return input.color; }",
+                    None,
+                )),
+            );
+            frame(&mut scene, &mut frames);
+            for step in [1., 2.5] {
+                changes(&mut scene, &mut frames, placed, &placed_children, step);
+                changes(&mut scene, &mut frames, plain, &plain_children, step);
+            }
+            // Emptied: each group's children removed in turn.
+            for &child in plain_children.iter().chain(&placed_children) {
+                scene.remove(child);
+                frame(&mut scene, &mut frames);
+            }
+            frames
+        };
+        let (walked, before) = (run(false), run(true));
+        assert!(walked.iter().filter(|f| !f.is_empty()).count() > 20);
+        assert_eq!(walked, before);
     }
     /// A move under the parent the last move was under takes that parent's
     /// context as kept (`move_context`): the damage of every frame is, to
