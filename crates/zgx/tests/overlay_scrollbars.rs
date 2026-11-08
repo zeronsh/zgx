@@ -191,3 +191,37 @@ fn a_windows_scrollbar_widens_under_the_pointer_and_narrows_after_it() {
     assert_eq!(thumb(&ui).0, 0., "gone");
     assert_eq!(ui.next_interaction_deadline(), None, "nothing scheduled");
 }
+
+/// Windows' arrow buttons: where scrollbars always show, a press on the
+/// bar's end steps it, down at the bottom, up at the top, as an arrow key.
+#[cfg(windows)]
+#[test]
+fn a_windows_scrollbars_arrow_buttons_step_it() {
+    use zgx::input::PointerButton;
+    let mut ui = Ui::new(300., 200.);
+    let offset = mount(&mut ui);
+    let bounds = ui.scene.borrow().bounds(bar(&ui));
+    let press = |ui: &mut Ui, y: f32| {
+        let x = bounds.x + bounds.width / 2.;
+        for event in [
+            InputEvent::PointerDown {
+                x,
+                y,
+                button: PointerButton::Primary,
+            },
+            InputEvent::PointerUp {
+                x,
+                y,
+                button: PointerButton::Primary,
+            },
+        ] {
+            ui.dispatch(event);
+        }
+        ui.prepare_frame();
+    };
+    press(&mut ui, bounds.y + bounds.height - 4.);
+    assert_eq!(offset.get(), 40., "down a step");
+    press(&mut ui, bounds.y + 4.);
+    assert_eq!(offset.get(), 0., "and up");
+    assert_eq!(ui.next_interaction_deadline(), None, "nothing scheduled");
+}
