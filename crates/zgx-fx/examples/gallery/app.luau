@@ -1,5 +1,6 @@
--- Every effect of zgx-fx, each over stripes to bend and split, and a lava melt
--- written here with zgx's public props alone. Press a one-shot's box to fire it.
+-- Every effect of zgx-fx, each over stripes to bend and split, and a lava melt,
+-- a trail and a bloom written here with zgx's public props alone. Press a
+-- one-shot's box to fire it.
 -- Run: ZGX_SCRIPT_DIR=crates/zgx-fx/examples/gallery cargo run -p zgx-script --example hot_reload
 local fx = require("../../luau/fx")
 
@@ -29,6 +30,140 @@ fn layer(input: LayerInput) -> vec4<f32> {
     let lava = mix(vec3(0.9, 0.2, 0.05), vec3(1.0, 0.85, 0.4), heat);
     return vec4(mix(c.rgb, lava, melted * smoothstep(0.1, 0.5, heat)), c.a);
 }]])
+-- Trail: boxes moving on the compositor leave light behind them. A pass keeps
+-- its last frame (`feedback`), fades it by the time that passed, and stamps in
+-- where the boxes are now (`geometry`, read with no script); the shader adds
+-- it to what's painted. Passes, state and boxes, and nothing else.
+local trail = ui.layer_shader(
+	[[
+fn layer(input: LayerInput) -> vec4<f32> {
+    let heat = zgx_heat(input.p / input.size).r;
+    let light = mix(vec3(0.15, 0.3, 0.9), vec3(0.6, 0.9, 1.0), heat) * heat;
+    // Added to what's painted (the panel's ground included).
+    let c = input.color;
+    let a = clamp(max(c.a, heat), 0.0, 1.0);
+    return vec4(min((c.rgb * c.a + light) / max(a, 0.001), vec3(1.0)), a);
+}]],
+	{
+		geometry = "trail",
+		passes = {
+			{
+				name = "heat",
+				shader = [[
+fn run(input: PassInput) -> vec4<f32> {
+    let p = input.area.xy + input.uv * input.area.zw;
+    var heat = zgx_heat(input.uv).r * exp(-input.dt * 2.5);
+    for (var i = 0u; i < zgx_rect_count(); i++) {
+        heat = max(heat, smoothstep(1.5, -1.5, zgx_rect_distance(p, i)));
+    }
+    return vec4(heat, 0.0, 0.0, 1.0);
+}]],
+				scale = 0.5,
+				format = "rgba16float",
+				feedback = true,
+			},
+		},
+	}
+)
+
+-- Bloom: bright boxes glow past their edges. One pass draws where they are at a
+-- quarter of the box's pixels, two more blur that across and down, and the
+-- shader adds the glow to what's painted.
+local BLUR = [[
+fn run(input: PassInput) -> vec4<f32> {
+    let step = AXIS / input.size;
+    var sum = vec4(0.0);
+    for (var k = -6; k <= 6; k++) {
+        let w = exp(-f32(k * k) / 18.0);
+        sum += SOURCE(input.uv + step * f32(k)) * w;
+    }
+    return sum / 7.298;
+}]]
+local bloom = ui.layer_shader(
+	[[
+fn layer(input: LayerInput) -> vec4<f32> {
+    let glow = zgx_down(input.p / input.size).r * 1.4;
+    let c = input.color;
+    let lit = c.rgb * c.a + vec3(1.0, 0.55, 0.2) * glow;
+    let a = clamp(max(c.a, glow), 0.0, 1.0);
+    return vec4(lit / max(a, 0.001), a);
+}]],
+	{
+		geometry = "bloom",
+		passes = {
+			{
+				name = "shapes",
+				shader = [[
+fn run(input: PassInput) -> vec4<f32> {
+    let p = input.area.xy + input.uv * input.area.zw;
+    var inside = 0.0;
+    for (var i = 0u; i < zgx_rect_count(); i++) {
+        inside = max(inside, smoothstep(1.0, -1.0, zgx_rect_distance(p, i)));
+    }
+    return vec4(inside, 0.0, 0.0, 1.0);
+}]],
+				scale = 0.25,
+			},
+			{
+				name = "across",
+				shader = BLUR:gsub("AXIS", "vec2(1.0, 0.0)"):gsub("SOURCE", "zgx_shapes"),
+				scale = 0.25,
+				format = "rgba16float",
+			},
+			{
+				name = "down",
+				shader = BLUR:gsub("AXIS", "vec2(0.0, 1.0)"):gsub("SOURCE", "zgx_across"),
+				scale = 0.25,
+				format = "rgba16float",
+			},
+		},
+	}
+)
+
+-- A panel under `shader`, holding three small boxes tagged for its passes.
+local function panel(shader, class: string, tag: string, color: string)
+	local props: { [any]: any } = {
+		id = tag,
+		absolute = true,
+		left = 10,
+		top = 20,
+		w = 200,
+		h = 84,
+		rounded = 14,
+		bg = "#10131c",
+		layer_shader = shader,
+		layer_clock = true,
+	}
+	for i = 1, 3 do
+		table.insert(
+			props,
+			ui.div {
+				class = class,
+				absolute = true,
+				left = 10,
+				top = 8 + (i - 1) * 24,
+				w = 18,
+				h = 16,
+				rounded = 5,
+				bg = color,
+				geometry = tag,
+			}
+		)
+	end
+	return ui.div(props)
+end
+-- Each panel's boxes back and forth, one after another.
+for _, class in { ".trail-box", ".bloom-box" } do
+	anime.animate(class, {
+		x = { 0, 150 },
+		duration = 1800,
+		delay = anime.stagger(240),
+		ease = "inOutSine",
+		loop = true,
+		alternate = true,
+	})
+end
+
 local effects = {
 	{ name = "glow soft", effect = fx.glow { preset = "soft" } },
 	{ name = "glow neon", effect = fx.glow { preset = "neon" } },
@@ -168,6 +303,28 @@ table.insert(
 		ui.text { "melt: this file's own", absolute = true, left = 6, top = 146, size = 12, color = "#ffffff" },
 	}
 )
+for _, made in
+	{
+		{
+			name = "trail: passes, feedback, boxes",
+			shader = trail,
+			class = "trail-box",
+			tag = "trail",
+			color = "#9ad8ff",
+		},
+		{ name = "bloom: passes, blur", shader = bloom, class = "bloom-box", tag = "bloom", color = "#ffd27a" },
+	}
+do
+	table.insert(
+		cells,
+		ui.overlay {
+			w = 220,
+			h = 170,
+			panel(made.shader, made.class, made.tag, made.color),
+			ui.text { made.name, absolute = true, left = 6, top = 146, size = 12, color = "#ffffff" },
+		}
+	)
+end
 for _, effect in effects do
 	table.insert(cells, cell(effect.name, effect.effect))
 end
