@@ -114,6 +114,10 @@ impl VariableHeights {
         self.index.borrow().row_at(offset)
     }
 }
+/// How many rows it built an end-anchored measured list keeps past its range
+/// on either side.
+const KEPT_PAST_RANGE: usize = 6;
+
 struct Anchor {
     revision: u64,
     length: usize,
@@ -865,6 +869,28 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         discovery = Some((first, range.start, range.end));
                     } else {
                         discovery = None;
+                    }
+                    // A transcript keeps the rows it built a while past its
+                    // range: a row in view growing and shrinking (a fold, a
+                    // step arriving) moves the range by a row or two, and
+                    // building again what just left is what's slow. Only
+                    // those reaching the range: a jump builds no more than
+                    // it shows.
+                    if measured && heights.end.get() && !range.is_empty() && !entries.is_empty() {
+                        let (mut low, mut high) = (usize::MAX, 0);
+                        for entry in entries.values() {
+                            let index = entry.index.with_untracked(|index| *index);
+                            low = low.min(index);
+                            high = high.max(index + 1);
+                        }
+                        if low < range.start && high >= range.start {
+                            range.start = low.max(range.start.saturating_sub(KEPT_PAST_RANGE));
+                        }
+                        if high > range.end && low <= range.end {
+                            range.end = high
+                                .min(range.end.saturating_add(KEPT_PAST_RANGE))
+                                .min(length);
+                        }
                     }
                     // Measured, a row must be built to know its height. Given
                     // it, one too thin to show isn't: rows folded away would

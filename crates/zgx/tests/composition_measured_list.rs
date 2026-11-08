@@ -821,6 +821,59 @@ fn a_wheel_down_at_the_end_follows_again_with_nowhere_to_go() {
     assert_eq!(offset.get(), heights.content_height() - 200.);
 }
 
+/// A measured list of 200 rows 20 tall, at its end: its offset, and how many
+/// rows it has built.
+fn counting(ui: &mut Ui, end: bool) -> (zgx::reactive::Signal<f32>, Rc<Cell<usize>>) {
+    let built = Rc::new(Cell::new(0));
+    let count = built.clone();
+    let heights = VariableHeights::new(&ui.runtime, 200, 20.);
+    let heights = if end { heights.anchor_end() } else { heights };
+    let offset = ui.signal(1e9_f32);
+    ui.mount(
+        measured_virtual_list(
+            offset.clone(),
+            heights,
+            1,
+            |index| index,
+            move |_, _, _| {
+                count.set(count.get() + 1);
+                div().h(20.)
+            },
+        )
+        .size(200., 200.),
+    );
+    settle(ui);
+    (offset, built)
+}
+
+#[test]
+fn an_end_anchored_list_keeps_built_rows_a_while_past_the_view() {
+    let mut ui = Ui::new(200., 300.);
+    let (offset, built) = counting(&mut ui, true);
+    // Up two rows and back: the rows that left the range and came back
+    // weren't built again.
+    let end = offset.get();
+    offset.set(end - 40.);
+    settle(&mut ui);
+    let before = built.get();
+    offset.set(end);
+    settle(&mut ui);
+    assert_eq!(built.get(), before, "nothing is built on the way back");
+}
+
+#[test]
+fn a_jump_builds_no_more_rows_for_those_kept() {
+    let jump = |end: bool| {
+        let mut ui = Ui::new(200., 300.);
+        let (offset, built) = counting(&mut ui, end);
+        let before = built.get();
+        offset.set(0.);
+        settle(&mut ui);
+        built.get() - before
+    };
+    assert_eq!(jump(true), jump(false));
+}
+
 #[test]
 fn measured_rows_keep_heights_by_key_and_estimate_the_unmounted() {
     let mut ui = Ui::new(200., 300.);
