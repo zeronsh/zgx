@@ -125,7 +125,11 @@ impl Effects {
     /// is left, and what is made next takes the lowest. (A slot's id never
     /// comes back, so that one gone and made again names no stale effect.)
     fn rest(&mut self) {
-        while self.slots.last().is_some_and(|(_, record)| record.is_none()) {
+        while self
+            .slots
+            .last()
+            .is_some_and(|(_, record)| record.is_none())
+        {
             self.slots.pop();
         }
         let left = self.slots.len() as u32;

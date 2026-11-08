@@ -433,3 +433,26 @@ return ui.column {
 - `ui.computed` makes a read-only derived value for a `progress`; a slider or input bound to a computed would have its edits overwritten when the inputs change.
 - Inputs are 240 points wide whatever their text; a long value scrolls inside. Use `w_full = true` (or a stretching parent) for a field that fills its row.
 - Controls take no children, except `button`.
+
+### Natural editor text metrics
+
+`el:text_metrics(content_width)` returns `{ width, unwrapped_width,
+wrapped_height, line_height, revision, exact = true }`, or nil for non-editors,
+unmounted or password editors, and non-finite/non-positive widths. Rust uses
+`EditorHandle::text_metrics`. Dimensions are local points, excluding borders,
+padding, line-number gutter and placeholder. A trailing empty line contributes
+a line. The displayed IME preedit replaces the selection without committing it;
+changing only the composition cursor keeps the same revision.
+
+A call in an effect/computed follows content and typography changes, published
+after layout. It does not follow the viewport's size, scroll, focus, selection
+or caret blink. Use a ref's `get()` to follow mount/unmount as well. Measurements
+use the editor's plain/rich shapers, font fallback and span-highlighter routes;
+the requested width is independent of the allocated textarea width and height.
+
+Results are exact, including long documents. The first query per revision/width
+visits all hard lines using retained line-shaping caches; unchanged queries are
+constant-time. This is an opt-in full-content operation: large virtualized
+editors should avoid requesting full metrics on each edit unless needed. Keep
+the requested width stable during geometry animations. The viewport keeps its
+own line cache so a natural-width query cannot evict its wrapping geometry.

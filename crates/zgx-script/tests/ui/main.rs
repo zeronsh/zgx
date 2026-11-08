@@ -107,3 +107,6 @@ mod variants;
 mod wheel_phase;
 #[path = "../z_order.rs"]
 mod z_order;
+
+#[path = "../editor_metrics.rs"]
+mod editor_metrics;

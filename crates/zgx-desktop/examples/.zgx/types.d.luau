@@ -1280,6 +1280,19 @@ declare extern type Element with
 	-- scrolls into view, focused or not.
 	function set_selection_bytes(self, a: number, b: number?): boolean
 	function selection_bytes(self): (number?, number?)
+	-- Exact displayed content at a requested content width, excluding insets
+	-- and placeholder. Tracks content/IME/style after layout; viewport, focus,
+	-- selection and scroll do not change the revision. Nil for non-editors,
+	-- passwords, unmounted editors and non-positive/non-finite widths.
+	function text_metrics(self, width: number): {
+		width: number,
+		unwrapped_width: number,
+		wrapped_height: number,
+		line_height: number,
+		revision: number,
+		exact: boolean,
+	}?
+
 	-- The selection replaced by `text`, as typing it would (one step of
 	-- undo): a search's Replace.
 	function replace_selection(self, text: string): boolean

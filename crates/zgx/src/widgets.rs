@@ -241,6 +241,65 @@ fn follow(editor: &mut TextEditor, text: &Text, current: &TextValue) -> bool {
 fn is_canonical(text: &Text, multiline: bool) -> bool {
     !text.has_returns() && (multiline || text.line_count() == 1)
 }
+/// Exact content metrics in local points, excluding placeholder, padding,
+/// borders and line-number gutter. Includes the displayed IME composition.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EditorTextMetrics {
+    /// Requested wrapping width, independent of the editor viewport.
+    pub width: f32,
+    /// Width of the widest hard line without wrapping.
+    pub unwrapped_width: f32,
+    /// Height at `width`, including a final empty line.
+    pub wrapped_height: f32,
+    /// The editor's base line height.
+    pub line_height: f32,
+    /// Changes with displayed content or typography, not focus/selection/scroll.
+    pub revision: u64,
+}
+#[derive(PartialEq)]
+struct NaturalMetricsKey {
+    text: u64,
+    composition: Option<(String, std::ops::Range<usize>)>,
+    size: f32,
+    font: FontStyle,
+    shaper: u64,
+    spans: u64,
+}
+struct NaturalMetrics {
+    key: RefCell<Option<NaturalMetricsKey>>,
+    revision: Cell<u64>,
+    published: Signal<u64>,
+    queued: Cell<bool>,
+    spans: Cell<u64>,
+    wrapped: Rc<crate::editor_lines::LineCache>,
+    unwrapped: Rc<crate::editor_lines::LineCache>,
+    sample: Cell<Option<EditorTextMetrics>>,
+}
+impl NaturalMetrics {
+    fn new(runtime: &Runtime) -> Self {
+        Self {
+            key: RefCell::new(None),
+            revision: Cell::new(0),
+            published: runtime.signal(0),
+            queued: Cell::new(false),
+            spans: Cell::new(0),
+            wrapped: Rc::default(),
+            unwrapped: Rc::default(),
+            sample: Cell::new(None),
+        }
+    }
+    fn invalidate_spans(&self) {
+        self.spans.set(self.spans.get().wrapping_add(1));
+        self.sample.set(None);
+    }
+}
+impl Drop for NaturalMetrics {
+    fn drop(&mut self) {
+        // Each line cache and its last layout hold each other.
+        self.wrapped.forget_last();
+        self.unwrapped.forget_last();
+    }
+}
 /// A mounted text editor (a `text_input` or `text_area`): its editing
 /// model and the value it is bound to, for hosts, tests and commands.
 #[derive(Clone)]
@@ -266,6 +325,7 @@ pub struct EditorHandle {
     geometry: Rc<RefCell<Option<EditorGeometry>>>,
     position: Rc<Cell<TextPosition>>,
     hint: Rc<EditorHint>,
+    natural: Rc<NaturalMetrics>,
 }
 /// What an editor shows while it is empty, whether focus selects all, and
 /// the value it is bound to (here, once, for its handle and handlers).
@@ -657,6 +717,81 @@ pub struct Caret {
     pub focus: usize,
 }
 impl EditorHandle {
+    /// Exact natural metrics at a finite, positive content width. A reactive
+    /// reader follows content, IME and typography changes after layout settles.
+    /// Passwords and unmounted editors return `None`.
+    ///
+    /// The first query per revision/width visits every hard line, shaping via
+    /// the editor's line caches. Repeated queries are O(1); this opt-in API does
+    /// not turn a virtualized long editor's viewport into a full-document layout.
+    /// Consumers should keep the requested width stable during animations.
+    pub fn text_metrics(&self, width: f32) -> Option<EditorTextMetrics> {
+        self.natural.published.get();
+        if !width.is_finite() || width <= 0. || self.hint.secure.get() {
+            return None;
+        }
+        let scene = self.scene.borrow();
+        if !scene.contains(self.node) || self.natural.key.borrow().is_none() {
+            return None;
+        }
+        let revision = self.natural.revision.get();
+        if let Some(sample) = self.natural.sample.get()
+            && sample.revision == revision
+            && sample.width == width
+        {
+            return Some(sample);
+        }
+        let e = self.editor.borrow();
+        let mut source = e
+            .long_text()
+            .cloned()
+            .unwrap_or_else(|| self.natural.wrapped.text_of(&e.text()));
+        if let Some(preedit) = e.preedit() {
+            source.replace_range(e.selection().range(), &preedit.text);
+        }
+        let (_, size, font) = self.typography.borrow().clone();
+        let font = editor_font(&scene, self.node, &font);
+        // Separate width caches keep a query from evicting viewport shaping.
+        // Both use the editor's rich/plain shapers and span highlighter.
+        let unwrapped = long_layout(
+            &self.natural.unwrapped,
+            &scene,
+            || source.clone(),
+            Some(revision),
+            size,
+            None,
+            &font,
+        );
+        let mut unwrapped_width = 0f32;
+        for i in 0..unwrapped.line_count() {
+            self.natural.unwrapped.spans(&unwrapped, i);
+            unwrapped_width = unwrapped_width.max(unwrapped.line(i).size().0);
+        }
+        let wrapped = long_layout(
+            &self.natural.wrapped,
+            &scene,
+            || source,
+            Some(revision),
+            size,
+            Some(width),
+            &font,
+        );
+        let mut wrapped_height = 0.;
+        for i in 0..wrapped.line_count() {
+            self.natural.wrapped.spans(&wrapped, i);
+            wrapped.line(i);
+            wrapped_height += wrapped.height(i);
+        }
+        let sample = EditorTextMetrics {
+            width,
+            unwrapped_width,
+            wrapped_height,
+            line_height: wrapped.height(0).min(unwrapped.height(0)),
+            revision,
+        };
+        self.natural.sample.set(Some(sample));
+        Some(sample)
+    }
     /// The value it is bound to; edits set it.
     pub fn value(&self) -> &EditorValue {
         &self.hint.value
@@ -914,7 +1049,10 @@ impl EditorHandle {
         if !self.multiline {
             return;
         }
-        self.hint.line_cache().set_highlighter(highlighter);
+        self.hint.line_cache().set_highlighter(highlighter.clone());
+        self.natural.wrapped.set_highlighter(highlighter.clone());
+        self.natural.unwrapped.set_highlighter(highlighter);
+        self.natural.invalidate_spans();
         self.refresh();
     }
     /// The caret's colour (`None`: the text's, as by default) and width in
@@ -928,6 +1066,9 @@ impl EditorHandle {
     /// Ask the highlighter for the lines anew (what it gives changed: a
     /// theme's colours).
     pub fn rehighlight(&self) {
+        self.natural.wrapped.rehighlight();
+        self.natural.unwrapped.rehighlight();
+        self.natural.invalidate_spans();
         if let Some(lines) = self.hint.code().and_then(|c| c.lines.borrow().clone()) {
             lines.rehighlight();
         }
@@ -6006,10 +6147,15 @@ impl Ui {
         });
         // Geometry refresh may make an existing stationary drag scrollable.
         // The weak callback avoids refresh -> arm -> tick -> refresh ownership cycles.
+        let natural = Rc::new(NaturalMetrics::new(&self.runtime));
         let interaction_refresh: InteractionRefresh = Rc::new(RefCell::new(None));
         let refresh: Rc<dyn Fn()> = {
             let hook = interaction_refresh.clone();
             let told = hint.clone();
+            let metrics = natural.clone();
+            let metric_editor = editor.clone();
+            let metric_scene = self.scene.clone();
+            let metric_typography = typography.clone();
             let storage = Rc::downgrade(&self.storage);
             Rc::new(move || {
                 refresh();
@@ -6023,6 +6169,43 @@ impl Ui {
                     refresh();
                 }
                 EditorHint::watch_theme(&told, &storage, root, &watched_theme);
+                // Publish only after layout, with no scene/model borrow held.
+                // Selection affects metrics only while replacing text in IME.
+                let key = {
+                    let e = metric_editor.borrow();
+                    let scene = metric_scene.borrow();
+                    if !scene.contains(root) {
+                        return;
+                    }
+                    let (_, size, font) = metric_typography.borrow().clone();
+                    let mut font = editor_font(&scene, root, &font).into_owned();
+                    font.masked = told.secure.get();
+                    NaturalMetricsKey {
+                        text: e.revision(),
+                        composition: e.preedit().map(|p| (p.text.clone(), e.selection().range())),
+                        size,
+                        font,
+                        shaper: scene.text_shaper_revision(),
+                        spans: metrics.spans.get(),
+                    }
+                };
+                if metrics.key.borrow().as_ref() != Some(&key) {
+                    *metrics.key.borrow_mut() = Some(key);
+                    metrics.revision.set(metrics.revision.get().wrapping_add(1));
+                    metrics.sample.set(None);
+                    if !metrics.queued.replace(true)
+                        && let Some(storage) = storage.upgrade()
+                    {
+                        let weak = Rc::downgrade(&metrics);
+                        storage.after_layout.borrow_mut().push(Box::new(move || {
+                            if let Some(metrics) = weak.upgrade() {
+                                metrics.queued.set(false);
+                                metrics.published.set(metrics.revision.get());
+                            }
+                        }));
+                    }
+                }
+
                 // Where the caret is, told once drawn (nothing borrowed),
                 // if it moved. The callback is out while it runs: a refresh
                 // it causes finds none and leaves the telling to this one,
@@ -6084,6 +6267,7 @@ impl Ui {
             geometry,
             position: position.clone(),
             hint: hint.clone(),
+            natural,
         };
         self.storage
             .editors
