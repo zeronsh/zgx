@@ -1022,12 +1022,44 @@ impl FallbackTextLayout {
         )
     }
 }
+/// `text`'s graphemes as byte ranges, in order: what
+/// `grapheme_indices(true)` gives (each `(start, grapheme)` as
+/// `start..start + grapheme.len()`), an ASCII text's read from its bytes
+/// (`AsciiClusters`), anything else segmented. For a walk over every
+/// grapheme of a text (carets, a screen reader's runs).
+pub fn grapheme_ranges(text: &str) -> GraphemeRanges<'_> {
+    if text.is_ascii() {
+        GraphemeRanges::Ascii(AsciiClusters::new(text.as_bytes()))
+    } else {
+        GraphemeRanges::Unicode(text.grapheme_indices(true))
+    }
+}
+/// `grapheme_ranges`' iterator.
+pub enum GraphemeRanges<'a> {
+    #[doc(hidden)]
+    Ascii(AsciiClusters<'a>),
+    #[doc(hidden)]
+    Unicode(unicode_segmentation::GraphemeIndices<'a>),
+}
+impl Iterator for GraphemeRanges<'_> {
+    type Item = Range<usize>;
+    #[inline]
+    fn next(&mut self) -> Option<Range<usize>> {
+        match self {
+            Self::Ascii(bytes) => bytes.next(),
+            Self::Unicode(graphemes) => graphemes
+                .next()
+                .map(|(start, grapheme)| start..start + grapheme.len()),
+        }
+    }
+}
 /// An ASCII text's graphemes, without Unicode's segmentation: each byte is
 /// one, but a carriage return before a line feed, which joins it (UAX #29
 /// GB3; every other ASCII character, controls included, breaks from its
 /// neighbours). `grapheme_indices` gives the same ranges, a table lookup and
 /// state machine step a character slower.
-struct AsciiClusters<'a> {
+#[doc(hidden)]
+pub struct AsciiClusters<'a> {
     bytes: &'a [u8],
     at: usize,
 }
@@ -1141,6 +1173,30 @@ impl TextLayout for FallbackTextLayout {
 }
 #[cfg(test)]
 mod tests {
+    /// `grapheme_ranges` is `grapheme_indices`' ranges, ASCII or not.
+    #[test]
+    fn grapheme_ranges_are_grapheme_indices() {
+        use unicode_segmentation::UnicodeSegmentation;
+        for text in [
+            "",
+            "Row 12 at 345",
+            "a\r\nb\rc\nd",
+            "caf\u{e9} na\u{ef}ve",
+            "e\u{301}\u{302}x",
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} family",
+            "\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}",
+            "\u{5e9}\u{5dc}\u{5d5}\u{5dd} hello",
+            "\u{915}\u{94d}\u{937} \r\n",
+        ] {
+            let ranges: Vec<_> = super::grapheme_ranges(text).collect();
+            let indices: Vec<_> = text
+                .grapheme_indices(true)
+                .map(|(at, grapheme)| at..at + grapheme.len())
+                .collect();
+            assert_eq!(ranges, indices, "{text:?}");
+        }
+    }
+
     /// An ASCII text's graphemes are its bytes but CR LF, as Unicode's
     /// segmentation finds them: every string of up to four bytes from an
     /// alphabet of controls, line breaks, letters, digits and punctuation,

@@ -1255,7 +1255,8 @@ fn text_run_data_on(
     let mut runs = Vec::new();
     let mut run = fresh(0);
     let mut chars: Vec<Option<Edge>> = Vec::new();
-    for (offset, grapheme) in value.grapheme_indices(true) {
+    for range in zgx::text_layout::grapheme_ranges(value) {
+        let (offset, grapheme) = (range.start, &value[range]);
         let length = u8::try_from(grapheme.len()).ok()?;
         let (edge, wrap_start) = match &mut walk {
             Some(walk) => walk.edge(value, offset)?,
@@ -1335,9 +1336,8 @@ fn far_side(rect: accesskit::Rect, window: accesskit::Rect) -> Option<FarSide> {
 /// `value` as one line across `rect`, its graphemes spread evenly: where
 /// text far from the window is, near enough, without shaping it.
 fn estimated_line(value: &str, rect: zgx::scene::Rect) -> zgx::scene::TextLine {
-    use unicode_segmentation::UnicodeSegmentation;
     let text = value.trim_end_matches(['\n', '\r']);
-    let count = text.graphemes(true).count().max(1);
+    let count = zgx::text_layout::grapheme_ranges(text).count().max(1);
     let step = rect.width / count as f32;
     zgx::scene::TextLine {
         range: 0..text.len(),
