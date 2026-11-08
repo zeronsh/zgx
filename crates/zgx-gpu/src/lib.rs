@@ -14429,16 +14429,26 @@ impl GpuRenderer {
     /// The target's pixels, RGBA, a row at a time.
     pub fn readback(&self) -> Result<Vec<u8>, GpuError> {
         let mut pixels = Vec::new();
-        self.readback_into(&mut pixels, &mut Readback::default())?;
+        self.read_target(&mut pixels, &mut Readback::default(), false)?;
         Ok(pixels)
     }
     /// [`GpuRenderer::readback`] into `pixels`, its allocation reused, through
-    /// `staging`'s buffer (made at the first read, kept for the next): what a
-    /// video, reading every frame, calls.
+    /// `staging` (made at the first read, kept for the next): what a video,
+    /// reading every frame, calls. The BGRA target is copied to an RGBA
+    /// texture on the GPU first (a pass `staging` keeps), so the read is a
+    /// copy of rows, with nothing swapped a pixel at a time.
     pub fn readback_into(
         &self,
         pixels: &mut Vec<u8>,
         staging: &mut Readback,
+    ) -> Result<(), GpuError> {
+        self.read_target(pixels, staging, true)
+    }
+    fn read_target(
+        &self,
+        pixels: &mut Vec<u8>,
+        staging: &mut Readback,
+        swizzle_on_gpu: bool,
     ) -> Result<(), GpuError> {
         if let Some(reason) = self.context.lost() {
             return Err(GpuError::device_lost(&reason));
@@ -14460,11 +14470,11 @@ impl GpuRenderer {
             return Ok(());
         }
         self.flush_pending();
-        self.read_texture_into(&self.target, pixels, staging)
+        self.read_texture_into(&self.target, pixels, staging, swizzle_on_gpu)
     }
     fn read_texture(&self, texture: &wgpu::Texture) -> Result<Vec<u8>, GpuError> {
         let mut pixels = Vec::new();
-        self.read_texture_into(texture, &mut pixels, &mut Readback::default())?;
+        self.read_texture_into(texture, &mut pixels, &mut Readback::default(), false)?;
         Ok(pixels)
     }
     fn read_texture_into(
@@ -14472,25 +14482,77 @@ impl GpuRenderer {
         texture: &wgpu::Texture,
         pixels: &mut Vec<u8>,
         staging: &mut Readback,
+        swizzle_on_gpu: bool,
     ) -> Result<(), GpuError> {
         let stride = (self.width * 4).div_ceil(256) * 256;
         let size = u64::from(stride) * u64::from(self.height);
         if staging
-            .0
+            .buffer
             .as_ref()
             .is_none_or(|buffer| buffer.size() != size)
         {
-            staging.0 = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+            staging.buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("readback"),
                 size,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             }));
         }
-        let buffer = staging.0.as_ref().expect("made above");
+        let buffer = staging.buffer.as_ref().expect("made above");
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        // Retained textures are BGRA (see `FORMAT`); callers read RGBA. A
+        // reader that keeps its `Readback` has the GPU copy the target to an
+        // RGBA texture (the present blit: a `textureLoad` and a store, exact
+        // for 8-bit channels) and reads that.
+        let swizzled = swizzle_on_gpu && texture.format() == wgpu::TextureFormat::Bgra8Unorm;
+        let source = if swizzled {
+            let rgba = |device: &wgpu::Device| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("readback rgba"),
+                    size: texture.size(),
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
+            };
+            let swizzle = staging.swizzle.get_or_insert_with(|| Swizzle {
+                pipeline: blit_pipeline(&self.device, wgpu::TextureFormat::Rgba8Unorm, false),
+                texture: rgba(&self.device),
+            });
+            if swizzle.texture.size() != texture.size() {
+                swizzle.texture = rgba(&self.device);
+            }
+            let bind = blit_group(
+                &self.device,
+                &swizzle.pipeline,
+                &texture.create_view(&Default::default()),
+            );
+            let view = swizzle.texture.create_view(&Default::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&swizzle.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+            drop(pass);
+            &swizzle.texture
+        } else {
+            texture
+        };
         encoder.copy_texture_to_buffer(
-            texture.as_image_copy(),
+            source.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer,
                 layout: wgpu::TexelCopyBufferLayout {
@@ -14515,8 +14577,7 @@ impl GpuRenderer {
         let mapped = buffer.get_mapped_range(..);
         let row = self.width as usize * 4;
         let length = row * self.height as usize;
-        // Retained textures are BGRA (see `FORMAT`); callers read RGBA.
-        let bgra = texture.format() == wgpu::TextureFormat::Bgra8Unorm;
+        let bgra = !swizzled && texture.format() == wgpu::TextureFormat::Bgra8Unorm;
         let rows = mapped.chunks(stride as usize).map(|read| &read[..row]);
         if pixels.len() == length {
             // A kept buffer (a video's, frame after frame): each row copied
@@ -14562,12 +14623,20 @@ fn bgra_to_rgba(word: u32) -> u32 {
     (word & 0xFF00_FF00) | ((word >> 16) & 0xFF) | ((word & 0xFF) << 16)
 }
 
-/// The staging buffer [`GpuRenderer::readback_into`] reads through, kept by
-/// whoever reads every frame (a video's stage) and made at its first read:
-/// an app that never reads back holds none. It belongs to one renderer: its
-/// buffer is that renderer's device's, and another's can't copy into it.
+/// What [`GpuRenderer::readback_into`] reads through, kept by whoever reads
+/// every frame (a video's stage) and made at its first read: a staging
+/// buffer, and the RGBA texture and pass the target is copied to. An app
+/// that never reads back holds none. It belongs to one renderer: its buffer
+/// and texture are that renderer's device's, and another's can't use them.
 #[derive(Default)]
-pub struct Readback(Option<wgpu::Buffer>);
+pub struct Readback {
+    buffer: Option<wgpu::Buffer>,
+    swizzle: Option<Swizzle>,
+}
+struct Swizzle {
+    pipeline: wgpu::RenderPipeline,
+    texture: wgpu::Texture,
+}
 
 /// A frame a window showed (`GpuRenderer::shown_frame`), its pixels
 /// readable while it is held.

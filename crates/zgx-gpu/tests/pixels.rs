@@ -6930,6 +6930,8 @@ fn reading_into_a_kept_buffer_reads_what_a_fresh_read_does() {
     let green = (5 * 64 + 30) * 4;
     assert_eq!(&fresh[green..green + 4], &[0, 255, 0, 255]);
 
+    // A kept read swaps red and blue on the GPU (a pass into an RGBA
+    // texture), a fresh one on the CPU: the same bytes either way.
     let mut staging = zgx_gpu::Readback::default();
     // Stale bytes of the right length, then of the wrong one: each read
     // replaces them whole.
