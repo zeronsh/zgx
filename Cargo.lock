@@ -5204,6 +5204,7 @@ dependencies = [
  "zgx-gpu",
  "zgx-run",
  "zgx-script",
+ "zgx-surface",
  "zgx-terminal",
  "zgx-workload",
 ]
@@ -5319,6 +5320,19 @@ dependencies = [
  "zgx-gpu",
  "zgx-mlua",
  "zgx-workload",
+]
+
+[[package]]
+name = "zgx-surface"
+version = "0.1.10"
+dependencies = [
+ "ash",
+ "libc",
+ "pollster",
+ "wgpu",
+ "windows-sys 0.59.0",
+ "zgx",
+ "zgx-gpu",
 ]
 
 [[package]]

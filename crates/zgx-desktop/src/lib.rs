@@ -219,6 +219,10 @@ pub use zgx_gpu::text::FontData;
 /// GPU views: an app's own wgpu drawing in a box (`zgx::compose::gpu_view`),
 /// with the wgpu the renderer draws with.
 pub use zgx_gpu::{viewport, wgpu};
+/// External surfaces: another program's frames as an element, its input
+/// forwarded (`surface::App`, `surface::surface`; zgx-surface's host).
+#[cfg(feature = "surfaces")]
+pub use zgx_surface::host as surface;
 
 mod file_drop;
 mod gpu_stats;

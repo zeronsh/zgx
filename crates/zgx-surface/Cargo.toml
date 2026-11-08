@@ -1,0 +1,54 @@
+[package]
+# Integration tests build as one binary (see AGENTS.md).
+autotests = false
+name = "zgx-surface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+keywords = ["gui", "gpu", "vulkan", "ipc", "zgx"]
+categories = ["gui", "graphics"]
+description = "External surfaces for zgx: another process's frames shown as an element, shared GPU memory where the platform allows, with input forwarded back."
+
+[features]
+# Vulkan images shared between processes (`vulkan`): ash 0.38, the version
+# wgpu-hal 29 and 30 use, so its handles are theirs.
+vulkan = ["dep:ash"]
+# A client on wgpu 29 (`wgpu29`): its adapter picked to match the host's GPU,
+# shared buffers made `wgpu::Texture`s, and reading back into shared memory
+# where it can't share. A client on another wgpu copies the module.
+wgpu29 = ["vulkan", "dep:wgpu"]
+# The zgx side (`host`): starting a program with the surface's socket, its
+# frames as a GPU view's, and the element forwarding input to it.
+host = ["wgpu29", "dep:zgx", "dep:zgx-gpu"]
+
+[dependencies]
+ash = { version = "0.38", optional = true, default-features = false, features = ["std", "loaded"] }
+wgpu = { version = "29.0.4", optional = true, default-features = false, features = ["std", "wgsl"] }
+zgx = { path = "../zgx", version = "0.1.10", default-features = false, optional = true }
+zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(not(any(windows, target_vendor = "apple")))'.dependencies]
+wgpu = { version = "29.0.4", optional = true, default-features = false, features = ["vulkan"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Threading"] }
+
+[dev-dependencies]
+pollster = "0.4"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+[[example]]
+name = "spinner_client"
+required-features = ["wgpu29"]
+
+[[test]]
+name = "surface"
+path = "tests/surface/main.rs"
