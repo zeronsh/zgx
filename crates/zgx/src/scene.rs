@@ -3088,6 +3088,21 @@ pub struct Scene {
     geometry_reader: std::cell::Cell<Option<u64>>,
     geometry_reads: std::cell::RefCell<Vec<(u64, NodeId, Rect)>>,
     geometry_revision: u64,
+    /// The last moved node's parent and its context (`shown_context`: its
+    /// translation and clip, or hidden): a reorder animation moves every row
+    /// of one parent each frame, and moving a child leaves its parent's
+    /// context as it was. Cleared wherever what a context reads can change:
+    /// a style written (a resize writes the root's), a translation written,
+    /// a layout walk (`arrange_from`). Not by a leaf's box (`place_leaf`: a
+    /// node without children is no node's ancestor), nor a removal (a
+    /// removed node's descendants go with it). (A node's parent never
+    /// changes.)
+    move_context: Option<(NodeId, DamageContext)>,
+    /// Tests: work every move's context out again (`move_context` unused).
+    #[cfg(test)]
+    pub(crate) no_move_context: bool,
+    #[cfg(test)]
+    pub(crate) move_context_kept: u64,
     /// The last point hit tested, the revisions it was hit at and what it
     /// hit (`hit_test_all`): a pointer move's dispatch and its cursor ask the
     /// same, and most moves between frames ask where nothing changed.
@@ -3298,6 +3313,11 @@ impl Scene {
             geometry_reader: Default::default(),
             geometry_reads: Default::default(),
             geometry_revision: 0,
+            move_context: None,
+            #[cfg(test)]
+            no_move_context: false,
+            #[cfg(test)]
+            move_context_kept: 0,
             hit_memo: Default::default(),
             cursor_styles: 0,
             contents_styles: Default::default(),
@@ -8125,6 +8145,7 @@ impl Scene {
             self.relative_count =
                 self.relative_count + usize::from(style.relative) - usize::from(old.relative);
         }
+        self.move_context = None;
         let node = self.node_mut(id);
         node.style = style;
         node.style_writes = node.style_writes.wrapping_add(1);
@@ -8192,8 +8213,12 @@ impl Scene {
         // What it needs of the node, read once (a move is the hottest
         // setter: a reorder animation moves every row each frame).
         let node = self.node(id);
-        let (scroll_copy, from, transparent) =
-            (node.scroll_copy, node.transform, node.effects.opacity <= 0.);
+        let (scroll_copy, from, transparent, parent) = (
+            node.scroll_copy,
+            node.transform,
+            node.effects.opacity <= 0.,
+            node.parent,
+        );
         if scroll_copy {
             transform = self.on_pixels(transform);
         }
@@ -8206,6 +8231,7 @@ impl Scene {
                 Some((.., again)) => *again = true,
                 None => self.pending_moves.push((id, from, false)),
             }
+            self.move_context = None;
             self.node_mut(id).transform = transform;
             self.geometry_revision = self.geometry_revision.wrapping_add(1);
             self.invalidate(id, COMPOSITE);
@@ -8214,19 +8240,50 @@ impl Scene {
         // Fully transparent, it paints nothing in either place (a caret the
         // host draws, moving): nothing to damage.
         if transparent {
+            self.move_context = None;
             self.node_mut(id).transform = transform;
             self.geometry_revision = self.geometry_revision.wrapping_add(1);
             self.invalidate(id, COMPOSITE);
             return;
         }
         // Its old place and its new, under the same ancestors: their
-        // context is worked out once.
-        let mut context = None;
+        // context is worked out once, and kept for the next move under the
+        // same parent while nothing else changed (`move_context`).
+        let mut context = match self.move_context {
+            Some((kept, context)) if Some(kept) == parent => Some(context),
+            _ => None,
+        };
+        #[cfg(test)]
+        if self.no_move_context {
+            context = None;
+        }
+        #[cfg(test)]
+        if let Some(kept) = context {
+            self.move_context_kept += 1;
+            // What it was kept as is what it is now, wherever it is used.
+            let now = self.damage_context(parent);
+            let bits = |context: DamageContext| {
+                context.map(|(t, clip)| {
+                    (
+                        [t.x, t.y].map(f32::to_bits),
+                        clip.map(|r| [r.x, r.y, r.width, r.height].map(f32::to_bits)),
+                    )
+                })
+            };
+            assert_eq!(bits(kept), bits(now), "a kept move context went stale");
+        }
         self.damage_subtree_with(id, &mut context);
+        self.move_context = None;
         self.node_mut(id).transform = transform;
         self.geometry_revision = self.geometry_revision.wrapping_add(1);
         self.damage_subtree_with(id, &mut context);
         self.invalidate(id, COMPOSITE);
+        // Moving a child (and marking it and its ancestors to repaint)
+        // leaves the parent's places, clips and visibility as they were: a
+        // child is never its own parent's ancestor.
+        if let (Some(parent), Some(context)) = (parent, context) {
+            self.move_context = Some((parent, context));
+        }
     }
     /// Apply finite render effects. NaN opacity uses the opaque default;
     /// infinite opacity clamps to its endpoint. Non-finite filter radii disable
@@ -8326,6 +8383,7 @@ impl Scene {
         let mut context = None;
         self.damage_subtree_with(id, &mut context);
         self.filter_changing(id, &effects);
+        self.move_context = None;
         let node = self.node_mut(id);
         node.transform = transform;
         node.effects = effects;
@@ -11382,10 +11440,15 @@ impl Scene {
     /// a grid made meanwhile taking them as `add_damage` gives them.
     fn arrange_from(&mut self, id: NodeId, x: f32, y: f32, report: &mut FrameReport) {
         assert!(self.contains(id), "stale scene node");
+        // Boxes change only in a layout walk, and every walk starts here:
+        // a context kept before it (`move_context`), or during it, holds no
+        // longer. (Once a walk, not once a box: layout writes thousands.)
+        self.move_context = None;
         match self.grid_takes_cells() {
             true => self.arrange::<true>(id, x, y, report, false, 0, &mut None),
             false => self.arrange::<false>(id, x, y, report, false, 0, &mut None),
         }
+        self.move_context = None;
     }
     pub(crate) fn geometry_revision(&self) -> u64 {
         self.geometry_revision
@@ -13049,6 +13112,194 @@ impl<'a> Iterator for PaintIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A move under the parent the last move was under takes that parent's
+    /// context as kept (`move_context`): the damage of every frame is, to
+    /// the bit, what working each move's context out again gives, as rows
+    /// move between changes to their parent, its clips, its ancestors'
+    /// places and visibility, the rows' list and the viewport.
+    #[test]
+    fn a_kept_move_context_damages_what_working_it_out_again_does() {
+        let boxed = |w: f32, h: f32, clip: bool| Style {
+            width: Some(w),
+            height: Some(h),
+            clip,
+            ..Style::default()
+        };
+        let hidden = |w: f32, h: f32| Style {
+            layout_options: Some(Arc::new(crate::layout::LayoutOptions {
+                visible: Some(false),
+                ..Default::default()
+            })),
+            ..boxed(w, h, true)
+        };
+        let run = |kept: bool| {
+            let mut scene = Scene::new(300., 260.);
+            scene.no_move_context = !kept;
+            scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+            let background = scene.append(
+                scene.root(),
+                NodeKind::Rect(Color(4, 4, 4, 255)),
+                boxed(300., 260., false),
+            );
+            let scroller = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Overlay),
+                boxed(240., 200., true),
+            );
+            let list = scene.append(
+                scroller,
+                NodeKind::Container(Layout::Column),
+                boxed(220., 400., true),
+            );
+            let mut rows = Vec::new();
+            for n in 0..8 {
+                let row = scene.append(
+                    list,
+                    NodeKind::Container(Layout::Overlay),
+                    boxed(200., 30., false),
+                );
+                scene.append(
+                    row,
+                    NodeKind::Rect(Color(n * 20, 9, 9, 255)),
+                    boxed(180. - n as f32 * 7., 20., false),
+                );
+                rows.push(row);
+            }
+            scene.flush();
+            let mut frames = Vec::new();
+            let mut frame = |scene: &mut Scene| {
+                frames.push(
+                    scene
+                        .flush()
+                        .damage
+                        .iter()
+                        .map(|r| [r.x, r.y, r.width, r.height].map(f32::to_bits))
+                        .collect::<Vec<_>>(),
+                );
+            };
+            let shift = |scene: &mut Scene, rows: &[NodeId], step: f32| {
+                for (n, &row) in rows.iter().enumerate() {
+                    scene.set_transform(
+                        row,
+                        Transform {
+                            x: step * 0.3 + n as f32 / 7.,
+                            y: -step * (n as f32 + 0.5) / 3.,
+                        },
+                    );
+                }
+            };
+            shift(&mut scene, &rows, 1.);
+            frame(&mut scene);
+            // Between rows: the parent moves, then its ancestor scrolls.
+            shift(&mut scene, &rows[..4], 2.);
+            scene.set_transform(list, Transform { x: 0.25, y: -13.5 });
+            shift(&mut scene, &rows[4..], 2.);
+            scene.set_transform(
+                scroller,
+                Transform {
+                    x: 3.125,
+                    y: 1. / 3.,
+                },
+            );
+            shift(&mut scene, &rows, 3.);
+            frame(&mut scene);
+            // Between rows: the scroller's clip goes, then comes back.
+            shift(&mut scene, &rows[..3], 4.);
+            scene.set_style(scroller, boxed(240., 200., false));
+            shift(&mut scene, &rows[3..], 4.);
+            frame(&mut scene);
+            scene.set_style(scroller, boxed(240., 120., true));
+            shift(&mut scene, &rows, 5.);
+            frame(&mut scene);
+            // Between rows: the list hides, then shows.
+            shift(&mut scene, &rows[..2], 6.);
+            scene.set_style(list, hidden(220., 400.));
+            shift(&mut scene, &rows[2..], 6.);
+            frame(&mut scene);
+            scene.set_style(list, boxed(220., 400., true));
+            shift(&mut scene, &rows, 7.);
+            frame(&mut scene);
+            // Between rows: the list moves by each other setter, transparent
+            // (moved without damage) and with its effects.
+            shift(&mut scene, &rows[..3], 7.25);
+            let opaque = scene.node(list).effects;
+            scene.set_effects(
+                list,
+                Effects {
+                    opacity: 0.,
+                    ..opaque
+                },
+            );
+            scene.set_transform(list, Transform { x: -2.5, y: 7.75 });
+            scene.set_effects(list, opaque);
+            shift(&mut scene, &rows[3..], 7.25);
+            frame(&mut scene);
+            shift(&mut scene, &rows[..4], 7.5);
+            scene.set_transform_and_effects(
+                list,
+                Transform { x: 1.5, y: -0.125 },
+                Effects {
+                    opacity: 0.75,
+                    ..opaque
+                },
+            );
+            shift(&mut scene, &rows[4..], 7.5);
+            frame(&mut scene);
+            scene.set_effects(list, opaque);
+            // The list moves while all is damaged (no context worked out for
+            // it), the background's fade having damaged everything.
+            shift(&mut scene, &rows, 7.55);
+            frame(&mut scene);
+            scene.set_effects(
+                background,
+                Effects {
+                    opacity: 0.5,
+                    ..Effects::default()
+                },
+            );
+            scene.set_transform(list, Transform { x: 4.5, y: -9.25 });
+            frame(&mut scene);
+            shift(&mut scene, &rows, 7.56);
+            frame(&mut scene);
+            // Between rows: the list is scroll content, moved as such.
+            shift(&mut scene, &rows[..2], 7.6);
+            scene.set_scroll_copy(list, true);
+            scene.set_transform(list, Transform { x: 1.5, y: -20. });
+            shift(&mut scene, &rows[2..], 7.6);
+            frame(&mut scene);
+            scene.set_scroll_copy(list, false);
+            // Between frames: the scroller's box changes by layout alone.
+            shift(&mut scene, &rows, 7.7);
+            frame(&mut scene);
+            let mut kept_box = None;
+            scene.set_box(scroller, &boxed(200., 150., true), &mut kept_box);
+            frame(&mut scene);
+            shift(&mut scene, &rows, 7.8);
+            frame(&mut scene);
+            // Between rows: the list's rows change, then the viewport.
+            shift(&mut scene, &rows[..5], 8.);
+            scene.remove(rows[5]);
+            let mut order = rows.clone();
+            order.remove(5);
+            order.reverse();
+            assert!(scene.reorder_children(list, &order));
+            shift(&mut scene, &order, 8.5);
+            scene.resize(280., 230.);
+            shift(&mut scene, &order, 9.);
+            frame(&mut scene);
+            (frames, scene.move_context_kept)
+        };
+        let ((kept, used), (again, _)) = (run(true), run(false));
+        assert!(used > 30, "moves took the kept context {used} times");
+        assert!(
+            kept.iter().all(|damage| !damage.is_empty()),
+            "every frame damages"
+        );
+        assert_eq!(kept.len(), again.len());
+        for (n, (kept, again)) in kept.iter().zip(&again).enumerate() {
+            assert_eq!(kept, again, "frame {n}");
+        }
+    }
     fn text(value: &str) -> NodeKind {
         NodeKind::Text {
             text: value.into(),
