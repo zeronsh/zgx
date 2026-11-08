@@ -2040,6 +2040,11 @@ pub(crate) struct OverlayLook {
     pub(crate) tooltip_padding: (f32, f32, f32),
     pub(crate) tooltip_radius: crate::theme::Themed<f32>,
     pub(crate) tooltip_font_size: crate::theme::Themed<f32>,
+    /// A text tooltip's panel, its text (`None`: inherited) and its border
+    /// (width, colour).
+    pub(crate) tooltip_bg: crate::theme::Themed<crate::scene::Color>,
+    pub(crate) tooltip_text: Option<crate::theme::Themed<crate::scene::Color>>,
+    pub(crate) tooltip_border: (f32, crate::theme::Themed<crate::scene::Color>),
 }
 /// zgx's own.
 pub(crate) const BUILT_IN_OVERLAY: OverlayLook = OverlayLook {
@@ -2055,6 +2060,9 @@ pub(crate) const BUILT_IN_OVERLAY: OverlayLook = OverlayLook {
     tooltip_padding: (8., 4., 4.),
     tooltip_radius: crate::theme::Themed::Token(tok::RADIUS_SM.0),
     tooltip_font_size: crate::theme::Themed::Token(tok::FONT_SIZE_XS.0),
+    tooltip_bg: crate::theme::Themed::Token(tok::POPOVER_BG.0),
+    tooltip_text: None,
+    tooltip_border: (0.5, crate::theme::Themed::Token(tok::BORDER.0)),
 };
 /// Windows 11's, as WinUI 3 draws its MenuFlyout, FlyoutPresenter and
 /// ToolTip (microsoft-ui-xaml's `CommonStyles`): a menu's panel rounded as
@@ -2096,7 +2104,21 @@ pub(crate) const LINUX_OVERLAY: OverlayLook = OverlayLook {
     popover_radius: crate::theme::Themed::Value(15.),
     popover_padding: 8.,
     shortcut_gap: 12.,
-    ..BUILT_IN_OVERLAY
+    // A tooltip as libadwaita's (`widgets/_tooltip.scss`): dark and
+    // translucent in either scheme, white text, a 1 border of white at 10%,
+    // padded 10 by 6, rounded 9, its text the body's less a step. (When it
+    // shows is `TooltipTiming`'s, GTK's by default on Linux.)
+    tooltip_padding: (10., 6., 6.),
+    tooltip_radius: crate::theme::Themed::Value(9.),
+    tooltip_font_size: crate::theme::Themed::Token(tok::FONT_SIZE_SM.0),
+    tooltip_bg: crate::theme::Themed::Value(crate::scene::Color(0, 0, 6, 204)),
+    tooltip_text: Some(crate::theme::Themed::Value(crate::scene::Color(
+        255, 255, 255, 255,
+    ))),
+    tooltip_border: (
+        1.,
+        crate::theme::Themed::Value(crate::scene::Color(255, 255, 255, 26)),
+    ),
 };
 pub(crate) const OVERLAY: OverlayLook = if cfg!(windows) {
     WINDOWS_OVERLAY

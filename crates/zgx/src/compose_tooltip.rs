@@ -9,7 +9,6 @@ use crate::{
     compose::{Placement, PlacementEdge, PlacementSide, TaskRunner, TaskToken, View},
     input::{EventPhase, InputEvent, Key},
     style::{Styled, Styles},
-    theme::tok,
     widgets::WeakUi,
 };
 use std::{
@@ -140,7 +139,9 @@ fn hide(open: &crate::reactive::Signal<bool>, shown: &Cell<bool>) {
 /// (zero: at once). zgx's: 300 ms, AppKit's, and at once within a second of
 /// another; Windows': twice the system's mouse hover time, and the hover
 /// time within 200 ms of another opening (WinUI's `ToolTipService`, whose
-/// one and a half times truncates to one).
+/// one and a half times truncates to one); GNOME's, the default on Linux:
+/// 500 ms (GTK's `HOVER_TIMEOUT`), and 60 ms within 500 ms of another
+/// closing (`BROWSE_TIMEOUT`, `BROWSE_DISABLE_TIMEOUT`; `gtktooltip.c`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TooltipTiming {
     /// How long the pointer rests on a view before its tooltip shows.
@@ -155,6 +156,14 @@ pub struct TooltipTiming {
 }
 impl Default for TooltipTiming {
     fn default() -> Self {
+        if cfg!(target_os = "linux") {
+            return Self {
+                delay: Duration::from_millis(500),
+                reshow_within: Duration::from_millis(500),
+                reshow_delay: Duration::from_millis(60),
+                reshow_from_open: false,
+            };
+        }
         Self {
             delay: Duration::from_millis(300),
             reshow_within: Duration::from_secs(1),
@@ -219,15 +228,19 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
                     true => panel.py(above),
                     false => panel.pt(above).pb(below),
                 };
-                panel
+                let panel = panel
                     .max_w(320.)
-                    .bg(tok::POPOVER_BG)
-                    .border(0.5)
-                    .border_color(tok::BORDER)
+                    .bg(look.tooltip_bg)
+                    .border(look.tooltip_border.0)
+                    .border_color(look.tooltip_border.1)
                     .rounded(look.tooltip_radius)
-                    .text_size(look.tooltip_font_size)
-                    .text_wrap(true)
-                    .child(crate::compose::text(text))
+                    .text_size(look.tooltip_font_size);
+                match look.tooltip_text {
+                    Some(color) => panel.text_color(color),
+                    None => panel,
+                }
+                .text_wrap(true)
+                .child(crate::compose::text(text))
             }
         };
         let open = runtime.signal(false);
