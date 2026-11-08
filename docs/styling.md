@@ -414,7 +414,7 @@ ui.theme().set(LIGHT).unwrap(); // what uses changed tokens restyles, nothing el
 | Scrollbars | `scrollbar.thumb`, `scrollbar.thumb.active`, `scrollbar.track` |
 | Glass | `glass.tint` (laid over a backdrop blur), `glass.blur` |
 | Typography | `font.sans`, `font.mono`; `font.size.{xs,sm,md,lg,xl,xxl}` with matching line heights `font.line.*`; `font.weight.{regular,medium,semibold,bold}` |
-| Metrics | `radius.{sm,md,lg,xl,full}`, `space.1` to `space.8` (4 to 64 points), `control.height` |
+| Metrics | `radius.{sm,md,lg,xl,full}`, `space.1` to `space.8` (4 to 64 points), `control.height` (a one-line field's and a slider's height, following it as it changes; under a larger system text size, at least a body line and 12 points) |
 | Shadows | `shadow.sm`, `shadow.md`, `shadow.lg` |
 | Motion | `motion.duration.{fast,normal,slow}` (milliseconds), `motion.ease.{standard,enter,exit}` (anime.js easings) |
 
