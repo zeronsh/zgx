@@ -1,0 +1,34 @@
+# Scratch (not for merging): zgx's look sheet on the Windows runner, from
+# this branch and from main, to compare.
+name: look sheet (scratch)
+on:
+  push:
+    branches: [scratch/win-look]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - name: After (this branch)
+        shell: bash
+        run: cargo run --release -p zgx-gpu --example win_look --locked -- after.png
+      - name: Before (the step before this one, which has the sheet example)
+        shell: bash
+        env:
+          BEFORE: origin/win/look-values
+        run: |
+          git checkout "$BEFORE" -- crates Cargo.lock
+          cargo run --release -p zgx-gpu --example win_look --locked -- before.png
+          if cmp before.png after.png; then echo "IDENTICAL"; else echo "DIFFERENT"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: look-sheet-windows
+          path: |
+            before.png
+            after.png
