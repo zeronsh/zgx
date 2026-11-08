@@ -400,6 +400,17 @@ jobs:
           if [ "${{ github.event_name }}" != pull_request ]; then status=0; fi
           cat perf.md >> "$GITHUB_STEP_SUMMARY" || true
           echo "status=$status" >> "$GITHUB_ENV"
+      # One chunk of a streamed Markdown reply should cost the same at 800
+      # sections as at 100 (scripts/perf/flat_chunks.py; by phase,
+      # crates/zgx-script/tests/md_chunk_flat.rs). Reported, not yet failing
+      # the job: it fails while layout and damage still walk every block.
+      - name: Streamed Markdown per chunk
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          ZGX_GATE_TARGET: target/perf-gate
+        run: python3 scripts/perf/flat_chunks.py --report --markdown "$GITHUB_STEP_SUMMARY"
       - name: Functions
         if: ${{ !cancelled() }}
         continue-on-error: true
