@@ -736,3 +736,53 @@ fn a_backdrop_reader_keeps_what_lies_under_its_shadow() {
         }
     }
 }
+
+#[test]
+fn drawn_glass_shows_what_the_systems_does_over_black_and_white() {
+    use zgx::glass::{GlassStyle, GlassVariant};
+    let _gpu_fixture = gpu_fixture();
+    // The system's glass in a key window, read back over a black half and a
+    // white half (sRGB levels, the same at either scale): its regular glass
+    // casts a shadow it doesn't show itself.
+    for (variant, dark, over_black, over_white) in [
+        (GlassVariant::Regular, false, 180, 247),
+        (GlassVariant::Regular, true, 26, 91),
+        (GlassVariant::Clear, false, 19, 255),
+        (GlassVariant::Clear, true, 19, 255),
+    ] {
+        let mut gpu = GpuRenderer::new(SIZE, SIZE).unwrap();
+        let mut scene = scene();
+        let root = scene.root();
+        scene.append(root, NodeKind::Rect(Color(0, 0, 0, 255)), fixed(100., 200.));
+        let white = scene.append(
+            root,
+            NodeKind::Rect(Color(255, 255, 255, 255)),
+            fixed(100., 200.),
+        );
+        scene.set_transform(white, Transform { x: 100., y: 0. });
+        let style = GlassStyle {
+            variant,
+            ..Default::default()
+        };
+        let pane = scene.append(
+            root,
+            NodeKind::Quad(QuadStyle {
+                radius: 16.,
+                shadow: style.drawn_shadow(dark),
+                ..Default::default()
+            }),
+            fixed(180., 120.),
+        );
+        scene.set_transform(pane, Transform { x: 10., y: 40. });
+        style.drawn(dark).apply(&mut scene, pane, 0.);
+        let (_, p) = render(&mut gpu, &mut scene);
+        let name = format!("{variant:?}, dark {dark}");
+        for (x, level) in [(30, over_black), (170, over_white)] {
+            let got = pixel(&p, x, 100);
+            assert!(
+                got[..3].iter().all(|v| v.abs_diff(level) <= 4),
+                "{name} at {x}: {got:?}, not {level}"
+            );
+        }
+    }
+}

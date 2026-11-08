@@ -54,37 +54,53 @@ impl Default for GlassStyle {
 }
 impl GlassStyle {
     /// What it draws where the system has none, `dark` or light as the theme
-    /// is: numbers measured against the system's own
-    /// (`scripts/glass_compare.py`), its frost a backdrop blur.
+    /// is: the system's glass in a key window, its face from the numbers its
+    /// own filter holds (the luma range, saturation, fill and rim colours),
+    /// its blur, rim, shadow and tint fitted to its pixels
+    /// (`scripts/glass_compare.py`).
     pub fn drawn(&self, dark: bool) -> crate::shader_drive::ShaderDrive {
         thread_local! {
             static MATERIAL: std::sync::Arc<crate::decoration::FillShader> =
                 crate::decoration::FillShader::new(include_str!("glass.wgsl"), None);
         }
-        let (frost, saturation, gray, amount, depth, bevel, rim) = match (self.variant, dark) {
-            (GlassVariant::Clear, _) => (20., 1.4, 114., 0.36, 6., 10., 0.4),
-            (GlassVariant::Regular, true) => (9., 2.2, 44., 0.7, 4., 8., 0.3),
-            (GlassVariant::Regular, false) => (9., 2.2, 246., 0.7, 4., 8., 0.3),
+        // [black, white, saturation, top], fill, blur (the system's has a
+        // sharp core and a broad shoulder: one sigma fitted over text,
+        // pictures and an edge together).
+        let (face, fill, frost) = match (self.variant, dark) {
+            (GlassVariant::Regular, false) => ([0.5, 1.03, 1., 0.97], [1., 1., 1., 0.4], 4.5),
+            // Its filter's black is 0.2; on screen it reads 0.17.
+            (GlassVariant::Regular, true) => ([0.17, 0.6, 1., 0.97], [0., 0., 0., 0.4], 4.5),
+            (GlassVariant::Clear, _) => ([0.075, 1.15, 1.06, 1.], [1., 1., 1., 0.], 1.5),
         };
-        let (tint, amount) = match self.tint {
-            Some(tint) => (
-                [f32::from(tint.0), f32::from(tint.1), f32::from(tint.2)].map(|v| v / 255.),
-                f32::from(tint.3) / 255.,
-            ),
-            None => ([gray / 255.; 3], amount),
+        // The rim's colour from the face: gain, luma taken off, lift; and its
+        // shadow's alpha, for the material to see past it.
+        let shadow = self
+            .drawn_shadow(dark)
+            .map_or(0., |s| f32::from(s.color.3) / 255.);
+        let rim = match dark {
+            false => [1.5, 1.4, 0.9, shadow],
+            true => [3., 1.65, 0.15, shadow],
         };
+        let tint = self.tint.map_or([0.; 4], |tint| {
+            [tint.0, tint.1, tint.2, tint.3].map(|v| f32::from(v) / 255.)
+        });
         crate::shader_drive::ShaderDrive {
             shader: Some(MATERIAL.with(std::sync::Arc::clone)),
-            params: [
-                [bevel, depth, saturation, amount],
-                [tint[0], tint[1], tint[2], rim],
-                [0.; 4],
-                [0.; 4],
-            ],
-            reach: depth * 1.2,
+            params: [face, fill, rim, tint],
             frost,
             ..Default::default()
         }
+    }
+    /// The shadow the drawn glass casts, as the system's regular glass does
+    /// in a key window (clear casts none): fitted to its pixels. Its offset
+    /// and blur are the material's too (`glass.wgsl`), which sees past it.
+    pub fn drawn_shadow(&self, dark: bool) -> Option<crate::scene::BoxShadow> {
+        (self.variant == GlassVariant::Regular).then_some(crate::scene::BoxShadow {
+            color: Color(0, 0, 0, if dark { 64 } else { 30 }),
+            offset: crate::scene::Transform { x: 0., y: 8. },
+            blur_radius: 20.,
+            spread: 0.,
+        })
     }
     /// The drawn material's own source, for tests of every shader.
     pub fn material_source() -> &'static str {
@@ -131,18 +147,32 @@ pub fn glass(mut style: impl FnMut() -> GlassStyle + 'static) -> View {
             let rounded = style();
             let theme = cx.theme();
             let themes = crate::theme::Themes::of(&cx.runtime());
+            let style = Rc::new(RefCell::new(style));
+            let shading = style.clone();
+            let shading_theme = theme.clone();
             let filled = match rounded.corners {
                 Some(corners) => filling().rounded_corners(corners),
                 None => filling().rounded(radius_of(&rounded)),
             };
-            return filled.shader_drive(move || {
-                let mut drive = style().drawn(theme.theme_kind().is_dark());
-                // Asked for less transparency, as the system's goes solid.
-                if themes.system_preferences().reduced_transparency {
-                    drive.params[0][3] = 0.97;
-                }
-                drive
-            });
+            return filled
+                .reactive_style(move || {
+                    let dark = shading_theme.theme_kind().is_dark();
+                    match (shading.borrow_mut())().drawn_shadow(dark) {
+                        Some(shadow) => Styles::new().shadow(shadow),
+                        None => Styles::new().shadow_none(),
+                    }
+                })
+                .shader_drive(move || {
+                    let dark = theme.theme_kind().is_dark();
+                    let mut drive = (style.borrow_mut())().drawn(dark);
+                    // Asked for less transparency, as the system's goes
+                    // solid: its fill nearly opaque.
+                    if themes.system_preferences().reduced_transparency {
+                        let gray = if dark { 44. / 255. } else { 246. / 255. };
+                        drive.params[1] = [gray, gray, gray, 0.97];
+                    }
+                    drive
+                });
         };
         let pane = GlassPane(shared.clone());
         let effect = cx.runtime().effect(move || {

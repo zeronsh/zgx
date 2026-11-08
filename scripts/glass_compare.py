@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
-"""zgx's drawn glass against the system's, by measurement.
+"""zgx's drawn glass against the system's, pixel by pixel.
 
-    python3 scripts/glass_compare.py [--top N] system.png drawn.png [more pairs...]
+    python3 scripts/glass_compare.py system_dir drawn_dir
 
-The system's: `GLASS_OUT=system.png ZGX_NO_ACTIVATE=1 cargo run -p zgx-desktop
---example glass` on macOS 26, its window's own pixels (`--top 28` for its title
-bar, in points). Drawn: `cargo run -p zgx-gpu --example glass_compare -- drawn.png`.
-Both lay out twenty stripes under a pane at 2x. Over the pane's middle (clear of
-its rim and of any text) it compares mean colour, saturation (a channel's spread)
-and the stripes' surviving contrast, in sRGB levels of 255: a capture in Display
-P3 is converted first.
+Each directory holds `{glass,clear}-{light,dark}-{patches,edge}.png`, a
+1000 by 800 point window at 2x. `patches` is twenty solid patches, 200 points
+square, each under an 80 point pane with corners of 16; `edge` is the window
+black on its left half and white on its right, under one 600 by 400 pane at
+(200, 200). Drawn: `cargo run -p zgx-gpu --example glass_compare` (its doc says
+how to make each). The system's: the same layout of `NSGlassEffectView`s in a
+key window on macOS 26, its own pixels read back (a capture in Display P3 is
+converted to sRGB first).
+
+It prints the mean difference, in sRGB levels of 255, inside the panes, on
+their rim (the outer point and a half), and in the shadow past them.
 """
 import argparse
 import io
 
 import numpy as np
 from PIL import Image, ImageCms
-
-LUMA = np.array([0.2126, 0.7152, 0.0722])
 
 
 def load(path):
@@ -30,32 +32,44 @@ def load(path):
     return np.asarray(image, dtype=float)
 
 
-def middle(pixels, top):
-    # Points to pixels: the pane is at (60, 60), 300 by 200, at 2x.
-    y = top * 2
-    return pixels[y + 200:y + 520, 300:540]
+def panes(scene):
+    if scene == 'edge':
+        return [(200, 200, 600, 400)]
+    return [((i % 5) * 200 + 60, 800 - (i // 5 + 1) * 200 + 60, 80, 80) for i in range(20)]
 
 
-def stats(pixels):
-    luma = (pixels @ LUMA).mean(axis=1)
-    return {
-        'mean': pixels.mean(axis=(0, 1)).round(1).tolist(),
-        'saturation': round(float((pixels.max(axis=2) - pixels.min(axis=2)).mean()), 1),
-        'contrast': round(float(luma.max() - luma.min()), 1),
-    }
+def distance(shape, boxes, radius=16):
+    """Each pixel's signed distance in points to the nearest pane's edge."""
+    y, x = np.mgrid[0:shape[0], 0:shape[1]]
+    x, y = (x + 0.5) / 2, (y + 0.5) / 2
+    nearest = np.full(shape, np.inf)
+    for bx, by, bw, bh in boxes:
+        qx = np.abs(x - (bx + bw / 2)) - bw / 2 + radius
+        qy = np.abs(y - (by + bh / 2)) - bh / 2 + radius
+        d = np.hypot(np.maximum(qx, 0), np.maximum(qy, 0)) + np.minimum(np.maximum(qx, qy), 0) - radius
+        nearest = np.minimum(nearest, d)
+    return nearest
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--top', type=int, default=0, help="points of title bar over the system's")
-    parser.add_argument('images', nargs='+')
+    parser.add_argument('system')
+    parser.add_argument('drawn')
     args = parser.parse_args()
-    for system, drawn in zip(args.images[0::2], args.images[1::2]):
-        a, b = middle(load(system), args.top), middle(load(drawn), 0)
-        print(system.rsplit('/', 1)[-1], 'against', drawn.rsplit('/', 1)[-1])
-        print('  system', stats(a))
-        print('  drawn ', stats(b))
-        print('  mean error by channel', np.abs(a - b).mean(axis=(0, 1)).round(1).tolist())
+    for variant in ['glass', 'clear']:
+        for appearance in ['light', 'dark']:
+            for scene in ['patches', 'edge']:
+                name = f'{variant}-{appearance}-{scene}.png'
+                system, drawn = load(f'{args.system}/{name}'), load(f'{args.drawn}/{name}')
+                d = distance(system.shape[:2], panes(scene))
+                error = np.abs(system - drawn).mean(axis=2)
+                regions = {
+                    'inside': d < -1.5,
+                    'rim': (d >= -1.5) & (d < 0.5),
+                    'shadow': (d >= 0.5) & (d < 60),
+                }
+                print(f'{name:28}' + '  '.join(f'{k} {error[m].mean():5.2f}' for k, m in regions.items()))
 
 
-main()
+if __name__ == '__main__':
+    main()
