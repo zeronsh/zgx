@@ -71,7 +71,7 @@ Fonts in a `fonts` folder beside the script (`.ttf`, `.otf`, `.ttc`) are its tex
 
 ## Sequences, series and transitions
 
-`video.sequence { from, duration, name, … }` shows its children only from frame `from` for `duration` frames, and their time starts at `from`. A function child is built as the sequence appears and is given that time. Sequences nest, and their offsets add up. The sequence fills its parent unless it has `layout = "none"`, and other properties go on its box. Named sequences show on the studio's timeline.
+`video.sequence { from, duration, name, … }` shows its children only from frame `from` for `duration` frames, and their time starts at `from`. A function child is built as the sequence appears and is given that time. Sequences nest, and their offsets add up, whether a child sequence, series, loop, freeze, sound or clip is given as a function or as a table: each takes its time where it mounts. The sequence fills its parent unless it has `layout = "none"`, and other properties go on its box. Named sequences show on the studio's timeline.
 
 `video.series { video.scene { duration, name, … }, transition, video.scene { … } }` plays scenes one after another. A transition between two scenes overlaps them by its duration, and `video.series_length(list)` is the total length. Transitions: `video.fade`, `video.slide { from = "right" }`, `video.zoom`, `video.wipe { angle, soft }`, `video.shader_transition { wgsl, params }` (a [layer shader](reference/media.md#making-effects) over the arriving scene, `params(p)` giving its parameters as it goes from 0 to 1, and `zgx_backdrop` reading the scene leaving), or `video.transition { duration, ease, enter = function(p) return props end, exit = … }`.
 
@@ -135,7 +135,7 @@ video.freeze { frame = 120, Intro {} }
 
 ## Sound
 
-`video.audio { src, from, duration, trim, volume, fade_in, fade_out, loop }` places a sound file within the sequence it appears in; it adds no node. `volume` may be a function of the frame from the sound's start (a fade, or ducking under a voice): it is read once a frame when the sound is placed, and the mix goes smoothly between those values. Sounds are mixed sample by sample into one stereo track at 48 kHz and muxed into H.264, HEVC and ProRes files. WAV is read directly. Other formats are read through ffmpeg, or through afconvert on macOS.
+`video.audio { src, from, duration, trim, volume, fade_in, fade_out, loop }` places a sound file within the sequence it appears in; it adds only an empty box of no size, out of the flow. `volume` may be a function of the frame from the sound's start (a fade, or ducking under a voice): it is read once a frame when the sound is placed, and the mix goes smoothly between those values. Sounds are mixed sample by sample into one stereo track at 48 kHz and muxed into H.264, HEVC and ProRes files. WAV is read directly. Other formats are read through ffmpeg, or through afconvert on macOS.
 
 ```lua
 -- Music that fades in over a second and ducks to a quarter while a voice speaks.

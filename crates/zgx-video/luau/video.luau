@@ -432,6 +432,19 @@ local function children_of(opts: any, time: any): { any }
 	return out
 end
 
+-- An element that takes its time where it mounts, from the context the
+-- sequence around it provides, not where it's built: a sequence's children
+-- given as tables are built before it is, in the time around it, and would
+-- start at its parent's frames rather than at its own.
+local function timed(make: (any) -> any): any
+	return ui.component(function()
+		return make(time_here())
+	end) {}
+end
+
+-- Each element's body, given the time it takes.
+local sequence_in, loop_in, freeze_in, series_in, audio_in, clip_in
+
 local RESERVED = { from = true, duration = true, name = true, layout = true }
 
 -- Shows its children only from frame `from` for `duration` frames, their time
@@ -440,7 +453,11 @@ local RESERVED = { from = true, duration = true, name = true, layout = true }
 -- as it appears, given that time. It fills its parent unless `layout = "none"`;
 -- other properties go on its box.
 function video.sequence(opts: any): any
-	local parent = time_here()
+	return timed(function(parent)
+		return sequence_in(parent, opts)
+	end)
+end
+function sequence_in(parent: any, opts: any): any
 	local from: number = opts.from or 0
 	local duration: number = opts.duration or math.huge
 	local offset = parent.offset + from
@@ -479,8 +496,12 @@ end
 -- unless `layout = "none"`; other properties go on its box.
 local LOOP_KEYS = { duration = true, times = true, layout = true, name = true }
 function video.loop(opts: any): any
-	local parent = time_here()
 	local duration: number = opts.duration or error("video.loop: give it a `duration` in frames", 2)
+	return timed(function(parent)
+		return loop_in(parent, opts, duration)
+	end)
+end
+function loop_in(parent: any, opts: any, duration: number): any
 	local times: number = opts.times or math.huge
 	local time = child_time(parent, 0, duration, { wrap = duration })
 	local box: any = { provide = { ["zgx.video.time"] = time } }
@@ -508,7 +529,11 @@ end
 -- Holds its children at one frame of their time (`frame`, 0 by default):
 -- what reads the frame shows that frame for as long as it shows.
 function video.freeze(opts: any): any
-	local parent = time_here()
+	return timed(function(parent)
+		return freeze_in(parent, opts)
+	end)
+end
+function freeze_in(parent: any, opts: any): any
 	local time = child_time(parent, 0, parent.duration, { frozen = opts.frame or 0 })
 	local box: any = { provide = { ["zgx.video.time"] = time } }
 	if opts.layout ~= "none" then
@@ -634,7 +659,11 @@ end
 -- Scenes one after another, each starting as the last ends; a transition
 -- between two overlaps them by its duration. Fills its parent.
 function video.series(opts: any): any
-	local parent = time_here()
+	return timed(function(parent)
+		return series_in(parent, opts)
+	end)
+end
+function series_in(parent: any, opts: any): any
 	local items: { any } = {}
 	local at: number = 0
 	local before: any = nil
@@ -716,7 +745,7 @@ function video.series(opts: any): any
 				return local_frame(parent) < offset + enter.duration
 			end
 		end
-		table.insert(nodes, video.sequence(box))
+		table.insert(nodes, sequence_in(parent, box))
 	end
 	return ui.div(nodes)
 end
@@ -741,9 +770,16 @@ end
 -- A sound under the video: `src` (a file beside the script), `from` (its start,
 -- in frames, within this sequence), `duration`, `trim` (frames of it to skip),
 -- `volume` (1, or a function of the frame from its start: a fade or a duck), `fade_in` and `fade_out` (frames), `loop`. Goes anywhere among
--- children; it adds no node.
-function video.audio(opts: any): nil
-	local time = time_here()
+-- children, as a function or a table; it adds only an empty box, of no size
+-- and out of the flow, which tells where it mounts and so its time.
+function video.audio(opts: any): any
+	return timed(function(time)
+		audio_in(time, opts)
+		-- Where it mounts tells its time: a box of no size, out of the flow.
+		return ui.div { absolute = true, w = 0, h = 0 }
+	end)
+end
+function audio_in(time: any, opts: any)
 	local volume = opts.volume or 1
 	local volumes: { number }? = nil
 	if type(volume) == "function" then
@@ -767,7 +803,6 @@ function video.audio(opts: any): nil
 		fade_out = opts.fade_out or 0,
 		loop = opts.loop or false,
 	})
-	return nil
 end
 
 -- A video file shown from frame `from` (of this sequence) for `duration`
@@ -778,7 +813,11 @@ end
 -- 0 leaves it out; `loop` plays it again from its start.
 local CLIP_KEYS = { src = true, from = true, duration = true, trim = true, volume = true, loop = true }
 function video.clip(opts: any): any
-	local time = time_here()
+	return timed(function(time)
+		return clip_in(time, opts)
+	end)
+end
+function clip_in(time: any, opts: any): any
 	local from: number = opts.from or 0
 	local at = time.offset + from
 	local id = `zgx.clip:{opts.src}:{at}:{opts.trim or 0}:{opts.w or 0}x{opts.h or 0}`
@@ -799,13 +838,13 @@ function video.clip(opts: any): any
 			image[key] = value
 		end
 	end
-	return video.sequence {
+	return sequence_in(time, {
 		from = from,
 		duration = opts.duration,
 		layout = "none",
 		track = false,
 		ui.image(image),
-	}
+	})
 end
 
 -- What a sound file holds, moment by moment, to draw from: `bars`, its
