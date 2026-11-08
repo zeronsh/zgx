@@ -4183,12 +4183,12 @@ impl Ui {
             scene.contains(**node)
                 && signal.with_untracked(|told| moved(*told, scene.world_bounds(**node)))
         });
-        let mut moved = sizes;
-        moved.extend(bounds.map(|(node, _)| *node));
-        moved.sort_by_key(|node| node.number());
-        moved.dedup();
-        moved.truncate(8);
-        moved
+        let mut moving = sizes;
+        moving.extend(bounds.map(|(node, _)| *node));
+        moving.sort_by_key(|node| node.number());
+        moving.dedup();
+        moving.truncate(8);
+        moving
     }
     /// Recompute editor geometry after changing the font backend or display scale.
     pub(crate) fn observe_text_geometry_revision(&self) -> Signal<u64> {
@@ -7924,6 +7924,9 @@ fn moved(told: Rect, now: Rect) -> bool {
 /// Whether a length is the one told, to within `SIZE_NOISE`. Equal first:
 /// an unbounded size stays infinite, and infinity less itself is NaN, which
 /// is near nothing, so it was told again on every pass and never settled.
+/// A NaN length is never the same, as it never was compared exactly (NaN
+/// equals nothing), so one would keep layout from settling: layout
+/// doesn't make one.
 #[inline]
 fn same_length(told: f32, now: f32) -> bool {
     told == now || (told - now).abs() < SIZE_NOISE

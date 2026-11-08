@@ -931,8 +931,14 @@ impl Scene {
                         scene.map_size_calcs(*child, &mut mapped, bases);
                         scene.map_grid_place(*child, &mut mapped);
                     }
-                    // A `contents` child clips as the child it lays out as.
-                    mapped.overflow = overflow(super::clips(&scene.node(laid).style));
+                    // A `contents` child clips as the child it lays out as;
+                    // text that ends in an ellipsis clips across
+                    // (`Scene::automatic_minimum`).
+                    let node = scene.node(laid);
+                    mapped.overflow = overflow(super::clips(&node.style));
+                    if super::truncates(node) {
+                        mapped.overflow.x = taffy::style::Overflow::Hidden;
+                    }
                     if stacked {
                         mapped = stacked_style(mapped);
                     }

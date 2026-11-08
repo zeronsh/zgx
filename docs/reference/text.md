@@ -253,7 +253,7 @@ return ui.column {
 
 - Text from data is a template too: a commit message with `{id}` in it looks for state named `id` (an error if there is none), and `{{` shows as `{`. Pass `literal = true` (on `ui.text`, `ui.rich` or a span) for text the script didn't write.
 - A template names state by its key, not by its Luau variable: `"{count}"` shows `ui.state("count", …)` whatever the local is called (a component's `ui.use_state` has no key: give `ui.text` the state itself, `ui.text { count }`), and `"{state.count}"` is state `state`'s field `count`, not a module's state. A name no state has is an error when the text is built.
-- Text does not wrap by default, and a row shrinks it no narrower than it is (its min-content, unwrapped): `wrap = true` (in a box with a width) lets it wrap down to its longest word, or `truncate = true` lets it shrink past that, ending it with "…" in a row.
+- Text does not wrap by default, and a row shrinks it no narrower than it is (its min-content, unwrapped): `wrap = true` (in a box with a width) lets it wrap down to its longest word, or `truncate = true` lets it shrink past that, ending it with "…", when the text is itself the row's child (a box around it still needs its width: give the box `min_w = 0`). `truncate` on a box is inherited by the text inside, which shrinks the same way in rows of its own.
 - A span's `color`, `bg`, `text_size`, `weight`, `bold`, `italic`, `underline`, `strike` and `font` follow a state or a function, and its text does. Its other options are plain values, read once.
 - A span is used once: putting the same `ui.span` in two paragraphs is an error. Make a new one each time.
 - `ui.text` and `ui.rich` take no children; extra array entries in `ui.text` are an error.

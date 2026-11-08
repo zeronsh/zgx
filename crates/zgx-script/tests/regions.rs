@@ -130,6 +130,50 @@ fn presence_applies_its_sizing_and_its_content_fills_it() {
     assert_eq!(h.rect("pane-b"), Rect::new(0., 0., 120., 300.));
 }
 
+/// A presence's box lays its content out as a one-cell grid with stretched
+/// items would, the presence's own `items` and `justify` included (a grid
+/// reads `items` down, and `justify` moves no track that fills the box).
+#[test]
+fn a_presence_box_lays_out_as_a_one_cell_grid() {
+    let content = [
+        r#"ui.div { id = "content", w = 40, h = 20 }"#,
+        r#"ui.text { id = "content", "a few words that wrap in the box", wrap = true }"#,
+    ];
+    let props = [
+        "w = 120, h = 100",
+        "w = 120, h = 100, items = 'center'",
+        "w = 120, h = 100, justify = 'center'",
+        "w = 120, h = 100, items = 'end', justify = 'end'",
+        "w = 120, p = 10",
+        "grow = 1, py = 4",
+    ];
+    for content in content {
+        for props in props {
+            let items = if props.contains("items") {
+                ""
+            } else {
+                "items = 'stretch', "
+            };
+            let presence =
+                format!("ui.presence(tab, function() return {content} end, {{ {props} }})");
+            let grid = format!(
+                "ui.column {{ grid = true, cols = 1, rows = 1, {items}{props}, {content} }}"
+            );
+            let rects: Vec<_> = [presence, grid]
+                .iter()
+                .map(|boxed| {
+                    let mut h = Harness::inline(&format!(
+                        r#"local tab = ui.state("tab", "a")
+                        return ui.column {{ w_full = true, h_full = true, items = "start", {boxed} }}"#
+                    ));
+                    h.rect("content")
+                })
+                .collect();
+            assert_eq!(rects[0], rects[1], "{props}: {content}");
+        }
+    }
+}
+
 /// `mode = "wait"`: while the old content leaves, nothing takes its place
 /// and it stays where it was.
 #[test]

@@ -92,6 +92,43 @@ fn a_truncated_label_shrinks_past_its_longest_word() {
 }
 
 #[test]
+fn a_truncated_label_shrinks_in_rows_and_grids_taffy_lays_out() {
+    // A gap lays the row out with taffy: the label still gives way.
+    let word = word_width();
+    let gapped = |label: View| {
+        children(
+            row()
+                .w(200.)
+                .gap_x(8.)
+                .child(div().w(180.).h(10.).flex_shrink(1.))
+                .child(label.flex_shrink(1.)),
+        )
+    };
+    let proportional = word - (180. + word - 192.) * word / (180. + word);
+    let rects = gapped(text(WORD).truncate());
+    assert!((rects[1].width - proportional).abs() < 0.01, "{rects:?}");
+    assert_eq!(gapped(text(WORD).text_wrap(false))[1].width, word);
+    // A grid's `1fr` track (`minmax(auto, 1fr)`) takes its share, where
+    // the word would widen it.
+    let tracks = |label: View| {
+        children(
+            column()
+                .w(60.)
+                .grid()
+                .grid_cols(2)
+                .child(label)
+                .child(div().h(10.)),
+        )
+    };
+    let rects = tracks(text(WORD).truncate());
+    assert!((rects[0].width - 30.).abs() < 0.01, "{rects:?}");
+    assert!(
+        tracks(text(WORD).text_wrap(false))[0].width > 30.,
+        "the word widens it"
+    );
+}
+
+#[test]
 fn a_set_size_is_a_ceiling_on_the_automatic_minimum() {
     // A 30 px item holding the wider word needs no more than its 30.
     let rects = squeezed(row().w(30.).child(text(WORD).text_wrap(false)));
