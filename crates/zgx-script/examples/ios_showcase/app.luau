@@ -12,6 +12,10 @@ local lower = ui.state("lower", "")
 -- How the Notes page's fields clear the keyboard: UIKit's own scroll, or riding
 -- its edge. `ZGX_APP_ARGS="lowfield attached"` starts attached.
 local attached = ui.state("attached", ui.args[2] == "attached")
+-- `ZGX_APP_ARGS=soak`: the app drives itself for a long session (below).
+local SOAK = ui.args[1] == "soak"
+local soak_open: ((title: string) -> () -> ())?, soak_nav: any = nil, nil
+local low_field = ui.ref()
 
 local function Detail(nav: any, title: string)
 	local enabled = ui.use_state(true)
@@ -79,6 +83,9 @@ local function SettingsPage(nav: any)
 				return DetailPage { nav = inner, title = title }
 			end)
 		end
+	end
+	if SOAK then
+		soak_open, soak_nav = open, nav
 	end
 	return ios.page {
 		title = "Settings",
@@ -296,6 +303,7 @@ local function TextPage(nav: any)
 								end)
 							end
 							else nil,
+						ref = low_field,
 						value = lower,
 						label = "A field low on the page",
 						placeholder = "Tap to type",
@@ -401,6 +409,141 @@ local function page(index: number)
 			end,
 		},
 	}
+end
+
+-- `soak`: a cycle of what a person does, a step every 600 ms, each cycle
+-- leaving the app as it found it so memory comes back: a page pushed and
+-- popped, the sheet up and down, the keyboard up for the low field (the page
+-- scrolling to it) and the composer, text typed and cleared, the ride
+-- switched (the Notes page built again), every tab.
+if SOAK then
+	local cycle = 0
+	local function focus(r: any)
+		local el = r:peek()
+		if el then
+			el:focus()
+		end
+	end
+	local function blur(r: any)
+		local el = r:peek()
+		if el then
+			el:blur()
+		end
+	end
+	-- Each step with what it exercises: `ZGX_APP_ARGS="soak sheet"` repeats
+	-- only that one's (push, sheet, field, composer, ride, tabs), to find what a
+	-- cycle keeps; the cycle's last step always runs.
+	local all: { { string | () -> () } } = {
+		{
+			"tabs",
+			function()
+				tab:set(1)
+			end,
+		},
+		{
+			"push",
+			function()
+				if soak_open then
+					soak_open("Wi-Fi")()
+				end
+			end,
+		},
+		{ "push", function() end },
+		{
+			"push",
+			function()
+				if soak_nav then
+					soak_nav.pop()
+				end
+			end,
+		},
+		{
+			"sheet",
+			function()
+				sheet_open:set(true)
+			end,
+		},
+		{ "sheet", function() end },
+		{
+			"sheet",
+			function()
+				sheet_open:set(false)
+			end,
+		},
+		{
+			"tabs",
+			function()
+				tab:set(2)
+			end,
+		},
+		{
+			"field",
+			function()
+				focus(low_field)
+			end,
+		},
+		{
+			"field",
+			function()
+				lower:set("Typed in the soak, cycle " .. cycle)
+				note:set(string.rep("A note written while the keyboard is up. ", 30))
+			end,
+		},
+		{
+			"field",
+			function()
+				blur(low_field)
+				lower:set("")
+				note:set("")
+			end,
+		},
+		{
+			"composer",
+			function()
+				focus(composer_editor)
+			end,
+		},
+		{
+			"composer",
+			function()
+				blur(composer_editor)
+			end,
+		},
+		{
+			"ride",
+			function()
+				attached:set(not attached:get())
+			end,
+		},
+		{
+			"tabs",
+			function()
+				tab:set(3)
+			end,
+		},
+		{
+			"end",
+			function()
+				tab:set(1)
+				cycle += 1
+				print(string.format("SOAK cycle %d", cycle))
+			end,
+		},
+	}
+	local only = ui.args[2]
+	local steps: { () -> () } = {}
+	for _, s in all do
+		if only == nil or s[1] == only or s[1] == "end" then
+			table.insert(steps, s[2] :: () -> ())
+		end
+	end
+	local step = 0
+	ui.after(2000, function()
+		ui.every(600, function()
+			step = step % #steps + 1
+			steps[step]()
+		end)
+	end)
 end
 
 return ui.div {

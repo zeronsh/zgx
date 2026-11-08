@@ -851,3 +851,71 @@ fn a_pushed_pages_back_button_is_read_first_and_named_for_the_page_before() {
     );
     assert!(buttons.iter().any(|l| l == "Join"), "{buttons:?}");
 }
+
+/// Runs an example app's `soak` mode (`ZGX_APP_ARGS=soak`: it drives itself
+/// through a cycle of what a person does) and reads what it holds at each
+/// cycle's end: its nodes, and its scripts' heap after a full collection.
+fn soak_cycles(path: &str, cycle_ms: f64, start_ms: f64, cycles: usize) -> Vec<(usize, usize)> {
+    let mut app = Harness::new(|runtime| {
+        zgx_script::ScriptHost::new(runtime, path).args(vec!["soak".to_string()])
+    });
+    app.ui.scene.borrow_mut().resize(402., 874.);
+    // Between two steps, past the start.
+    app.advance_ms(start_ms + 300.);
+    let mut out = Vec::new();
+    for _ in 0..cycles {
+        assert_eq!(app.error(), None, "{path}");
+        out.push((app.ui.scene.borrow().len(), app.host.script_memory()));
+        app.advance_ms(cycle_ms);
+    }
+    out
+}
+
+/// What a long session needs: after a few cycles to warm, each cycle of a
+/// person's use leaves the app where the last did, nodes and memory.
+fn assert_returns(name: &str, samples: &[(usize, usize)]) {
+    let settled = &samples[3..];
+    let nodes = settled[0].0;
+    assert!(
+        settled.iter().all(|s| s.0 == nodes),
+        "{name}: nodes moved: {samples:?}"
+    );
+    let low = settled.iter().map(|s| s.1).min().unwrap();
+    let high = settled.iter().map(|s| s.1).max().unwrap();
+    assert!(
+        high - low <= 64 * 1024,
+        "{name}: the heap wanders {} bytes: {samples:?}",
+        high - low
+    );
+    assert!(
+        settled.last().unwrap().1 <= settled[0].1 + 32 * 1024,
+        "{name}: the heap grows: {samples:?}"
+    );
+}
+
+#[test]
+fn a_long_session_of_the_showcase_and_mail_comes_back_to_where_it_was() {
+    // The showcase: pages pushed and popped, the sheet, the keyboard for a
+    // field and the composer, text typed and cleared, the Notes page built
+    // again, every tab (16 steps of 600 ms).
+    let showcase = soak_cycles(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/ios_showcase/app.luau"
+        ),
+        16. * 600.,
+        2000.,
+        9,
+    );
+    assert_returns("showcase", &showcase);
+    // Mail, 4,000 messages: mailboxes, opening and marking unread, the list
+    // scrolled down and back, a draft typed and discarded, a search cleared
+    // (34 steps of 500 ms).
+    let mail = soak_cycles(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/mail/app.luau"),
+        34. * 500.,
+        0.,
+        9,
+    );
+    assert_returns("mail", &mail);
+}

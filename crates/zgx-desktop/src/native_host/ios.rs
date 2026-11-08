@@ -84,6 +84,20 @@ fn set_rounded_mask(clip: &AnyObject, round: Option<&zgx::scene::RoundRect>, vis
     }
 }
 
+/// A native view shown or hidden by its layer, not `UIView.hidden`: each time a
+/// view was un-hidden UIKit gave it another update link (a glass's, a switch's)
+/// that it never let go, so a view hidden and shown again, as a back button's
+/// glass on each push or a page's switch on each tab, kept one more each time
+/// (a long session's memory grew by them, with their textures). The hosts'
+/// hit test skips what is hidden this way (`host_class`).
+fn set_shown(view: &AnyObject, shown: bool) {
+    // SAFETY: UIView's and CALayer's methods, on the main thread the host runs on.
+    unsafe {
+        let layer: Retained<AnyObject> = msg_send![view, layer];
+        let _: () = msg_send![&*layer, setHidden: !shown];
+    }
+}
+
 fn plain_view(frame: CGRect) -> Retained<AnyObject> {
     // SAFETY: UIView's initializer, on the main thread.
     unsafe { msg_send![msg_send![class!(UIView), alloc], initWithFrame: frame] }
@@ -102,11 +116,24 @@ fn host_class() -> &'static AnyClass {
         // SAFETY: UIView's own method, UIKit asking on the main thread.
         let hit: *mut AnyObject =
             unsafe { msg_send![super(this, class!(UIView)), hitTest: at, withEvent: event] };
-        if std::ptr::eq(hit.cast_const(), this) {
-            std::ptr::null_mut()
-        } else {
-            hit
+        if std::ptr::eq(hit.cast_const(), this) || hit.is_null() {
+            return std::ptr::null_mut();
         }
+        // A view hidden by its layer (`set_shown`) takes no touch, as a hidden
+        // view takes none; nor what it holds.
+        // SAFETY: UIView's and CALayer's getters, on the main thread.
+        unsafe {
+            let mut view: *mut AnyObject = hit;
+            while !view.is_null() && !std::ptr::eq(view.cast_const(), this) {
+                let layer: Retained<AnyObject> = msg_send![&*view, layer];
+                let hidden: bool = msg_send![&*layer, isHidden];
+                if hidden {
+                    return std::ptr::null_mut();
+                }
+                view = msg_send![&*view, superview];
+            }
+        }
+        hit
     }
     // Touches on interactive glass reach winit's view up the responder chain; a
     // host above the edge effect isn't under that view, so it passes them there.
@@ -674,6 +701,9 @@ impl Surfaces {
                 // SAFETY: UIView's method, on the main thread.
                 unsafe {
                     let top = mounted.clip.as_ref().unwrap_or(&mounted.view);
+                    if matches!(mounted.content, Content::Edge(_)) {
+                        release_edge(&mounted.view);
+                    }
                     if mounted.parent.is_some() && matches!(mounted.content, Content::Glass(_)) {
                         dematerialize(top);
                     } else {
@@ -740,7 +770,7 @@ impl Surfaces {
                         // SAFETY: UISwitch's and UIView's setters, on the main thread.
                         unsafe {
                             let _: () = msg_send![&*view, setOn: state.on.get(), animated: false];
-                            let _: () = msg_send![&*clip, setHidden: false];
+                            set_shown(&clip, true);
                         }
                         self.mounted.insert(
                             *node,
@@ -820,10 +850,7 @@ impl Surfaces {
             if !mounted.hidden && !order.contains(node) {
                 mounted.hidden = true;
                 let top = mounted.clip.as_ref().unwrap_or(&mounted.view);
-                // SAFETY: UIView's setter, on the main thread.
-                unsafe {
-                    let _: () = msg_send![&**top, setHidden: true];
-                }
+                set_shown(top, false);
             }
         }
         // The host passes touches to its panes only while one answers them.
@@ -940,10 +967,7 @@ impl Surfaces {
         if hidden != mounted.hidden {
             mounted.hidden = hidden;
             let top = mounted.clip.as_ref().unwrap_or(&mounted.view);
-            // SAFETY: UIView's setter, on the main thread.
-            unsafe {
-                let _: () = msg_send![&**top, setHidden: hidden];
-            }
+            set_shown(top, !hidden);
         }
         if let (Some(clip), Some(visible)) = (&mounted.clip, visible) {
             // What cuts it, not its own box: its shadow shows past that.
@@ -1137,6 +1161,30 @@ unsafe fn materialize(view: &Retained<AnyObject>, style: GlassStyle) {
             scheduledTimerWithTimeInterval: 0f64,
             repeats: false,
             block: &*start];
+    }
+}
+
+/// An edge element's interaction let go of the scroll view it registered with
+/// (`EdgeHost::element`) before its view goes: removing the view alone left it
+/// registered there, with the update links that drive it, one more each time a
+/// page was pushed or a tab came back (a long session's memory grew by them).
+///
+/// # Safety
+/// `view` is an edge element's view, on the main thread.
+unsafe fn release_edge(view: &Retained<AnyObject>) {
+    // SAFETY: UIView's and the interaction's methods, as the caller promises.
+    unsafe {
+        let interactions: Retained<AnyObject> = msg_send![&**view, interactions];
+        let count: usize = msg_send![&*interactions, count];
+        for index in (0..count).rev() {
+            let interaction: Retained<AnyObject> = msg_send![&*interactions, objectAtIndex: index];
+            let edge: bool = msg_send![&*interaction, isKindOfClass: class!(UIScrollEdgeElementContainerInteraction)];
+            if edge {
+                let none = std::ptr::null::<AnyObject>();
+                let _: () = msg_send![&*interaction, setScrollView: none];
+                let _: () = msg_send![&**view, removeInteraction: &*interaction];
+            }
+        }
     }
 }
 
