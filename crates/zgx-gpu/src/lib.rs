@@ -14518,22 +14518,34 @@ impl GpuRenderer {
                     view_formats: &[],
                 })
             };
-            let swizzle = staging.swizzle.get_or_insert_with(|| Swizzle {
-                pipeline: blit_pipeline(&self.device, wgpu::TextureFormat::Rgba8Unorm, false),
-                texture: rgba(&self.device),
-            });
-            if swizzle.texture.size() != texture.size() {
-                swizzle.texture = rgba(&self.device);
+            // Made again only for another target (resized, or replaced): a
+            // video reads the same one frame after frame.
+            if staging
+                .swizzle
+                .as_ref()
+                .is_none_or(|swizzle| swizzle.source != *texture)
+            {
+                let pipeline = match staging.swizzle.take() {
+                    Some(swizzle) => swizzle.pipeline,
+                    None => blit_pipeline(&self.device, wgpu::TextureFormat::Rgba8Unorm, false),
+                };
+                let out = rgba(&self.device);
+                staging.swizzle = Some(Swizzle {
+                    bind: blit_group(
+                        &self.device,
+                        &pipeline,
+                        &texture.create_view(&Default::default()),
+                    ),
+                    view: out.create_view(&Default::default()),
+                    texture: out,
+                    source: texture.clone(),
+                    pipeline,
+                });
             }
-            let bind = blit_group(
-                &self.device,
-                &swizzle.pipeline,
-                &texture.create_view(&Default::default()),
-            );
-            let view = swizzle.texture.create_view(&Default::default());
+            let swizzle = staging.swizzle.as_ref().expect("made above");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &swizzle.view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -14544,7 +14556,7 @@ impl GpuRenderer {
                 ..Default::default()
             });
             pass.set_pipeline(&swizzle.pipeline);
-            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(0, &swizzle.bind, &[]);
             pass.draw(0..3, 0..1);
             drop(pass);
             &swizzle.texture
@@ -14633,9 +14645,14 @@ pub struct Readback {
     buffer: Option<wgpu::Buffer>,
     swizzle: Option<Swizzle>,
 }
+/// The pass a kept read copies the target to RGBA with, and what it binds:
+/// made for one target (`source`), and again for another.
 struct Swizzle {
     pipeline: wgpu::RenderPipeline,
+    source: wgpu::Texture,
+    bind: wgpu::BindGroup,
     texture: wgpu::Texture,
+    view: wgpu::TextureView,
 }
 
 /// A frame a window showed (`GpuRenderer::shown_frame`), its pixels

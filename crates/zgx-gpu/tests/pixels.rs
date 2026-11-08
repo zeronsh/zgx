@@ -6943,4 +6943,29 @@ fn reading_into_a_kept_buffer_reads_what_a_fresh_read_does() {
     let mut short = vec![7; 10];
     gpu.readback_into(&mut short, &mut staging).unwrap();
     assert_eq!(short, fresh);
+
+    // Another size: the kept pass and texture are made again for the new
+    // target, and read what a fresh read does.
+    gpu.resize(32, 24);
+    let mut small = Scene::new(32., 24.);
+    let small_root = small.root();
+    small.set_kind(small_root, NodeKind::Container(Layout::Overlay));
+    let dot = small.append(
+        small_root,
+        NodeKind::Panel {
+            layout: Layout::Overlay,
+            quad: QuadStyle {
+                fill: Color(10, 200, 90, 255),
+                ..Default::default()
+            },
+        },
+        fixed(8., 8.),
+    );
+    small.set_transform(dot, Transform { x: 4., y: 4. });
+    small.flush();
+    gpu.render(&small, &[Rect::new(0., 0., 32., 24.)]).unwrap();
+    let fresh = gpu.readback().unwrap();
+    assert_eq!(fresh.len(), 32 * 24 * 4);
+    gpu.readback_into(&mut kept, &mut staging).unwrap();
+    assert_eq!(kept, fresh);
 }
