@@ -165,7 +165,7 @@ fn wait(
     loop {
         {
             let mut state = shared.lock();
-            while !state.stop && !(state.wanted && state.ready.is_none()) {
+            while !state.stop && (!state.wanted || state.ready.is_some()) {
                 state = shared
                     .changed
                     .wait(state)
