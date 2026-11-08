@@ -6480,13 +6480,22 @@ fn mount_scroll(
         // scroll view that knows its width, with no word from here as that
         // changes; else what it holds is what sizes that.)
         let follows = fitted && scene.knows_its_size(root, (true, false), &sized_by_content);
+        // Scrolling down, all of the view's box, its content stretched across
+        // it: laid out with the view, so a new width reaches what it holds in
+        // the layout that makes it, not one more after this has seen it. (It
+        // is absolute: it adds nothing to the view's own size.)
+        let down = !horizontal;
         let style = Style {
-            width: (!follows).then_some(width),
-            width_percent: follows.then_some(1.),
-            height: (!fitted).then_some(height),
-            height_percent: fitted.then_some(1.),
+            width: (!follows && !down).then_some(width),
+            width_percent: (follows || down).then_some(1.),
+            height: (!fitted && !down).then_some(height),
+            height_percent: (fitted || down).then_some(1.),
             clip: true,
             absolute: !fitted,
+            align: match down {
+                true => crate::scene::Align::Stretch,
+                false => crate::scene::Align::default(),
+            },
             ..Default::default()
         };
         match fitted {
@@ -6494,7 +6503,8 @@ fn mount_scroll(
             false => scene.set_style_within(viewport, style, root),
         }
         let mut content_style = scene.style(content);
-        content_style.width = (!horizontal).then_some(width);
+        // Across: as wide as what it holds. Down: stretched (above).
+        content_style.width = None;
         content_style.height = (horizontal && !fitted).then_some(height);
         content_style.height_percent = fitted.then_some(1.);
         content_style.flex_shrink = 0.;

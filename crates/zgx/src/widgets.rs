@@ -8847,3 +8847,77 @@ mod input_draw_pass_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod scroll_viewport_tests {
+    use super::Ui;
+    use crate::compose::prelude::*;
+    use crate::reactive::Signal;
+
+    const WORDS: &str = "Words that wrap again at each width the scroll view is given";
+
+    /// A scroll view over wrapping text, as wide as `width` says, scrolled
+    /// to `offset`; laid out.
+    fn scrolled(
+        ui: &mut Ui,
+        width: &Signal<f32>,
+        offset: &Signal<f32>,
+    ) -> crate::compose::ViewHandle {
+        let width = width.clone();
+        let handle =
+            ui.mount(
+                column()
+                    .reactive_style(move || Styles::new().w(width.get()).h(200.))
+                    .child(scroll(offset.clone()).w_full().h_full().child(
+                        column().id("content").children(
+                            (0..12).map(|i| text(format!("{i}. {WORDS}")).text_wrap(true)),
+                        ),
+                    )),
+            );
+        for _ in 0..3 {
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush();
+        }
+        handle
+    }
+
+    /// Resized, a scroll view lays out once: what it holds takes the new
+    /// width in the layout that makes it, not a second one after the view's
+    /// pass has seen its size.
+    #[test]
+    fn a_scroll_views_content_takes_a_new_width_in_one_layout() {
+        let mut ui = Ui::new(800., 300.);
+        let (width, offset) = (ui.signal(400_f32), ui.signal(0_f32));
+        let handle = scrolled(&mut ui, &width, &offset);
+        let content = handle.find("content").unwrap();
+        for w in [460., 300., 520.] {
+            let before = ui.scene.borrow().layout_passes();
+            width.set(w);
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush();
+            assert_eq!(ui.scene.borrow().layout_passes() - before, 1, "at {w}");
+            assert_eq!(ui.scene.borrow().bounds(content).width, w, "at {w}");
+        }
+    }
+
+    /// Its offset still follows what it holds: scrolled to the end, then
+    /// widened (the text wraps into fewer lines), it is held at the new end.
+    #[test]
+    fn a_widened_scroll_view_keeps_its_offset_within_what_it_holds() {
+        let mut ui = Ui::new(800., 300.);
+        let (width, offset) = (ui.signal(260_f32), ui.signal(0_f32));
+        let handle = scrolled(&mut ui, &width, &offset);
+        let content = handle.find("content").unwrap();
+        offset.set(f32::MAX);
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        let tall = ui.scene.borrow().bounds(content).height;
+        assert_eq!(offset.get(), tall - 200., "at its end");
+        width.set(700.);
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        let short = ui.scene.borrow().bounds(content).height;
+        assert!(short < tall, "wider, it wraps into fewer lines");
+        assert_eq!(offset.get(), (short - 200.).max(0.), "held within it");
+    }
+}
