@@ -4695,6 +4695,72 @@ fn layout_ease(layout: &LayoutAnim) -> (crate::anime::ease::Ease, f64) {
     .resolve()
 }
 
+/// A size-animated box while it is mounted (`layout_box`): its content, the
+/// content's laid-out size, and its ease, if one has run.
+struct LiveBox {
+    content: zgx::compose::NodeHandle,
+    sizes: zgx::reactive::Signal<(f32, f32)>,
+    /// The content's size as the box last took it (what it eases from).
+    taken: Rc<std::cell::Cell<Option<(f32, f32)>>>,
+    /// What holds its margins (the space it shows past its content's).
+    slack: Rc<Element>,
+}
+impl LiveBox {
+    /// Whether its space is easing (it shows more or less than its content),
+    /// or its content changed and it hasn't taken that yet (it will, this
+    /// frame).
+    fn moving(&self) -> bool {
+        let now = self.sizes.with_untracked(|s| *s);
+        let untaken = self
+            .taken
+            .get()
+            .is_some_and(|t| (t.0 - now.0).abs() > 0.5 || (t.1 - now.1).abs() > 0.5);
+        untaken
+            || margin_of(&self.slack, Prop::Mb).abs() > 0.01
+            || margin_of(&self.slack, Prop::Mr).abs() > 0.01
+    }
+}
+/// A layout box's margin now (`layout_box`'s slack), 0 for none.
+fn margin_of(slack: &Element, prop: Prop) -> f32 {
+    slack
+        .animated
+        .borrow()
+        .styles
+        .iter()
+        .find(|(p, _)| *p == prop)
+        .and_then(|(_, lit)| match lit {
+            Lit::Len(zgx::layout::Length::Px(v)) => Some(*v),
+            Lit::Num(v) => Some(*v),
+            _ => None,
+        })
+        .unwrap_or(0.)
+}
+thread_local! {
+    /// Every size-animated box mounted, for a box to find those inside it.
+    static LIVE_BOXES: std::cell::RefCell<Vec<std::rc::Weak<LiveBox>>> = Default::default();
+}
+/// The size-animated boxes nearest inside `outer` (none between them and it),
+/// by identity.
+fn boxes_inside(outer: &LiveBox) -> Vec<Rc<LiveBox>> {
+    let inside: Vec<Rc<LiveBox>> = LIVE_BOXES.with(|all| {
+        let mut all = all.borrow_mut();
+        all.retain(|b| b.strong_count() > 0);
+        all.iter()
+            .filter_map(std::rc::Weak::upgrade)
+            .filter(|b| outer.content.holds(b.content.node()))
+            .collect()
+    });
+    inside
+        .iter()
+        .filter(|b| {
+            !inside
+                .iter()
+                .any(|other| other.content.holds(b.content.node()))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Wraps `inner` in a box whose size follows the inner content's, animated.
 /// The box is a contents node: `inner` lays out exactly as it would without
 /// it, at its new size at once (its percentages, `grow` and the scroll views
@@ -4704,6 +4770,12 @@ fn layout_ease(layout: &LayoutAnim) -> (crate::anime::ease::Ease, f64) {
 /// constraints never change, so a frame of the animation lays out only the
 /// box and its ancestors. Nothing is clipped unless `layout_clip` asks: then
 /// a clip inset follows the margin, cutting the content to the space.
+///
+/// A change that comes from a size-animated box inside it (a fold in a
+/// group that folds too) is that box's to ease: the space follows it frame
+/// for frame rather than easing after it again, which left the space lagging
+/// the content (what followed the box overlapping its foot, its clip cutting
+/// it). A box inside it mounting or going is its own change, eased as ever.
 fn layout_box(inner: View, layout: &LayoutAnim, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     let slack = Element::new(&low.runtime, None, Rc::new([]), "layout");
     let (enter, grow_h, grow_w, clip) = (layout.enter, layout.height, layout.width, layout.clip);
@@ -4716,7 +4788,17 @@ fn layout_box(inner: View, layout: &LayoutAnim, vm: &Rc<Vm>, low: &Rc<Lowering>)
         let (Some(sizes), Some(engine)) = (handle.observe_size(), engine) else {
             return;
         };
-        let last: std::cell::Cell<Option<(f32, f32)>> = Default::default();
+        let last: Rc<std::cell::Cell<Option<(f32, f32)>>> = Default::default();
+        let me = Rc::new(LiveBox {
+            content: handle.clone(),
+            sizes: sizes.clone(),
+            taken: last.clone(),
+            slack: target.clone(),
+        });
+        LIVE_BOXES.with(|all| all.borrow_mut().push(Rc::downgrade(&me)));
+        // The boxes inside it that were moving as it last looked: one that
+        // has just stopped (its last frame) is still the change's.
+        let moving_before: std::cell::RefCell<Vec<std::rc::Weak<LiveBox>>> = Default::default();
         let runtime = engine.runtime.clone();
         let effect = runtime.effect(move || {
             let size = sizes.get();
@@ -4724,6 +4806,20 @@ fn layout_box(inner: View, layout: &LayoutAnim, vm: &Rc<Vm>, low: &Rc<Lowering>)
                 return;
             }
             let previous = last.replace(Some(size));
+            // A box inside it that is moving (its content changed, or its
+            // space eases), or was the last time it looked (its last frame):
+            // the change is that box's, followed.
+            let moving: Vec<Rc<LiveBox>> = boxes_inside(&me)
+                .into_iter()
+                .filter(|b| b.moving())
+                .collect();
+            let follows = previous.is_some()
+                && (!moving.is_empty()
+                    || moving_before.borrow().iter().any(|b| b.strong_count() > 0));
+            *moving_before.borrow_mut() = moving.iter().map(Rc::downgrade).collect();
+            if follows {
+                return;
+            }
             // The margin now: what the box shows beyond (or short of) the
             // content's last size.
             let current = |prop| {
