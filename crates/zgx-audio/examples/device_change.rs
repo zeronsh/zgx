@@ -4,6 +4,9 @@
 //! The original default is put back however the run ends, short of the
 //! process being killed (it prints the device to put back by hand then).
 //!
+//! It changes a system setting (the default output), so a person runs it,
+//! on a machine they're at: never a script, an agent or CI.
+//!
 //! `cargo run -p zgx-audio --example device_change`
 #[cfg(target_os = "macos")]
 mod mac {

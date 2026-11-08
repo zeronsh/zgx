@@ -313,7 +313,7 @@ With zgx-audio:
   - It plays silence and switches the system's default output from the Studio Display speakers to the MacBook Pro speakers, then back.
   - The unit's device went 102 → 80 → 102, and it pulled 19,456, 18,944 and 18,944 frames in each 0.4 s: full rate, short of at most one 512-frame buffer at the switch.
   - The original default is restored however the run ends, short of the process being killed.
-  - It's an example rather than a test because it changes a system setting.
+  - It's an example, run only by a person at the machine, because it changes a system setting.
 
 Not yet:
 - **Windows output, run:** it's only type-checked here. CI shows whether a hosted runner has an endpoint. Running it there for sure means installing a virtual sound card in CI (VB-Cable, as LABSN/sound-ci-helpers does: a third-party driver downloaded at each run), which is a choice for review.
