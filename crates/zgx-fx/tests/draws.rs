@@ -243,6 +243,49 @@ fn with_motion_reduced_an_effect_holds_one_pose() {
 }
 
 #[test]
+fn a_metaball_is_whole_at_its_centre() {
+    // Its field climbs without bound there: an edge taken from its slope
+    // left dark pixels around each blob's centre, the background mixed in.
+    let _gpu = gpu_fixture();
+    let mut gpu = GpuRenderer::new(SIZE * 2, SIZE * 2).unwrap();
+    gpu.set_scale_factor(2.);
+    let fx: Fx = Metaballs::default().into();
+    let side = (SIZE * 2) as usize;
+    let mut specks = Vec::new();
+    for time in [0.1, 0.7, 1.2, 2.9, 4.4] {
+        let pixels = draw(&mut gpu, &fx, time, false, Instant::now());
+        // The background is about 52 in all, a blob's body 400 or more.
+        let level = |x: usize, y: usize| {
+            let i = (y * side + x) * 4;
+            pixels[i..i + 3].iter().map(|&c| c as i32).sum::<i32>()
+        };
+        let near = |x: usize, y: usize, r: usize| {
+            (y - r..=y + r).flat_map(move |ny| (x - r..=x + r).map(move |nx| (nx, ny)))
+        };
+        // The box, clear of its rounded corners.
+        for y in 184..316 {
+            for x in 144..336 {
+                // Well inside a blob, two pixels from any edge, it shades
+                // smoothly: no pixel a pit, far darker than the neighbours on
+                // both sides of it.
+                if !near(x, y, 2).all(|(nx, ny)| level(nx, ny) > 200) {
+                    continue;
+                }
+                let pit = [(1, 0), (0, 1), (1, 1), (1, -1)].iter().any(|&(dx, dy)| {
+                    let side =
+                        |s: i32| level((x as i32 + s * dx) as usize, (y as i32 + s * dy) as usize);
+                    side(1).min(side(-1)) - level(x, y) > 45
+                });
+                if pit {
+                    specks.push((time, x, y));
+                }
+            }
+        }
+    }
+    assert!(specks.is_empty(), "dark specks inside blobs: {specks:?}");
+}
+
+#[test]
 fn one_shots_overlap_within_their_pool_and_end() {
     let fx: Fx = Ripple::default().into();
     let start = Instant::now();
