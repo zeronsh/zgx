@@ -3147,6 +3147,25 @@ struct Batch {
     pixels: f32,
     promoted: f32,
 }
+/// Whether `draw`, scissored to `rect` (the region within its clip), can
+/// join a batch of its shading scissored to `batch`, under the batch's: a
+/// draw touches no pixel past its bounds (its quads' rasterized
+/// rectangles), so lying uncut within both it draws the same pixels under
+/// either. In a scroll view the rows wholly inside it (scissored to the
+/// window) then join the rows its edge cuts (to the view). Of one shading
+/// only: promoted into another's across clips (`merged_shading`), its
+/// pixels took the full shader where they had their own, and the GPU's
+/// cycles rose 3%. Not a layer's composite (in perspective its quad
+/// reaches past `quad_rect`) nor a backdrop filter's draw. (Within in
+/// logical units is within once `scissor` rounds both out to device
+/// pixels.)
+#[inline(never)]
+fn scissors_alike(batch: Rect, rect: Rect, draw: &Draw) -> bool {
+    rect_inside(draw.bounds, rect)
+        && rect_inside(draw.bounds, batch)
+        && draw.blur.is_none()
+        && !matches!(draw.source, TextureSource::Layer(_))
+}
 /// Device pixels a batch may draw with a costlier shader than they need, to
 /// join neighbours of another shading into one draw call: a draw costs the
 /// driver thousands of instructions, shading a small area costs little.
@@ -11140,7 +11159,10 @@ impl GpuRenderer {
                 * self.scale
                 * self.scale;
             if let Some(open) = &mut batch
-                && open.rect == rect
+                && (open.rect == rect
+                    || open.shading == shading
+                        && start == open.end
+                        && scissors_alike(open.rect, rect, draw))
                 && open.source == source
                 // From the kept frame, the instances it would span to this
                 // draw (draws outside `region`, a kept text's spare room),

@@ -5738,6 +5738,50 @@ fn small_quads_of_different_shading_share_a_draw() {
     assert_eq!(large, 3);
 }
 
+/// In a clipping box, what lies wholly inside it and what its edge cuts
+/// share draws: scissored to the window or to the box, the inside ones
+/// lose no pixel either way. Every pixel is as the box cut it.
+#[test]
+fn what_a_clip_cuts_and_what_lies_inside_it_share_a_draw() {
+    let _gpu_fixture = gpu_fixture();
+    use zgx::{compose::prelude::*, widgets::Ui};
+    let render = |wide: f32, clip: bool| {
+        let mut gpu = GpuRenderer::new(600, 400).unwrap();
+        gpu.set_scale_factor(2.);
+        let mut ui = Ui::new(300., 200.);
+        gpu.install_text(&mut ui.scene.borrow_mut());
+        // Rows of a short bar inside the box and a long one past its edge.
+        let rows = column().size(100., 100.).gap(2.).children((0..10).map(|_| {
+            row()
+                .gap(2.)
+                .child(div().size(10., 6.).shrink_0().bg(rgb(0x3366aa)))
+                .child(div().size(wide, 6.).shrink_0().bg(rgb(0x3366aa)))
+        }));
+        ui.mount(match clip {
+            true => rows.overflow_hidden(),
+            false => rows,
+        });
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        let draws = gpu.render(&ui.scene.borrow(), &damage).unwrap().draw_calls;
+        (draws, gpu.readback().unwrap())
+    };
+    let (draws, cut) = render(150., true);
+    // Twenty alternating clips, a draw each before.
+    assert!(draws <= 3, "{draws} draw calls");
+    // The long bars cut at the box's edge, as bars ending there draw.
+    let (_, ending) = render(88., false);
+    let differing = cut
+        .chunks(4)
+        .zip(ending.chunks(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        differing, 0,
+        "{differing} pixels differ from bars ending at the edge"
+    );
+}
+
 /// Opaque rounded and bordered panels draw a flat interior with the basic
 /// shader and only their edge bands with the full one: the same bytes as one
 /// quad, at fractional positions and sizes, per-corner radii and any scale.
