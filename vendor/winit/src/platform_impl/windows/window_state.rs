@@ -9,11 +9,12 @@ use std::sync::MutexGuard;
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::InvalidateRgn;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, EnableMenuItem, GetMenu, GetSystemMenu, GetWindowLongW, SendMessageW,
-    SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_BOTTOM, HWND_NOTOPMOST,
-    HWND_TOPMOST, MF_BYCOMMAND, MF_DISABLED, MF_ENABLED, SC_CLOSE, SWP_ASYNCWINDOWPOS,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREPOSITION, SWP_NOSIZE, SWP_NOZORDER,
-    SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, WINDOWPLACEMENT,
+    AdjustWindowRectEx, EnableMenuItem, GetMenu, GetSystemMenu, GetWindowLongW, IsZoomed,
+    SendMessageW, SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_BOTTOM,
+    HWND_NOTOPMOST, HWND_TOPMOST, MF_BYCOMMAND, MF_DISABLED, MF_ENABLED, SC_CLOSE,
+    SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREPOSITION, SWP_NOSIZE,
+    SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWMAXIMIZED,
+    SW_SHOWNOACTIVATE, WINDOWPLACEMENT,
     WINDOW_EX_STYLE, WINDOW_STYLE, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
     WS_CLIPSIBLINGS, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP,
     WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_EX_WINDOWEDGE, WS_MAXIMIZE, WS_MAXIMIZEBOX, WS_MINIMIZE,
@@ -330,7 +331,16 @@ impl WindowFlags {
         }
 
         if new.contains(WindowFlags::VISIBLE) {
-            let flag = if !self.contains(WindowFlags::MARKER_ACTIVATE) {
+            // A window to show maximized shows so at once (SW_SHOWMAXIMIZED):
+            // Windows maximizes it from its placement, keeping the frame it
+            // restores to, and activates and focuses it.
+            let show_maximized = diff.contains(WindowFlags::VISIBLE)
+                && new.contains(WindowFlags::MAXIMIZED)
+                && unsafe { IsZoomed(window) } == 0;
+            let flag = if show_maximized {
+                self.set(WindowFlags::MARKER_ACTIVATE, true);
+                SW_SHOWMAXIMIZED
+            } else if !self.contains(WindowFlags::MARKER_ACTIVATE) {
                 self.set(WindowFlags::MARKER_ACTIVATE, true);
                 SW_SHOWNOACTIVATE
             } else {
@@ -364,7 +374,11 @@ impl WindowFlags {
             }
         }
 
-        if diff.contains(WindowFlags::MAXIMIZED) || new.contains(WindowFlags::MAXIMIZED) {
+        // A hidden window maximizes as it shows: SW_MAXIMIZE would show and
+        // activate it now, and the SW_HIDE below would leave focus NULL.
+        if new.contains(WindowFlags::VISIBLE)
+            && (diff.contains(WindowFlags::MAXIMIZED) || new.contains(WindowFlags::MAXIMIZED))
+        {
             unsafe {
                 ShowWindow(window, match new.contains(WindowFlags::MAXIMIZED) {
                     true => SW_MAXIMIZE,
@@ -401,7 +415,14 @@ impl WindowFlags {
         }
 
         if diff != WindowFlags::empty() {
-            let (style, style_ex) = new.to_window_styles();
+            let (mut style, style_ex) = new.to_window_styles();
+            // A hidden window's maximized state is Windows' own until it
+            // shows (above): WS_MAXIMIZE written here would mark it maximized
+            // without its placement knowing, losing the frame it restores to.
+            if !new.contains(WindowFlags::VISIBLE) {
+                let current = unsafe { GetWindowLongW(window, GWL_STYLE) } as u32 & WS_MAXIMIZE;
+                style = (style & !WS_MAXIMIZE) | current;
+            }
 
             unsafe {
                 SendMessageW(window, event_loop::SET_RETAIN_STATE_ON_SIZE_MSG_ID.get(), 1, 0);
