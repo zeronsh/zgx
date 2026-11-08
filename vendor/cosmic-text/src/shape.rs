@@ -144,6 +144,21 @@ impl fmt::Debug for ShapeBuffer {
     }
 }
 
+/// zgx patch: `guess_segment_properties` for a buffer holding `run`, its
+/// direction already set. An ASCII run's script comes from its bytes: Latin
+/// if it has a letter, none otherwise, as every other ASCII character is
+/// Common. That's what the guess finds by looking up each character's script,
+/// and it sets no language. Any other run is guessed.
+fn guess_script(buffer: &mut harfrust::UnicodeBuffer, run: &str) {
+    if run.is_ascii() {
+        if run.bytes().any(|b| b.is_ascii_alphabetic()) {
+            buffer.set_script(harfrust::script::LATIN);
+        }
+    } else {
+        buffer.guess_segment_properties();
+    }
+}
+
 fn shape_fallback(
     scratch: &mut ShapeBuffer,
     glyphs: &mut Vec<ShapeGlyph>,
@@ -175,7 +190,7 @@ fn shape_fallback(
     } else {
         buffer.push_str(run);
     }
-    buffer.guess_segment_properties();
+    guess_script(&mut buffer, run);
 
     let rtl = matches!(buffer.direction(), harfrust::Direction::RightToLeft);
     assert_eq!(rtl, span_rtl);
@@ -4039,5 +4054,57 @@ mod classify_tests {
         // Text of left-to-right scripts and common punctuation passes.
         assert_eq!(classify("Résumé — naïve… ·×".as_bytes()), 0);
         assert_eq!(classify("Привет, мир! Γειά σου".as_bytes()), 0);
+    }
+}
+
+#[cfg(test)]
+mod ascii_script_tests {
+    use super::guess_script;
+    use harfrust::{Direction, UnicodeBuffer};
+
+    /// What `guess_segment_properties` makes of `run`, and what
+    /// `guess_script` does: script, direction and language.
+    fn both(run: &str) -> [(harfrust::Script, Direction, Option<harfrust::Language>); 2] {
+        let mut guessed = UnicodeBuffer::new();
+        guessed.set_direction(Direction::LeftToRight);
+        guessed.push_str(run);
+        guessed.guess_segment_properties();
+        let mut known = UnicodeBuffer::new();
+        known.set_direction(Direction::LeftToRight);
+        known.push_str(run);
+        guess_script(&mut known, run);
+        [
+            (guessed.script(), guessed.direction(), guessed.language()),
+            (known.script(), known.direction(), known.language()),
+        ]
+    }
+
+    /// Every ASCII character alone, and runs of letters, digits, punctuation
+    /// and spaces, get the script the guess gives them.
+    #[test]
+    fn an_ascii_run_gets_the_script_the_guess_finds() {
+        for byte in 0..128u8 {
+            let run = (byte as char).to_string();
+            let [guessed, known] = both(&run);
+            assert_eq!(guessed, known, "{byte:#04x}");
+        }
+        for run in [
+            "48.3 ms",
+            "12,345",
+            "p99 latency",
+            "#000123",
+            "  ",
+            "(-)",
+            "node-07",
+            "worker-00012.iad",
+            "\t\tTabbed",
+            "~!@#$%^&*()_+",
+        ] {
+            let [guessed, known] = both(run);
+            assert_eq!(guessed, known, "{run:?}");
+        }
+        // Not ASCII: still guessed.
+        let [guessed, known] = both("caf\u{e9} \u{65e5}\u{672c}");
+        assert_eq!(guessed, known);
     }
 }
