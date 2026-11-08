@@ -100,6 +100,10 @@ fn main() {
             titles[3..].contains(&"Services") && !items[0].1,
             "{items:?}"
         );
+        assert!(
+            debug_menu_bar_services_filled(&own("Check for Updates…", true)).unwrap(),
+            "with the app's own items first, AppKit fills another Services menu"
+        );
         println!("menu_services: the app's own items lead the application menu");
 
         // The app's menus changing only their items' titles and states are

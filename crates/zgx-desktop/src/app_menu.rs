@@ -1095,11 +1095,16 @@ fn list_open_windows() {
 #[cfg(target_os = "macos")]
 fn menu_bar_services_item() -> Option<objc2::rc::Retained<objc2_app_kit::NSMenuItem>> {
     let mtm = objc2::MainThreadMarker::new()?;
-    objc2_app_kit::NSApplication::sharedApplication(mtm)
+    let application = objc2_app_kit::NSApplication::sharedApplication(mtm)
         .mainMenu()?
         .itemAtIndex(0)?
-        .submenu()?
-        .itemAtIndex(0)
+        .submenu()?;
+    // After the app's own items (`APPLICATION_MENU`), when it has some: the
+    // last item so titled, as theirs come first.
+    (0..application.numberOfItems())
+        .rev()
+        .filter_map(|i| application.itemAtIndex(i))
+        .find(|item| item.title().to_string() == "Services")
 }
 /// While `on` (focus in a node that records a shortcut,
 /// `InputDispatcher::captures_keys`), every key goes to zgx's view and the
@@ -1291,8 +1296,24 @@ pub fn debug_menu_bar_services_filled(menus: &[AppMenu]) -> Result<bool, AppMenu
     let Some(mtm) = objc2::MainThreadMarker::new() else {
         return Ok(false);
     };
-    let filled = objc2_app_kit::NSApplication::sharedApplication(mtm).servicesMenu();
-    Ok(filled.is_some() && filled == menu_bar_services_item().and_then(|item| item.submenu()))
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    let Some(filled) = app.servicesMenu() else {
+        return Ok(false);
+    };
+    let Some(application) = app
+        .mainMenu()
+        .and_then(|bar| bar.itemAtIndex(0))
+        .and_then(|item| item.submenu())
+    else {
+        return Ok(false);
+    };
+    // Shown by the application menu's Services item, and by no other item.
+    let shown_by: Vec<String> = (0..application.numberOfItems())
+        .filter_map(|i| application.itemAtIndex(i))
+        .filter(|item| item.submenu().as_deref() == Some(&*filled))
+        .map(|item| item.title().to_string())
+        .collect();
+    Ok(shown_by == ["Services"])
 }
 /// The standard edit items' shortcuts while zgx's own view has the keyboard.
 /// AppKit offers a ⌘ key to the menu bar before the view, and the item for it
