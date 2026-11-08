@@ -157,3 +157,13 @@ fn menus_popovers_and_tooltips_default_to_the_built_in_look() {
         );
     }
 }
+
+#[test]
+fn windows_look_reshapes_menus_popovers_and_tooltips() {
+    let _gpu = gpu_fixture();
+    let alone = drawn(Vec::new());
+    let windows = drawn(zgx::theme::windows_look());
+    assert!(windows != alone, "Windows' look changes nothing");
+    // Drawn again, the same: its tokens are the frame's alone.
+    assert!(drawn(zgx::theme::windows_look()) == windows);
+}

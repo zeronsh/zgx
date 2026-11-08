@@ -30,6 +30,7 @@
 mod bind;
 mod file;
 pub(crate) mod json;
+mod platform;
 mod scope;
 mod tokens;
 mod value;
@@ -40,6 +41,7 @@ pub(crate) use bind::{
 };
 pub use bind::{Field, Themed};
 pub use file::{Theme, ThemeError, ThemeKind, ThemeOverride, TokenInput};
+pub use platform::windows_look;
 pub(crate) use scope::Body;
 pub use scope::{Appearance, DARK, LIGHT, SystemPreferences, ThemeReader, ThemeScope, Themes};
 pub use tokens::{

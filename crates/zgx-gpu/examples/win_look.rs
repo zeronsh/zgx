@@ -8,7 +8,9 @@
 //! cargo run -p zgx-gpu --example win_look --release -- look.png
 //! ```
 //!
-//! `SCALE` pixels a point (2 by default). Each cell is its own window, so
+//! `SCALE` pixels a point (2 by default); `LOOK=windows` (and on Windows,
+//! where zgx-desktop sets it as the system's) with Windows' look
+//! (`zgx::theme::windows_look`). Each cell is its own window, so
 //! each holds its own focus: an open menu with the keyboard on its second
 //! item, an open popover, a tooltip under the pointer, a button focused
 //! from the keyboard, and a list with its scrollbar.
@@ -42,9 +44,11 @@ fn cell(
     gpu.set_scale_factor(scale);
     let mut ui = Ui::new(CELL.0, CELL.1);
     gpu.install_text(&mut ui.scene.borrow_mut());
-    zgx::theme::Themes::of(&ui.runtime)
-        .set(theme)
-        .expect("a built-in theme");
+    let themes = zgx::theme::Themes::of(&ui.runtime);
+    themes.set(theme).expect("a built-in theme");
+    if cfg!(windows) || std::env::var("LOOK").is_ok_and(|look| look == "windows") {
+        themes.set_system_tokens(zgx::theme::windows_look());
+    }
     let view = build(&ui);
     let view = ui.mount(
         column()
