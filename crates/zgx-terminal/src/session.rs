@@ -226,10 +226,13 @@ pub struct Session {
     shared: Arc<Shared>,
     term: Arc<FairMutex<Term>>,
     pid: u32,
-    /// The pty's controller side, for its foreground process group.
+    /// The pty's controller side, for its foreground process group (none
+    /// replaying).
     #[cfg(unix)]
-    controller: std::os::fd::OwnedFd,
+    controller: Option<std::os::fd::OwnedFd>,
     exited: Arc<Mutex<Option<i32>>>,
+    /// A replay's parsing: output fed (`feed`) rather than read.
+    replay: Option<Mutex<Parse>>,
 }
 
 /// Bytes read before the screen is let go of for the app to draw.
@@ -325,9 +328,63 @@ impl Session {
             term,
             pid,
             #[cfg(unix)]
-            controller,
+            controller: Some(controller),
             exited,
+            replay: None,
         })
+    }
+
+    /// A session with no program: what `feed` is given is parsed as its
+    /// output, on the thread feeding it, as the session's thread parses a
+    /// program's. For benches, whose counts would move with how a pty
+    /// hands output over and when another thread reads it. What it would
+    /// write to a program goes nowhere.
+    #[doc(hidden)]
+    pub fn replay(
+        options: &SessionOptions,
+        size: GridSize,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        let (tx, _) = mpsc::channel();
+        let shared = Arc::new(Shared {
+            pending: AtomicBool::new(false),
+            events: Mutex::new(Vec::new()),
+            wake: Box::new(wake),
+            size: Mutex::new(size),
+            palette: Mutex::new(crate::Palette::default()),
+            colors_asked: Mutex::new(Vec::new()),
+            tx,
+            poller: Arc::new(Poller::new().expect("a poller")),
+        });
+        let config = Config {
+            scrolling_history: options.scrollback,
+            osc52: Osc52::CopyPaste,
+            kitty_keyboard: true,
+            ..Config::default()
+        };
+        let term = Term::new(config, &size, Listener(shared.clone()));
+        Self {
+            shared,
+            term: Arc::new(FairMutex::new(term)),
+            pid: 0,
+            #[cfg(unix)]
+            controller: None,
+            exited: Arc::new(Mutex::new(None)),
+            replay: Some(Mutex::new(Parse::default())),
+        }
+    }
+    /// Parse `bytes` as a replay's output (see `replay`); nothing for a
+    /// session running a program.
+    #[doc(hidden)]
+    pub fn feed(&self, bytes: &[u8]) {
+        let Some(parse) = &self.replay else {
+            return;
+        };
+        let mut parse = parse.lock().unwrap();
+        parse.feed(&self.shared, &mut self.term.lock(), bytes);
+        if parse.parser.sync_bytes_count() < bytes.len() {
+            self.shared.mark();
+        }
     }
 
     /// Send `bytes` to the program, as typed.
@@ -383,15 +440,18 @@ impl Session {
     /// group on Unix, the shell's newest descendant on Windows; the shell
     /// itself when nothing else runs (0 if unknown).
     pub fn foreground_pid(&self) -> u32 {
-        if self.exited().is_some() {
+        if self.exited().is_some() || self.replay.is_some() {
             return 0;
         }
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
+            let Some(controller) = &self.controller else {
+                return self.pid;
+            };
             // SAFETY: the descriptor is ours (`controller`), open while
             // `self` is; the call only reads the terminal's process group.
-            let group = unsafe { libc::tcgetpgrp(self.controller.as_raw_fd()) };
+            let group = unsafe { libc::tcgetpgrp(controller.as_raw_fd()) };
             if group > 0 { group as u32 } else { self.pid }
         }
         #[cfg(windows)]
@@ -463,6 +523,38 @@ struct Parse {
     sniffer: Sniffer,
     /// When the running command started (OSC 133;C).
     command_started: Option<Instant>,
+}
+impl Parse {
+    /// Parse `bytes` of output into the screen, reporting the commands the
+    /// screen model leaves to its embedder.
+    fn feed(&mut self, shared: &Shared, term: &mut Term, bytes: &[u8]) {
+        // The screen model's events and the sniffed commands' in the
+        // order the program wrote them: parse up to each command's end
+        // before reporting it.
+        let mut parsed = 0;
+        let (started, parser) = (&mut self.command_started, &mut self.parser);
+        self.sniffer.feed(bytes, |end, osc| {
+            parser.advance(term, &bytes[parsed..end]);
+            parsed = end;
+            let event = match osc {
+                Osc::Pwd(path) => SessionEvent::Pwd(path),
+                Osc::CommandStarted => {
+                    *started = Some(Instant::now());
+                    return;
+                }
+                Osc::CommandFinished(exit_code) => SessionEvent::CommandFinished {
+                    exit_code,
+                    duration_ms: started
+                        .take()
+                        .map_or(0, |at| at.elapsed().as_millis() as u64),
+                },
+                Osc::Progress(progress) => SessionEvent::Progress(progress),
+                Osc::Notification { title, body } => SessionEvent::Notification { title, body },
+            };
+            shared.push(event);
+        });
+        parser.advance(term, &bytes[parsed..]);
+    }
 }
 impl Io {
     fn run(mut self) {
@@ -603,33 +695,7 @@ impl Io {
             };
             let bytes = &buffer[..read];
             let term = term.get_or_insert_with(|| self.term.lock_unfair());
-            // The screen model's events and the sniffed commands' in the
-            // order the program wrote them: parse up to each command's end
-            // before reporting it.
-            let mut parsed = 0;
-            let (shared, started, parser) =
-                (&self.shared, &mut parse.command_started, &mut parse.parser);
-            parse.sniffer.feed(bytes, |end, osc| {
-                parser.advance(&mut **term, &bytes[parsed..end]);
-                parsed = end;
-                let event = match osc {
-                    Osc::Pwd(path) => SessionEvent::Pwd(path),
-                    Osc::CommandStarted => {
-                        *started = Some(Instant::now());
-                        return;
-                    }
-                    Osc::CommandFinished(exit_code) => SessionEvent::CommandFinished {
-                        exit_code,
-                        duration_ms: started
-                            .take()
-                            .map_or(0, |at| at.elapsed().as_millis() as u64),
-                    },
-                    Osc::Progress(progress) => SessionEvent::Progress(progress),
-                    Osc::Notification { title, body } => SessionEvent::Notification { title, body },
-                };
-                shared.push(event);
-            });
-            parser.advance(&mut **term, &bytes[parsed..]);
+            parse.feed(&self.shared, term, bytes);
             processed += read;
             if processed >= MAX_LOCKED_READ {
                 break;

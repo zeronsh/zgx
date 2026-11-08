@@ -108,6 +108,16 @@ name = "luau_pages"
 path = "tests/luau_pages.rs"
 
 [[test]]
+# Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
+name = "md_chunk_flat"
+path = "tests/md_chunk_flat.rs"
+
+[[test]]
+# Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
+name = "md_chunk_flat_render"
+path = "tests/md_chunk_flat_render.rs"
+
+[[test]]
 # Its own process: what `compile_ahead` compiled is the process's.
 name = "compile_ahead"
 path = "tests/compile_ahead.rs"

@@ -5340,6 +5340,8 @@ dependencies = [
  "windows-sys 0.59.0",
  "zgx",
  "zgx-alacritty-terminal",
+ "zgx-gpu",
+ "zgx-workload",
 ]
 
 [[package]]
