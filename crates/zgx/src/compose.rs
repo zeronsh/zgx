@@ -2289,7 +2289,7 @@ pub use crate::compose_context_menu::{ContextMenuEvent, ContextMenuSpan};
 pub use crate::compose_modal::ModalPlacement;
 pub use crate::compose_popover::{Edge as PlacementEdge, Placement, Side as PlacementSide};
 pub use crate::compose_rich::{RichTextView, SpanHover, SpanIcon, TextSpan, rich_text, text_span};
-pub use crate::compose_tooltip::Tooltip;
+pub use crate::compose_tooltip::{Tooltip, TooltipTiming, set_tooltip_timing};
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
 pub fn rich_text_signal(compute: impl FnMut() -> Vec<TextSpan> + 'static) -> View {
     View::new(Kind::RichText(Box::new(compute)))

@@ -227,3 +227,54 @@ fn a_menu_matching_its_trigger_is_as_wide_as_it() {
     );
     assert!(panel.width >= trigger.width, "{panel:?} {trigger:?}");
 }
+
+/// The system's timing (`set_tooltip_timing`, which a desktop host sets:
+/// Windows' from its hover time): a reshow within the window waits its own
+/// delay rather than none, a single timer.
+#[test]
+fn a_reshow_waits_as_the_systems_timing_says() {
+    use zgx::compose::{TooltipTiming, set_tooltip_timing};
+    set_tooltip_timing(TooltipTiming {
+        delay: Duration::from_millis(100),
+        reshow_within: Duration::from_secs(1),
+        reshow_delay: Duration::from_millis(400),
+        reshow_from_open: false,
+    });
+    let mut ui = Ui::new(300., 200.);
+    let executor = Rc::new(RefCell::new(LocalExecutor::new()));
+    ui.mount(provide(
+        TaskRunner::from_executor(executor.clone()),
+        column()
+            .p(60.)
+            .gap(20.)
+            .child(div().size(60., 24.).tooltip("First"))
+            .child(div().size(60., 24.).tooltip("Second")),
+    ));
+    ui.prepare_frame();
+    let until = |ui: &mut Ui, ms: u64, done: &dyn Fn(&Ui) -> bool| {
+        let end = std::time::Instant::now() + Duration::from_millis(ms);
+        loop {
+            while executor.borrow_mut().tick() > 0 {}
+            ui.prepare_frame();
+            if done(ui) {
+                return true;
+            }
+            if std::time::Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    hover(&mut ui, 70., 70.);
+    assert!(until(&mut ui, 2000, &|ui| showing(ui, "First")));
+    hover(&mut ui, 70., 110.);
+    assert!(
+        !until(&mut ui, 250, &|ui| showing(ui, "Second")),
+        "a reshow waits its delay"
+    );
+    assert!(
+        until(&mut ui, 3000, &|ui| showing(ui, "Second")),
+        "then shows"
+    );
+    set_tooltip_timing(TooltipTiming::default());
+}
