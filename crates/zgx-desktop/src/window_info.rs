@@ -100,7 +100,9 @@ pub struct DisplayInfo {
     pub primary: bool,
 }
 /// What this platform lets a window do, so an app can offer only what works.
+/// Apps read it; only zgx builds one, so it can gain fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WindowCapabilities {
     /// The window's position on the desktop can be read (not on Wayland).
     pub global_position: bool,

@@ -1632,7 +1632,7 @@ mod tests {
     /// Windows takes the accent's blur on a popup's window, which is never
     /// activated, and takes it off again: what a system backdrop would not
     /// show there. (Windows reads an accent back to no one, so this is all
-    /// a test can see; `windows_popup_glass_probe.py` looks at the pixels.)
+    /// a test can see of it.)
     #[test]
     fn a_never_activated_popup_window_takes_the_accent() {
         if !crate::window_chrome::popup_blur_behind() {
