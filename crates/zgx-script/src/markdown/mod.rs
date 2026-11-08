@@ -455,6 +455,7 @@ pub(crate) fn script(
             // the whole list each time a chunk lands (`value::derive`).
             if let Some(old) = last.replace(blocks.clone()) {
                 crate::value::derive(lua, &old, &blocks)?;
+                crate::value::hold(lua, &blocks)?;
             }
             touch(
                 &mut parsed.stream_order.borrow_mut(),
