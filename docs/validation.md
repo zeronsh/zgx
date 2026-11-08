@@ -1250,21 +1250,6 @@ itself stays active: AppKit tells the window it lost key status the same way
 when another app takes it, but the application's own `resignActive` is not
 exercised.
 
-## macOS menu bar set to hide itself
-
-`scripts/macos_menu_bar_probe.py` (the `menu_bar_probe` example, launched with
-`-_HIHideMenuBar YES`, the process's own setting) posts 200 mouse moves to its
-own window and counts the views AppKit makes for the menu bar over them,
-through a hook on its private `_newMenuBarStackViewWithAppearance:` (the
-probe's, not the library's). An app that activated before its first main menu
-was in (zgx sets its bar after the first frame; the activation winit asks for
-at launch arrives at about the same time) had AppKit make the bar's windows
-again for every move: 400 views over 200 moves, about 0.3 ms of the app's CPU
-a move, in most launches of the mail example. With the host showing the bar
-as it already is once its first bar is in (`+[NSMenu setMenuBarVisible:]`),
-the probe's launches that activated first make none over their moves (Apple
-M5 Max, macOS 26.4); without it, the first such launch made 400.
-
 ## macOS cursors, Insert, held drags, file drops and title bars
 
 `scripts/macos_native_checks_probe.py` runs the native_checks_probe

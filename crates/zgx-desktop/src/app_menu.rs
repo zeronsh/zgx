@@ -1184,22 +1184,6 @@ pub(crate) fn show_menus(
     *current = Some(replacement);
     Ok(false)
 }
-/// AppKit's menu bar made again as it is shown, once the app's first bar is
-/// in. With the bar set to hide itself (System Settings, "Automatically hide
-/// and show the menu bar"), AppKit makes its windows as the app activates;
-/// activated before it has a main menu, as an app whose bar follows its
-/// first frame can be (the activation winit asks for at launch arrives at
-/// about the same time), they are never made with the representation that
-/// keeps them, and every mouse move made them again: 0.3 ms of the app's
-/// CPU a move. Showing the bar as it already is has AppKit make them.
-#[cfg(target_os = "macos")]
-pub(crate) fn settle_menu_bar() {
-    use objc2_app_kit::NSMenu;
-    let Some(mtm) = objc2::MainThreadMarker::new() else {
-        return;
-    };
-    NSMenu::setMenuBarVisible(NSMenu::menuBarVisible(mtm), mtm);
-}
 /// What `debug_menu_change` saw.
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
