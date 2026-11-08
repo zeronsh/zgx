@@ -1555,6 +1555,10 @@ struct LayerCache {
     /// first), and in the one before (`prepare_layer`): unchanged since
     /// then, it is still; changed, it moves, and keeps its raster.
     seen: Seen,
+    /// Where its texel grid lies from its box's corner, within a texel:
+    /// kept as it is while it moves, never worked out again from where its
+    /// texels landed (`prepare_layer`).
+    phase: (f32, f32),
     /// Promoted by a local transform rather than isolation: kept a while
     /// once back at identity (`LAYER_PARK_FRAMES`).
     transformed: bool,
@@ -4058,6 +4062,12 @@ pub struct GpuRenderer {
     /// at a scale its glyphs fit instead (`prepare_layer`): then it is no
     /// issue.
     layer_glyph_too_large: (f32, bool),
+    /// A frame drawn again for layers drawn from another corner
+    /// (`render_once`): it is not drawn a third time.
+    redrawing_shifted: bool,
+    /// Magnified layers being drawn again no finer than their glyphs fit
+    /// (`prepare_layer`): each once.
+    redrawing_glyphs: Vec<NodeId>,
     /// A kept file's pixels were uploaded (`take_images_uploaded`).
     images_uploaded: bool,
     /// Images' own textures (`upload_image`), by the frame each was last
@@ -4733,6 +4743,8 @@ impl GpuRenderer {
             images_awaited: false,
             layer_incomplete: false,
             layer_glyph_too_large: (0., false),
+            redrawing_shifted: false,
+            redrawing_glyphs: Vec::new(),
             images_uploaded: false,
             image_drawn: FxHashMap::default(),
             images_gone: Default::default(),
@@ -5596,10 +5608,16 @@ impl GpuRenderer {
             }
         }
         // The frame again with those damaged too: its layers are current
-        // now, drawn from the same corners, so it goes this way once.
-        if !shifted.is_empty() && self.plane.is_none() {
+        // now, drawn from the same corners, so it goes this way once (a
+        // layer drawn again there, waiting on a picture, draws from the
+        // same corner; were it not to, this frame goes on rather than
+        // around again).
+        if !shifted.is_empty() && self.plane.is_none() && !self.redrawing_shifted {
             let damage: Vec<Rect> = damage.iter().copied().chain(shifted).collect();
-            let mut stats = self.render_once(scene, &damage)?;
+            self.redrawing_shifted = true;
+            let again = self.render_once(scene, &damage);
+            self.redrawing_shifted = false;
+            let mut stats = again?;
             add_layer_stats(&mut stats, &layer_stats);
             stats.layer_repaints += layer_stats.layer_repaints - 1;
             stats.layer_partial_repaints += layer_stats.layer_partial_repaints;
@@ -6022,26 +6040,30 @@ impl GpuRenderer {
         let aligned = placed
             .filter(|_| at_scale && !exact && !moving && factor != 1.)
             .and_then(|placed| placed.aligned(scale));
-        // Moving, its texels where they were at this scale (from its box's
-        // corner, as it moved); else counted from its box's corner.
-        let anchor = self
+        // Moving, its texels where they were at this scale: its grid's
+        // phase from its box's corner kept as it was (worked out again from
+        // where they landed, it drifts a little each frame, and now and then
+        // by a texel); else counted from its box's corner.
+        let kept_phase = self
             .layers
             .get(&id)
             .filter(|cache| moving && cache.factor == factor.to_bits())
-            .map_or((root.x, root.y), |cache| {
-                (
-                    cache.bounds.x + root.x - cache.root_origin.0,
-                    cache.bounds.y + root.y - cache.root_origin.1,
-                )
-            });
+            .map(|cache| cache.phase);
+        let phase = kept_phase.unwrap_or((0., 0.));
+        // The grid's line at or before `edge`, from `from` (the box's
+        // corner): a whole texel past it or short of it when `edge` lies a
+        // hair either side of a line, as the border texel does.
+        let on_grid = |edge: f32, from: f32, phase: f32| {
+            from + phase + ((edge - from - phase) * scale + 1e-3).floor() / scale
+        };
         let (x, y) = match (exact && factor != 1., aligned) {
             (true, _) => (
                 root.x + ((bounds.x - root.x) * scale).floor() / scale,
                 root.y + ((bounds.y - root.y) * scale).floor() / scale,
             ),
             (false, None) if magnifying => (
-                anchor.0 + ((bounds.x - anchor.0) * scale).floor() / scale,
-                anchor.1 + ((bounds.y - anchor.1) * scale).floor() / scale,
+                on_grid(bounds.x, root.x, phase.0),
+                on_grid(bounds.y, root.y, phase.1),
             ),
             (false, Some(grid)) => {
                 // Back from the texel corner to the pixel corner before it.
@@ -6064,6 +6086,13 @@ impl GpuRenderer {
         let width = (width * scale).ceil().max(1.) as u32;
         let height = (height * scale).ceil().max(1.) as u32;
         let bounds = Rect::new(x, y, width as f32 / scale, height as f32 / scale);
+        let phase = kept_phase.unwrap_or_else(|| {
+            let within = |at: f32, from: f32| {
+                let off = at - from;
+                off - (off * scale).floor() / scale
+            };
+            (within(x, root.x), within(y, root.y))
+        });
         // Where all of it shows in the window, if it does.
         let window = shown.and_then(|shown| shown.window(content));
         // Its window's damage, back in its own space: where its pixels can
@@ -6274,6 +6303,7 @@ impl GpuRenderer {
                 cropped,
                 glyphs: found,
                 seen,
+                phase,
                 transformed,
                 used: frame,
                 parked: false,
@@ -6282,8 +6312,9 @@ impl GpuRenderer {
                 incomplete: std::mem::take(&mut self.layer_incomplete),
             },
         );
-        if found > glyphs {
-            return self.prepare_layer(
+        if found > glyphs && !self.redrawing_glyphs.contains(&id) {
+            self.redrawing_glyphs.push(id);
+            let again = self.prepare_layer(
                 scene,
                 id,
                 magnified,
@@ -6293,6 +6324,8 @@ impl GpuRenderer {
                 stats,
                 room,
             );
+            self.redrawing_glyphs.pop();
+            return again;
         }
         Ok(())
     }
