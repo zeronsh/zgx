@@ -512,6 +512,9 @@ jobs:
       - run: cargo test -p zgx-fx --locked
       # Menus, popovers and tooltips in Windows' shapes there (WinUI's).
       - run: "cargo test -p zgx --test overlays --locked -- composition_menu::a_menu_takes_its_platforms_shape"
+      # Focus drawn as Windows' focus visual there (outside the control,
+      # two rings), as the Linux and macOS jobs test it inside.
+      - run: "cargo test -p zgx --test input --locked -- focus_visible::"
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # The swap chain's alpha (opaque windows aren't blended by DWM, #513)

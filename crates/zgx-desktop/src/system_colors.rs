@@ -56,7 +56,10 @@ fn tokens() -> Vec<(TokenId, TokenInput)> {
     }
     #[cfg(windows)]
     {
-        let mut tokens = windows_contrast().unwrap_or_else(windows_selection);
+        // Windows 11's colours for focus and scrollbars, under high
+        // contrast's or the accent's.
+        let mut tokens = zgx::theme::windows_look();
+        tokens.extend(windows_contrast().unwrap_or_else(windows_selection));
         tokens.extend(windows_motion());
         tokens
     }
