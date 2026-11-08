@@ -595,8 +595,26 @@ impl ThemeScope {
     /// one, including when this one's theme changes.
     pub fn child(self: &Rc<Self>, spec: ThemeOverride) -> Rc<ThemeScope> {
         let child = ThemeScope::new(self.shared.clone(), Some(self.clone()), spec);
-        self.children.borrow_mut().push(Rc::downgrade(&child));
+        let mut children = self.children.borrow_mut();
+        // A `Weak` keeps its scope's allocation, so those gone are let go of
+        // before this list grows: it would otherwise hold one for every scope
+        // ever made under this one, until the theme next changed.
+        if children.len() == children.capacity() {
+            children.retain(|c| c.strong_count() > 0);
+        }
+        children.push(Rc::downgrade(&child));
+        drop(children);
         child
+    }
+    /// At rest, what scopes gone left here and under here goes.
+    fn rest(&self) {
+        let live: Vec<Rc<ThemeScope>> = {
+            let mut children = self.children.borrow_mut();
+            children.retain(|c| c.strong_count() > 0);
+            children.shrink_to_fit();
+            children.iter().filter_map(Weak::upgrade).collect()
+        };
+        live.iter().for_each(|child| child.rest());
     }
     /// Change what this child scope overrides; what reads changed tokens
     /// restyles. (The root scope follows `Themes::set` instead.)
@@ -621,6 +639,10 @@ pub struct Themes {
     root: Rc<ThemeScope>,
 }
 impl Themes {
+    /// A window at rest: what scopes no longer in use left behind goes.
+    pub fn rest(&self) {
+        self.root.rest();
+    }
     /// The runtime's themes, created with the built-in dark theme applied.
     pub fn of(runtime: &Runtime) -> Rc<Themes> {
         runtime.extension(Themes::new)
@@ -1014,5 +1036,49 @@ fn read_file(path: &Path, reader: Option<&ReadText>) -> Result<Theme, ThemeError
         .map_err(fail)
     } else {
         Theme::from_value(&root, Some(&stem)).map_err(fail)
+    }
+}
+
+#[cfg(test)]
+mod scopes_gone {
+    use super::*;
+
+    fn root() -> (crate::reactive::Runtime, Rc<ThemeScope>) {
+        let runtime = crate::reactive::Runtime::new();
+        let root = Themes::of(&runtime).root().clone();
+        (runtime, root)
+    }
+
+    #[test]
+    fn scopes_made_and_dropped_leave_no_allocation_behind() {
+        let (_runtime, root) = root();
+        for _ in 0..10_000 {
+            drop(root.child(ThemeOverride::default()));
+        }
+        // (Each entry keeps its scope's allocation, so this is the leak itself.)
+        assert!(root.children.borrow().len() <= 4, "{}", root.children.borrow().len());
+    }
+
+    #[test]
+    fn scopes_in_use_stay_listed_and_at_rest_only_they_do() {
+        let (_runtime, root) = root();
+        let kept: Vec<_> = (0..100).map(|_| root.child(ThemeOverride::default())).collect();
+        for _ in 0..1_000 {
+            drop(root.child(ThemeOverride::default()));
+        }
+        let live = root.children.borrow().iter().filter(|c| c.strong_count() > 0).count();
+        assert_eq!(live, kept.len(), "a theme change must still reach every one");
+        root.rest();
+        assert_eq!(root.children.borrow().len(), kept.len());
+    }
+
+    #[test]
+    fn at_rest_a_scope_in_use_lets_go_of_those_gone_under_it() {
+        let (_runtime, root) = root();
+        let middle = root.child(ThemeOverride::default());
+        let _kept = middle.child(ThemeOverride::default());
+        drop(middle.child(ThemeOverride::default()));
+        root.rest();
+        assert_eq!(middle.children.borrow().len(), 1);
     }
 }
