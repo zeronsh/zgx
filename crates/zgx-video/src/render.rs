@@ -123,6 +123,16 @@ pub fn render(
     options: &RenderOptions,
     progress: impl FnMut(Progress) -> bool,
 ) -> Result<Report, String> {
+    render_heard(options, progress).map(|(report, _)| report)
+}
+
+/// [`render`], and the sounds its stage heard placed (with the composition's
+/// rate), which its mix was made of: for tests, against [`placed_audio`].
+#[doc(hidden)]
+pub fn render_heard(
+    options: &RenderOptions,
+    progress: impl FnMut(Progress) -> bool,
+) -> Result<(Report, Heard), String> {
     let timing = options.timing();
     if options.concurrency > 1 && options.resolved_format()? != Format::Gif {
         return render_chunks(options, progress);
@@ -139,16 +149,24 @@ pub fn render(
     })
 }
 
+/// The sounds a stage heard placed, and the composition's rate they count
+/// in: none for a view, which places none.
+#[doc(hidden)]
+pub type Heard = Option<(Vec<AudioClip>, f64)>;
+
 /// Something that plays and may place sounds.
 pub(crate) trait Playing {
     fn film(&mut self) -> &mut Film;
-    fn sounds(&mut self, options: &RenderOptions) -> Result<Option<(Vec<AudioClip>, f64)>, String>;
+    /// The sounds placed in time for frames `first` to `end` of a file at
+    /// `output_fps`, and the composition's rate: it steps on, drawing
+    /// nothing, through the last frame of the composition their mix covers.
+    fn heard(&mut self, output_fps: f64, first: u64, end: u64) -> Result<Heard, String>;
 }
 impl Playing for Film {
     fn film(&mut self) -> &mut Film {
         self
     }
-    fn sounds(&mut self, _: &RenderOptions) -> Result<Option<(Vec<AudioClip>, f64)>, String> {
+    fn heard(&mut self, _: f64, _: u64, _: u64) -> Result<Heard, String> {
         Ok(None)
     }
 }
@@ -156,9 +174,51 @@ impl Playing for ScriptStage {
     fn film(&mut self) -> &mut Film {
         &mut self.film
     }
-    fn sounds(&mut self, options: &RenderOptions) -> Result<Option<(Vec<AudioClip>, f64)>, String> {
-        placed_audio(options).map(Some)
+    fn heard(&mut self, output_fps: f64, first: u64, end: u64) -> Result<Heard, String> {
+        let fps = self.composition().fps;
+        let (skip, frames) = mixed_frames(fps, output_fps, first, end);
+        self.film
+            .step_to_composition_frame((skip + frames as i64 - 1).max(0) as u64)?;
+        Ok(Some((self.audio(), fps)))
     }
+}
+
+/// Where a file's frames are encoded while its sound waits: beside it,
+/// hidden, until the sound is muxed in.
+fn silent_part(output: &Path) -> PathBuf {
+    let name = output
+        .file_name()
+        .map_or("out".into(), |name| name.to_string_lossy().into_owned());
+    let ext = output
+        .extension()
+        .map_or("mp4".into(), |ext| ext.to_string_lossy().into_owned());
+    output.with_file_name(format!(".{name}.video.{ext}"))
+}
+
+/// `video` with the mix of `heard` over frames `first` to `end` muxed in, the
+/// frames copied, as `output`; just moved there if nothing sounds.
+fn mux_heard(
+    video: &Path,
+    output: &Path,
+    format: Format,
+    heard: Heard,
+    output_fps: f64,
+    first: u64,
+    end: u64,
+) -> Result<(), String> {
+    let mix = match heard {
+        Some((clips, fps)) => mix_range(clips, fps, output_fps, first, end)?,
+        None => None,
+    };
+    let done = match &mix {
+        Some(mix) => crate::encode::concat(&[video.to_owned()], output, format, Some(mix)),
+        None => std::fs::rename(video, output).map_err(|error| error.to_string()),
+    };
+    if let Some(mix) = mix {
+        let _ = std::fs::remove_file(mix);
+    }
+    let _ = std::fs::remove_file(video);
+    done
 }
 
 /// Render what `make` stages for the background it's given.
@@ -166,7 +226,7 @@ pub(crate) fn render_film<P: Playing>(
     options: &RenderOptions,
     mut progress: impl FnMut(Progress) -> bool,
     make: impl FnOnce(Color) -> Result<P, String>,
-) -> Result<Report, String> {
+) -> Result<(Report, Heard), String> {
     let started = Instant::now();
     let format = options.resolved_format()?;
     let transparent = options.transparent && format.has_alpha();
@@ -188,22 +248,21 @@ pub(crate) fn render_film<P: Playing>(
         ));
     }
     let size = film.stage.pixel_size();
-    let takes_sound = format.is_encoded();
-    let audio = if options.mute || !takes_sound {
-        None
+    // Its sounds are what its own stage hears placed as it plays, muxed in
+    // once the frames are encoded: no pass before it plays them all again.
+    let takes_sound = format.is_encoded() && !options.mute;
+    let video = if takes_sound {
+        silent_part(&options.output)
     } else {
-        match playing.sounds(options)? {
-            Some((clips, fps)) => mix_range(clips, fps, ticks.output_fps, first, end)?,
-            None => None,
-        }
+        options.output.clone()
     };
     let mut sink = Sink::start(EncodeOptions {
         format,
-        output: options.output.clone(),
+        output: video.clone(),
         size,
         fps: ticks.output_fps / options.every_nth.max(1) as f64,
         quality: options.quality,
-        audio: audio.clone(),
+        audio: None,
         first_index: 0,
     })?;
     let every = options.every_nth.max(1);
@@ -226,27 +285,49 @@ pub(crate) fn render_film<P: Playing>(
         }
         Ok(())
     })();
+    let heard = match &result {
+        Ok(()) => playing.heard(ticks.output_fps, first, end),
+        Err(_) => Ok(None),
+    };
     drop(playing);
     let finished = sink.finish();
-    if let Some(audio) = audio {
-        let _ = std::fs::remove_file(audio);
+    let muxed = match (&result, &finished, &heard) {
+        (Ok(()), Ok(()), Ok(sounds)) if takes_sound => mux_heard(
+            &video,
+            &options.output,
+            format,
+            sounds.clone(),
+            ticks.output_fps,
+            first,
+            end,
+        ),
+        _ => Ok(()),
+    };
+    if takes_sound {
+        let _ = std::fs::remove_file(&video);
     }
     result?;
     finished?;
+    let heard = heard?;
+    muxed?;
     let elapsed = started.elapsed();
-    Ok(Report {
-        output: options.output.clone(),
-        frames: total,
-        size,
-        elapsed,
-        rate: total as f64 / elapsed.as_secs_f64().max(1e-6),
-    })
+    Ok((
+        Report {
+            output: options.output.clone(),
+            frames: total,
+            size,
+            elapsed,
+            rate: total as f64 / elapsed.as_secs_f64().max(1e-6),
+        },
+        heard,
+    ))
 }
 
-/// What the script places, played through on a thread of its own, drawing
-/// nothing: a sound may be placed by a sequence only its frame mounts. Its
-/// clips, and the composition's rate they count in.
-fn placed_audio(options: &RenderOptions) -> Result<(Vec<AudioClip>, f64), String> {
+/// What the script places, played through on a stage of its own, drawing
+/// nothing: what a render's own stage hears ([`render_heard`]) is held to it
+/// in tests. Its clips, and the composition's rate they count in.
+#[doc(hidden)]
+pub fn placed_audio(options: &RenderOptions) -> Result<(Vec<AudioClip>, f64), String> {
     let (script, composition, props) = (
         options.script.clone(),
         options.composition.clone(),
@@ -284,9 +365,7 @@ fn mix_range(
     first: u64,
     end: u64,
 ) -> Result<Option<PathBuf>, String> {
-    // A whole count computed a hair under stays whole.
-    let frames = ((end + 1 - first) as f64 / output_fps * fps + 1e-9).floor() as u64;
-    let skip = (first as f64 / output_fps * fps).round() as i64;
+    let (skip, frames) = mixed_frames(fps, output_fps, first, end);
     let clips: Vec<_> = clips
         .into_iter()
         .map(|mut clip| {
@@ -306,6 +385,15 @@ fn mix_range(
     crate::audio::mixed_file(&clips, fps, frames)
 }
 
+/// The first frame of the composition a mix over frames `first` to `end` of
+/// a file at `output_fps` begins at, and how many frames it lasts.
+fn mixed_frames(fps: f64, output_fps: f64, first: u64, end: u64) -> (i64, u64) {
+    // A whole count computed a hair under stays whole.
+    let frames = ((end + 1 - first) as f64 / output_fps * fps + 1e-9).floor() as u64;
+    let skip = (first as f64 / output_fps * fps).round() as i64;
+    (skip, frames)
+}
+
 /// Whether `path` names a frame pattern or directory rather than a file.
 pub fn is_sequence(path: &Path) -> bool {
     path.extension().is_none() || path.to_string_lossy().contains("%04d")
@@ -319,7 +407,7 @@ pub fn is_sequence(path: &Path) -> bool {
 fn render_chunks(
     options: &RenderOptions,
     mut progress: impl FnMut(Progress) -> bool,
-) -> Result<Report, String> {
+) -> Result<(Report, Heard), String> {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     let started = Instant::now();
@@ -371,12 +459,10 @@ fn render_chunks(
         .filter(|(from, to)| from < to)
         .collect();
     let encoded = format.is_encoded();
-    let audio = if options.mute || !encoded {
-        None
-    } else {
-        let (clips, fps) = placed_audio(options)?;
-        mix_range(clips, fps, ticks.output_fps, first, end)?
-    };
+    // The last chunk's stage plays every frame before its own, drawing none:
+    // what it hears placed is what the file's sound is made of.
+    let last_heard: std::sync::Mutex<Heard> = Default::default();
+    let last = chunks.len() - 1;
     let part = |k: usize| -> PathBuf {
         let name = options
             .output
@@ -394,7 +480,7 @@ fn render_chunks(
     let (tell, heard) = std::sync::mpsc::channel::<Result<(), String>>();
     let outcome = std::thread::scope(|scope| {
         for (k, &(from, to)) in chunks.iter().enumerate() {
-            let (tell, stop) = (tell.clone(), stop.clone());
+            let (tell, stop, last_heard) = (tell.clone(), stop.clone(), &last_heard);
             let output = if encoded {
                 part(k)
             } else {
@@ -432,6 +518,12 @@ fn render_chunks(
                         sink.push(pixels)?;
                         let _ = tell.send(Ok(()));
                     }
+                    if k == last && encoded && !options.mute {
+                        let sounds = stage.heard(ticks.output_fps, first, end)?;
+                        *last_heard
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner()) = sounds;
+                    }
                     drop(stage);
                     sink.finish()
                 })();
@@ -463,8 +555,16 @@ fn render_chunks(
         }
         failed.map_or(Ok(()), Err)
     });
+    let heard = last_heard
+        .into_inner()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let mut audio = None;
     let joined = outcome.and_then(|()| {
         if encoded {
+            audio = match heard.clone() {
+                Some((clips, fps)) => mix_range(clips, fps, ticks.output_fps, first, end)?,
+                None => None,
+            };
             let parts: Vec<PathBuf> = (0..chunks.len()).map(part).collect();
             crate::encode::concat(&parts, &options.output, format, audio.as_deref())
         } else {
@@ -481,13 +581,16 @@ fn render_chunks(
     }
     joined?;
     let elapsed = started.elapsed();
-    Ok(Report {
-        output: options.output.clone(),
-        frames: total,
-        size,
-        elapsed,
-        rate: total as f64 / elapsed.as_secs_f64().max(1e-6),
-    })
+    Ok((
+        Report {
+            output: options.output.clone(),
+            frames: total,
+            size,
+            elapsed,
+            rate: total as f64 / elapsed.as_secs_f64().max(1e-6),
+        },
+        heard,
+    ))
 }
 
 /// One frame of a composition, its pixels straight RGBA.

@@ -118,6 +118,12 @@ impl Film {
     pub fn step_to(&mut self, frame: u64) -> Result<(), String> {
         self.step_to_tick(frame * u64::from(self.ticks.per_frame))
     }
+    /// Move on, drawing nothing, until it has stood at frame `frame` of the
+    /// composition (a tick of the stage may fall between its frames).
+    pub fn step_to_composition_frame(&mut self, frame: u64) -> Result<(), String> {
+        let tick = (frame as f64 / self.frames_per_tick - 1e-9).ceil().max(0.) as u64;
+        self.step_to_tick(tick)
+    }
     fn step_to_tick(&mut self, tick: u64) -> Result<(), String> {
         while self.stage.frame() < tick {
             let next = self.stage.frame() + 1;
