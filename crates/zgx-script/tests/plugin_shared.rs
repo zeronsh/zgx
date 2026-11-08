@@ -9,7 +9,11 @@ use std::path::PathBuf;
 use zgx_script::{Plugin, ScriptHost, Value};
 
 fn plugin(name: &str, code: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-shared-{}-{name}", std::process::id()));
+    // A directory of each call's own: tests run in parallel in one process,
+    // and two writing one name's file would load each other's code.
+    static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("zgx-shared-{}-{n}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("init.luau");
     std::fs::write(&entry, code).unwrap();
