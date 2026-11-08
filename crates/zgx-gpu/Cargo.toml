@@ -153,3 +153,9 @@ required-features = ["svg"]
 name = "d3d11_parity"
 harness = false
 required-features = ["d3d11"]
+
+# Sets `ZGX_D3D11=1` (read once a process) before anything draws.
+[[test]]
+name = "d3d11_left_out"
+harness = false
+required-features = ["d3d11"]

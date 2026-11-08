@@ -552,7 +552,7 @@ jobs:
       # fill and layer shader, each compiled cold by FXC in its child
       # (`d3d11_parity`), optimized as apps ship them; and its ahead-compiled
       # shaders are what naga writes now.
-      - run: cargo test -p zgx-gpu --features d3d11 --test d3d11_parity --release --locked
+      - run: cargo test -p zgx-gpu --features d3d11 --test d3d11_parity --test d3d11_left_out --release --locked
         env:
           LOCALAPPDATA: ${{ runner.temp }}\zgx-cold-d3d11
       - run: cargo test -p zgx-gpu --features d3d11 --lib --locked -- d3d11_frame

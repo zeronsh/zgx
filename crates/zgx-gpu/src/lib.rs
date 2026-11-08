@@ -1984,6 +1984,54 @@ fn plain_box(item: &zgx::scene::PaintItem<'_>) -> bool {
         && item.rounded().iter().all(Option::is_none)
         && item.color().is_none()
 }
+/// Whether node `id` reads what lies behind it: a backdrop blur, or a layer
+/// shader reading the backdrop (glass). Direct3D 11 reads none
+/// (`GpuRenderer::d3d11_leave_out`).
+#[cfg(d3d11)]
+fn d3d11_reads_backdrop(scene: &Scene, id: NodeId) -> bool {
+    scene.effects(id).blur_radius > 0.
+        || scene
+            .layer_shader(id)
+            .and_then(|layer| layer.shader.as_ref())
+            .is_some_and(|shader| shader.reads_backdrop())
+}
+/// A box's own colour drawn opaque, as the system's Reduce transparency
+/// draws glass: its translucent, untextured quads inside its box (`fade`;
+/// not its shadows), made opaque. Built so, a kept frame keeps them so.
+#[cfg(d3d11)]
+fn d3d11_opaque(quads: &mut [Quad], fade: [f32; 4]) {
+    let [x, y, width, height] = fade;
+    for quad in quads {
+        let [qx, qy, qw, qh] = quad.rect;
+        let inside = qx >= x && qy >= y && qx + qw <= x + width && qy + qh <= y + height;
+        if inside && quad.options[1] <= 0.5 && quad.shape[2] <= 0. && quad.color[3] > 0. {
+            quad.color[3] = 1.;
+        }
+    }
+}
+/// Whether a draw whose backdrop Direct3D 11 doesn't read has a colour of
+/// its own drawn opaque under what it holds (`d3d11_opaque`): a layer's
+/// node's fill, or a plain box's own opaque quad over its backdrop's bounds.
+#[cfg(d3d11)]
+fn d3d11_has_colour(scene: &Scene, quads: &[Quad], draw: &Draw) -> bool {
+    match draw.source {
+        TextureSource::Layer(id) => match scene.kind(id) {
+            NodeKind::Panel { quad, .. } | NodeKind::Quad(quad) => quad.fill.3 > 0,
+            NodeKind::Rect(color) => color.3 > 0,
+            _ => false,
+        },
+        _ => draw.blur.as_deref().is_some_and(|&(bounds, ..)| {
+            let rect = [bounds.x, bounds.y, bounds.width, bounds.height];
+            quads
+                .get(draw.start as usize..draw.end as usize)
+                .is_some_and(|drawn| {
+                    drawn.iter().any(|quad| {
+                        quad.rect == rect && quad.options[1] <= 0.5 && quad.color[3] >= 1.
+                    })
+                })
+        }),
+    }
+}
 /// A flat colour's quad over `fade` (a box's place), as it shows.
 #[inline(always)]
 fn rect_quad(color: Color, fade: [f32; 4], effects: zgx::scene::Effects) -> Quad {
@@ -6300,6 +6348,13 @@ impl GpuRenderer {
     fn waits_for_shaders(&self) -> bool {
         self.debug_waits_for_shaders || self.offscreen_waits && !self.presents()
     }
+    /// What Direct3D 11 frames have left out so far, each kind once
+    /// (`ZGX_D3D11`, the `d3d11` feature). For tests.
+    #[cfg(d3d11)]
+    #[doc(hidden)]
+    pub fn debug_d3d11_left_out() -> Vec<&'static str> {
+        d3d11_frame::left_out_so_far()
+    }
     /// Have this renderer's frames wait for shaders compiling, though it
     /// presents: a test comparing its pixels with an offscreen one's.
     #[doc(hidden)]
@@ -7758,6 +7813,16 @@ impl GpuRenderer {
                         .zip(self.effect_slot(item.id, effects::Purpose::Shadow).copied()),
                     false => None,
                 };
+                // Direct3D 11 draws no layer effects: a drop shadow is left
+                // out (named once), the layer drawn without it.
+                #[cfg(d3d11)]
+                let shadow = match shadow.is_some() && self.d3d11.is_some() {
+                    true => {
+                        d3d11_frame::left_out("drop shadows");
+                        None
+                    }
+                    false => shadow,
+                };
                 if !damage.iter().any(|d| {
                     d.intersects(clip)
                         && d.intersects(if item.isolated {
@@ -9181,6 +9246,12 @@ impl GpuRenderer {
                     true => cull_on_cpu(&mut quads, start as usize, clip, viewport, self.scale),
                     false => (clip, None),
                 };
+                // Direct3D 11 reads no backdrop: a box reading it draws its
+                // own colour opaque instead (`d3d11_leave_out`).
+                #[cfg(d3d11)]
+                if self.d3d11.is_some() && d3d11_reads_backdrop(scene, item.id) {
+                    d3d11_opaque(&mut quads[start as usize..], fade);
+                }
                 if quads.len() as u32 > start || item.effects.blur_radius > 0. {
                     let drawn =
                         culled_bounds.unwrap_or_else(|| quad_bounds(&quads[start as usize..]));
@@ -9411,12 +9482,13 @@ impl GpuRenderer {
         // from the same data `render_direct` takes.
         #[cfg(d3d11)]
         if self.d3d11.is_some() {
-            let mut draws = draws;
+            let (mut draws, mut batches, mut effect_jobs) = (draws, batches, effect_jobs);
             self.d3d11_app_shaders(&mut draws);
+            self.d3d11_leave_out(scene, &quads, &mut draws, &mut batches, &mut effect_jobs);
             if let Some(lacks) = self.d3d11_lacks(&draws, &batches, &effect_jobs) {
                 let message = format!(
-                    "ZGX_D3D11 draws no {lacks}: the Direct3D 11 proof draws the Windows \
-                     suite's scenes alone"
+                    "ZGX_D3D11 draws no {lacks} yet, and leaving it out could mislead \
+                     (docs/windows.md, Direct3D 11)"
                 );
                 eprintln!("zgx: {message}");
                 if cfg!(debug_assertions) {
@@ -10213,9 +10285,62 @@ impl GpuRenderer {
         }
         self.images_awaited |= awaited;
     }
-    /// What a frame needs that Direct3D 11 does not draw, if anything: it
-    /// draws what the Windows suite's scenes do, shader fills and layer
-    /// shaders not reading the backdrop.
+    /// What Direct3D 11 leaves out of a frame rather than fail it, where
+    /// what's left can't show a picture a user would wrongly trust; each kind
+    /// named once (`d3d11_frame::left_out`):
+    /// - drop shadows (left out as the frame is made, their jobs here);
+    /// - images a GPU view draws: left empty, visibly missing;
+    /// - backdrop blurs and layer shaders reading the backdrop (glass): the
+    ///   box drawn opaque in its own colour under its content (built so,
+    ///   `d3d11_opaque`), as the system's Reduce transparency draws glass,
+    ///   so what's over it stays legible. A box with no colour of its own
+    ///   keeps the frame's error.
+    ///
+    /// Content blurs, masks, blend modes and image effects keep the error:
+    /// without them content meant hidden would show, or an inverted icon
+    /// or a blended text could read as something else.
+    #[cfg(d3d11)]
+    fn d3d11_leave_out(
+        &self,
+        scene: &Scene,
+        quads: &[Quad],
+        draws: &mut [Draw],
+        batches: &mut Vec<(usize, Vec<usize>)>,
+        effect_jobs: &mut Vec<effects::Job>,
+    ) {
+        effect_jobs.retain(|job| job.purpose != effects::Purpose::Shadow);
+        for draw in draws.iter_mut() {
+            if let TextureSource::Image(id) | TextureSource::Pixelated(id) = draw.source
+                && id != effects::EFFECT_ATLAS
+                && draw.end > draw.start
+                && self.d3d11_texture(draw.source).is_none()
+            {
+                d3d11_frame::left_out("images a GPU view draws");
+                draw.end = draw.start;
+            }
+        }
+        for draw in draws.iter_mut() {
+            let glass = matches!(draw.shading, Shading::FilterBlend(_));
+            if !(draw.blur.is_some() || glass) || !d3d11_has_colour(scene, quads, draw) {
+                continue;
+            }
+            d3d11_frame::left_out(match glass {
+                true => "backdrop reads (glass drawn opaque)",
+                false => "backdrop blurs (drawn opaque)",
+            });
+            draw.blur = None;
+            if glass {
+                draw.shading = Shading::Full;
+            }
+        }
+        // The backdrop batches index draws: none is left to read them.
+        if draws.iter().all(|draw| draw.blur.is_none()) {
+            batches.clear();
+        }
+    }
+    /// What a frame needs that Direct3D 11 neither draws nor leaves out
+    /// (`d3d11_leave_out`), if anything: it draws what the Windows suite's
+    /// scenes do, shader fills and layer shaders not reading the backdrop.
     #[cfg(d3d11)]
     fn d3d11_lacks(
         &self,
@@ -10224,15 +10349,16 @@ impl GpuRenderer {
         effect_jobs: &[effects::Job],
     ) -> Option<&'static str> {
         if !batches.is_empty() {
-            return Some("backdrop filter");
+            return Some("backdrop blur over a box with no colour of its own");
         }
         if !effect_jobs.is_empty() {
-            return Some("layer effect");
+            return Some("content blur or mask");
         }
         draws
             .iter()
+            .filter(|draw| draw.end > draw.start)
             .find_map(|draw| match (draw.source, draw.shading) {
-                // Drawn by the GPU, not written by the CPU: a GPU view's.
+                (TextureSource::Image(effects::EFFECT_ATLAS), _) => Some("content blur or mask"),
                 (TextureSource::Image(_) | TextureSource::Pixelated(_), _)
                     if self.d3d11_texture(draw.source).is_none() =>
                 {
@@ -10250,7 +10376,11 @@ impl GpuRenderer {
                     | Shading::Fill(_)
                     | Shading::Filter(_),
                 ) => None,
-                _ => Some("blend mode, layer shader reading the backdrop or image effect"),
+                (_, Shading::FilterBlend(_)) => {
+                    Some("layer shader reading the backdrop over a box with no colour of its own")
+                }
+                (_, Shading::Blend) => Some("blend mode"),
+                _ => Some("image effect"),
             })
     }
     /// What a batch of `source` samples with Direct3D 11: the glyph atlas,
