@@ -4179,6 +4179,7 @@ impl Host {
             // Listening before the first keyboard comes.
             let _ = crate::ios_system::keyboard_height();
             crate::ios_system::dump_accessibility_later(&window);
+            crate::ios_system::audio_session_from_bundle();
             crate::ios_metrics::start();
             // What the bars leave of it, before its first frame.
             self.context

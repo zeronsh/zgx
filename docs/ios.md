@@ -31,13 +31,19 @@ Bold Text makes every weight a step heavier, in text and in symbols, and text sh
 
 A text field's `accessibilityActivate` takes focus and brings the keyboard; rows, tabs and switches click. A search field is marked as one, and Voice Control answers to a row's name alone ("Wi-Fi", from "Wi-Fi, Home"), by `accessibilityUserInputLabels`.
 
+## For the App Store
+
+`python3 scripts/ios/package.py app.json` builds a manifest's app for devices and lays it out as the App Store takes it, unsigned: `target/ios-package/<Name>.xcarchive` (the app, a dSYM, the archive's own Info.plist), `<Name>-unsigned.ipa` (a `Payload` folder), and `<Name>.entitlements` for whoever signs. It signs nothing and reads no Keychain: Xcode's Organizer opens the archive, signs and uploads it. `--check <archive>` checks one (every plist with `plutil -lint`, the app where the archive says, its keys, an arm64 iOS executable, compiled icons, symbols, no signature yet).
+
+The manifest (`scripts/ios/package/app.example.json`) names the app, its bundle id, version and build, the example to build and the Luau folder to carry, its link schemes, and one square icon of 1024 or more: `sips` flattens it (the App Store refuses an icon with alpha) and `actool` compiles the sizes iOS draws, with the Info.plist's icon keys. The Info.plist comes from `scripts/ios/package/Info.plist.in`. `audio` adds what a player or a synth needs: `background` (`UIBackgroundModes: audio`, playing on with the screen locked), `microphone` (the reason iOS shows when it asks), and `session_category` (`playback`, `playAndRecord`…), which the host sets on the shared `AVAudioSession` at launch (`ZGXAudioSessionCategory`), so sound plays with the ring switch on silent. zgx has no audio API yet: the session is ready for one.
+
 ## Not there yet
 
-- Checked on a simulator against UIKit's own (Ref): the tree VoiceOver reads (order, labels, values, hints, traits; a sheet read alone; a pushed page's back button first, named for the page before), Dynamic Type from xS to AX5 (sizes from `preferredFontForTextStyle:`, the bar and titles placed as UINavigationBar's), Reduce Motion's cross-fade (headless).
+- Checked on a simulator against UIKit's own (Ref): the tree VoiceOver reads (order, labels, values, hints, traits; a sheet read alone; a pushed page's back button first, named for the page before), Dynamic Type from xS to AX5 (sizes from `preferredFontForTextStyle:`, the bar and titles placed as UINavigationBar's), Reduce Motion's cross-fade (headless), and a suspend and resume (sent to the background by another app: no CPU while there, the same process and picture back).
 - Still for a person on a phone (build 1794077264 has each; the Notes tab's "Field rides the keyboard" toggle switches the ride): VoiceOver's gestures in practice (the headings rotor, a two-finger scrub closing a sheet, a double tap on the grabber), Switch Control, Voice Control, Full Keyboard Access, Dynamic Type and Reduce Motion as they feel, and the two keyboard rides side by side. Measured there so far: glass, planes, frame rate, launch, memory (`scripts/ios/device.py measure`).
 - System glass isn't cut by rounded or scrolling parents: it ignores masks and clips. A pane scrolled away is hidden whole.
 - Morphs between panes that aren't in one group (a pane joining a group grows out of it and melts back); terminals; web views' new windows, downloads, finding and printing.
-- Notifications.
+- Notifications. An app's own audio (the session's category is set, no API makes sound).
 - `Documents/zgx-gesture.log` records each gesture, scroll, refresh and keyboard reveal; `ZGX_IOS_SHOT=seconds` writes the window to `Documents/shot.png`.
 
 ## The edge fade

@@ -535,6 +535,35 @@ pub(crate) unsafe fn objc2_foundation_string(text: &str) -> Retained<AnyObject> 
     unsafe { msg_send![class!(NSString), stringWithUTF8String: text.as_ptr()] }
 }
 
+/// The shared audio session's category, as the app's Info.plist asks
+/// (`ZGXAudioSessionCategory`: `AVAudioSessionCategoryPlayback`… from
+/// `scripts/ios/package.py`'s manifest), set once at launch: an app that
+/// plays keeps sounding with the ring switch on silent, and with background
+/// audio in the background. Without the key, iOS's default (solo ambient).
+pub(crate) fn audio_session_from_bundle() {
+    #[link(name = "AVFAudio", kind = "framework")]
+    unsafe extern "C" {}
+    // SAFETY: Foundation's and AVFAudio's methods on the main thread; the
+    // category is a string the session checks, an error left unread.
+    unsafe {
+        let bundle: Retained<AnyObject> = msg_send![class!(NSBundle), mainBundle];
+        let key = ns_string("ZGXAudioSessionCategory");
+        let category: Option<Retained<AnyObject>> =
+            msg_send![&*bundle, objectForInfoDictionaryKey: &*key];
+        let Some(category) = category else { return };
+        let Some(session_class) = objc2::runtime::AnyClass::get(c"AVAudioSession") else {
+            return;
+        };
+        let session: Retained<AnyObject> = msg_send![session_class, sharedInstance];
+        let mut error: *mut AnyObject = std::ptr::null_mut();
+        let set: bool = msg_send![&*session, setCategory: &*category, error: &mut error];
+        let active: bool = msg_send![&*session, setActive: true, error: &mut error];
+        if !(set && active) {
+            eprintln!("zgx: the audio session didn't take its category");
+        }
+    }
+}
+
 /// `ZGX_IOS_AX_DUMP=1`: three seconds in, print what assistive technology is
 /// offered from `window`'s view, as `dump_element` walks it: a check of the
 /// tree where VoiceOver doesn't run (a simulator).
