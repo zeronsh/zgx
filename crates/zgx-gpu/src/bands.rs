@@ -610,6 +610,7 @@ impl GpuRenderer {
                 cropped: false,
                 glyphs: 0.,
                 seen: ((0, None, 1.), (None, 1.)),
+                phase: (0., 0.),
                 transformed: false,
                 used: self.layer_frame,
                 parked: false,

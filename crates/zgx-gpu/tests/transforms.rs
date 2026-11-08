@@ -820,3 +820,49 @@ fn text_under_a_moving_transform_moves_as_one_picture() {
     let most = rest.iter().zip(&first).map(|(a, b)| a.abs_diff(*b)).max();
     assert_eq!(differ, 0, "{differ} channels differ, by up to {most:?}");
 }
+
+#[test]
+fn a_moving_layer_waiting_on_a_picture_draws_each_frame_once() {
+    let _gpu_fixture = gpu_fixture();
+    // A magnified board drifting by fractions of a point, waiting on a
+    // picture all the while: drawn again every frame, and again within the
+    // frame when its corner moves (`layer_shifted`). Its texel grid where
+    // it was, its corner never moves: each frame draws it once at most,
+    // however long it drifts. (Worked out again from where it last landed, the
+    // corner wandered by a texel between a frame's drawings, which drew it
+    // again, and in a long render without end.)
+    const WINDOW: u32 = 300;
+    let (mut gpu, mut scene) = window(WINDOW);
+    let root = scene.root();
+    let board = scene.append(root, NodeKind::Container(Layout::Overlay), fixed(120., 80.));
+    rect(&mut scene, board, 0., 0., (120., 80.), RED);
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(400, 400, image::Rgba([0, 0, 255, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let picture = zgx_gpu::assets::decode_image_kept(std::sync::Arc::from(png)).unwrap();
+    let held = scene.append(board, NodeKind::Image(picture), fixed(20., 20.));
+    scene.set_transform(held, Transform { x: 10., y: 10. });
+    let whole = [Rect::new(0., 0., WINDOW as f32, WINDOW as f32)];
+    for frame in 0..600 {
+        let t = frame as f32;
+        scene.set_transform(
+            board,
+            Transform {
+                x: 37.3 + t * 0.0137,
+                y: 41.7 + t * 0.0291,
+            },
+        );
+        scene.set_local_transform(
+            board,
+            LocalTransform {
+                scale: (1.9 + t * 1e-4, 1.9 + t * 1e-4),
+                ..LocalTransform::IDENTITY
+            },
+        );
+        scene.flush();
+        let stats = gpu.render(&scene, &whole).unwrap();
+        // (None, once the picture is in.)
+        assert!(stats.layer_repaints <= 1, "frame {frame}: {stats:?}");
+    }
+}
