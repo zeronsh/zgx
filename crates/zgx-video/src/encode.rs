@@ -470,9 +470,16 @@ pub fn concat(
     std::fs::write(&list, text).map_err(|error| error.to_string())?;
     let mut command = Command::new(ffmpeg);
     command.args(["-hide_banner", "-loglevel", "error", "-y"]);
-    command
-        .args(["-f", "concat", "-safe", "0", "-i"])
-        .arg(&list);
+    // One part is read as it is: through the concat demuxer, its keyframes
+    // would carry the parameter sets again, and the frames it copies would
+    // differ from those encoded.
+    if let [part] = parts {
+        command.arg("-i").arg(part);
+    } else {
+        command
+            .args(["-f", "concat", "-safe", "0", "-i"])
+            .arg(&list);
+    }
     if let Some(audio) = audio {
         command.arg("-i").arg(audio);
         command.args(["-map", "0:v", "-map", "1:a"]);
@@ -484,7 +491,8 @@ pub fn concat(
             Format::WebM => command.args(["-c:a", "libopus", "-b:a", "192k"]),
             _ => command.args(["-c:a", "aac", "-b:a", "256k"]),
         };
-        command.arg("-shortest");
+        // No `-shortest`: the mix is never longer than the frames, and a
+        // shorter one would have it end the file early, cutting frames.
     }
     if matches!(format, Format::H264 | Format::Hevc | Format::Av1) {
         command.args(["-movflags", "+faststart"]);

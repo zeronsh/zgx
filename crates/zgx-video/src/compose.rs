@@ -318,4 +318,5 @@ pub fn render_view(
     render::render_film(options, progress, |background| {
         film(composition, options, background, build)
     })
+    .map(|(report, _)| report)
 }
