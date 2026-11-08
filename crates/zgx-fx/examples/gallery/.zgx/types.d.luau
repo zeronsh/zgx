@@ -20255,7 +20255,7 @@ export type SlotProps = {
 -- offer.
 -- The hooks this app declares (`hook = "…"`).
 export type HookName = never
-export type HookTarget = "#melt"
+export type HookTarget = "#melt" | ".bloom-box" | ".trail-box"
 -- A target inside others (`"#sidebar >> .session-row"`): any text, since a
 -- chain's parts combine freely; `zgx lint` checks each `#id` and `hook:`.
 export type HookChain = string
