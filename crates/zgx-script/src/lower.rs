@@ -4946,7 +4946,10 @@ fn layout_box(inner: View, layout: &LayoutAnim, vm: &Rc<Vm>, low: &Rc<Lowering>)
                     // Entering grows from nothing; a first size otherwise holds.
                     None if enter => 0.,
                     None => continue,
-                    Some(before) if before == now => continue,
+                    // Under a hundredth of a point is rounding (text
+                    // measured again, a shrinking parent's share): easing
+                    // it would lay the box out again each frame for nothing.
+                    Some(before) if before == now || (before - now).abs() < 0.01 => continue,
                     Some(before) => before + current(prop).unwrap_or(0.),
                 };
                 let margin = (shown - now) as f64;
@@ -9537,9 +9540,11 @@ fn pin_in_place(scene: &mut zgx::scene::Scene, entry: zgx::scene::NodeId) {
 }
 
 /// A box whose one in-flow child fills it in both directions unless it
-/// sizes itself: a one-cell grid, whose items stretch.
+/// sizes itself: an overlay, whose children stretch. It lays out as a
+/// one-cell grid does, without a taffy run: presences with sizing of their
+/// own nest a few deep around each paragraph of a chat.
 fn cell() -> View {
-    column().grid().grid_cols(1).grid_rows(1).items_stretch()
+    overlay()
 }
 
 #[cfg(test)]
