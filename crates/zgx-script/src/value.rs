@@ -2027,6 +2027,12 @@ fn rebuild_cache(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 /// The cached table of `value`, if it has one.
+/// `value`'s table for scripts, if it has one now (`cached`): for a holder
+/// outside the VM to keep it past the host's idle sweeps (`markdown`'s
+/// stream, deriving each answer from the last).
+pub(crate) fn table_of(lua: &Lua, value: &Value) -> mlua::Result<Option<Table>> {
+    cached(lua, value)
+}
 fn cached(lua: &Lua, value: &Value) -> mlua::Result<Option<Table>> {
     let Some(cache) = lua.app_data_ref::<Converted>() else {
         return Ok(None);
@@ -2128,17 +2134,6 @@ pub(crate) fn derive(lua: &Lua, old: &Value, new: &Value) -> mlua::Result<()> {
         None => weight(new),
     };
     file_weighed(lua, new, &table, added)
-}
-/// `value`'s table, if it has one (`derive`'s), among the large tables kept
-/// for the reads to come (`keep_large`), as one made whole is: a list a
-/// stream derives each answer from (`markdown`'s) finds its last one there,
-/// however the collector ran between them. Only filed (a weak entry), it
-/// could be gone by the next answer, which then converted whole.
-pub(crate) fn hold(lua: &Lua, value: &Value) -> mlua::Result<()> {
-    if let Some(table) = cached(lua, value)? {
-        keep_large(lua, value, &table);
-    }
-    Ok(())
 }
 /// Whether two list items convert to the same script value: one table, or
 /// equal plain values.
