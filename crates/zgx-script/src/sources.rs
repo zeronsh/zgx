@@ -105,6 +105,75 @@ pub(crate) fn compiled(code: &[u8]) -> (Rc<Compiled>, bool) {
     })
 }
 
+/// Packages' modules compiled (`ScriptHost::package`), shared by every host
+/// on every thread: a package's files are the same for each host that
+/// requires them (a video's stages one after another, render workers, a
+/// player building its stage again), so each compiles once. Each host holds
+/// what its last load required; [`release_unused_packages`], run as a host
+/// goes idle, drops those no host holds, so a process at rest keeps nothing
+/// it doesn't use, released at that point and never as a collector runs.
+static PACKAGES: std::sync::Mutex<Vec<std::sync::Arc<Compiled>>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn packages() -> std::sync::MutexGuard<'static, Vec<std::sync::Arc<Compiled>>> {
+    PACKAGES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A package module's `code` compiled: the entry another host compiled from
+/// the same bytes, what was compiled ahead, or compiled now (outside the
+/// lock: another thread's requires don't wait for it). The second value is
+/// whether it was compiled now. Hold the `Arc` while the host uses it.
+pub(crate) fn package_compiled(code: &[u8]) -> (std::sync::Arc<Compiled>, bool) {
+    let found =
+        |entries: &[std::sync::Arc<Compiled>]| entries.iter().find(|entry| entry.is(code)).cloned();
+    if let Some(entry) = found(&packages()) {
+        return (entry, false);
+    }
+    // Compiled ahead as the app's window was made (`prefetch`), or now.
+    let (entry, now) = match prefetched(code) {
+        Some(ahead) => (
+            Compiled {
+                source: ahead.source.clone(),
+                bytecode: ahead.bytecode.clone(),
+            },
+            false,
+        ),
+        None => (
+            Compiled {
+                source: code.into(),
+                bytecode: mlua::chunk::Compiler::new()
+                    .compile(code)
+                    .ok()
+                    .map(Into::into),
+            },
+            true,
+        ),
+    };
+    let entry = std::sync::Arc::new(entry);
+    let mut entries = packages();
+    // Another thread may have compiled the same meanwhile: one entry each.
+    if let Some(entry) = found(&entries) {
+        return (entry, false);
+    }
+    entries.push(entry.clone());
+    (entry, now)
+}
+
+/// Drops the packages' modules no host holds; how many it dropped.
+pub(crate) fn release_unused_packages() -> usize {
+    let mut entries = packages();
+    let before = entries.len();
+    entries.retain(|entry| std::sync::Arc::strong_count(entry) > 1);
+    before - entries.len()
+}
+
+/// How many packages' modules are compiled and kept (for tests).
+pub(crate) fn packages_kept() -> usize {
+    packages().len()
+}
+
 /// A host's compiled files, by path, once it hot-reloads.
 #[derive(Default)]
 pub(crate) struct Sources {

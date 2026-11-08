@@ -1354,7 +1354,26 @@ fn require_module<const LENDING: bool>(
     let lent = LENDING
         && matches!(files, Files::Disk)
         && packages.iter().any(|(_, dir)| within(dir, &path));
+    // A package's module, the app's: compiled once for every host while
+    // its bytes stay the same, held while this host uses it.
+    let in_package = !LENDING
+        && matches!(files, Files::Disk)
+        && packages.iter().any(|(_, dir)| path.starts_with(dir));
+    let package = in_package.then(|| host.upgrade()).flatten().map(|h| {
+        let (entry, now) = sources::package_compiled(&code);
+        let count = if now {
+            &h.package_compiles
+        } else {
+            &h.package_hits
+        };
+        count.set(count.get() + 1);
+        h.package_compiled
+            .borrow_mut()
+            .insert(path.clone(), entry.clone());
+        entry
+    });
     let compiled = match files {
+        _ if package.is_some() => None,
         Files::Disk if lent => host.upgrade().map(|h| {
             let (compiled, now) = sources::compiled(&code);
             h.lent_compiles.set(h.lent_compiles.get() + u64::from(now));
@@ -1370,7 +1389,11 @@ fn require_module<const LENDING: bool>(
             .or_else(|| sources::prefetched(&code)),
         Files::Bundle(_) => None,
     };
-    let loaded = match compiled.as_deref().and_then(sources::Compiled::bytecode) {
+    let bytecode = match package.as_deref() {
+        Some(package) => package.bytecode(),
+        None => compiled.as_deref().and_then(sources::Compiled::bytecode),
+    };
+    let loaded = match bytecode {
         Some(bytecode) => lua.load(bytecode).set_mode(mlua::chunk::ChunkMode::Binary),
         None => files.chunk(lua.load(code)),
     };
@@ -1468,6 +1491,12 @@ pub fn compile_ahead(script: &std::path::Path, packages: &[(&str, &std::path::Pa
 /// What [`compile_ahead`] did: its latest session's files compiled, whether
 /// its worker is done, whether the session is still open (no load has ended
 /// since), `require`s that found their file compiled ahead (all sessions),
+/// How many packages' modules are kept compiled for hosts to share (held by
+/// a live host, or not yet released at an idle trim). For tests.
+#[doc(hidden)]
+pub fn packages_kept() -> usize {
+    sources::packages_kept()
+}
 /// and the compiled entries this thread holds from it. For tests.
 #[doc(hidden)]
 pub fn compile_ahead_counts() -> (usize, bool, bool, usize, usize) {
@@ -1664,6 +1693,13 @@ struct Inner {
     lent_compiled: RefCell<HashMap<PathBuf, Rc<sources::Compiled>>>,
     /// How many lent modules were compiled (not found compiled).
     lent_compiles: Cell<u64>,
+    /// The packages' modules its last load required, compiled once for
+    /// every host (`sources::package_compiled`): held, so kept while it
+    /// lives, by path.
+    package_compiled: RefCell<HashMap<PathBuf, std::sync::Arc<sources::Compiled>>>,
+    /// Packages' modules it compiled, and found compiled by another host.
+    package_compiles: Cell<u64>,
+    package_hits: Cell<u64>,
     /// The scripts' bytecode by what their files held, once the host
     /// hot-reloads: a reload compiles only what changed.
     sources: sources::Sources,
@@ -1852,6 +1888,9 @@ impl ScriptHost {
             lent: RefCell::default(),
             lent_compiled: RefCell::default(),
             lent_compiles: Cell::new(0),
+            package_compiled: RefCell::default(),
+            package_compiles: Cell::new(0),
+            package_hits: Cell::new(0),
             sources: sources::Sources::default(),
             overrides: RefCell::default(),
             decisions: Rc::new(lower::Decisions::new(runtime)),
@@ -3217,6 +3256,10 @@ impl ScriptHost {
                         .lent_compiled
                         .borrow_mut()
                         .retain(|path, _| required.contains(path));
+                    self.0
+                        .package_compiled
+                        .borrow_mut()
+                        .retain(|path, _| required.contains(path));
                 }
                 let mut problems = self
                     .0
@@ -3671,6 +3714,12 @@ impl ScriptHost {
     #[doc(hidden)]
     pub fn lent_compiles(&self) -> u64 {
         self.0.lent_compiles.get()
+    }
+    /// The packages' modules this host compiled, and those it found compiled
+    /// by another host (for tests).
+    #[doc(hidden)]
+    pub fn package_compiles(&self) -> (u64, u64) {
+        (self.0.package_compiles.get(), self.0.package_hits.get())
     }
     /// Whether `stamps`, read now, name the files of the last load and each
     /// whose time moved holds what that load read.
@@ -4463,6 +4512,8 @@ fn trim_idle(inner: &Inner) {
     collect_garbage(inner);
     mlua::release_free_pages();
     inner.assets.trim();
+    // Packages' modules no host holds now (every host's, process-wide).
+    sources::release_unused_packages();
 }
 
 #[cfg(test)]
