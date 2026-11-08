@@ -126,6 +126,87 @@ fn keyed_reorder_keeps_local_state_and_builds_only_new_keys() {
     assert!(handle.find("row-3").is_none());
 }
 
+/// A keyed list growing at its end (a stream's), or its last key changing,
+/// keeps every row ahead of that as it was: the same nodes, built once, their
+/// local state kept; only what follows is built or removed. A row ahead
+/// removed from outside is built again, as ever, and a key after them
+/// repeating one of theirs is refused before anything changes.
+#[test]
+fn keyed_rows_ahead_of_an_append_or_a_changed_last_key_stay_as_they_were() {
+    let mut ui = Ui::new(400., 200.);
+    // Forty rows ahead: a long list (a stream's), whose tail alone moves.
+    let ahead: Vec<i32> = (1..=40).collect();
+    let with = |tail: &[i32]| [&ahead[..], tail].concat();
+    let keys = ui.signal(ahead.clone());
+    let locals: Rc<RefCell<HashMap<i32, Signal<i32>>>> = Rc::default();
+    let builds = Rc::new(Cell::new(0));
+    let handle = ui.mount(keyed(
+        {
+            let keys = keys.clone();
+            move || keys.get()
+        },
+        {
+            let locals = locals.clone();
+            let builds = builds.clone();
+            move |key, cx| {
+                builds.set(builds.get() + 1);
+                let state = cx.state(0);
+                locals.borrow_mut().insert(key, state.clone());
+                text_signal(move || state.get().to_string()).id(format!("row-{key}"))
+            }
+        },
+    ));
+    let children = |ui: &Ui| ui.scene.borrow().children(handle.node()).to_vec();
+    let row = |key: i32| handle.find(&format!("row-{key}")).unwrap();
+    let first = children(&ui);
+    assert_eq!(builds.get(), 40);
+    locals.borrow()[&2].set(42);
+    // Appended: the rows ahead as they were.
+    keys.set(with(&[41, 42]));
+    assert_eq!(builds.get(), 42);
+    let grown = children(&ui);
+    assert_eq!(grown[..40], first[..]);
+    assert_eq!(grown[40..], [row(41), row(42)]);
+    assert_eq!(content(&ui, row(2)), "42");
+    // The last key changed: its row goes, one is built in its place.
+    keys.set(with(&[41, 43]));
+    assert_eq!(builds.get(), 43);
+    assert!(handle.find("row-42").is_none());
+    let changed = children(&ui);
+    assert_eq!(changed[..41], grown[..41]);
+    assert_eq!(changed[41], row(43));
+    // Both: changed and appended.
+    keys.set(with(&[41, 44, 45]));
+    assert_eq!(builds.get(), 45);
+    assert_eq!(children(&ui)[..41], grown[..41]);
+    assert_eq!(children(&ui)[41..], [row(44), row(45)]);
+    assert_eq!(content(&ui, row(2)), "42");
+    // A row ahead removed from outside is built again.
+    let third = row(3);
+    ui.remove(third);
+    keys.set(with(&[41, 44, 45, 46]));
+    assert_eq!(builds.get(), 47);
+    assert_ne!(row(3), third);
+    assert_eq!(
+        children(&ui),
+        with(&[41, 44, 45, 46])
+            .into_iter()
+            .map(row)
+            .collect::<Vec<_>>(),
+        "in key order"
+    );
+    // A key after them repeating one ahead: refused, nothing changed.
+    let before = children(&ui);
+    let node_count = ui.scene.borrow().len();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        keys.set(with(&[41, 44, 45, 46, 2]));
+    }));
+    assert!(failed.is_err());
+    assert_eq!(children(&ui), before);
+    assert_eq!(ui.scene.borrow().len(), node_count);
+    assert_eq!(builds.get(), 47);
+}
+
 /// Rows whose keys go are removed in the order they were in, the same every
 /// run: what their removal repaints follows it (a map's order did not).
 #[test]
