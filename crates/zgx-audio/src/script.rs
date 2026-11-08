@@ -59,6 +59,10 @@ impl Audio {
     pub fn is_open(&self) -> bool {
         matches!(&*self.0.borrow(), Some(Ok(_)))
     }
+    /// Whether opening the device has been tried, opened or not.
+    pub fn was_tried(&self) -> bool {
+        self.0.borrow().is_some()
+    }
 }
 
 fn number(value: &Value, key: &str) -> Option<f64> {
@@ -66,9 +70,16 @@ fn number(value: &Value, key: &str) -> Option<f64> {
 }
 
 /// Gives `host`'s scripts `require("@audio")`, `base` being the folder their
-/// sounds' paths count from. Returns `host` and the engine they share.
-pub fn install(host: ScriptHost, base: &Path) -> Result<(ScriptHost, Audio), String> {
-    let host = host.package("audio", package()?);
+/// sounds' paths count from. Returns `host` and the engine they share (not
+/// open: it opens at the first sound a script plays).
+pub fn install(host: ScriptHost, base: &Path) -> (ScriptHost, Audio) {
+    let host = match package() {
+        Ok(dir) => host.package("audio", dir),
+        Err(error) => {
+            eprintln!("zgx-audio: writing its script: {error}");
+            host
+        }
+    };
     let audio = Audio::default();
     let playing = audio.clone();
     let base = base.to_owned();
@@ -92,5 +103,46 @@ pub fn install(host: ScriptHost, base: &Path) -> Result<(ScriptHost, Audio), Str
             eprintln!("zgx-audio: {error}");
         }
     });
-    Ok((host, audio))
+    (host, audio)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs `code` as a script with `@audio` installed; whether it tried to
+    /// open the device.
+    fn tried(name: &str, code: &str) -> bool {
+        let dir =
+            std::env::temp_dir().join(format!("zgx-audio-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("app.luau");
+        std::fs::write(&entry, code).unwrap();
+        let ui = zgx::widgets::Ui::new(1., 1.);
+        let (host, audio) = install(ScriptHost::new(&ui.runtime, &entry), &dir);
+        host.reload().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        audio.was_tried()
+    }
+
+    #[test]
+    fn a_script_that_plays_nothing_opens_no_device() {
+        assert!(!tried("none", "return ui.div {}"));
+        assert!(
+            !tried(
+                "required",
+                "local audio = require(\"@audio\")\nlocal _ = audio\nreturn ui.div {}"
+            ),
+            "requiring it costs a table, not a device"
+        );
+    }
+
+    #[test]
+    fn its_first_sound_opens_it() {
+        // Whether a device exists (a CI runner may have none), it is tried.
+        assert!(tried(
+            "plays",
+            "require(\"@audio\").play(\"missing.wav\")\nreturn ui.div {}"
+        ));
+    }
 }

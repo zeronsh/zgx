@@ -19,6 +19,24 @@ Nothing, if it doesn't use sound:
 
 Whether zgx-run turns `audio` on by default is an open choice (below).
 
+### Measured
+
+zgx-run on the M5 MacBook Pro, built in release with this branch's prototype behind an `audio` feature (`require("@audio")`), off and then on:
+
+| | Off | On |
+| --- | --- | --- |
+| Binary | 35,605,680 bytes | 35,666,304 bytes (+60,624, +0.17%) |
+| `__TEXT` | 29,507,584 | 29,556,736 (+49,152) |
+| Images dyld loads at launch | 1,310 | 1,310, the same set |
+| First frame, a two-line script, 20 launches each, alternating | median 129.6 ms (125.0–153.5), 686.4M instructions (683.6–696.6) | median 130.1 ms (125.4–154.7), 685.9M instructions (684.4–697.6) |
+| Threads, a script that never plays a sound | 7 | 7, none of them audio |
+| Threads, the click script | | 12: the system's `com.apple.audio.IOThread.client` and `AudioSession - RootQueue` among them |
+
+Off, zgx-audio isn't in zgx-run's dependency graph at all (`cargo tree`). On:
+- **Linking.** The binary links AudioToolbox, but AppKit loads AudioToolbox and CoreAudio in every app anyway, so launch loads nothing new.
+- **Startup.** The two sides are within each other's noise.
+- **No device until a sound.** A test (`script::tests`) runs a script that doesn't require `@audio`, and one that requires it and plays nothing. Neither tries to open the device. A script that plays a sound does.
+
 ## Layers
 
 ```
@@ -181,7 +199,7 @@ The prototype's bridge is smaller: a package, `require("@audio")`, whose `audio.
 | Platform | Output | Prototype | Notes |
 | --- | --- | --- | --- |
 | macOS | AudioUnit, default output (`auou`/`def `) | yes | Follows the default device as it changes (headphones in or out). |
-| iOS | AudioUnit, Remote I/O (`rioc`) | compiles, untested | Needs the session below. |
+| iOS | AudioUnit, Remote I/O (`rioc`) | plays in the simulator | Needs the session below. The prototype runs under the default session. |
 | Windows | WASAPI, shared, event-driven | no | Through the `windows` crate zgx already uses. Reopen on a device change (`IMMNotificationClient`). |
 | Linux | ALSA's API, loaded with `dlopen` | no | Plays on PipeWire, PulseAudio and plain ALSA alike. A binary still starts where there's no libasound. PipeWire's own API later, for lower latency. |
 | Android | AAudio, loaded with `dlopen` | no | When zgx runs there. |
@@ -232,7 +250,10 @@ With zgx-audio:
 - `examples/click.rs`: headless, with no window. A script (`examples/click/app.luau`) plays a click three times, left, middle and right, a fifth of a second apart, timed on the audio thread. Then a stream plays a 440 Hz tone with an envelope. On an M5 MacBook Pro, `cargo run -p zgx-audio --features script --example click` printed `script: 3 clicks sounded, peak 0.78, 33792 frames at 48000 Hz` and `stream: peak 0.19, 24064 frames`.
 - Tests: the mixer's behaviour offline (levels, pan, a delay across buffers, a loop and a stop's fade, the stream under the voices, freeing off the audio thread), the queue across threads, WAV reading and resampling, and `no_alloc`.
 
-Not yet: buffer-size requests, device changes, the idle stop, decoders beyond WAV and `afconvert`, and any platform but macOS. Nothing in zgx-script changes yet.
+- The same example in the iOS simulator (built for `aarch64-apple-ios-sim`, run with `xcrun simctl spawn`) printed `script: 3 clicks sounded, peak 0.78, 33280 frames at 48000 Hz` and `stream: peak 0.19, 23552 frames`.
+- zgx-run's `audio` feature, off by default, installs `@audio` for an app's script. It exists for the measurements above. zgx-run can't be published with it until zgx-audio is.
+
+Not yet: buffer-size requests, device changes, the idle stop, decoders beyond WAV and `afconvert`, iOS's session, and Windows and Linux. Nothing in zgx-script changes yet.
 
 ## Phases
 

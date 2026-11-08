@@ -5298,6 +5298,7 @@ dependencies = [
  "ureq",
  "webpki-roots",
  "zgx",
+ "zgx-audio",
  "zgx-desktop",
  "zgx-script",
 ]

@@ -15,7 +15,7 @@ fn main() -> Result<(), String> {
     }
     let ui = zgx::widgets::Ui::new(1., 1.);
     let host = zgx_script::ScriptHost::new(&ui.runtime, dir.join("app.luau"));
-    let (host, audio) = zgx_audio::script::install(host, &dir)?;
+    let (host, audio) = zgx_audio::script::install(host, &dir);
     host.reload()?;
     std::thread::sleep(Duration::from_millis(700));
     let reading = audio.with(Engine::reading).ok_or("no output")?;
