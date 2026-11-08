@@ -947,7 +947,18 @@ fn copy_blocker(
         let Some(rect) = paints(item) else {
             continue;
         };
-        if !repainted(rect) {
+        // All it can put on screen: a box's paint (its shadows and outline),
+        // or for text, an image or a canvas the ink the scene keeps for it,
+        // which may reach past its box (a glyph's overhang, a stroke).
+        let ink = match item.kind {
+            NodeKind::Quad(_) | NodeKind::Panel { .. } => rect,
+            _ => scene
+                .layer_ink(item)
+                .and_then(|ink| ink.intersection(item.clip?))
+                .and_then(|ink| ink.intersection(clip))
+                .map_or(rect, |ink| ink.union(rect)),
+        };
+        if !repainted(ink) {
             // Something that stays put over the view (a composer floating
             // on a transcript): the copy moves the view's pixels, its among
             // them, so it repaints where it is, as the copy left what was
@@ -956,9 +967,9 @@ fn copy_blocker(
             if item.isolated || item.effects.blur_radius > 0. {
                 return Some(CopyBlocker::Over(item.id));
             }
-            carried.push(rect);
+            carried.push(ink);
         }
-        carried.extend(carry(rect));
+        carried.extend(carry(ink));
     }
     // Content opaque across the whole clip (a list's rows) hides whatever
     // lies under it, before the move and after.
