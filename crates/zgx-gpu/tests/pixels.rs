@@ -6930,6 +6930,8 @@ fn reading_into_a_kept_buffer_reads_what_a_fresh_read_does() {
     let green = (5 * 64 + 30) * 4;
     assert_eq!(&fresh[green..green + 4], &[0, 255, 0, 255]);
 
+    // A kept read swaps red and blue on the GPU (a pass into an RGBA
+    // texture), a fresh one on the CPU: the same bytes either way.
     let mut staging = zgx_gpu::Readback::default();
     // Stale bytes of the right length, then of the wrong one: each read
     // replaces them whole.
@@ -6941,4 +6943,29 @@ fn reading_into_a_kept_buffer_reads_what_a_fresh_read_does() {
     let mut short = vec![7; 10];
     gpu.readback_into(&mut short, &mut staging).unwrap();
     assert_eq!(short, fresh);
+
+    // Another size: the kept pass and texture are made again for the new
+    // target, and read what a fresh read does.
+    gpu.resize(32, 24);
+    let mut small = Scene::new(32., 24.);
+    let small_root = small.root();
+    small.set_kind(small_root, NodeKind::Container(Layout::Overlay));
+    let dot = small.append(
+        small_root,
+        NodeKind::Panel {
+            layout: Layout::Overlay,
+            quad: QuadStyle {
+                fill: Color(10, 200, 90, 255),
+                ..Default::default()
+            },
+        },
+        fixed(8., 8.),
+    );
+    small.set_transform(dot, Transform { x: 4., y: 4. });
+    small.flush();
+    gpu.render(&small, &[Rect::new(0., 0., 32., 24.)]).unwrap();
+    let fresh = gpu.readback().unwrap();
+    assert_eq!(fresh.len(), 32 * 24 * 4);
+    gpu.readback_into(&mut kept, &mut staging).unwrap();
+    assert_eq!(kept, fresh);
 }
