@@ -5104,6 +5104,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zgx-audio"
+version = "0.1.10"
+dependencies = [
+ "windows",
+ "zgx",
+ "zgx-script",
+]
+
+[[package]]
 name = "zgx-components"
 version = "0.1.10"
 dependencies = [
@@ -5291,6 +5300,7 @@ dependencies = [
  "ureq",
  "webpki-roots",
  "zgx",
+ "zgx-audio",
  "zgx-desktop",
  "zgx-script",
 ]

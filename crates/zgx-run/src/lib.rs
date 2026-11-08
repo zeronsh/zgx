@@ -436,6 +436,9 @@ pub fn run_hosting(
         // Its packages, what it exposes to plugins, and its plugins.
         let host = app_host.apply(ScriptHost::new(&cx.ui.runtime, script.clone()));
         let host = host.app_id(&config.app_id).args(args.clone());
+        #[cfg(feature = "audio")]
+        let (host, _) =
+            zgx_audio::script::install(host, script.parent().unwrap_or(std::path::Path::new(".")));
         // The launch's files, and what the system opened meanwhile:
         // they wait for the script's `ui.on_open`.
         host.open(launched.clone(), Vec::new());

@@ -174,6 +174,19 @@ jobs:
       - run: cargo test -p zgx-terminal --locked
       # The optional effects package: every effect drawn, on each job's backend.
       - run: cargo test -p zgx-fx --locked
+      # Sound (zgx-audio's draft): the mixer, and the output through ALSA's own
+      # calls into its file plugin over the null device (the runner has no
+      # sound card), a sound played, the device closed after its silence
+      # and opened again, and clicks scheduled on the audio clock read back
+      # from the file on their exact samples. libasound is loaded when a sound plays, not linked.
+      - name: Sound through ALSA
+        run: |
+          home="$RUNNER_TEMP/alsa-home"
+          mkdir -p "$home"
+          printf 'pcm.!default {\n type file\n slave.pcm "null"\n file "%s/out.raw"\n format "raw"\n}\n' "$home" > "$home/.asoundrc"
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          HOME="$home" ZGX_AUDIO_REQUIRE_DEVICE=1 ZGX_AUDIO_CAPTURE="$home/out.raw" cargo test -p zgx-audio --features script --locked -- --nocapture
+          test -s "$home/out.raw"
       # zgx-script's tests with all its features, as an app built by zgx-run
       # has them (scene3d, i18n, gltf, inspect): ICU's plural rules change
       # what the i18n lint finds, and each feature may add lazy `ui`
@@ -434,6 +447,9 @@ jobs:
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
       - run: cargo test -p zgx-fx --locked
+      # Sound (zgx-audio's draft): the mixer, and the output if the runner
+      # has one (the device test says which).
+      - run: cargo test -p zgx-audio --features script --locked -- --nocapture
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # The soak (an app used for a while holds what it did), on Metal.
@@ -510,6 +526,9 @@ jobs:
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
       - run: cargo test -p zgx-fx --locked
+      # Sound (zgx-audio's draft): the mixer, and WASAPI's output if the
+      # runner has an endpoint (the device test says which).
+      - run: cargo test -p zgx-audio --features script --locked -- --nocapture
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # The swap chain's alpha (opaque windows aren't blended by DWM, #513)
