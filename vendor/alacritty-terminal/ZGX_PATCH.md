@@ -124,3 +124,28 @@ edits across ❤️ in bash. A cell's joined characters (`CellExtra`'s
 a selector or ZWJ joined with the mode reset, costs one allocation rather
 than two. Version 0.26.3, depending on `unicode-segmentation` and
 `smallvec`.
+
+## Pictures placed on the grid
+
+For the kitty graphics protocol, which zgx-terminal reads (vte passes APC
+strings over), each screen keeps the pictures placed on it
+(`term::graphics`): which picture, under what number, the rectangle of cells
+it covers (its top line a grid line, negative in the scrollback), its z and
+what part of it shows. `Term::place`, `placements` and `retain_placements`
+are the embedder's. The placements move with the lines they sit on: a
+scroll from the top carries them into the scrollback and drops them once
+their last line leaves it; a scrolling region moves those starting in it
+and drops those leaving it; inserted and deleted lines are such scrolls; a
+resize moves them as the screen moves over the scrollback (a reflow of
+wrapped lines isn't followed). Clearing the screen (ED 2) drops what it
+shows, as kitty does, and moves the scrollback's with the lines the clear
+pushes into it (`Grid::clear_viewport` says how many); clearing the
+scrollback (ED 3) drops what starts there; a shorter scrollback drops what
+its lost lines showed. The alternate screen keeps its own, blank each time
+it is entered; a full reset drops both. Text written over a picture leaves
+it, as kitty does.
+
+A screen with none allocates nothing and pays one comparison where its
+lines move (each move is out of line, `#[cold]`). The fork's
+`graphics::tests` check each case and that no placements hold no room.
+Also in 0.26.3.
