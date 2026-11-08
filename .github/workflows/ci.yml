@@ -510,6 +510,8 @@ jobs:
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
       - run: cargo test -p zgx-fx --locked
+      # Menus, popovers and tooltips in Windows' shapes there (WinUI's).
+      - run: "cargo test -p zgx --test overlays --locked -- composition_menu::a_menu_takes_its_platforms_shape"
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # The swap chain's alpha (opaque windows aren't blended by DWM, #513)

@@ -2048,7 +2048,33 @@ pub(crate) const BUILT_IN_OVERLAY: OverlayLook = OverlayLook {
     tooltip_radius: crate::theme::Themed::Token(tok::RADIUS_SM.0),
     tooltip_font_size: crate::theme::Themed::Token(tok::FONT_SIZE_XS.0),
 };
-pub(crate) const OVERLAY: OverlayLook = BUILT_IN_OVERLAY;
+/// Windows 11's, as WinUI 3 draws its MenuFlyout, FlyoutPresenter and
+/// ToolTip (microsoft-ui-xaml's `CommonStyles`): a menu's panel rounded as
+/// overlays are (`OverlayCornerRadius`, 8) with 2 above and below its items
+/// and none across (`MenuFlyoutPresenterThemePadding`), each item's
+/// highlight inset 4 across and 2 down (`MenuFlyoutItemMargin`) and rounded
+/// as controls are (`ControlCornerRadius`, 4), padded 11 by 4 (the narrow
+/// padding a mouse or keyboard opens it with); a popover rounded 8; a
+/// tooltip padded 9 across, 6 above and 8 below (`ToolTipBorderPadding`)
+/// in 12-point text (`ToolTipContentThemeFontSize`). Colours stay the
+/// theme's. No border on menus and popovers: in windows of their own, the
+/// default, DWM draws their rim, its corner matching the panel's 8.
+pub(crate) const WINDOWS_OVERLAY: OverlayLook = OverlayLook {
+    menu_radius: crate::theme::Themed::Value(8.),
+    menu_padding: (0., 2.),
+    menu_item_padding: (11., 4.),
+    menu_item_inset: (4., 2.),
+    menu_item_radius: 4.,
+    popover_radius: crate::theme::Themed::Value(8.),
+    tooltip_padding: (9., 6., 8.),
+    tooltip_radius: crate::theme::Themed::Token(tok::RADIUS_SM.0),
+    tooltip_font_size: crate::theme::Themed::Value(12.),
+};
+pub(crate) const OVERLAY: OverlayLook = if cfg!(windows) {
+    WINDOWS_OVERLAY
+} else {
+    BUILT_IN_OVERLAY
+};
 
 /// A control's default focus ring: an accent border. Where the control has
 /// no border of its own it paints over the control (an inset stroke, taking

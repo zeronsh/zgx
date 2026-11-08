@@ -574,3 +574,38 @@ fn a_menu_in_a_popup_window_names_its_trigger_while_open() {
     assert!(ui.scene.borrow().popups().is_empty());
     assert_eq!(ui.scene.borrow().popup_anchor(root), None);
 }
+
+/// A menu takes its platform's shape: on Windows WinUI's (its panel
+/// rounded 8, 2 above its items and none across, each item's highlight
+/// inset 4 and rounded 4), elsewhere zgx's (rounded `radius.md`, padded 16,
+/// items edge to edge).
+#[test]
+fn a_menu_takes_its_platforms_shape() {
+    use zgx::scene::NodeKind;
+    let mut ui = Ui::new(500., 400.);
+    let open = ui.signal(true);
+    let view = ui.mount(
+        column().p(20.).child(
+            menu("Edit", open, button().id("anchor").size(80., 28.))
+                .id("panel")
+                .child(menu_item("Cut").id("cut")),
+        ),
+    );
+    ui.prepare_frame();
+    ui.prepare_frame();
+    let scene = ui.scene.borrow();
+    let panel = view.find("panel").unwrap();
+    let (panel_box, item) = (scene.bounds(panel), scene.bounds(view.find("cut").unwrap()));
+    let radius = match scene.kind(panel) {
+        NodeKind::Panel { quad, .. } => quad.radius,
+        other => panic!("{other:?}"),
+    };
+    let (inset, above) = (item.x - panel_box.x, item.y - panel_box.y);
+    if cfg!(windows) {
+        assert_eq!(radius, 8.);
+        assert_eq!((inset, above), (4., 4.), "0 + 4 across, 2 + 2 down");
+    } else {
+        assert_eq!(radius, 6., "radius.md");
+        assert_eq!((inset, above), (16., 16.));
+    }
+}
