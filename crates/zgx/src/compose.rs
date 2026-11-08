@@ -5514,8 +5514,10 @@ fn open_element(
                 {
                     // Where menus are windows of their own (AppKit's), the
                     // chosen item flashes, then the menu closes, then its
-                    // action runs, as AppKit sends it.
+                    // action runs, as AppKit sends it. Windows' menus close
+                    // at once, as WinUI's do.
                     if let (Some(runner), Some(ui)) = (&runner, weak_ui.upgrade())
+                        && !cfg!(windows)
                         && ui.popup_screens().with_untracked(|s| !s.is_empty())
                     {
                         let (click, modifiers) = (menu_click.clone(), cx.pointer_modifiers());

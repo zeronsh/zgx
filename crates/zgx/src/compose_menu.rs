@@ -317,7 +317,8 @@ pub(crate) fn mount(
 }
 
 /// A chosen item flashes off and on, then its menu closes and `then` (its
-/// action) runs, as AppKit's menus confirm a choice (macOS). Choosing again
+/// action) runs, as AppKit's menus confirm a choice (where menus are windows
+/// of their own, but on Windows, whose menus close at once). Choosing again
 /// meanwhile does nothing.
 pub(crate) fn flash(
     ui: &Ui,

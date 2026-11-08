@@ -609,3 +609,62 @@ fn a_menu_takes_its_platforms_shape() {
         assert_eq!((inset, above), (16., 16.));
     }
 }
+
+/// Where menus are windows of their own, a chosen item flashes before its
+/// menu closes and its action runs, as AppKit's do; on Windows, as WinUI's,
+/// the menu closes and the action runs at once.
+#[test]
+fn a_chosen_item_flashes_first_where_menus_do() {
+    use std::{cell::RefCell, rc::Rc};
+    use zgx::compose::{TaskRunner, TaskToken};
+    let spawned: Rc<RefCell<usize>> = Rc::default();
+    let count = spawned.clone();
+    let runner = TaskRunner::new(move |future| {
+        *count.borrow_mut() += 1;
+        TaskToken::new(Rc::new(RefCell::new(future)), |_| true)
+    });
+    let mut ui = Ui::new(500., 400.);
+    ui.set_popup_screens(vec![zgx::scene::Rect::new(0., 0., 1000., 800.)]);
+    let open = ui.signal(true);
+    let chosen = Rc::new(RefCell::new(0));
+    let ran = chosen.clone();
+    let view = ui.mount(provide(
+        runner,
+        column().p(20.).child(
+            menu("Edit", open.clone(), button().id("anchor").size(80., 28.)).child(
+                menu_item("Cut")
+                    .id("cut")
+                    .on_click(move || *ran.borrow_mut() += 1),
+            ),
+        ),
+    ));
+    ui.prepare_frame();
+    ui.prepare_frame();
+    let bounds = ui.scene.borrow().bounds(view.find("cut").unwrap());
+    let (x, y) = (bounds.x + 4., bounds.y + 4.);
+    for event in [
+        InputEvent::PointerMove { x, y },
+        InputEvent::PointerDown {
+            x,
+            y,
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerUp {
+            x,
+            y,
+            button: PointerButton::Primary,
+        },
+    ] {
+        ui.dispatch(event);
+    }
+    ui.prepare_frame();
+    if cfg!(windows) {
+        assert_eq!(*chosen.borrow(), 1, "its action at once");
+        assert!(!open.get(), "its menu closed at once");
+        assert_eq!(*spawned.borrow(), 0, "no flash");
+    } else {
+        assert_eq!(*chosen.borrow(), 0, "its action after the flash");
+        assert!(open.get(), "its menu open while it flashes");
+        assert_eq!(*spawned.borrow(), 1, "a flash");
+    }
+}
