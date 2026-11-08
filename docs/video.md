@@ -121,7 +121,7 @@ video.clip { src = "demo.mp4", from = 30, trim = 60, duration = 90, w = 640, h =
 
 ## Loops and freezes
 
-`video.loop { duration, times, … }` plays its children over and over, `duration` frames a pass (`times` passes, or for ever). Their time starts again with each pass, and they mount again, so whatever starts as they mount starts again too. Sequences, captions and `video.audio_data` inside a loop follow the pass's time. `video.freeze { frame, … }` holds its children at one frame of their time.
+`video.loop { duration, times, … }` plays its children over and over, `duration` frames a pass (`times` passes, or for ever). Their time starts again with each pass, and they mount again, so whatever starts as they mount starts again too. Sequences, captions and `video.audio_data` inside a loop follow the pass's time, and a `video.audio` inside one plays again at the start of each pass. `video.freeze { frame, … }` holds its children at one frame of their time.
 
 ```lua
 -- A ring that pulses on every beat (30 frames), four times.

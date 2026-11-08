@@ -226,6 +226,7 @@ fn sounds_given_to_a_sequence_as_tables_start_where_it_places_them() {
         ("one.wav", 20),
         ("two.wav", 34),
         ("turn.wav", 50),
+        ("turn.wav", 60),
         ("direct.wav", 80),
         ("inner.wav", 95),
     ]
@@ -233,6 +234,65 @@ fn sounds_given_to_a_sequence_as_tables_start_where_it_places_them() {
     .map(|(name, from)| (name.to_owned(), from))
     .collect();
     assert_eq!(placed, expected);
+}
+
+#[test]
+fn a_sound_in_a_loop_plays_on_every_pass() {
+    let dir = app(
+        "loop-click",
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "L", w = 32, h = 32, fps = 30, duration = 60,
+            render = function()
+                return ui.div { w_full = true, h_full = true,
+                    video.sequence { from = 10, video.loop { duration = 12, times = 3, function()
+                        return video.audio { src = "click.wav" }
+                    end } },
+                }
+            end,
+        } }
+        "##,
+    );
+    // A click: one sample at full scale, the rest silence.
+    let mut click = vec![0f32; 2 * 480];
+    click[0] = 1.;
+    click[1] = 1.;
+    zgx_video::audio::write_wav(&dir.join("click.wav"), &click).unwrap();
+    let mut stage = script_stage(&dir, json!({}));
+    stage.step_to(59).unwrap();
+    let clips = stage.audio();
+    // One stage, and one virtual clock, a thread at a time.
+    drop(stage);
+    let starts: Vec<u64> = clips.iter().map(|clip| clip.from).collect();
+    assert_eq!(starts, [10, 22, 34], "one a pass, at its start");
+    // Ticking four times a frame (motion blur), its passes start on the
+    // same frames.
+    let mut blurred = zgx_video::ScriptStage::new(
+        &dir,
+        None,
+        &json!({}),
+        1.,
+        zgx::scene::Color(0, 0, 0, 255),
+        zgx_video::Timing {
+            samples: 4,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    blurred.film.step_to(59).unwrap();
+    let blurred: Vec<u64> = blurred.audio().iter().map(|clip| clip.from).collect();
+    assert_eq!(blurred, [10, 22, 34], "with motion blur");
+    // Mixed, the click sounds at each pass's start: 48,000 samples a second.
+    let mix = zgx_video::audio::mixed_file(&clips, 30., 60)
+        .unwrap()
+        .unwrap();
+    let sound = zgx_video::audio::decode(&mix).unwrap();
+    let _ = std::fs::remove_file(&mix);
+    let heard: Vec<usize> = (0..sound.0.len() / 2)
+        .filter(|frame| sound.0[frame * 2] > 0.5)
+        .collect();
+    assert_eq!(heard, [16_000, 35_200, 54_400]);
 }
 
 #[test]
