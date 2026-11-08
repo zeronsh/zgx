@@ -92,7 +92,7 @@ local function stripes()
 	return ui.column { absolute = true, left = 0, top = 0, w_full = true, table.unpack(rows) }
 end
 
-local function cell(name: string, effect, on_click: ((e: any) -> ())?)
+local function cell(name: string, effect, on_press: ((e: PointerEvent) -> ...unknown)?, id: string?)
 	return ui.overlay {
 		w = 220,
 		h = 170,
@@ -104,7 +104,8 @@ local function cell(name: string, effect, on_click: ((e: any) -> ())?)
 			w = 140,
 			h = 84,
 			rounded = 14,
-			on_click = on_click,
+			id = id,
+			on_press = on_press,
 			ui.text { "Sample", color = "#ffffff", size = 18, p = 10 },
 		})),
 		ui.text { name, absolute = true, left = 6, top = 146, size = 12, color = "#ffffff" },
@@ -116,14 +117,14 @@ local shockwave = fx.shockwave { reach = 160 }
 local wave = fx.wave()
 local cells = {
 	cell("ripple: press", ripple, function(e)
-		ripple:fire(e.x, e.y)
-	end),
+		ripple:fire(e.local_x, e.local_y)
+	end, "ripple"),
 	cell("shockwave: press", shockwave, function(e)
-		shockwave:fire(e.x, e.y)
-	end),
+		shockwave:fire(e.local_x, e.local_y)
+	end, "shockwave"),
 	cell("wave: press", wave, function(e)
-		wave:fire(e.x, e.y)
-	end),
+		wave:fire(e.local_x, e.local_y)
+	end, "wave"),
 }
 table.insert(
 	cells,

@@ -88,6 +88,14 @@ out = ['''--!nonstrict
 -- `effect:fire(x, y)` starts its next, and goes on the node `fx.with` made.
 local fx = {}
 
+-- What an effect takes, all optional: `preset`, `seed`, `intensity`, and any of
+-- its own parameters by name (`fx.glow { preset = "neon", radius = 12 }`),
+-- checked by name as it's made.
+export type Options = { [string]: any }
+-- An effect made: its spec, options and state, read by `fx.with`, and a
+-- one-shot's `fire(x, y)`.
+export type Effect = { [string]: any }
+
 local function channel(text, at)
 	return (tonumber(string.sub(text, at, at + 1), 16) or 0) / 255
 end
@@ -138,8 +146,8 @@ local function lanes(spec, o, seed, intensity)
 	return p
 end
 
-local function make(spec, opts)
-	opts = opts or {}
+local function make(spec, opts: Options?): Effect
+	local opts: Options = opts or {}
 	local o = {}
 	for name, field in spec.fields do
 		o[name] = field[4]
@@ -203,7 +211,8 @@ local function make(spec, opts)
 end
 
 -- `props` with `effect`'s.
-function fx.with(effect, props)
+-- (Any element's props, handed back to it: typed by the element they go to.)
+function fx.with(effect: Effect, props: any): any
 	local spec = effect.spec
 	if effect.idle then
 		return props
@@ -283,7 +292,7 @@ for luau, kind, wgsl, fields, presets, fps, bleed, reach, frost, animated, idle,
     for key, text in [('bleed', bleed), ('reach', reach), ('frost', frost), ('animated', animated), ('idle', idle), ('life', life)]:
         out.append(f'\t{key} = function(o)\n\t\treturn {expression(text)}\n\tend,')
     out.append('}')
-    out.append(f'function fx.{luau}(opts)\n\treturn make({luau}_spec, opts)\nend')
+    out.append(f'function fx.{luau}(opts: Options?): Effect\n\treturn make({luau}_spec, opts)\nend')
 out.append('\nreturn fx\n')
 (FX / 'luau/fx.luau').write_text('\n'.join(out))
 print(len(effects), 'effects')

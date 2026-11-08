@@ -88,6 +88,29 @@ fn the_gallery_runs_and_a_one_shot_goes_away() {
     }
 }
 
+/// A one-shot in the gallery fires where it's pressed, in its box's points.
+#[test]
+fn the_gallerys_one_shots_fire_where_pressed() {
+    let gallery = include_str!("../examples/gallery/app.luau").replace("../../luau/fx", "./fx");
+    let mut app = app(&gallery);
+    app.ui.scene.borrow_mut().resize(900., 1200.);
+    app.frames(3);
+    let ripple = app.find("ripple").unwrap();
+    let size = app.bounds("ripple");
+    app.click("ripple");
+    app.frames(2);
+    assert_eq!(app.host.error().get(), None);
+    let scene = app.ui.scene.borrow();
+    // The first shot's row: where, in points from the box's top left.
+    let shot = scene.layer_shader(ripple).unwrap().uniforms.params[1];
+    let middle = (size.width / 2., size.height / 2.);
+    assert!(
+        (shot[0] - middle.0).abs() < 1. && (shot[1] - middle.1).abs() < 1.,
+        "fired at {:?}, pressed at {middle:?}",
+        (shot[0], shot[1])
+    );
+}
+
 /// A moving effect takes no script as it moves, and a one-shot none once fired.
 #[test]
 fn what_moves_runs_no_script_per_frame() {
