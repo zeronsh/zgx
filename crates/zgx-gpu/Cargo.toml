@@ -105,6 +105,8 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 harfrust = { package = "zgx-harfrust", version = "0.5.3", path = "../../vendor/harfrust" }
 
 [target.'cfg(windows)'.dev-dependencies]
+# Every ready-made shader fill, drawn with Direct3D 11 (tests/d3d11_parity.rs).
+zgx-fx = { path = "../zgx-fx" }
 windows = { version = "0.62", default-features = false, features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Direct3D12", "Win32_Graphics_DirectComposition", "Win32_Graphics_Gdi", "Win32_Foundation", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_WindowsAndMessaging"] }
 # The debug layer's errors, collected (tests/d3d12_validation.rs).
 wgpu-hal = { version = "29.0.4", default-features = false, features = ["validation_canary"] }

@@ -547,3 +547,12 @@ jobs:
       # The app-shader HLSL generator's register map and the FXC child's
       # job and cache key (dx12_fill, fxc_child: Windows-only modules).
       - run: cargo test -p zgx-gpu --lib --locked -- dx12_fill fxc_child
+      # Direct3D 11 (the `d3d11` feature, on WARP) draws what Direct3D 12
+      # does, byte for byte: the suite's scenes and every ready-made shader
+      # fill and layer shader, each compiled cold by FXC in its child
+      # (`d3d11_parity`), optimized as apps ship them; and its ahead-compiled
+      # shaders are what naga writes now.
+      - run: cargo test -p zgx-gpu --features d3d11 --test d3d11_parity --release --locked
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}\zgx-cold-d3d11
+      - run: cargo test -p zgx-gpu --features d3d11 --lib --locked -- d3d11_frame
