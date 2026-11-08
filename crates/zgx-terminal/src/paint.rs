@@ -13,7 +13,7 @@ use std::sync::Arc;
 use zgx::{
     canvas::{Canvas, CanvasText, LineCap, LineJoin, Path, Stroke, TextAnchor, TextBaseline},
     scene::{Color, Rect},
-    text_layout::{FontFamily, FontFeatures, FontStyle, LetterSpacing, TextUnderline},
+    text_layout::{FontFamily, FontFeatures, FontStyle, TextUnderline},
 };
 
 /// A cell's size and the font, in points.
@@ -553,7 +553,8 @@ pub(crate) fn font() -> FontStyle {
     }
 }
 
-/// `paint` drawn on a row's canvas.
+/// `paint` drawn on a row's canvas, in `font`: the grid's, on its cells
+/// (`LetterSpacing::cells`, set once with the cell, `view::row_view`).
 pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canvas {
     let mut canvas = Canvas::new();
     for fill in paint.fills.iter().chain(&paint.lines) {
@@ -571,11 +572,8 @@ pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canv
             fill.color,
         );
     }
-    // On the grid: each character its cells, whichever font draws it.
-    let grid = LetterSpacing::cells(metrics.cell_width);
     for run in &paint.runs {
         let mut font = font.clone();
-        font.letter_spacing = grid;
         if run.bold {
             font.weight = 700;
         }

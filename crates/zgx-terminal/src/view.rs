@@ -1753,7 +1753,11 @@ fn view(engine: Rc<Engine>) -> View {
 fn row_view(engine: &Rc<Engine>, slot: usize) -> View {
     let (paint, line) = engine.slot(slot);
     let metrics = engine.metrics.get();
-    let font = engine.font.borrow().clone();
+    // On the grid: each character its cells, whichever font draws it. Set
+    // here, once with the cell (rows are made again when it changes), not
+    // as each row draws.
+    let mut font = engine.font.borrow().clone();
+    font.letter_spacing = zgx::text_layout::LetterSpacing::cells(metrics.cell_width);
     let label = paint.clone();
     canvas(move |_| paint::draw(&paint.get(), metrics, &font))
         .absolute()
