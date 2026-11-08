@@ -492,6 +492,7 @@ pub(crate) fn compile(
                     path: path.take(),
                     implicit_from: false,
                     deferred: Default::default(),
+                    moving: Default::default(),
                 });
                 return Ok(());
             }
@@ -553,6 +554,7 @@ pub(crate) fn compile(
                 path: path.take(),
                 implicit_from,
                 deferred: Default::default(),
+                moving: Default::default(),
             });
             Ok(())
         };
