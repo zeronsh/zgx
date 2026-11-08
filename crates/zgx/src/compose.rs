@@ -2906,12 +2906,18 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
         // (a constructor panicked, the region went) left `entries` marked
         // for keys `last` does not hold.
         let (mut pass, mut finished) = (0u64, true);
+        // A pass's children by key after the prefix, the keys with none yet
+        // (by place) and those built: kept from pass to pass, as is the
+        // order, so a pass allocates none of them.
+        let mut nodes: Vec<Option<NodeId>> = Vec::new();
+        let (mut fresh, mut added): (Vec<usize>, Vec<(usize, NodeId)>) = (Vec::new(), Vec::new());
         ui.bind(root, move || {
             let keys = keys();
             // The same keys in the same order, every child still mounted (a
             // list whose rows changed in place): nothing to add, remove or
             // move, and no key hashed to find out.
-            if keys == last.0
+            if finished
+                && keys == last.0
                 && let Some(ui) = weak.upgrade()
             {
                 let scene = ui.scene.borrow();
@@ -2953,8 +2959,8 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
             // one, marked as shown this pass where it is now. A key met
             // twice, or one of the prefix's again (placed before `from`, as
             // it still is), is a duplicate.
-            let mut nodes: Vec<Option<NodeId>> = Vec::with_capacity(keys.len() - from);
-            let mut fresh: Vec<&K> = Vec::new();
+            nodes.clear();
+            fresh.clear();
             for (at, key) in keys.iter().enumerate().skip(from) {
                 match entries.get_mut(key) {
                     Some(entry) => {
@@ -2966,7 +2972,7 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
                         nodes.push(Some(entry.node));
                     }
                     None => {
-                        fresh.push(key);
+                        fresh.push(at);
                         nodes.push(None);
                     }
                 }
@@ -2974,24 +2980,24 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
             // Those with none yet, among themselves (a stream's: a key or
             // two, looked through).
             let repeats = if fresh.len() <= 8 {
-                (1..fresh.len()).any(|i| fresh[..i].contains(&fresh[i]))
+                (1..fresh.len()).any(|i| fresh[..i].iter().any(|&j| keys[j] == keys[fresh[i]]))
             } else {
                 let mut unique = std::collections::HashSet::with_capacity_and_hasher(
                     fresh.len(),
                     crate::key_hasher(),
                 );
-                !fresh.iter().all(|key| unique.insert(*key))
+                !fresh.iter().all(|&at| unique.insert(&keys[at]))
             };
             assert!(!repeats, "duplicate component child key");
             if !ui.scene.borrow().contains(root) {
                 return;
             }
-            let order = runtime.untracked(|| {
+            runtime.untracked(|| {
                 let mut transaction = MountTransaction::new(&ui, root);
                 // Stage every new child before changing the committed registry
                 // or removing old children. The mount guard disposes staged
                 // roots if any later constructor panics.
-                let mut added = Vec::new();
+                added.clear();
                 for (i, key) in keys[from..].iter().enumerate() {
                     if nodes[i].is_some_and(|node| ui.scene.borrow().contains(node)) {
                         continue;
@@ -3002,7 +3008,7 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
                     cx.finish(&mut ui, node);
                     added.push((i, node));
                 }
-                for (i, node) in added {
+                for &(i, node) in &added {
                     nodes[i] = Some(node);
                     let (at, key) = (from + i, keys[from + i].clone());
                     entries.insert(key, Keyed { node, pass, at });
@@ -3031,18 +3037,18 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
                         });
                     }
                 }
-                let mut order = Vec::with_capacity(keys.len());
-                order.extend_from_slice(&last.1[..from]);
+                // (In place: the prefix's children are where they were.)
+                let order = &mut last.1;
+                order.truncate(from);
                 order.extend(
                     nodes
                         .iter()
                         .map(|node| node.expect("each key has its child")),
                 );
-                assert!(ui.scene.borrow_mut().reorder_children(root, &order));
+                assert!(ui.scene.borrow_mut().reorder_children(root, order));
                 transaction.commit();
-                order
             });
-            last = (keys, order);
+            last.0 = keys;
             finished = true;
         });
     })))
