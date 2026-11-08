@@ -31,6 +31,12 @@ pub(crate) enum Ask {
     Reload,
     /// How long it keeps its drawn frames once nothing is asked of it.
     KeepFor(Duration),
+    /// Frames as pixel buffers for a window to show as they are (macOS,
+    /// `Player::view`), rather than read back to bytes.
+    #[cfg(target_os = "macos")]
+    Surfaces(bool),
+    /// Bytes wanted too (a script's player): no pixel buffers then.
+    Pixels(bool),
     Quit,
 }
 
@@ -122,6 +128,12 @@ struct Preview {
     tell: Sender<Event>,
     wake: Rc<dyn Fn()>,
     tracks: usize,
+    /// Frames as pixel buffers, sent here (`Ask::Surfaces`), unless bytes
+    /// are wanted (`Ask::Pixels`).
+    surfaces: bool,
+    pixels_wanted: bool,
+    #[cfg(target_os = "macos")]
+    surfaces_to: Sender<(u64, zgx_gpu::PixelBuffer)>,
 }
 impl Preview {
     fn say(&self, told: Event) {
@@ -156,15 +168,15 @@ impl Preview {
         }
         Ok(())
     }
-    /// Show `frame`: drawn before, or by moving there, from the start if it's
-    /// behind where the stage stands.
     /// Draw `frame` (or take it from the cache) and tell it; `keep`, keep it.
     fn show(&mut self, frame: u64, keep: bool) -> Result<(), String> {
         if self.stage.is_none() {
             self.build()?;
         }
         let (width, height) = self.stage.as_ref().map_or((1, 1), |s| s.stage.pixel_size());
-        if let Some(pixels) = self.cache.get(frame) {
+        // Bytes kept serve only those who want bytes.
+        let bytes_wanted = !self.surfaces || self.pixels_wanted;
+        if let Some(pixels) = self.cache.get(frame).filter(|_| bytes_wanted) {
             self.say(Event::Frame {
                 frame,
                 width,
@@ -181,6 +193,39 @@ impl Preview {
             self.build()?;
         }
         let stage = self.stage.as_mut().expect("built");
+        // For a window that shows it as it is: copied on the GPU, no bytes
+        // (and read back too, for a script that shows bytes as well).
+        #[cfg(target_os = "macos")]
+        if self.surfaces {
+            let mut pixels = Vec::new();
+            let buffer = stage.film.draw_output_surface(
+                frame,
+                &mut pixels,
+                self.pixels_wanted,
+                Duration::from_secs(30),
+            )?;
+            if !self.pixels_wanted {
+                // A blurred frame's bytes: not asked for.
+                pixels = Vec::new();
+            }
+            let tracks = stage.tracks();
+            if tracks.len() != self.tracks {
+                self.tracks = tracks.len();
+                self.say(Event::Tracks(tracks));
+            }
+            let pixels: Arc<[u8]> = pixels.into();
+            if keep && self.pixels_wanted {
+                self.cache.put(frame, pixels.clone());
+            }
+            let _ = self.surfaces_to.send((frame, buffer));
+            self.say(Event::Frame {
+                frame,
+                width,
+                height,
+                pixels,
+            });
+            return Ok(());
+        }
         let mut pixels = Vec::new();
         stage.draw_output(frame, &mut pixels, Duration::from_secs(30))?;
         let tracks = stage.tracks();
@@ -220,6 +265,7 @@ pub(crate) fn run(
     tell: Sender<Event>,
     wake: Box<dyn Fn() + Send>,
     held: Arc<AtomicUsize>,
+    #[cfg(target_os = "macos")] surfaces_to: Sender<(u64, zgx_gpu::PixelBuffer)>,
 ) {
     let wake: Rc<dyn Fn()> = Rc::from(wake as Box<dyn Fn()>);
     let mut preview = Preview {
@@ -232,6 +278,10 @@ pub(crate) fn run(
         tell,
         wake,
         tracks: 0,
+        surfaces: false,
+        pixels_wanted: false,
+        #[cfg(target_os = "macos")]
+        surfaces_to,
     };
     let mut at = 0u64;
     let mut playing: Option<(Instant, u64)> = None;
@@ -341,6 +391,23 @@ pub(crate) fn run(
                     watched = on;
                 }
                 Ask::KeepFor(time) => keep_for = time,
+                #[cfg(target_os = "macos")]
+                Ask::Surfaces(on) => {
+                    // A frame shown already, shown again the other way. Its
+                    // view asks as it's built, before it's seen or not.
+                    if preview.surfaces != on {
+                        preview.surfaces = on;
+                        if preview.composition.is_some() {
+                            seek = Some(at);
+                        }
+                    }
+                }
+                Ask::Pixels(on) => {
+                    if preview.pixels_wanted != on {
+                        preview.pixels_wanted = on;
+                        seek = Some(at);
+                    }
+                }
                 Ask::Reload => {
                     preview.cache.clear();
                     result = preview.build();
@@ -384,6 +451,13 @@ pub(crate) fn run(
                 if watched {
                     result = preview.show(at, playing.is_none());
                     stale = false;
+                    // At rest, only the buffer shown is held.
+                    #[cfg(target_os = "macos")]
+                    if playing.is_none()
+                        && let Some(stage) = &preview.stage
+                    {
+                        stage.film.stage.release_surfaces();
+                    }
                 } else {
                     stale = true;
                 }
@@ -412,10 +486,17 @@ pub struct Player {
     pub tracks: Signal<Vec<crate::script::Track>>,
     /// Why it couldn't go on, until it can.
     pub error: Signal<Option<String>>,
-    /// The picture it shows.
+    /// The picture it shows, as bytes. While its [`Player::view`] shows
+    /// pixel buffers (macOS), they are read when an image's pixels are first
+    /// asked for, and no frame is read back that no one reads.
     pub image: Signal<Option<Arc<ImageData>>>,
     /// Bytes of drawn frames its thread keeps.
     cached: Arc<AtomicUsize>,
+    /// Its frames as pixel buffers, as its thread sends them (`view`, macOS).
+    #[cfg(target_os = "macos")]
+    surfaces: Receiver<(u64, zgx_gpu::PixelBuffer)>,
+    #[cfg(target_os = "macos")]
+    surface: Signal<Option<Rc<zgx::native_surface::NativeSurface>>>,
 }
 impl Player {
     /// A player of the script at `path` (a file, or a directory holding
@@ -426,6 +507,8 @@ impl Player {
         let (asks, asked) = channel();
         let (tell, told) = channel::<Event>();
         let (wake_up, woken) = zgx::task::latest::<()>();
+        #[cfg(target_os = "macos")]
+        let (surfaces_to, surfaces) = channel();
         let path = path.to_owned();
         let cached = Arc::new(AtomicUsize::new(0));
         let held = cached.clone();
@@ -441,6 +524,8 @@ impl Player {
                         wake_up.send(());
                     }),
                     held,
+                    #[cfg(target_os = "macos")]
+                    surfaces_to,
                 );
             })
             .map_err(|error| error.to_string())?;
@@ -454,6 +539,10 @@ impl Player {
             error: runtime.signal(None),
             image: runtime.signal(None),
             cached,
+            #[cfg(target_os = "macos")]
+            surfaces,
+            #[cfg(target_os = "macos")]
+            surface: runtime.signal(None),
         }))
     }
     /// Bytes of drawn frames its thread keeps now: for tests.
@@ -521,6 +610,23 @@ impl Player {
                         }
                     }
                 }
+                // The latest pixel buffer, before the frame it is of says so.
+                #[cfg(target_os = "macos")]
+                if let Some((_, buffer)) = this.surfaces.try_iter().last() {
+                    // The picture shown, as bytes when asked for: read from
+                    // the buffer then, once, and not at all if no one asks.
+                    if let Ok(surface) = buffer.native_surface() {
+                        let (width, height) = (surface.width(), surface.height());
+                        this.surface.set(Some(Rc::new(surface)));
+                        if let Ok(image) =
+                            ImageData::on_demand_premultiplied(width, height, move || {
+                                buffer.to_rgba().into()
+                            })
+                        {
+                            this.image.set(Some(Arc::new(image)));
+                        }
+                    }
+                }
                 if let Some(event) = frame {
                     this.keep(&event);
                     heard(&event);
@@ -536,7 +642,11 @@ impl Player {
                 height,
                 pixels,
             } => {
-                if let Ok(image) = ImageData::new_premultiplied(*width, *height, pixels.clone()) {
+                // None read back (shown as pixel buffers): `image` is the
+                // buffer shown, read when asked for (`listen`).
+                if !pixels.is_empty()
+                    && let Ok(image) = ImageData::new_premultiplied(*width, *height, pixels.clone())
+                {
                     self.image.set(Some(Arc::new(image)));
                 }
                 self.frame.set(*frame);
@@ -563,8 +673,6 @@ impl Player {
         let this = self.clone();
         zgx::compose::component(move |cx| {
             cx.tasks().spawn(this.listen(|_| {}));
-            let image = this.image.clone();
-            let blank = Arc::new(ImageData::new(1, 1, vec![0u8; 4]).expect("a pixel"));
             // Seen while any of its box shows, in a window that shows: else
             // its thread draws nothing (`Player::watch`).
             let watching: Rc<RefCell<Option<zgx::reactive::Effect>>> = Rc::default();
@@ -578,10 +686,7 @@ impl Player {
             }
             cx.retain(Unwatch(this.clone()));
             let (player, runtime) = (this.clone(), cx.runtime());
-            zgx::compose::image_signal("Video", move || {
-                image.get().unwrap_or_else(|| blank.clone())
-            })
-            .on_mount(move |handle| {
+            let watch = move |handle: zgx::compose::NodeHandle| {
                 let (Some(visible), Some(shown)) =
                     (handle.observe_visibility(), handle.observe_shown())
                 else {
@@ -595,7 +700,33 @@ impl Player {
                         player.watch(seen);
                     }
                 }));
+            };
+            // On macOS its frames are pixel buffers the window shows as they
+            // are: copied on the GPU, never read back or uploaded again.
+            #[cfg(target_os = "macos")]
+            if let Ok(blank) = zgx_gpu::blank_surface()
+                && let Ok(blank) = blank.native_surface()
+            {
+                struct Bytes(Rc<Player>);
+                impl Drop for Bytes {
+                    fn drop(&mut self) {
+                        let _ = self.0.asks.send(Ask::Surfaces(false));
+                    }
+                }
+                let _ = this.asks.send(Ask::Surfaces(true));
+                cx.retain(Bytes(this.clone()));
+                let (surface, blank) = (this.surface.clone(), Rc::new(blank));
+                return zgx::compose::native_surface_signal("Video", move || {
+                    surface.get().unwrap_or_else(|| blank.clone())
+                })
+                .on_mount(watch);
+            }
+            let image = this.image.clone();
+            let blank = Arc::new(ImageData::new(1, 1, vec![0u8; 4]).expect("a pixel"));
+            zgx::compose::image_signal("Video", move || {
+                image.get().unwrap_or_else(|| blank.clone())
             })
+            .on_mount(watch)
         })
     }
 }
@@ -632,6 +763,8 @@ impl Player {
         let (this, shown, image) = (self.clone(), host.clone(), name.to_owned());
         let telling = tell.clone();
         host.async_action(format!("{name}.listen"), move |_| {
+            // A script shows bytes (`host:<name>`): they're drawn as before.
+            let _ = this.asks.send(Ask::Pixels(true));
             let (shown, image, tell) = (shown.clone(), image.clone(), telling.clone());
             let listen = this.listen(move |event| {
                 if let Event::Frame {

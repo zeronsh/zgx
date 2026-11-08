@@ -28,6 +28,8 @@ mod gpu_views;
 mod hidden_blur_damage;
 #[path = "../image_cache.rs"]
 mod image_cache;
+#[path = "../image_on_demand.rs"]
+mod image_on_demand;
 #[path = "../image_updates.rs"]
 mod image_updates;
 #[path = "../repaints.rs"]

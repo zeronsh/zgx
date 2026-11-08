@@ -44,21 +44,29 @@ fn a_player_shows_its_compositions_frame_in_any_view() {
     )
     .unwrap();
     let player = held.unwrap();
-    // Its frames come from a thread of their own, in real time.
+    // Its frames come from a thread of their own, in real time: drawn until
+    // the frame shows (as bytes, or on macOS as a pixel buffer).
     let deadline = Instant::now() + Duration::from_secs(30);
-    while player.frame.with_untracked(|f| *f) != 40 || player.image.with_untracked(Option::is_none)
-    {
-        stage.step().unwrap();
-        assert!(Instant::now() < deadline, "no frame came");
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    stage.step().unwrap();
     let mut pixels = Vec::new();
-    stage.draw(&mut pixels).unwrap();
-    // 40 points of green bar in a 100-point frame shown 200 wide: 80 pixels.
-    let green = (0..200u32)
-        .filter(|x| pixel(&pixels, 200, *x, 50)[1] > 200 && pixel(&pixels, 200, *x, 50)[0] < 60)
-        .count();
+    let green = loop {
+        stage.step().unwrap();
+        stage.draw(&mut pixels).unwrap();
+        // 40 points of green bar in a 100-point frame shown 200 wide: 80 pixels.
+        let green = (0..200u32)
+            .filter(|x| pixel(&pixels, 200, *x, 50)[1] > 200 && pixel(&pixels, 200, *x, 50)[0] < 60)
+            .count();
+        if player.frame.with_untracked(|f| *f) == 40 && green > 0 {
+            break green;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no frame came: frame {}, error {:?}, green {green}, centre {:?}",
+            player.frame.with_untracked(|f| *f),
+            player.error.with_untracked(Clone::clone),
+            pixel(&pixels, 200, 100, 50)
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    };
     assert!((76..=84).contains(&green), "{green} green pixels");
     assert_eq!(
         player.composition.with_untracked(|c| c.clone()).unwrap().id,
@@ -475,14 +483,28 @@ fn a_player_keeps_frames_only_paused_and_gives_them_back_at_rest() {
             ..Default::default()
         },
         |setting| {
+            // A script's player: its frames are bytes, which it keeps (a
+            // view on macOS shows pixel buffers, and keeps none).
             let player = Player::new(setting.runtime, &path, 1.)?;
-            let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
-            held = Some(player);
+            let host = zgx_script::ScriptHost::inline(
+                setting.runtime,
+                "app",
+                r##"
+                ui.on_mount(function() ui.call("clip.listen", nil) end)
+                return ui.column { w = 100, h = 50,
+                    ui.image { src = "host:clip", w = 100, h = 50 } }
+                "##,
+            );
+            host.lint_strip(false);
+            player.expose(&host, "clip");
+            host.reload()?;
+            let view = host.view();
+            held = Some((player, host));
             Ok(view)
         },
     )
     .unwrap();
-    let player = held.unwrap();
+    let (player, _host) = held.unwrap();
     // A frame of 100 by 50, RGBA.
     let frame_bytes = 100 * 50 * 4;
     player.keep_frames_for(Duration::from_millis(300));
@@ -531,4 +553,191 @@ fn a_player_keeps_frames_only_paused_and_gives_them_back_at_rest() {
         rest.elapsed() >= Duration::from_millis(250),
         "gave back too soon"
     );
+}
+
+/// Steps `stage` until what it draws shows `player` at `frame` and holds
+/// still, returning those pixels.
+fn drawn_at(stage: &mut Stage, player: &Player, frame: u64) -> Vec<u8> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last = Vec::new();
+    loop {
+        stage.step().unwrap();
+        let mut pixels = Vec::new();
+        stage.draw(&mut pixels).unwrap();
+        let green = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|p| p[1] > 200 && p[0] < 60);
+        if player.frame.with_untracked(|f| *f) == frame && green && pixels == last {
+            return pixels;
+        }
+        last = pixels;
+        assert!(Instant::now() < deadline, "frame {frame} never showed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_players_view_draws_the_same_pixels_as_its_frames_bytes_do() {
+    let dir = temp_dir("player-same-pixels");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let options = || StageOptions {
+        width: 100.,
+        height: 50.,
+        fps: 60.,
+        scale: 1.,
+        background: Color(255, 255, 255, 255),
+        ..Default::default()
+    };
+    let path = dir.to_path_buf();
+    // Its own view: on macOS, pixel buffers the window shows as they are.
+    let mut held = None;
+    let mut stage = Stage::new(options(), |setting| {
+        let player = Player::new(setting.runtime, &path, 1.)?;
+        player.open("Bar", json!({ "color": "#00ff00" }), 40);
+        let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
+        held = Some(player);
+        Ok(view)
+    })
+    .unwrap();
+    let player = held.unwrap();
+    let as_surfaces = drawn_at(&mut stage, &player, 40);
+    drop((stage, player));
+    // A script's: its frames' bytes, an image.
+    let mut held = None;
+    let mut stage = Stage::new(options(), |setting| {
+        let player = Player::new(setting.runtime, &path, 1.)?;
+        let host = zgx_script::ScriptHost::inline(
+            setting.runtime,
+            "app",
+            r##"
+            ui.on_mount(function()
+                ui.call("clip.listen", nil)
+                ui.invoke("clip.open", { id = "Bar", props = { color = "#00ff00" }, frame = 40 })
+            end)
+            return ui.column { w = 100, h = 50,
+                ui.image { src = "host:clip", w = 100, h = 50, fit = "contain" } }
+            "##,
+        );
+        host.lint_strip(false);
+        player.expose(&host, "clip");
+        host.reload()?;
+        let view = host.view();
+        held = Some((player, host));
+        Ok(view)
+    })
+    .unwrap();
+    let (player, _host) = held.unwrap();
+    let as_bytes = drawn_at(&mut stage, &player, 40);
+    assert!(as_surfaces == as_bytes, "the two ways draw it differently");
+}
+
+/// How many pixels wide `image`'s bar is: the frame it shows.
+fn bar_width(image: &zgx::image::ImageData) -> usize {
+    let row = &image.pixels()[..image.width() as usize * 4];
+    row.as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| p[1] > 200 && p[0] < 60)
+        .count()
+}
+
+#[test]
+fn a_players_image_is_the_frame_its_view_shows() {
+    let dir = temp_dir("player-image");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let path = dir.to_path_buf();
+    // Its view shows pixel buffers (macOS): no frame is read back to bytes,
+    // and `image` reads the one shown when asked.
+    let mut held = None;
+    let mut stage = Stage::new(
+        StageOptions {
+            width: 100.,
+            height: 50.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            player.open("Bar", json!({ "color": "#00ff00" }), 40);
+            let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
+            held = Some(player);
+            Ok(view)
+        },
+    )
+    .unwrap();
+    let player = held.unwrap();
+    let image = |player: &Player| player.image.with_untracked(Clone::clone).expect("an image");
+    let shown = drawn_at(&mut stage, &player, 40);
+    let at_40 = image(&player);
+    assert_eq!(bar_width(&at_40), 40, "image isn't frame 40");
+    // As drawn: the view's pixels where it shows the frame, at one pixel
+    // a point and the frame's own size.
+    assert_eq!((at_40.width(), at_40.height()), (100, 50));
+    assert!(
+        at_40.pixels() == &shown[..],
+        "image differs from the frame shown"
+    );
+    // The next frame's picture is its own; the one read stays as it was.
+    player.seek(25);
+    drawn_at(&mut stage, &player, 25);
+    assert_eq!(bar_width(&image(&player)), 25, "image isn't frame 25");
+    assert_eq!(bar_width(&at_40), 40, "a picture read changed");
+}
+
+#[test]
+fn images_held_unread_never_stall_a_players_view() {
+    let dir = temp_dir("player-held-images");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let path = dir.to_path_buf();
+    let mut held = None;
+    let mut stage = Stage::new(
+        StageOptions {
+            width: 100.,
+            height: 50.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            player.open("Bar", json!({ "color": "#00ff00" }), 10);
+            let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
+            held = Some(player);
+            Ok(view)
+        },
+    )
+    .unwrap();
+    let player = held.unwrap();
+    // Four frames' images kept and never read: on macOS each holds the pixel
+    // buffer it was shown in, all four a pool lends.
+    let mut kept = Vec::new();
+    for frame in [10, 20, 30, 40] {
+        player.seek(frame);
+        drawn_at(&mut stage, &player, frame);
+        kept.push(player.image.with_untracked(Clone::clone).expect("an image"));
+    }
+    // The view still goes on, frame by frame, as drawn.
+    for frame in [45, 50, 55] {
+        player.seek(frame);
+        let shown = drawn_at(&mut stage, &player, frame);
+        let green = shown[..400]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[1] > 200 && p[0] < 60)
+            .count();
+        assert_eq!(
+            green, frame as usize,
+            "the view stopped before frame {frame}"
+        );
+    }
+    // Each kept image is still the frame it was.
+    for (image, frame) in kept.iter().zip([10, 20, 30, 40]) {
+        assert_eq!(bar_width(image), frame, "a kept image changed");
+    }
 }
