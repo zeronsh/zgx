@@ -107,6 +107,8 @@ mod size_calc;
 mod stack;
 #[path = "../sticky.rs"]
 mod sticky;
+#[path = "../stream_in_scroll_and_list.rs"]
+mod stream_in_scroll_and_list;
 #[path = "../sweep.rs"]
 mod sweep;
 #[path = "../text_props.rs"]
