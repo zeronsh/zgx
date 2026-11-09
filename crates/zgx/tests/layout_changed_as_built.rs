@@ -27,6 +27,8 @@ struct Part {
     style: Style,
     words: String,
     gone: bool,
+    /// Its place among its siblings: they're appended in this order.
+    order: f64,
 }
 struct Random(u64);
 impl Random {
@@ -43,19 +45,39 @@ fn kind(part: &Part) -> NodeKind {
         None => text(&part.words),
     }
 }
+/// `parent`'s live children, in their order.
+fn siblings(parts: &[Part], parent: usize) -> Vec<usize> {
+    let mut them: Vec<usize> = (1..parts.len())
+        .filter(|at| parts[*at].parent == parent && !parts[*at].gone)
+        .collect();
+    them.sort_by(|a, b| parts[*a].order.total_cmp(&parts[*b].order));
+    them
+}
 fn build(parts: &[Part], viewport: (f32, f32)) -> (Scene, Vec<Option<NodeId>>) {
     let mut scene = Scene::new(viewport.0, viewport.1);
     scene.set_text_measurer(measure);
-    let mut ids: Vec<Option<NodeId>> = vec![Some(scene.root())];
-    for part in &parts[1..] {
-        let id = match (part.gone, ids[part.parent]) {
-            (false, Some(parent)) => Some(scene.append(parent, kind(part), part.style.clone())),
-            _ => None,
-        };
-        ids.push(id);
+    let mut ids: Vec<Option<NodeId>> = vec![None; parts.len()];
+    ids[0] = Some(scene.root());
+    let mut queue = vec![0];
+    while let Some(parent) = queue.pop() {
+        for at in siblings(parts, parent) {
+            let id = scene.append(
+                ids[parent].unwrap(),
+                kind(&parts[at]),
+                parts[at].style.clone(),
+            );
+            ids[at] = Some(id);
+            queue.push(at);
+        }
     }
     scene.flush();
     (scene, ids)
+}
+/// The next order among `parent`'s children: after them all.
+fn last_order(parts: &[Part], parent: usize) -> f64 {
+    siblings(parts, parent)
+        .last()
+        .map_or(0.0, |at| parts[*at].order + 1.0)
 }
 fn container_style(random: &mut Random, top: bool) -> Style {
     let mut style = Style {
@@ -82,14 +104,17 @@ fn tree(random: &mut Random, long: bool) -> (Vec<Part>, Option<usize>) {
         style: Style::default(),
         words: String::new(),
         gone: false,
+        order: 0.0,
     }];
     let container = |parts: &mut Vec<Part>, parent, layout, style| {
+        let order = last_order(parts, parent);
         parts.push(Part {
             parent,
             layout: Some(layout),
             style,
             words: String::new(),
             gone: false,
+            order,
         });
         parts.len() - 1
     };
@@ -131,6 +156,7 @@ fn tree(random: &mut Random, long: bool) -> (Vec<Part>, Option<usize>) {
     (parts, long_column)
 }
 fn add_text(parts: &mut Vec<Part>, parent: usize, words: String) {
+    let order = last_order(parts, parent);
     parts.push(Part {
         parent,
         layout: None,
@@ -140,6 +166,7 @@ fn add_text(parts: &mut Vec<Part>, parent: usize, words: String) {
         },
         words,
         gone: false,
+        order,
     });
 }
 fn run(seed: u64, long: bool) {
@@ -203,6 +230,51 @@ fn run(seed: u64, long: bool) {
                         );
                         ids.push(Some(id));
                     }
+                }
+                continue;
+            }
+            // Children moved: two swapped, or one put somewhere else (a keyed
+            // list's move), or the long column's early row taken out as it
+            // streams.
+            if random.next(6) == 0 {
+                let mut holders = live_holders(&parts);
+                if let Some(column) = long_column
+                    && random.next(2) == 0
+                {
+                    holders = vec![column];
+                }
+                let parent = holders[random.next(holders.len())];
+                let mut them = siblings(&parts, parent);
+                if them.len() >= 2 {
+                    match random.next(3) {
+                        0 => {
+                            let (a, b) = (random.next(them.len()), random.next(them.len()));
+                            them.swap(a, b);
+                            what.push_str(&format!(" swap {a} {b} of {parent}"));
+                        }
+                        1 => {
+                            let from = random.next(them.len());
+                            let moved = them.remove(from);
+                            let to = random.next(them.len() + 1);
+                            them.insert(to, moved);
+                            what.push_str(&format!(" move {from} to {to} of {parent}"));
+                        }
+                        _ if them.len() > 3 => {
+                            let at = them[random.next(them.len() / 2)];
+                            if parts[at].layout.is_none() {
+                                what.push_str(&format!(" cut {at} of {parent}"));
+                                parts[at].gone = true;
+                                scene.remove(ids[at].take().unwrap());
+                            }
+                            continue;
+                        }
+                        _ => continue,
+                    }
+                    for (i, at) in them.iter().enumerate() {
+                        parts[*at].order = i as f64;
+                    }
+                    let order: Vec<_> = them.iter().map(|at| ids[*at].unwrap()).collect();
+                    assert!(scene.reorder_children(ids[parent].unwrap(), &order));
                 }
                 continue;
             }
