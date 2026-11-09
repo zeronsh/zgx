@@ -6320,10 +6320,89 @@ impl GpuRenderer {
     /// does: changed, it repaints only where the window's damage reaches it.
     /// `room`: the bytes its texture may take (`LAYER_ROOM`, or what the
     /// budget has left: it then rasterizes coarser, never fails).
-    /// `placed`: where its texels land in the target it composites into,
-    /// and what of it can show there (`placed`), when known.
+    /// `placing`: what says where its texels land in the target it
+    /// composites into, and what of it can show there.
     #[allow(clippy::too_many_arguments)]
     fn prepare_layer(
+        &mut self,
+        scene: &Scene,
+        id: NodeId,
+        magnified: f32,
+        exact_around: bool,
+        shown: Option<Shown<'_>>,
+        placing: &Placing<'_>,
+        stats: &mut GpuStats,
+        room: usize,
+    ) -> Result<(), GpuError> {
+        // Most layers, most frames: not magnified nor placed, and kept as
+        // they were. Planned and checked as layers always were, apart from
+        // all a magnified one needs (`prepare_layer_planned`).
+        debug_assert!(
+            self.effect_jobs.is_empty(),
+            "effect jobs left for another draw"
+        );
+        let local = scene.local_transform(id);
+        let zoom = scene.zoom(id);
+        let magnification = magnified * local.magnification() * zoom;
+        let magnifying = magnification > 1. && magnification.is_finite();
+        if !magnifying
+            && let Some(cache) = self.layers.get_mut(&id)
+            && !cache.cropped
+            && cache.seen.grids.is_none()
+            && cache.revision == scene.layer_revision(id)
+            && !cache.incomplete
+        {
+            let exact = exact_around && local.is_identity();
+            let step = raster_step(magnification, Some(cache.step));
+            let factor = match exact && magnification != 1. {
+                true => magnification,
+                false => step_scale(step),
+            };
+            if cache.step == step && cache.factor == factor.to_bits() {
+                let root = scene.bounds(id);
+                let serial = scene.flush_serial();
+                let before = match cache.seen.frame == serial {
+                    true => cache.seen.before,
+                    false => cache.seen.magnification,
+                };
+                cache.bounds.x += root.x - cache.root_origin.0;
+                cache.bounds.y += root.y - cache.root_origin.1;
+                cache.content.x += root.x - cache.root_origin.0;
+                cache.content.y += root.y - cache.root_origin.1;
+                cache.root_origin = (root.x, root.y);
+                cache.transformed = !local.is_identity()
+                    || zoom != 1.
+                    || scene.filter_blur(id) > 0.
+                    || scene.mask(id).is_some();
+                cache.seen = Seen {
+                    frame: serial,
+                    magnification,
+                    before,
+                    grids: None,
+                };
+                cache.used = self.layer_frame;
+                cache.parked = false;
+                cache.watched = shown.and_then(|shown| shown.window(cache.content));
+                stats.layer_cache_hits += 1;
+                return Ok(());
+            }
+        }
+        self.prepare_layer_planned(
+            scene,
+            id,
+            magnified,
+            exact_around,
+            shown,
+            placing,
+            stats,
+            room,
+        )
+    }
+
+    /// `prepare_layer`, planned in full: magnified, placed, or drawn.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn prepare_layer_planned(
         &mut self,
         scene: &Scene,
         id: NodeId,
