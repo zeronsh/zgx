@@ -7867,6 +7867,23 @@ impl NodeHandle {
     pub fn node(&self) -> NodeId {
         self.node
     }
+    /// Whether `other` lies inside this node (a descendant, not the node
+    /// itself), in the same window; `false` once either or the UI is gone.
+    pub fn holds(&self, other: &NodeHandle) -> bool {
+        // (Another window's node: ids say nothing across scenes.)
+        if !self.ui.same(&other.ui) {
+            return false;
+        }
+        let Some(ui) = self.ui.upgrade() else {
+            return false;
+        };
+        let scene = ui.scene.borrow();
+        let other = other.node;
+        other != self.node
+            && scene.contains(other)
+            && scene.contains(self.node)
+            && scene.ancestors(other).any(|id| id == self.node)
+    }
     /// Listen for input at the node as long as it is mounted, ahead of what
     /// listens already: `View::on_event`, for a listener that comes later.
     /// A node takes the pointer once it listens. `false` once the UI is gone.
