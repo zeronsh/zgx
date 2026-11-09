@@ -49,6 +49,11 @@ def tape(gesture, hz):
         if gesture == 'slow':
             dy = -.2  # also tests quantized, intentionally unchanged pixels
         elif gesture in ('flick', 'fling'):
+            # The host infers momentum from a new Started less than 50ms
+            # after finger Ended. A decay with only Moved never enters it.
+            if i == max(2, round(hz * .15)):
+                events.append((t - period / 4, 'pixel', 0., 0., 'ended'))
+                phase = 'started'
             dy = -(64 if gesture == 'fling' else 32) * math.exp(-i / (hz * 1.4))
         elif gesture == 'reversals':
             dy = -12 if (i // (hz // 4)) % 2 == 0 else 12

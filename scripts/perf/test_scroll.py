@@ -154,6 +154,20 @@ class ScrollMetrics(unittest.TestCase):
                                   max_instructions=50_000_000,max_gpu_ms=4)
         self.assertTrue(any('main-thread work max' in e for e in scroll.failures(m,args)))
 
+    def test_flick_and_fling_cross_the_platform_momentum_transition(self):
+        for gesture in ('flick', 'fling'):
+            for hz in (60, 120):
+                events=scroll.parse_tape(scroll.tape(gesture,hz))
+                releases=[i for i,e in enumerate(events[:-1]) if e[4]=='ended']
+                self.assertEqual(len(releases),1)
+                end=releases[0];resume=events[end+1]
+                self.assertEqual(resume[4],'started')
+                self.assertGreater(resume[0]-events[end][0],0)
+                self.assertLess(resume[0]-events[end][0],50)
+                self.assertGreater(abs(resume[3]),1)
+                self.assertEqual(events[-1][4],'ended')
+                self.assertGreater(sum(e[4]=='moved' for e in events[end+2:]),hz)
+
     def test_stream_motion_stays_near_its_visible_tail(self):
         offset=low=high=0
         for _,_,_,dy,_ in scroll.parse_tape(scroll.tape('stream',120)):

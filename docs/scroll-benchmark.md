@@ -28,7 +28,8 @@ script errors and type errors invalidate a run.
 Defaults run three trials per scene/gesture/size/background. Use
 `--repeats 1 --scenes tables --gestures flick --sizes M --backgrounds opaque`
 for a quick reproduction. `--gestures slow` uses subpixel steps;
-`flick` and `fling` decay velocity; `reversals` changes direction every quarter
+`flick` and `fling` release the fingers and restart within 50 ms to enter
+the host’s momentum state, then decay velocity; `reversals` changes direction every quarter
 second; `notches` sends line deltas; `stream` changes transcript row 400 near the bottom while
 scrolling. `wing` preserves the original 94.56-second tape byte for byte from
 [Wing's recording](https://gist.github.com/wing-anara/fa7628315d83138923947bd7a562645a).
