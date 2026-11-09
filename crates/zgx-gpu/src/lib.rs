@@ -648,6 +648,8 @@ struct QuadPipelines {
     /// `Shading::SourceIn`'s and `Shading::Behind`'s: gradient text's.
     source_in: std::cell::OnceCell<wgpu::RenderPipeline>,
     behind: std::cell::OnceCell<wgpu::RenderPipeline>,
+    /// `Shading::Continuous`'s, with its module (`continuous_source`).
+    continuous: std::cell::OnceCell<wgpu::RenderPipeline>,
     /// The quad pipelines' group layouts (texture, viewport), for the
     /// polyline layout.
     texture_layout: wgpu::BindGroupLayout,
@@ -675,8 +677,18 @@ impl QuadPipelines {
             | Shading::Filter(_)
             | Shading::Blend
             | Shading::FilterBlend(_)
-            | Shading::ImageEffect
-            | Shading::Continuous => (&self.full, false, Some(OVER)),
+            | Shading::ImageEffect => (&self.full, false, Some(OVER)),
+            Shading::Continuous => {
+                return self.continuous.get_or_init(|| {
+                    let module = self
+                        .device
+                        .create_shader_module(wgpu::ShaderModuleDescriptor {
+                            label: Some("continuous corners"),
+                            source: wgpu::ShaderSource::Wgsl(continuous_source().into()),
+                        });
+                    quad_pipeline(&self.device, &module, &self.layout, Some(OVER), None, false)
+                });
+            }
             Shading::Basic => (&self.basic, true, Some(OVER)),
             Shading::Opaque => (&self.basic_clear, true, None),
             Shading::Polyline => return &self.polylines().pipeline,
@@ -4004,6 +4016,7 @@ impl GpuContext {
             basic_clear: Default::default(),
             source_in: Default::default(),
             behind: Default::default(),
+            continuous: Default::default(),
             texture_layout: texture_layout.clone(),
             viewport_layout: viewport_layout.clone(),
             polylines: Default::default(),
@@ -4476,8 +4489,9 @@ pub struct GpuRenderer {
     /// The image effects' pipeline (image_effects.wgsl), made when an image
     /// first draws with one.
     image_effect_pipeline: std::cell::OnceCell<wgpu::RenderPipeline>,
-    /// `Shading::Continuous`'s pipeline, made when a box first asks for it.
-    continuous_pipeline: std::cell::OnceCell<wgpu::RenderPipeline>,
+    /// Whether a box has asked for continuous corners: frames look for them
+    /// from then (`Shading::Continuous`).
+    continuous_asked: std::cell::Cell<bool>,
     fill_shaders: FxHashMap<u64, Arc<zgx::decoration::FillShader>>,
     /// Layer shaders' pipelines by shader id (`None`: it failed to compile).
     filter_pipelines: FxHashMap<u64, compile::Compiled<wgpu::RenderPipeline>>,
@@ -5080,7 +5094,7 @@ impl GpuRenderer {
             blend_layouts: std::cell::OnceCell::new(),
             backdrops: FxHashMap::default(),
             image_effect_pipeline: Default::default(),
-            continuous_pipeline: Default::default(),
+            continuous_asked: Default::default(),
             fill_shaders: FxHashMap::default(),
             filter_shaders: FxHashMap::default(),
             plane: None,
@@ -6670,7 +6684,6 @@ impl GpuRenderer {
             Shading::Blend => self.blend_pipelines.get(&BLEND_PLAIN)?.get(),
             Shading::FilterBlend(id) => self.blend_pipelines.get(&id)?.get(),
             Shading::ImageEffect => self.image_effect_pipeline.get(),
-            Shading::Continuous => self.continuous_pipeline.get(),
             _ => None,
         }
     }
@@ -6702,7 +6715,7 @@ impl GpuRenderer {
         if fill_shading.is_some() {
             return;
         }
-        self.prepare_continuous();
+        self.continuous_asked.set(true);
         for quad in quads {
             // (Not a transformed quad, whose `shape` is its matrix, nor a stroke.)
             if quad.options[2] < 0.5
@@ -6713,25 +6726,6 @@ impl GpuRenderer {
             }
         }
         *fill_shading = Some(Shading::Continuous);
-    }
-    /// Compile the pipeline for continuous corners if not yet: before the
-    /// first quad asking for them is drawn, as the choice of path below reads.
-    fn prepare_continuous(&self) {
-        self.continuous_pipeline.get_or_init(|| {
-            let module = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("continuous corners"),
-                    source: wgpu::ShaderSource::Wgsl(continuous_source().into()),
-                });
-            fill_pipeline(
-                &self.device,
-                &module,
-                &module,
-                &self.context.inner.quad_layout,
-                "fs",
-            )
-        });
     }
     /// A shader's pipeline from WGSL `source`, built by `build(vertex,
     /// fragment)`, or none if it fails. `apps`: an app's own shader, which
@@ -10090,7 +10084,7 @@ impl GpuRenderer {
                 && self.filter_pipelines.is_empty()
                 && self.blend_pipelines.is_empty()
                 && self.image_effect_pipeline.get().is_none()
-                && self.continuous_pipeline.get().is_none())
+                && !self.continuous_asked.get())
                 || draws
                     .iter()
                     .chain(bands.iter().flat_map(|band| &band.draws))
@@ -10108,15 +10102,18 @@ impl GpuRenderer {
                     .get_or_init(|| metal_frame::MetalFrame::new(&self.device, &self.queue).ok())
                     .as_ref()
                     .is_some_and(|frame| frame.image_effects()),
+                Shading::Continuous => self
+                    .metal_frame
+                    .get_or_init(|| metal_frame::MetalFrame::new(&self.device, &self.queue).ok())
+                    .as_ref()
+                    .is_some_and(|frame| frame.continuous()),
                 // Layer shaders and blend modes take the wgpu path, as layers'
-                // own frames do (gradient text's, `!self.in_layer` above), and
-                // so do continuous corners: draw.metal draws circular ones.
+                // own frames do (gradient text's, `!self.in_layer` above).
                 Shading::Filter(_)
                 | Shading::Blend
                 | Shading::FilterBlend(_)
                 | Shading::SourceIn
-                | Shading::Behind
-                | Shading::Continuous => false,
+                | Shading::Behind => false,
                 _ => true,
             }))
             && effect_jobs.iter().all(|job| {
