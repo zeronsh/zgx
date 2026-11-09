@@ -2132,12 +2132,18 @@ pub(crate) const OVERLAY: OverlayLook = if cfg!(windows) {
 /// no border of its own it paints over the control (an inset stroke, taking
 /// no layout room), so focusing never moves its content; otherwise it
 /// colours the control's own border. On Windows, a ring outside it as
-/// WinUI draws one, taking no room either. (Made when first focused.)
+/// WinUI draws one, and on Linux an outline inset over it as GNOME draws
+/// one, taking no room either. (Made when first focused.)
 fn focus_ring(styles: &Styles) -> fn() -> Styles {
     // Windows draws keyboard focus outside the control, bordered or not, as
     // WinUI's focus visual does (`focus_outside`).
     if cfg!(windows) {
         return || widget_style(|w| &w.focus_outside);
+    }
+    // GNOME draws keyboard focus as an outline inset over the control,
+    // bordered or not (`focus_inset`).
+    if cfg!(target_os = "linux") {
+        return || widget_style(|w| &w.focus_inset);
     }
     match bordered(styles) {
         true => || widget_style(|w| &w.focus_recolor),
@@ -4488,6 +4494,10 @@ struct WidgetStyles {
     /// wide), its corners the control's grown by 3.
     #[cfg_attr(not(windows), allow(dead_code))]
     focus_outside: Styles,
+    /// GNOME's focus (libadwaita's `focus-ring`): an outline 2 wide inset
+    /// over the control's edge (offset −2), its corners the control's.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    focus_inset: Styles,
     menu_focus_recolor: Styles,
     menu_item: Styles,
     menu_hover: Styles,
@@ -4513,6 +4523,10 @@ impl WidgetStyles {
                 .outline_color(tok::FOCUS_RING)
                 .outline_offset(1.)
                 .outline_inner(1., tok::BACKGROUND),
+            focus_inset: Styles::new()
+                .outline_width(2.)
+                .outline_color(tok::FOCUS_RING)
+                .outline_offset(-2.),
             menu_focus_recolor: Styles::new()
                 .bg(tok::MENU_HOVER)
                 .border_color(tok::FOCUS_RING),

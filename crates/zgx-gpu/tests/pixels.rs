@@ -3991,13 +3991,23 @@ fn variable_virtual_rows_height_anchor_focus_and_resize_match_full_repaint() {
         for y in 0..height {
             if y < 8 || y >= height - 8 {
                 // Removing a focused row returns focus to the list, whose
-                // default focus variant paints a one-pixel outer border.
-                let padding =
-                    if ui.input.focused() == Some(mounted.node()) && (y == 0 || y == height - 1) {
-                        [94, 165, 255, 255]
-                    } else {
-                        [16, 32, 48, 255]
-                    };
+                // default focus ring is the platform's: a one-pixel border
+                // (zgx's), an outline 2 wide inset over it (GNOME's), or
+                // one outside it (Windows', past the window here).
+                let ring = if cfg!(windows) {
+                    0
+                } else if cfg!(target_os = "linux") {
+                    2
+                } else {
+                    1
+                };
+                let padding = if ui.input.focused() == Some(mounted.node())
+                    && (y < ring || y >= height - ring)
+                {
+                    [94, 165, 255, 255]
+                } else {
+                    [16, 32, 48, 255]
+                };
                 assert_eq!(
                     pixel(9, y),
                     &padding,

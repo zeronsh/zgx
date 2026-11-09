@@ -444,11 +444,12 @@ fn a_popover_its_triggers_click_opens_runs_that_click_once() {
     assert_eq!((clicks.get(), ups.get()), (1, 1), "no second handler");
 }
 
-/// Keyboard focus draws Windows' focus visual there, bordered control or
-/// not: a ring 2 wide, 1 outside the control, and a contrasting ring 1 wide
-/// in that gap, taking no room (the control's border as it was). Elsewhere
-/// the ring is inside the control as before: an inset stroke, or its own
-/// border recoloured.
+/// Keyboard focus rings the control as its platform does, bordered control
+/// or not, taking no room (the control's border as it was): on Windows
+/// WinUI's focus visual, a ring 2 wide, 1 outside the control, and a
+/// contrasting ring 1 wide in that gap; on Linux GNOME's, an outline 2 wide
+/// inset over the control (offset −2). Elsewhere the ring is inside the
+/// control as before: an inset stroke, or its own border recoloured.
 #[test]
 fn keyboard_focus_rings_the_control_as_its_platform_does() {
     use zgx::scene::NodeKind;
@@ -486,6 +487,12 @@ fn keyboard_focus_rings_the_control_as_its_platform_does() {
                 Some(1.),
                 "{id}"
             );
+            assert_eq!(quad.border_width, resting.border_width, "{id}");
+            assert_eq!(quad.border_over, resting.border_over, "{id}");
+        } else if cfg!(target_os = "linux") {
+            let outline = quad.outline.expect("an outline");
+            assert_eq!((outline.width, outline.offset), (2., -2.), "{id}");
+            assert_eq!(scene.outline_inner(node), None, "{id}");
             assert_eq!(quad.border_width, resting.border_width, "{id}");
             assert_eq!(quad.border_over, resting.border_over, "{id}");
         } else {

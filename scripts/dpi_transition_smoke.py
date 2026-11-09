@@ -100,11 +100,13 @@ def main():
                     height = int(math.floor(800 / scale) * scale)
                     assert picture.size == (1200, height), picture.size
                     # Solid editor fill below glyphs and above rounded corners:
-                    # one logical border pixel surrounds a 398-pixel interior.
+                    # the focused editor's ring, GNOME's outline 2 logical
+                    # pixels wide inset over its border, surrounds a
+                    # 396-pixel interior.
                     fill = [x for x in range(picture.width)
                             if picture.getpixel((x, round(90 * scale))) == (32, 48, 80)]
                     # An edge between pixels blends the one it crosses.
-                    first, last = 21 * scale, 419 * scale - 1
+                    first, last = 22 * scale, 418 * scale - 1
                     assert fill == list(range(fill[0], fill[-1] + 1)), (stage, "gaps", fill[:3], fill[-3:])
                     assert math.floor(first) <= fill[0] <= math.ceil(first) and math.floor(last) <= fill[-1] <= math.ceil(last), (stage, fill[:3], fill[-3:])
                     click(60, 125)
