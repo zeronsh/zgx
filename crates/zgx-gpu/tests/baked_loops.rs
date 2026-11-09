@@ -490,6 +490,225 @@ impl Placed {
     }
 }
 
+/// A window with a scroll view of stripes on an opaque fill, 120 points tall
+/// from y 20, and a loop among the stripes at y 100 of its content.
+#[cfg(target_os = "macos")]
+struct Scrolling {
+    host: objc2::rc::Retained<objc2_quartz_core::CALayer>,
+    gpu: GpuRenderer,
+    scene: Scene,
+    content: NodeId,
+    refused: Rc<Cell<u32>>,
+}
+#[cfg(target_os = "macos")]
+impl Scrolling {
+    fn new() -> Self {
+        Self::with(NodeKind::Rect(RED), false, false)
+    }
+    /// Its loop painting `looped`, its view fading its edges if `fade`, a box
+    /// holding still over the view if `over`.
+    fn with(looped: NodeKind, fade: bool, over: bool) -> Self {
+        use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+        let host = objc2_quartz_core::CALayer::new();
+        host.setGeometryFlipped(true);
+        host.setBounds(CGRect::new(CGPoint::new(0., 0.), CGSize::new(200., 200.)));
+        let mut gpu = GpuRenderer::debug_for_layer(host.clone(), 400, 400).unwrap();
+        gpu.set_scale_factor(2.);
+        let mut scene = Scene::new(200., 200.);
+        gpu.install_text(&mut scene);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        scene.append(root, NodeKind::Rect(BLUE), fixed(200., 200.));
+        let fill = |color: Color| {
+            NodeKind::Quad(QuadStyle {
+                fill: color,
+                ..Default::default()
+            })
+        };
+        let view = scene.append(
+            root,
+            NodeKind::Panel {
+                layout: Layout::Column,
+                quad: QuadStyle {
+                    fill: Color(16, 24, 32, 255),
+                    ..Default::default()
+                },
+            },
+            Style {
+                clip: true,
+                fade_edges: if fade { [16., 16.] } else { [0., 0.] },
+                ..fixed(200., 120.)
+            },
+        );
+        scene.set_transform(view, Transform { x: 0., y: 20. });
+        // (Holding their sizes in a shorter view.)
+        let held = |width: f32, height: f32| Style {
+            flex_shrink: 0.,
+            ..fixed(width, height)
+        };
+        let content = scene.append(view, NodeKind::Container(Layout::Overlay), held(200., 900.));
+        let rows = scene.append(
+            content,
+            NodeKind::Container(Layout::Column),
+            held(200., 900.),
+        );
+        for row in 0..30 {
+            let color = match row % 2 {
+                0 => Color(90, 122, 154, 255),
+                _ => Color(154, 90, 122, 255),
+            };
+            scene.append(rows, fill(color), held(200., 30.));
+        }
+        let node = scene.append(content, looped, held(20., 20.));
+        scene.set_transform(node, Transform { x: 40., y: 100. });
+        scene.set_scroll_copy(content, true);
+        if over {
+            let bar = scene.append(root, fill(Color(240, 240, 240, 255)), fixed(200., 16.));
+            scene.set_transform(bar, Transform { x: 0., y: 70. });
+        }
+        let refused: Rc<Cell<u32>> = Rc::default();
+        let mut scrolling = Self {
+            host,
+            gpu,
+            scene,
+            content,
+            refused: refused.clone(),
+        };
+        let damage = scrolling.scene.flush().damage;
+        scrolling.gpu.render(&scrolling.scene, &damage).unwrap();
+        scrolling.gpu.present().unwrap();
+        let frames = (0..30).map(|at| (1. - at as f32 / 60., 0.)).collect();
+        let wake = Box::new(move || refused.set(refused.get() + 1));
+        let baked = BakedLoop::new(frames, 30., wake);
+        scrolling.scene.set_baked_loop(node, Some(Rc::new(baked)));
+        scrolling
+    }
+    /// Its next frame, `whole` or from its damage, shown.
+    fn show(&mut self, whole: bool) {
+        let damage = self.scene.flush().damage;
+        let all = [Rect::new(0., 0., 200., 200.)];
+        let damage: &[Rect] = if whole { &all } else { &damage };
+        self.gpu.render(&self.scene, damage).unwrap();
+        self.gpu.present().unwrap();
+    }
+    fn layer(&self) -> Option<(f64, f64)> {
+        // SAFETY: this thread made the layer; nothing else changes its list.
+        let sublayers = unsafe { self.host.sublayers() }?;
+        sublayers
+            .iter()
+            .find(|layer| layer.zPosition() == 0.5 && !layer.isHidden())
+            .map(|layer| (layer.frame().origin.x, layer.frame().origin.y))
+    }
+}
+
+/// A scroll moves the frame's pixels past a loop in its content: every frame
+/// is, to the byte, the frame painted whole, the layer goes with its node, and
+/// when the view's edge reaches the loop the loop is refused and stays in the
+/// frames, cut as they are.
+#[cfg(target_os = "macos")]
+fn a_scroll_copies_past_a_loop_in_its_content() {
+    let (mut copied, mut whole) = (Scrolling::new(), Scrolling::new());
+    for window in [&mut copied, &mut whole] {
+        window.show(false);
+        window.show(false);
+        assert!(!window.gpu.debug_loop_sheets().is_empty(), "no sheet");
+    }
+    let frame = |window: &mut Scrolling| window.gpu.debug_bare_pixels().expect("shown").2;
+    let mut scrolled = 0.;
+    for step in 0..40 {
+        scrolled += 4.;
+        for window in [&mut copied, &mut whole] {
+            let content = window.content;
+            window.scene.set_transform(
+                content,
+                Transform {
+                    x: 0.,
+                    y: -scrolled,
+                },
+            );
+        }
+        copied.show(false);
+        whole.show(true);
+        assert!(
+            frame(&mut copied) == frame(&mut whole),
+            "step {step}: the copied frame differs from the whole one"
+        );
+        // In the view, whole: its layer plays it, where its node is.
+        if scrolled <= 100. {
+            let at = (40., 120. - f64::from(scrolled));
+            assert_eq!(copied.layer(), Some(at), "step {step}");
+            assert_eq!(copied.refused.get(), 0, "step {step}");
+            assert_eq!(copied.gpu.debug_scroll_copies(), step + 1, "step {step}");
+        }
+    }
+    // Cut by the view's top, then out of it.
+    assert!(copied.refused.get() > 0, "the view's edge didn't refuse it");
+    assert_eq!(copied.layer(), None, "a layer over the view's edge");
+}
+
+/// The same whatever stops the layer: `make`'s window scrolled, each frame to
+/// the byte the frame painted whole, and the loop refused on the way.
+#[cfg(target_os = "macos")]
+fn scrolled_past_a_loop_matches_painting_whole(name: &str, make: impl Fn() -> Scrolling) {
+    let (mut copied, mut whole) = (make(), make());
+    for window in [&mut copied, &mut whole] {
+        window.show(false);
+        window.show(false);
+    }
+    let frame = |window: &mut Scrolling| window.gpu.debug_bare_pixels().expect("shown").2;
+    let mut scrolled = 0.;
+    for step in 0..40 {
+        scrolled += 4.;
+        for window in [&mut copied, &mut whole] {
+            let content = window.content;
+            window.scene.set_transform(
+                content,
+                Transform {
+                    x: 0.,
+                    y: -scrolled,
+                },
+            );
+        }
+        copied.show(false);
+        whole.show(true);
+        assert!(
+            frame(&mut copied) == frame(&mut whole),
+            "{name}, step {step}: the copied frame differs from the whole one"
+        );
+    }
+    assert!(
+        copied.gpu.debug_scroll_copies() > 0,
+        "{name}: nothing copied"
+    );
+    assert!(copied.refused.get() > 0, "{name}: never refused");
+}
+
+#[cfg(target_os = "macos")]
+fn a_scroll_past_a_loop_reaching_past_its_box_or_stopped_otherwise() {
+    // A shadow past its box, at the view's edge.
+    scrolled_past_a_loop_matches_painting_whole("shadow", || {
+        let shadowed = NodeKind::Quad(QuadStyle {
+            fill: RED,
+            shadow: Some(BoxShadow {
+                color: Color(0, 0, 0, 200),
+                offset: Transform { x: 0., y: 6. },
+                blur_radius: 6.,
+                spread: 2.,
+            }),
+            ..Default::default()
+        });
+        Scrolling::with(shadowed, false, false)
+    });
+    // Sliding under a box holding still over the view.
+    scrolled_past_a_loop_matches_painting_whole("under a box", || {
+        Scrolling::with(NodeKind::Rect(RED), false, true)
+    });
+    // Into a band of the view's fade.
+    scrolled_past_a_loop_matches_painting_whole("into a band", || {
+        Scrolling::with(NodeKind::Rect(RED), true, false)
+    });
+}
+
 #[cfg(target_os = "macos")]
 fn a_layer_never_shows_a_loop_its_node_does_not() {
     // Past its clip in one step, as a fling's frame takes it, with nothing
@@ -760,6 +979,8 @@ fn main() {
         a_loop_moved_by_layout_above_it_moves_its_layer(true);
         a_frame_drawn_again_for_a_shifted_layer_still_moves_a_loop();
         loops_that_look_alike_share_a_sheet();
+        a_scroll_copies_past_a_loop_in_its_content();
+        a_scroll_past_a_loop_reaching_past_its_box_or_stopped_otherwise();
         a_layer_never_shows_a_loop_its_node_does_not();
         a_layer_is_where_its_node_is_after_any_frame();
         a_layer_moved_behind_its_back_is_put_back();
