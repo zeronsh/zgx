@@ -147,6 +147,12 @@ pub struct TextRun {
     pub padding: [f32; 2],
     /// The background's corner radius.
     pub radius: f32,
+    /// The next piece of the run before's span (`TextSpan::continues`: a
+    /// span a fade cut into runs, one a piece): padded, washed and lined as
+    /// that span, whole, where both are alike in font, size, padding,
+    /// background and radius (`RichText::continues`). A run beside another
+    /// alike, not marked, is a span of its own.
+    pub continues: bool,
 }
 impl TextRun {
     /// The approximate advance of `grapheme` at byte `at` (no shaper): 0.6
@@ -176,6 +182,7 @@ impl Default for TextRun {
             strikethrough: None,
             padding: [0.; 2],
             radius: 0.,
+            continues: false,
         }
     }
 }
@@ -245,11 +252,11 @@ impl RichText {
                         == b.strikethrough.map(|d| (d.thickness(), d.line))
             })
     }
-    /// Whether run `index` goes on from the run before as one padded span:
-    /// both padded alike, in one font, size, background and corner radius,
-    /// neither a placeholder's (a span's room or icon, word joiners alone).
-    /// A span cut into runs (a fade's pieces) is padded at its ends alone,
-    /// as it is whole, not where it was cut.
+    /// Whether run `index` is the next piece of the run before's span
+    /// (`TextRun::continues`), drawn as that span whole: marked so, and
+    /// alike in font, size, padding, background and radius, right after it.
+    /// Padded so, the pieces are padded at the span's ends alone; their
+    /// washes and lines go on from one to the next.
     pub fn continues(&self, index: usize) -> bool {
         let (Some(before), Some(run)) = (
             index.checked_sub(1).and_then(|i| self.runs.get(i)),
@@ -257,20 +264,13 @@ impl RichText {
         ) else {
             return false;
         };
-        let placeholder = |run: &TextRun| {
-            self.text[run.range.clone()]
-                .chars()
-                .all(|c| c == '\u{2060}')
-        };
-        run.padding[0] != 0.
+        run.continues
             && run.padding == before.padding
             && run.font_size == before.font_size
             && run.background == before.background
             && run.radius == before.radius
             && run.range.start == before.range.end
             && run.font == before.font
-            && !placeholder(run)
-            && !placeholder(before)
     }
     /// Whether `other` is this very text: its text and runs the same
     /// allocations (clones of one), and its options. Asked of a text the
@@ -303,7 +303,8 @@ impl RichText {
                 && now.underline == was.underline
                 && now.strikethrough == was.strikethrough
                 && now.padding == was.padding
-                && now.radius == was.radius;
+                && now.radius == was.radius
+                && now.continues == was.continues;
             return Some(match alike {
                 // Alike but where it ends (the last run going on).
                 true => now.range.end.min(was.range.end),
@@ -317,10 +318,12 @@ impl RichText {
             && self.text == other.text
             && self.runs.len() == other.runs.len()
             && self.runs.iter().zip(other.runs.iter()).all(|(a, b)| {
-                // A run's padding across takes room in its line.
+                // A run's padding across takes room in its line (at a
+                // span's ends alone where its pieces go on: `continues`).
                 a.range == b.range
                     && a.font_size == b.font_size
                     && a.padding[0] == b.padding[0]
+                    && a.continues == b.continues
                     && a.font == b.font
             })
     }
@@ -335,6 +338,7 @@ impl RichText {
                 a.range != b.range
                     || a.font_size != b.font_size
                     || a.padding[0] != b.padding[0]
+                    || a.continues != b.continues
                     || a.font != b.font
             })
     }

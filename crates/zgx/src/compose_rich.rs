@@ -147,6 +147,8 @@ pub(crate) struct SpanExtras {
     pub padding_end: Option<f32>,
     /// Its text fading in (`TextSpan::fade_in`).
     pub fade: Option<TextFade>,
+    /// The next piece of the span before (`TextSpan::continues`).
+    pub continues: bool,
 }
 /// A run's text fading in (`TextSpan::fade_in`): from clear at `start`
 /// (milliseconds since the Unix epoch, as `ui.now()` says, on the thread's
@@ -242,6 +244,16 @@ impl TextSpan {
     /// edge, its name with more room after it.
     pub fn padding_end(mut self, end: f32) -> Self {
         self.extras.get_or_insert_default().padding_end = Some(end.max(0.));
+        self
+    }
+    /// The next piece of the span before: a span cut into pieces (a fade's,
+    /// each piece its own colour) that draws as the span whole where the
+    /// pieces are alike in font, size, padding, background and radius:
+    /// padded at its ends alone, its background and lines going on from
+    /// piece to piece. Spans beside each other, not so marked, draw apart
+    /// (two chips are two chips).
+    pub fn continues(mut self) -> Self {
+        self.extras.get_or_insert_default().continues = true;
         self
     }
     /// The span background's corner radius.

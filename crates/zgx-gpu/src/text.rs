@@ -2072,10 +2072,11 @@ mod rich_tests {
     }
     /// A paragraph whose spans a fade cut into runs at its pieces (Zeron's
     /// veil: a piece every 24 bytes, anywhere, a chip's span cut after a
-    /// space or inside a word, a link's too), its fades done, draws as the
-    /// paragraph whole: each chip padded at its ends alone, one wash a line,
-    /// one underline: shaped (cosmic-text's line, and the prepared text's
-    /// words) and decorated alike.
+    /// space or inside a word, a link's too), each piece after a span's
+    /// first marked as going on from it (`TextRun::continues`), its fades
+    /// done, draws as the paragraph whole: each chip padded at its ends
+    /// alone, one wash a line, one underline: shaped (cosmic-text's line,
+    /// and the prepared text's words) and decorated alike.
     #[test]
     fn a_paragraph_cut_into_pieces_draws_as_whole() {
         let code = FontStyle {
@@ -2136,10 +2137,14 @@ mod rich_tests {
                     .copied()
                     .filter(|cut| *cut > start && *cut < end)
                 {
-                    runs.push(style(kind, at..cut));
+                    let mut piece = style(kind, at..cut);
+                    piece.continues = at > start;
+                    runs.push(piece);
                     at = cut;
                 }
-                runs.push(style(kind, at..end));
+                let mut piece = style(kind, at..end);
+                piece.continues = at > start;
+                runs.push(piece);
                 start = end;
             }
             RichText::new(text.clone(), runs).unwrap()
@@ -2206,6 +2211,103 @@ mod rich_tests {
                     "prepared, cut at {cuts:?}, {width} wide"
                 );
             }
+        }
+    }
+    /// Spans side by side, alike but not marked as one span's pieces (two
+    /// chips, `ab` and `c`; two links), draw as they always have: each
+    /// chip padded at both its ends, its own wash; each link its own
+    /// underline (as main drew them, to the bit). Marked (`continues`),
+    /// the same runs draw as one span.
+    #[test]
+    fn spans_alike_side_by_side_stay_apart_unless_marked() {
+        let code = FontStyle {
+            family: zgx::text_layout::FontFamily::Monospace,
+            ..FontStyle::default()
+        };
+        let text = "see abc then link link end";
+        let chip = |range: std::ops::Range<usize>, continues| TextRun {
+            range,
+            font: code.clone(),
+            font_size: 14.,
+            color: Color(228, 228, 232, 255),
+            background: Some(Color(255, 255, 255, 26)),
+            padding: [4., 1.],
+            radius: 4.5,
+            continues,
+            ..Default::default()
+        };
+        let plain = |range: std::ops::Range<usize>| TextRun {
+            range,
+            font_size: 16.,
+            color: Color(228, 228, 232, 255),
+            ..Default::default()
+        };
+        let link = |range: std::ops::Range<usize>, continues| TextRun {
+            underline: Some(zgx::rich_text::Decoration::new(1.)),
+            continues,
+            ..plain(range)
+        };
+        // `ab` and `c` chips, `link ` and `link` links.
+        let paragraph = |marked: bool| {
+            RichText::new(
+                text,
+                vec![
+                    plain(0..4),
+                    chip(4..6, false),
+                    chip(6..7, marked),
+                    plain(7..13),
+                    link(13..18, false),
+                    link(18..22, marked),
+                    plain(22..text.len()),
+                ],
+            )
+            .unwrap()
+        };
+        let mut fonts = bundled_test_fonts();
+        let drawn = |fonts: &mut FontSystem, rich: &RichText| {
+            let buffer = rich_buffer(fonts, rich, Some(600.), None);
+            let x = |at: usize| {
+                buffer
+                    .layout_runs()
+                    .flat_map(|run| run.glyphs.iter())
+                    .find(|g| g.start == at)
+                    .map(|g| g.x)
+                    .unwrap()
+            };
+            let decorations = rich_decorations(&buffer, rich);
+            let washes = decorations.iter().filter(|d| d.background).count();
+            let lines = decorations.iter().filter(|d| !d.background).count();
+            // From `b` to after `c` (the room at their join), and their
+            // decorations.
+            (x(7) - x(5), washes, lines)
+        };
+        let apart = drawn(&mut fonts, &paragraph(false));
+        let whole = drawn(&mut fonts, &paragraph(true));
+        // Two chips: `b` padded after it, `c` before it (8 points more than
+        // the one chip `abc` has between them); two washes, two underlines.
+        assert!((apart.0 - whole.0 - 8.).abs() < 0.01, "{apart:?} {whole:?}");
+        assert_eq!((apart.1, apart.2), (2, 2), "two chips, two links");
+        assert_eq!((whole.1, whole.2), (1, 1), "one span each, cut");
+        // The prepared text's words place them alike.
+        for marked in [false, true] {
+            let rich = paragraph(marked);
+            let buffer = rich_buffer(&mut fonts, &rich, Some(600.), None);
+            let from_buffer: Vec<_> = buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter().map(|g| (g.start, g.x.to_bits())))
+                .collect();
+            let mut cache = crate::prepared::TextCache::default();
+            let from_words: Vec<_> = cache
+                .layout(&mut fonts, &rich, Some(600.))
+                .runs(None)
+                .flat_map(|run| {
+                    run.glyphs
+                        .iter()
+                        .map(|g| (g.start, g.x.to_bits()))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert_eq!(from_words, from_buffer, "marked {marked}");
         }
     }
     /// A chip's words are where they are whatever was shaped before: a
@@ -2877,9 +2979,11 @@ fn join(joined: &mut Rect, bounds: Rect, right: f32) {
     }
 }
 /// The line (underline or strikethrough, `strike`) of the run before
-/// `index` that `bounds` goes on from on its line: drawn alike (its colour,
-/// its run's line style, its place and thickness) and touching it. As
-/// `joined_wash` joins washes.
+/// `index` that `bounds` goes on from on its line, where run `index` is the
+/// next piece of that run's span (`RichText::continues`): drawn alike (its
+/// colour, its run's line style, its place and thickness) and touching it.
+/// As `joined_wash` joins washes. Runs beside each other, not so marked,
+/// draw lines of their own.
 fn joined_line<'o>(
     output: &'o mut [RichDecoration],
     rich: &zgx::rich_text::RichText,
@@ -2905,6 +3009,7 @@ fn joined_line<'o>(
     let runs = rich.runs();
     let joins = index > 0
         && before.run + 1 == index
+        && rich.continues(index)
         && style(runs.get(index - 1)) == style(runs.get(index))
         && before.color == color
         && (before.bounds.y - bounds.y).abs() < 0.01

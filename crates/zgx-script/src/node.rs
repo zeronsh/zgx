@@ -1467,6 +1467,9 @@ pub(crate) struct SpanRare {
     /// `context_menu = function(e) return { … } end`: its own menu (a
     /// link's in place of Open Link and Copy Link).
     pub menu: Option<Function>,
+    /// `continues = true`: the next piece of the span before
+    /// (`TextSpan::continues`).
+    pub continues: bool,
     /// `fade_in = { start = ui.now(), ms = 200, power = 1.6 }`: its text
     /// fading in, drawn in Rust a frame at a time (`TextSpan::fade_in`).
     pub fade: Option<zgx::compose::TextFade>,
@@ -4835,6 +4838,12 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 }
                 b"underline_color" => span.underline_color = themed_color(&lua.unpack(given)?),
                 b"underline_thickness" => span.underline_thickness = number(given)?,
+                // The next piece of the span before: one span cut in pieces.
+                b"continues" => {
+                    if lua.unpack::<Value>(given)?.truthy() {
+                        rare_mut(&mut span).continues = true;
+                    }
+                }
                 // `hover = { underline = true, color = … }`: a link's look
                 // under the pointer (CSS's `a:hover`).
                 b"hover" => {
