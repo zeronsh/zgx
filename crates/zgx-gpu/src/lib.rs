@@ -4238,6 +4238,10 @@ pub struct GpuRenderer {
     images_gone: rustc_hash::FxHashSet<u64>,
     /// Frames drawn, for `image_drawn`.
     image_frame: u64,
+    /// The scene the frame under way draws, for what an image giving way must
+    /// spare (`images_showing`). Its marks in `image_drawn` can't say: a frame
+    /// paints what it kept without asking for its images.
+    frame_scene: Option<std::ptr::NonNull<Scene>>,
     /// The bytes of textures this frame asked for, their pixels decoding:
     /// each decodes to its share of the budget, not all of it.
     images_decoding: usize,
@@ -4917,6 +4921,7 @@ impl GpuRenderer {
             image_drawn: FxHashMap::default(),
             images_gone: Default::default(),
             image_frame: 0,
+            frame_scene: None,
             images_decoding: 0,
             images_softer: FxHashMap::default(),
             image_share: usize::MAX,
@@ -5665,6 +5670,13 @@ impl GpuRenderer {
         }
     }
     fn render_inner(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
+        // For as long as this frame runs, and no longer (`images_showing`).
+        self.frame_scene = Some(std::ptr::NonNull::from(scene));
+        let result = self.render_frame(scene, damage);
+        self.frame_scene = None;
+        result
+    }
+    fn render_frame(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
         if let Some(reason) = self.context.lost() {
             return Err(GpuError::device_lost(&reason));
         }
@@ -12497,6 +12509,67 @@ impl GpuRenderer {
             scale *= 0.75;
         }
     }
+    /// The images the frame under way shows, or may: what a texture giving way
+    /// must not be. Worked out only when one has to (past a budget), from the
+    /// scene: an image's mark says when it last came through an upload, and a
+    /// frame paints what it kept without one. Under a layer or a matrix, where
+    /// it lands isn't read here, and counts as showing: spared needlessly, a
+    /// new image is drawn softer, where evicted, one on screen would go blank.
+    #[cold]
+    #[inline(never)]
+    fn images_showing(&self) -> rustc_hash::FxHashSet<u64> {
+        let mut showing = rustc_hash::FxHashSet::default();
+        // SAFETY: Set by `render` for as long as it runs, from a scene it
+        // borrows throughout; nothing here keeps the reference.
+        let Some(scene) = self.frame_scene.map(|scene| unsafe { scene.as_ref() }) else {
+            return showing;
+        };
+        let window = scene.bounds(scene.root());
+        for item in scene.paint_items() {
+            let image = match item.kind {
+                NodeKind::Image(image) => image.id(),
+                #[cfg(target_os = "macos")]
+                NodeKind::NativeSurface(frame) => frame.id(),
+                NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
+                    match quad
+                        .decoration
+                        .as_deref()
+                        .and_then(|d| d.background.as_ref())
+                    {
+                        Some(zgx::decoration::Background::Image { image, .. }) => image.id(),
+                        _ => continue,
+                    }
+                }
+                _ => continue,
+            };
+            let placed_elsewhere = item.projective().is_some()
+                || std::iter::successors(scene.parent(item.id), |id| scene.parent(*id))
+                    .any(|id| scene.is_layer(id));
+            let shown = item.clip.unwrap_or(window).intersection(window);
+            if placed_elsewhere
+                || scene.is_layer(item.id)
+                || shown.is_some_and(|shown| shown.intersection(item.bounds).is_some())
+            {
+                showing.insert(image);
+            }
+        }
+        // What holds images of its own, as `prune` counts them.
+        showing.extend(self.canvases.image_ids());
+        showing.extend(self.svgs.image_ids());
+        showing.extend(
+            (self.node_ramps.values())
+                .filter_map(|key| self.ramps.get(key))
+                .map(|ramp| ramp.id()),
+        );
+        showing.insert(effects::EFFECT_ATLAS);
+        showing.extend(
+            self.layers
+                .keys()
+                .filter(|id| scene.contains(**id))
+                .filter_map(|id| scene.mask(*id).map(|mask| mask.image.id())),
+        );
+        showing
+    }
     /// `upload_image` at `size` (`fitted_size`), or smaller where the budget
     /// or the texture limit says: drawn softer rather than left out.
     fn upload_image_at(
@@ -12521,10 +12594,11 @@ impl GpuRenderer {
             // Images not drawn this frame give their textures back, least
             // recently drawn first (a long page scrolled through): drawn
             // again, they upload again.
+            let showing = self.images_showing();
             let mut idle: Vec<(u64, u64)> = self
                 .image_drawn
                 .iter()
-                .filter(|(_, drawn)| **drawn < self.image_frame)
+                .filter(|(id, drawn)| **drawn < self.image_frame && !showing.contains(*id))
                 .map(|(id, drawn)| (*drawn, *id))
                 .collect();
             idle.sort_unstable();
@@ -12554,8 +12628,9 @@ impl GpuRenderer {
         if self.images.len() >= MAX_IMAGES && !self.images.contains_key(&image.id()) {
             // Images not drawn this frame give way, the longest gone first;
             // only as many as this drawn at once leave one out.
+            let showing = self.images_showing();
             let oldest = (self.image_drawn.iter())
-                .filter(|(_, drawn)| **drawn < self.image_frame)
+                .filter(|(id, drawn)| **drawn < self.image_frame && !showing.contains(*id))
                 .min_by_key(|(_, drawn)| **drawn)
                 .map(|(id, _)| *id);
             let Some(oldest) = oldest else {
