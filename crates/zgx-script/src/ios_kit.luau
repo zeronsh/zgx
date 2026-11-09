@@ -886,6 +886,7 @@ function ios.row(props)
 	return ui.button {
 		min_h = 60,
 		hidden = props.hidden,
+		table_row = true,
 		-- `menu`: a function giving what a long press shows (`ui.system_menu`).
 		on_mount = props.menu and function(element)
 			ui.system_menu(element, props.menu)

@@ -1525,3 +1525,28 @@ fn ios_text_takes_a_text_styles_size_weight_and_leading() {
         (19., LineHeight::with_leading(1.9))
     );
 }
+
+#[test]
+fn a_kit_row_is_a_table_row_and_a_plain_button_is_not() {
+    let mut h = Harness::inline(
+        r#"local ios = ui.ios
+        return ui.column {
+            ui.button { label = "Plain", w = 40, h = 40, on_click = function() end },
+            ui.button { label = "Unsaid", table_row = false, w = 40, h = 40, on_click = function() end },
+            ios.row { title = "Wi-Fi", on_click = function() end },
+        }"#,
+    );
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    let buttons = with_role(&mut h, Role::Button);
+    let is_row = |label: &str| {
+        buttons
+            .iter()
+            .find(|node| node.label == label)
+            .unwrap_or_else(|| panic!("no `{label}`"))
+            .table_row
+    };
+    assert!(is_row("Wi-Fi"));
+    assert!(!is_row("Plain"));
+    assert!(!is_row("Unsaid"));
+}

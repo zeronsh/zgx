@@ -4399,6 +4399,10 @@ fn styled(
             view = with_rare(view, rare, vm, low, handle_for());
         }
     }
+    // Not input of its own: a row's click alone doesn't come by `with_rare`.
+    if events.rare.as_ref().is_some_and(|rare| rare.table_row) {
+        view = view.table_row();
+    }
     if events.any_drag() || events.drag_preview.is_some() {
         view = with_drag(view, node, vm, low, handle_for());
     }

@@ -2312,6 +2312,10 @@ export type NodeProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: boolean?,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: boolean?,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -2739,6 +2743,10 @@ export type Props = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -3118,6 +3126,7 @@ export type Props_ref = (Ref | { Ref })?
 export type Props_focusable = boolean?
 export type Props_focus_on_press = boolean?
 export type Props_capture_keys = boolean?
+export type Props_table_row = boolean?
 export type Props_role = AriaRole?
 export type Props_heading = number?
 export type Props_selected = (boolean | Readable<boolean> | (() -> boolean))?
@@ -3415,6 +3424,10 @@ export type ContainerProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -3856,6 +3869,10 @@ export type ScrollProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -4335,6 +4352,10 @@ export type TextProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -4761,6 +4782,10 @@ export type MarkdownViewProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -5265,6 +5290,10 @@ export type RichProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -5685,6 +5714,10 @@ export type ImageProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -6122,6 +6155,10 @@ export type SvgProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -6670,6 +6707,10 @@ export type Scene3DProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -7113,6 +7154,10 @@ export type CanvasProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -7565,6 +7610,10 @@ export type CheckboxProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -7995,6 +8044,10 @@ export type InputProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -8526,6 +8579,10 @@ export type ProgressProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -8947,6 +9004,10 @@ export type SliderProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -9387,6 +9448,10 @@ export type SegmentedProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -9823,6 +9888,10 @@ export type StepperProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -10260,6 +10329,10 @@ export type DisclosureProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -10704,6 +10777,10 @@ export type AccordionProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -11122,6 +11199,10 @@ export type SectionProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -11565,6 +11646,10 @@ export type SeparatorProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -11991,6 +12076,10 @@ export type TabsProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -12439,6 +12528,10 @@ export type TreeProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -12883,6 +12976,10 @@ export type DataGridProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -13323,6 +13420,10 @@ export type CalendarProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -13756,6 +13857,10 @@ export type DatePickerProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -14187,6 +14292,10 @@ export type TimeFieldProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -14617,6 +14726,10 @@ export type ComboboxProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -15055,6 +15168,10 @@ export type CommandPaletteProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -15481,6 +15598,10 @@ export type SelectProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -15914,6 +16035,10 @@ export type SplitProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -16403,6 +16528,10 @@ export type ListProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -16918,6 +17047,10 @@ export type LayerProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -17358,6 +17491,10 @@ export type ModalProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -17816,6 +17953,10 @@ export type PopoverProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -18284,6 +18425,10 @@ export type MenuItemProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -18709,6 +18854,10 @@ export type SubmenuProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -19155,6 +19304,10 @@ export type WebViewProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -19601,6 +19754,10 @@ export type TerminalProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -20019,6 +20176,10 @@ export type GlassProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -20451,6 +20612,10 @@ export type GlassGroupProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -20869,6 +21034,10 @@ export type SymbolProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -21296,6 +21465,10 @@ export type NativeSwitchProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -22277,6 +22450,10 @@ export type NativeTabsProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -22702,6 +22879,10 @@ export type SlotProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -23174,6 +23355,10 @@ export type EachOptions = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
@@ -23610,6 +23795,10 @@ export type PresenceOptions = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
