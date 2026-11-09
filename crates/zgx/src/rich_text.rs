@@ -296,6 +296,24 @@ impl RichText {
     pub fn runs(&self) -> &[TextRun] {
         &self.runs
     }
+    /// The same text with run `i`'s colour `color(i, colour)`: shaped
+    /// alike (`same_shape`), so the renderer recolours its glyphs only.
+    pub fn recoloured(&self, mut color: impl FnMut(usize, Color) -> Color) -> Self {
+        let runs: Vec<TextRun> = self
+            .runs
+            .iter()
+            .enumerate()
+            .map(|(i, run)| TextRun {
+                color: color(i, run.color),
+                ..run.clone()
+            })
+            .collect();
+        Self {
+            options: self.options,
+            text: self.text.clone(),
+            runs: runs.into(),
+        }
+    }
 }
 
 /// Approximate, allocation-free headless metrics. Native hosts replace this with

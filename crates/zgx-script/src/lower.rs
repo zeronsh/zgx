@@ -8529,6 +8529,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
                     out = out.context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
                 }
+                if let Some(fade) = rare.and_then(|rare| rare.fade) {
+                    out = out.fade_in(fade);
+                }
                 if let Some(href) = &span.href {
                     out = out.href(href.clone());
                     if underline == Some(false) {

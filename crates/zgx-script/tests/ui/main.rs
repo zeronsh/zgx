@@ -109,6 +109,8 @@ mod stack;
 mod sticky;
 #[path = "../sweep.rs"]
 mod sweep;
+#[path = "../text_fade.rs"]
+mod text_fade;
 #[path = "../text_props.rs"]
 mod text_props;
 #[path = "../theme.rs"]

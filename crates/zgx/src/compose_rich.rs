@@ -144,6 +144,43 @@ pub(crate) struct SpanExtras {
     pub menu: Option<SpanMenu>,
     /// Not underlined, though a link (`TextSpan::no_underline`).
     pub plain: bool,
+    /// Its text fading in (`TextSpan::fade_in`).
+    pub fade: Option<TextFade>,
+}
+/// A run's text fading in (`TextSpan::fade_in`): from clear at `start`
+/// (milliseconds since the Unix epoch, as `ui.now()` says, on the thread's
+/// clock) to its own colour `ms` later, easing out by `power` (its alpha
+/// `1 - (1 - t)^power`). Drawn in Rust, a frame at a time while it fades:
+/// no script runs for it, and nothing lays out again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextFade {
+    /// When it starts: milliseconds since the Unix epoch (`ui.now()`).
+    pub start: f64,
+    /// How long it takes, in milliseconds.
+    pub ms: f32,
+    /// How it eases out: its alpha `1 - (1 - t)^power`.
+    pub power: f32,
+}
+impl TextFade {
+    /// How far in it is at `now` (ms since the epoch): 0 clear, 1 its colour.
+    pub fn at(&self, now: f64) -> f32 {
+        if self.ms.is_nan() || self.ms <= 0. {
+            return 1.;
+        }
+        let t = (((now - self.start) / self.ms as f64) as f32).clamp(0., 1.);
+        1. - (1. - t).powf(self.power)
+    }
+    /// Whether it's still fading at `now`.
+    pub fn fading(&self, now: f64) -> bool {
+        self.ms > 0. && now < self.start + self.ms as f64
+    }
+}
+/// Now, as a fade counts it: milliseconds since the Unix epoch on the
+/// thread's clock (`ui.now()`'s).
+pub fn fade_now() -> f64 {
+    crate::clock::system_now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0., |d| d.as_secs_f64() * 1000.)
 }
 /// How a link span looks under the pointer (`TextSpan::hover`): CSS's
 /// `a:hover { text-decoration: underline }`.
@@ -177,6 +214,13 @@ impl TextSpan {
     /// that follows the text colour takes the span's.
     pub fn icon(mut self, icon: SpanIcon) -> Self {
         self.extras.get_or_insert_default().icon = Some(icon);
+        self
+    }
+    /// Its text fading in, from clear to its colour (`TextFade`): a
+    /// streamed reply's new words. The paragraph draws the fade itself, a
+    /// frame at a time while it lasts, recolouring its glyphs only.
+    pub fn fade_in(mut self, fade: TextFade) -> Self {
+        self.extras.get_or_insert_default().fade = Some(fade);
         self
     }
     /// Restyled under the pointer, once it's a link (`on_click`), in place
