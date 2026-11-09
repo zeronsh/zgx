@@ -8412,6 +8412,12 @@ impl NodeHandle {
             .contains(self.node)
             .then(|| ui.observe_size(self.node))
     }
+    /// A number that changes when text's geometry may have: the window's
+    /// scale factor (`Scene::pixel_scale`) or the font backend changed. For
+    /// what measures text by device pixels, to measure again.
+    pub fn observe_text_geometry(&self) -> Option<Signal<u64>> {
+        Some(self.ui.upgrade()?.observe_text_geometry_revision())
+    }
     /// Whether any of the node shows (inside every clip and viewport above
     /// it), republished after each frame's layout: for building what only
     /// matters on screen.
