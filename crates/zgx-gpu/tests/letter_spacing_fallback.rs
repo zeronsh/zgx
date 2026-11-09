@@ -53,10 +53,14 @@ fn a_legacy_shaper_spaces_and_wraps_as_the_gpu_shaper() {
                 for (offset, _) in text.char_indices().chain([(text.len(), ' ')]) {
                     let (ca, cb) = (a.caret(offset), b.caret(offset));
                     // A space the GPU shaper drops at a wrap (one starting
-                    // past the edge) is on no line of its: its caret reads
-                    // as the text's start. Here it ends its line.
-                    let dropped =
-                        offset > 0 && (ca.x, ca.y) == (0., 0.) && text[offset..].starts_with(' ');
+                    // past the edge) has no glyph: its caret stays after the
+                    // line's last glyph, on the line it hangs from. Here it
+                    // ends its line, past that by the space itself.
+                    let dropped = offset > 0
+                        && text[offset..].starts_with(' ')
+                        && close(ca.y, cb.y)
+                        && ca.x > 0.
+                        && ca.x <= cb.x + 0.01;
                     if !dropped && (!close(ca.x, cb.x) || !close(ca.y, cb.y)) {
                         differences.push(format!(
                             "{text:?} {spacing} {width:?}: caret {offset} at ({}, {}) and ({}, {})",
