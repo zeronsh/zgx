@@ -1867,7 +1867,12 @@ impl View {
     /// copying it copies it all. Mounted rows copy as they show. Without
     /// it, only mounted rows copy. For a virtual list.
     pub fn row_text(mut self, text: impl Fn(usize) -> Option<String> + 'static) -> Self {
-        self.rare_mut().row_text = Some(std::rc::Rc::new(text));
+        self.rare_mut().row_text = Some(crate::selection::ListRows::new(text, None));
+        self
+    }
+    /// A virtual list's rows for a selection: their text and its keys.
+    pub(crate) fn list_rows(mut self, rows: crate::selection::RowText) -> Self {
+        self.rare_mut().row_text = Some(rows);
         self
     }
     /// A canvas's drawing placed by `view` (pan and zoom), following the
@@ -3142,24 +3147,37 @@ impl<K: 'static> RowSource<K> {
         let build = self.build.clone();
         move |index, key, cx| (build.borrow_mut())(index, key, cx)
     }
-    /// Where a row's key is in the list now, of `len()` rows (`None` while
-    /// it can't be read): at the index it was last seen at if it's still
-    /// there, else found down the list (`selection::RowFind`). Read
-    /// untracked; asked while the list reads its keys, it stays where it was.
-    pub(crate) fn find(
+    /// The list's keys, of `len()` rows (`None` while that can't be read),
+    /// for a selection's ends in its rows (`selection::ListKeys`): a row's
+    /// key, read as an end is set in it, and where a key is now, at the index
+    /// it was last seen at if it's still there, else found down the list.
+    /// Read untracked; asked while the list reads its keys, a key stays where
+    /// it was.
+    pub(crate) fn keys(
         &self,
         len: impl Fn() -> Option<usize> + 'static,
-    ) -> crate::selection::RowFind
+    ) -> crate::selection::RowKeys
     where
         K: Eq,
     {
-        let (key, mounted_in) = (self.key.clone(), self.mounted_in.clone());
-        Rc::new(move |wanted: &dyn std::any::Any, seen: usize| {
-            let wanted = wanted.downcast_ref::<K>()?;
-            let runtime = mounted_in
+        let untracked = |mounted_in: &Rc<RefCell<Option<(Runtime, Environment)>>>| {
+            mounted_in
                 .borrow()
                 .as_ref()
-                .map(|(runtime, _)| runtime.clone())?;
+                .map(|(runtime, _)| runtime.clone())
+        };
+        let (key, mounted_in) = (self.key.clone(), self.mounted_in.clone());
+        let read = move |index: usize| -> Option<Rc<dyn std::any::Any>> {
+            let runtime = untracked(&mounted_in)?;
+            runtime.untracked(|| {
+                let mut key = key.try_borrow_mut().ok()?;
+                Some(Rc::new(key(index)) as Rc<dyn std::any::Any>)
+            })
+        };
+        let (key, mounted_in) = (self.key.clone(), self.mounted_in.clone());
+        let find = move |wanted: &dyn std::any::Any, seen: usize| -> Option<usize> {
+            let wanted = wanted.downcast_ref::<K>()?;
+            let runtime = untracked(&mounted_in)?;
             runtime.untracked(|| {
                 let (Some(len), Ok(mut key)) = (len(), key.try_borrow_mut()) else {
                     return Some(seen);
@@ -3169,6 +3187,10 @@ impl<K: 'static> RowSource<K> {
                 }
                 (0..len).find(|&index| key(index) == *wanted)
             })
+        };
+        Rc::new(crate::selection::ListKeys {
+            key: Box::new(read),
+            find: Box::new(find),
         })
     }
     /// Row `index`'s text, of `len()` rows: the row built as the list builds
@@ -3309,7 +3331,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
         let count = count.clone();
         move || count.try_borrow_mut().map_or(0, |mut count| count())
     });
-    let find = rows.find({
+    let keys = rows.keys({
         let count = count.clone();
         move || count.try_borrow_mut().ok().map(|mut count| count())
     });
@@ -3528,7 +3550,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             let mut cx = Context::new(runtime.clone(), environment.clone());
                             let view = build(index_signal.clone(), key.clone(), &mut cx);
                             let row = ui.container(content, Layout::Overlay, Default::default());
-                            crate::selection::mount_row(&mut ui, row, &index_signal, key, &find);
+                            crate::selection::mount_row(&mut ui, row, &index_signal);
                             let node = mount(&mut ui, row, view, environment.clone());
                             cx.finish(&mut ui, node);
                             if let Some(navigation) = &navigation {
@@ -3642,7 +3664,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
             });
         },
     )))
-    .row_text(text)
+    .list_rows(crate::selection::ListRows::new(text, Some(keys)))
 }
 // Roll back newly appended roots if a component constructor or initial binding
 // panics. Existing siblings are never removed by this guard. This is ownership
