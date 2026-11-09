@@ -1872,6 +1872,8 @@ struct Host {
     /// `ZGX_DAMAGE_CHECK=1`: compare every damaged frame with a full
     /// repaint and report stale pixels (slow; for debugging damage).
     damage_check: Option<u64>,
+    /// `ZGX_PAINT_CHECK`: each shown frame against one drawn whole.
+    paint_check: Option<crate::paint_check::PaintCheck>,
     /// Wheel and trackpad motion waiting for display refreshes.
     scroll: crate::scroll_resample::ScrollResampler,
     /// Fingers and pens on the screen, as the pointer.
@@ -2209,6 +2211,7 @@ impl Host {
             present_ready: false,
             gpu_stats: crate::gpu_stats::GpuStatsLog::from_env(),
             damage_check: zgx::env::var_os("ZGX_DAMAGE_CHECK").map(|_| 0),
+            paint_check: crate::paint_check::PaintCheck::from_env(),
             frames,
             #[cfg(any(target_os = "macos", windows))]
             display_link: None,
@@ -2938,6 +2941,9 @@ impl Host {
                             renderer.hide_loops();
                         }
                         let stats = stats?;
+                        if let Some(check) = &mut self.paint_check {
+                            check.rendered(renderer, &scene, damage, &stats);
+                        }
                         first_mark(&FIRST_RENDER, "first frame rendered");
                         self.native.render(&scene, damage)?;
                         if let Some(frame) = &mut self.damage_check {
@@ -3149,6 +3155,9 @@ impl Host {
                     *self.shown.borrow_mut() = renderer
                         .shown_frame()
                         .map(|frame| (frame, self.scale_factor));
+                    if let Some(check) = &mut self.paint_check {
+                        check.presented(renderer);
+                    }
                     if let Some(gpu) = renderer.take_gpu_time() {
                         zgx::profile::gpu_time(gpu);
                         if grid.is_some() {
@@ -3901,6 +3910,7 @@ impl Host {
                 renderer.set_display_key(&self.display_key);
                 #[cfg(target_os = "macos")]
                 renderer.set_plane_waker(self.plane_waker());
+                renderer.record_scroll_notes(self.paint_check.is_some());
                 self.renderer = Some(renderer);
                 self.force = true;
                 eprintln!("zgx: drawing again on a new GPU renderer");
@@ -4166,6 +4176,7 @@ impl Host {
         renderer.set_display_key(&self.display_key);
         #[cfg(target_os = "macos")]
         renderer.set_plane_waker(self.plane_waker());
+        renderer.record_scroll_notes(self.paint_check.is_some());
         self.renderer = Some(renderer);
         self.adapter = adapter;
         window.set_maximized(self.state.maximized);

@@ -966,6 +966,111 @@ fn a_failed_frame_hides_the_layers() {
     assert_eq!(window.gpu.debug_loop_disagreements(), 0, "nothing to say");
 }
 
+/// A measured list of lines that paint little of their room, on the window's
+/// own surfaces: scrolled a little (copies), then sent many views in one jump,
+/// rows mounting and measuring, and scrolled again. Each frame shown, to the
+/// byte, is what a second window drawing every frame whole shows.
+#[cfg(target_os = "macos")]
+fn a_jump_down_a_measured_list_on_the_windows_surfaces(scale: f32, from: f32, to: f32) {
+    use zgx::{compose::prelude::*, widgets::Ui};
+    let (w, h) = (240_f32, 200_f32);
+    let window = |offset: f32| {
+        let host = objc2_quartz_core::CALayer::new();
+        let mut gpu =
+            GpuRenderer::debug_for_layer(host, (w * scale) as u32, (h * scale) as u32).unwrap();
+        gpu.set_scale_factor(scale);
+        let mut ui = Ui::new(w, h);
+        ui.scene.borrow_mut().set_pixel_scale(scale);
+        let at = ui.signal(offset);
+        let heights = VariableHeights::new(&ui.runtime, 400, 40.);
+        let list = measured_virtual_list(
+            at.clone(),
+            heights,
+            2,
+            |i| i,
+            |_, i, _| {
+                let lines = [1, 1, 3, 1, 2][i % 5];
+                let mut row = column().w_full().gap(4.).pb(10.);
+                for line in 0..lines {
+                    let width = 30. + ((i * 7 + line * 13) % 9) as f32 * 20.;
+                    row = row.child(
+                        div()
+                            .w(width)
+                            .h(10.)
+                            .bg(rgb(0xd8dce4 - (i as u32 % 7) * 0x0a0a0a)),
+                    );
+                }
+                row
+            },
+        )
+        .w_full()
+        .h_full()
+        .bg(rgb(0x14181f));
+        ui.mount(overlay().w(w).h(h).bg(rgb(0x000000)).child(list));
+        (gpu, ui, at)
+    };
+    let (mut gpu, mut ui, offset) = window(from);
+    let (mut whole, mut whole_ui, whole_offset) = window(from);
+    let all = [Rect::new(0., 0., w, h)];
+    let mut check = |label: &str| {
+        for (gpu, ui, all_of_it) in [
+            (&mut gpu, &mut ui, false),
+            (&mut whole, &mut whole_ui, true),
+        ] {
+            ui.prepare_frame();
+            let damage = ui.scene.borrow_mut().flush().damage;
+            let damage: &[Rect] = if all_of_it { &all } else { &damage };
+            gpu.render(&ui.scene.borrow(), damage).unwrap();
+            gpu.present().unwrap();
+        }
+        let (_, _, shown) = gpu.debug_bare_pixels().expect("shown");
+        let (_, _, painted) = whole.debug_bare_pixels().expect("shown");
+        let count = shown
+            .chunks(4)
+            .zip(painted.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        let first = shown
+            .chunks(4)
+            .zip(painted.chunks(4))
+            .position(|(a, b)| a != b);
+        let row = (w * scale) as usize;
+        assert!(
+            first.is_none(),
+            "{scale}x, {from} to {to}, {label}: {count} stale pixels, the first at points {:?}",
+            first.map(|p| ((p % row) as f32 / scale, (p / row) as f32 / scale)),
+        );
+    };
+    for n in 0..4 {
+        check(&format!("settling {n}"));
+    }
+    for n in 0..6 {
+        offset.update(|o| *o += 6.);
+        whole_offset.update(|o| *o += 6.);
+        check(&format!("scrolled {n}"));
+    }
+    offset.set(to);
+    whole_offset.set(to);
+    for n in 0..8 {
+        check(&format!("{n} after the jump"));
+    }
+    for n in 0..8 {
+        offset.update(|o| *o -= 6.);
+        whole_offset.update(|o| *o -= 6.);
+        check(&format!("{n} scrolling back"));
+    }
+    assert!(gpu.debug_scroll_copies() > 0, "nothing copied");
+}
+
+#[cfg(target_os = "macos")]
+fn jumps_down_measured_lists_on_the_windows_surfaces() {
+    for scale in [2., 1.] {
+        a_jump_down_a_measured_list_on_the_windows_surfaces(scale, 0., 1_000_000.);
+        a_jump_down_a_measured_list_on_the_windows_surfaces(scale, 0., 6_000.);
+        a_jump_down_a_measured_list_on_the_windows_surfaces(scale, 6_000., 0.);
+    }
+}
+
 fn main() {
     #[cfg(target_os = "macos")]
     {
@@ -979,6 +1084,7 @@ fn main() {
         a_loop_moved_by_layout_above_it_moves_its_layer(true);
         a_frame_drawn_again_for_a_shifted_layer_still_moves_a_loop();
         loops_that_look_alike_share_a_sheet();
+        jumps_down_measured_lists_on_the_windows_surfaces();
         a_scroll_copies_past_a_loop_in_its_content();
         a_scroll_past_a_loop_reaching_past_its_box_or_stopped_otherwise();
         a_layer_never_shows_a_loop_its_node_does_not();
