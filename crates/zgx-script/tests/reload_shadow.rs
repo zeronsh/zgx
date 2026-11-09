@@ -411,6 +411,8 @@ fn a_template_swapped_whole_loads_everything() {
 
 #[test]
 fn hundreds_of_partial_reloads_return_to_the_memory_a_fresh_load_holds() {
+    // Saves read at each mark, the lowest counting.
+    const READS: usize = 16;
     let (app, mut h) = ticking("memory");
     // What a fresh VM holds: the first reload loaded everything.
     let fresh = h.host.script_memory();
@@ -425,18 +427,24 @@ fn hundreds_of_partial_reloads_return_to_the_memory_a_fresh_load_holds() {
         h.frames(2);
         assert!(last(&h).taken, "{:?}", last(&h));
     };
+    // Luau's heap is pages of 16 KB, and how many stand part full after a
+    // collection moves with when the last ones ran: one reading runs up to
+    // five pages over the same heap, on no pattern. What the reloads keep
+    // only adds, so the lowest of a few saves' readings is what's kept: 3,096
+    // bytes over a fresh load on a Mac at a load of 80 to 130, where keeping
+    // each save's module values leaves 160 KB by the end.
     let mut after = Vec::new();
+    let mut lowest = usize::MAX;
     for n in 0..600 {
         save(n);
+        if n % 200 >= 200 - READS {
+            lowest = lowest.min(h.host.script_memory());
+        }
         if n % 200 == 199 {
-            after.push(h.host.script_memory());
+            after.push(std::mem::replace(&mut lowest, usize::MAX));
         }
     }
     assert_eq!(h.text("version"), "0599");
-    // Luau's heap is pages of 16 KB, and how full they stand after a
-    // collection moves with its timing: beside other tests, a page or two
-    // either way from a fresh load (alone, the same to the byte). A
-    // module's run kept each save would leave hundreds of KB by now.
     assert!(
         after.iter().all(|&a| a <= fresh + 64 * 1024),
         "{fresh} bytes freshly loaded, {after:?} after 200, 400 and 600 saves"
