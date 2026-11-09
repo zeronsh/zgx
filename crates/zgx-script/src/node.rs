@@ -1516,6 +1516,9 @@ pub(crate) struct MarkdownLook {
     /// `track(element)`: each top-level block's box as it mounts, which
     /// gives back what to call as it goes.
     pub track: Option<Function>,
+    /// `window = { key, near, mounted, resized }`: the text held in runs
+    /// (`markdown::window`), as the app judges what's near what shows.
+    pub window: Option<MarkdownWindow>,
     /// `pictures = true`: a paragraph with pictures among its words goes to
     /// `block` (the app shows them).
     pub pictures: bool,
@@ -1553,6 +1556,16 @@ const PARTS: [&str; 15] = [
     "rule",
     "pull",
 ];
+/// `ui.markdown_view`'s `window`: the key its runs' heights are kept by;
+/// `near(at, last)`, whether run `at` is built (tracked); `mounted(at,
+/// element)`, a run's box as it mounts; `resized(at, height, was)`, a run
+/// laid out at another height than it was held at.
+pub(crate) struct MarkdownWindow {
+    pub key: Rc<str>,
+    pub near: Function,
+    pub mounted: Function,
+    pub resized: Function,
+}
 /// How many kinds of run a markdown style names (`MarkdownLook::runs`).
 pub(crate) const RUN_KINDS: usize = 7;
 const RUN_KIND_NAMES: [&str; RUN_KINDS] = [
@@ -1602,6 +1615,18 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
     let chip: Option<Function> = table.get("chip")?;
     let block: Option<Function> = table.get("block")?;
     let track: Option<Function> = table.get("track")?;
+    let window = match table.get::<Option<Table>>("window")? {
+        Some(t) => Some(MarkdownWindow {
+            key: t
+                .get::<Option<String>>("key")?
+                .ok_or_else(|| mlua::Error::runtime("ui.markdown_view's window needs a `key`"))?
+                .into(),
+            near: t.get("near")?,
+            mounted: t.get("mounted")?,
+            resized: t.get("resized")?,
+        }),
+        None => None,
+    };
     let pictures = table.get::<Option<bool>>("pictures")?.unwrap_or(false);
     let find = match table.get::<Option<Table>>("find")? {
         Some(t) => Some(MarkdownFind {
@@ -1630,6 +1655,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
         "block",
         "pictures",
         "track",
+        "window",
     ] {
         table.raw_set(name, mlua::Value::Nil)?;
     }
@@ -1640,6 +1666,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
         && find.is_none()
         && block.is_none()
         && track.is_none()
+        && window.is_none()
         && !web_only
     {
         return Ok(None);
@@ -1746,6 +1773,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
         find,
         block,
         track,
+        window,
         pictures,
         web_only,
         made: RefCell::new(vec![None; 1 << RUN_KINDS]),
@@ -5579,9 +5607,15 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 attached: markdown_attached(&table)?,
                 top: None,
                 path: Rc::from([]),
+                run_at: 0,
+                window: None,
                 quoted: false,
             };
             let look = markdown_look(lua, &table)?;
+            let mut options = options;
+            options.window = look
+                .as_ref()
+                .and_then(|look| look.window.as_ref().map(|w| w.key.clone()));
             let mut args = TextArgs::default();
             let empty = Kind::Text(Text::Literal(String::new()));
             let (owner, lint) = owner_and_lint(lua)?;

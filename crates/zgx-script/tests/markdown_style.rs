@@ -670,3 +670,57 @@ fn each_top_level_block_is_told_to_track_as_it_mounts_and_goes() {
     assert_eq!(seen(&app), "1", "the boxes gone told so");
     assert_eq!(app.error(), None);
 }
+
+#[test]
+fn a_text_held_in_runs_builds_those_near_and_holds_the_rest_at_their_height() {
+    // Forty paragraphs: three runs of sixteen.
+    let mut text = String::new();
+    for i in 1..=40 {
+        text.push_str(&format!("Paragraph {i}.\n\n"));
+    }
+    let app = TestApp::inline(&format!(
+        r##"local near = ui.state("near", {{ false, false, true }})
+        local mounted = ui.state("mounted", "")
+        return ui.column {{ w = 600,
+            ui.markdown_view {{ {text:?}, id = "md", w_full = true, style = {{}},
+                window = {{
+                    key = "held",
+                    near = function(at, last) return near:get()[at] end,
+                    mounted = function(at, el) mounted:set(mounted:peek() .. at .. ";") end,
+                    resized = function(at, h, was) end,
+                }} }},
+        }}"##
+    ));
+    app.frames(3);
+    assert_eq!(app.error(), None);
+    let texts = |app: &mut TestApp| -> Vec<String> {
+        paragraphs(app, "md").into_iter().map(|p| p.1).collect()
+    };
+    let mut app = app;
+    let shown = texts(&mut app);
+    assert!(
+        shown.contains(&"Paragraph 40.".to_string()),
+        "the last run built: {shown:?}"
+    );
+    assert!(
+        !shown.contains(&"Paragraph 1.".to_string()),
+        "the first held"
+    );
+    let mounted = (app.host.states().into_iter())
+        .find(|(name, _)| name == "mounted")
+        .map(|(_, v)| v.to_string())
+        .unwrap();
+    assert_eq!(mounted, "1;2;3;");
+    // Built as the look says it's near.
+    app.host
+        .set_state(
+            "near",
+            Value::List(vec![Value::Bool(true), Value::Bool(false), Value::Bool(true)].into()),
+        )
+        .unwrap();
+    app.frames(2);
+    let shown = texts(&mut app);
+    assert!(shown.contains(&"Paragraph 1.".to_string()));
+    assert!(!shown.contains(&"Paragraph 20.".to_string()));
+    assert_eq!(app.error(), None);
+}

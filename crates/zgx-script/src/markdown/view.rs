@@ -44,6 +44,12 @@ pub(crate) struct ViewOptions {
     /// where a part nested in it stands among its parts.
     pub(crate) top: Option<Signal<Value>>,
     pub(crate) path: Rc<[usize]>,
+    /// Where the run of top-level blocks being built starts among them
+    /// (`window`).
+    pub(crate) run_at: usize,
+    /// `window = { key, … }`: the text held in runs (`super::window`), its
+    /// runs' heights kept by `key`.
+    pub window: Option<Rc<str>>,
     /// In a quote: its words in the quote's ink.
     pub(crate) quoted: bool,
 }
@@ -235,6 +241,13 @@ pub(crate) trait Look {
     fn find(&self, block: usize) -> Option<(Rc<str>, usize)>;
     /// Whether the view has a find.
     fn finds(&self) -> bool;
+    /// Whether run `at` (from 1) of a text held in runs is built: near what
+    /// shows, as the look judges it. `last`: the text's last run. Tracked.
+    fn near(&self, at: usize, last: bool) -> bool;
+    /// Run `at`'s box, mounted: the look judges by it.
+    fn run_mounted(&self, at: usize, block: zgx::compose::NodeHandle);
+    /// Run `at` laid out at `height`, held at `was` before.
+    fn run_resized(&self, at: usize, height: f32, was: f32);
     /// Whether the look is told of each top-level block's box (`track`).
     fn tracks(&self) -> bool;
     /// A top-level block's box, mounted: told to the look, and what it gives
@@ -996,7 +1009,7 @@ fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
             // top-level blocks.)
             let mut options = options.clone();
             if top {
-                options.block_at = Some(index);
+                options.block_at = Some(options.run_at + index);
                 options.path = Rc::from([]);
             } else {
                 options.path = super::order::on(&options.path, &[index]);
@@ -1036,7 +1049,7 @@ fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
                     if heading {
                         outer = look.part("pull", outer);
                     }
-                    let view = revealed(outer, index, look.clone(), cell, cx);
+                    let view = revealed(outer, options.run_at + index, look.clone(), cell, cx);
                     tracked(view, look, top, cx)
                 }
                 Some(look) => tracked(view, look, top, cx),
@@ -1067,6 +1080,100 @@ fn tracked(view: View, look: &Rc<dyn Look>, top: bool, cx: &mut Context) -> View
     div().w_full().min_w(0.).child(view).on_mount(move |node| {
         *held.borrow_mut() = look.track(node.clone());
     })
+}
+
+/// The top-level blocks `list` holds in runs of `window::RUN`, each in a
+/// box: built (a list of its blocks, as the view's) while the look says
+/// it's near what shows, else a box of the height it last had (`key`'s), or
+/// a guess at it. The box is handed to the look as it mounts, and its
+/// height told as it changes.
+fn held_runs(list: Signal<Value>, options: &ViewOptions, key: Rc<str>, look: Rc<dyn Look>) -> View {
+    use super::window::{RUN, guess, height_of, keep_height};
+    let (counting, reading, options) = (list.clone(), list, options.clone());
+    keyed(
+        move || counting.with(|l| (0..l.list().len().div_ceil(RUN)).collect::<Vec<usize>>()),
+        move |r: usize, cx: &mut Context| {
+            let at = r + 1;
+            let slice = move |l: &Value| -> Value {
+                Value::List(
+                    l.list()
+                        .iter()
+                        .skip(r * RUN)
+                        .take(RUN)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .into(),
+                )
+            };
+            let cell = cx.runtime().signal(reading.with_untracked(slice));
+            let (from, into) = (reading.clone(), cell.clone());
+            cx.retain(cx.runtime().effect(move || {
+                let now = from.with(slice);
+                put(&into, &now);
+            }));
+            // Whether it's the text's last run, followed.
+            let last = {
+                let reading = reading.clone();
+                move || reading.with(|l| l.list().len().div_ceil(RUN) == at)
+            };
+            // The height it's held at: as last laid out, else a guess.
+            let held = cx.runtime().signal(
+                height_of(&key, at).unwrap_or_else(|| cell.with_untracked(|b| guess(b.list()))),
+            );
+            let mut options = options.clone();
+            options.run_at = r * RUN;
+            let (judging, building, holding) = (look.clone(), look.clone(), held.clone());
+            let content = zgx::compose::switch(
+                move || judging.near(at, last()),
+                move |near: bool, _cx: &mut Context| {
+                    if near {
+                        building.blocks(block_list(cell.clone(), &options, true))
+                    } else {
+                        let holding = holding.clone();
+                        div()
+                            .w_full()
+                            .reactive_style(move || zgx::style::Styles::new().h(holding.get()))
+                    }
+                },
+            )
+            .w_full()
+            .min_w(0.);
+            // Its box: told to the look as it mounts; its height as it
+            // changes (size alone: moving doesn't tell).
+            let (telling, key, runtime) = (look.clone(), key.clone(), cx.runtime().clone());
+            let watch: Rc<RefCell<Option<Box<dyn std::any::Any>>>> = Rc::default();
+            cx.retain(watch.clone());
+            div()
+                .w_full()
+                .min_w(0.)
+                .child(content)
+                .on_mount(move |node| {
+                    telling.run_mounted(at, node.clone());
+                    let Some(sizes) = node.observe_size() else {
+                        return;
+                    };
+                    let (look, key, held) = (telling.clone(), key.clone(), held.clone());
+                    let effect = runtime.effect(move || {
+                        let (_, h) = sizes.get();
+                        if h <= 0. {
+                            return;
+                        }
+                        let was = held.with_untracked(|h| *h);
+                        if height_of(&key, at).is_none_or(|kept| (kept - h).abs() >= 0.5) {
+                            keep_height(&key, at, h);
+                        }
+                        if (h - was).abs() < 0.5 {
+                            return;
+                        }
+                        held.set(h);
+                        look.run_resized(at, h, was);
+                    });
+                    *watch.borrow_mut() = Some(Box::new(effect));
+                })
+        },
+    )
+    .w_full()
+    .items_stretch()
 }
 
 /// Top-level block `index`'s `view`, brought into view (`Look::reveal`) a
@@ -1614,10 +1721,12 @@ pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOp
                 true
             });
         }));
-        let blocks = block_list(top, &options, true);
-        match &options.look {
-            Some(look) => look.blocks(blocks),
-            None => blocks.gap(10.),
+        match (&options.look, &options.window) {
+            (Some(look), Some(key)) => {
+                look.blocks(held_runs(top, &options, key.clone(), look.clone()))
+            }
+            (Some(look), None) => look.blocks(block_list(top, &options, true)),
+            (None, _) => block_list(top, &options, true).gap(10.),
         }
     })
 }

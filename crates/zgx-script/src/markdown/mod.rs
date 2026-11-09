@@ -27,6 +27,7 @@ mod mend;
 mod order;
 mod veil;
 pub(crate) mod view;
+mod window;
 
 pub use mend::PENDING_LINK_URL;
 
