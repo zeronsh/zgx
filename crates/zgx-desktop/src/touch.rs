@@ -38,6 +38,8 @@ pub(crate) enum Step {
     /// to what had it before the finger landed (a pan focuses nothing, as
     /// in a browser).
     Unpress,
+    /// A pan's fingers lifted: what a scroll view that pages goes by.
+    PanLifted,
     /// Offer this movement to the scroll views at (`x`, `y`) as a scroll and
     /// say whether one took it (`Touches::decided`): a pan, or a drag.
     TryPan {
@@ -91,6 +93,8 @@ pub(crate) struct Touches {
     #[cfg(target_os = "linux")]
     wheel_sum: Option<(f32, f32)>,
     fling: Option<Fling>,
+    /// The host has heard this fling began (`take_coast_began`).
+    coast_told: bool,
     /// The press has been held long enough, and the host told (`hold`).
     held: bool,
 }
@@ -107,6 +111,7 @@ impl Default for Touches {
             #[cfg(target_os = "linux")]
             wheel_sum: None,
             fling: None,
+            coast_told: false,
             held: false,
         }
     }
@@ -310,7 +315,7 @@ impl Touches {
                             began: now,
                             elapsed: 0.,
                         });
-                        Vec::new()
+                        vec![Step::PanLifted]
                     }
                     Mode::Idle | Mode::Pen => Vec::new(),
                 };
@@ -378,6 +383,14 @@ impl Touches {
         // Scrolling runs against the finger.
         let speed = ((first.0 - last.0) / seconds, (first.1 - last.1) / seconds);
         (speed.0.hypot(speed.1) >= STILL).then_some(speed)
+    }
+
+    /// Whether a fling has begun since last asked.
+    pub(crate) fn take_coast_began(&mut self) -> bool {
+        let coasting = self.fling.is_some();
+        let began = coasting && !self.coast_told;
+        self.coast_told = coasting;
+        began
     }
 
     /// Whether a fling is coasting: frames should follow until it stops.
@@ -740,6 +753,27 @@ mod tests {
         assert!(touches.hold(t + HOLD).is_some());
         let up = events(touches.touch(2, Ended, (5., 5.), false, t + HOLD));
         assert_eq!(up[0], PointerCancel);
+    }
+
+    /// A pan is a gesture to a scroll view that pages (and only to one: it reaches
+    /// no latch, nor other views): its lift says so, and the coast after it says it
+    /// began, once, as a trackpad's momentum does.
+    #[test]
+    fn lifting_a_pan_ends_its_gesture_and_a_coast_is_its_momentum() {
+        let t = Instant::now();
+        let mut touches = Touches::default();
+        touches.touch(1, Started, (100., 100.), false, t);
+        touches.touch(1, Moved, (100., 80.), false, t);
+        touches.decided(true);
+        touches.touch(1, Moved, (100., 60.), false, t + Duration::from_millis(8));
+        assert!(!touches.take_coast_began());
+        let up = touches.touch(1, Ended, (100., 40.), false, t + Duration::from_millis(16));
+        assert_eq!(up[0], Step::PanLifted);
+        assert!(touches.flinging());
+        assert!(touches.take_coast_began());
+        assert!(!touches.take_coast_began(), "said once");
+        touches.stop();
+        assert!(!touches.take_coast_began());
     }
 
     #[test]

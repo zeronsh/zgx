@@ -2296,6 +2296,10 @@ impl Host {
         for step in steps {
             match step {
                 crate::touch::Step::Dispatch(event) => self.dispatch(event)?,
+                crate::touch::Step::PanLifted => {
+                    let ui = &self.context.ui;
+                    ui.paging_gesture(zgx::input::ScrollGesture::Ended);
+                }
                 crate::touch::Step::Unpress => {
                     self.dispatch(InputEvent::PointerCancel)?;
                     let ui = &self.context.ui;
@@ -2304,12 +2308,21 @@ impl Host {
                     }
                 }
                 crate::touch::Step::TryPan { x, y, dx, dy } => {
+                    // A gesture's, not a wheel's: a paged view follows it.
+                    self.context
+                        .ui
+                        .paging_gesture(zgx::input::ScrollGesture::Began);
                     let panned = self.dispatch_prevented(InputEvent::Scroll {
                         x,
                         y,
                         delta_x: dx,
                         delta_y: dy,
                     })?;
+                    if !panned {
+                        self.context
+                            .ui
+                            .paging_gesture(zgx::input::ScrollGesture::Ended);
+                    }
                     let next = self.touch.decided(panned);
                     self.touch_steps(next)?;
                 }
@@ -6113,7 +6126,8 @@ impl Host {
         }
         // A fling coasts a step each refresh, and stops at the end of what
         // it scrolls.
-        if self.touch.flinging()
+        let coasting = self.touch.flinging();
+        if coasting
             && (self.frame_arrived || !self.frames_presented())
             && let Some((x, y, delta_x, delta_y)) = self
                 .touch
@@ -6126,6 +6140,16 @@ impl Host {
             })?
         {
             self.touch.stop();
+        }
+        // Its momentum, as a trackpad's: a paged view has gone to its page, and
+        // what coasts after moves nothing until it stops.
+        if self.touch.take_coast_began() {
+            let ui = &self.context.ui;
+            ui.paging_gesture(zgx::input::ScrollGesture::MomentumBegan);
+        }
+        if coasting && !self.touch.flinging() {
+            let ui = &self.context.ui;
+            ui.paging_gesture(zgx::input::ScrollGesture::MomentumEnded);
         }
         if let StartupTrim::At(at) = self.startup_trim
             && std::time::Instant::now() >= at

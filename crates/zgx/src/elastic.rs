@@ -528,13 +528,13 @@ pub(crate) struct Speed {
     measured: bool,
 }
 impl Speed {
-    fn starting(now: Instant) -> Self {
+    pub(crate) fn starting(now: Instant) -> Self {
         Self {
             at: Some(now),
             ..Self::default()
         }
     }
-    fn scrolled(&mut self, delta: f32, now: Instant) {
+    pub(crate) fn scrolled(&mut self, delta: f32, now: Instant) {
         if delta == 0. || !delta.is_finite() {
             return;
         }
@@ -560,7 +560,7 @@ impl Speed {
     /// The speed the fingers lift at, at `now`: none once they've rested
     /// `SPEED_LATEST` (on an `NSScrollView`, a push held 150 ms before lifting
     /// still went on, one held 300 ms didn't).
-    fn at(&self, now: Instant) -> f32 {
+    pub(crate) fn at(&self, now: Instant) -> f32 {
         match self.at {
             Some(at)
                 if self.measured

@@ -46,6 +46,7 @@ pub(crate) mod editor_spell;
 pub(crate) mod elastic;
 pub mod find;
 mod find_text;
+pub(crate) mod paging;
 pub mod rich_text;
 mod scroll_keys;
 pub mod selection;

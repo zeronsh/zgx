@@ -4509,6 +4509,9 @@ export type ScrollProps = {
 	-- edge. A trackpad's
 	-- swipe mostly down leaves it still.
 	wheel_across: boolean?,
+	-- Comes to rest only on whole pages, each its own length along the way it
+	-- scrolls, as UIKit's paging scroll views.
+	paging: boolean?,
 	-- What a focused control or a find keeps clear of scrolling into view
 	-- (CSS's scroll-padding): a composer or a bar floating over its edges.
 	-- Points: one number for every side, or { top, bottom, left, right };

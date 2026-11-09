@@ -1095,6 +1095,8 @@ pub(crate) enum Kind {
         contain: bool,
         /// `wheel_across = true` (`ui.scroll_x`): a mouse wheel moves it.
         wheel_across: bool,
+        /// `paging = true`: it comes to rest on whole pages.
+        paging: bool,
         /// `scroll_padding`: kept clear as what it holds scrolls into view.
         padding: Option<Box<ScrollPadding>>,
     },
@@ -3541,6 +3543,7 @@ const LATE_FIELDS: &[&str] = &[
     "on_paste",
     "overscroll",
     "wheel_across",
+    "paging",
     "capture_keys",
     "scroll_padding",
     "read_only",
@@ -3703,6 +3706,11 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                         "`wheel_across` is for a `ui.scroll_x`",
                     ));
                 }
+            }
+        }
+        "paging" => {
+            if let Kind::Scroll { paging, .. } = &mut node.kind {
+                *paging = lua.unpack::<Option<bool>>(value)?.unwrap_or(false);
             }
         }
         "overscroll" => {
@@ -5077,6 +5085,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             // Set as `fill` walks the table (`late_field`).
                             contain: false,
                             wheel_across: false,
+                            paging: false,
                             padding: None,
                         },
                     ),

@@ -106,6 +106,7 @@ SMOKES = [
     ("overlay-scrolling", "python3 scripts/overlay_scrolling_smoke.py {bin}/scrollbars --output {out}", False),
     ("xsettings", "python3 scripts/xsettings_smoke.py {bin}/drag_drop {bin}/primary_selection --output {out}", False),
     ("touchpad-fling", "python3 scripts/touchpad_fling_smoke.py {bin}/scroll --output {out}", False),
+    ("paging", "python3 scripts/paging_smoke.py {bin}/paging --output {out}", False),
     ("window-buttons", "python3 scripts/window_buttons_smoke.py {bin}/glass_counter --output {out}", False),
     ("titlebar-double-click", "python3 scripts/titlebar_double_click_smoke.py {bin}/glass_counter --output {out}", False),
     ("glass-blur", "python3 scripts/linux_glass_blur_smoke.py {bin} --output {out}", False),
