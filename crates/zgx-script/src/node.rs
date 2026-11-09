@@ -3693,11 +3693,10 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
         }
         "capture_keys" => {
             if lua.unpack::<bool>(value)? {
-                node.events
-                    .get_or_insert_default()
-                    .rare
-                    .get_or_insert_default()
-                    .capture_keys = true;
+                let events = node.events.get_or_insert_default();
+                events.rare.get_or_insert_default().capture_keys = true;
+                // No handler sets it for this one (`any_input`).
+                events.input = true;
             }
         }
         "wheel_across" => {
