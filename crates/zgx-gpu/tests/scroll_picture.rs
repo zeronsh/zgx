@@ -1,7 +1,7 @@
 //! Scroll content drawn from a picture (`pictures.rs`) draws what painting it
 //! whole draws, every frame: a list scrolled both ways past the picture's
 //! wrap, rows mounting and changing, what fades and what floats over it, at
-//! 1x, 1.5x and 2x.
+//! 1x and 2x. (At a fractional scale a view takes no picture.)
 use zgx::{
     compose::prelude::{rgba, *},
     reactive::Signal,
@@ -122,7 +122,7 @@ fn run_within(
     assert!(held > 0, "{name} at {scale}x: no picture was drawn from");
 }
 
-const SCALES: [f32; 3] = [1., 1.5, 2.];
+const SCALES: [f32; 2] = [1., 2.];
 /// Down past the texture's height, back up past where it began, by steps
 /// small and large (even points: whole pixels at every scale here).
 const WALK: [f32; 16] = [
@@ -334,10 +334,7 @@ fn boxes_fading_down_their_height_cross_the_views_edges_as_painted() {
         6_f32, 6., 8., 10., 40., 90., 8., 6., -4., -8., -30., -60., 300., -300., 8., 500., -500.,
     ];
     for scale in SCALES {
-        // (At a fractional scale a band's value rounds a level apart between
-        // a texture's coordinates and the window's.)
-        let levels = if scale.fract() == 0. { 0 } else { 1 };
-        run_within("fading down", scale, &steps, levels, 0., |ui, offset| {
+        run("fading down", scale, &steps, |ui, offset| {
             let row = |key: usize| {
                 div()
                     .w(200.)
@@ -442,6 +439,59 @@ fn an_image_drawn_by_window_position_refuses_a_picture() {
         );
     }
     let mut gpu = GpuRenderer::new(W as u32, H as u32).unwrap();
+    gpu.set_scroll_pictures(true);
+    for _ in 0..4 {
+        offset.update(|o| *o += 8.);
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        gpu.render(&ui.scene.borrow(), &damage).unwrap();
+        assert_eq!(gpu.debug_pictures(), 0);
+    }
+}
+
+/// A layer in a run of boxes under one fade: bands fade stacked boxes apart
+/// or together by what the run holds, and a picture walks what a paint walks.
+#[test]
+fn a_layer_in_a_faded_run_draws_as_painted() {
+    let _gpu = gpu_fixture();
+    let steps = [6_f32, 8., 40., 90., 8., -4., -30., -60., 300., -300.];
+    for scale in SCALES {
+        run("layer under a fade", scale, &steps, |ui, offset| {
+            let row = |key: usize| {
+                div()
+                    .w(200.)
+                    .h(if key.is_multiple_of(2) { 96. } else { 40. })
+                    .mb(4.)
+                    .bg(rgb(0x5a7a9a))
+                    .overflow_hidden()
+                    .fade_edges(16., 24.)
+                    .child(div().w(180.).h(30.).bg(rgb(0x9a5a7a)))
+                    .child(div().w(120.).h(30.).bg(rgb(0x3a8a5a)).filter_blur(2.))
+                    .child(text(format!("row {key}")).text_color(rgb(0xffffff)))
+            };
+            ui.mount(
+                scroll(offset)
+                    .w(W)
+                    .h(H)
+                    .bg(rgb(0x101820))
+                    .children((0..60).map(row)),
+            );
+        });
+    }
+}
+
+/// At a fractional scale a texture's rows aren't whole points, and text could
+/// snap a pixel off: the view goes on without a picture.
+#[test]
+fn a_fractional_scale_refuses_a_picture() {
+    let _gpu = gpu_fixture();
+    let scale = 1.5;
+    let mut ui = Ui::new(W, H);
+    ui.scene.borrow_mut().set_pixel_scale(scale);
+    let offset = ui.signal(0_f32);
+    ui.mount(list(offset.clone(), striped));
+    let mut gpu = GpuRenderer::new((W * scale) as u32, (H * scale) as u32).unwrap();
+    gpu.set_scale_factor(scale);
     gpu.set_scroll_pictures(true);
     for _ in 0..4 {
         offset.update(|o| *o += 8.);
