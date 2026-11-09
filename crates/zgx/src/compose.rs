@@ -4414,8 +4414,11 @@ fn paragraph_effect<const LOCATING: bool>(
                 span.background = span.background.or(span.styles.background);
             }
             // An icon keeps its room before the text: a padded
-            // placeholder run of its own.
-            let icon_at = icon.is_some().then(|| {
+            // placeholder run of its own. So does the room before the text
+            // where it isn't the room after it (`padding_end`).
+            let end_room = span.padding_end.unwrap_or(span.padding[0]);
+            let apart = icon.is_some() || end_room != span.padding[0];
+            let icon_at = apart.then(|| {
                 let at = content.len();
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
                 at..content.len()
@@ -4487,7 +4490,21 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, the span's padding goes around both: its
             // room takes the padding before, a placeholder after the
             // text the padding after.
-            let lead = if icon.is_some() { span.padding[0] } else { 0. };
+            let lead = if apart { span.padding[0] } else { 0. };
+            // (No icon, the room before alone: a placeholder that wide.)
+            if let (Some(range), true) = (icon_at.clone(), icon.is_none()) {
+                runs.push(crate::rich_text::TextRun {
+                    background: span.background,
+                    underline: None,
+                    strikethrough: None,
+                    padding: [lead / 2., span.padding[1]],
+                    radius: span.radius,
+                    range,
+                    font: font.clone(),
+                    font_size,
+                    color,
+                });
+            }
             if let (Some(range), Some(icon)) = (icon_at, icon) {
                 // (A well takes its room round the icon too.)
                 let pad = if icon.bg.is_some() { icon.pad } else { 0. };
@@ -4551,7 +4568,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     }
                 },
                 strikethrough: span.strikethrough,
-                padding: if lead > 0. {
+                padding: if apart {
                     [0., span.padding[1]]
                 } else {
                     span.padding
@@ -4562,13 +4579,14 @@ fn paragraph_effect<const LOCATING: bool>(
                 font_size,
                 color,
             });
-            if lead > 0. {
+            // The room after the text: a placeholder of its own.
+            if apart && end_room > 0. {
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
                 runs.push(crate::rich_text::TextRun {
                     background: span.background,
                     underline: None,
                     strikethrough: None,
-                    padding: [lead / 2., span.padding[1]],
+                    padding: [end_room / 2., span.padding[1]],
                     radius: span.radius,
                     range: text_end..content.len(),
                     font,

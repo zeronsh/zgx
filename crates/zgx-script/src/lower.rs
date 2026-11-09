@@ -8208,7 +8208,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         italic: bool,
         underline: Option<bool>,
         strike: bool,
-        padding: [f32; 2],
+        padding: [f32; 3],
         radius: f32,
         underline_offset: Option<f32>,
         underline_style: Option<zgx::rich_text::LineStyle>,
@@ -8361,8 +8361,11 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 if let Some(font) = font {
                     out = out.font_family(font_family(font));
                 }
-                if padding != [0.; 2] {
+                if padding != [0.; 3] {
                     out = out.padding(padding[0], padding[1]);
+                    if padding[2] != padding[0] {
+                        out = out.padding_end(padding[2]);
+                    }
                 }
                 if radius > 0. {
                     out = out.radius(radius);
