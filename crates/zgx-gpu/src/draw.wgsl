@@ -122,6 +122,11 @@ fn shade_texel(input:Out, given:vec4<f32>, has_texel:bool)->vec4<f32> {
    let reach=length(outside);
    let gradient=select(select(vec2(0.,1.),vec2(1.,0.),q.x>q.y),outside/max(reach,1e-20),reach>0.);
    let slope=gradient/viewport.z;
+   // The least softness, in points: half of one, but never past a device
+   // pixel, or a box's sides on whole pixels show a grey column above 2x
+   // (CALayer's have none: `square_image`, `circle_image`). At 2x and below
+   // it is half a point, as the slopes already are at least.
+   let least=min(0.5,1./viewport.z);
    if v.shape.y<0. {
      // A ring (a border alone, `ring_quad`): side widths (top, right,
      // bottom, left) packed two to a lane in 16ths of a pixel; inside, the
@@ -137,7 +142,7 @@ fn shade_texel(input:Out, given:vec4<f32>, has_texel:bool)->vec4<f32> {
      // Its slopes (above), each pixel's own: Direct3D's `fwidth` is
      // coarse, one per 2×2 block, and softened rounded rings (a pixel 1.4 px
      // inside a 4 px border came out 94% covered).
-     let aa=max(slope.x+slope.y,0.5);
+     let aa=max(slope.x+slope.y,least);
      let hollow=select(0.,clamp(0.5-inside/aa,0.,1.),box.z>0.&&box.w>0.);
      color.a*=max(clamp(0.5-distance/aa,0.,1.)-hollow,0.);
    } else if v.shape.z>0. {
@@ -153,7 +158,7 @@ fn shade_texel(input:Out, given:vec4<f32>, has_texel:bool)->vec4<f32> {
    // `fwidth` (the slopes' sum) adds both axes' there when the pixel's 2×2
    // block reaches outside (a corner at an odd pixel), and shaded 3/4 what
    // the basic shader draws whole, so a box's pixels hung on its batch.
-   else {let dx=slope.x;let dy=slope.y;let aa=max(select(dx+dy,max(dx,dy),radius<=0.),0.5);let outer=clamp(0.5-distance/aa,0.,1.);let inner=clamp(0.5-(distance+v.shape.y)/aa,0.,1.);let alpha=color.a*inner+v.border.a*(outer-inner);let rgb=select(vec3(0.),(color.rgb*color.a*inner+v.border.rgb*v.border.a*(outer-inner))/max(alpha,0.00001),alpha>0.);color=vec4(rgb,alpha);}
+   else {let dx=slope.x;let dy=slope.y;let aa=max(select(dx+dy,max(dx,dy),radius<=0.),least);let outer=clamp(0.5-distance/aa,0.,1.);let inner=clamp(0.5-(distance+v.shape.y)/aa,0.,1.);let alpha=color.a*inner+v.border.a*(outer-inner);let rgb=select(vec3(0.),(color.rgb*color.a*inner+v.border.rgb*v.border.a*(outer-inner))/max(alpha,0.00001),alpha>0.);color=vec4(rgb,alpha);}
  }
 
  // Premultiplied texels carry their alpha already: the colour stays
