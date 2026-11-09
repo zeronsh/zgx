@@ -188,6 +188,64 @@ fn upstream_divides_by_zero(upstream: &[String], patched: &[String]) -> bool {
         && patched.last().is_some_and(|last| last == "advances finite true")
 }
 
+/// The PostScript names of the faces the patch chooses for Chinese where
+/// upstream doesn't, on purpose. macOS 26's PingFang keeps its shapes in
+/// Apple's `hvgl` alone: the patch shapes in it (`needs_platform_outlines`;
+/// zgx-gpu draws it through Core Text, "On macOS an `hvgl` face is a font" in
+/// ZGX_PATCH.md), and its lists name Heiti SC and TC after it; upstream reads
+/// no font from PingFang and takes Arial Unicode MS. Neither has these faces
+/// here, so both take the same one and must lay out identically; zgx-gpu's
+/// `chinese_text_on_macos_draws` checks Chinese in the faces themselves.
+fn faces_chosen_apart() -> &'static [String] {
+    static FACES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    FACES.get_or_init(|| {
+        let mut fonts = patched::FontSystem::new();
+        let faces: Vec<_> = fonts
+            .db()
+            .faces()
+            .map(|face| {
+                let heiti = face.families.iter().any(|(family, _)| family == "Heiti SC" || family == "Heiti TC");
+                (face.id, face.post_script_name.clone(), heiti)
+            })
+            .collect();
+        faces
+            .into_iter()
+            .filter(|(id, _, heiti)| {
+                *heiti
+                    || fonts
+                        .get_font(*id, patched::fontdb::Weight::NORMAL)
+                        .is_some_and(|font| font.needs_platform_outlines())
+            })
+            .map(|(_, name, _)| name)
+            .collect()
+    })
+}
+
+/// A font system without `faces_chosen_apart`.
+macro_rules! compared_fonts {
+    ($ct:ident) => {{
+        let mut fonts = $ct::FontSystem::new();
+        let db = fonts.db_mut();
+        let apart: Vec<_> = db
+            .faces()
+            .filter(|face| faces_chosen_apart().contains(&face.post_script_name))
+            .map(|face| face.id)
+            .collect();
+        for id in apart {
+            db.remove_face(id);
+        }
+        fonts
+    }};
+}
+
+fn upstream_fonts() -> upstream::FontSystem {
+    compared_fonts!(upstream)
+}
+
+fn patched_fonts() -> patched::FontSystem {
+    compared_fonts!(patched)
+}
+
 fn next(seed: &mut u64) -> u64 {
     *seed ^= *seed << 13;
     *seed ^= *seed >> 7;
@@ -242,9 +300,10 @@ fn main() {
     let kept_only = std::env::args().nth(1).as_deref() == Some("kept");
     let plain: &[(f32, usize)] = if kept_only { &[] } else { &[(1e6, 0), (120., 1), (60., 2), (240., 3)] };
     let spans: &[(f32, usize)] = if kept_only { &[] } else { &[(1e6, 0), (120., 1), (240., 3)] };
-    let mut up = upstream::FontSystem::new();
-    let mut pa = patched::FontSystem::new();
+    let mut up = upstream_fonts();
+    let mut pa = patched_fonts();
     let (mut mono, mut fresh) = (monospaced(), monospaced());
+    println!("{} faces the patch chooses apart left out of both", faces_chosen_apart().len());
     std::panic::set_hook(Box::new(|_| {}));
     let (mut identical, mut rich, mut kept, mut zero_upem, mut both_panicked) = (0, 0, 0, 0, 0);
     let (mut sans, mut sans_fresh) = (patched::FontSystem::new(), patched::FontSystem::new());
@@ -259,8 +318,8 @@ fn main() {
                 // Upstream panics on paragraphs of mixed direction in one line.
                 (Err(_), Err(_)) => {
                     both_panicked += 1;
-                    up = upstream::FontSystem::new();
-                    pa = patched::FontSystem::new();
+                    up = upstream_fonts();
+                    pa = patched_fonts();
                 }
                 (a, b) => {
                     let _ = std::panic::take_hook();
@@ -288,8 +347,8 @@ fn main() {
                 (Ok(a), Ok(b)) if upstream_divides_by_zero(&a, &b) => zero_upem += 1,
                 (Err(_), Err(_)) => {
                     both_panicked += 1;
-                    up = upstream::FontSystem::new();
-                    pa = patched::FontSystem::new();
+                    up = upstream_fonts();
+                    pa = patched_fonts();
                 }
                 (a, b) => {
                     let _ = std::panic::take_hook();
