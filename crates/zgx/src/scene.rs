@@ -5845,25 +5845,45 @@ impl Scene {
     /// without modifying the scene. An unchanged order is a successful no-op.
     #[inline(never)]
     pub fn reorder_children(&mut self, parent: NodeId, children: &[NodeId]) -> bool {
+        self.reorder_children_from(parent, 0, children)
+    }
+    /// [`reorder_children`](Self::reorder_children) whose first `from`
+    /// children are where they were (a list grown at its end): only those
+    /// after them are compared and moved.
+    pub fn reorder_children_from(
+        &mut self,
+        parent: NodeId,
+        from: usize,
+        children: &[NodeId],
+    ) -> bool {
         self.settle_children();
         if !self.contains(parent) {
             return false;
         }
         let current = self.children_raw(self.node(parent));
-        if current == children {
-            return true;
-        }
-        if current.len() != children.len() {
+        if current.len() != children.len() || from > current.len() {
             return false;
         }
-        self.reorder_changed_children(parent, children)
+        // (Where the prefix ends, a glance: comparing it whole would make
+        // a debug build's long list cost its length again.)
+        debug_assert!(from == 0 || current[from - 1] == children[from - 1]);
+        if current[from..] == children[from..] {
+            return true;
+        }
+        self.reorder_changed_children(parent, from, children)
     }
     // Keep unchanged-order calls independent of the map and damage work:
     // cold, so that the entry keeps no register for it.
     #[cold]
     #[inline(never)]
-    fn reorder_changed_children(&mut self, parent: NodeId, children: &[NodeId]) -> bool {
-        let current = self.children_raw(self.tree_node(parent));
+    fn reorder_changed_children(
+        &mut self,
+        parent: NodeId,
+        from: usize,
+        children: &[NodeId],
+    ) -> bool {
+        let current = &self.children_raw(self.tree_node(parent))[from..];
+        let children = &children[from..];
         let place: NodeMap<usize> = current.iter().enumerate().map(|(i, id)| (*id, i)).collect();
         let Some(places) = children
             .iter()
@@ -5892,10 +5912,7 @@ impl Scene {
                 self.damage_subtree(*child);
             }
         }
-        self.node_mut(parent)
-            .children
-            .get_mut()
-            .copy_from_slice(children);
+        self.node_mut(parent).children.get_mut()[from..].copy_from_slice(children);
         self.invalidate_layout(parent);
         self.children_changed(parent);
         // In another order, another may be hit on top.

@@ -89,9 +89,14 @@ pub struct Incremental {
     /// parses lazily is the size it was.)
     pending_below: u32,
     /// How many top-level elements, from the first, hold the very blocks
-    /// [`blocks_shared`](Self::blocks_shared) last answered: what changes
-    /// them lowers it.
+    /// last answered: what changes them lowers it.
     settled: usize,
+    /// The last answer of [`blocks_appended`](Self::blocks_appended), which
+    /// the next is grown from.
+    appended: Option<std::rc::Rc<crate::value::Appended>>,
+    /// How many blocks the top-level elements before each hold (`counts[i]`
+    /// for `tops[..i]`), as far as the settled ones: theirs stand.
+    counts: Vec<usize>,
 }
 
 /// A top-level element: where it starts, and the blocks it made (one, or
@@ -397,37 +402,61 @@ impl Incremental {
         }
         out
     }
-    /// [`blocks`](Self::blocks) as one shared list, made in place (a long
-    /// reply's answer is one allocation, not a vector and its copy), and
-    /// how many of its first blocks are the last answer's own values: those
-    /// of the elements nothing changed since.
-    pub fn blocks_shared(&mut self) -> (std::rc::Rc<[Value]>, usize) {
+    /// [`blocks`](Self::blocks) as one shared list, made in place: a long
+    /// reply's answer is one allocation, not a vector and its copy.
+    pub fn blocks_shared(&mut self) -> std::rc::Rc<[Value]> {
         let stable = self.tops.len().saturating_sub(1);
-        let (head, last) = self.tops.split_at(stable);
-        let tail: &[Value] = match &self.display_tail {
-            Some(tail) => tail,
-            None => last.first().map_or(&[], |top| &top.blocks),
-        };
-        let (mut len, mut shared) = (tail.len(), 0);
-        for (at, top) in head.iter().enumerate() {
-            if at == self.settled {
-                shared = len - tail.len();
-            }
-            len += top.blocks.len();
-        }
-        if self.settled >= stable {
-            shared = len - tail.len();
-        }
+        let (head, tail) = self.head_and_tail();
+        let len = head.iter().map(|t| t.blocks.len()).sum::<usize>() + tail.len();
         let mut list = std::rc::Rc::<[Value]>::new_uninit_slice(len);
         let slots = std::rc::Rc::get_mut(&mut list).expect("made here, held nowhere else");
         let blocks = head.iter().flat_map(|top| &top.blocks).chain(tail);
         for (slot, block) in slots.iter_mut().zip(blocks) {
             slot.write(block.clone());
         }
-        self.settled = stable;
+        (self.settled, self.appended) = (stable, None);
+        self.counts.clear();
         // SAFETY: `len` is what `head` and `tail` hold, so every slot was
         // written above.
-        (unsafe { list.assume_init() }, shared)
+        unsafe { list.assume_init() }
+    }
+    /// [`blocks`](Self::blocks) as a list grown from the last answer: the
+    /// chunks of it wholly within the elements nothing changed since are
+    /// its own, so an answer costs what changed (`value::Appended`).
+    pub fn blocks_appended(&mut self) -> std::rc::Rc<crate::value::Appended> {
+        let stable = self.tops.len().saturating_sub(1);
+        // The counts of the settled elements stand: the others' are counted.
+        self.counts.truncate(self.settled.min(stable) + 1);
+        if self.counts.is_empty() {
+            self.counts.push(0);
+        }
+        for at in self.counts.len() - 1..stable {
+            let count = self.counts[at] + self.tops[at].blocks.len();
+            self.counts.push(count);
+        }
+        let (head, tail) = self.head_and_tail();
+        let counts = &self.counts[..=stable];
+        let shared = counts[self.settled.min(stable)];
+        let len = counts[stable] + tail.len();
+        let list = crate::value::Appended::grown(self.appended.as_ref(), shared, len, |start| {
+            // The element block `start` is in (or the last's, past them).
+            let at = counts.partition_point(|&count| count <= start) - 1;
+            let rest = head[at..].iter().flat_map(|top| &top.blocks).chain(tail);
+            Box::new(rest.skip(start - counts[at]))
+        });
+        self.settled = stable;
+        self.appended = Some(list.clone());
+        list
+    }
+    /// The elements before the last, and the last's blocks as shown.
+    fn head_and_tail(&self) -> (&[Top], &[Value]) {
+        let stable = self.tops.len().saturating_sub(1);
+        let (head, last) = self.tops.split_at(stable);
+        let tail: &[Value] = match &self.display_tail {
+            Some(tail) => tail,
+            None => last.first().map_or(&[], |top| &top.blocks),
+        };
+        (head, tail)
     }
 }
 
@@ -574,8 +603,10 @@ fn answer(lua: &mlua::Lua, text: Source, call: &Call, table: bool) -> mlua::Resu
                 (None, Source::Str(text)) => stream.set_text(text),
             }
             let pending = stream.has_pending();
-            let (list, shared) = stream.blocks_shared();
-            let blocks = Value::List(list);
+            let blocks = match table {
+                true => Value::List(stream.blocks_shared()),
+                false => crate::value::Appended::into_value(stream.blocks_appended()),
+            };
             if table {
                 // Its table from the last answer's, which holds the same
                 // blocks but the end: only what's new is converted and
@@ -591,12 +622,9 @@ fn answer(lua: &mlua::Lua, text: Source, call: &Call, table: bool) -> mlua::Resu
                     *kept = crate::value::table_of(lua, &blocks)?;
                 }
             } else {
-                // A state's: no table. What it shares with the last answer
-                // is noted, so what reads both passes over that.
-                if let (Some(Value::List(old)), Value::List(list)) = (&*last, &blocks) {
-                    crate::value::grown(list, old, shared);
-                }
-                (*last, *kept) = (Some(blocks.clone()), None);
+                // A state's: no table, nor one to derive the next from (its
+                // list is grown from the last itself).
+                (*last, *kept) = (None, None);
             }
             touch(
                 &mut parsed.stream_order.borrow_mut(),
@@ -2316,15 +2344,21 @@ mod tests {
     #[test]
     fn an_answer_shares_with_the_last_the_blocks_it_says() {
         let mut stream = Incremental::new(plain());
-        let mut last: Option<std::rc::Rc<[Value]>> = None;
+        let mut last: Option<std::rc::Rc<crate::value::Appended>> = None;
         let mut check = |stream: &mut Incremental| {
-            let (list, shared) = stream.blocks_shared();
-            assert_eq!(list[..], stream.blocks()[..]);
+            let list = stream.blocks_appended();
+            assert!(list.iter().eq(stream.blocks().iter()));
+            assert_eq!(list.flat()[..], stream.blocks()[..]);
+            let mut shared = 0;
             if let Some(last) = &last {
+                shared = list.grown_from(last).expect("grown from the last answer");
                 assert!(shared <= last.len().min(list.len()));
-                for (now, then) in list[..shared].iter().zip(&last[..]) {
+                for (now, then) in list.iter().zip(last.iter()).take(shared) {
                     assert_ne!(crate::value::identity(now), 0);
                     assert_eq!(crate::value::identity(now), crate::value::identity(then));
+                }
+                for from in [0, shared, list.len()] {
+                    assert!(list.iter_from(from).eq(list.flat()[from..].iter()));
                 }
             }
             last = Some(list);

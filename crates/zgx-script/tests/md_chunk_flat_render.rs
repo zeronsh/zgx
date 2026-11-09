@@ -9,8 +9,6 @@ use zgx::profile::Phase;
 
 /// As `md_chunk_flat`'s, with the phases drawing adds.
 const STILL_GROWING: &[(Phase, &str)] = &[
-    (Phase::Script, "flush"),
-    (Phase::Update, "flush, render"),
     (Phase::Layout, "layout"),
     // The paint walk over every block of the column, shown or not, to find
     // the few a chunk's damage reaches (render lane).

@@ -848,7 +848,7 @@ pub(crate) fn view(
             let (count, cells, cell_order) = (rows.clone(), rows.clone(), order.clone());
             let (format, format_vm) = (cell.clone(), vm.clone());
             let mut source = GridSource::new(
-                move || count.with(|v| v.list().len()),
+                move || count.with(|v| v.items().len()),
                 move |r, column| {
                     let i = cell_order
                         .with(|o| o.as_ref().map_or(r, |o| o.get(r).copied().unwrap_or(r)));
@@ -862,9 +862,7 @@ pub(crate) fn view(
                         });
                     };
                     // `cell(value, column, record)`: the app's text for it.
-                    let record = cells
-                        .with(|v| v.list().get(i).cloned())
-                        .unwrap_or(Value::Nil);
+                    let record = cells.with(|v| v.item(i).cloned()).unwrap_or(Value::Nil);
                     let value = record.field(column).cloned().unwrap_or(Value::Nil);
                     format_vm
                         .call::<String>(format, (value.clone(), column.to_owned(), record))
