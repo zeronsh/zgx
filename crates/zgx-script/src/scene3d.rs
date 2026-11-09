@@ -19,8 +19,8 @@ use mlua::{Function, Lua, Table, UserData};
 use std::rc::Rc;
 use zgx::{compose::prelude::*, reactive::Signal, theme::Themed};
 use zgx_3d::{
-    Camera, Geometry, Light, Material, Object, ObjectId, Orbit, Quat, Transform, Vec3, World,
-    srgb_to_linear, vec3,
+    Camera, Geometry, Light, Material, Object, ObjectId, Orbit, Quat, Transform, Vec3, Vertex,
+    World, srgb_to_linear, vec3,
 };
 
 /// A number: as written, a state's, a function's, or a binding's.
@@ -50,6 +50,9 @@ pub(crate) struct MaterialSpec {
     emissive: Option<ColorSpec>,
     opacity: Option<Num>,
     unlit: bool,
+    /// Its back faces draw too (`World::set_double_sided`): an open shell,
+    /// a cut-away section.
+    double_sided: bool,
 }
 pub(crate) enum LightKind {
     Directional,
@@ -303,6 +306,7 @@ fn material(table: Option<Table>) -> mlua::Result<MaterialSpec> {
             emissive: None,
             opacity: None,
             unlit: false,
+            double_sided: false,
         });
     };
     Ok(MaterialSpec {
@@ -312,6 +316,7 @@ fn material(table: Option<Table>) -> mlua::Result<MaterialSpec> {
         emissive: opt_color(&table, "emissive")?,
         opacity: opt_num(&table, "opacity")?,
         unlit: table.get::<Option<bool>>("unlit")?.unwrap_or(false),
+        double_sided: table.get::<Option<bool>>("double_sided")?.unwrap_or(false),
     })
 }
 /// A literal number of `table`, or `default`.
@@ -319,9 +324,17 @@ fn lit(table: &Table, key: &str, default: f32) -> mlua::Result<f32> {
     Ok(table.get::<Option<f32>>(key)?.unwrap_or(default))
 }
 fn geometry(table: &Table) -> mlua::Result<Geometry> {
-    let kind: String = table
-        .get::<Option<String>>("geometry")?
-        .unwrap_or_else(|| "box".into());
+    let kind: String = match table.get::<mlua::Value>("geometry")? {
+        mlua::Value::Nil => "box".into(),
+        mlua::Value::String(name) => name.to_str()?.to_owned(),
+        mlua::Value::Table(own) => return own_geometry(&own),
+        other => {
+            return Err(wrong(format_args!(
+                "ui.mesh `geometry` is a shape's name or {{ positions, indices, … }}, not {}",
+                other.type_name()
+            )));
+        }
+    };
     let size = |default: f32| -> mlua::Result<[f32; 3]> {
         match table.get::<mlua::Value>("size")? {
             mlua::Value::Nil => Ok([default; 3]),
@@ -373,6 +386,228 @@ fn geometry(table: &Table) -> mlua::Result<Geometry> {
             )));
         }
     })
+}
+
+/// The most vertices a script's own geometry has (as drawn: a flat one has
+/// three a triangle), so a mistaken table can't ask for gigabytes.
+const MOST_VERTICES: usize = 1 << 22;
+
+/// `numbers` of `table`, a flat list (`{ x, y, z, x, y, z, … }`), or
+/// `None` unsaid.
+fn flat_numbers(table: &Table, key: &str) -> mlua::Result<Option<Vec<f32>>> {
+    let list = match table.get::<mlua::Value>(key)? {
+        mlua::Value::Nil => return Ok(None),
+        mlua::Value::Table(list) => list,
+        other => {
+            return Err(wrong(format_args!(
+                "ui.mesh geometry `{key}` is a list of numbers, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    let n = list.raw_len();
+    if n > MOST_VERTICES * 4 {
+        return Err(wrong(format_args!(
+            "ui.mesh geometry `{key}` has {n} numbers, more than it may"
+        )));
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 1..=n {
+        match list.raw_get::<mlua::Value>(i)? {
+            mlua::Value::Number(v) => out.push(v as f32),
+            mlua::Value::Integer(v) => out.push(v as f32),
+            other => {
+                return Err(wrong(format_args!(
+                    "ui.mesh geometry `{key}`[{i}] is a number, not {}",
+                    other.type_name()
+                )));
+            }
+        }
+    }
+    Ok(Some(out))
+}
+/// Colours of a flat list, `count` of them: three numbers each (sRGB, 0 to
+/// 1) or four (with alpha), made linear as the renderer mixes them.
+fn colors_of(list: &[f32], count: usize, key: &str) -> mlua::Result<Vec<[f32; 4]>> {
+    let stride = if list.len() == count * 3 {
+        3
+    } else if list.len() == count * 4 {
+        4
+    } else {
+        return Err(wrong(format_args!(
+            "ui.mesh geometry `{key}` has {} numbers: three or four for each of its {count}",
+            list.len()
+        )));
+    };
+    Ok(list
+        .chunks_exact(stride)
+        .map(|c| {
+            [
+                srgb_to_linear(c[0].clamp(0., 1.)),
+                srgb_to_linear(c[1].clamp(0., 1.)),
+                srgb_to_linear(c[2].clamp(0., 1.)),
+                if stride == 4 { c[3].clamp(0., 1.) } else { 1. },
+            ]
+        })
+        .collect())
+}
+fn unit(v: Vec3) -> [f32; 3] {
+    let length = v.length();
+    if length > 1e-12 {
+        let v = v * (1. / length);
+        [v.x, v.y, v.z]
+    } else {
+        [0., 1., 0.]
+    }
+}
+/// `ui.mesh { geometry = { positions, indices, normals, colors,
+/// face_normals, face_colors, flat } }`: the script's own triangles.
+///
+/// - `positions`: `{ x, y, z, … }`, three numbers a vertex.
+/// - `indices`: three a triangle, counter-clockwise from its front,
+///   counting vertices from 1 (as Luau does). Unsaid, each three vertices
+///   are a triangle.
+/// - `normals`: a vertex's each (three numbers); unsaid, smoothed from
+///   its triangles.
+/// - `colors`: a vertex's each, sRGB 0 to 1 (three, or four with alpha),
+///   multiplying the material's colour.
+/// - `face_normals`, `face_colors`: a triangle's each instead. Either, or
+///   `flat = true`, draws each triangle flat on vertices of its own.
+fn own_geometry(spec: &Table) -> mlua::Result<Geometry> {
+    let Some(positions) = flat_numbers(spec, "positions")? else {
+        return Err(wrong(format_args!(
+            "ui.mesh geometry needs `positions`: {{ x, y, z, … }}"
+        )));
+    };
+    if !positions.len().is_multiple_of(3) {
+        return Err(wrong(format_args!(
+            "ui.mesh geometry `positions` has {} numbers, not three a vertex",
+            positions.len()
+        )));
+    }
+    let count = positions.len() / 3;
+    let corner = |i: usize| [positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]];
+    let at = |i: usize| Vec3::from(corner(i));
+    let indices: Vec<u32> = match flat_numbers(spec, "indices")? {
+        None => (0..count as u32).collect(),
+        Some(list) => {
+            let mut out = Vec::with_capacity(list.len());
+            for (k, &i) in list.iter().enumerate() {
+                if i.fract() != 0. || i < 1. || i as usize > count {
+                    return Err(wrong(format_args!(
+                        "ui.mesh geometry `indices`[{}] is {i}: a vertex from 1 to {count}",
+                        k + 1
+                    )));
+                }
+                out.push(i as u32 - 1);
+            }
+            out
+        }
+    };
+    if !indices.len().is_multiple_of(3) {
+        return Err(wrong(format_args!(
+            "ui.mesh geometry `indices` has {} entries, not three a triangle",
+            indices.len()
+        )));
+    }
+    let triangles = indices.len() / 3;
+    let face_normals = flat_numbers(spec, "face_normals")?;
+    let face_colors = flat_numbers(spec, "face_colors")?;
+    let flat = spec.get::<Option<bool>>("flat")?.unwrap_or(false)
+        || face_normals.is_some()
+        || face_colors.is_some();
+    let face = |t: usize| {
+        let [a, b, c] = [0, 1, 2].map(|k| at(indices[t * 3 + k] as usize));
+        (b - a).cross(c - a)
+    };
+    let made = if flat {
+        if triangles * 3 > MOST_VERTICES {
+            return Err(wrong(format_args!(
+                "ui.mesh geometry has {triangles} triangles, more than it may"
+            )));
+        }
+        if let Some(n) = &face_normals
+            && n.len() != triangles * 3
+        {
+            return Err(wrong(format_args!(
+                "ui.mesh geometry `face_normals` has {} numbers: three for each of its {triangles} triangles",
+                n.len()
+            )));
+        }
+        let colors = face_colors
+            .as_deref()
+            .map(|c| colors_of(c, triangles, "face_colors"))
+            .transpose()?;
+        let mut vertices = Vec::with_capacity(triangles * 3);
+        for t in 0..triangles {
+            let normal = match &face_normals {
+                Some(n) => unit(vec3(n[t * 3], n[t * 3 + 1], n[t * 3 + 2])),
+                None => unit(face(t)),
+            };
+            for k in 0..3 {
+                vertices.push(Vertex {
+                    position: corner(indices[t * 3 + k] as usize),
+                    normal,
+                    uv: [0., 0.],
+                });
+            }
+        }
+        let geometry = Geometry::new(vertices, (0..triangles as u32 * 3).collect())
+            .map_err(|e| wrong(format_args!("ui.mesh geometry: {e}")))?;
+        match colors {
+            Some(colors) => {
+                geometry.with_colors(colors.into_iter().flat_map(|c| [c, c, c]).collect())
+            }
+            None => Ok(geometry),
+        }
+    } else {
+        if count > MOST_VERTICES {
+            return Err(wrong(format_args!(
+                "ui.mesh geometry has {count} vertices, more than it may"
+            )));
+        }
+        let normals: Vec<[f32; 3]> = match flat_numbers(spec, "normals")? {
+            Some(n) if n.len() == count * 3 => n
+                .chunks_exact(3)
+                .map(|n| unit(vec3(n[0], n[1], n[2])))
+                .collect(),
+            Some(n) => {
+                return Err(wrong(format_args!(
+                    "ui.mesh geometry `normals` has {} numbers: three for each of its {count} vertices",
+                    n.len()
+                )));
+            }
+            None => {
+                // Smoothed: each triangle's area-weighted normal, summed.
+                let mut sum = vec![Vec3::ZERO; count];
+                for t in 0..triangles {
+                    let n = face(t);
+                    for k in 0..3 {
+                        let i = indices[t * 3 + k] as usize;
+                        sum[i] = sum[i] + n;
+                    }
+                }
+                sum.into_iter().map(unit).collect()
+            }
+        };
+        let colors = flat_numbers(spec, "colors")?
+            .map(|c| colors_of(&c, count, "colors"))
+            .transpose()?;
+        let vertices = (0..count)
+            .map(|i| Vertex {
+                position: corner(i),
+                normal: normals[i],
+                uv: [0., 0.],
+            })
+            .collect();
+        let geometry = Geometry::new(vertices, indices)
+            .map_err(|e| wrong(format_args!("ui.mesh geometry: {e}")))?;
+        match colors {
+            Some(colors) => geometry.with_colors(colors),
+            None => Ok(geometry),
+        }
+    };
+    made.map_err(|e| wrong(format_args!("ui.mesh geometry: {e}")))
 }
 
 /// `ui.scene3d`, `ui.mesh`, `ui.light`, `ui.group`: one closure type for
@@ -1250,11 +1485,13 @@ fn add(adding: &mut Adding, spec: &Rc<ObjectSpec>, parent: Option<ObjectId>, cx:
             follow(cx, Box::new(move || world.set_light(id, read())));
         }
         Shape::Mesh(..) | Shape::Group(_) | Shape::Model(_) => {
-            let (geometry, material) = match &spec.shape {
-                Shape::Mesh(geometry, material) => {
-                    (Some(geometry.clone()), Some(LiveMaterial::of(material, cx)))
-                }
-                _ => (None, None),
+            let (geometry, material, double_sided) = match &spec.shape {
+                Shape::Mesh(geometry, material) => (
+                    Some(geometry.clone()),
+                    Some(LiveMaterial::of(material, cx)),
+                    material.double_sided,
+                ),
+                _ => (None, None, false),
             };
             let object = Object {
                 geometry,
@@ -1267,6 +1504,9 @@ fn add(adding: &mut Adding, spec: &Rc<ObjectSpec>, parent: Option<ObjectId>, cx:
                 parent,
             };
             let id = world.add(object);
+            if double_sided {
+                world.set_double_sided(id, true);
+            }
             if spec.on_click.is_some() || spec.on_hover.is_some() {
                 adding.handled.push((id, spec.clone()));
             }
