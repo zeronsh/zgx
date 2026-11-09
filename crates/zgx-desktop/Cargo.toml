@@ -165,7 +165,7 @@ harness = false
 zgx-components = { path = "../zgx-components" }
 # The terminal example's interface is a Luau script. Image formats come
 # through this crate's own features.
-zgx-script = { path = "../zgx-script", default-features = false }
+zgx-script = { path = "../zgx-script", default-features = false, features = ["scene3d"] }
 # The script examples' menus (`zgx_run::menus`). Without its default
 # features: its `mimalloc` would turn on this crate's for every example
 # and test (features unify), the comparison workloads included.
