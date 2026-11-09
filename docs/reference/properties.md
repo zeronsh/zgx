@@ -369,6 +369,7 @@ return ui.div {
 | `lines` | `number` | all | clamp to that many lines |
 | `line_height` | `number` | the font's | points |
 | `letter_spacing` | `number` | `0` | points |
+| `leading` | `number` | `0` | points between lines, after each but the last (a font's leading, as UIKit's text styles add it): the first line keeps its own height, and nothing follows the last. Inherited; `0` resets it. The font's normal line and this: it takes `line_height`'s place, whichever is set last holds |
 | `tabular` | `boolean` | `false` | tabular figures: every digit one width, so a changing number holds still |
 | `font_features` | `string` | none | OpenType features, as CSS's `font-feature-settings`: `"ss01 cv02=3 liga=0"`, a tag on, or `tag=value` (`0` off). `hyphens` breaks words at their hyphenation points with a hyphen, as CSS's `hyphens: auto`, in the system's language (zgx's `hyphens` feature; without it, an error where scripts are linted: a debug build, `zgx lint`. `hyphens = "auto"` of its own comes in 0.2). What the font lacks does nothing, and what isn't a four-letter tag with a number is left out. Replaces `tabular`: give `"tnum"` here too |
 | `underline` | `boolean` | `false` | underlined text, inherited (CSS's `text-decoration`): `hover = { underline = true }` underlines a link button's label |

@@ -1942,6 +1942,9 @@ export type Styles = {
 	lines: number?,
 	line_height: Num?,
 	letter_spacing: Num?,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Num?,
 	-- Tabular figures: every digit the same width.
 	tabular: boolean?,
 	font_features: string?,
@@ -2127,6 +2130,9 @@ export type StyleProps = {
 	lines: Reactive<number>?,
 	line_height: Reactive<Num>?,
 	letter_spacing: Reactive<Num>?,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -3479,8 +3485,25 @@ export type AlertOptions = {
 	buttons: { { title: string, style: ("default" | "cancel" | "destructive")? } },
 	on_choose: ((button: number) -> ())?,
 }
+export type IosTextStyle =
+	"largeTitle"
+	| "title1"
+	| "title2"
+	| "title3"
+	| "headline"
+	| "body"
+	| "callout"
+	| "subheadline"
+	| "footnote"
+	| "caption1"
+	| "caption2"
+export type IosTextProps = Merge<TextProps, { style: IosTextStyle? }>
 export type IosKit = {
 	settle: (state: State<number>, target: number, done: (() -> ())?) -> () -> (),
+	-- Text in one of UIKit's text styles ("body" if none), as a UILabel in
+	-- `preferredFont(forTextStyle:)` sets it: size, weight, and its lines the
+	-- style's leading apart; read live from the system on iOS.
+	text: (props: IosTextProps) -> Node,
 	section: (props: { header: string?, footer: string?, [number]: Node }) -> Node,
 	tile: (symbol: string, tint: Color) -> Node,
 	row: (props: {

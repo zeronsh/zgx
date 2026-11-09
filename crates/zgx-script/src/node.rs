@@ -1838,6 +1838,7 @@ props! {
     "drop_shadow" => DropShadow: Shadow,
     "slice" => Slice: Corners,
     "geometry" => Geometry: Str,
+    "leading" => Leading: Num,
     // Transforms: after layout, about `origin` (fractions of the node).
     // Last, so that `is_transform` is a single comparison.
     "x" => X: Num, "y" => Y: Num,

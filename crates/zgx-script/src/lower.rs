@@ -1528,6 +1528,7 @@ fn token_field(prop: Prop) -> Option<zgx::theme::Field> {
         TextSize => Field::TextSize,
         LineHeight => Field::LineHeight,
         LetterSpacing => Field::LetterSpacing,
+        Leading => Field::Leading,
         Weight => Field::FontWeight,
         Font => Field::FontFamily,
         Shadow => Field::Shadow,
@@ -9093,6 +9094,7 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         (Lines, Lit::Num(v)) => s.line_clamp(*v as u32),
         (LineHeight, Lit::Num(v)) => s.line_height(*v),
         (LetterSpacing, Lit::Num(v)) => s.letter_spacing(*v),
+        (Leading, Lit::Num(v)) => s.leading(*v),
         (Underline, Lit::Bool(v)) => s.text_underline(*v),
         (UnderlineOffset, Lit::Num(v)) => s.underline_offset(*v),
         // Every digit one width, so changing numbers hold still.
