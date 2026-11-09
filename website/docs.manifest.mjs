@@ -165,6 +165,8 @@ export const sets = [
         description: "An app's own wgpu drawing (3D, a game, video) in a box, composited as an image." },
       { slug: 'external-surfaces', src: 'docs/external-surfaces.md', title: 'External surfaces',
         description: "Another program's frames as an element, its GPU memory shared, its input forwarded." },
+      { slug: 'wasm-apps', src: 'docs/wasm-apps.md', title: 'WebAssembly apps',
+        description: "A plugin's .wasm run sandboxed in the app's process, drawing with the GPU." },
       '---Evidence---',
       { slug: 'validation', src: 'docs/validation.md', title: 'Validation record' },
     ],
