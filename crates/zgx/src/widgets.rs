@@ -289,6 +289,9 @@ struct EditorHint {
     contain: Cell<bool>,
     /// A password field: its text shows masked and never leaves it.
     secure: Cell<bool>,
+    /// A password field's last character, just typed, shown as itself.
+    #[cfg(target_os = "ios")]
+    reveal_last: Cell<bool>,
     /// What kind of text it takes (`View::input_mode`).
     input_mode: Cell<crate::text_edit::InputMode>,
     /// Misspelled words (`View::spellcheck`), as byte ranges: marked with a
@@ -519,6 +522,8 @@ impl EditorHint {
             lines,
             contain: Cell::default(),
             secure: Cell::default(),
+            #[cfg(target_os = "ios")]
+            reveal_last: Cell::default(),
             input_mode: Cell::default(),
             misspelled: RefCell::default(),
             clause: Cell::default(),
@@ -842,6 +847,14 @@ impl EditorHandle {
     /// front keeps the selection it had.
     pub fn set_select_on_focus(&self, select: bool) {
         self.hint.select_on_focus.set(select);
+    }
+    /// Show a password field's last character as itself, or stop: UITextField
+    /// shows the character just typed for two seconds.
+    #[cfg(target_os = "ios")]
+    pub fn set_reveal_last(&self, reveal: bool) {
+        if self.hint.reveal_last.replace(reveal) != reveal {
+            (self.refresh)();
+        }
     }
     /// Whether it is a password's (`set_secure`).
     pub fn is_secure(&self) -> bool {
@@ -5272,6 +5285,8 @@ impl Ui {
             let (color, size, font) = draw_typography.borrow().clone();
             let font = crate::text_layout::FontStyle {
                 masked: draw_hint.secure.get(),
+                #[cfg(target_os = "ios")]
+                reveal_last: draw_hint.reveal_last.get(),
                 ..font
             };
             // The gutter: as wide as the last line's number (two digits at

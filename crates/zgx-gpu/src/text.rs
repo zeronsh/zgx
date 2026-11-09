@@ -268,6 +268,8 @@ pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> 
         } else {
             cosmic_text::Style::Normal
         });
+    #[cfg(target_os = "ios")]
+    let attrs = attrs.reveal_last(font.reveal_last);
     if font.letter_spacing == zgx::text_layout::LetterSpacing::ZERO {
         // What UIKit does for its system font, unasked: a face's tracking at
         // this size. Text with a spacing of its own keeps it.

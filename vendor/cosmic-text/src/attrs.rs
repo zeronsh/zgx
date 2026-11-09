@@ -367,6 +367,10 @@ pub struct Attrs<'a> {
     /// `opsz` axis), in pixels: CSS's `font-optical-sizing: auto` sets it to
     /// the font size. 0 leaves the font's default.
     pub optical: u16,
+    /// zgx: of masked text, the line's last character is shown as itself: iOS
+    /// shows the character just typed in a secure field for a moment.
+    #[cfg(target_os = "ios")]
+    pub reveal_last: bool,
     /// zgx: shown masked, a bullet for each character (a password), each
     /// bullet keeping its character's place in the text.
     pub masked: bool,
@@ -391,6 +395,8 @@ impl<'a> Attrs<'a> {
             letter_spacing_opt: None,
             padding_opt: None,
             optical: 0,
+            #[cfg(target_os = "ios")]
+            reveal_last: false,
             masked: false,
             font_features: FontFeatures::new(),
             text_decoration: TextDecoration::new(),
@@ -451,6 +457,12 @@ impl<'a> Attrs<'a> {
         self
     }
 
+    /// zgx: show masked text's last character as itself (see `reveal_last`)
+    #[cfg(target_os = "ios")]
+    pub const fn reveal_last(mut self, reveal_last: bool) -> Self {
+        self.reveal_last = reveal_last;
+        self
+    }
     /// zgx: show the text masked (see `masked`)
     pub const fn masked(mut self, masked: bool) -> Self {
         self.masked = masked;
@@ -570,6 +582,8 @@ pub struct AttrsOwned {
     pub letter_spacing_opt: Option<LetterSpacing>,
     pub padding_opt: Option<LetterSpacing>,
     pub optical: u16,
+    #[cfg(target_os = "ios")]
+    pub reveal_last: bool,
     pub masked: bool,
     pub font_features: FontFeatures,
     pub text_decoration: TextDecoration,
@@ -589,6 +603,8 @@ impl AttrsOwned {
             letter_spacing_opt: attrs.letter_spacing_opt,
             padding_opt: attrs.padding_opt,
             optical: attrs.optical,
+            #[cfg(target_os = "ios")]
+            reveal_last: attrs.reveal_last,
             masked: attrs.masked,
             font_features: attrs.font_features.clone(),
             text_decoration: attrs.text_decoration,
@@ -608,6 +624,8 @@ impl AttrsOwned {
             letter_spacing_opt: self.letter_spacing_opt,
             padding_opt: self.padding_opt,
             optical: self.optical,
+            #[cfg(target_os = "ios")]
+            reveal_last: self.reveal_last,
             masked: self.masked,
             font_features: self.font_features.clone(),
             text_decoration: self.text_decoration,
