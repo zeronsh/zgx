@@ -599,8 +599,14 @@ impl ThemeScope {
         // A `Weak` keeps its scope's allocation, so those gone are let go of
         // before this list grows: it would otherwise hold one for every scope
         // ever made under this one, until the theme next changed.
+        // A prune that leaves it over half full makes room for as many
+        // again, so the next waits until it has doubled (not one per scope).
         if children.len() == children.capacity() {
             children.retain(|c| c.strong_count() > 0);
+            if children.len() > children.capacity() / 2 {
+                let len = children.len();
+                children.reserve(len);
+            }
         }
         children.push(Rc::downgrade(&child));
         drop(children);
@@ -1056,20 +1062,54 @@ mod scopes_gone {
             drop(root.child(ThemeOverride::default()));
         }
         // (Each entry keeps its scope's allocation, so this is the leak itself.)
-        assert!(root.children.borrow().len() <= 4, "{}", root.children.borrow().len());
+        assert!(
+            root.children.borrow().len() <= 4,
+            "{}",
+            root.children.borrow().len()
+        );
     }
 
     #[test]
     fn scopes_in_use_stay_listed_and_at_rest_only_they_do() {
         let (_runtime, root) = root();
-        let kept: Vec<_> = (0..100).map(|_| root.child(ThemeOverride::default())).collect();
+        let kept: Vec<_> = (0..100)
+            .map(|_| root.child(ThemeOverride::default()))
+            .collect();
         for _ in 0..1_000 {
             drop(root.child(ThemeOverride::default()));
         }
-        let live = root.children.borrow().iter().filter(|c| c.strong_count() > 0).count();
-        assert_eq!(live, kept.len(), "a theme change must still reach every one");
+        let live = root
+            .children
+            .borrow()
+            .iter()
+            .filter(|c| c.strong_count() > 0)
+            .count();
+        assert_eq!(
+            live,
+            kept.len(),
+            "a theme change must still reach every one"
+        );
         root.rest();
         assert_eq!(root.children.borrow().len(), kept.len());
+    }
+
+    #[test]
+    fn a_prune_that_frees_little_makes_room_so_the_next_waits() {
+        let (_runtime, root) = root();
+        let _kept: Vec<_> = (0..7)
+            .map(|_| root.child(ThemeOverride::default()))
+            .collect();
+        drop(root.child(ThemeOverride::default()));
+        root.children.borrow_mut().shrink_to_fit();
+        assert_eq!(
+            root.children.borrow().len(),
+            root.children.borrow().capacity()
+        );
+        // Full: this prunes the one gone, and seven are left of eight.
+        let _one = root.child(ThemeOverride::default());
+        let children = root.children.borrow();
+        assert_eq!(children.len(), 8);
+        assert!(children.capacity() >= 14, "{}", children.capacity());
     }
 
     #[test]
