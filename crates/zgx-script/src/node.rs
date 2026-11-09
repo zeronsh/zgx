@@ -7024,6 +7024,9 @@ pub(crate) fn retain(env: &Env, resource: Box<dyn Any>) {
 /// `resource` kept in `kept`, which lasts as long as what owns it, the whole
 /// app's life for one made in a handler at no scope. So timers that have ended
 /// go before the list grows: each `ui.after` would otherwise stay for good.
+/// A prune that leaves it over half full makes room for as many again, so
+/// the next waits until it has doubled: each costs no more than the pushes
+/// since the last, not the whole list on every one.
 pub(crate) fn keep_in(kept: &mut Vec<Box<dyn Any>>, resource: Box<dyn Any>) {
     if kept.len() == kept.capacity() {
         kept.retain(|resource| {
@@ -7031,6 +7034,10 @@ pub(crate) fn keep_in(kept: &mut Vec<Box<dyn Any>>, resource: Box<dyn Any>) {
                 .downcast_ref::<crate::timers::Stop>()
                 .is_some_and(crate::timers::Stop::done)
         });
+        if kept.len() > kept.capacity() / 2 {
+            let len = kept.len();
+            kept.reserve(len);
+        }
     }
     kept.push(resource);
 }
