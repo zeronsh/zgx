@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from gate import touch
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -104,6 +105,11 @@ def main():
     env = dict(os.environ,CARGO_TARGET_DIR=str(a.target.resolve()),ZIG='/opt/homebrew/opt/zig@0.16/bin/zig')
     if not Path(env['ZIG']).is_file():
         env.pop('ZIG')
+    # A target cache copied from another checkout can otherwise look newer
+    # than this checkout's changed sources. Reuse the normal perf builder's
+    # source freshness rule before every measured native build.
+    touch(engine)
+    touch(source)
     subprocess.run(['cargo','build','--profile','dist','--manifest-path',str(manifest),
                     '--bin','zeron-zgx'],cwd=app,env=env,check=True)
     binary = output/'zeron-zgx'

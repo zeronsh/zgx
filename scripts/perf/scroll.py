@@ -311,7 +311,8 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
     out = args.output / label
     out.mkdir(parents=True, exist_ok=False)
     result = dict(scene=scene, gesture=gesture, size=size, hz=hz, scale=scale,
-                  background=background, repeat=repeat, present=present, status='invalid', failures=[])
+                  background=background, repeat=repeat, present=present, status='invalid', failures=[],
+                  engine_pin=args.engine_pin,engine_commit=args.engine_commit)
     process = None
     try:
         if unavailable:
@@ -344,6 +345,8 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
             result['tape_sha256'] = hashlib.sha256(text.encode()).hexdigest()
             env = {k: v for k, v in os.environ.items() if not k.startswith(('ZGX_', 'ZGUI_', 'ZERON_'))}
             env.update(ZGX_SCROLL_BENCH='1', ZGX_PRESENT_DRAWABLE=present)
+            env.update(dict(v.split('=',1) for v in args.host_env))
+            result['host_env']=dict(v.split('=',1) for v in args.host_env)
             if real_app:
                 home = stage/'home'
                 home.mkdir()
@@ -543,13 +546,13 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
 
 
 def report(results):
-    lines = ['| Scene | Gesture | Size | Hz / scale / bg / present | Late % | Interval p99 ms | Main >4ms | App/GPU / system / unknown late | Result |',
-             '|---|---|---|---|---:|---:|---:|---|---|']
+    lines = ['| Engine | Scene | Gesture | Size | Hz / scale / bg / present | Late % | Interval p99 ms | Main >4ms | App/GPU / system / unknown late | Result |',
+             '|---|---|---|---|---|---:|---:|---:|---|---|']
     for r in results:
         m = r.get('metrics', {})
         def fmt(v):
             return '—' if v is None else f'{v:.2f}'
-        lines.append(f"| {r['scene']} | {r['gesture']} | {r['size']} | {r['hz']} / {r['scale']} / {r['background']} / {r.get('present', '?')} | "
+        lines.append(f"| {(r.get('engine_pin') or r.get('engine_commit') or '—')[:8]} | {r['scene']} | {r['gesture']} | {r['size']} | {r['hz']} / {r['scale']} / {r['background']} / {r.get('present', '?')} | "
                      f"{fmt(m.get('late_pct'))} | {fmt(m.get('interval_ms', {}).get('p99'))} | {m.get('main_over_4ms', '—')} | {m.get('app_late_frames', '—')} / {m.get('system_late_frames', '—')} / {m.get('unattributed_late_frames', '—')} | {r['status']} |")
     return '\n'.join(lines) + '\n'
 
@@ -645,6 +648,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('command', choices=['run', 'headless', 'reference'])
     p.add_argument('--runner', type=Path, default=ROOT / 'target/dist/zgx-run')
+    p.add_argument('--engine-source',type=Path,default=ROOT,help='engine checkout that produced the binaries')
+    p.add_argument('--engine-pin',help='canonical engine commit under comparison, before suite instrumentation')
     p.add_argument('--zeron-source',type=Path,default=Path.home()/'Documents/GitHub/zeron-scrollbench')
     p.add_argument('--zeron-runner',type=Path,default=ROOT/'target/zeron-native/current/zeron-zgx')
     p.add_argument('--reference-runner', type=Path, default=ROOT / 'target/dist/examples/scroll_reference')
@@ -653,6 +658,7 @@ def main():
     p.add_argument('--gestures', default='slow,flick,reversals,notches,fling,wing,stream')
     p.add_argument('--sizes', default='S,M,L')
     p.add_argument('--hz', default='120')
+    p.add_argument('--host-env',action='append',default=[],help='diagnostic ZGX_VIEW_CLOCK=0|1 or ZGX_SCROLL_LINK=0|1; repeat for both')
     p.add_argument('--native-floor',action='store_true',help='bracket each zgx idle reference with independent Swift/Metal references')
     p.add_argument('--set-refresh', action='store_true', help='select matching native display modes and restore the original')
     p.add_argument('--scale', default='2')
@@ -671,6 +677,9 @@ def main():
     p.add_argument('--damage-check', action='store_true', help='correctness run; timings include full repaint verification')
     p.add_argument('--strict', action='store_true', help='headless: require zero row builds and copies on the shared scene')
     args = p.parse_args()
+    for item in args.host_env:
+        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1'):
+            p.error('unsupported diagnostic host environment override')
     if args.command == 'headless':
         env = dict(os.environ)
         if args.strict:
@@ -684,6 +693,8 @@ def main():
         p.error('native replay currently requires macOS; headless works in normal CI')
     args.runner = args.runner.resolve()
     args.reference_runner = args.reference_runner.resolve()
+    args.engine_source=args.engine_source.resolve()
+    args.engine_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=args.engine_source,text=True).strip()
     args.zeron_source = args.zeron_source.resolve()
     args.zeron_runner = args.zeron_runner.resolve()
     if 'zeron' in args.scenes.split(',') and not args.zeron_runner.is_file():
@@ -701,6 +712,10 @@ def main():
                  runner=str(args.runner), runner_sha256=sha(args.runner),
                  reference_sha256=sha(args.reference_runner), platform=platform.platform(),
                  machine=platform.machine(), args={k: str(v) if isinstance(v, Path) else v for k,v in vars(args).items()})
+    audit['engine_commit']=args.engine_commit
+    audit['engine_source_diff']=subprocess.check_output(['git','diff','HEAD'],cwd=args.engine_source,text=True)
+    if args.engine_pin:
+        audit['engine_delta_from_pin']=subprocess.check_output(['git','diff',args.engine_pin,'HEAD'],cwd=args.engine_source,text=True)
     sources = args.output / 'sources'
     sources.mkdir()
     for name in ('transcript_scroll', 'scroll_scenes'):

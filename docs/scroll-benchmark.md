@@ -249,3 +249,13 @@ began/ended events: those can perturb the input/presentation path. Use
 the bracketed marker references. The real-app host must already be built.
 At 1× renderer scale, odd logical sizes retain half-point native window
 dimensions so the native reference has exactly the same device-pixel extent.
+
+For an instrumented sibling pin, pass `--engine-source CHECKOUT --engine-pin SHA`.
+The audit records that checkout's integration commit, working diff and complete
+delta from the declared canonical pin, separately from the harness source.
+`--host-env ZGX_VIEW_CLOCK=1 --host-env ZGX_SCROLL_LINK=1` enables the explicitly
+requested clock experiment on a supporting engine pin; only those two boolean
+keys are accepted, and every run records the overrides. With no overrides the
+engine's defaults apply. `prepare_zeron.py` uses the existing perf builder's
+source-touch step before compiling so a reused target cache cannot supply an
+older path-crate artifact whose timestamp looks fresh.
