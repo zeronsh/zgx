@@ -430,3 +430,11 @@ An absent or changed state invalidates a run. Public summaries carry the intende
 enum and observed completion boolean. Earlier wrappers omitted catalog completion;
 their real-shell data must not certify a settled composer. Keep comparisons within
 the same catalog condition and rerun headline decisions on the settled fixture.
+
+The manual workflow also runs a real-shell momentum flick with
+`--model-catalog loading`, in addition to the settled headline runs. A loading
+animation must not reduce the scroll's refresh rate. Its result is separate;
+fixing fixture settlement does not waive this regression case. To reproduce it
+locally, run the actual-shell command with `--gestures flick --model-catalog loading`
+and retain the default three trials. The workflow still has only
+`workflow_dispatch` as a trigger and exports numeric summaries only.
