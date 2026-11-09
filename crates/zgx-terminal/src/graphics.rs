@@ -549,6 +549,9 @@ fn place<T: EventListener>(
             ],
             (columns, rows) => [across(columns), down(rows)],
         };
+    } else if keys.columns != 0 || keys.rows != 0 {
+        // Pixels unknown, it stretches over its cells as they are drawn.
+        size = [0, 0];
     }
     let cells = |given: u32, offset: u32, pixels: u32, cell: u32| match (given, cell) {
         (0, 0) => 1,
@@ -711,6 +714,11 @@ mod tests {
         assert_eq!(sizes(&mut fx, "c=2,r=3"), ([20, 60], 2, 3));
         assert_eq!(sizes(&mut fx, "c=8"), ([80, 40], 8, 2));
         assert_eq!(sizes(&mut fx, "r=2,X=4"), ([80, 40], 9, 2));
+        // The cell's pixels unknown: over the cells asked for, as drawn.
+        fx.graphics
+            .command(b"a=p,i=1,C=1,c=3,r=2", &mut fx.term, (0, 0), &fx.images);
+        let p = fx.term.placements().last().unwrap();
+        assert_eq!((p.size, p.columns, p.lines), ([0, 0], 3, 2));
     }
 
     /// Sent in chunks (each base64 of its own), compressed or as a PNG, a

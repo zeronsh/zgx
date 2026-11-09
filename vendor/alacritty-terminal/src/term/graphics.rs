@@ -33,7 +33,8 @@ pub struct Placement {
     /// From the top-left cell's corner to the picture's, in pixels.
     pub offset: [u32; 2],
     /// The size it is drawn at, in pixels: the part shown's own, or
-    /// stretched to the cells asked for.
+    /// stretched to the cells asked for; zero by zero stretched over the
+    /// cells it covers (asked for before the cell's pixels were known).
     pub size: [u32; 2],
 }
 
