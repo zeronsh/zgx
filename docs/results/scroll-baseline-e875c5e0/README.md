@@ -1,5 +1,12 @@
 # e875c5e0 generic scroll baseline
 
+**Historical cadence qualification:** Wing's recorded tape contains system
+momentum that macOS zgx intentionally ignores. These saved tables used raw tape
+motion windows, so their Wing late percentages cannot certify app missed refreshes.
+The current scorer uses actual dispatched input and observed app coast instead.
+Original captures and numbers remain unchanged; this is a failed historical
+baseline, not a passing or current headline gate.
+
 These 16 single-trial cells are the original-engine baseline, with opt-in
 frame-indexed presentation/GPU instrumentation. Conditions: 120 Hz, 2×, opaque,
 M=960×720 and L=1440×960; tiles (`p0`) and drawables (`p1`) are separate.

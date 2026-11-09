@@ -1,4 +1,7 @@
 | Scene | Gesture | Size | Hz / scale / bg / present | Late % | Interval p99 ms | Main >4ms | App/GPU / system / unknown late | Result |
+
+Historical diagnostic only: see the [fixture and cadence qualifications](README.md).
+
 |---|---|---|---|---:|---:|---:|---|---|
 | tables | flick | L | 120 / 2.0 / opaque / 0 | 1.71 | 16.67 | 4 | 4 / 0 / 4 | fail |
 | tables | flick | L | 120 / 2.0 / opaque / 1 | 1.28 | 16.67 | 227 | 5 / 0 / 1 | fail |

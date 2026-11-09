@@ -1,4 +1,7 @@
 | Scene | Gesture | Size | Hz / scale / bg / present | Late % | Interval p99 ms | Main >4ms | App/GPU / system / unknown late | Result |
+
+Historical diagnostic only: see the [fixture and cadence qualifications](README.md).
+
 |---|---|---|---|---:|---:|---:|---|---|
 | zeron-idle | reference | W | 120 / 2.0 / translucent / 0 | 1.18 | 16.67 | 0 | 0 / 0 / 14 | fail |
 | zeron-idle | reference | W | 120 / 2.0 / translucent / 1 | 0.08 | 8.33 | 0 | 0 / 0 / 1 | fail |
