@@ -14404,6 +14404,11 @@ impl GpuRenderer {
         self.ramps.retain(|_, ramp| images.contains_key(&ramp.id()));
         self.spare = None;
         self.layers.retain(|_, cache| !cache.parked);
+        // Surfaces the last frame took out: no frame may come to let them go.
+        #[cfg(target_os = "macos")]
+        if let Some(cache) = &mut self.native_surfaces {
+            cache.rest();
+        }
         self.retain_views();
         // Idle: only the shown surface is needed; the next frame makes another.
         #[cfg(target_os = "macos")]
