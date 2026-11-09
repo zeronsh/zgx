@@ -182,6 +182,8 @@ return ui.markdown_view { "{reply}", w = 520, text_size = 15 }
 
 A link whose address is still streaming in is styled as one but goes nowhere: neither is asked of it.
 
+`veil = { key, seed }` fades a streaming reply's new words in, colour only, so nothing moves or wraps for them: each paragraph remembers what it has shown, and what arrives is a chunk of its runs fading in once (their `fade_in`, drawn in Rust a frame at a time), over three times the average gap between chunks, between 120 and 400 ms, a little faster while three or more fade at once. `key` names the reply: a view made again under it (a row scrolled back) doesn't fade what it showed. `seed = true` shows what is there as the view is made at once (a chat opened mid-reply). Leave it out where motion is reduced.
+
 ```lua
 local reply = ui.state("reply", "See **the guide** and `ui.rich`: https://zgx.zeron.sh.")
 return ui.markdown_view {

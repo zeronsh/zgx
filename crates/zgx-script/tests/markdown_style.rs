@@ -334,3 +334,64 @@ fn with_links_web_only_web_addresses_are_links() {
         .count();
     assert_eq!(documents, 1, "the column's alone");
 }
+
+/// The alpha of each run of the paragraphs under `id`.
+fn alphas(app: &mut TestApp, id: &str) -> Vec<(String, u8)> {
+    paragraphs(app, id)
+        .into_iter()
+        .flat_map(|(_, text, runs)| {
+            runs.into_iter()
+                .map(move |r| (text[r.range.clone()].to_string(), r.color.3))
+        })
+        .collect()
+}
+
+#[test]
+fn a_veiled_views_new_words_fade_in_once_at_the_pace_they_come() {
+    let clock = zgx::clock::VirtualClock::new();
+    let mut app = TestApp::inline(
+        r##"local reply = ui.state("reply", "")
+        return ui.column { w = 600,
+            ui.markdown_view { "{reply}", id = "md", w_full = true, style = { paragraph = { color = "#ffffff" } },
+                veil = { key = "reply:1" } },
+        }"##,
+    );
+    app.frames(2);
+    let at = |ms: u64| std::time::Duration::from_millis(ms);
+    app.host.set_state("reply", Value::from("Hello")).unwrap();
+    app.frames(1);
+    assert_eq!(
+        alphas(&mut app, "md"),
+        [("Hello".to_string(), 0)],
+        "clear as it lands"
+    );
+    clock.advance(at(25), || {});
+    app.host
+        .set_state("reply", Value::from("Hello world"))
+        .unwrap();
+    app.frames(1);
+    let runs = alphas(&mut app, "md");
+    assert_eq!(runs.len(), 2, "what came later a run of its own: {runs:?}");
+    assert!(
+        runs[0].1 > 0 && runs[0].1 < 255 && runs[1].1 == 0,
+        "{runs:?}"
+    );
+    // Past the longest fade (400 ms): all of it shown.
+    clock.advance(at(500), || {});
+    app.frames(1);
+    assert!(alphas(&mut app, "md").iter().all(|(_, a)| *a == 255));
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn a_veil_seeded_shows_what_is_there_at_once() {
+    let _clock = zgx::clock::VirtualClock::new();
+    let mut app = TestApp::inline(
+        r##"return ui.column { w = 600,
+            ui.markdown_view { "Already here.", id = "md", w_full = true, style = { paragraph = { color = "#ffffff" } },
+                veil = { key = "reply:seeded", seed = true } },
+        }"##,
+    );
+    app.frames(2);
+    assert!(alphas(&mut app, "md").iter().all(|(_, a)| *a == 255));
+}

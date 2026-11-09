@@ -2549,6 +2549,11 @@ export type MarkdownViewProps = Merge<Props, {
 	-- "web": only web addresses are links; others are styled as links and
 	-- go nowhere (no click, menu or address). "all" by default.
 	links: ("all" | "web")?,
+	-- A reply streaming in: its new words fade in, colour only, a chunk at
+	-- a time at the pace they come. `key` names the reply (what each
+	-- paragraph has shown is kept by it); `seed`: what is there as the view
+	-- is made shows at once.
+	veil: { key: string, seed: boolean? }?,
 }>
 -- `ui.markdown_view`'s `style`: a paragraph's options as `ui.rich`'s, and
 -- each kind of run's as `ui.span`'s (tokens, states and functions as

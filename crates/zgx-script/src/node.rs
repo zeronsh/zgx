@@ -1621,6 +1621,28 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
     })))
 }
 
+/// `ui.markdown_view`'s `veil = { key = …, seed = … }`, taken out of its
+/// table: none for nil or false.
+fn markdown_veil(table: &Table) -> mlua::Result<Option<crate::markdown::view::VeilOptions>> {
+    let veil = table.get::<mlua::Value>("veil")?;
+    table.raw_set("veil", mlua::Value::Nil)?;
+    match veil {
+        mlua::Value::Nil | mlua::Value::Boolean(false) => Ok(None),
+        mlua::Value::Table(t) => {
+            let key: String = t.get::<Option<String>>("key")?.ok_or_else(|| {
+                mlua::Error::runtime("ui.markdown_view's veil needs a `key`: the reply's")
+            })?;
+            Ok(Some(crate::markdown::view::VeilOptions {
+                key: key.into(),
+                seed: t.get::<Option<bool>>("seed")?.unwrap_or(false),
+            }))
+        }
+        _ => Err(mlua::Error::runtime(
+            "ui.markdown_view's veil is { key = …, seed = … }",
+        )),
+    }
+}
+
 /// The span a run of the kinds `bits` has (`MarkdownLook::runs`, bit `k`
 /// for kind `k`): their options laid over one another, as a `ui.span`'s.
 pub(crate) fn look_span(lua: &Lua, look: &MarkdownLook, bits: usize) -> mlua::Result<Span> {
@@ -5384,6 +5406,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 },
                 copy: flag("copy", true)?,
                 look: None,
+                veil: markdown_veil(&table)?,
+                veil_state: None,
+                veil_at: None,
             };
             let look = markdown_look(lua, &table)?;
             let mut args = TextArgs::default();
