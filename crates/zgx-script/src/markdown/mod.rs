@@ -42,6 +42,11 @@ pub struct Options {
     /// Repository paths in text (`src/main.rs:12`), in code spans that are a
     /// path whole, and relative links that read as one, are files (`f`).
     pub paths: bool,
+    /// Web addresses written bare in a paragraph's words (`https://…`,
+    /// outside code and links) are links to themselves, as GitHub's
+    /// autolinks are; punctuation ending the sentence stays out of them,
+    /// and a closing bracket too unless the address opened one.
+    pub autolink: bool,
     /// More fields for a code block, from its language and text (coloured
     /// lines, say): `(name, value)` pairs.
     pub code: Option<CodeFields>,
@@ -538,6 +543,7 @@ impl Call {
         let options = Options {
             breaks: flag("breaks")?,
             paths: flag("paths")?,
+            autolink: flag("autolink")?,
             code: None,
         };
         let key: Option<String> = match opts {
@@ -644,7 +650,11 @@ fn answer(lua: &mlua::Lua, text: Source, call: &Call, table: bool) -> mlua::Resu
     let Some(parsed) = lua.app_data_ref::<Parsed>() else {
         return Ok(Value::List(parse(&whole(), &call.options).into()));
     };
-    let flags = (call.options.breaks, call.options.paths);
+    let flags = (
+        call.options.breaks,
+        call.options.paths,
+        call.options.autolink,
+    );
     Ok(match &call.key {
         Some(key) => {
             let mut streams = parsed.streams.borrow_mut();
@@ -850,8 +860,8 @@ const STREAM_QUIET: std::time::Duration = std::time::Duration::from_secs(60);
 /// How many texts and streams a script's `ui.markdown` keeps.
 const KEPT: usize = 256;
 
-/// `breaks` and `paths`, as a script asked for them.
-type Flags = (bool, bool);
+/// `breaks`, `paths` and `autolink`, as a script asked for them.
+type Flags = (bool, bool, bool);
 type Texts = std::collections::HashMap<(String, Flags), Value>;
 /// Each keyed stream: its flags, its parse, and its last answer (whose
 /// table the next one's is derived from), with that table once a script
@@ -1185,6 +1195,90 @@ struct Run {
     file: Option<String>,
     /// A picture among the words: its source, its text the alt's.
     img: Option<String>,
+}
+
+/// A byte of a bare web address (`Options::autolink`): a letter or digit,
+/// or one of `-._~:/?#[]@!$&'()*+,;=%`.
+fn url_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"-._~:/?#[]@!$&'()*+,;=%".contains(&b)
+}
+/// The first bare web address in `text` at or after `from`: `http://` or
+/// `https://` and at least a byte of address, as bytes `start..end`.
+fn find_url(text: &str, from: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let at = |i: usize, s: &[u8]| bytes.get(i..i + s.len()) == Some(s);
+    for i in from..bytes.len() {
+        if !at(i, b"http") {
+            continue;
+        }
+        let colon = if at(i + 4, b"s://") { i + 5 } else { i + 4 };
+        if !at(colon, b"://") {
+            continue;
+        }
+        let start = colon + 3;
+        let end = start + bytes[start..].iter().take_while(|b| url_byte(**b)).count();
+        if end > start {
+            return Some((i, end));
+        }
+    }
+    None
+}
+/// A bare address without what ends the sentence round it: `.,;:!?'"`, and
+/// a `)` it didn't open.
+fn trim_url(mut url: &str) -> &str {
+    loop {
+        match url.as_bytes().last() {
+            Some(b'.' | b',' | b';' | b':' | b'!' | b'?' | b'\'' | b'"') => {}
+            Some(b')') if url.matches('(').count() < url.matches(')').count() => {}
+            _ => return url,
+        }
+        url = &url[..url.len() - 1];
+    }
+}
+/// `runs` with the web addresses written bare in their words links of
+/// their own (`Options::autolink`), each keeping its run's bold, italic and
+/// strike. Not in code, a link, a file or a picture's words.
+fn autolinked(runs: Vec<Run>) -> Vec<Run> {
+    if !runs.iter().any(|r| r.text.contains("://")) {
+        return runs;
+    }
+    let mut out = Vec::with_capacity(runs.len() + 2);
+    for run in runs {
+        if run.code || run.link.is_some() || run.file.is_some() || run.img.is_some() {
+            out.push(run);
+            continue;
+        }
+        let piece = |text: &str, link: Option<String>| Run {
+            text: text.to_string(),
+            style: run.style,
+            code: false,
+            link,
+            file: None,
+            img: None,
+        };
+        let (mut at, mut copied, mut found) = (0, 0, false);
+        while let Some((start, end)) = find_url(&run.text, at) {
+            let url = trim_url(&run.text[start..end]);
+            // (`https://` alone, or about: no address.)
+            if url.len() <= "https://".len() {
+                at = end;
+                continue;
+            }
+            found = true;
+            if start > copied {
+                out.push(piece(&run.text[copied..start], None));
+            }
+            out.push(piece(url, Some(url.to_string())));
+            copied = start + url.len();
+            at = copied;
+        }
+        if !found {
+            out.push(run);
+        } else if copied < run.text.len() {
+            out.push(piece(&run.text[copied..], None));
+        }
+    }
+    out
 }
 
 /// Where a link goes: a page, or (with `paths`) a file in the repository.
@@ -1663,6 +1757,9 @@ impl Builder<'_> {
             while last.text.ends_with('\n') {
                 last.text.pop();
             }
+        }
+        if self.options.autolink {
+            runs = autolinked(runs);
         }
         runs_value(&runs)
     }
@@ -2182,6 +2279,57 @@ mod tests {
             blocks[2].field("lang").map(|v| v.to_json()),
             Some("\"rust\"".into())
         );
+    }
+
+    #[test]
+    fn bare_web_addresses_are_links_of_their_own_with_autolink() {
+        let options = Options {
+            autolink: true,
+            ..plain()
+        };
+        // Each paragraph's runs: (text, link).
+        let runs = |text: &str| -> Vec<(String, Option<String>)> {
+            let blocks = parse(text, &options);
+            let field = |r: &Value, f: &str| match r.field(f) {
+                Some(Value::Str(x)) => Some(x.to_string()),
+                _ => None,
+            };
+            blocks[0]
+                .field("s")
+                .unwrap()
+                .list()
+                .iter()
+                .map(|r| (field(r, "x").unwrap(), field(r, "a")))
+                .collect()
+        };
+        let link = |url: &str| (url.to_string(), Some(url.to_string()));
+        let words = |text: &str| (text.to_string(), None);
+        assert_eq!(
+            runs("See https://a.b/c. Then (https://en.wikipedia.org/wiki/A_(b)) too."),
+            [
+                words("See "),
+                link("https://a.b/c"),
+                words(". Then ("),
+                link("https://en.wikipedia.org/wiki/A_(b)"),
+                words(") too."),
+            ]
+        );
+        // `https://` alone, or about, is no address; code and links stay.
+        assert_eq!(
+            runs("http://a, https:// and `https://c.d` [x](https://e.f) xhttps://g.h?"),
+            [
+                words("http://a, https:// and "),
+                ("https://c.d".to_string(), None),
+                words(" "),
+                ("x".to_string(), Some("https://e.f".to_string())),
+                words(" x"),
+                link("https://g.h"),
+                words("?"),
+            ]
+        );
+        // Off, the words are words.
+        let off = parse("See https://a.b/c.", &plain());
+        assert_eq!(off[0].field("s").unwrap().list().len(), 1);
     }
 
     #[test]

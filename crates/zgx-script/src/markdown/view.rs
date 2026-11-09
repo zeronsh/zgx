@@ -23,6 +23,36 @@ pub(crate) struct ViewOptions {
     pub parse: Options,
     /// Code blocks get a Copy button.
     pub copy: bool,
+    /// The script's look for its prose (`style`, `on_link`, `link_menu`),
+    /// if it gave one: its runs, its paragraphs and the room between its
+    /// blocks drawn by it, not by the defaults here.
+    pub look: Option<Rc<dyn Look>>,
+}
+
+/// A run of a paragraph, as a look is asked to draw it: its text, its
+/// kinds, and where it links (none for a link still streaming its
+/// address).
+pub(crate) struct Run<'a> {
+    pub text: &'a str,
+    pub strong: bool,
+    pub em: bool,
+    pub strike: bool,
+    pub code: bool,
+    /// A link's: its target, or `Some("")` while its address streams.
+    pub link: Option<&'a str>,
+}
+
+/// What draws a markdown view's prose where the script gave a look
+/// (`ui.markdown_view { style = … }`): made where scripts' elements are
+/// lowered, so each option resolves as an element's.
+pub(crate) trait Look {
+    /// A run as a span.
+    fn span(&self, run: &Run) -> zgx::compose::TextSpan;
+    /// A paragraph (its runs' rich text) with the style's own options.
+    fn paragraph(&self, view: View) -> View;
+    /// The top-level blocks' list with the style's room between them (the
+    /// view's own where it gives none).
+    fn blocks(&self, view: View) -> View;
 }
 
 fn themed<T>(name: &str) -> Themed<T> {
@@ -82,9 +112,29 @@ impl<'a> RunFields<'a> {
     }
 }
 
-/// A run of text as a span: bold, italic, struck, code or a link.
-fn span(run: &Value, bold: bool) -> zgx::compose::TextSpan {
+/// A run of text as a span: bold, italic, struck, code or a link; drawn
+/// by the look, if there is one.
+fn span(run: &Value, bold: bool, look: Option<&dyn Look>) -> zgx::compose::TextSpan {
     let fields = RunFields::of(run);
+    if let Some(look) = look {
+        let text: Rc<str> = match fields.text {
+            Some(Value::Str(s)) => s.clone(),
+            other => text_of(other).into(),
+        };
+        let link = match fields.link {
+            Some(Value::Str(href)) if &**href == PENDING_LINK_URL => Some(""),
+            Some(Value::Str(href)) => Some(&**href),
+            _ => None,
+        };
+        return look.span(&Run {
+            text: &text,
+            strong: bold || fields.bold,
+            em: fields.italic,
+            strike: fields.strike,
+            code: fields.code,
+            link,
+        });
+    }
     let mut out = zgx::compose::text_span(text_of(fields.text));
     if bold || fields.bold {
         out = out.font_bold();
@@ -114,9 +164,18 @@ fn span(run: &Value, bold: bool) -> zgx::compose::TextSpan {
 
 /// A settled block (one before the last: a parse keeps it as it is),
 /// built as it is, without following anything: a paragraph of runs.
-fn static_runs(list: Option<&Value>, bold: bool) -> zgx::compose::RichTextView {
+fn static_runs(
+    list: Option<&Value>,
+    bold: bool,
+    look: Option<&dyn Look>,
+) -> zgx::compose::RichTextView {
     let spans = list
-        .map(|l| l.list().iter().map(|r| span(r, bold)).collect::<Vec<_>>())
+        .map(|l| {
+            l.list()
+                .iter()
+                .map(|r| span(r, bold, look))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     zgx::compose::rich_text().children(spans).text_wrap(true)
 }
@@ -218,7 +277,7 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
                 _ => "font.size.md",
             };
             View::from(
-                static_runs(b.field("s"), true)
+                static_runs(b.field("s"), true, options.look.as_deref())
                     .text_size(themed(size))
                     .pt(4.),
             )
@@ -272,7 +331,11 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
             let line = |cells: Option<&Value>, bold: bool| {
                 let mut out = row().gap(12.);
                 for cell in cells.map(|c| c.list().to_vec()).unwrap_or_default() {
-                    out = out.child(column().w(160.).child(static_runs(Some(&cell), bold)));
+                    out = out.child(column().w(160.).child(static_runs(
+                        Some(&cell),
+                        bold,
+                        options.look.as_deref(),
+                    )));
                 }
                 out
             };
@@ -287,7 +350,13 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
             table
         }
         "img" => text(text_of(b.field("alt"))).text_color(themed("text.secondary")),
-        _ => static_runs(b.field("s"), false).into(),
+        _ => {
+            let runs: View = static_runs(b.field("s"), false, options.look.as_deref()).into();
+            match &options.look {
+                Some(look) => look.paragraph(runs),
+                None => runs,
+            }
+        }
     }
 }
 
@@ -512,11 +581,21 @@ fn code(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
 }
 
 /// A paragraph of the runs field `field` of `cell` holds, following it.
-fn runs_of(cell: Signal<Value>, field: &'static str, bold: bool) -> View {
+fn runs_of(
+    cell: Signal<Value>,
+    field: &'static str,
+    bold: bool,
+    look: Option<Rc<dyn Look>>,
+) -> View {
     zgx::compose::rich_text_signal(move || {
         cell.with(|b| {
             b.field(field)
-                .map(|runs| runs.list().iter().map(|r| span(r, bold)).collect())
+                .map(|runs| {
+                    runs.list()
+                        .iter()
+                        .map(|r| span(r, bold, look.as_deref()))
+                        .collect()
+                })
                 .unwrap_or_default()
         })
     })
@@ -534,7 +613,7 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                 2 => "font.size.lg",
                 _ => "font.size.md",
             };
-            runs_of(cell, "s", true)
+            runs_of(cell, "s", true, options.look.clone())
                 .text_size(themed(size))
                 .pt(4.)
                 .heading(level)
@@ -619,7 +698,7 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                     let runs = cell
                         .list()
                         .iter()
-                        .map(|r| span(r, bold))
+                        .map(|r| span(r, bold, options.look.as_deref()))
                         .collect::<Vec<_>>();
                     out = out.child(
                         column()
@@ -641,7 +720,13 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
         }
         "img" => zgx::compose::text_signal(move || cell.with(|b| text_of(b.field("alt"))))
             .text_color(themed("text.secondary")),
-        _ => runs_of(cell, "s", false),
+        _ => {
+            let runs = runs_of(cell, "s", false, options.look.clone());
+            match &options.look {
+                Some(look) => look.paragraph(runs),
+                None => runs,
+            }
+        }
     }
 }
 
@@ -673,6 +758,10 @@ pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOp
                 true
             });
         }));
-        block_list(top, &options).gap(10.)
+        let blocks = block_list(top, &options);
+        match &options.look {
+            Some(look) => look.blocks(blocks),
+            None => blocks.gap(10.),
+        }
     })
 }

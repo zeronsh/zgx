@@ -1110,6 +1110,9 @@ pub(crate) enum Kind {
     Markdown {
         text: Text,
         options: crate::markdown::view::ViewOptions,
+        /// `style`, `on_link`, `link_menu`: its prose drawn as the
+        /// script's own elements would draw it.
+        look: Option<Rc<MarkdownLook>>,
     },
     Rich(RichSpans),
     Image {
@@ -1475,6 +1478,156 @@ pub(crate) struct SpanRare {
     /// fading in, drawn in Rust a frame at a time (`TextSpan::fade_in`).
     pub fade: Option<zgx::compose::TextFade>,
 }
+/// `ui.markdown_view`'s `style`, `on_link` and `link_menu`: its prose
+/// drawn as a script would draw it with `ui.rich` and `ui.span`, each
+/// option resolved as theirs are (tokens through the theme, functions and
+/// states followed).
+pub(crate) struct MarkdownLook {
+    /// `style.paragraph`: a paragraph's options, as `ui.rich`'s (a node
+    /// of no runs, whose styles each paragraph takes).
+    pub paragraph: Option<Rc<Node>>,
+    /// `style.gap`: room between the top-level blocks (a node holding it).
+    pub blocks: Option<Rc<Node>>,
+    /// `style.strong`, `em`, `strike`, `code` and `link`: a run's options,
+    /// as `ui.span`'s, laid over one another in that order for a run of
+    /// several kinds (the kind's defaults where the style names none).
+    pub runs: [Table; RUN_KINDS],
+    /// `on_link(target, keys)`: a link clicked; `true` back handled it (a
+    /// web address it has stays shut).
+    pub on_link: Option<Function>,
+    /// `link_menu(target, e)`: a link's context menu, as `context_menu`'s.
+    pub link_menu: Option<Function>,
+    /// The span each mix of kinds makes (by its bits, `RUN_KINDS` of them),
+    /// made as first asked: a run is a copy of its kinds' span.
+    pub made: RefCell<Vec<Option<Span>>>,
+}
+/// How many kinds of run a markdown style names (`MarkdownLook::runs`).
+pub(crate) const RUN_KINDS: usize = 5;
+const RUN_KIND_NAMES: [&str; RUN_KINDS] = ["strong", "em", "strike", "code", "link"];
+
+/// A table's own fields, copied: what a look keeps of the script's, so a
+/// change the script makes after has no part in it.
+fn copied(lua: &Lua, table: &Table) -> mlua::Result<Table> {
+    let out = lua.create_table()?;
+    table.for_each::<mlua::Value, mlua::Value>(|k, v| out.raw_set(k, v))?;
+    Ok(out)
+}
+
+/// A kind of run's look where a style names none: the markdown view's own.
+fn default_run(lua: &Lua, kind: usize) -> mlua::Result<Table> {
+    let out = lua.create_table()?;
+    match kind {
+        0 => out.raw_set("bold", true)?,
+        1 => out.raw_set("italic", true)?,
+        2 => out.raw_set("strike", true)?,
+        3 => {
+            out.raw_set("font", "mono")?;
+            out.raw_set("bg", "$surface.sunken")?;
+            out.raw_set("padding", lua.create_sequence_from([3., 0.5])?)?;
+            out.raw_set("radius", 3.)?;
+        }
+        _ => out.raw_set("color", "$accent")?,
+    }
+    Ok(out)
+}
+
+/// `ui.markdown_view`'s `style`, `on_link` and `link_menu`, taken out of
+/// its table (they aren't styles of its own); none if it has none.
+fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLook>>> {
+    let style: Option<Table> = table.get("style")?;
+    let on_link: Option<Function> = table.get("on_link")?;
+    let link_menu: Option<Function> = table.get("link_menu")?;
+    for name in ["style", "on_link", "link_menu"] {
+        table.raw_set(name, mlua::Value::Nil)?;
+    }
+    if style.is_none() && on_link.is_none() && link_menu.is_none() {
+        return Ok(None);
+    }
+    let style = match style {
+        Some(style) => style,
+        None => lua.create_table()?,
+    };
+    // A name it doesn't know is a mistake (`strong` written `bold`), not
+    // a look left out.
+    style.for_each::<mlua::Value, mlua::Value>(|key, _| {
+        let known = key.as_string().is_some_and(|k| {
+            let k = k.as_bytes();
+            &*k == b"paragraph" || &*k == b"gap" || RUN_KIND_NAMES.iter().any(|n| n.as_bytes() == &*k)
+        });
+        if known {
+            Ok(())
+        } else {
+            Err(mlua::Error::runtime(format!(
+                "ui.markdown_view's style has no `{}` (paragraph, gap, strong, em, strike, code, link)",
+                key.to_string().unwrap_or_default()
+            )))
+        }
+    })?;
+    // (Styles each paragraph takes as it is made: nothing that needs a
+    // component of its own, as an animation does.)
+    let plain = |node: Node, what: &str| {
+        if node.needs_context() {
+            return Err(mlua::Error::runtime(format!(
+                "ui.markdown_view's style.{what} takes values, tokens, states and \
+                 functions, not animations"
+            )));
+        }
+        Ok(Some(Rc::new(node)))
+    };
+    let paragraph = match style.get::<Option<Table>>("paragraph")? {
+        Some(t) => {
+            let node = Node::new(owner(lua)?, Kind::Rich(RichSpans::Listed(Vec::new())));
+            plain(fill(lua, node, Some(&copied(lua, &t)?))?, "paragraph")?
+        }
+        None => None,
+    };
+    let blocks = match style.get::<mlua::Value>("gap")? {
+        mlua::Value::Nil => None,
+        gap => {
+            let t = lua.create_table()?;
+            t.raw_set("gap", gap)?;
+            plain(
+                fill(lua, Node::new(owner(lua)?, Kind::Div), Some(&t))?,
+                "gap",
+            )?
+        }
+    };
+    let mut runs = Vec::with_capacity(RUN_KINDS);
+    for (kind, name) in RUN_KIND_NAMES.iter().enumerate() {
+        runs.push(match style.get::<Option<Table>>(*name)? {
+            Some(t) => copied(lua, &t)?,
+            None => default_run(lua, kind)?,
+        });
+    }
+    Ok(Some(Rc::new(MarkdownLook {
+        paragraph,
+        blocks,
+        runs: runs.try_into().expect("one table a kind"),
+        on_link,
+        link_menu,
+        made: RefCell::new(vec![None; 1 << RUN_KINDS]),
+    })))
+}
+
+/// The span a run of the kinds `bits` has (`MarkdownLook::runs`, bit `k`
+/// for kind `k`): their options laid over one another, as a `ui.span`'s.
+pub(crate) fn look_span(lua: &Lua, look: &MarkdownLook, bits: usize) -> mlua::Result<Span> {
+    if let Some(made) = &look.made.borrow()[bits] {
+        return Ok(made.clone());
+    }
+    let merged = lua.create_table()?;
+    for (kind, t) in look.runs.iter().enumerate() {
+        if bits & (1 << kind) != 0 {
+            t.for_each::<mlua::Value, mlua::Value>(|k, v| merged.raw_set(k, v))?;
+        }
+    }
+    // (Its text each run's own.)
+    merged.raw_set(1, "")?;
+    let made = span(lua, mlua::Value::Table(merged), true)?;
+    look.made.borrow_mut()[bits] = Some(made.clone());
+    Ok(made)
+}
+
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
 /// radius = 4, pad = 2 } }`.
 #[derive(Clone)]
@@ -4818,6 +4971,19 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
             match key {
                 b"color" => span.color = themed_color(&lua.unpack(given)?),
                 b"bg" => span.background = themed_color(&lua.unpack(given)?),
+                // A token (`"$font.size.sm"`): its value in the theme as the
+                // paragraph builds, followed as the theme changes.
+                b"text_size"
+                    if matches!(&given, mlua::Value::String(s) if s.as_bytes().starts_with(b"$")) =>
+                {
+                    let name = given.to_string()?[1..].to_owned();
+                    let read = lua.create_function(move |lua, ()| crate::theme::value_of(lua, &name))?;
+                    followed.push((
+                        "text_size",
+                        Ty::Num,
+                        source(lua, Ty::Num, "text_size", mlua::Value::Function(read))?,
+                    ));
+                }
                 b"text_size" => span.size = number(given)?,
                 b"weight" => span.weight = number(given)?.map(|v| v as u16),
                 b"bold" => bold = lua.unpack::<Value>(given)?.truthy(),
@@ -5212,10 +5378,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 parse: crate::markdown::Options {
                     breaks: flag("breaks", false)?,
                     paths: flag("paths", false)?,
+                    autolink: flag("autolink", false)?,
                     code: None,
                 },
                 copy: flag("copy", true)?,
+                look: None,
             };
+            let look = markdown_look(lua, &table)?;
             let mut args = TextArgs::default();
             let empty = Kind::Text(Text::Literal(String::new()));
             let (owner, lint) = owner_and_lint(lua)?;
@@ -5223,7 +5392,11 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             fill_from(lua, &mut node, &table, Some(&mut args), lint)?;
             let literal = args.literal.unwrap_or(false);
             let text = text_of(lua, args.content, "ui.markdown_view", literal)?;
-            node.kind = Kind::Markdown { text, options };
+            node.kind = Kind::Markdown {
+                text,
+                options,
+                look,
+            };
             // Prose: selectable as a web page's is, unless asked not to be.
             if node.selectable.is_none() {
                 node.selectable = Some(true);

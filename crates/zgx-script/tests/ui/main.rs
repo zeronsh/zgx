@@ -77,6 +77,8 @@ mod list_tab_rows;
 mod list_thin_rows;
 #[path = "../markdown_lazy.rs"]
 mod markdown_lazy;
+#[path = "../markdown_style.rs"]
+mod markdown_style;
 #[path = "../mentions.rs"]
 mod mentions;
 #[path = "../pointer_lock.rs"]
