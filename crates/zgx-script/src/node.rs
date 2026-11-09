@@ -1497,6 +1497,9 @@ pub(crate) struct MarkdownLook {
     pub on_link: Option<Function>,
     /// `link_menu(target, e)`: a link's context menu, as `context_menu`'s.
     pub link_menu: Option<Function>,
+    /// `links = "web"`: only web addresses are links; any other target is
+    /// styled as one and goes nowhere (no click, menu or address).
+    pub web_only: bool,
     /// The span each mix of kinds makes (by its bits, `RUN_KINDS` of them),
     /// made as first asked: a run is a copy of its kinds' span.
     pub made: RefCell<Vec<Option<Span>>>,
@@ -1537,10 +1540,19 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
     let style: Option<Table> = table.get("style")?;
     let on_link: Option<Function> = table.get("on_link")?;
     let link_menu: Option<Function> = table.get("link_menu")?;
-    for name in ["style", "on_link", "link_menu"] {
+    let web_only = match table.get::<Option<String>>("links")?.as_deref() {
+        None | Some("all") => false,
+        Some("web") => true,
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "ui.markdown_view's `links` is \"all\" or \"web\", not {other:?}"
+            )));
+        }
+    };
+    for name in ["style", "on_link", "link_menu", "links"] {
         table.raw_set(name, mlua::Value::Nil)?;
     }
-    if style.is_none() && on_link.is_none() && link_menu.is_none() {
+    if style.is_none() && on_link.is_none() && link_menu.is_none() && !web_only {
         return Ok(None);
     }
     let style = match style {
@@ -1605,6 +1617,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
         runs: runs.try_into().expect("one table a kind"),
         on_link,
         link_menu,
+        web_only,
         made: RefCell::new(vec![None; 1 << RUN_KINDS]),
     })))
 }
@@ -5392,13 +5405,16 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             fill_from(lua, &mut node, &table, Some(&mut args), lint)?;
             let literal = args.literal.unwrap_or(false);
             let text = text_of(lua, args.content, "ui.markdown_view", literal)?;
+            let styled = look.is_some();
             node.kind = Kind::Markdown {
                 text,
                 options,
                 look,
             };
             // Prose: selectable as a web page's is, unless asked not to be.
-            if node.selectable.is_none() {
+            // One in an app's own look is part of the app's page: selectable
+            // as what holds it is, with no document of its own.
+            if node.selectable.is_none() && !styled {
                 node.selectable = Some(true);
             }
             node_ud(lua, node)

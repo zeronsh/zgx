@@ -5384,6 +5384,9 @@ export type MarkdownViewProps = {
 	on_link: ((target: string, e: ClickEvent) -> boolean?)?,
 	-- A link's context menu, as `context_menu`'s: told where it goes.
 	link_menu: ((target: string, e: PointerEvent) -> ...{ Node }?)?,
+	-- "web": only web addresses are links; others are styled as links and
+	-- go nowhere (no click, menu or address). "all" by default.
+	links: ("all" | "web")?,
 }
 -- `ui.markdown_view`'s `style`: a paragraph's options as `ui.rich`'s, and
 -- each kind of run's as `ui.span`'s (tokens, states and functions as

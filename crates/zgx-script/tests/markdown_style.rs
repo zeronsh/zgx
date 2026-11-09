@@ -312,3 +312,25 @@ fn a_styles_options_are_not_animated() {
     };
     assert!(error.contains("not animations"), "{error}");
 }
+
+#[test]
+fn with_links_web_only_web_addresses_are_links() {
+    let app = TestApp::inline(
+        r##"return ui.column { w = 600, selectable = true,
+            ui.markdown_view { id = "md", style = {}, links = "web", on_link = function() return true end,
+                "[a page](https://a.test/) and [a file](src/main.rs)" },
+        }"##,
+    );
+    app.frames(2);
+    assert_eq!(app.error(), None);
+    let links: Vec<String> = (app.ui.semantics.borrow().iter())
+        .filter(|(_, s)| s.role == zgx::semantics::Role::Link)
+        .map(|(_, s)| s.label.clone())
+        .collect();
+    assert_eq!(links, ["a page"]);
+    // Part of the page it is in: no selectable document of its own.
+    let documents = (app.ui.semantics.borrow().iter())
+        .filter(|(_, s)| s.role == zgx::semantics::Role::Document)
+        .count();
+    assert_eq!(documents, 1, "the column's alone");
+}
