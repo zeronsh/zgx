@@ -71,6 +71,17 @@ struct ColumnMemo {
     /// Passes in a row it has laid out whole (`COLUMN_WHOLE_PASSES`).
     whole: u8,
 }
+/// The first children of column `id`'s result of `pass` under `constraints`,
+/// aside while it is arranged, and where it stood then: its result holds its
+/// end alone, so `arrange` walks that (`Scene::return_kept_children`).
+struct KeptChildren {
+    id: NodeId,
+    pass: u64,
+    constraints: Constraints,
+    end: usize,
+    stood: Rect,
+    children: Vec<ChildPlacement>,
+}
 /// What a column reads of what each child reads (`Scene::read_bits`).
 const COLUMN_READS: u8 = READS_WIDTH | READS_HEIGHT | PERCENT_WIDTH | PERCENT_HEIGHT;
 /// A column's sums over its children so far, as `measure_uncached` adds
@@ -2015,6 +2026,9 @@ struct ColdMaps {
     sticky: NodeMap<Sticky>,
     /// Columns streamed into (`KEPT_COLUMN`).
     column_memos: NodeMap<ColumnMemo>,
+    /// What columns resumed at their end keep aside while they are arranged
+    /// (`Scene::return_kept_children`).
+    column_kept: Vec<KeptChildren>,
     /// Sizes worked out from the containing block (`set_size_calcs`).
     size_calcs: NodeMap<std::sync::Arc<crate::size_calc::SizeCalcs>>,
     /// Nodes that balance their text's lines, or not (`set_text_balance`),
@@ -3302,7 +3316,10 @@ pub struct Scene {
     /// `measure` calls, for tests of how much work layout does.
     #[cfg(test)]
     pub(crate) measure_calls: u64,
-    /// `read_bits` calls, for tests of how much work layout does.
+    /// `arrange` calls, for tests of how much work layout does.
+    #[cfg(test)]
+    pub(crate) arrange_calls: u64,
+    /// `read_bits` calls, for the same.
     #[cfg(test)]
     pub(crate) read_bits_calls: std::cell::Cell<u64>,
     /// While a mount defers its text inputs' layout: the observer running
@@ -3565,6 +3582,8 @@ impl Scene {
             escaped: Vec::new(),
             #[cfg(test)]
             measure_calls: 0,
+            #[cfg(test)]
+            arrange_calls: 0,
             #[cfg(test)]
             read_bits_calls: Default::default(),
             geometry_reader: Default::default(),
@@ -12017,6 +12036,70 @@ impl Scene {
             node.reads.set(bits);
         }
     }
+    /// Gives each column resumed at its end the children it set aside
+    /// (`column_end`), as this layout ends, so its result is whole for
+    /// anything that next reads it. One arranged somewhere else, its kept
+    /// children's places move with it, is arranged again. One whose result was
+    /// replaced since by a whole layout has nothing to take back.
+    #[cold]
+    #[inline(never)]
+    fn return_kept_children(&mut self, report: Option<&mut FrameReport>) {
+        let Some(cold) = self.cold.as_deref_mut() else {
+            return;
+        };
+        let kept = std::mem::take(&mut cold.column_kept);
+        let mut report = report;
+        for mut kept in kept {
+            if !self.contains(kept.id) {
+                continue;
+            }
+            let node = self.tree_node_mut(kept.id);
+            let result = node
+                .measurement
+                .iter_mut()
+                .chain(node.alternates.iter_mut())
+                .find(|m| {
+                    m.pass == kept.pass
+                        && m.constraints == kept.constraints
+                        && m.children.len() == kept.end
+                });
+            let Some(result) = result else {
+                continue;
+            };
+            kept.children.append(&mut result.children);
+            result.children = std::mem::take(&mut kept.children);
+            let now = node.bounds;
+            if (now.x, now.y, now.width) != (kept.stood.x, kept.stood.y, kept.stood.width) {
+                node.arrange_dirty = true;
+                if let Some(report) = report.as_deref_mut() {
+                    self.arrange_from(kept.id, now.x, now.y, report);
+                }
+            } else {
+                #[cfg(debug_assertions)]
+                self.check_kept_in_place(kept.id, now);
+            }
+        }
+    }
+    /// Column `id`, at `at`: every child arranged where its result says.
+    #[cfg(debug_assertions)]
+    fn check_kept_in_place(&self, id: NodeId, at: Rect) {
+        let node = self.tree_node(id);
+        // Not arranged this pass (a probe's result, its own still current).
+        if node.arrange_dirty || node.dirty & LAYOUT != 0 || node.rtl {
+            return;
+        }
+        let Some(last) = node.measurement.as_ref() else {
+            return;
+        };
+        for &(child, rect, _) in &last.children {
+            let child = self.tree_node(child);
+            assert!(
+                child.style.snap
+                    || (child.bounds.x, child.bounds.y) == (at.x + rect.x, at.y + rect.y),
+                "a kept child stands where it is placed"
+            );
+        }
+    }
     /// Column `id` no longer looks at its end (`keep_column_end`).
     fn drop_column_end(&mut self, id: NodeId) {
         if let Some(maps) = &mut self.cold {
@@ -12178,8 +12261,21 @@ impl Scene {
         }
         let width = dimension(explicit_w, style.min_width, style.max_width);
         let height = dimension(sums.natural_h + gaps + vertical_padding, None, None);
-        self.store_measurement(id, constraints, (width, height), children);
+        // Its result holds its end alone until this pass ends: those it keeps
+        // stand where they are, and `arrange` doesn't walk them.
+        let end = children.split_off(keep);
+        let stood = self.tree_node(id).bounds;
+        let ends = end.len();
+        self.store_measurement(id, constraints, (width, height), end);
         let pass = self.tree_node(id).measurement.as_ref()?.pass;
+        self.cold.as_deref_mut()?.column_kept.push(KeptChildren {
+            id,
+            pass,
+            constraints,
+            end: ends,
+            stood,
+            children,
+        });
         let memos = &mut self.cold.as_deref_mut()?.column_memos;
         memos.insert(
             id,
@@ -12701,6 +12797,10 @@ impl Scene {
         level: u32,
         context: &mut Option<DamageContext>,
     ) {
+        #[cfg(test)]
+        {
+            self.arrange_calls += 1;
+        }
         self.visit(id);
         // Checked by the caller: `arrange_from`, or the loop below for a
         // child.
@@ -13180,6 +13280,7 @@ impl Scene {
             false => full,
         };
         if self.cold.is_some() {
+            self.return_kept_children(None);
             self.restore_column_reads();
         }
         if full {
@@ -13232,6 +13333,9 @@ impl Scene {
         }
         if !self.escaped.is_empty() {
             self.place_escaped(&mut report);
+        }
+        if self.cold.is_some() {
+            self.return_kept_children(Some(&mut report));
         }
         // Probes this pass answered stay only as the next pass's few.
         for id in std::mem::take(&mut self.overfull) {
@@ -16164,7 +16268,7 @@ mod tests {
                 .last_mut()
                 .unwrap()
                 .push_str(" and then a good deal more of it");
-            let before = scene.measure_calls;
+            let (before, arranged) = (scene.measure_calls, scene.arrange_calls);
             let read = scene.read_bits_calls.get();
             scene.set_text(*ids.last().unwrap(), words.last().unwrap().as_str());
             scene.flush();
@@ -16173,8 +16277,13 @@ mod tests {
                 "grow {more}: {} measures for 66 nodes",
                 scene.measure_calls - before
             );
-            // Its earlier blocks aren't asked what they read, once it has
-            // sums to resume from.
+            // Its earlier blocks aren't placed again.
+            assert!(
+                scene.arrange_calls - arranged < 10,
+                "grow {more}: {} placed of 66 nodes",
+                scene.arrange_calls - arranged
+            );
+            // Nor asked what they read, once it has sums to resume from.
             if more > 0 {
                 assert!(
                     scene.read_bits_calls.get() - read < 10,
@@ -16415,6 +16524,83 @@ mod tests {
         for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
             assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
         }
+    }
+    /// A column resumed at its end while a sibling above it grows, and while
+    /// a parent moves it: its kept children, which `arrange` didn't walk, go
+    /// with it, where a column built with what it holds puts them.
+    #[test]
+    fn a_resumed_column_moved_takes_its_kept_children_with_it() {
+        let measurer = |text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+        };
+        let wrap = Style {
+            text_wrap: true,
+            ..Style::default()
+        };
+        let column_style = Style {
+            width: Some(220.0),
+            gap: 4.0,
+            ..Style::default()
+        };
+        let build = |above: &str, words: &[String]| {
+            let mut scene = Scene::new(300.0, 4000.0);
+            scene.set_text_measurer(measurer);
+            let root = scene.root();
+            let head = scene.append(root, text(above), wrap.clone());
+            let column = scene.append(
+                root,
+                NodeKind::Container(Layout::Column),
+                column_style.clone(),
+            );
+            let ids: Vec<_> = words
+                .iter()
+                .map(|w| scene.append(column, text(w), wrap.clone()))
+                .collect();
+            scene.flush();
+            (scene, head, column, ids)
+        };
+        let mut words: Vec<String> = (0..100).map(|i| format!("block {i}")).collect();
+        let (mut scene, head, column, ids) = build("a heading", &words);
+        let grow = |scene: &mut Scene, words: &mut Vec<String>| {
+            words.last_mut().unwrap().push_str(" more of it");
+            scene.set_text(*ids.last().unwrap(), words.last().unwrap().as_str());
+        };
+        for _ in 0..2 {
+            grow(&mut scene, &mut words);
+            scene.flush();
+        }
+        // Its end changes, and something above it pushes it down.
+        grow(&mut scene, &mut words);
+        let above = "a heading grown so long that it wraps onto several lines of text".repeat(3);
+        scene.set_text(head, above.as_str());
+        scene.flush();
+        let (fresh, _, fresh_column, fresh_ids) = build(&above, &words);
+        assert_eq!(scene.bounds(column), fresh.bounds(fresh_column));
+        for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
+            assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
+        }
+        // And streams on from there, all its children back in its result.
+        for _ in 0..2 {
+            grow(&mut scene, &mut words);
+            scene.flush();
+        }
+        let (fresh, _, fresh_column, fresh_ids) = build(&above, &words);
+        assert_eq!(scene.bounds(column), fresh.bounds(fresh_column));
+        for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
+            assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
+        }
+        assert_eq!(
+            scene
+                .node(column)
+                .measurement
+                .as_ref()
+                .unwrap()
+                .children
+                .len(),
+            100
+        );
     }
     /// A long column changed at its start, flush after flush: nothing is
     /// streaming into it, so it stops looking at its end, and lays out as any.
