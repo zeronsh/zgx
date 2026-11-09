@@ -89,6 +89,7 @@ return ui.rich {
 | `lang` | `string` | the paragraph's | the language the run is in: a quote's Han characters in its language's fonts. A plain value, not followed |
 | `padding` | `number` or `{ across, down }` | `0` | room around the run: across, before and after it (it takes space in the line); with `bg`, the background hugs the text plus this instead of filling the line, an inline code chip |
 | `radius` | `number` | `0` | the background's corner radius |
+| `continues` | `boolean` | `false` | the next piece of the span before: one span cut into pieces (a fade's, each its own colour), drawn as the span whole where the pieces are alike in font, size, padding, background and radius: padded at its ends alone, its background and underline going on from piece to piece. Spans beside each other, not so marked, draw apart: two chips stay two |
 | `underline_offset` | `number` | a tenth of the text size | how far below the baseline the underline sits (CSS's `text-underline-offset`) |
 | `underline_style` | `"solid"`, `"double"`, `"dotted"`, `"dashed"`, `"wavy"` | `"solid"` | how the underline is drawn (CSS's `text-decoration-style`): `"wavy"` marks a spelling mistake or a diagnostic. The software raster draws them all solid |
 | `underline_color` | `Color` | the text's | its colour, or a token (`"$danger"`) |

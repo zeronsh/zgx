@@ -8905,6 +8905,9 @@ fn text_spans_of(
                 if let Some(end) = rare.padding_end.filter(|end| *end != padding[0]) {
                     out = out.padding_end(end);
                 }
+                if rare.continues {
+                    out = out.continues();
+                }
                 if let Some(build) = rare.menu.as_ref() {
                     let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
                     out = out.context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
