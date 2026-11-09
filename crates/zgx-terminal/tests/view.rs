@@ -1150,3 +1150,35 @@ fn a_picture_keeps_its_node_as_it_scrolls_and_is_replaced() {
     assert!(drawn(&app).is_empty());
     term.close();
 }
+
+/// Output read before the view's first layout (a terminal opened while its
+/// window runs, its program quick to write) makes the rows for the session's
+/// own size, from outside any reactive flush: the rows built then find the
+/// slots free to take theirs from. It used to panic, which took the tasks of
+/// that tick with it.
+#[test]
+fn output_read_before_the_first_layout_makes_the_rows() {
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    replay.feed(b"early\r\n");
+    app.ui.prepare_frame();
+    assert!(app.shows("early"), "{:?}", app.texts());
+    replay.feed(b"later\r\n");
+    app.ui.prepare_frame();
+    assert!(
+        app.shows("early") && app.shows("later"),
+        "{:?}",
+        app.texts()
+    );
+    term.close();
+}
