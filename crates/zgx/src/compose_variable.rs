@@ -436,7 +436,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
         let heights = heights.clone();
         move || heights.index.try_borrow().map_or(0, |index| index.count())
     });
-    let find = rows.find({
+    let keys = rows.keys({
         let heights = heights.clone();
         move || heights.index.try_borrow().ok().map(|index| index.count())
     });
@@ -957,7 +957,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             Layout::Overlay,
                             row_style(width, *row_height, measured),
                         );
-                        crate::selection::mount_row(&mut ui, row, &index_signal, key, &find);
+                        crate::selection::mount_row(&mut ui, row, &index_signal);
                         let node = mount(&mut ui, row, view, environment.clone());
                         cx.finish(&mut ui, node);
                         if let Some(navigation) = &navigation {
@@ -1110,5 +1110,5 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             });
         },
     )))
-    .row_text(text)
+    .list_rows(crate::selection::ListRows::new(text, Some(keys)))
 }
