@@ -446,9 +446,30 @@ impl GpuRenderer {
             Some(kept) => kept,
             None => {
                 let bytes = size.0 as usize * size.1 as usize * 4;
-                if bytes + self.images.values().map(|entry| entry.1).sum::<usize>()
-                    > 64 * 1024 * 1024
-                {
+                let budget = 64 * 1024 * 1024;
+                let mut held = self.images.values().map(|entry| entry.1).sum::<usize>();
+                if bytes + held > budget {
+                    // Images not drawn this frame give their textures back,
+                    // least recently drawn first, as they do for an image
+                    // (`upload_image_at`): drawn again, they upload again.
+                    // (A video's clip leaves a frame's picture behind each
+                    // frame; a 3D view after it found the budget spent.)
+                    let mut idle: Vec<(u64, u64)> = (self.image_drawn.iter())
+                        .filter(|(_, drawn)| **drawn < self.image_frame)
+                        .map(|(id, drawn)| (*drawn, *id))
+                        .collect();
+                    idle.sort_unstable();
+                    for (_, id) in idle {
+                        if bytes + held <= budget {
+                            break;
+                        }
+                        self.image_drawn.remove(&id);
+                        if let Some(entry) = self.images.remove(&id) {
+                            held -= entry.1;
+                        }
+                    }
+                }
+                if bytes + held > budget {
                     return Err(GpuError(
                         "visible image and GPU view textures exceed their budget".into(),
                     ));
