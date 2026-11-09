@@ -1050,3 +1050,103 @@ fn a_placed_picture_is_drawn_over_its_cells_and_scrolls_with_them() {
         !app.shows("next") && pictures_drawn(app).is_empty()
     });
 }
+
+/// A picture keeps its nodes: scrolling carries it along with the rows,
+/// without one being made again; sending it again changes what they show;
+/// deleting it takes them away. It stays over its line throughout.
+#[test]
+fn a_picture_keeps_its_node_as_it_scrolls_and_is_replaced() {
+    use zgx::scene::NodeId;
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    let drawn = |app: &Harness| -> Vec<(NodeId, u64, f32)> {
+        let scene = app.ui.scene.borrow();
+        scene
+            .paint_items()
+            .filter_map(|item| match item.kind {
+                NodeKind::Image(image) => {
+                    Some((item.id, image.id(), scene.transformed_bounds(item.id).y))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let text_y = |app: &Harness, text: &str| {
+        let scene = app.ui.scene.borrow();
+        scene
+            .paint_items()
+            .find_map(|item| match scene.kind(item.id) {
+                NodeKind::Text { text: shown, .. } if &**shown == text => {
+                    Some(scene.transformed_bounds(item.id).y)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{text} isn't shown"))
+    };
+    let feed = |app: &Harness, bytes: &[u8]| {
+        replay.feed(bytes);
+        app.ui.prepare_frame();
+    };
+    // Ten lines down, below "mark", over a cell of its own. Lines all
+    // different: a scroll moves the rows' slots and their container only
+    // where the rows show it scrolled.
+    let lines = |from: usize, count: usize| -> Vec<u8> {
+        (from..from + count)
+            .flat_map(|n| format!("line {n}\r\n").into_bytes())
+            .collect()
+    };
+    feed(&app, &lines(0, 10));
+    feed(&app, b"mark\r\n");
+    feed(
+        &app,
+        b"\x1b_Ga=T,f=24,s=1,v=1,c=1,r=1,i=7,q=2;/wAA\x1b\\\r\n",
+    );
+    let [(node, shows, first)] = drawn(&app)[..] else {
+        panic!("{:?}", drawn(&app));
+    };
+    let gap = first - text_y(&app, "mark");
+    assert!(gap > 1., "{gap}");
+    // A line a frame, then several at once: the screen scrolls, and its
+    // node goes with its line.
+    let held = |app: &Harness| {
+        let [(now, _, y)] = drawn(app)[..] else {
+            panic!("{:?}", drawn(app));
+        };
+        assert_eq!(now, node, "made again");
+        assert!(
+            (y - text_y(app, "mark") - gap).abs() < 0.01,
+            "{y} not a line below mark, at {}",
+            text_y(app, "mark")
+        );
+        y
+    };
+    for n in 0..6 {
+        feed(&app, &lines(100 + n, 1));
+        held(&app);
+    }
+    feed(&app, &lines(200, 3));
+    let y = held(&app);
+    assert!(
+        y < first - gap,
+        "the screen never scrolled: {y}, from {first}"
+    );
+    // Sent again, it shows the new pixels in the same node.
+    feed(&app, b"\x1b_Ga=t,f=24,s=1,v=1,i=7,q=2;AP8A\x1b\\");
+    assert_ne!(drawn(&app)[0].1, shows);
+    held(&app);
+    // Deleted, its nodes go.
+    feed(&app, b"\x1b_Ga=d,d=i,i=7,q=2\x1b\\");
+    assert!(drawn(&app).is_empty());
+    term.close();
+}
