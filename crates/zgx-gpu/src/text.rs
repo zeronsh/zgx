@@ -148,6 +148,37 @@ fn font_features(settings: &[([u8; 4], u32)]) -> cosmic_text::FontFeatures {
     }
     features
 }
+/// The `wght` iOS's system font is drawn at for CSS's `weight`: the face
+/// UIKit gives for each of its weights (`systemFont(ofSize:weight:)`, read in a
+/// reference app, iOS 26.5: ultraLight 30.925, thin 110.725, light 274.315,
+/// regular 400, medium 510, semibold 590, bold 700, heavy 860, black 1000), in
+/// CSS's order of its nine (100 the lightest, as WebKit's `system-ui`), and
+/// between two of them in proportion. Other families take `weight` as it is.
+#[cfg(target_os = "ios")]
+#[inline]
+fn face_weight(family: &zgx::text_layout::FontFamily, weight: u16) -> u16 {
+    if matches!(family, zgx::text_layout::FontFamily::SansSerif) {
+        system_weight(weight)
+    } else {
+        weight
+    }
+}
+#[cfg(not(target_os = "ios"))]
+#[inline(always)]
+fn face_weight(_: &zgx::text_layout::FontFamily, weight: u16) -> u16 {
+    weight
+}
+#[cfg(any(target_os = "ios", test))]
+fn system_weight(weight: u16) -> u16 {
+    const FACES: [f32; 9] = [
+        30.925, 110.725, 274.315, 400., 510., 590., 700., 860., 1000.,
+    ];
+    let at = (f32::from(weight.clamp(100, 900)) - 100.) / 100.;
+    let (index, part) = (at.floor() as usize, at.fract());
+    let below = FACES[index];
+    let above = FACES[(index + 1).min(8)];
+    (below + (above - below) * part).round() as u16
+}
 /// iOS's system font's tracking at `size` points, in ems: the normal row of
 /// its `trak` table (SFUI.ttf, iOS 26), units of 1/2048 em, between its sizes.
 #[cfg(target_os = "ios")]
@@ -209,7 +240,7 @@ pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> 
         .optical(size.round().clamp(1., 1000.) as u16)
         .masked(font.masked)
         .weight(cosmic_text::Weight(
-            shown_weight(font.weight).clamp(1, 1000),
+            face_weight(&font.family, shown_weight(font.weight)).clamp(1, 1000),
         ))
         .style(if font.italic {
             cosmic_text::Style::Italic
@@ -2770,6 +2801,16 @@ mod wash_tests {
             .to_vec();
         assert_eq!(shown, [600, 600, 700, 700, 800, 900, 900]);
         assert!(shown.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+    #[test]
+    fn ios_system_weights_are_uikits_faces() {
+        // `systemFont(ofSize:weight:)`'s `wght`, ultraLight to black, read
+        // in a reference app (iOS 26.5), to the axis's whole units.
+        let faces = [100, 200, 300, 400, 500, 600, 700, 800, 900].map(super::system_weight);
+        assert_eq!(faces, [31, 111, 274, 400, 510, 590, 700, 860, 1000]);
+        assert_eq!(super::system_weight(650), 645);
+        assert_eq!(super::system_weight(1), 31);
+        assert_eq!(super::system_weight(1000), 1000);
     }
 
     use super::*;

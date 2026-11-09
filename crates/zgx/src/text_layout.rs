@@ -25,7 +25,8 @@ impl From<String> for FontFamily {
         Self::Named(value.into())
     }
 }
-/// Logical line-box pitch. Normal uses `ceil(font_size * 1.4)`.
+/// Logical line-box pitch. Normal uses `ceil(font_size * 1.4)`; on iOS, the
+/// system font's own line, as UIKit's labels have it.
 ///
 /// Positive finite pixel values are preserved, including pitches smaller than
 /// glyph ink. Text still obeys its allocated paint bounds: tight lines may
@@ -59,8 +60,24 @@ impl LineHeight {
             } else {
                 1.
             };
-            (size * 1.4).min(f32::MAX).ceil()
+            normal_line(size, cfg!(target_os = "ios"))
         })
+    }
+}
+/// The system font's line on iOS, in ems: SF's ascent and descent (1950 and
+/// 494 of 2048, no line gap), which UIKit gives as `UIFont.lineHeight` at
+/// every size and weight (read in a reference app, iOS 26.5). A label's first
+/// baseline is its ascender down, so glyphs centred in this line sit where
+/// UIKit's do; 1.4 times the size put them 0.107 em lower.
+const IOS_SYSTEM_LINE: f32 = 2444. / 2048.;
+/// The normal line pitch for text `size` large: iOS's system font's line, or
+/// elsewhere 1.4 times the size rounded up to a point.
+#[inline]
+fn normal_line(size: f32, ios: bool) -> f32 {
+    if ios {
+        (size * IOS_SYSTEM_LINE).min(f32::MAX)
+    } else {
+        (size * 1.4).min(f32::MAX).ceil()
     }
 }
 /// Additional tracking in logical pixels. Native glyph clusters follow the font
@@ -1300,6 +1317,23 @@ mod tests {
             LineHeight::px(f32::from_bits(1)).pixels(),
             Some(f32::from_bits(1))
         );
+    }
+    #[test]
+    fn ios_normal_line_is_uikits_system_font_line() {
+        // `UIFont.lineHeight` of the system font, read in a reference app
+        // (iOS 26.5), at the text styles' sizes.
+        for (size, uikit) in [
+            (11., 13.1270),
+            (13., 15.5137),
+            (17., 20.2871),
+            (20., 23.8672),
+            (28., 33.4141),
+            (34., 40.5742),
+        ] {
+            assert!((normal_line(size, true) - uikit).abs() < 1e-3, "{size}");
+        }
+        assert_eq!(normal_line(10., false), 14.);
+        assert_eq!(normal_line(f32::MAX, true), f32::MAX);
     }
     #[test]
     fn explicit_pitch_keeps_wrapped_unicode_hit_selection_and_caret_aligned() {
