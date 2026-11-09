@@ -130,30 +130,22 @@ pub(crate) struct Shared {
 /// that stops reading never holds up the UI.
 #[derive(Clone)]
 pub(crate) struct Outbox {
-    tx: mpsc::Sender<HostMessage>,
+    /// Each message, and whether it counts as input queued.
+    tx: mpsc::Sender<(HostMessage, bool)>,
     input: Arc<AtomicUsize>,
 }
 impl Outbox {
     /// Send what must arrive (a welcome, buffers, a release).
     pub fn send(&self, message: HostMessage) {
-        let _ = self.tx.send(message);
+        let _ = self.tx.send((message, false));
     }
     /// Send input, unless the client has this much unread already.
     fn input(&self, message: HostMessage) {
         if self.input.load(Ordering::Relaxed) < MAX_QUEUED_INPUT {
             self.input.fetch_add(1, Ordering::Relaxed);
-            let _ = self.tx.send(message);
+            let _ = self.tx.send((message, true));
         }
     }
-}
-fn is_input(message: &HostMessage) -> bool {
-    !matches!(
-        message,
-        HostMessage::Welcome(_)
-            | HostMessage::Buffers(_)
-            | HostMessage::Release { .. }
-            | HostMessage::Close
-    )
 }
 
 /// What `App::on_exit` calls.
@@ -249,7 +241,7 @@ impl App {
         let shared: Arc<Mutex<Shared>> = Arc::default();
         let (wake, woken) = zgx::task::latest::<()>();
         let exited = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = mpsc::channel::<HostMessage>();
+        let (tx, rx) = mpsc::channel::<(HostMessage, bool)>();
         let out = Outbox {
             tx,
             input: Arc::default(),
@@ -640,12 +632,15 @@ fn kill(_pid: u32) {
 }
 
 /// The thread writing messages to the client.
-fn writer(mut sender: Sender, rx: mpsc::Receiver<HostMessage>, input: Arc<AtomicUsize>) {
+fn writer(mut sender: Sender, rx: mpsc::Receiver<(HostMessage, bool)>, input: Arc<AtomicUsize>) {
     let _ = std::thread::Builder::new()
         .name("zgx-surface write".into())
         .spawn(move || {
-            while let Ok(message) = rx.recv() {
-                if is_input(&message) {
+            // Only what `Outbox::input` counted is uncounted: a resize sent
+            // with `send` once took the count below zero, and then every
+            // input event after was dropped as too many unread.
+            while let Ok((message, counted)) = rx.recv() {
+                if counted {
                     input.fetch_sub(1, Ordering::Relaxed);
                 }
                 let close = matches!(message, HostMessage::Close);
@@ -802,5 +797,53 @@ fn zgx_cursor(cursor: Cursor) -> zgx::cursor::Cursor {
         Cursor::NsResize => C::NsResize,
         Cursor::NeswResize => C::NeswResize,
         Cursor::NwseResize => C::NwseResize,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What must arrive (a resize, buffers) is not input: sending it never
+    /// takes the input count below zero, which once dropped every input
+    /// event after a session's first resize as too many unread.
+    #[test]
+    fn input_still_flows_after_what_must_arrive() {
+        let ((host_tx, _host_rx), (_client_tx, mut client_rx)) = crate::transport::pair().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let out = Outbox {
+            tx,
+            input: Arc::default(),
+        };
+        writer(host_tx, rx, out.input.clone());
+        out.send(HostMessage::Resize {
+            width: 640,
+            height: 480,
+            scale: 1.5,
+        });
+        out.send(HostMessage::Release {
+            generation: 1,
+            index: 0,
+        });
+        for i in 0..3 {
+            out.input(HostMessage::PointerMove { x: i as f32, y: 0. });
+        }
+        let mut heard = Vec::new();
+        for _ in 0..5 {
+            heard.push(format!("{:?}", client_rx.recv_host().unwrap().unwrap()));
+        }
+        assert_eq!(
+            heard[2..],
+            [
+                "PointerMove { x: 0.0, y: 0.0 }",
+                "PointerMove { x: 1.0, y: 0.0 }",
+                "PointerMove { x: 2.0, y: 0.0 }"
+            ]
+        );
+        assert_eq!(
+            out.input.load(Ordering::Relaxed),
+            0,
+            "every counted input uncounted, nothing more"
+        );
     }
 }

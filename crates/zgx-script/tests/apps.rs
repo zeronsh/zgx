@@ -613,3 +613,81 @@ return ui.column {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// Input reaches the program through a script's `ui.surface`, as it does
+/// through the Rust element: the program here copies what the host sends
+/// it into a file, which the test reads back as messages.
+#[test]
+fn a_scripts_surface_forwards_input_to_its_program() {
+    use zgx::input::{InputEvent, Key, Modifiers, PointerButton};
+    use zgx_surface::HostMessage;
+    static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let out = std::env::temp_dir().join(format!("zgx-surface-heard-{}-{n}", std::process::id()));
+    let script = format!(
+        r#"
+local app = ui.app("t", {{ command = "sh", args = {{ "-c", 'exec cat <&"$ZGX_SURFACE_FD" > "{}"' }} }})
+return ui.column {{
+    ui.surface {{ id = "game", app = app, w = 200, h = 100 }},
+}}
+"#,
+        out.display()
+    );
+    let mut h = Harness::inline(&script);
+    h.frames(2);
+    let button = PointerButton::Primary;
+    h.ui.dispatch(InputEvent::PointerMove { x: 50., y: 60. });
+    h.ui.input.note_gesture();
+    h.ui.dispatch(InputEvent::PointerDown {
+        x: 50.,
+        y: 60.,
+        button,
+    });
+    h.ui.dispatch(InputEvent::PointerUp {
+        x: 50.,
+        y: 60.,
+        button,
+    });
+    h.ui.input.set_key_code(Some("KeyW".into()));
+    h.ui.dispatch(InputEvent::KeyDown {
+        key: Key::Character("w".into()),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    h.frames(2);
+    // What the program heard, frame by frame.
+    let heard = |bytes: &[u8]| {
+        let mut messages = Vec::new();
+        let mut at = 0;
+        while at + 8 <= bytes.len() {
+            let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize + 4;
+            if at + len > bytes.len() {
+                break;
+            }
+            if let Ok(Some(message)) = HostMessage::decode(&bytes[at..at + len], Vec::new()) {
+                messages.push(format!("{message:?}"));
+            }
+            at += len;
+        }
+        messages
+    };
+    let want = [
+        "PointerMove { x: 50.0, y: 60.0 }",
+        "Focus(true)",
+        "Button { button: Left, down: true, x: 50.0, y: 60.0 }",
+        "Button { button: Left, down: false, x: 50.0, y: 60.0 }",
+    ];
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let got = heard(&std::fs::read(&out).unwrap_or_default());
+        let key = got
+            .iter()
+            .any(|m| m.contains(r#"code: "KeyW", down: true"#));
+        if want.iter().all(|w| got.iter().any(|m| m == w)) && key {
+            break;
+        }
+        assert!(Instant::now() < until, "the program heard {got:#?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = std::fs::remove_file(&out);
+}
