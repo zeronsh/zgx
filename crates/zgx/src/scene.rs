@@ -16729,6 +16729,88 @@ mod tests {
             100
         );
     }
+    /// A column streamed into at two widths, at rest after each chunk: rest
+    /// keeps only the sizes of the width it isn't showing, and the column
+    /// resumes at its end and stands where one built whole puts it, its
+    /// children all back in its result.
+    #[test]
+    fn a_column_streamed_into_resumes_the_same_after_rest() {
+        let measurer = |text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+        };
+        let wrap = Style {
+            text_wrap: true,
+            ..Style::default()
+        };
+        let column_style = Style {
+            flex_grow: 1.0,
+            gap: 4.0,
+            ..Style::default()
+        };
+        // In a row, beside one that grows twice as much: probed and placed,
+        // it holds results under more than one width in a pass.
+        let build = |width: f32, words: &[String]| {
+            let mut scene = Scene::new(width, 4000.0);
+            scene.set_text_measurer(measurer);
+            let row = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Row),
+                Style::default(),
+            );
+            let column = scene.append(
+                row,
+                NodeKind::Container(Layout::Column),
+                column_style.clone(),
+            );
+            scene.append(
+                row,
+                text("a wrapping neighbour beside the column"),
+                Style {
+                    text_wrap: true,
+                    flex_grow: 2.0,
+                    ..Style::default()
+                },
+            );
+            let ids: Vec<_> = words
+                .iter()
+                .map(|w| scene.append(column, text(w), wrap.clone()))
+                .collect();
+            scene.flush();
+            (scene, column, ids)
+        };
+        let mut words: Vec<String> = (0..100).map(|i| format!("block {i}")).collect();
+        let (mut scene, column, ids) = build(300.0, &words);
+        let (mut resumed, mut held) = (false, false);
+        for width in [300.0, 220.0, 300.0, 220.0, 300.0] {
+            scene.resize(width, 4000.0);
+            for _ in 0..3 {
+                words.last_mut().unwrap().push_str(" more of it");
+                scene.set_text(*ids.last().unwrap(), words.last().unwrap().as_str());
+                scene.flush();
+                resumed |= scene
+                    .cold
+                    .as_deref()
+                    .is_some_and(|cold| cold.column_memos.contains_key(&column));
+                held |= !scene.node(column).alternates.is_empty();
+                scene.rest();
+                assert!(scene.node(column).alternates.is_empty());
+            }
+            let (fresh, fresh_column, fresh_ids) = build(width, &words);
+            assert_eq!(scene.bounds(column), fresh.bounds(fresh_column));
+            for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
+                assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
+            }
+            let held = scene.node(column).measurement.as_ref().unwrap();
+            assert_eq!(held.children.len(), words.len());
+        }
+        assert!(resumed, "the column looked at its end");
+        assert!(
+            held,
+            "it held a result of the other width, for rest to let go of"
+        );
+    }
     /// A long column changed at its start, flush after flush: nothing is
     /// streaming into it, so it stops looking at its end, and lays out as any.
     #[test]
