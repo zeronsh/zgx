@@ -445,6 +445,47 @@ fn area(start: usize, end: usize) -> CGRect {
         in_view,
     )
 }
+/// How tall a UITextField makes a line of the system font at `size` points, as
+/// it answers for its caret. It is about 1.8 points over the font's
+/// `lineHeight`, in no ratio to it (15, 22 and 42.33 for 11, 17 and 34 points;
+/// read in a reference app, iOS 26.5), so one is asked, once for each size.
+fn field_line(size: f32) -> f64 {
+    thread_local! {
+        static LINES: RefCell<std::collections::HashMap<u32, f64>> = RefCell::default();
+    }
+    LINES.with(|lines| {
+        *lines.borrow_mut().entry(size.to_bits()).or_insert_with(|| {
+            // SAFETY: UIKit's constructor, setters and getters, on the main
+            // thread UIKit calls this from; the field goes with its scope.
+            unsafe {
+                let field: Retained<AnyObject> = msg_send![class!(UITextField), new];
+                let font: Retained<AnyObject> =
+                    msg_send![class!(UIFont), systemFontOfSize: f64::from(size)];
+                let _: () = msg_send![&*field, setFont: &*font];
+                let start: Retained<AnyObject> = msg_send![&*field, beginningOfDocument];
+                let caret: CGRect = msg_send![&*field, caretRectForPosition: &*start];
+                caret.size.height
+            }
+        })
+    })
+}
+/// `rect` as tall as a UITextField makes its line, in the system font: the
+/// stems and highlight UIKit draws take this box. Other fonts' lines keep theirs.
+fn as_field_line(mut rect: CGRect) -> CGRect {
+    let typography = state().and_then(|state| {
+        let store = state.store.borrow();
+        store.editor().map(EditorHandle::typography)
+    });
+    if let Some((size, font)) = typography
+        && matches!(font.family, zgx::text_layout::FontFamily::SansSerif)
+    {
+        let (y, height) =
+            crate::text_store::grown_line(rect.origin.y, rect.size.height, field_line(size));
+        rect.origin.y = y;
+        rect.size.height = height;
+    }
+    rect
+}
 /// A rectangle in the window's points, in the view's.
 fn in_view(r: zgx::scene::Rect) -> CGRect {
     let (x, y) = state().map_or((0., 0.), |state| state.origin.get());
@@ -541,7 +582,7 @@ extern "C-unwind" fn first_rect(_: &AnyObject, _: Sel, range: *mut AnyObject) ->
 }
 extern "C-unwind" fn caret_rect(_: &AnyObject, _: Sel, at: *mut AnyObject) -> CGRect {
     let at = offset_of(at);
-    let mut rect = area(at, at);
+    let mut rect = as_field_line(area(at, at));
     rect.size.width = rect.size.width.max(2.);
     rect
 }
@@ -561,7 +602,7 @@ extern "C-unwind" fn selection_rects(
     unsafe {
         let array: Retained<AnyObject> = msg_send![class!(NSMutableArray), array];
         for (index, line) in lines.into_iter().enumerate() {
-            let rect = in_view(line);
+            let rect = as_field_line(in_view(line));
             let made: Retained<AnyObject> = msg_send![class, new];
             let set = |name: &std::ffi::CStr, value: f64| {
                 *class

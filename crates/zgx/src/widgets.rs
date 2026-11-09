@@ -879,6 +879,11 @@ impl EditorHandle {
         drop(current);
         self.refresh();
     }
+    /// Its text's size and font.
+    pub fn typography(&self) -> (f32, FontStyle) {
+        let typography = self.typography.borrow();
+        (typography.1, typography.2.clone())
+    }
     /// The placeholder, if any.
     pub fn placeholder(&self) -> Option<String> {
         self.hint

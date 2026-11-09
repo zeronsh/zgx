@@ -576,6 +576,16 @@ fn seen(editor: &EditorHandle) -> Seen {
     }
 }
 
+/// A line's box `(y, height)` grown to `line` about its middle: never shrunk,
+/// a line of its own that tall keeping its place (iOS, `field_line`).
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn grown_line(y: f64, height: f64, line: f64) -> (f64, f64) {
+    if height >= line {
+        (y, height)
+    } else {
+        (y - (line - height) / 2., line)
+    }
+}
 /// The word to select at `caret` (UTF-16, as the store counts): the word
 /// holding it, or the one just before it; none where only spaces are around.
 /// `select:`, as a caret's Select in the edit menu takes (iOS).
@@ -601,6 +611,15 @@ pub(crate) fn word_at(units: &[u16], caret: usize) -> Option<(usize, usize)> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_lines_box_grows_about_its_middle_and_never_shrinks() {
+        // A body line in a 44 point field, as a UITextField has it.
+        let (y, height) = super::grown_line(11.8565, 20.287, 22.);
+        assert_eq!(height, 22.);
+        assert!((y - 11.).abs() < 1e-3);
+        // A line that tall already, its leading in it.
+        assert_eq!(super::grown_line(5., 22.5, 22.), (5., 22.5));
+    }
     #[test]
     fn select_takes_the_word_at_the_caret() {
         let units: Vec<u16> = "Hello world 😀 x".encode_utf16().collect();
