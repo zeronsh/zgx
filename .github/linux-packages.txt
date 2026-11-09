@@ -4,6 +4,7 @@ cmake
 dbus-x11
 fcitx5
 fcitx5-chinese-addons
+ffmpeg
 fonts-droid-fallback
 gdb
 gir1.2-atspi-2.0
