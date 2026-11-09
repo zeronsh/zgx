@@ -7907,7 +7907,7 @@ mod ownership_tests {
 /// as this compares with what was told last.
 #[inline]
 fn resized(told: (f32, f32), now: (f32, f32)) -> bool {
-    !(same_length(told.0, now.0) && same_length(told.1, now.1))
+    told != now && !(same_length(told.0, now.0) && same_length(told.1, now.1))
 }
 
 /// Whether bounds have moved from what was told of them, as `resized`
@@ -7915,21 +7915,22 @@ fn resized(told: (f32, f32), now: (f32, f32)) -> bool {
 /// neighbouring floats as a size does.
 #[inline]
 fn moved(told: Rect, now: Rect) -> bool {
-    !(same_length(told.x, now.x)
-        && same_length(told.y, now.y)
-        && same_length(told.width, now.width)
-        && same_length(told.height, now.height))
+    told != now
+        && !(same_length(told.x, now.x)
+            && same_length(told.y, now.y)
+            && same_length(told.width, now.width)
+            && same_length(told.height, now.height))
 }
 
-/// Whether a length is the one told, to within `SIZE_NOISE`. Equal first:
-/// an unbounded size stays infinite, and infinity less itself is NaN, which
-/// is near nothing, so it was told again on every pass and never settled.
+/// Whether a length is the one told, to within `SIZE_NOISE`, or equal: an
+/// unbounded size stays infinite, and infinity less itself is NaN, which is
+/// near nothing, so it was told again on every pass and never settled.
 /// A NaN length is never the same, as it never was compared exactly (NaN
 /// equals nothing), so one would keep layout from settling: layout
 /// doesn't make one.
 #[inline]
 fn same_length(told: f32, now: f32) -> bool {
-    told == now || (told - now).abs() < SIZE_NOISE
+    (told - now).abs() < SIZE_NOISE || told == now
 }
 
 fn allocated_content_size(scene: &Scene, node: NodeId) -> (f32, f32) {
