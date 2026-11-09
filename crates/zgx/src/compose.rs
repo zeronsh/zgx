@@ -4631,16 +4631,21 @@ fn paragraph_effect<const LOCATING: bool>(
             }
             let link = span.action.is_some() || span.href.is_some();
             // Most spans have none of these: one test for all three.
-            let (hover, icon, menu, plain, padding_end) = match span.extras.take() {
-                None => (None, None, None, false, None),
+            // With an icon, or room after the text other than before it, the
+            // room is kept apart from the text's run: `room_after` is then
+            // what follows the text. Negative (no room is), otherwise.
+            let (hover, icon, menu, plain, room_after) = match span.extras.take() {
+                None => (None, None, None, false, -1.),
                 Some(extras) => {
                     let extras = *extras;
+                    let end = extras.padding_end.unwrap_or(span.padding[0]);
+                    let apart = extras.icon.is_some() || end != span.padding[0];
                     (
                         extras.hover,
                         extras.icon,
                         extras.menu,
                         extras.plain,
-                        extras.padding_end,
+                        if apart { end } else { -1. },
                     )
                 }
             };
@@ -4664,8 +4669,7 @@ fn paragraph_effect<const LOCATING: bool>(
             // An icon keeps its room before the text: a padded
             // placeholder run of its own. So does the room before the text
             // where it isn't the room after it (`padding_end`).
-            let apart = icon.is_some() || padding_end.is_some_and(|end| end != span.padding[0]);
-            let icon_at = apart.then(|| {
+            let icon_at = (room_after >= 0.).then(|| {
                 let at = content.len();
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
                 at..content.len()
@@ -4737,73 +4741,72 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, the span's padding goes around both: its
             // room takes the padding before, a placeholder after the
             // text the padding after.
-            let lead = if apart { span.padding[0] } else { 0. };
-            if let Some(range) = icon_at {
-                match icon {
-                    // (No icon, the room before alone: a placeholder that wide.)
-                    None => runs.push(crate::rich_text::TextRun {
+            match (icon, icon_at) {
+                // (No icon, the room before alone: a placeholder that wide.)
+                (None, Some(range)) => runs.push(crate::rich_text::TextRun {
+                    background: span.background,
+                    underline: None,
+                    strikethrough: None,
+                    padding: [span.padding[0] / 2., span.padding[1]],
+                    radius: span.radius,
+                    range,
+                    font: font.clone(),
+                    font_size,
+                    color,
+                }),
+                (Some(icon), Some(range)) => {
+                    let lead = span.padding[0];
+                    // (A well takes its room round the icon too.)
+                    let pad = if icon.bg.is_some() { icon.pad } else { 0. };
+                    runs.push(crate::rich_text::TextRun {
                         background: span.background,
                         underline: None,
                         strikethrough: None,
-                        padding: [lead / 2., span.padding[1]],
+                        padding: [
+                            (lead + icon.size + 2. * pad + icon.gap) / 2.,
+                            span.padding[1],
+                        ],
                         radius: span.radius,
-                        range,
+                        range: range.clone(),
                         font: font.clone(),
                         font_size,
                         color,
-                    }),
-                    Some(icon) => {
-                        // (A well takes its room round the icon too.)
-                        let pad = if icon.bg.is_some() { icon.pad } else { 0. };
-                        runs.push(crate::rich_text::TextRun {
-                            background: span.background,
-                            underline: None,
-                            strikethrough: None,
-                            padding: [
-                                (lead + icon.size + 2. * pad + icon.gap) / 2.,
-                                span.padding[1],
-                            ],
-                            radius: span.radius,
-                            range: range.clone(),
-                            font: font.clone(),
-                            font_size,
-                            color,
-                        });
-                        icons.push(crate::compose_rich::InlineIcon {
-                            range,
-                            svg: match icon.tint {
-                                Some(crate::theme::Themed::Value(tint)) => {
-                                    std::sync::Arc::new(icon.svg.tinted(tint))
-                                }
-                                Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
-                                    icon.svg.tinted(
-                                        theme
-                                            .get(token)
-                                            .color()
-                                            .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
-                                    ),
+                    });
+                    icons.push(crate::compose_rich::InlineIcon {
+                        range,
+                        svg: match icon.tint {
+                            Some(crate::theme::Themed::Value(tint)) => {
+                                std::sync::Arc::new(icon.svg.tinted(tint))
+                            }
+                            Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                                icon.svg.tinted(
+                                    theme
+                                        .get(token)
+                                        .color()
+                                        .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
                                 ),
-                                None if icon.svg.follows_text_color() => {
-                                    std::sync::Arc::new(icon.svg.tinted(color))
-                                }
-                                None => icon.svg,
-                            },
-                            size: icon.size,
-                            inset: lead,
-                            well: icon.bg.and_then(|bg| {
-                                let color = match bg {
-                                    crate::theme::Themed::Value(color) => Some(color),
-                                    crate::theme::Themed::Token(token) => theme.get(token).color(),
-                                }?;
-                                Some(crate::compose_rich::IconWell {
-                                    color,
-                                    radius: icon.radius,
-                                    pad,
-                                })
-                            }),
-                        });
-                    }
+                            ),
+                            None if icon.svg.follows_text_color() => {
+                                std::sync::Arc::new(icon.svg.tinted(color))
+                            }
+                            None => icon.svg,
+                        },
+                        size: icon.size,
+                        inset: lead,
+                        well: icon.bg.and_then(|bg| {
+                            let color = match bg {
+                                crate::theme::Themed::Value(color) => Some(color),
+                                crate::theme::Themed::Token(token) => theme.get(token).color(),
+                            }?;
+                            Some(crate::compose_rich::IconWell {
+                                color,
+                                radius: icon.radius,
+                                pad,
+                            })
+                        }),
+                    });
                 }
+                _ => {}
             }
             let text_end = content.len();
             runs.push(crate::rich_text::TextRun {
@@ -4824,7 +4827,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     }
                 },
                 strikethrough: span.strikethrough,
-                padding: if apart {
+                padding: if room_after >= 0. {
                     [0., span.padding[1]]
                 } else {
                     span.padding
@@ -4836,14 +4839,13 @@ fn paragraph_effect<const LOCATING: bool>(
                 color,
             });
             // The room after the text: a placeholder of its own.
-            let end_room = padding_end.unwrap_or(span.padding[0]);
-            if apart && end_room > 0. {
+            if room_after > 0. {
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
                 runs.push(crate::rich_text::TextRun {
                     background: span.background,
                     underline: None,
                     strikethrough: None,
-                    padding: [end_room / 2., span.padding[1]],
+                    padding: [room_after / 2., span.padding[1]],
                     radius: span.radius,
                     range: text_end..content.len(),
                     font,

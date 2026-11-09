@@ -3821,6 +3821,20 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
     styled(view, node, vm, low, cx, element)
 }
 
+/// `window_drag` and `focus_on_press`, rare: apart from the node's common
+/// path.
+#[cold]
+#[inline(never)]
+fn press_flagged(mut view: View, flags: u8) -> View {
+    if flags & crate::node::KEEPS_FOCUS != 0 {
+        view = view.focus_on_press(false);
+    }
+    if flags & crate::node::WINDOW_DRAG != 0 {
+        view = view.window_drag();
+    }
+    view
+}
+
 /// What a node sets on its view, after its children: styles, handlers,
 /// observers. Apart from `build` for its frame, as `kind_view`.
 #[cfg_attr(debug_assertions, inline(never))]
@@ -4131,11 +4145,8 @@ fn styled(
     if let Some(focusable) = node.focusable {
         view = view.focusable(focusable);
     }
-    if node.press_keeps_focus {
-        view = view.focus_on_press(false);
-    }
-    if node.window_drag {
-        view = view.window_drag();
+    if node.press_flags != 0 {
+        view = press_flagged(view, node.press_flags);
     }
     if let Some(selectable) = node.selectable {
         view = view.selectable(selectable);
@@ -8363,12 +8374,6 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 if padding != [0.; 2] {
                     out = out.padding(padding[0], padding[1]);
                 }
-                if let Some(end) = (span.rare.as_deref())
-                    .and_then(|rare| rare.padding_end)
-                    .filter(|end| *end != padding[0])
-                {
-                    out = out.padding_end(end);
-                }
                 if radius > 0. {
                     out = out.radius(radius);
                 }
@@ -8387,9 +8392,15 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     }
                 }
                 let rare = span.rare.as_deref();
-                if let Some(build) = rare.and_then(|rare| rare.menu.as_ref()) {
-                    let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
-                    out = out.context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
+                if let Some(rare) = rare {
+                    if let Some(end) = rare.padding_end.filter(|end| *end != padding[0]) {
+                        out = out.padding_end(end);
+                    }
+                    if let Some(build) = rare.menu.as_ref() {
+                        let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
+                        out = out
+                            .context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
+                    }
                 }
                 if let Some(href) = &span.href {
                     out = out.href(href.clone());

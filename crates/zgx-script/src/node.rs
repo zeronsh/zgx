@@ -68,10 +68,9 @@ pub(crate) struct Node {
     /// `bg_shader`, `shader_params`, `layer_shader` and `layer_params`
     /// (boxed: few nodes have any).
     pub shaders: Option<Box<Shaders>>,
-    /// `window_drag = true`: a press on it moves the window.
-    pub window_drag: bool,
-    /// `focus_on_press = false`: a press on it leaves focus where it is.
-    pub press_keeps_focus: bool,
+    /// `window_drag = true` (`WINDOW_DRAG`) and `focus_on_press = false`
+    /// (`KEEPS_FOCUS`): rare, tested together where the node is styled.
+    pub press_flags: u8,
     /// `hook = false` or `private = true`: no plugin may target it
     /// (`ui.contribute { target }`), whatever matches it.
     pub private: bool,
@@ -665,6 +664,13 @@ pub(crate) struct LayoutAnim {
     pub hit: bool,
 }
 impl Node {
+    fn set_press_flag(&mut self, flag: u8, on: bool) {
+        if on {
+            self.press_flags |= flag;
+        } else {
+            self.press_flags &= !flag;
+        }
+    }
     /// The hook the app declares here (`hook = "name"`), if any.
     pub fn hook(&self) -> Option<&str> {
         self.a11y.as_ref()?.hook.as_deref()
@@ -689,8 +695,7 @@ impl Node {
             layout_id: None,
             mask: None,
             shaders: None,
-            window_drag: false,
-            press_keeps_focus: false,
+            press_flags: 0,
             private: false,
             selectable: None,
             selection_colors: None,
@@ -1452,6 +1457,11 @@ pub(crate) struct SpanIcon {
     pub radius: f32,
     pub pad: f32,
 }
+
+/// `Node::press_flags`: a press on it moves the window.
+pub(crate) const WINDOW_DRAG: u8 = 1;
+/// `Node::press_flags`: a press on it leaves focus where it is.
+pub(crate) const KEEPS_FOCUS: u8 = 2;
 
 /// A node's tooltip (`tooltip`, `tooltip_placement`).
 #[derive(Default, Clone)]
@@ -4009,8 +4019,8 @@ fn fill_from(
                 }
             },
             "focusable" => node.focusable = Some(lua.unpack(value)?),
-            "window_drag" => node.window_drag = lua.unpack(value)?,
-            "focus_on_press" => node.press_keeps_focus = !lua.unpack::<bool>(value)?,
+            "window_drag" => node.set_press_flag(WINDOW_DRAG, lua.unpack(value)?),
+            "focus_on_press" => node.set_press_flag(KEEPS_FOCUS, !lua.unpack::<bool>(value)?),
             "selectable" => node.selectable = lua.unpack(value)?,
             "selection_color" | "selected_text_color" => {
                 let at = usize::from(key == "selected_text_color");
