@@ -100,7 +100,7 @@ fn a_truncated_label_shrinks_in_rows_and_grids_taffy_lays_out() {
             row()
                 .w(200.)
                 .gap_x(8.)
-                .child(div().w(180.).h(10.).flex_shrink(1.))
+                .child(div().w(180.).h(10.).flex_shrink(1.).min_w(0.))
                 .child(label.flex_shrink(1.)),
         )
     };
@@ -109,13 +109,14 @@ fn a_truncated_label_shrinks_in_rows_and_grids_taffy_lays_out() {
     assert!((rects[1].width - proportional).abs() < 0.01, "{rects:?}");
     assert_eq!(gapped(text(WORD).text_wrap(false))[1].width, word);
     // A grid's `1fr` track (`minmax(auto, 1fr)`) takes its share, where
-    // the word would widen it.
+    // the word would widen it. (`grid_cols(2)`'s are `minmax(0, 1fr)`, as
+    // Tailwind's, which no word widens.)
     let tracks = |label: View| {
         children(
             column()
                 .w(60.)
                 .grid()
-                .grid_cols(2)
+                .grid_template_columns("1fr 1fr".parse().unwrap())
                 .child(label)
                 .child(div().h(10.)),
         )
@@ -126,6 +127,97 @@ fn a_truncated_label_shrinks_in_rows_and_grids_taffy_lays_out() {
         tracks(text(WORD).text_wrap(false))[0].width > 30.,
         "the word widens it"
     );
+}
+
+#[test]
+fn a_paragraph_truncated_and_untruncated_again_gives_way_and_holds() {
+    // A paragraph's truncation is its own (its kind), not its style:
+    // turned on and off in place, by `set_kind` or a streamed
+    // `set_leaf_kind`, in a plain row and in the rows and grids taffy lays
+    // out. Taffy measures an item's min-content at no width, where a
+    // truncated paragraph, wrapping or not, ends in an ellipsis that fits.
+    use zgx::rich_text::{RichText, TextRun};
+    use zgx::scene::NodeKind;
+    use zgx::text_layout::{TextOptions, TextOverflow};
+    type Parent = fn(View) -> View;
+    let rows: [(Parent, usize); 3] = [
+        (
+            |label| {
+                row()
+                    .w(60.)
+                    .child(div().w(180.).h(10.).flex_shrink(1.))
+                    .child(label.flex_shrink(1.))
+            },
+            1,
+        ),
+        (
+            |label| {
+                row()
+                    .w(60.)
+                    .gap_x(8.)
+                    .child(div().w(180.).h(10.).flex_shrink(1.).min_w(0.))
+                    .child(label.flex_shrink(1.))
+            },
+            1,
+        ),
+        (
+            |label| {
+                column()
+                    .w(60.)
+                    .grid()
+                    .grid_template_columns("1fr 1fr".parse().unwrap())
+                    .child(label)
+                    .child(div().h(10.))
+            },
+            0,
+        ),
+    ];
+    let words = format!("{WORD} {WORD}");
+    let paragraph = |overflow| NodeKind::RichText {
+        text: RichText::new(
+            words.as_str(),
+            vec![TextRun {
+                range: 0..words.len(),
+                ..TextRun::default()
+            }],
+        )
+        .unwrap()
+        .with_options(TextOptions {
+            overflow,
+            ..TextOptions::default()
+        })
+        .into(),
+    };
+    for leaf in [false, true] {
+        for (parent, at) in rows {
+            let mut ui = Ui::new(400., 300.);
+            let _view = ui.mount(parent(text(words.as_str()).text_wrap(true)));
+            ui.prepare_frame();
+            // The row's own child a paragraph, as a streamed reply's are.
+            let label = {
+                let scene = ui.scene.borrow();
+                let id = scene.children(scene.root())[0];
+                scene.children(id)[at]
+            };
+            let set = |ui: &mut Ui, overflow| {
+                let mut scene = ui.scene.borrow_mut();
+                if leaf {
+                    scene.set_leaf_kind(label, paragraph(overflow));
+                } else {
+                    scene.set_kind(label, paragraph(overflow));
+                }
+                drop(scene);
+                ui.prepare_frame();
+                ui.scene.borrow().bounds(label).width
+            };
+            // Untruncated, it holds its longest word, wider than the room.
+            let held = set(&mut ui, TextOverflow::Clip);
+            assert!(held > 60., "{leaf} {at}: {held}");
+            let width = set(&mut ui, TextOverflow::Ellipsis);
+            assert!(width < 31., "{leaf} {at}: {width}");
+            assert_eq!(set(&mut ui, TextOverflow::Clip), held, "{leaf} {at}");
+        }
+    }
 }
 
 #[test]
