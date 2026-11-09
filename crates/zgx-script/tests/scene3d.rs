@@ -543,12 +543,8 @@ fn a_window_reads_its_model_off_its_main_thread() {
     unsafe extern "C" {
         fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
     }
-    // Its real path: a model's buffers are found only below that (macOS's
-    // temporary directory is a link).
-    let dir = std::env::temp_dir()
-        .canonicalize()
-        .unwrap()
-        .join(format!("zgx-model-pipe-{}", std::process::id()));
+    // Under macOS's temporary directory, a link: found through it all the same.
+    let dir = std::env::temp_dir().join(format!("zgx-model-pipe-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let pipe = dir.join("buffer.bin");

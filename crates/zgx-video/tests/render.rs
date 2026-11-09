@@ -759,9 +759,7 @@ fn a_models_first_frame_draws_it() {
     unsafe extern "C" {
         fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
     }
-    // Its real path: a model's buffers are found only below that.
-    let held = temp_dir("render-model");
-    let dir = held.canonicalize().unwrap();
+    let dir = temp_dir("render-model");
     let pipe = dir.join("buffer.bin");
     let _ = std::fs::remove_file(&pipe);
     let name = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
