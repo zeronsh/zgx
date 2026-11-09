@@ -3986,9 +3986,9 @@ impl Ui {
             if !layout_changed && !geometry_changed {
                 // What is under the pointer, once layout is done: a popup
                 // between its layout and its placement is under no one's
-                // pointer. What hovering changes is laid out in the next pass.
-                if std::mem::take(&mut hover_stale) {
-                    self.input.refresh_hover(&self.scene);
+                // pointer. What a listener told changes is laid out in the
+                // next pass; a hover no listener heard changes nothing.
+                if std::mem::take(&mut hover_stale) && self.input.refresh_hover(&self.scene) {
                     continue;
                 }
                 if !self.run_after_layout() {
