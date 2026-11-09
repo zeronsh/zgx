@@ -272,7 +272,7 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def collect(pid, future, begin, out):
+def collect(pid, future, begin, out, target):
     cursor = begin['frame']
     frames, polls = {}, []
     while True:
@@ -288,7 +288,9 @@ def collect(pid, future, begin, out):
             cursor = max(f['frame'] for f in batch)
         # Numeric cursor is the last frame actually read, so a frame drawn
         # between this read and the next mark is never lost.
-        polls.append(request(pid, 'mark', name='drain')['data'])
+        mark = request(pid, 'mark', name='drain')['data']
+        mark['target'] = request(pid,'node',target=target)['data']
+        polls.append(mark)
         if future.done():
             future.result()
             break
@@ -444,8 +446,11 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                 with ThreadPoolExecutor(max_workers=1) as pool:
                     future = pool.submit(request, process.pid, 'replay', target=target, tape=text,
                                          timeout=events[-1][0] / 1000 + 20)
-                    frames, polls = collect(process.pid, future, begin, out)
+                    frames, polls = collect(process.pid, future, begin, out, target)
                     result['replay'] = future.result()
+                errors = request(process.pid,'errors')['text']
+                if 'error:' in errors or 'types:' in errors:
+                    raise RuntimeError(errors)
                 after = rss(process.pid)
                 result['polls'] = polls
                 result['frames'] = frames
@@ -499,6 +504,8 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                 if args.damage_check and 'ZGX_DAMAGE_CHECK frame' in (out / 'native.log').read_text():
                     result['failures'].append('stale pixels detected')
                 result['status'] = 'fail' if result['failures'] else 'pass'
+                process.terminate()
+                process.wait(timeout=5)
     except Exception as error:
         result['failures'].append(str(error))
     finally:

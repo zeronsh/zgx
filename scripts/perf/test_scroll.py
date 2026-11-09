@@ -99,6 +99,18 @@ class ScrollMetrics(unittest.TestCase):
         self.assertEqual(events[-1][-1], 'ended')
 
 
+class CollectionIntegrity(unittest.TestCase):
+    def test_disappearing_transcript_invalidates_the_sample(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def answer(pid,cmd,**kwargs):
+                if cmd=='frames': return {'data':[]}
+                if cmd=='mark': return {'data':{'frame':1}}
+                raise RuntimeError('nothing matches #transcript')
+            with patch.object(scroll,'request',side_effect=answer):
+                with self.assertRaisesRegex(RuntimeError,'nothing matches'):
+                    scroll.collect(1,None,{'frame':0},Path(directory),'#transcript')
+
+
 class DisplayModes(unittest.TestCase):
     def modes(self, directory):
         modes = object.__new__(scroll.RefreshModes)

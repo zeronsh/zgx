@@ -202,7 +202,10 @@ folded user prompts, tools, 400 sidebar sessions and the frosted composer.
 is the headline; generic transcript results cannot certify the real app.
 
 Use a dedicated source clone; `prepare_zeron.py` changes that clone's fixture
-geometry/reference hook and Cargo dependency paths. It never installs Zeron.
+geometry/reference hook and Cargo dependency paths. Only for `scroll_fixture.luau`,
+it leaves chat-data publication to the fixture; otherwise a disconnected engine's
+timeout replaces fixture state with nil. The real UI/rendering path is unchanged.
+A missing transcript during any collection poll invalidates the run. It never installs Zeron.
 Each launch strips inherited Zeron settings and uses fresh scratch `HOME`,
 `ZERON_DATA_DIR`, UI files and an unused engine port; engine spawning is disabled.
 No installed app or `~/.zeron` is used. Build proofs retain source diffs, lockfile

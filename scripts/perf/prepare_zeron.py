@@ -58,6 +58,14 @@ def main():
     }
 '''+text[at:]
         main_rs.write_text(text)
+    text = main_rs.read_text()
+    if '// Scroll fixture data is supplied by shell_fixture.' not in text:
+        text = text.replace('        chat::install(cx, &host);', '''        // Scroll fixture data is supplied by shell_fixture. A disconnected
+        // engine must not replace it with nil when its connection times out.
+        if entry != "scroll_fixture.luau" {
+            chat::install(cx, &host);
+        }''')
+        main_rs.write_text(text)
     manifest = app/'Cargo.toml'
     text = manifest.read_text()
     if '[profile.dist]' not in text:
