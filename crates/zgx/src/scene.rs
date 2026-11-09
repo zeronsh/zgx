@@ -4128,9 +4128,9 @@ impl Scene {
         }
         let empty = node.effects.blur_radius <= 0.0
             && !self.platform_nodes.contains(&id)
-            && !self
+            && self
                 .layer_shader(id)
-                .is_some_and(|layer| layer.shader.is_some())
+                .is_none_or(|layer| layer.shader.is_none())
             && match &node.kind {
                 NodeKind::Container(_) => true,
                 NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => quad.paints_nothing(),
