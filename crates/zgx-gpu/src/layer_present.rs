@@ -790,7 +790,13 @@ struct Drawables {
     /// and, once they do, the last wait, until the host skips a tick.
     watch: crate::phase_watch::PhaseWatch,
     rephase: Option<std::time::Duration>,
+    /// The next frame's drawable, waited for off the main thread as soon as
+    /// a frame takes one (`ZGX_DRAWABLE_PREFETCH=0`: on it, as it draws).
+    prefetch: Option<crate::plane_drawables::Drawables>,
 }
+/// `ZGX_DRAWABLE_PREFETCH=0`: a frame waits for its drawable itself.
+static DRAWABLE_PREFETCH: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_DRAWABLE_PREFETCH").is_none_or(|v| v != "0"));
 /// Hides the plain layer's tiles once the video layer above it shows a
 /// frame: until then they show the frame before; after, under a window's
 /// translucent pixels, they would show through. Checked on the main queue
@@ -1400,6 +1406,8 @@ impl Layer {
             layer.setHidden(true);
             transaction(|| self.host.addSublayer(&layer));
             crate::present_log::log(|| "drawables-start".into());
+            let prefetch = DRAWABLE_PREFETCH
+                .then(|| crate::plane_drawables::Drawables::new(layer.clone(), None));
             Drawables {
                 layer,
                 pending: None,
@@ -1407,17 +1415,37 @@ impl Layer {
                 feedback: Default::default(),
                 watch: Default::default(),
                 rephase: None,
+                prefetch,
             }
         });
         let size = CGSize::new(width as f64, height as f64);
         if drawables.layer.drawableSize() != size {
+            // One waited for at the old size goes back to the pool.
+            if let Some(prefetch) = &drawables.prefetch {
+                prefetch.cancel();
+                drop(prefetch.take());
+            }
             drawables.layer.setDrawableSize(size);
         }
         if drawables.layer.isOpaque() != opaque {
             transaction(|| drawables.layer.setOpaque(opaque));
         }
         let asked = std::time::Instant::now();
-        let drawable = drawables.layer.nextDrawable()?;
+        // Waited for already, off the main thread, while the last frame ran
+        // its course; else (the first, after a resize) waited for here.
+        let ready = drawables.prefetch.as_ref().and_then(|prefetch| {
+            prefetch.take().filter(|drawable| {
+                let texture = drawable.texture();
+                texture.width() as f64 == size.width && texture.height() as f64 == size.height
+            })
+        });
+        let drawable = match ready {
+            Some(drawable) => drawable,
+            None => drawables.layer.nextDrawable()?,
+        };
+        if let Some(prefetch) = &mut drawables.prefetch {
+            prefetch.want();
+        }
         let waited = asked.elapsed();
         if drawables.watch.observe(waited) {
             drawables.rephase = Some(waited);
@@ -1507,6 +1535,11 @@ impl Layer {
         {
             drawables.shown = false;
             drawables.layer.setHidden(true);
+            // None held for a frame the plain layer shows instead.
+            if let Some(prefetch) = &drawables.prefetch {
+                prefetch.cancel();
+                drop(prefetch.take());
+            }
         }
     }
     /// Drop the drawable layer and its pool (at rest, showing a tile).
