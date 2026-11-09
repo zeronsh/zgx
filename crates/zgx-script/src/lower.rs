@@ -8629,6 +8629,9 @@ fn text_span_of(span: &OwnedSpan, vm: &Rc<Vm>, low: &Rc<Lowering>) -> TextSpan {
     {
         out = out.padding_end(end);
     }
+    if rare.is_some_and(|rare| rare.continues) {
+        out = out.continues();
+    }
     if let Some(build) = rare.and_then(|rare| rare.menu.as_ref()) {
         let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
         out = out.context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));

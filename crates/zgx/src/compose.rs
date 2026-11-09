@@ -4920,8 +4920,8 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, icon, menu, plain, room_after) = match span.extras.take() {
-                None => (None, None, None, false, -1.),
+            let (hover, icon, menu, plain, room_after, continues) = match span.extras.take() {
+                None => (None, None, None, false, -1., false),
                 Some(extras) => {
                     let extras = *extras;
                     let end = extras.padding_end.unwrap_or(span.padding[0]);
@@ -4938,6 +4938,7 @@ fn paragraph_effect<const LOCATING: bool>(
                         extras.menu,
                         extras.plain,
                         if apart { end } else { -1. },
+                        extras.continues,
                     )
                 }
             };
@@ -5045,6 +5046,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     font: font.clone(),
                     font_size,
                     color,
+                    continues: false,
                 }),
                 (Some(icon), Some(range)) => {
                     let lead = span.padding[0];
@@ -5063,6 +5065,7 @@ fn paragraph_effect<const LOCATING: bool>(
                         font: font.clone(),
                         font_size,
                         color,
+                        continues: false,
                     });
                     icons.push(crate::compose_rich::InlineIcon {
                         range,
@@ -5129,6 +5132,9 @@ fn paragraph_effect<const LOCATING: bool>(
                 font: font.clone(),
                 font_size,
                 color,
+                // (The next piece of the span before, unless its room is
+                // a run of its own.)
+                continues: continues && room_after < 0.,
             });
             // The room after the text: a placeholder of its own.
             if room_after > 0. {
@@ -5143,6 +5149,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     font,
                     font_size,
                     color,
+                    continues: false,
                 });
             }
         }
