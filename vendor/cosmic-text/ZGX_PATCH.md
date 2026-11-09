@@ -352,6 +352,11 @@ added to `Metrics`, `LayoutRun`, `LayoutRunIter` or a glyph, and only a line
 being laid out reads it, once. zgx-gpu takes the one leading after the last
 line off a text's size.
 
+It exists only on iOS and in this crate's tests, or with `text-leading` for
+zgx's host tests. Elsewhere the fields are gone and `Buffer::set_leading` does
+nothing: an arm64 cachegrind read of it at runtime cost text 0.23% on the
+mount-text scene.
+
 ## A paragraph's words for a layout outside a line (zgx-cosmic-text 0.19.8)
 
 zgx-gpu lays out a paragraph that this crate shapes as one left-to-right span
