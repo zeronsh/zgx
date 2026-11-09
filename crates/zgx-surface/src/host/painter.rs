@@ -249,9 +249,17 @@ impl Painter {
                     let mut shared = app.shared.lock().unwrap();
                     self.log
                         .presented(shared.presented_at.take(), shared.ring.has_pending());
-                    shared.ring.take_newest()
+                    shared.ring.show_newest()
                 };
-                let Some(slot) = newest else { return };
+                let Some((slot, previous)) = newest else {
+                    return;
+                };
+                // The one it replaces was copied as it showed: the client's
+                // again now. Held until then, it paces the client to the
+                // frames shown, as a Vulkan buffer's release does.
+                if let Some(previous) = previous {
+                    app.out.send(release(previous));
+                }
                 let (Some(upload), Some(map)) =
                     (&buffers.upload, buffers.maps.get(slot.index as usize))
                 else {
@@ -277,8 +285,6 @@ impl Painter {
                         depth_or_array_layers: 1,
                     },
                 );
-                // `write_texture` copied it: the client's again at once.
-                app.out.send(release(slot));
                 if self.shown.as_ref().is_none_or(|s| s._texture != *upload) {
                     self.shown = Some(Shown {
                         bind: blit.bind(frame.device, upload),
