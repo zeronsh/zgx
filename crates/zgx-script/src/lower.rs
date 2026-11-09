@@ -8399,8 +8399,11 @@ impl crate::markdown::view::Look for ScriptLook {
             }
         };
         span.text = Text::Literal(run.text.to_owned());
-        // (A link still streaming its address goes nowhere yet.)
-        let target = run.link.filter(|t| !t.is_empty());
+        // (A link still streaming its address goes nowhere yet, nor one
+        // that isn't the web's where only those are links.)
+        let target = run
+            .link
+            .filter(|t| !t.is_empty() && (!look.web_only || web_address(t)));
         if let Some(target) = target
             && (web_address(target) || look.on_link.is_none())
         {

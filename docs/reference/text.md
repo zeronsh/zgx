@@ -172,12 +172,13 @@ return ui.markdown_view { "{reply}", w = 520, text_size = 15 }
 
 ### An app's own look
 
-`style` draws its prose as the app's own `ui.rich` and `ui.span` would, without the script building them: so far its paragraphs, and the runs of every block. `paragraph` holds a paragraph's options as `ui.rich`'s (`text_size`, `line_height`, `color`…), each kind of run its options as `ui.span`'s (`strong`, `em`, `strike`, `code`, `link`), and `gap` the room between the top-level blocks. They resolve as those elements' do: tokens through the node's theme (a window's or a plugin's overrides apply), and a function or a state is followed (a change makes the runs again, in place). A run of several kinds (bold code in a link) takes each kind's options, laid over one another in that order: a link's colour over code's. A kind left out keeps the view's own look (bold 700, italic, struck, `code` in mono on `$surface.sunken`, links in `$accent`); one given replaces it. A name the style doesn't know is an error.
+`style` draws its prose as the app's own `ui.rich` and `ui.span` would, without the script building them: so far its paragraphs, and the runs of every block. `paragraph` holds a paragraph's options as `ui.rich`'s (`text_size`, `line_height`, `color`…), each kind of run its options as `ui.span`'s (`strong`, `em`, `strike`, `code`, `link`), and `gap` the room between the top-level blocks. They resolve as those elements' do: tokens through the node's theme (a window's or a plugin's overrides apply), and a function or a state is followed (a change makes the runs again, in place). A run of several kinds (bold code in a link) takes each kind's options, laid over one another in that order: a link's colour over code's. A kind left out keeps the view's own look (bold 700, italic, struck, `code` in mono on `$surface.sunken`, links in `$accent`); one given replaces it. A name the style doesn't know is an error. A view with a `style` is part of the app's page: selectable as what holds it is (a transcript's list, say), rather than a selectable document of its own.
 
 | Option | Type | |
 | --- | --- | --- |
 | `on_link` | `(target, e: ClickEvent) -> boolean?` | a link clicked, told where it goes and the keys held. `true` back handled it: a web address (`http:`, `https:`, `mailto:`, which the link keeps for its menu and pointing hand) stays shut. Any other target goes to it alone, and opens nothing else |
 | `link_menu` | `(target, e: PointerEvent) -> { Node }?` | a link's context menu, as a span's `context_menu`, told where it goes |
+| `links` | `"all"` or `"web"` | `"web"`: only web addresses are links; a link elsewhere (a path, with nothing to open it) is styled as one and goes nowhere: no click, menu, address or link role |
 
 A link whose address is still streaming in is styled as one but goes nowhere: neither is asked of it.
 
