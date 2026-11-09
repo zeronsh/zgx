@@ -11847,6 +11847,24 @@ impl GpuRenderer {
     /// Plan a batch of backdrop filters (see blur.wgsl): each one's levels
     /// as slots of the atlas, packed, the atlas grown to hold them.
     fn plan_blur(&mut self, filters: &[Filter]) -> Option<BlurPlan> {
+        zgx::profile::note(|| {
+            let each: Vec<String> = filters
+                .iter()
+                .map(|filter| {
+                    let area = filter.bounds.intersection(filter.clip).unwrap_or_default();
+                    format!(
+                        "{:.0}x{:.0} at {:.0},{:.0} sigma {:.0} outputs {}",
+                        area.width,
+                        area.height,
+                        area.x,
+                        area.y,
+                        filter.effects.blur_radius,
+                        filter.outputs.len()
+                    )
+                })
+                .collect();
+            format!("blur batch: {}", each.join("; "))
+        });
         // Mixed over the target by dual-source blending, unless drawn at
         // presentation into two targets at once (which it cannot be): then a
         // copy of each area's pixels to mix with.
