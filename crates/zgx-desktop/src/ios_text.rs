@@ -1073,13 +1073,6 @@ impl TextInput {
                 ),
             }
         }
-        // The caret and handles where the editor's text now lies (a field
-        // scrolled to the caret, lines rewrapped): the display interaction
-        // keeps its range and places it again. Edits and moves reach it
-        // through the keyboard's own path or `tell`.
-        if self.focused.get() {
-            selection_display(&self.view, None);
-        }
     }
 }
 /// UIKit's caret, selection and handles over the input view: its
