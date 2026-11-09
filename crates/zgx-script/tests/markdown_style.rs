@@ -640,6 +640,54 @@ fn a_block_the_style_doesnt_draw_is_the_hooks() {
 }
 
 #[test]
+fn a_code_block_or_table_the_hook_draws_grows_in_place_with_its_value_live() {
+    let mut app = TestApp::inline(
+        r##"local reply = ui.state("reply", "```lua\nprint(1)\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |")
+        local built = ui.state("built", "")
+        return ui.column { w = 600,
+            ui.markdown_view { "{reply}", id = "md", w_full = true, style = {},
+                block = function(b, at)
+                    built:set(built:peek() .. b.t .. ";")
+                    local live = at.live
+                    return ui.text { id = "hooked-" .. b.t, function()
+                        local now = live:get()
+                        return if now.t == "code" then now.text else tostring(#now.rows)
+                    end }
+                end },
+        }"##,
+    );
+    app.frames(2);
+    let state = |app: &TestApp, name: &str| {
+        (app.host.states().into_iter())
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.to_string())
+            .unwrap()
+    };
+    assert_eq!(app.error(), None);
+    assert_eq!(state(&app, "built"), "code;table;");
+    // More written to each: the hook's blocks as they were, their values
+    // followed.
+    app.host
+        .set_state(
+            "reply",
+            Value::from("```lua\nprint(1)\nprint(2)\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |"),
+        )
+        .unwrap();
+    app.frames(2);
+    assert_eq!(app.error(), None);
+    assert_eq!(state(&app, "built"), "code;table;", "built once");
+    let tree = app.tree();
+    assert!(tree.contains("print(2)"), "{tree}");
+    assert!(tree.contains("\"2\""), "two rows: {tree}");
+    // Another language: another block, built for it.
+    app.host
+        .set_state("reply", Value::from("```rust\nfn main() {}\n```"))
+        .unwrap();
+    app.frames(2);
+    assert_eq!(state(&app, "built"), "code;table;code;");
+}
+
+#[test]
 fn each_top_level_block_is_told_to_track_as_it_mounts_and_goes() {
     let app = TestApp::inline(
         r##"local reply = ui.state("reply", "One.\n\nTwo.")
