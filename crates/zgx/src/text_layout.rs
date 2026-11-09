@@ -748,15 +748,20 @@ impl FallbackTextLayout {
         let (mut x, mut y, mut max_x, mut pitch) = (0_f32, 0_f32, 0_f32, 0_f32);
         let mut row_start = 0;
         let mut run_index = 0;
+        // Each run's line, worked out once rather than for each grapheme.
+        let (mut line, mut line_of) = (0_f32, usize::MAX);
         for (index, grapheme) in rich.text().grapheme_indices(true) {
             while rich.runs()[run_index].range.end <= index {
                 run_index += 1;
             }
             let run = &rich.runs()[run_index];
-            let line = run
-                .font
-                .line_height
-                .resolve_in(&run.font.family, run.font_size);
+            if line_of != run_index {
+                line_of = run_index;
+                line = run
+                    .font
+                    .line_height
+                    .resolve_in(&run.font.family, run.font_size);
+            }
             let newline = grapheme.contains(['\r', '\n']);
             let advance = run.estimated_advance(grapheme, index);
             if newline || width.is_some_and(|w| x > 0. && x + advance > w.max(0.)) {

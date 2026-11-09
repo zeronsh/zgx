@@ -788,8 +788,6 @@ struct Entry {
     /// None if the text does not qualify.
     compact: Option<Compact>,
     metrics: Metrics,
-    /// The part of each line height that is leading (`LineHeight::with_leading`).
-    leading: f32,
     /// The width `lines` are laid out at, if any.
     laid: Option<Option<f32>>,
     /// Inline: an entry is made for every new text, and keeps `SIZES`.
@@ -798,7 +796,24 @@ struct Entry {
     /// The `trim` that last found it drawn.
     drawn: u64,
 }
+/// `size` without the leading after its last line.
+#[inline]
+fn trimmed(size: (f32, f32), leading: f32) -> (f32, f32) {
+    if leading == 0. {
+        size
+    } else {
+        (size.0, (size.1 - leading).max(0.))
+    }
+}
 impl Entry {
+    /// The part of each line height that is leading
+    /// (`LineHeight::with_leading`): the most of its spans'. Asked where a
+    /// size is worked out or lines are laid out, not of each measure.
+    fn leading(&self) -> f32 {
+        (self.key.spans.iter())
+            .map(|(_, font, ..)| font.line_height.leading())
+            .fold(0., f32::max)
+    }
     fn shaped_bytes(&self) -> usize {
         match (&self.lines, &self.words) {
             (Some(_), _) => self.key.text.len() * SHAPED_BYTES_PER_CHAR + 512,
@@ -822,6 +837,7 @@ impl Entry {
             self.laid = Some(width);
             return;
         }
+        let leading = self.leading();
         let lines = self.lines.as_mut().expect("shaped lines");
         for line in lines.iter_mut() {
             line.reset_layout();
@@ -834,7 +850,7 @@ impl Entry {
                 None,
                 TAB_WIDTH,
                 Hinting::default(),
-                self.leading,
+                leading,
             );
         }
         self.laid = Some(width);
@@ -982,7 +998,7 @@ impl Entry {
             }
         };
         // Worked out once for a width: no leading after the last line.
-        let size = (size.0, (size.1 - self.leading).max(0.));
+        let size = trimmed(size, self.leading());
         if self.sizes.len() == SIZES {
             self.sizes.remove(0);
         }
@@ -1286,7 +1302,7 @@ impl TextCache {
             return (self.sized(fonts, hash, width), 0.);
         };
         let mut reach = compact.size_reach(&self.slab, width, entry.metrics.line_height);
-        reach.0.1 = (reach.0.1 - entry.leading).max(0.);
+        reach.0 = trimmed(reach.0, entry.leading());
         if entry.sizes.len() == SIZES {
             entry.sizes.remove(0);
         }
@@ -1609,10 +1625,6 @@ impl TextCache {
             );
         }
         let (lines, metrics) = self.shape(fonts, source, caret_row, &extended);
-        let leading = match source {
-            Source::Rich(rich) => crate::text::runs_leading(rich),
-            Source::Plain { font, .. } => font.line_height.leading(),
-        };
         if known {
             // Evicted lines, shaped again for drawing; measurements stay.
             let entry = self.entries.get_mut(&hash).expect("cached");
@@ -1636,7 +1648,6 @@ impl TextCache {
                 lines: (!detached).then_some(lines),
                 words: None,
                 metrics,
-                leading,
                 laid: None,
                 sizes: smallvec::SmallVec::new(),
                 used: self.clock,
@@ -1845,7 +1856,6 @@ impl TextCache {
                 lines: None,
                 words,
                 metrics,
-                leading: 0.,
                 laid: None,
                 sizes: smallvec::SmallVec::new(),
                 used: self.clock,
