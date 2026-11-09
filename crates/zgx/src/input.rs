@@ -579,6 +579,11 @@ pub struct NodeInput {
     /// Its place in Tab order, as HTML's `tabindex`: positive indices first,
     /// in order, then 0s in document order; negative leaves Tab order.
     pub tab_index: i32,
+    /// A press on it (or anything inside it) leaves focus where it is, as
+    /// the web's `mousedown` with `preventDefault()`: a list hanging from a
+    /// field, its rows and tabs taking clicks while the field keeps the
+    /// keys and its caret.
+    pub press_keeps_focus: bool,
 }
 type Callback = Rc<RefCell<dyn FnMut(&mut EventContext)>>;
 /// `set_tab_hook`'s: the focused node, whether backward, and where Tab
@@ -3251,8 +3256,9 @@ impl InputDispatcher {
         if !prevented {
             match &event {
                 InputEvent::PointerDown {
+                    x,
+                    y,
                     button: PointerButton::Primary,
-                    ..
                 } => {
                     self.state.borrow_mut().pressed = target;
                     let mut node = target.filter(|id| self.enabled(&scene.borrow(), *id));
@@ -3264,7 +3270,28 @@ impl InputDispatcher {
                         }
                         node = scene.borrow().parent(id);
                     }
-                    if !keep_focus && (target.is_some() || self.focus_scope().is_none()) {
+                    // A press inside a node that keeps focus where it is
+                    // (`press_keeps_focus`): focus stays. (From what's
+                    // under the pointer, a listener or not: its blank room
+                    // too.)
+                    let held = {
+                        let scene = scene.borrow();
+                        let mut node = scene
+                            .hit_test_all(*x, *y)
+                            .into_iter()
+                            .find(|hit| !self.boxless(&scene, *hit))
+                            .or(target);
+                        let mut held = false;
+                        while let Some(id) = node {
+                            if self.options(id).is_some_and(|o| o.press_keeps_focus) {
+                                held = true;
+                                break;
+                            }
+                            node = scene.parent(id);
+                        }
+                        held
+                    };
+                    if !keep_focus && !held && (target.is_some() || self.focus_scope().is_none()) {
                         self.focus(scene, focus);
                     }
                 }
