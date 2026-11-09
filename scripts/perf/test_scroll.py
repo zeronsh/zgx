@@ -14,6 +14,13 @@ class ScrollMetrics(unittest.TestCase):
         self.assertEqual(scroll.behavior_checks(metrics,[],[],'0',True),{})
         self.assertEqual(scroll.behavior_checks(metrics,[],[],'0',False),{})
 
+    def test_frame_source_context_does_not_change_the_mode(self):
+        frame=dict(frame=1,notes=['scroll @1 copied its pixels',
+                   'frame source: view link (wanted true, rate Some(30), scroll live true, coasting false, input true)'],
+                   phases=[dict(phase='paint',micros=100,instructions=1000)],gpu_micros=500)
+        result=scroll.summarize([frame],[(.01,.01,1,0)],[(0,'pixel',0,-10,'moved')],120,2,0,{})
+        self.assertEqual(result['frame_source_counts'],{'view link':1})
+
     def test_catalog_settlement_must_be_observed_and_missing_is_not_loading(self):
         self.assertTrue(scroll.catalog_matches({'bench_catalog_complete':True},'settled'))
         self.assertTrue(scroll.catalog_matches({'bench_catalog_complete':False},'loading'))

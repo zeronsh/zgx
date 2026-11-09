@@ -354,7 +354,7 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
         in_motion=in_motion_window(f,windows,trace_to_host_ms,anchor)
         if f.get('spare', False) or (not moving and not reference and not in_motion):
             continue
-        frame_sources.update(n.removeprefix('frame source: ') for n in notes if n.startswith('frame source: '))
+        frame_sources.update(n.removeprefix('frame source: ').split(' (',1)[0] for n in notes if n.startswith('frame source: '))
         noted_frames+=moving or reference
         if in_motion:motion_frames.append(f)
         scroll_frames.append(f)
