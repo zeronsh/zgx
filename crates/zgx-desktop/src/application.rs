@@ -3675,6 +3675,18 @@ impl Host {
             },
             accesskit::Action::SetTextSelection => {
                 if let Some(accesskit::ActionData::SetTextSelection(selection)) = request.data {
+                    // (Which client asked isn't said: AppKit's accessibility
+                    // calls don't name the process making them.)
+                    let _cause = self.context.ui.note_selection_cause(|| {
+                        format!(
+                            "an accessibility client's SetTextSelection on @{} ({:?} char {} to {:?} char {})",
+                            node.number(),
+                            selection.anchor.node,
+                            selection.anchor.character_index,
+                            selection.focus.node,
+                            selection.focus.character_index,
+                        )
+                    });
                     match self.tree.resolve_selection(&selection) {
                         Some((owner, anchor, focus)) if owner == node => {
                             self.context

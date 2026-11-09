@@ -3420,6 +3420,7 @@ impl Ui {
         if self.storage.preparing_frame.get() {
             return Ok(());
         }
+        crate::selection::count_frame();
         // A new pixel scale (the window moved to another display) places
         // scroll content afresh from the offsets it was scrolled to.
         let scale = self.scene.borrow().pixel_scale();

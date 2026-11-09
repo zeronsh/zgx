@@ -260,6 +260,60 @@ pub(crate) struct State {
     deferred: Vec<Shown>,
     /// The scene's geometry when `deferred` was last checked.
     deferred_at: u64,
+    /// `ZGX_SELECTION_LOG`: what is changing the selection, and the last
+    /// change logged.
+    cause: Option<String>,
+    logged: Option<Logged>,
+}
+
+/// `ZGX_SELECTION_LOG=1` (a development aid; nothing when unset): a line on
+/// standard error each time the selection changes, saying what changed it
+/// (a key, a pointer, an accessibility client, a call from where, a row
+/// coming back), the frame, and how much it takes in characters and rows.
+fn log_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("ZGX_SELECTION_LOG").is_some_and(|v| !v.is_empty() && v != "0")
+    })
+}
+/// `Ui::note_selection_cause`'s cause, until it goes out of scope.
+#[doc(hidden)]
+#[must_use]
+pub struct SelectionCause(Option<WeakUi>);
+impl Drop for SelectionCause {
+    fn drop(&mut self) {
+        if let Some(ui) = self.0.as_ref().and_then(WeakUi::upgrade)
+            && let Ok(mut state) = ui.selection_state().try_borrow_mut()
+        {
+            state.cause = None;
+        }
+    }
+}
+/// Frames prepared, for the log's lines.
+static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// A frame is being prepared (`Ui::try_prepare_frame`).
+#[inline(always)]
+pub(crate) fn count_frame() {
+    if log_on() {
+        FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+/// A selection as the log tells it: a change of any of it is a line.
+#[derive(Clone, PartialEq)]
+struct Logged {
+    selected: bool,
+    ends: (String, String),
+    chars: usize,
+    nodes: usize,
+    rows: usize,
+    all: bool,
+}
+fn end_name(end: &End) -> String {
+    match end {
+        End::Live(point) => format!("at @{}:{}", point.node.number(), point.offset),
+        End::Parked(row, offset) => format!("parked in row {} at {offset}", row.index),
+        End::Gone => "gone".into(),
+    }
 }
 
 /// Rows a copy takes from one list's row text at most.
@@ -738,6 +792,13 @@ impl Ui {
         count: u8,
         modifiers: Modifiers,
     ) -> bool {
+        let _cause = self.note_selection_cause(|| {
+            format!(
+                "pointer press ({count} click{}{})",
+                if count == 1 { "" } else { "s" },
+                if modifiers.shift { ", shift" } else { "" }
+            )
+        });
         let point = self.point_at(root, x, y);
         let mut state = self.selection_state().borrow_mut();
         state.active_root = Some(root);
@@ -837,6 +898,7 @@ impl Ui {
             let mut state = self.selection_state().borrow_mut();
             state.units = Some((unit, edges, (anchor, focus)));
         }
+        let _cause = self.note_selection_cause(|| "pointer drag".into());
         self.set_selection(Some(root), Some(anchor), Some(focus));
         self.arm_selection_scroll();
         true
@@ -1058,6 +1120,8 @@ impl Ui {
                 end(state.focus, &state.focus_row),
             )
         };
+        // (For `ZGX_SELECTION_LOG`, as they stand before the range is made.)
+        let log_ends = log_on().then(|| (end_name(&anchor), end_name(&focus)));
         if let End::Live(point) = anchor {
             state.anchor = Some(point);
         }
@@ -1185,6 +1249,9 @@ impl Ui {
         let semantic_root = selected.filter(|_| document.is_some());
         let previous = std::mem::replace(&mut state.semantic_root, semantic_root);
         let old = std::mem::replace(&mut state.shown, shown.clone());
+        if let Some(ends) = log_ends {
+            self.log_selection(&mut state, ends, &shown, selected.is_some());
+        }
         let inactive = state.inactive;
         {
             let scene = self.scene.borrow();
@@ -1237,6 +1304,73 @@ impl Ui {
         if !gesture {
             self.selection_state().borrow_mut().layouts.clear();
         }
+    }
+    /// `ZGX_SELECTION_LOG`'s line for the selection as it now stands, if
+    /// it changed: what changed it, the frame, and what it takes.
+    fn log_selection(
+        &self,
+        state: &mut State,
+        ends: (String, String),
+        shown: &[Shown],
+        selected: bool,
+    ) {
+        let scene = self.scene.borrow();
+        let chars = shown
+            .iter()
+            .filter_map(|part| {
+                let text = text_of(&scene, part.node)?;
+                let range = part.range.start.min(text.len())..part.range.end.min(text.len());
+                Some(text.get(range)?.chars().count())
+            })
+            .sum();
+        let rows: std::collections::HashSet<(NodeId, usize)> = shown
+            .iter()
+            .filter_map(|part| row_of(&state.rows, &scene, part.node))
+            .collect();
+        let now = Logged {
+            selected,
+            ends,
+            chars,
+            nodes: shown.len(),
+            rows: rows.len(),
+            all: state.all,
+        };
+        let cause = state.cause.take();
+        let before = state.logged.replace(now.clone());
+        if cause.is_none() && before.as_ref() == Some(&now) {
+            return;
+        }
+        // Nothing said what changed it: the scene did.
+        let cause = cause.unwrap_or_else(|| {
+            let parked = |ends: &(String, String)| {
+                ends.0.starts_with("parked") || ends.1.starts_with("parked")
+            };
+            let was_parked = before.as_ref().is_some_and(|b| parked(&b.ends));
+            if !selected && before.as_ref().is_some_and(|b| b.selected) {
+                "its text went (ended)".into()
+            } else if was_parked && !parked(&now.ends) {
+                "revived: its row mounted again".into()
+            } else if parked(&now.ends) {
+                "a row it is in was recycled (parked)".into()
+            } else if state.all {
+                "select-all following the region's ends as rows mount".into()
+            } else {
+                "the scene changed under it (refresh)".into()
+            }
+        });
+        let frame = FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        if !selected {
+            eprintln!("zgx selection: frame {frame}: none ({cause})");
+            return;
+        }
+        eprintln!(
+            "zgx selection: frame {frame}: {cause}: {chars} chars in {} text nodes, {} list rows{}; anchor {}, focus {}",
+            now.nodes,
+            now.rows,
+            if now.all { ", all of the region" } else { "" },
+            now.ends.0,
+            now.ends.1,
+        );
     }
     /// Lay out the highlights of `parts` in view; returns those out of
     /// view, their highlights cleared until they show.
@@ -1505,7 +1639,10 @@ impl Ui {
     }
     /// Select from `anchor` to `focus`, both in one selectable region.
     /// Returns false (selecting nothing) otherwise.
+    #[track_caller]
     pub fn select_text(&self, anchor: TextPoint, focus: TextPoint) -> bool {
+        let at = std::panic::Location::caller();
+        let _cause = self.note_selection_cause(|| format!("select_text, called at {at}"));
         let root = {
             let scene = self.scene.borrow();
             let root = scene.selection_root(anchor.node);
@@ -1527,7 +1664,11 @@ impl Ui {
     }
     /// Select as assistive technology asks: each end a label and an offset
     /// into its semantic value (`SemanticNode::document_selection`).
+    #[track_caller]
     pub fn select_accessible_text(&self, anchor: (NodeId, usize), focus: (NodeId, usize)) -> bool {
+        let at = std::panic::Location::caller();
+        let _cause =
+            self.note_selection_cause(|| format!("select_accessible_text, called at {at}"));
         let point = |(node, offset): (NodeId, usize)| {
             let scene = self.scene.borrow();
             scene.contains(node).then(|| TextPoint {
@@ -1541,7 +1682,10 @@ impl Ui {
         }
     }
     /// Select all the text in the selectable region holding `node`.
+    #[track_caller]
     pub fn select_all_text(&self, node: NodeId) -> bool {
+        let at = std::panic::Location::caller();
+        let _cause = self.note_selection_cause(|| format!("select_all_text, called at {at}"));
         let Some(root) = self.scene.borrow().selection_root(node) else {
             return false;
         };
@@ -1575,7 +1719,10 @@ impl Ui {
     /// does: a long press on a touch screen starts a selection this way.
     /// Returns false (changing nothing) when no selectable text is there,
     /// or it is in an editor, which selects its own.
+    #[track_caller]
     pub fn select_word_at(&self, x: f32, y: f32) -> bool {
+        let at = std::panic::Location::caller();
+        let _cause = self.note_selection_cause(|| format!("select_word_at, called at {at}"));
         let Some(target) = self.scene.borrow().hit_test(x, y) else {
             return false;
         };
@@ -1615,8 +1762,28 @@ impl Ui {
         true
     }
     /// Clear the text selection.
+    #[track_caller]
     pub fn clear_text_selection(&self) {
+        let at = std::panic::Location::caller();
+        let _cause = self.note_selection_cause(|| format!("clear_text_selection, called at {at}"));
         self.set_selection(None, None, None);
+    }
+    /// What is about to change the selection, for `ZGX_SELECTION_LOG`'s
+    /// next line (the first said wins: the outermost caller). Nothing
+    /// unless the log is on.
+    /// It lasts while the returned guard does: a cause that changed
+    /// nothing isn't left for the next change.
+    #[doc(hidden)]
+    pub fn note_selection_cause(&self, cause: impl FnOnce() -> String) -> SelectionCause {
+        if !log_on() {
+            return SelectionCause(None);
+        }
+        let mut state = self.selection_state().borrow_mut();
+        if state.cause.is_some() {
+            return SelectionCause(None);
+        }
+        state.cause = Some(cause());
+        SelectionCause(Some(self.downgrade()))
     }
     /// The selected text as plain text: a node's selected part as it is
     /// (soft wraps join, its own line breaks stay), and between nodes what
@@ -2172,6 +2339,7 @@ impl Ui {
             }
         };
         self.selection_state().borrow_mut().active_root = Some(root);
+        let _cause = self.note_selection_cause(|| format!("shift key ({step:?})"));
         self.set_selection(Some(root), Some(anchor), Some(next));
         self.reveal_selection_focus();
         true
@@ -2266,6 +2434,7 @@ impl Ui {
                     let state = self.selection_state().borrow();
                     state.root.or(state.active_root)
                 };
+                let _cause = self.note_selection_cause(|| "Select All key (primary+A)".into());
                 if let Some(root) = root.filter(|root| self.scene.borrow().contains(*root))
                     && self.select_all_text(root)
                 {
@@ -2301,6 +2470,7 @@ impl Ui {
                 if !acts {
                     self.selection_state().borrow_mut().active_root = None;
                     if self.selection_state().borrow().anchor.is_some() {
+                        let _cause = self.note_selection_cause(|| "a press elsewhere".into());
                         self.clear_text_selection();
                     }
                 }
@@ -2356,6 +2526,8 @@ pub(crate) fn context_menu(
                 .id("selection-select-all")
                 .on_click(move || {
                     if let Some(ui) = all.upgrade() {
+                        let _cause =
+                            ui.note_selection_cause(|| "Select All (zgx's context menu)".into());
                         ui.select_all_text(root);
                     }
                 }),
