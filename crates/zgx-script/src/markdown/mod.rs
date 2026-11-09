@@ -6,7 +6,9 @@
 //! - `p` (`s`: runs), `h` (`l`: level, `s`), `code` (`lang`, `text`, and
 //!   what [`Options::code`] adds), `ul` / `ol` (`start`, `items`: a list of
 //!   block lists), `quote` (`b`), `hr`, `table` (`head`: cells, `rows`:
-//!   rows of cells; a cell is runs), `img` (`src`, `alt`).
+//!   rows of cells; a cell is runs; `align`: each column's side, `"start"`,
+//!   `"center"`, `"end"`, or `""` where the source says none), `img` (`src`,
+//!   `alt`).
 //!
 //! A list item's own text (a tight list's, never a paragraph) is a `p`
 //! with `tight`, which has no space under it.
@@ -28,7 +30,7 @@ pub use mend::PENDING_LINK_URL;
 
 use crate::Value;
 use mlua::IntoLua;
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use std::rc::Rc;
 
 /// How text is read.
@@ -859,6 +861,7 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool) -> Ve
         took: false,
         options,
         deeper: 0,
+        table_align: Vec::new(),
     };
     let mut tops = Vec::new();
     let mut depth = 0usize;
@@ -1139,6 +1142,27 @@ fn runs_value(runs: &[Run]) -> Value {
     )
 }
 
+/// A table's columns' sides as a list: `"start"`, `"center"`, `"end"`, or
+/// `""` where the source says none. Columns on the same side share their
+/// string.
+fn table_align(align: &[Alignment]) -> Value {
+    let mut sides: [Option<Value>; 4] = Default::default();
+    Value::List(
+        align
+            .iter()
+            .map(|side| {
+                let (i, name) = match side {
+                    Alignment::None => (0, ""),
+                    Alignment::Left => (1, "start"),
+                    Alignment::Center => (2, "center"),
+                    Alignment::Right => (3, "end"),
+                };
+                sides[i].get_or_insert_with(|| name.into()).clone()
+            })
+            .collect(),
+    )
+}
+
 /// What is being built at each level of nesting.
 enum Frame {
     /// Blocks of a container (the document, a list item, a quote).
@@ -1179,6 +1203,11 @@ struct Builder<'a> {
     /// Quotes, lists and items open beyond `NESTING`: read into the deepest
     /// container kept, as its blocks.
     deeper: usize,
+    /// The open table's columns' sides, as the parser gave them: a table
+    /// holds only inline text, so one is open at a time. Kept here rather
+    /// than in `Frame::Table`, which every frame's size would carry, and
+    /// made into values once, as the table closes.
+    table_align: Vec<Alignment>,
 }
 
 /// How deeply quotes and lists nest at most (in frames: a list level is
@@ -1418,12 +1447,15 @@ impl Builder<'_> {
                     items: Vec::new(),
                 }),
                 Tag::Item => self.frames.push(Frame::Blocks(Vec::new())),
-                Tag::Table(_) => self.frames.push(Frame::Table {
-                    head: Vec::new(),
-                    rows: Vec::new(),
-                    row: Vec::new(),
-                    in_head: false,
-                }),
+                Tag::Table(align) => {
+                    self.table_align = align;
+                    self.frames.push(Frame::Table {
+                        head: Vec::new(),
+                        rows: Vec::new(),
+                        row: Vec::new(),
+                        in_head: false,
+                    })
+                }
                 Tag::TableHead => {
                     if let Some(Frame::Table { in_head, .. }) = self.frames.last_mut() {
                         *in_head = true;
@@ -1544,8 +1576,10 @@ impl Builder<'_> {
                 }
                 TagEnd::Table => {
                     if let Some(Frame::Table { head, rows, .. }) = self.frames.pop() {
+                        let align = table_align(&std::mem::take(&mut self.table_align));
                         self.block(map(vec![
                             ("t", "table".into()),
+                            ("align", align),
                             ("head", Value::List(head.into())),
                             ("rows", Value::List(rows.into())),
                         ]));
@@ -1626,6 +1660,39 @@ mod tests {
     /// it) is a block of its own there, the words before and after it
     /// their own paragraphs, and none left empty. Among words it is a run
     /// keeping its source (`img`), its text its alt.
+    /// A table says each column's side as its delimiter row does, `""`
+    /// where it says none, and the next table starts again from its own.
+    #[test]
+    fn a_table_says_how_its_columns_align() {
+        let sides = |b: &Value| match b.field("align") {
+            Some(Value::List(sides)) => sides
+                .iter()
+                .map(|side| match side {
+                    Value::Str(s) => s.to_string(),
+                    _ => "?".into(),
+                })
+                .collect::<Vec<_>>(),
+            _ => vec!["missing".into()],
+        };
+        let blocks = parse(
+            "| a | b | c | d |\n|---|:--|:-:|--:|\n| 1 | 2 | 3 | 4 |\n\n\
+             | e | f |\n|---|---|\n| 5 | 6 |",
+            &plain(),
+        );
+        assert_eq!(kinds(&blocks), ["table", "table"]);
+        assert_eq!(sides(&blocks[0]), ["", "start", "center", "end"]);
+        assert_eq!(sides(&blocks[1]), ["", ""]);
+        // In a list item, and with nothing after it.
+        let blocks = parse("- | a |\n  |--:|\n  | 1 |", &plain());
+        let Some(Value::List(items)) = blocks[0].field("items") else {
+            panic!()
+        };
+        let Value::List(first) = &items[0] else {
+            panic!()
+        };
+        assert_eq!(sides(&first[0]), ["end"]);
+    }
+
     #[test]
     fn a_picture_on_a_line_of_its_own_is_a_picture_and_among_words_a_run() {
         let cases: [(&str, &[&str]); 8] = [

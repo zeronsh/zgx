@@ -1310,7 +1310,7 @@ export type MarkdownBlock =
 	| { t: "ol", start: number, items: { { MarkdownBlock } } }
 	| { t: "quote", b: { MarkdownBlock } }
 	| { t: "hr" }
-	| { t: "table", head: { { MarkdownRun } }, rows: { { { MarkdownRun } } } }
+	| { t: "table", head: { { MarkdownRun } }, rows: { { { MarkdownRun } } }, align: { "start" | "center" | "end" | "" } }
 	| { t: "img", src: string, alt: string }
 	-- A block `lazy` has not parsed yet: what it is by its first line
 	-- (`hint`), its lines and its bytes in the text (`from`, `to`, as
