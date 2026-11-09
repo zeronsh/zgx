@@ -1215,6 +1215,16 @@ const ALIGN_LATEST: std::time::Duration = std::time::Duration::from_micros(4500)
 /// Where an early frame waits until, before the refresh point.
 #[cfg(any(target_os = "macos", test))]
 const ALIGN_AT: std::time::Duration = std::time::Duration::from_micros(1600);
+/// `ZGX_VIEW_CLOCK=1`: tiles tick from the view's `CADisplayLink`, as
+/// drawables do, handed over at once.
+#[cfg(target_os = "macos")]
+static VIEW_CLOCK: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_VIEW_CLOCK").is_some_and(|v| v != "0"));
+/// `ZGX_SCROLL_LINK=1`: a live scroll's frames tick from the display link, as
+/// an animation's do, not a timer on its grid.
+#[cfg(target_os = "macos")]
+static SCROLL_LINK: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_SCROLL_LINK").is_some_and(|v| v != "0"));
 /// The slowest refresh period frames align at (below 60 Hz's 16.7 ms).
 #[cfg(any(target_os = "macos", test))]
 const ALIGN_PERIOD: std::time::Duration = std::time::Duration::from_millis(12);
@@ -3011,8 +3021,12 @@ impl Host {
                 let link = self
                     .display_link
                     .as_ref()
-                    .filter(|_| {
-                        grid.is_none() && !presents_itself && self.link_paced && self.refresh_frame
+                    .filter(|link| {
+                        grid.is_none()
+                            && !presents_itself
+                            && self.link_paced
+                            && self.refresh_frame
+                            && !link.on_view_clock()
                     })
                     .filter(|_| {
                         self.resized_at
@@ -6329,7 +6343,18 @@ impl Host {
         }
     }
     fn poll_frame_deadline(&mut self, now: std::time::Instant) {
-        if self.frame_deadline.is_some_and(|deadline| now >= deadline) {
+        if let Some(deadline) = self.frame_deadline.filter(|deadline| now >= *deadline) {
+            // How late the main thread woke for it, for devtools: what held
+            // it up comes before the frame, in no phase of its own.
+            let late = now.duration_since(deadline);
+            if late >= std::time::Duration::from_millis(1) {
+                zgx::profile::note(|| {
+                    format!(
+                        "woke {:.2} ms after its frame's time",
+                        late.as_secs_f64() * 1e3
+                    )
+                });
+            }
             #[cfg(target_os = "macos")]
             self.late_sample.start(now);
             let frame = self.frame_timer.frame(now, self.frame_interval);
@@ -6437,7 +6462,7 @@ impl Host {
             // updates, scrolling) a timer paces them on the grid the link last
             // reported, and the link (a thread spinning to each refresh) runs
             // again only to resync.
-            let animating = wanted && rate.is_none() && !scrolling;
+            let animating = wanted && rate.is_none() && (!scrolling || *SCROLL_LINK);
             self.link_paced = animating;
             if let Some(renderer) = &mut self.renderer {
                 renderer.set_full_rate(wanted && rate.is_none());
@@ -6455,7 +6480,7 @@ impl Host {
             // against 13.1 left alone). Skipping one on the display's link
             // paced as well, but the window server's GPU rose from 1.9% to
             // 8.0%, near a composited view's 9.1%.
-            link.set_view_clock(drawables);
+            link.set_view_clock(drawables || *VIEW_CLOCK);
             // Once the link has reported the grid, the timer continues it:
             // a scroll starting after a pause, or the grid going stale, keeps
             // its frames on the timer while the link reports again (see
