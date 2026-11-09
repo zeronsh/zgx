@@ -29,8 +29,11 @@ class ScrollMetrics(unittest.TestCase):
         self.assertEqual(m['late_pct'], 0)
         self.assertEqual(m['main_over_4ms'], 0)  # wait is not CPU work
 
-    def test_skipped_drawables_are_failures(self):
-        self.assertGreater(self.metrics(8, skipped=20)['late_pct'], 3)
+    def test_canceled_submissions_do_not_double_count_visible_missed_refreshes(self):
+        m=self.metrics(8,skipped=20)
+        self.assertEqual(m['late_pct'],0)
+        self.assertEqual(m['skipped_drawables'],20)
+        self.assertGreater(m['presentation_incident_pct'],3)
 
     def test_idle_gap_is_not_a_missed_refresh(self):
         p = 1000/120
@@ -97,6 +100,27 @@ class ScrollMetrics(unittest.TestCase):
         events = scroll.parse_tape(scroll.tape('wing', 120))
         self.assertGreater(events[-1][0], 94000)
         self.assertEqual(events[-1][-1], 'ended')
+
+
+class NativeReference(unittest.TestCase):
+    def test_skipped_native_drawable_and_its_gap_remain_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args=argparse.Namespace(output=Path(directory),native_scale=2)
+            def run(command,stdout,**kwargs):
+                stdout.write('NATIVE_BEGIN 1\n')
+                for n in range(1200):
+                    t=1+n/120
+                    stdout.write(f'NATIVE_WAKE {n} {t} {t} {t+1/120}\n')
+                    shown=0 if n==20 else t+.005
+                    stdout.write(f'NATIVE_PRESENT {n} {t+.006} {shown} {t}\n')
+                    stdout.write(f'NATIVE_GPU {n} 0.1\nNATIVE_WORK {n} 0.2\n')
+                stdout.write('NATIVE_END 11\n')
+            with patch.object(scroll.subprocess,'run',side_effect=run),patch.object(scroll,'sha',return_value='hash'):
+                m=scroll.native_floor(args,'W',120,2,'0','native')
+            self.assertEqual(m['skipped_drawables'],1)
+            self.assertEqual(m['late_frames'],1)
+            self.assertGreater(m['late_pct'],0)
+            self.assertAlmostEqual(m['display_period_ms']['p50'],1000/120)
 
 
 class CollectionIntegrity(unittest.TestCase):

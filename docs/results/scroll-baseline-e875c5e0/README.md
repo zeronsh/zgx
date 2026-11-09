@@ -3,7 +3,10 @@
 These 16 single-trial cells are the original-engine baseline, with opt-in
 frame-indexed presentation/GPU instrumentation. Conditions: 120 Hz, 2×, opaque,
 M=960×720 and L=1440×960; tiles (`p0`) and drawables (`p1`) are separate.
-The executable/source audit is inside the archive. [Corrected table](summary.md).
+The executable/source audit is inside the archive. [Current visible-interval table](visible-interval-summary.md). The older
+[attribution-only correction](summary.md) and archive retain the combined
+gap-plus-cancellation percentage; that is now only a presentation-incident
+diagnostic, not the missed-refresh percentage.
 
 This fixture reproduced 0.85–3.98% total late frames, below Wing's 17% real-app
 observation. It cannot certify the actual Zeron app. Every cell fails the

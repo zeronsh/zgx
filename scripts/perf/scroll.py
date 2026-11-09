@@ -200,15 +200,21 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
             if 'repainted its view:' in n:
                 blockers[n.split('repainted its view:', 1)[1].strip()] += 1
     displayed_ids = {r[2] for r in shown if r[1]*1000-anchor <= (events[-1][0] if events else 0)+4*period}
-    causes = Counter(r['cause'] for r in late_records)
+    # A canceled submission can coincide with the same visible gap. Count
+    # actual late presentation intervals once; keep canceled submissions as
+    # a separate diagnostic rather than counting the missed refresh twice.
+    causes = Counter(r['cause'] for r in late_records if r['kind']=='late')
+    skipped_causes = Counter(r['cause'] for r in late_records if r['kind']=='skipped')
     app_late = sum(causes[c] for c in ('app', 'gpu', 'app_pacing'))
-    total = len(gaps)+len(skipped)
+    total = len(gaps)
     return dict(frames=len(frames), sparse=sparse,
                 expected_pixel_updates=len(motion_windows(events,period,scale,merge=False)),
                 displayed_motion_frames=sum(f['frame'] in displayed_ids for f in scroll_frames), spare_frames=sum(f.get('spare',False) for f in frames),
                 rows_prefetched=sum(f.get('notes',[]).count('list built row') for f in frames if f.get('spare',False)), scroll_frames=len(scroll_frames), active_intervals=len(gaps),
                 late_frames=sum(r['kind']=='late' for r in late_records), skipped_drawables=len(skipped),
-                late_pct=100*len(late_records)/total if total else None,
+                late_pct=100*sum(r['kind']=='late' for r in late_records)/total if total else None,
+                presentation_incident_pct=100*len(late_records)/(total+len(skipped)) if total+len(skipped) else None,
+                skipped_causes=dict(skipped_causes),
                 app_late_frames=app_late, app_late_pct=100*app_late/total if total else None,
                 system_late_frames=causes['system'], unattributed_late_frames=causes['unattributed'],
                 late_attributions=late_records, interval_ms=spread(gaps), idle_intervals=len(idle),
@@ -446,7 +452,12 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                 with ThreadPoolExecutor(max_workers=1) as pool:
                     future = pool.submit(request, process.pid, 'replay', target=target, tape=text,
                                          timeout=events[-1][0] / 1000 + 20)
-                    frames, polls = collect(process.pid, future, begin, out, target)
+                    try:
+                        frames, polls = collect(process.pid, future, begin, out, target)
+                    except Exception:
+                        process.terminate()
+                        process.wait(timeout=5)
+                        raise
                     result['replay'] = future.result()
                 errors = request(process.pid,'errors')['text']
                 if 'error:' in errors or 'types:' in errors:
@@ -573,6 +584,53 @@ class RefreshModes:
                 dict(original=self.original, actions=self.actions), indent=2)+'\n')
 
 
+def native_floor(args, size, hz, scale, present, label):
+    """Independent CADisplayLink/Metal window; no zgx pacing in this process."""
+    out=args.output/label
+    out.mkdir()
+    mode='tiles' if present=='0' else 'drawables'
+    width,height=SIZES[size]
+    native_size=[round(width*scale/args.native_scale),round(height*scale/args.native_scale)]
+    binary=ROOT/'target/scroll-native'
+    with (out/'native.log').open('w') as log:
+        subprocess.run([str(binary),*map(str,native_size),str(hz),mode,'10'],
+                       stdout=log,stderr=log,check=True,timeout=30)
+    begin=end=None
+    wakes={}; gpu=[]; work=[]; presents=[]; unavailable=0
+    for line in (out/'native.log').read_text().splitlines():
+        parts=line.split()
+        if not parts: continue
+        if parts[0]=='NATIVE_BEGIN': begin=float(parts[1])
+        elif parts[0]=='NATIVE_END': end=float(parts[1])
+        elif parts[0]=='NATIVE_WAKE': wakes[int(parts[1])]=list(map(float,parts[2:]))
+        elif parts[0]=='NATIVE_PRESENT': presents.append(list(map(float,parts[1:])))
+        elif parts[0]=='NATIVE_GPU': gpu.append((int(parts[1]),float(parts[2])))
+        elif parts[0]=='NATIVE_WORK': work.append((int(parts[1]),float(parts[2])))
+        elif parts[0]=='NATIVE_UNAVAILABLE': unavailable+=1
+    if begin is None or end is None: raise RuntimeError('native floor missing sample anchors')
+    sample={n:v for n,v in wakes.items() if begin<=v[0]<=end}
+    presented=sorted(p[2] for p in presents if int(p[0]) in sample and p[2]>0)
+    gaps=[1000*(b-a) for a,b in zip(presented,presented[1:])]
+    skipped=sum(p[2]<=0 for p in presents if int(p[0]) in sample)
+    late=sum(gap>1.5*1000/hz for gap in gaps)
+    m=dict(mode=mode,native_points=native_size,requested_scale=scale,hz=hz,
+           late_frames=late,skipped_drawables=skipped,late_pct=100*late/max(1,len(gaps)),
+           interval_ms=spread(gaps),main_work_ms=spread([v for n,v in work if n in sample]),
+           gpu_p99_ms=percentile([v for n,v in gpu if n in sample],.99),
+           wake_after_timestamp_ms=spread([1000*(v[0]-v[1]) for v in sample.values()]),
+           wake_after_target_ms=spread([1000*(v[0]-v[2]) for v in sample.values()]),
+           display_period_ms=spread([1000*(v[2]-v[1]) for v in sample.values()]),
+           samples=len(presented),unavailable_drawables=unavailable,
+           binary_sha256=sha(binary),source_sha256=sha(ROOT/'scripts/perf/scroll_native.swift'))
+    if len(presented)<hz*8: raise RuntimeError('native floor lacks sustained feedback')
+    if abs(m['display_period_ms']['p50']-1000/hz)>.5:
+        raise RuntimeError('native display clock differs from requested refresh')
+    if m['gpu_p99_ms'] is None or m['main_work_ms']['max'] is None:
+        raise RuntimeError('native floor lacks work/GPU evidence')
+    (out/'run.json').write_text(json.dumps(m,indent=2)+'\n')
+    return m
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('command', choices=['run', 'headless'])
@@ -585,6 +643,7 @@ def main():
     p.add_argument('--gestures', default='slow,flick,reversals,notches,fling,wing,stream')
     p.add_argument('--sizes', default='S,M,L')
     p.add_argument('--hz', default='120')
+    p.add_argument('--native-floor',action='store_true',help='bracket each zgx idle reference with independent Swift/Metal references')
     p.add_argument('--set-refresh', action='store_true', help='select matching native display modes and restore the original')
     p.add_argument('--scale', default='2')
     p.add_argument('--native-scale', type=float, default=2, help='display backing scale; requested render scales use app zoom')
@@ -621,6 +680,11 @@ def main():
         p.error('build the real app with prepare_zeron.py and supply --zeron-runner')
     if not args.reference_runner.is_file():
         p.error('build scroll_reference with --profile dist --features inspect first')
+    if args.native_floor:
+        source=ROOT/'scripts/perf/scroll_native.swift'
+        binary=ROOT/'target/scroll-native'
+        if not binary.exists() or binary.stat().st_mtime<source.stat().st_mtime:
+            subprocess.run(['swiftc','-O',str(source),'-o',str(binary)],check=True)
     args.output.mkdir(parents=True, exist_ok=False)
     audit = dict(commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                  diff=subprocess.check_output(['git', 'diff', 'HEAD'], cwd=ROOT, text=True),
@@ -636,6 +700,7 @@ def main():
     if args.zeron_runner.is_file():
         audit['zeron_binary_sha256']=sha(args.zeron_runner)
         audit['zeron_source_commit']=subprocess.check_output(['git','rev-parse','HEAD'],cwd=args.zeron_source,text=True).strip()
+    shutil.copy2(ROOT / 'scripts/perf/scroll_native.swift', sources / 'scroll_native.swift')
     shutil.copy2(ROOT / 'scripts/perf/scroll_display.swift', sources / 'scroll_display.swift')
     shutil.copy2(ROOT / 'crates/zgx-script/examples/scroll_reference.rs', sources / 'scroll_reference.rs')
     audit['sources'] = {str(f.relative_to(sources)): sha(f) for f in sources.rglob('*') if f.is_file()}
@@ -668,7 +733,11 @@ def main():
             print(f'{scene} {gesture} {size} {hz}Hz {scale}x {bg} trial {repeat+1}', flush=True)
             key = (size, hz, scale, bg, present, repeat, 'zeron' if scene=='zeron' else 'generic')
             if key not in references:
+                floor_before=native_floor(args,size,hz,scale,present,f'native-before-{len(references)}') if args.native_floor else None
                 ref = run_cell(args, 'zeron-idle' if scene=='zeron' else 'idle', 'reference', size, hz, scale, bg, repeat, present, real_reference=scene=='zeron')
+                if args.native_floor:
+                    ref['native_floor_before']=floor_before
+                    ref['native_floor_after']=native_floor(args,size,hz,scale,present,f'native-after-{len(references)}')
                 references[key] = ref
                 results.append(ref)
             r = run_cell(args, scene, gesture, size, hz, scale, bg, repeat, present)

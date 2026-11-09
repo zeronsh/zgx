@@ -68,7 +68,11 @@ A refresh period is **1000 / verified requested Hz**, never the observed
 median. Thus a display-link latch that halves the rate cannot redefine success.
 For intervals during sustained input motion, a frame is late when it appears
 more than 1.5 periods after the previous one. A zero Metal `presentedTime` is
-counted as a skipped drawable and included in the late numerator and denominator.
+reported as a canceled/skipped submission with its frame attribution. It does
+not count as an additional missed refresh: a cancellation can overlap a visible
+late interval, or a newer submission can still show on time. `late_pct` counts
+actual late visible intervals once; `presentation_incident_pct` preserves the
+older combined late-interval-plus-cancellation diagnostic.
 Every callback carries the exact devtools frame index, including skipped ones.
 Metal command-buffer completion callbacks also record GPU time against that
 same index. The analyzer uses those completed timestamps; the legacy inspect
@@ -220,3 +224,20 @@ python3 scripts/perf/scroll.py run --scenes zeron --gestures wing,flick,stream \
   --sizes W,M,L --backgrounds translucent --hz 120 --scale 2 \
   --zeron-runner target/zeron-native/current/zeron-zgx
 ```
+
+## Independent native reference
+
+`--native-floor` brackets every zgx marker reference with two separate Swift
+processes. `scroll_native.swift` imports AppKit/Metal/QuartzCore/IOSurface and
+contains no zgx code. NSView's CADisplayLink drives its main run loop at the
+requested rate. Drawables clear a full CAMetalLayer; tiles clear a triple-buffered
+IOSurface, flip its layer contents in a transaction and use a one-pixel drawable
+probe. Both use Metal's presented handlers and the same 1.5-period late rule,
+with raw wake/timestamp/target, work, GPU and presentation records. Compilation
+finishes before measurement. Native results are evidence about the machine and
+probe floor; aggregate similarity never excuses an individual zgx late frame.
+
+A standalone handover-slack diagnostic accepts an optional encoding-to-handover
+delay in milliseconds: `target/scroll-native 1114 685 120 tiles 10 2`. Its two-ms
+sleep is included in main work. Do not compare that diagnostic to the default
+headroom gate without labeling it.

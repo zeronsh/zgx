@@ -37,14 +37,14 @@ jobs:
         env:
           SCROLL_HZ: ${{ inputs.hz }}
           SCROLL_SCALES: ${{ inputs.scales }}
-        run: python3 scripts/perf/scroll.py run --set-refresh --scenes zeron --gestures wing,flick,stream --hz "$SCROLL_HZ" --sizes W --scale "$SCROLL_SCALES" --backgrounds translucent --output target/scroll-real-ci
+        run: python3 scripts/perf/scroll.py run --native-floor --set-refresh --scenes zeron --gestures wing,flick,stream --hz "$SCROLL_HZ" --sizes W --scale "$SCROLL_SCALES" --backgrounds translucent --output target/scroll-real-ci
       - name: Real-window replay gate
         if: success() || (failure() && steps.real.outcome == 'failure')
         env:
           SCROLL_HZ: ${{ inputs.hz }}
           SCROLL_SIZES: ${{ inputs.sizes }}
           SCROLL_SCALES: ${{ inputs.scales }}
-        run: python3 scripts/perf/scroll.py run --set-refresh --scenes transcript,tables --gestures wing,flick,reversals,stream --hz "$SCROLL_HZ" --sizes "$SCROLL_SIZES" --scale "$SCROLL_SCALES" --output target/scroll-ci
+        run: python3 scripts/perf/scroll.py run --native-floor --set-refresh --scenes transcript,tables --gestures wing,flick,reversals,stream --hz "$SCROLL_HZ" --sizes "$SCROLL_SIZES" --scale "$SCROLL_SCALES" --output target/scroll-ci
       - uses: actions/upload-artifact@v4
         if: always()
         with:
