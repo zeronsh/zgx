@@ -1,6 +1,6 @@
 # Scrolling: scroll, scroll_x, list
 
-`scroll` and `scroll_x` are viewports over ordinary children, all of them mounted. `list` is virtualized: of its `count` rows, only those in view (and a few beyond) are built, so it holds a million rows as cheaply as twenty.
+`scroll` and `scroll_x` are viewports over ordinary children, all of them mounted. `list` is virtualized: of its `count` rows, only those near the view are built, so it holds a million rows as cheaply as twenty.
 
 ```luau
 ui.scroll(props: ScrollProps?) -> Node
@@ -45,7 +45,8 @@ A child with `sticky_top` holds at the top as the view scrolls past it, inside i
 | `heights` | `{ number }`, a state of one, or a function returning one | none | each row's own height instead, in order; the count is its length. A row of 0 takes no room and isn't built, nor one under a hundredth of a point: rows folded away cost nothing, however many |
 | `sticky` | `{ number }`, a state of one, or a function returning one | none | with `heights`, and with or without `key`: rows (from 1) that stick to the top while the rows after them scroll past, each pushed up by the next (section headers, a diff's file headers); the one in charge is built again over the list, as any row is |
 | `sticky_top` | `number` | `0` | how far below the top the sticky rows stick (CSS's sticky `top`): what scrolls above them still shows, so cover it if it shouldn't |
-| `overscan` | `number` | `2` | rows built beyond each edge of the view |
+| `overscan` | `number` | `2` | rows built beyond each edge of the view, at the least: at once where a host has no time to spare, as `ahead`'s otherwise ([building ahead](#building-ahead)) |
+| `ahead` | `number` | `1` | viewports of rows built beyond each edge of the view in time frames leave over, and kept as it scrolls away ([building ahead](#building-ahead)); `0`, it builds the rows in view and its `overscan` alone, and drops the rest |
 | `offset` | `State<number>` | its own | the scroll position in points, as `scroll`'s |
 | `scrollbar` | `boolean` | `false` | an interactive scrollbar, as `scroll`'s |
 | `overscroll` | `"auto"` \| `"contain"` | `"auto"` | as `scroll`'s: `"contain"` keeps a gesture over the list with it at its ends |
@@ -114,7 +115,23 @@ return ui.column {
 }
 ```
 
-A row is built when it scrolls into view and dropped when it leaves; it owns what it makes, as a [component](state.md#components) does: its `ui.use_state`, effects and computed values end with it.
+A row is built before it scrolls into view and dropped a while after it leaves ([building ahead](#building-ahead)); it owns what it makes, as a [component](state.md#components) does: its `ui.use_state`, effects and computed values end with it.
+
+### Building ahead
+
+A row can cost milliseconds to build (a reply's Markdown, a table), more than a frame at 120 Hz has to spare. So a window builds rows off the scroll frame, as a browser lays out and paints ahead of its viewport:
+
+- **Ahead.** As a refresh begins, up to half of it from its start and before the frame's own work (what a window's frame otherwise spends waiting for its point in the refresh), the list builds and lays out the rows within `ahead` viewports of each edge of the view (and `overscan` rows at the least), the way the view is going first, one at a time. A row that doesn't fit waits for a frame it fits; one longer than that budget is built after a few frames, in a frame that has only just begun. Measured, its height is known before it shows, so what's in view doesn't jump as it comes in. It starts as the view first moves and goes quiet once they are built; a hidden or covered window waits until it shows.
+- **At once.** A row in view that isn't built is built in that frame, as it must be: a jump far away, or a scroll faster than time allows.
+- **Kept.** A row that leaves stays built while it is within 4 viewports more of the view, so scrolling back builds nothing, and costs little where it is: it is laid out once, and outside the list's clip it isn't painted or hit. Beyond that it is dropped, and past 256 rows or 8,000 nodes the farthest go first, though never those shown or to build. A new width drops what's out of view, to be built at it.
+- **At rest.** A list that has never scrolled holds what shows and its `overscan`, as it always did, and builds nothing further. 30 seconds after its window's last frame, shown or covered, a list goes back to that and what it let go of is freed, until its view next moves.
+- **Keys.** With `key`, rows kept follow their items when rows are added or removed around them, as those in view do.
+
+A row built ahead is mounted like one in view: its effects run, what it fetches on mount is fetched, and its controls are reached by Tab in order. A row with a popover open from it, or with the keyboard's focus in a list with `keyboard`, goes as it leaves, as ever. A list whose rows shouldn't start before they show, or that holds something scarce, says `ahead = 0`.
+
+A headless host (`TestApp`, `zgx test`) has no time left over: its lists build the rows in view and their `overscan`. In Rust, a host says it has some with `Ui::host_spare_time`, and spends it with `Ui::run_spare_work`.
+
+`zgx inspect frames` shows spare time as `spare` entries of their own; the replay's and `summary`'s frames and work leave them out.
 
 A list whose items are removed or inserted (a mailbox's messages archived, a feed's new posts) keys its rows, and reads each row's item by its key:
 
@@ -240,7 +257,7 @@ return ui.row {
 ## Gotchas
 
 - Every list row is `height` points: a taller row overlaps the next and a shorter one leaves a gap. For rows of different heights give `heights` (each row's own, still never measured), or `measured = true` for rows whose height depends on their text (`zgx lint` flags wrapped text in rows of fixed height).
-- A list row is built once for its index, when it comes into view. Reading state in `row` (`items:get()[i]`) takes the value at that moment; to follow a change, read it in a function property or text inside the row (`ui.text(function() return items:get()[i].name end)`), or change `count`. Rows are keyed by index, so a row's own state stays with its position, not its data.
+- A list row is built once for its index, before it comes into view. Reading state in `row` (`items:get()[i]`) takes the value at that moment; to follow a change, read it in a function property or text inside the row (`ui.text(function() return items:get()[i].name end)`), or change `count`. Rows are keyed by index, so a row's own state stays with its position, not its data.
 - In a `selectable` region, a selection runs through a list as through any text: dragging past its edge scrolls it, the selection outlives the rows scrolled away (each end keeps its place in its row), and copying takes the rows between, mounted or not (see `row_text`).
 - List rows do not stretch across the list: give a row's root `w_full = true`.
 - A `scroll` with no size and nothing sizing it is 320 by 240 along its scrolling axis; across it, a column or row stretches it (the default `items`), and inside one with `items = "start"` it keeps 320. Use `w_full = true`, `grow = 1` or a stretching parent.
