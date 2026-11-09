@@ -3502,16 +3502,6 @@ impl ScriptHost {
         }
         let host = self.clone();
         async move {
-            // A signed app's files never change: nothing to watch at all.
-            if !can_change(
-                matches!(host.0.files, Files::Bundle(_)),
-                !host.0.managed.borrow().is_empty(),
-                cfg!(target_os = "ios"),
-                cfg!(debug_assertions),
-            ) && cfg!(target_os = "ios")
-            {
-                return;
-            }
             // A bundle never changes; the plugins beside it (on the disk)
             // are watched as any file is.
             // The kernel says when a file changes; nothing runs meanwhile.
@@ -3521,10 +3511,18 @@ impl ScriptHost {
                 let (rewatch, mut rewatched) = zgx::task::latest::<()>();
                 *host.0.rewatch.borrow_mut() = Some(rewatch);
                 let mut heard = false;
+                let signed_bundle = signed_bundle();
                 loop {
                     // After a change, open them again: a file an editor
                     // replaced is a new file.
-                    events.watch(host.watched_files(), host.watched_dirs(), heard);
+                    events.watch(
+                        host.watched_files()
+                            .into_iter()
+                            .filter(|file| !in_signed_bundle(file, signed_bundle.as_deref()))
+                            .collect(),
+                        host.watched_dirs(),
+                        heard,
+                    );
                     // While a type check runs on its thread, its result is
                     // looked for this often; a change still wakes this at
                     // once.
@@ -3555,12 +3553,7 @@ impl ScriptHost {
                     host.poll_check();
                 }
             }
-            if !can_change(
-                matches!(host.0.files, Files::Bundle(_)),
-                !host.0.managed.borrow().is_empty(),
-                cfg!(target_os = "ios"),
-                cfg!(debug_assertions),
-            ) {
+            if matches!(host.0.files, Files::Bundle(_)) && host.0.managed.borrow().is_empty() {
                 return;
             }
             loop {
@@ -4481,16 +4474,23 @@ const SETTLE: Duration = Duration::from_millis(10);
 #[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
 const SETTLE_MAX: Duration = Duration::from_millis(100);
 
-/// Whether a host's files can change, to be watched at all. Not a bundle's,
-/// with no managed plugins beside it. Nor those of a release build on iOS, in
-/// its signed bundle: a resting app there had nothing else waking it (240
-/// wakeups a minute, from stat-ing its scripts, measured in the simulator; a
-/// static UIKit app has none). A debug build keeps hot reload there.
-fn can_change(bundle: bool, managed: bool, ios: bool, debug: bool) -> bool {
-    if managed {
-        return true;
+/// The app bundle whose files never change, where one is: a release build on
+/// iOS, its scripts signed. Stat-ing them was all that woke a resting app (240
+/// wakeups a minute in the simulator; a static UIKit app has none), and a
+/// watch on them would hold descriptors for nothing. A debug build watches
+/// them for hot reload, and what lies outside (a plugin in the app's documents)
+/// is watched either way, however late it comes.
+#[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
+fn signed_bundle() -> Option<PathBuf> {
+    if cfg!(target_os = "ios") && !cfg!(debug_assertions) {
+        return std::env::current_exe().ok()?.parent().map(PathBuf::from);
     }
-    !bundle && (!ios || debug)
+    None
+}
+/// Whether `file` lies in `bundle` (`signed_bundle`), with no need of a watch.
+#[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
+fn in_signed_bundle(file: &std::path::Path, bundle: Option<&std::path::Path>) -> bool {
+    bundle.is_some_and(|bundle| file.starts_with(bundle))
 }
 /// What woke `watch`.
 #[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
@@ -4583,19 +4583,24 @@ fn trim_idle(inner: &Inner) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn only_what_can_change_is_watched() {
-        use super::can_change;
-        // Files on a disk, where nothing says they changed: watch them.
-        assert!(can_change(false, false, false, false));
-        assert!(can_change(false, false, false, true));
-        // A bundle doesn't change, but managed plugins beside it can.
-        assert!(!can_change(true, false, false, false));
-        assert!(can_change(true, true, false, false));
-        // iOS: an app's files are in its signed bundle, so a release build
-        // rests; a debug build keeps hot reload.
-        assert!(!can_change(false, false, true, false));
-        assert!(can_change(false, false, true, true));
-        assert!(can_change(false, true, true, false));
+    fn a_signed_bundles_files_alone_go_unwatched() {
+        use super::in_signed_bundle;
+        use std::path::Path;
+        let bundle = Path::new("/app/My.app");
+        assert!(in_signed_bundle(
+            Path::new("/app/My.app/x/app.luau"),
+            Some(bundle)
+        ));
+        // A plugin in the app's documents, and any file with no such bundle.
+        assert!(!in_signed_bundle(
+            Path::new("/data/Documents/p.luau"),
+            Some(bundle)
+        ));
+        assert!(!in_signed_bundle(
+            Path::new("/app/My.app.luau"),
+            Some(bundle)
+        ));
+        assert!(!in_signed_bundle(Path::new("/app/My.app/x/app.luau"), None));
     }
     use super::*;
 
