@@ -432,11 +432,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
     measured: bool,
 ) -> View {
     let rows = RowSource::new(key, build);
-    let text = rows.text({
-        let heights = heights.clone();
-        move || heights.index.try_borrow().map_or(0, |index| index.count())
-    });
-    let keys = rows.keys({
+    let source = rows.rows({
         let heights = heights.clone();
         move || heights.index.try_borrow().ok().map(|index| index.count())
     });
@@ -1110,5 +1106,5 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             });
         },
     )))
-    .list_rows(crate::selection::ListRows::new(text, Some(keys)))
+    .list_rows(source)
 }
