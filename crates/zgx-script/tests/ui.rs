@@ -843,6 +843,69 @@ fn a_span_icon_sits_on_its_well_behind_it_and_the_wash_spans_the_chip() {
 }
 
 #[test]
+fn a_span_takes_other_room_before_and_after_its_text() {
+    use zgx::scene::NodeKind;
+    let svg = r#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><rect width='12' height='12'/></svg>"#;
+    let measure = |extra: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"return ui.column {{ w = 300, ui.rich {{ id = "p",
+                ui.span {{ "notes.rs", literal = true, bg = "#ff0000"{extra} }} }} }}"##
+        ));
+        h.frames(2);
+        let p = h.find("p").unwrap();
+        let scene = h.ui.scene.borrow();
+        let (mut well_x, mut width, mut washed) = (None, 0., true);
+        let mut stack = vec![p];
+        while let Some(n) = stack.pop() {
+            match scene.kind(n) {
+                NodeKind::Panel { .. } => well_x = Some(scene.bounds(n).x - scene.bounds(p).x),
+                NodeKind::RichText { text } => {
+                    width = scene.bounds(n).width;
+                    washed = text.runs().iter().all(|r| r.background.is_some());
+                }
+                _ => {}
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        (well_x, width, washed)
+    };
+    let (_, plain, _) = measure("");
+    // `{ start, end, y }` with an icon on a well: the well `start` in, the
+    // line its room, then the text, then `end`.
+    let (well_x, chip, washed) = measure(&format!(
+        ", padding = {{ 1, 7, 2 }}, icon = {{ code = \"{svg}\", size = 12, gap = 2, bg = \"#00ff00\", pad = 2 }}"
+    ));
+    assert_eq!(
+        well_x.map(f32::round),
+        Some(1.),
+        "a point in from the start"
+    );
+    assert!(
+        (chip - plain - (1. + 16. + 2. + 7.)).abs() < 0.5,
+        "1 + well 16 + 2 + text + 7: {plain} → {chip}"
+    );
+    assert!(washed, "one wash across every run");
+    // No icon: the room before and after, apart.
+    let (_, apart, washed) = measure(", padding = { 3, 9, 0 }");
+    assert!(
+        (apart - plain - 12.).abs() < 0.5,
+        "3 + text + 9: {plain} → {apart}"
+    );
+    assert!(washed);
+    // The old forms as they were: `{ x, y }` and `x`, the same both sides.
+    let (_, both, _) = measure(", padding = { 4, 2 }");
+    assert!(
+        (both - plain - 8.).abs() < 0.5,
+        "4 + text + 4: {plain} → {both}"
+    );
+    let (_, one, _) = measure(", padding = 5");
+    assert!(
+        (one - plain - 10.).abs() < 0.5,
+        "5 + text + 5: {plain} → {one}"
+    );
+}
+
+#[test]
 fn a_padded_span_wraps_its_icon_and_text() {
     use zgx::scene::NodeKind;
     let svg = r#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><rect width='12' height='12'/></svg>"#;

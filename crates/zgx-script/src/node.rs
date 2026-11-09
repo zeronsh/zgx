@@ -1395,9 +1395,9 @@ pub(crate) struct Span {
     /// given: read as the paragraph is built, so a change builds it again.
     /// Empty for most spans.
     pub followed: Vec<(&'static str, Ty, Source)>,
-    /// Room around it (across, down) and its background's corners: an
-    /// inline code chip.
-    pub padding: [f32; 2],
+    /// Room around it (across before it, down, across after it) and its
+    /// background's corners: an inline code chip.
+    pub padding: [f32; 3],
     pub radius: f32,
     pub click: Option<Handler>,
     /// Where it links (`href = "https://…"`): a click opens it.
@@ -4680,7 +4680,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
         font: None,
         lang: None,
         followed: Vec::new(),
-        padding: [0.; 2],
+        padding: [0.; 3],
         radius: 0.,
         click: None,
         href: None,
@@ -4733,13 +4733,20 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 }
                 // `padding = 4` (across) or `{ 4, 0.5 }` (across, down).
                 b"padding" => {
+                    // `x`, `{ x, y }`, or `{ start, end, y }` (across before
+                    // the text and after it, then down).
                     span.padding = match lua.unpack(given)? {
-                        Value::Num(x) => [x as f32, 0.],
-                        Value::List(l) => [
-                            l.first().and_then(Value::as_f64).unwrap_or(0.) as f32,
-                            l.get(1).and_then(Value::as_f64).unwrap_or(0.) as f32,
-                        ],
-                        _ => [0.; 2],
+                        Value::Num(x) => [x as f32, 0., x as f32],
+                        Value::List(l) => {
+                            let at =
+                                |i: usize| l.get(i).and_then(Value::as_f64).unwrap_or(0.) as f32;
+                            if l.len() >= 3 {
+                                [at(0), at(2), at(1)]
+                            } else {
+                                [at(0), at(1), at(0)]
+                            }
+                        }
+                        _ => [0.; 3],
                     }
                 }
                 b"radius" => span.radius = number(given)?.unwrap_or(0.),
