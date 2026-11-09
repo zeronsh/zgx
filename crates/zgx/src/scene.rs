@@ -50,6 +50,80 @@ struct FlexRounds {
     limit: f32,
     gaps: f32,
 }
+/// The children a column has as it looks at its end alone
+/// (`Scene::children_outgrown`): fewer cost little to lay out whole.
+const COLUMN_KEPT_FROM: usize = 64;
+/// Layout passes in a row a column lays out whole before it stops looking at
+/// its end alone (`Scene::column_laid_out_whole`): one that isn't streamed
+/// into pays no more than this.
+const COLUMN_WHOLE_PASSES: u8 = 3;
+/// What a column streamed into was last laid out with
+/// (`ColdMaps::column_memos`): while its result is that of `pass`, its style
+/// and kind as they were, it resumes at its end (`Scene::column_end`).
+#[derive(Clone, Copy)]
+struct ColumnMemo {
+    pass: u64,
+    style_writes: u32,
+    border: Insets,
+    /// Its sums before its last child and after it, for the `count` children
+    /// of that result; none until a resume has worked them out.
+    sums: Option<(usize, [ColumnSums; 2])>,
+    /// Passes in a row it has laid out whole (`COLUMN_WHOLE_PASSES`).
+    whole: u8,
+}
+/// What a column reads of what each child reads (`Scene::read_bits`).
+const COLUMN_READS: u8 = READS_WIDTH | READS_HEIGHT | PERCENT_WIDTH | PERCENT_HEIGHT;
+/// A column's sums over its children so far, as `measure_uncached` adds
+/// them: its widest, its height, its children's main sizes before gaps, and
+/// where the next child goes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ColumnSums {
+    natural_w: f32,
+    natural_h: f32,
+    main: f32,
+    cursor: f32,
+    /// What its children so far read (`Scene::read_bits`).
+    reads: u8,
+}
+impl ColumnSums {
+    /// These with a child of size `(w, h)` and margin `m` after, `gap` on.
+    #[inline]
+    fn then(mut self, (w, h): (f32, f32), m: Insets, gap: f32) -> Self {
+        self.natural_w = self.natural_w.max(w + m.left + m.right);
+        self.natural_h += h + m.top + m.bottom;
+        self.main += h + (m.top + m.bottom);
+        self.cursor += h + (m.top + m.bottom) + gap + 0.0;
+        self
+    }
+}
+/// Whether `node` is a column whose style leaves its height to its children,
+/// laid out natively: no height or limits of its own, no options that send it
+/// to taffy (a column's other options lay out as ever), justified at
+/// its start, not aligned to a baseline, and given a width.
+fn column_sized_by_children(node: &Node) -> bool {
+    let style = &node.style;
+    matches!(
+        node.kind,
+        NodeKind::Container(Layout::Column)
+            | NodeKind::Panel {
+                layout: Layout::Column,
+                ..
+            }
+    ) && !Scene::own_options_take_advanced_layout(node)
+        && style.height.is_none()
+        && style.height_percent.is_none()
+        && style.min_height.is_none()
+        && style.max_height.is_none()
+        && style.justify == Justify::Start
+        && style.align != Align::Baseline
+}
+/// The room `kind`'s border takes of a column's layout.
+fn column_border(kind: &NodeKind) -> Insets {
+    match kind {
+        NodeKind::Panel { quad, .. } => quad.layout_border(),
+        _ => Insets::default(),
+    }
+}
 /// A map keyed by node. Ids are small integers with a generation: a
 /// multiplicative hash beats SipHash on them, and mounting or removing a
 /// node touches several such maps.
@@ -1928,6 +2002,8 @@ struct ColdMaps {
     outside_fade: NodeMap<OutsideFade>,
     /// Nodes that stick in their scroll view (`set_sticky`).
     sticky: NodeMap<Sticky>,
+    /// Columns streamed into (`KEPT_COLUMN`).
+    column_memos: NodeMap<ColumnMemo>,
     /// Sizes worked out from the containing block (`set_size_calcs`).
     size_calcs: NodeMap<std::sync::Arc<crate::size_calc::SizeCalcs>>,
     /// Nodes that balance their text's lines, or not (`set_text_balance`),
@@ -2059,6 +2135,10 @@ const ZOOMED: u8 = 2;
 /// (track lists, a `z`, a paint order of its children): what looks at them
 /// is behind `contents_count`, so a scene with none pays no test of its own.
 const COLD: u8 = 4;
+/// `Node::special`: a column streamed into, with an entry in
+/// `ColdMaps::column_memos`: `measure_special` looks there before it lays
+/// out whole (`Scene::column_end`).
+const KEPT_COLUMN: u8 = 8;
 /// `Scene::contents_count`'s unit for a node with any `special` bit.
 const SPECIAL_UNIT: u64 = 1 << 32;
 /// `Node::special`'s bits (`CONTENTS`, `ZOOMED`, `COLD`), as an enum rather than a
@@ -2076,12 +2156,27 @@ enum Special {
     ColdContents = 5,
     ColdZoomed = 6,
     ColdBoth = 7,
+    Kept = 8,
+    KeptContents = 9,
+    KeptZoomed = 10,
+    KeptBoth = 11,
+    KeptCold = 12,
+    KeptColdContents = 13,
+    KeptColdZoomed = 14,
+    KeptColdBoth = 15,
 }
 impl Special {
     /// Whether it has any bit: the one test a node without any pays.
     #[inline(always)]
     fn any(self) -> bool {
         self != Special::None
+    }
+    /// Whether it has a bit `contents_count` counts: all but `KEPT_COLUMN`,
+    /// no style's concern, which leaves a scene streaming into a column to
+    /// the styles' path it had.
+    #[inline(always)]
+    fn counted(self) -> bool {
+        self as u8 & !KEPT_COLUMN != 0
     }
     /// Whether it lays out specially, contents or zoomed: asked past `any`.
     #[inline(always)]
@@ -2107,7 +2202,15 @@ impl Special {
             4 => Special::Cold,
             5 => Special::ColdContents,
             6 => Special::ColdZoomed,
-            _ => Special::ColdBoth,
+            7 => Special::ColdBoth,
+            8 => Special::Kept,
+            9 => Special::KeptContents,
+            10 => Special::KeptZoomed,
+            11 => Special::KeptBoth,
+            12 => Special::KeptCold,
+            13 => Special::KeptColdContents,
+            14 => Special::KeptColdZoomed,
+            _ => Special::KeptColdBoth,
         }
     }
 }
@@ -3181,6 +3284,9 @@ pub struct Scene {
     /// `measure` calls, for tests of how much work layout does.
     #[cfg(test)]
     pub(crate) measure_calls: u64,
+    /// `read_bits` calls, for tests of how much work layout does.
+    #[cfg(test)]
+    pub(crate) read_bits_calls: std::cell::Cell<u64>,
     /// While a mount defers its text inputs' layout: the observer running
     /// now, whose geometry reads (`bounds` and the boxes made from it) are
     /// kept with what they found (`geometry_reads`), to run it again if
@@ -3438,6 +3544,8 @@ impl Scene {
             escaped: Vec::new(),
             #[cfg(test)]
             measure_calls: 0,
+            #[cfg(test)]
+            read_bits_calls: Default::default(),
             geometry_reader: Default::default(),
             geometry_reads: Default::default(),
             geometry_revision: 0,
@@ -5213,7 +5321,7 @@ impl Scene {
         let was = node.special;
         node.special = was.with(bit, on);
         let laid_out = (was.laid_out(), node.special.laid_out());
-        match (was.any(), node.special.any()) {
+        match (was.counted(), node.special.counted()) {
             (false, true) => self.contents_count += SPECIAL_UNIT,
             (true, false) => self.contents_count -= SPECIAL_UNIT,
             _ => {}
@@ -6883,7 +6991,21 @@ impl Scene {
                 generation: self.new_slot_generation,
             }
         };
-        self.node_mut(parent).children.get_mut().push(id);
+        let siblings = self.node_mut(parent).children.get_mut();
+        // On the test `push` makes anyway, and no other where there is room: a
+        // long list outgrowing it, which it only does as it doubles. (A short
+        // one outgrows it often: every list's first child.) Three pushes, each
+        // knowing which it is.
+        if siblings.len() == siblings.capacity() {
+            if siblings.len() >= COLUMN_KEPT_FROM {
+                self.children_outgrown(parent);
+                self.node_mut(parent).children.get_mut().push(id);
+            } else {
+                siblings.push(id);
+            }
+        } else {
+            siblings.push(id);
+        }
         if let Some(given) = given {
             self.given_styles.insert(id, given);
         }
@@ -7075,10 +7197,17 @@ impl Scene {
             if node.special.has(COLD) {
                 self.forget_cold(id);
             }
+            if node.special.has(KEPT_COLUMN)
+                && let Some(maps) = &mut self.cold
+            {
+                maps.column_memos.remove(&id);
+            }
             if node.special.laid_out() {
                 self.contents_count -= 1;
             }
-            self.contents_count -= SPECIAL_UNIT;
+            if node.special.counted() {
+                self.contents_count -= SPECIAL_UNIT;
+            }
         }
         if !self.given_styles.is_empty() {
             self.given_styles.remove(&id);
@@ -7247,7 +7376,7 @@ impl Scene {
     /// Whether `id` has a `special` bit (`has_special_nodes` first).
     #[inline(always)]
     pub(crate) fn is_special(&self, id: NodeId) -> bool {
-        self.node(id).special.any()
+        self.node(id).special.counted()
     }
     /// Whether `id` has track lists or a `z` a style without them must
     /// clear, or a paint order.
@@ -8949,7 +9078,7 @@ impl Scene {
                     ..
                 }
         ) && parent.advanced_layout.is_none()
-            && !parent.special.any()
+            && (!parent.special.any() || parent.special == Special::Kept)
             && parent.measurement.is_some()
             && parent.alternates.is_empty()
             && parent.sizes.is_empty()
@@ -10560,6 +10689,7 @@ impl Scene {
     /// its parent passes (`Constraints::percent_width`, `percent_height`): its
     /// own percentage sizes, limits and padding. Its children's bases come
     /// from its own size.
+    #[inline(always)]
     pub(super) fn percent_bases(&self, id: NodeId) -> (bool, bool) {
         let node = self.node(id);
         let style = &node.style;
@@ -10623,6 +10753,8 @@ impl Scene {
         crate::deep(0, || self.read_bits(id))
     }
     fn read_bits(&self, id: NodeId) -> u8 {
+        #[cfg(test)]
+        self.read_bits_calls.set(self.read_bits_calls.get() + 1);
         let node = self.node(id);
         // Percentages anywhere below, or its own.
         let (own_w, own_h) = self.percent_bases(id);
@@ -11575,6 +11707,466 @@ impl Scene {
         self.store_measurement(id, constraints, (width, height), children);
         (width, height)
     }
+    /// `id`'s children outgrowing their list. A column long enough, whose
+    /// height is its children's: perhaps a reply streaming into it, now or
+    /// once it is mounted whole (a reply set, then streamed), and its layouts
+    /// from here look first at whether only its end changed (`column_end`).
+    #[cold]
+    #[inline(never)]
+    fn children_outgrown(&mut self, id: NodeId) {
+        let node = self.tree_node(id);
+        if node.special != Special::None || !column_sized_by_children(node) {
+            return;
+        }
+        // No result to resume from yet: its next layout leaves one.
+        let memo = ColumnMemo {
+            pass: u64::MAX,
+            style_writes: node.style_writes,
+            border: column_border(&node.kind),
+            sums: None,
+            whole: 0,
+        };
+        self.cold
+            .get_or_insert_default()
+            .column_memos
+            .insert(id, memo);
+        self.set_special(id, KEPT_COLUMN, true);
+    }
+    /// Column `id` is about to be laid out whole: the result it stores this
+    /// pass is the one its next layout resumes from, of its style and kind
+    /// now. One that no longer sizes by its children, or that has laid out
+    /// whole a few passes running (nothing streaming into it), stops looking.
+    /// Its first layout, another in one pass, or one under other constraints
+    /// (a window resized while a reply streams) isn't one more: a stream
+    /// goes on resuming after it.
+    fn column_laid_out_whole(&mut self, id: NodeId, constraints: Constraints) {
+        let node = self.tree_node(id);
+        let was = self
+            .cold
+            .as_deref()
+            .and_then(|cold| cold.column_memos.get(&id))
+            .map_or(0, |memo| {
+                let counts = memo.pass != self.layout_pass
+                    && node
+                        .measurement
+                        .as_ref()
+                        .is_some_and(|last| last.constraints == constraints);
+                memo.whole + u8::from(counts)
+            });
+        if !column_sized_by_children(node) || was >= COLUMN_WHOLE_PASSES {
+            return self.drop_column_end(id);
+        }
+        let memo = ColumnMemo {
+            pass: self.layout_pass,
+            style_writes: node.style_writes,
+            border: column_border(&node.kind),
+            sums: None,
+            whole: was,
+        };
+        if let Some(cold) = self.cold.as_deref_mut() {
+            cold.column_memos.insert(id, memo);
+        }
+    }
+    /// How many of column `id`'s first children its last result's places
+    /// stand for, by `memo`: all it placed but the last if that changed, and
+    /// none (`None`) if any other did or anything else about it is not as
+    /// that result had it. Looks at what changed since (`self.dirty`), not at
+    /// every child: its cost is the change's, however long the column; only
+    /// children added or removed have it compare their ids. Debug builds
+    /// check it against every child.
+    fn column_keeps(&self, id: NodeId, memo: &ColumnMemo) -> Option<usize> {
+        let node = self.tree_node(id);
+        let last = node.measurement.as_ref()?;
+        let is_column = matches!(
+            node.kind,
+            NodeKind::Container(Layout::Column)
+                | NodeKind::Panel {
+                    layout: Layout::Column,
+                    ..
+                }
+        );
+        if !is_column
+            || last.pass != memo.pass
+            || node.style_writes != memo.style_writes
+            || column_border(&node.kind) != memo.border
+            || node.advanced_layout.is_some()
+        {
+            return None;
+        }
+        let ids = self.children_raw(node);
+        let placed = last.children.len();
+        // All it placed but the last stay in their places, and the last may
+        // be another now (a block that became another kind).
+        let stable = placed.checked_sub(1)?;
+        if ids.len() < stable {
+            return None;
+        }
+        if node.dirty & CHILDREN != 0
+            && last.children[..stable]
+                .iter()
+                .zip(ids)
+                .any(|((child, ..), id)| child != id)
+        {
+            return None;
+        }
+        let at_end = last.children[stable].0;
+        let mut keep = match ids.get(stable) == Some(&at_end) {
+            true => placed,
+            false => stable,
+        };
+        for changed in &self.dirty {
+            if !self.contains(*changed) {
+                continue;
+            }
+            let child = self.tree_node(*changed);
+            if child.parent != Some(id) || child.dirty & LAYOUT == 0 {
+                continue;
+            }
+            if *changed == at_end {
+                keep = stable;
+            } else if child.measurement.is_some() {
+                return None;
+            }
+        }
+        // (With none yet, `column_end` looks at each child it would keep.)
+        #[cfg(debug_assertions)]
+        if memo.sums.is_some() {
+            let scanned = last
+                .children
+                .iter()
+                .zip(ids)
+                .take_while(|((child, placed, under), id)| {
+                    let node = self.tree_node(**id);
+                    child == *id
+                        && !node.style.absolute
+                        && under.force_height.is_none()
+                        && node.dirty & LAYOUT == 0
+                        && node.measurement.as_ref().is_some_and(|held| {
+                            held.constraints == *under && held.size == (placed.width, placed.height)
+                        })
+                })
+                .count();
+            assert!(
+                scanned >= keep,
+                "a column keeps {keep} of {placed}, {scanned} unchanged"
+            );
+        }
+        (keep > 0).then_some(keep)
+    }
+    /// What columns streamed into read (`Scene::read_bits`), each from what
+    /// it kept for the children that stand and from those past them, not by
+    /// asking every child. Before a layout asks: what changed in one has just
+    /// taken its answer away.
+    #[cold]
+    #[inline(never)]
+    fn restore_column_reads(&self) {
+        let Some(cold) = self.cold.as_deref() else {
+            return;
+        };
+        for (id, memo) in &cold.column_memos {
+            let Some(node) = self
+                .slots
+                .get(id.index as usize)
+                .and_then(|s| s.node.as_ref())
+            else {
+                continue;
+            };
+            if node.reads.get() & READS_KNOWN != 0 {
+                continue;
+            }
+            let Some((held, at)) = memo.sums else {
+                continue;
+            };
+            let Some(keep) = self.column_keeps(*id, memo) else {
+                continue;
+            };
+            let placed = node
+                .measurement
+                .as_ref()
+                .map_or(0, |last| last.children.len());
+            if held != placed {
+                continue;
+            }
+            let end = &self.children_raw(node)[keep..];
+            if end.iter().any(|child| {
+                self.tree_node(*child).style.absolute || self.child_takes_advanced_layout(*child)
+            }) {
+                continue;
+            }
+            let mut reads = at[keep + 1 - placed].reads;
+            for child in end {
+                reads |= self.reads_bits(*child) & COLUMN_READS;
+            }
+            let (own_w, own_h) = self.percent_bases(*id);
+            let style = &node.style;
+            let bits = READS_KNOWN
+                | if reads & READS_WIDTH != 0 && style.width.is_none() {
+                    READS_WIDTH
+                } else {
+                    0
+                }
+                | if reads & READS_HEIGHT != 0 && style.height.is_none() {
+                    READS_HEIGHT
+                } else {
+                    0
+                }
+                | if reads & PERCENT_WIDTH != 0 || own_w {
+                    PERCENT_WIDTH
+                } else {
+                    0
+                }
+                | if reads & PERCENT_HEIGHT != 0 || own_h {
+                    PERCENT_HEIGHT
+                } else {
+                    0
+                }
+                | if own_w { OWN_PERCENT_WIDTH } else { 0 }
+                | if own_h { OWN_PERCENT_HEIGHT } else { 0 };
+            #[cfg(debug_assertions)]
+            {
+                #[cfg(test)]
+                let calls = self.read_bits_calls.get();
+                assert_eq!(self.read_bits(*id), bits, "what a kept column reads");
+                #[cfg(test)]
+                self.read_bits_calls.set(calls);
+            }
+            node.reads.set(bits);
+        }
+    }
+    /// Column `id` no longer looks at its end (`keep_column_end`).
+    fn drop_column_end(&mut self, id: NodeId) {
+        if let Some(maps) = &mut self.cold {
+            maps.column_memos.remove(&id);
+        }
+        self.set_special(id, KEPT_COLUMN, false);
+    }
+    /// Column `id` laid out again with only its end changed (its last child,
+    /// or children appended), its height its children's and its style, kind
+    /// and constraints as its last result had them: that result's places
+    /// stand, and only the end is measured and placed, every value the float
+    /// a whole layout gives. None, for `measure_uncached` to lay it out
+    /// whole, otherwise, or where flex distribution would share room out
+    /// (sums that round off by a thousandth). Debug builds check what it
+    /// keeps against working it out.
+    #[inline(never)]
+    fn column_end(&mut self, id: NodeId, constraints: Constraints) -> Option<(f32, f32)> {
+        let memo = *self.cold.as_deref()?.column_memos.get(&id)?;
+        let node = self.tree_node(id);
+        let last = node.measurement.as_ref()?;
+        if node.dirty & LAYOUT == 0
+            || last.pass == self.layout_pass
+            || last.constraints != constraints
+        {
+            return None;
+        }
+        let keep = self.column_keeps(id, &memo)?;
+        let node = self.tree_node(id);
+        let last = node.measurement.as_ref()?;
+        let ids = self.children_raw(node);
+        let (placed, count) = (last.children.len(), ids.len());
+        if keep >= count {
+            return None;
+        }
+        // Nothing past it lays out another way (`uses_advanced_layout`; those
+        // it keeps were laid out as a column, unchanged).
+        if ids[keep..].iter().any(|child| {
+            self.tree_node(*child).style.absolute || self.child_takes_advanced_layout(*child)
+        }) {
+            return None;
+        }
+        let style = self.resolved_leaf_style(id, constraints);
+        // As `measure_uncached` works these out.
+        let padding = style.padding_edges.unwrap_or(Insets::all(style.padding));
+        let border = memo.border;
+        let padding = Insets {
+            top: padding.top.max(0.0) + border.top,
+            right: padding.right.max(0.0) + border.right,
+            bottom: padding.bottom.max(0.0) + border.bottom,
+            left: padding.left.max(0.0) + border.left,
+        };
+        let horizontal_padding = padding.left + padding.right;
+        let vertical_padding = padding.top + padding.bottom;
+        let explicit_w = constraints
+            .force_width
+            .or(style.width)
+            .or_else(|| percentage(style.width_percent, constraints.percent_width))
+            .map(|w| dimension(w, style.min_width, style.max_width))?;
+        let explicit_h = constraints
+            .force_height
+            .or(style.height)
+            .or_else(|| percentage(style.height_percent, constraints.percent_height));
+        if explicit_h.is_some()
+            || style.min_height.is_some()
+            || style.max_height.is_some()
+            || style.justify != Justify::Start
+            || style.align == Align::Baseline
+        {
+            return None;
+        }
+        let inner_w = dimension(explicit_w, style.min_width, style.max_width) - horizontal_padding;
+        let natural = Constraints {
+            width: Some((explicit_w - horizontal_padding).max(0.0)),
+            height: constraints.height.map(|h| (h - vertical_padding).max(0.0)),
+            percent_width: Some((explicit_w - horizontal_padding).max(0.0)),
+            percent_height: None,
+            ..Constraints::default()
+        };
+        let aligned = |s: &Style| {
+            s.layout_options
+                .as_deref()
+                .and_then(|options| options.align_self)
+                .unwrap_or(style.align)
+        };
+        let gap = style.gap;
+        // Its sums from nothing: those it keeps are in flow and none flexed
+        // (held to as they change, by `column_keeps`), and each holds the
+        // result it was placed with.
+        if memo.sums.is_none() {
+            let last = self.tree_node(id).measurement.as_ref()?;
+            let plain = last.children[..keep].iter().all(|&(child, placed, under)| {
+                let node = self.tree_node(child);
+                under.force_height.is_none()
+                    && !node.style.absolute
+                    && !self.child_takes_advanced_layout(child)
+                    && node.measurement.as_ref().is_some_and(|held| {
+                        held.constraints == under && held.size == (placed.width, placed.height)
+                    })
+            });
+            if !plain {
+                return None;
+            }
+        }
+        let last = self.tree_node_mut(id).measurement.as_mut()?;
+        let mut children = std::mem::take(&mut last.children);
+        children.truncate(keep);
+        #[cfg(debug_assertions)]
+        self.check_kept_column(id, &children, natural, inner_w, padding, gap, &aligned);
+        // Its sums where its end begins: kept for this result's end, or added
+        // up from the places it keeps.
+        let start = match memo.sums {
+            Some((held, at)) if held == placed => at[keep + 1 - placed],
+            _ => children
+                .iter()
+                .fold(ColumnSums::default(), |sums, &(child, at, _)| {
+                    let m = self.node(child).style.margin;
+                    let mut sums = sums.then((at.width, at.height), m, gap);
+                    sums.reads |= self.reads_bits(child) & COLUMN_READS;
+                    sums
+                }),
+        };
+        let (mut sums, mut before) = (start, start);
+        for at in keep..count {
+            let child = self.children_raw(self.tree_node(id))[at];
+            before = sums;
+            let s = &self.node(child).style;
+            let m = s.margin;
+            // The width it stretches to, unless it sizes itself there.
+            let force_width = (aligned(s) == Align::Stretch
+                && (s.width.is_none() || s.intrinsic_width)
+                && percentage(s.width_percent, natural.percent_width).is_none())
+            .then(|| (explicit_w - horizontal_padding - m.left - m.right).max(0.));
+            let asked = Constraints {
+                force_width,
+                ..natural
+            };
+            let ((w, h), under) = self.measure_kept(child, asked);
+            let cross_free = inner_w - w - m.left - m.right;
+            let cross = match aligned(&self.node(child).style) {
+                Align::Center => cross_free / 2.0,
+                Align::End => cross_free,
+                _ => 0.0,
+            };
+            let place = Rect::new(
+                cross + m.left + padding.left,
+                sums.cursor + m.top + padding.top,
+                w,
+                h,
+            );
+            children.push((child, place, under));
+            sums = sums.then((w, h), m, gap);
+            sums.reads |= self.reads_bits(child) & COLUMN_READS;
+        }
+        let gaps = gap * count.saturating_sub(1) as f32;
+        let natural_main = sums.main + gaps;
+        let limit = dimension(natural_main + vertical_padding, None, None) - vertical_padding;
+        if (limit - natural_main).abs() >= 0.001 {
+            return None;
+        }
+        let width = dimension(explicit_w, style.min_width, style.max_width);
+        let height = dimension(sums.natural_h + gaps + vertical_padding, None, None);
+        self.store_measurement(id, constraints, (width, height), children);
+        let pass = self.tree_node(id).measurement.as_ref()?.pass;
+        let memos = &mut self.cold.as_deref_mut()?.column_memos;
+        memos.insert(
+            id,
+            ColumnMemo {
+                pass,
+                sums: Some((count, [before, sums])),
+                whole: 0,
+                ..memo
+            },
+        );
+        Some((width, height))
+    }
+    /// What `column_end` keeps of column `id`, against asking each child and
+    /// placing it as `measure_uncached` does.
+    #[cfg(debug_assertions)]
+    #[allow(clippy::too_many_arguments)]
+    fn check_kept_column(
+        &mut self,
+        id: NodeId,
+        children: &[ChildPlacement],
+        natural: Constraints,
+        inner_w: f32,
+        padding: Insets,
+        gap: f32,
+        aligned: &impl Fn(&Style) -> Align,
+    ) {
+        let _ = id;
+        #[cfg(test)]
+        let calls = self.measure_calls;
+        let mut cursor = 0.0_f32;
+        for &(child, placed, under) in children {
+            let s = self.node(child).style.clone();
+            let m = s.margin;
+            let force_width = (aligned(&s) == Align::Stretch
+                && (s.width.is_none() || s.intrinsic_width)
+                && percentage(s.width_percent, natural.percent_width).is_none())
+            .then(|| (inner_w - m.left - m.right).max(0.));
+            let asked = Constraints {
+                force_width,
+                ..natural
+            };
+            let answer = self.measure_kept(child, asked);
+            assert_eq!(
+                answer,
+                ((placed.width, placed.height), under),
+                "a column's kept child answers as it did"
+            );
+            let (w, h) = (placed.width, placed.height);
+            let cross_free = inner_w - w - m.left - m.right;
+            let cross = match aligned(&s) {
+                Align::Center => cross_free / 2.0,
+                Align::End => cross_free,
+                _ => 0.0,
+            };
+            let at = Rect::new(
+                cross + m.left + padding.left,
+                cursor + m.top + padding.top,
+                w,
+                h,
+            );
+            assert_eq!(
+                placed, at,
+                "a column's kept child stands where it is placed"
+            );
+            cursor += h + (m.top + m.bottom) + gap + 0.0;
+        }
+        #[cfg(test)]
+        {
+            self.measure_calls = calls;
+        }
+    }
     /// An empty box whose size its style or constraints fix (a bar, a
     /// swatch), as the rest of `measure_uncached` works it out: its width and
     /// height, with no padding, children or advanced layout to weigh, and
@@ -11873,6 +12465,14 @@ impl Scene {
     #[cold]
     #[inline(never)]
     fn measure_special(&mut self, id: NodeId, constraints: Constraints) -> Option<(f32, f32)> {
+        if self.tree_node(id).special == Special::Kept {
+            // Only its end changed; or it lays out whole, as any node.
+            let size = self.column_end(id, constraints);
+            if size.is_none() {
+                self.column_laid_out_whole(id, constraints);
+            }
+            return size;
+        }
         if constraints.force_width.is_none()
             && self.is_contained(id)
             && let Some(size) = self.measure_contained(id, constraints)
@@ -12495,6 +13095,9 @@ impl Scene {
             }
             false => full,
         };
+        if self.cold.is_some() {
+            self.restore_column_reads();
+        }
         if full {
             self.measure_full(self.root, Constraints::default());
             self.arrange_from(self.root, 0.0, 0.0, &mut report);
@@ -15428,6 +16031,410 @@ mod tests {
                 );
             }
         }
+    }
+    /// A column whose height is its children's, a reply streaming into it:
+    /// its last child growing, or a child appended, is laid out alone, its
+    /// earlier children kept where they were, and every box is where a
+    /// column built at the end puts it.
+    #[test]
+    fn a_column_growing_at_its_end_lays_out_only_its_end() {
+        let build = |words: &[String]| {
+            let mut scene = Scene::new(300.0, 2000.0);
+            scene.set_text_measurer(|text: &str, _: f32, limit: Option<f32>| {
+                let width = text.len() as f32 * 7.0;
+                let room = limit.unwrap_or(width).max(7.0);
+                (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+            });
+            let column = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                Style {
+                    width: Some(200.0),
+                    gap: 8.0,
+                    padding: 4.0,
+                    ..Style::default()
+                },
+            );
+            let wrap = Style {
+                text_wrap: true,
+                ..Style::default()
+            };
+            let ids: Vec<_> = words
+                .iter()
+                .map(|w| scene.append(column, text(w), wrap.clone()))
+                .collect();
+            scene.flush();
+            (scene, column, ids, wrap)
+        };
+        let mut words: Vec<String> = (0..64)
+            .map(|i| format!("block {i} says a little"))
+            .collect();
+        let (mut scene, column, mut ids, wrap) = build(&words);
+        // A block arrives: from here it looks only at its end.
+        words.push("the block a reply streams into".to_string());
+        ids.push(scene.append(column, text(words.last().unwrap()), wrap.clone()));
+        scene.flush();
+        // The last block grows, again and again.
+        for more in 0..3 {
+            words
+                .last_mut()
+                .unwrap()
+                .push_str(" and then a good deal more of it");
+            let before = scene.measure_calls;
+            let read = scene.read_bits_calls.get();
+            scene.set_text(*ids.last().unwrap(), words.last().unwrap().as_str());
+            scene.flush();
+            assert!(
+                scene.measure_calls - before < 10,
+                "grow {more}: {} measures for 66 nodes",
+                scene.measure_calls - before
+            );
+            // Its earlier blocks aren't asked what they read, once it has
+            // sums to resume from.
+            if more > 0 {
+                assert!(
+                    scene.read_bits_calls.get() - read < 10,
+                    "grow {more}: {} asked of 66 nodes",
+                    scene.read_bits_calls.get() - read
+                );
+            }
+        }
+        // A block appended.
+        words.push("a new block arrives".to_string());
+        let before = scene.measure_calls;
+        ids.push(scene.append(column, text(words.last().unwrap()), wrap));
+        scene.flush();
+        assert!(
+            scene.measure_calls - before < 10,
+            "{} measures",
+            scene.measure_calls - before
+        );
+        // As a column built with all of it lays it out.
+        let (fresh, fresh_column, fresh_ids, _) = build(&words);
+        assert_eq!(scene.bounds(column), fresh.bounds(fresh_column));
+        for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
+            assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
+        }
+    }
+    /// A column streamed into every way its end can change: appended to,
+    /// its last child growing, a child before it changing (laid out from
+    /// there), its last removed, padded so its sums carry far: each time
+    /// every box where a column built with what it holds then puts it (and
+    /// debug builds check the sums it resumes from).
+    #[test]
+    fn a_column_resumed_at_its_end_lays_out_as_one_built_whole() {
+        let measurer = |text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.3)
+        };
+        let column_style = Style {
+            width: Some(220.0),
+            gap: 6.5,
+            padding: 3.25,
+            ..Style::default()
+        };
+        let wrap = Style {
+            text_wrap: true,
+            margin: Insets {
+                top: 1.5,
+                bottom: 2.25,
+                ..Insets::default()
+            },
+            ..Style::default()
+        };
+        let build = |words: &[String]| {
+            let mut scene = Scene::new(300.0, 4000.0);
+            scene.set_text_measurer(measurer);
+            let column = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                column_style.clone(),
+            );
+            let ids: Vec<_> = words
+                .iter()
+                .map(|w| scene.append(column, text(w), wrap.clone()))
+                .collect();
+            scene.flush();
+            (scene, column, ids)
+        };
+        let same = |scene: &Scene, column: NodeId, ids: &[NodeId], words: &[String]| {
+            let (fresh, fresh_column, fresh_ids) = build(words);
+            assert_eq!(scene.bounds(column), fresh.bounds(fresh_column));
+            for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
+                assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
+            }
+        };
+        let mut words: Vec<String> = (0..64).map(|i| format!("block {i} of the reply")).collect();
+        let (mut scene, column, mut ids) = build(&words);
+        for step in 0..12 {
+            match step % 4 {
+                // Appended.
+                0 | 2 => {
+                    words.push(format!("a block arriving at step {step}"));
+                    ids.push(scene.append(column, text(words.last().unwrap()), wrap.clone()));
+                }
+                // The last grows.
+                1 => {
+                    words
+                        .last_mut()
+                        .unwrap()
+                        .push_str(" with more words after it");
+                    scene.set_text(*ids.last().unwrap(), words.last().unwrap().as_str());
+                }
+                // One before the end changes, then the last is removed.
+                _ => {
+                    let at = ids.len() - 3;
+                    words[at].push_str(" changed");
+                    scene.set_text(ids[at], words[at].as_str());
+                    scene.flush();
+                    same(&scene, column, &ids, &words);
+                    words.pop();
+                    scene.remove(ids.pop().unwrap());
+                }
+            }
+            scene.flush();
+            same(&scene, column, &ids, &words);
+        }
+    }
+    /// A column mounted whole, past any doubling of its list a stream would
+    /// reach soon, with options of its own: its first layout is the one the
+    /// next resumes from.
+    #[test]
+    fn a_column_mounted_long_lays_out_only_its_end() {
+        let mut scene = Scene::new(300.0, 4000.0);
+        scene.set_text_measurer(|text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+        });
+        let column = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(220.0),
+                gap: 4.0,
+                // As a script's has: options that don't send it to taffy.
+                layout_options: Some(Arc::new(crate::layout::LayoutOptions {
+                    visible: Some(true),
+                    ..Default::default()
+                })),
+                ..Style::default()
+            },
+        );
+        let wrap = Style {
+            text_wrap: true,
+            ..Style::default()
+        };
+        let ids: Vec<_> = (0..100)
+            .map(|i| scene.append(column, text(&format!("block {i}")), wrap.clone()))
+            .collect();
+        scene.flush();
+        let mut words = "block 99".to_string();
+        for more in 0..3 {
+            words.push_str(" and a good deal more of it");
+            let before = scene.measure_calls;
+            scene.set_text(*ids.last().unwrap(), words.as_str());
+            scene.flush();
+            assert!(
+                scene.measure_calls - before < 10,
+                "grow {more}: {} measures for 101 nodes",
+                scene.measure_calls - before
+            );
+        }
+        // Its last block replaced by another, as one that changes kind is.
+        scene.remove(*ids.last().unwrap());
+        let before = scene.measure_calls;
+        let new = scene.append(column, text("another block"), wrap);
+        scene.flush();
+        assert!(
+            scene.measure_calls - before < 10,
+            "replaced: {} measures for 101 nodes",
+            scene.measure_calls - before
+        );
+        assert_eq!(
+            scene.bounds(new).y,
+            scene.bounds(ids[98]).y + scene.bounds(ids[98]).height + 4.0
+        );
+    }
+    /// A window resized again and again while a reply streams into a column
+    /// as wide as a share of it: each lays it out whole, and none ends it
+    /// resuming at its end, where a column built with what it holds puts it.
+    #[test]
+    fn a_column_resized_while_streamed_into_goes_on_resuming() {
+        let measurer = |text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+        };
+        let column_style = Style {
+            width_percent: Some(0.5),
+            gap: 4.0,
+            ..Style::default()
+        };
+        let wrap = Style {
+            text_wrap: true,
+            ..Style::default()
+        };
+        let mut scene = Scene::new(600.0, 4000.0);
+        scene.set_text_measurer(measurer);
+        let column = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            column_style.clone(),
+        );
+        let mut words: Vec<String> = (0..100).map(|i| format!("block {i} of a reply")).collect();
+        let mut ids: Vec<_> = words
+            .iter()
+            .map(|w| scene.append(column, text(w), wrap.clone()))
+            .collect();
+        scene.flush();
+        // Streaming into it, resuming.
+        let grow = |scene: &mut Scene, words: &mut Vec<String>, ids: &[NodeId]| {
+            words.last_mut().unwrap().push_str(" and more of it");
+            let before = scene.measure_calls;
+            scene.set_text(*ids.last().unwrap(), words.last().unwrap().as_str());
+            scene.flush();
+            scene.measure_calls - before
+        };
+        grow(&mut scene, &mut words, &ids);
+        assert!(grow(&mut scene, &mut words, &ids) < 10);
+        // Resized, more often than it would take to stop it looking.
+        let last_width = 600.0 + 40.0 * (COLUMN_WHOLE_PASSES as f32 + 2.0);
+        for step in 0..COLUMN_WHOLE_PASSES as u32 + 3 {
+            scene.resize(600.0 + 40.0 * step as f32, 4000.0);
+            scene.flush();
+            assert!(scene.node(column).special == Special::Kept, "resize {step}");
+        }
+        assert_eq!(scene.bounds(column).width, last_width / 2.0);
+        // Its next chunk lays it out from that, and its next resumes.
+        grow(&mut scene, &mut words, &ids);
+        let measures = grow(&mut scene, &mut words, &ids);
+        assert!(measures < 10, "{measures} measures after resizing");
+        words.push("a block arriving".to_string());
+        ids.push(scene.append(column, text(words.last().unwrap()), wrap.clone()));
+        scene.flush();
+        // As one built with all of it at that width.
+        let mut fresh = Scene::new(last_width, 4000.0);
+        fresh.set_text_measurer(measurer);
+        let fresh_column = fresh.append(
+            fresh.root(),
+            NodeKind::Container(Layout::Column),
+            column_style,
+        );
+        let fresh_ids: Vec<_> = words
+            .iter()
+            .map(|w| fresh.append(fresh_column, text(w), wrap.clone()))
+            .collect();
+        fresh.flush();
+        assert_eq!(scene.bounds(column), fresh.bounds(fresh_column));
+        for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
+            assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
+        }
+    }
+    /// A long column changed at its start, flush after flush: nothing is
+    /// streaming into it, so it stops looking at its end, and lays out as any.
+    #[test]
+    fn a_long_column_not_streamed_into_stops_looking_at_its_end() {
+        let mut scene = Scene::new(300.0, 4000.0);
+        scene.set_text_measurer(|text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+        });
+        let column = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(220.0),
+                ..Style::default()
+            },
+        );
+        let wrap = Style {
+            text_wrap: true,
+            ..Style::default()
+        };
+        let ids: Vec<_> = (0..100)
+            .map(|i| scene.append(column, text(&format!("block {i}")), wrap.clone()))
+            .collect();
+        scene.flush();
+        assert!(scene.node(column).special == Special::Kept);
+        let mut words = "block 0".to_string();
+        for _ in 0..=COLUMN_WHOLE_PASSES {
+            words.push_str(" more");
+            scene.set_text(ids[0], words.as_str());
+            scene.flush();
+        }
+        assert!(scene.node(column).special == Special::None);
+        assert!(
+            scene
+                .cold
+                .as_deref()
+                .is_none_or(|c| c.column_memos.is_empty())
+        );
+    }
+    /// A column streamed into, then changed so its earlier places can't all
+    /// stand: its gap, an absolute child arriving: each time as a column
+    /// built that way lays out.
+    #[test]
+    fn a_kept_column_changed_otherwise_lays_out_whole() {
+        let measurer = |text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+        };
+        let wrap = Style {
+            text_wrap: true,
+            ..Style::default()
+        };
+        let build = |gap: f32, count: usize| {
+            let mut scene = Scene::new(300.0, 4000.0);
+            scene.set_text_measurer(measurer);
+            let column = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                Style {
+                    width: Some(220.0),
+                    gap,
+                    ..Style::default()
+                },
+            );
+            let ids: Vec<_> = (0..count)
+                .map(|i| scene.append(column, text(&format!("block {i}")), wrap.clone()))
+                .collect();
+            scene.flush();
+            (scene, column, ids)
+        };
+        let same = |a: &Scene, column: NodeId, ids: &[NodeId], gap: f32| {
+            let (fresh, fresh_column, fresh_ids) = build(gap, ids.len());
+            assert_eq!(a.bounds(column), fresh.bounds(fresh_column));
+            for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
+                assert_eq!(a.bounds(*id), fresh.bounds(*fresh_id));
+            }
+        };
+        let (mut scene, column, mut ids) = build(4.0, 64);
+        ids.push(scene.append(column, text("block 64"), wrap.clone()));
+        scene.flush();
+        same(&scene, column, &ids, 4.0);
+        // Its gap, with a block arriving in the same flush.
+        let mut style = scene.style(column);
+        style.gap = 9.0;
+        scene.set_style(column, style);
+        ids.push(scene.append(column, text("block 65"), wrap.clone()));
+        scene.flush();
+        same(&scene, column, &ids, 9.0);
+        // An absolute child arriving takes no place, and those after it do.
+        scene.append(
+            column,
+            text("over it"),
+            Style {
+                absolute: true,
+                ..Style::default()
+            },
+        );
+        ids.push(scene.append(column, text("block 66"), wrap.clone()));
+        scene.flush();
+        same(&scene, column, &ids, 9.0);
     }
     #[test]
     fn text_sizes_survive_alternating_wrap_limits() {
