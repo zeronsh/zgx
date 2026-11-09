@@ -416,8 +416,9 @@ fn overlay_down(value: Justify) -> t::AlignItems {
     }
 }
 /// A child's style in its overlay parent: in the one grid area, its own
-/// `align_self` across.
-fn stacked_style(mut mapped: t::Style) -> t::Style {
+/// `align_self` across, or down where the overlay reads it so
+/// (`Scene::set_aligns_down`), as the grid does.
+fn stacked_style(mut mapped: t::Style, down: bool) -> t::Style {
     if mapped.position != t::Position::Absolute {
         mapped.grid_row = t::Line {
             start: line(1),
@@ -428,7 +429,9 @@ fn stacked_style(mut mapped: t::Style) -> t::Style {
             end: span(1),
         };
     }
-    mapped.justify_self = mapped.align_self.take();
+    if !down {
+        mapped.justify_self = mapped.align_self.take();
+    }
     mapped
 }
 /// Taffy's overflow for a node that clips, or not: clipping on either axis
@@ -934,7 +937,7 @@ impl Scene {
                     // A `contents` child clips as the child it lays out as.
                     mapped.overflow = overflow(super::clips(&scene.node(laid).style));
                     if stacked {
-                        mapped = stacked_style(mapped);
+                        mapped = stacked_style(mapped, scene.aligns_down(id));
                     }
                     mapped
                 };

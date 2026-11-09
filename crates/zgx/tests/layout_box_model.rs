@@ -8,7 +8,7 @@ use zgx::{
     compose::{ViewHandle, prelude::*},
     input::{InputEvent, Key, Modifiers},
     layout::Length,
-    scene::{Color, Insets, Rect},
+    scene::{Align, Color, Insets, Rect},
     widgets::Ui,
 };
 
@@ -262,6 +262,64 @@ fn overlay_children_stretch_by_default_unless_they_size_themselves() {
             Rect::new(10., 10., 30., 20.),
             "{case}"
         );
+    }
+}
+
+#[test]
+fn an_overlay_laid_out_as_a_grid_cell_aligns_its_children_down() {
+    // `set_aligns_down`: a child's own alignment places it down, as in a
+    // one-column grid with its items stretched; across it fills, or sits
+    // at the start sized. Set on the overlay or written to the child
+    // after, it lays out as soon as it is.
+    for taffy in [false, true] {
+        for (own, expected) in [
+            (Some(Align::Center), Rect::new(10., 40., 30., 20.)),
+            (Some(Align::End), Rect::new(10., 70., 30., 20.)),
+            (Some(Align::Start), Rect::new(10., 10., 30., 20.)),
+            (Some(Align::Stretch), Rect::new(10., 10., 30., 20.)),
+            (None, Rect::new(10., 10., 30., 20.)),
+        ] {
+            let case = format!("taffy {taffy}, {own:?}");
+            let (ui, h) = mount(
+                overlay()
+                    .id("cell")
+                    .w(200.)
+                    .h(100.)
+                    .p(10.)
+                    .child(div().id("fixed").w(30.).h(20.))
+                    .child(div().id("fill"))
+                    .when(taffy, |v| v.child(advanced())),
+            );
+            let (cell, fixed, fill) = (
+                h.find("cell").unwrap(),
+                h.find("fixed").unwrap(),
+                h.find("fill").unwrap(),
+            );
+            ui.scene.borrow_mut().set_aligns_down(cell, true);
+            ui.prepare_frame();
+            assert_eq!(
+                rect(&ui, &h, "fill"),
+                Rect::new(10., 10., 180., 80.),
+                "{case}"
+            );
+            for node in [fixed, fill] {
+                let mut scene = ui.scene.borrow_mut();
+                let mut style = scene.style(node);
+                let mut options = style.layout_options.as_deref().copied().unwrap_or_default();
+                options.align_self = own;
+                style.layout_options = (!options.is_empty()).then(|| options.into());
+                scene.set_style(node, style);
+            }
+            ui.prepare_frame();
+            assert_eq!(rect(&ui, &h, "fixed"), expected, "{case}");
+            let fill_want = match own {
+                Some(Align::Center) => Rect::new(10., 50., 180., 0.),
+                Some(Align::End) => Rect::new(10., 90., 180., 0.),
+                Some(Align::Start) => Rect::new(10., 10., 180., 0.),
+                _ => Rect::new(10., 10., 180., 80.),
+            };
+            assert_eq!(rect(&ui, &h, "fill"), fill_want, "{case}");
+        }
     }
 }
 

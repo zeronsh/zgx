@@ -174,6 +174,201 @@ fn a_presence_box_lays_out_as_a_one_cell_grid() {
     }
 }
 
+/// Where `content` lays out in a presence's box with `props`, and in the
+/// one-cell grid with stretched items that box was before it was an
+/// overlay.
+fn in_presence_and_grid(content: &str, props: &str) -> [Rect; 2] {
+    let presence = format!("ui.presence(tab, function() return {content} end, {{ {props} }})");
+    let grid = format!(
+        "ui.column {{ grid = true, cols = 1, rows = 1, items = 'stretch', {props}, {content} }}"
+    );
+    [presence, grid].map(|boxed| {
+        let mut h = Harness::inline(&format!(
+            r#"local tab = ui.state("tab", "a")
+            return ui.column {{ w_full = true, h_full = true, items = "start", {boxed} }}"#
+        ));
+        h.run_frames(2);
+        h.rect("content")
+    })
+}
+
+const PRESENCE_BOXES: [&str; 3] = [
+    "w = 120, h = 100",
+    "w = 120, p = 10",
+    "w = 120, h = 100, relative = true",
+];
+
+/// Content aligning itself (`self`) in a presence's box aligns down, as in
+/// the grid the box was, though an overlay aligns a child's `self` across.
+#[test]
+fn a_presence_box_aligns_content_by_its_self_down_as_the_grid_did() {
+    for content in [
+        r#"ui.div { id = "content", w = 40, h = 20, self = "center" }"#,
+        r#"ui.div { id = "content", w = 40, h = 20, self = "end" }"#,
+        r#"ui.div { id = "content", self = "center" }"#,
+        r#"ui.div { id = "content", h = 20, self = "start" }"#,
+        r#"ui.text { id = "content", "a few words that wrap", wrap = true, self = "center" }"#,
+        r#"ui.show(true, ui.div { id = "content", w = 40, h = 20, self = "end" })"#,
+    ] {
+        for props in PRESENCE_BOXES {
+            let [presence, grid] = in_presence_and_grid(content, props);
+            assert_eq!(presence, grid, "{props}: {content}");
+        }
+    }
+}
+
+/// A box sized by its content, aligning it down through taffy, answers a
+/// change of the room it has as the grid did: it reads what its content
+/// reads, so what it measured under other room never serves wrongly.
+#[test]
+fn a_presence_box_with_content_aligned_down_follows_its_room() {
+    for content in [
+        r#"ui.div { id = "content", w = 40, h = 20, self = "center" }"#,
+        r#"ui.text { id = "content", "a few words that wrap in the box", wrap = true, self = "end" }"#,
+    ] {
+        let rects = [
+            format!("ui.presence(tab, function() return {content} end, {{ p = 10 }})"),
+            format!(
+                "ui.column {{ grid = true, cols = 1, rows = 1, items = 'stretch', p = 10, {content} }}"
+            ),
+        ]
+        .map(|boxed| {
+            let mut h = Harness::inline(&format!(
+                r#"local tab = ui.state("tab", "a")
+                local room = ui.state("room", 300)
+                return ui.column {{ w_full = true, h_full = true, items = "start",
+                    ui.column {{ w = room, items = "start", {boxed} }},
+                    ui.button {{ id = "narrow", w = 4, h = 4, on_click = ui.set(room, 90) }},
+                    ui.button {{ id = "wide", w = 4, h = 4, on_click = ui.set(room, 300) }},
+                }}"#
+            ));
+            h.run_frames(2);
+            let wide = h.rect("content");
+            h.click("narrow");
+            h.run_frames(2);
+            let narrow = h.rect("content");
+            h.click("wide");
+            h.run_frames(2);
+            [wide, narrow, h.rect("content")]
+        });
+        assert_eq!(rects[0], rects[1], "{content}");
+    }
+}
+
+/// Content that aligns itself mounting when the value changes aligns as
+/// the grid's did too, and content that stretches after it fills the box.
+#[test]
+fn content_a_presence_box_changes_to_aligns_by_its_self() {
+    let mut h = Harness::inline(
+        r#"local tab = ui.state("tab", "a")
+        return ui.column { w_full = true, h_full = true, items = "start",
+            ui.presence(tab, function(v)
+                if v == "b" then return ui.div { id = "content", w = 40, h = 20, self = "end" } end
+                return ui.div { id = "content" }
+            end, { w = 120, h = 100 }),
+            ui.button { id = "b", w = 4, h = 4, on_click = ui.set(tab, "b") },
+            ui.button { id = "c", w = 4, h = 4, on_click = ui.set(tab, "c") },
+        }"#,
+    );
+    h.run_frames(2);
+    assert_eq!(h.rect("content"), Rect::new(0., 0., 120., 100.));
+    h.click("b");
+    h.run_frames(2);
+    assert_eq!(h.rect("content"), Rect::new(0., 80., 40., 20.));
+    h.click("c");
+    h.run_frames(2);
+    assert_eq!(h.rect("content"), Rect::new(0., 0., 120., 100.));
+}
+
+/// Content's `self` written after it mounts moves it down at once, as in
+/// the grid.
+#[test]
+fn a_self_set_after_content_mounts_in_a_presence_box_aligns_it_down() {
+    let mut h = Harness::inline(
+        r#"local tab = ui.state("tab", "a")
+        local at = ui.state("at", "stretch")
+        return ui.column { w_full = true, h_full = true, items = "start",
+            ui.presence(tab, function()
+                return ui.div { id = "content", w = 40, h = 20, self = at }
+            end, { w = 120, h = 100 }),
+            ui.button { id = "center", w = 4, h = 4, on_click = ui.set(at, "center") },
+            ui.button { id = "end", w = 4, h = 4, on_click = ui.set(at, "end") },
+        }"#,
+    );
+    h.run_frames(2);
+    assert_eq!(h.rect("content"), Rect::new(0., 0., 40., 20.));
+    h.click("center");
+    h.run_frames(1);
+    assert_eq!(h.rect("content"), Rect::new(0., 40., 40., 20.));
+    h.click("end");
+    h.run_frames(1);
+    assert_eq!(h.rect("content"), Rect::new(0., 80., 40., 20.));
+}
+
+/// Content's margins in a presence's box take room as in the grid.
+#[test]
+fn a_presence_box_keeps_its_contents_margins_as_the_grid_did() {
+    for content in [
+        r#"ui.div { id = "content", m = 8 }"#,
+        r#"ui.div { id = "content", mt = 4, ml = 6, w = 40, h = 20 }"#,
+        r#"ui.text { id = "content", "a few words that wrap", wrap = true, mx = 5 }"#,
+    ] {
+        for props in PRESENCE_BOXES {
+            let [presence, grid] = in_presence_and_grid(content, props);
+            assert_eq!(presence, grid, "{props}: {content}");
+        }
+    }
+}
+
+/// A presence's box sized by its content holds the content's margins, as
+/// CSS sizes a grid track by an item's margin box, and content aligning
+/// itself aligns that margin box: the grid it was (taffy's `1fr` row in a
+/// box of no height) left the margins out, so the box was 16 shorter and
+/// centred content sat 8 higher.
+#[test]
+fn a_presence_box_sized_by_its_content_holds_its_margins() {
+    for (content, y) in [
+        (r#"ui.div { id = "content", m = 8, h = 20 }"#, 18.),
+        (
+            r#"ui.div { id = "content", m = 8, h = 20, self = "center" }"#,
+            18.,
+        ),
+        (
+            r#"ui.div { id = "content", mt = 4, mb = 12, h = 20, self = "end" }"#,
+            14.,
+        ),
+    ] {
+        let mut h = Harness::inline(&format!(
+            r#"local tab = ui.state("tab", "a")
+            return ui.column {{ w_full = true, h_full = true, items = "start",
+                ui.presence(tab, function() return {content} end, {{ w = 120, p = 10 }}),
+                ui.div {{ id = "below", w = 4, h = 4 }},
+            }}"#
+        ));
+        h.run_frames(2);
+        assert_eq!(h.rect("content").y, y, "{content}");
+        assert_eq!(h.rect("below").y, 56., "{content}");
+    }
+}
+
+/// Absolute content, and absolute children of content, in a presence's box
+/// sit where the grid put them.
+#[test]
+fn a_presence_box_places_absolute_content_as_the_grid_did() {
+    for content in [
+        r#"ui.div { id = "content", absolute = true, top = 5, left = 7, w = 40, h = 20 }"#,
+        r#"ui.div { id = "content", absolute = true, top = 5, left = 5, right = 5, bottom = 5 }"#,
+        r#"ui.div { id = "content", absolute = true, right = 5, bottom = 7, w = 40, h = 20 }"#,
+        r#"ui.div { w = 40, h = 20,
+            ui.div { id = "content", absolute = true, top = 5, left = 7, w = 10, h = 10 } }"#,
+    ] {
+        for props in PRESENCE_BOXES {
+            let [presence, grid] = in_presence_and_grid(content, props);
+            assert_eq!(presence, grid, "{props}: {content}");
+        }
+    }
+}
+
 /// `mode = "wait"`: while the old content leaves, nothing takes its place
 /// and it stays where it was.
 #[test]
