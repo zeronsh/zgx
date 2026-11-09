@@ -139,3 +139,15 @@ fn a_pull_refreshes_where_uikit_snaps() {
     assert_eq!(pull_refresh_threshold(100.), 50.);
     assert!(pull_refresh_threshold(912.) > pull_refresh_threshold(874.));
 }
+
+#[test]
+fn a_swipe_begins_as_uikits_row_swipes_do() {
+    use zgx::native_control::{SwipePan, swipe_pan};
+    // UIKit, driven: -100/-30 swipes (25 across before 10 down), -100/-50
+    // scrolls (10 down at 20 across), both ways across.
+    assert_eq!(swipe_pan(-24.9, 0.), SwipePan::Waits);
+    assert_eq!(swipe_pan(-25., -7.5), SwipePan::Begins);
+    assert_eq!(swipe_pan(25., 7.5), SwipePan::Begins);
+    assert_eq!(swipe_pan(-20.1, -10.05), SwipePan::Fails);
+    assert_eq!(swipe_pan(0., 10.5), SwipePan::Fails);
+}

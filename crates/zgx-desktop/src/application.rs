@@ -1851,6 +1851,9 @@ struct Host {
     /// UIKit's scrolling (`ios_scroll`), made with the window.
     #[cfg(target_os = "ios")]
     native_scroll: Option<crate::ios_scroll::NativeScroller>,
+    /// A finger that closed a row's actions: nothing else to the window.
+    #[cfg(target_os = "ios")]
+    touch_swallowed: Option<u64>,
     /// UIKit's text input (`ios_text`), made with the window.
     #[cfg(target_os = "ios")]
     text_input: Option<crate::ios_text::TextInput>,
@@ -2149,6 +2152,8 @@ impl Host {
             touch: Default::default(),
             #[cfg(target_os = "ios")]
             native_scroll: None,
+            #[cfg(target_os = "ios")]
+            touch_swallowed: None,
             #[cfg(target_os = "ios")]
             text_input: None,
             #[cfg(target_os = "ios")]
@@ -4344,6 +4349,10 @@ impl Host {
                 &window,
                 self.context.ui.scene.clone(),
                 self.native_scroll.as_ref().map(|s| s.pan()),
+                {
+                    let finder = self.context.ui.scroll_driver_finder();
+                    move |x, y| finder(x, y, Some(true)).is_some()
+                },
             );
             // Listening before the first keyboard comes.
             let _ = crate::ios_system::keyboard_height();
@@ -5323,6 +5332,20 @@ impl Host {
                 #[cfg(windows)]
                 {
                     self.touch_last = true;
+                }
+                // A touch that closes a row's actions is nothing else to the window.
+                #[cfg(target_os = "ios")]
+                {
+                    use winit::event::TouchPhase::{Cancelled, Ended, Started};
+                    if touch.phase == Started && zgx::native_control::take_swallowed_touch() {
+                        self.touch_swallowed = Some(touch.id);
+                    }
+                    if self.touch_swallowed == Some(touch.id) {
+                        if matches!(touch.phase, Ended | Cancelled) {
+                            self.touch_swallowed = None;
+                        }
+                        return Ok(());
+                    }
                 }
                 #[cfg(target_os = "ios")]
                 if touch.phase == winit::event::TouchPhase::Started

@@ -441,6 +441,8 @@ pub struct PanEvent {
     pub vx: f32,
     /// Down, in points a second.
     pub vy: f32,
+    /// Where the finger is, in points from the window's top left.
+    pub at: (f32, f32),
 }
 /// A pan the platform recognizes, which an app only draws (`add_pan`).
 #[derive(Clone)]
@@ -449,8 +451,36 @@ pub struct PanTarget {
     pub node: Option<crate::scene::NodeId>,
     /// Whether it may start now.
     pub can_begin: Option<Rc<dyn Fn() -> bool>>,
+    /// A row's swipe: it begins only sideways, as UIKit's swipe actions do
+    /// (`SwipePan`), if this says so of a move that way (points, right
+    /// positive). Elsewhere a pan begins whichever way it goes.
+    pub across: Option<Rc<dyn Fn(f32) -> bool>>,
     /// Told of each of its states, always to an ending.
     pub on_pan: Rc<dyn Fn(PanEvent)>,
+}
+
+/// What UIKit's swipe actions make of a finger's move from where it landed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwipePan {
+    /// Too little yet to say.
+    Waits,
+    /// It is a swipe.
+    Begins,
+    /// It is a scroll: a table's scroll view has taken it.
+    Fails,
+}
+/// A row's swipe begins once a finger has gone 25 points across
+/// (`_UISwipeActionPanGestureRecognizer`'s `_hysteresis`, UIKit 26.5), unless
+/// it has gone 10 down first, where the scroll view around it takes it
+/// (`UIScrollViewPanGestureRecognizer`'s, the first past its own wins).
+pub fn swipe_pan(dx: f32, dy: f32) -> SwipePan {
+    if dy.abs() > 10. {
+        SwipePan::Fails
+    } else if dx.abs() >= 25. {
+        SwipePan::Begins
+    } else {
+        SwipePan::Waits
+    }
 }
 thread_local! {
     static PANS: std::cell::RefCell<Vec<PanTarget>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -458,6 +488,80 @@ thread_local! {
 /// Have the platform recognize this pan: the latest added wins where two could.
 pub fn add_pan(target: PanTarget) {
     PANS.with(|pans| pans.borrow_mut().push(target));
+}
+/// A finger's part in what watches them all (`set_touch_watch`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchWatch {
+    /// One landed.
+    Down,
+    /// It lifted with no pan of a row's having taken it.
+    Up,
+}
+/// What hears each finger on the window, and says whether the rest of the
+/// window is to hear no more of it.
+pub type TouchWatcher = Rc<dyn Fn(TouchWatch, f32, f32) -> bool>;
+thread_local! {
+    static TOUCH_WATCH: std::cell::RefCell<Option<TouchWatcher>> = const { std::cell::RefCell::new(None) };
+    static SWALLOWED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CUSTOM_ACTIONS: std::cell::RefCell<std::collections::HashMap<crate::scene::NodeId, MenuBuilder>> = std::cell::RefCell::default();
+}
+/// A row with its actions open watches where fingers go, as a table does to
+/// close it: a touch elsewhere closes it, and is nothing else.
+pub fn set_touch_watch(watch: Option<TouchWatcher>) {
+    TOUCH_WATCH.with(|slot| *slot.borrow_mut() = watch);
+}
+/// Whether anything watches fingers now (the host).
+pub fn touch_watched() -> bool {
+    TOUCH_WATCH.with(|slot| slot.borrow().is_some())
+}
+/// Tell what watches of a finger (the host).
+pub fn watch_touch(phase: TouchWatch, x: f32, y: f32) {
+    let watch = TOUCH_WATCH.with(|slot| slot.borrow().clone());
+    if let Some(watch) = watch
+        && watch(phase, x, y)
+        && phase == TouchWatch::Down
+    {
+        SWALLOWED.with(|swallowed| swallowed.set(true));
+    }
+}
+/// Whether the finger just landed is nothing to the window (the host, once).
+pub fn take_swallowed_touch() -> bool {
+    SWALLOWED.with(|swallowed| swallowed.replace(false))
+}
+/// What `node` offers assistive technology as actions of its own, as a table
+/// row's swipe actions are (VoiceOver's "Actions available").
+pub fn set_custom_actions(node: crate::scene::NodeId, build: MenuBuilder) {
+    CUSTOM_ACTIONS.with(|actions| actions.borrow_mut().insert(node, build));
+}
+/// `node`'s actions, for assistive technology: those it offers and its menu's.
+pub fn custom_actions_of(node: crate::scene::NodeId) -> Option<Vec<MenuAction>> {
+    let build = CUSTOM_ACTIONS.with(|actions| actions.borrow().get(&node).cloned());
+    let own = build.map(|build| build());
+    match (own, system_menu_of(node)) {
+        (Some(mut own), Some(menu)) => {
+            own.extend(menu);
+            Some(own)
+        }
+        (own, menu) => own.or(menu),
+    }
+}
+/// The actions of what assistive technology has reached at `node`: its own, or
+/// those of the nearest node around it with some, as a cell's reach what's in it.
+pub fn custom_actions_around(
+    scene: &crate::scene::Scene,
+    node: crate::scene::NodeId,
+) -> Option<Vec<MenuAction>> {
+    std::iter::once(node)
+        .chain(scene.ancestors(node))
+        .find_map(custom_actions_of)
+}
+/// Forget the pans of nodes gone from `scene`: rows of a list come and go.
+pub fn prune_pans(scene: &crate::scene::Scene) {
+    PANS.with(|pans| {
+        pans.borrow_mut()
+            .retain(|target| target.node.is_none_or(|node| scene.contains(node)));
+    });
+    CUSTOM_ACTIONS.with(|actions| actions.borrow_mut().retain(|node, _| scene.contains(*node)));
 }
 /// The pans added.
 pub fn pans() -> Vec<PanTarget> {

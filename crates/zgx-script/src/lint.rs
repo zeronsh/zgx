@@ -258,6 +258,8 @@ const NOT_ELEMENTS: &[&str] = &[
     "native_keyboard_bar",
     "native_edge",
     "native_pan",
+    "custom_actions",
+    "touch_watch",
     "pull_refresh",
     "haptic",
     "gesture_log",

@@ -21106,6 +21106,9 @@ export type NativePanOptions = {
 	edge: "left"?,
 	element: Element?,
 	can_begin: (() -> boolean)?,
+	-- A row's swipe: begins only sideways, as UIKit's swipe actions do, if this
+	-- says so of a move that way (points, right positive).
+	across: ((dx: number) -> boolean)?,
 	on_pan: (e: NativePanEvent) -> (),
 	[any]: any,
 }
@@ -21123,6 +21126,24 @@ export type AlertOptions = {
 	buttons: { { title: string, style: ("default" | "cancel" | "destructive")? } },
 	on_choose: ((button: number) -> ())?,
 }
+-- A row's swipe action, as a UIContextualAction: `title`, `symbol` or both; its
+-- colour (`style = "destructive"`: the system's red; else its gray). `action`
+-- says when it's done: `done(true)` on a destructive one collapses the row and
+-- then calls `on_delete`, for the app to take the item from its list.
+export type SwipeAction = {
+	title: string?,
+	symbol: string?,
+	color: Color?,
+	style: ("normal" | "destructive")?,
+	action: (done: (performed: boolean) -> ()) -> (),
+}
+export type SwipeActions = {
+	leading: { SwipeAction }?,
+	trailing: { SwipeAction }?,
+	-- A full swipe performs the edge's first action (default true).
+	full: boolean?,
+	on_delete: (() -> ())?,
+}
 export type IosKit = {
 	settle: (state: State<number>, target: number, done: (() -> ())?) -> () -> (),
 	section: (props: { header: string?, footer: string?, [number]: Node }) -> Node,
@@ -21137,6 +21158,16 @@ export type IosKit = {
 		on_click: (() -> ())?,
 		last: boolean?,
 		color: Color?,
+		-- Actions under the row, as a table's swipe actions (`SwipeActions`).
+		swipe: SwipeActions?,
+	}) -> Node,
+	-- A row of an app's own with the swipe actions a table's rows have.
+	swipe_row: (props: {
+		leading: { SwipeAction }?,
+		trailing: { SwipeAction }?,
+		full: boolean?,
+		on_delete: (() -> ())?,
+		[number]: Node,
 	}) -> Node,
 	search: (props: { value: State<string>, placeholder: string?, mx: number? }) -> Node,
 	-- A chat's composer on a keyboard bar: a small pill that opens as it takes focus
@@ -23082,6 +23113,13 @@ declare ui: {
 	on_escape: (handler: () -> boolean) -> (),
 	-- A long press on the element shows these, the system's way (iOS).
 	system_menu: (element: Element, build: () -> { SystemMenuItem }) -> (),
+	-- What the element offers assistive technology as actions of its own, as a
+	-- table row's swipe actions are (VoiceOver's "Actions available"; iOS).
+	custom_actions: (element: Element, build: () -> { SystemMenuItem }) -> (),
+	-- Hears each finger on the window ("down", and "up" if no row's swipe took
+	-- it), answering whether the window is to hear no more of a finger landing;
+	-- nil stops. A row with its actions open closes so (iOS).
+	touch_watch: (watch: ((phase: "down" | "up", x: number, y: number) -> boolean)?) -> (),
 	-- The system's alert, or action sheet (iOS). `on_choose` hears which button, from 1.
 	alert: (opts: AlertOptions) -> (),
 	action_sheet: (opts: AlertOptions) -> (),

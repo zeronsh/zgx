@@ -194,6 +194,8 @@ pub(crate) fn tokens() -> Vec<(TokenId, TokenInput)> {
         ("ios.cell", sel!(secondarySystemGroupedBackgroundColor)),
         ("ios.fill", sel!(systemFillColor)),
         ("ios.gray", sel!(systemGrayColor)),
+        ("ios.gray3", sel!(systemGray3Color)),
+        ("ios.gray5", sel!(systemGray5Color)),
         ("ios.red", sel!(systemRedColor)),
         ("ios.orange", sel!(systemOrangeColor)),
         ("ios.yellow", sel!(systemYellowColor)),

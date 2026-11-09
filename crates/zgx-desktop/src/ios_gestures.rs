@@ -6,11 +6,17 @@
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
     rc::Retained,
-    runtime::{AnyObject, Bool, NSObject, NSObjectProtocol},
+    runtime::{AnyClass, AnyObject, Bool, ClassBuilder, NSObject, NSObjectProtocol, Sel},
     sel,
 };
 use objc2_core_foundation::CGPoint;
-use std::{cell::RefCell, io::Write, rc::Rc, sync::Arc, time::Instant};
+use std::{
+    cell::{Cell, RefCell},
+    io::Write,
+    rc::Rc,
+    sync::Arc,
+    time::Instant,
+};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use zgx::{
     native_control::{PanEvent, PanPhase, PanTarget, pans},
@@ -65,8 +71,137 @@ struct State {
     window: Arc<winit::window::Window>,
     root: Retained<AnyObject>,
     edge: Retained<AnyObject>,
+    /// The recognizer of rows' swipes (`row_pan_class`).
+    row: Retained<AnyObject>,
+    /// Where its finger landed, in the root view.
+    row_start: Cell<CGPoint>,
+    /// Whether a scroll view scrolling across lies at a point: it takes a
+    /// finger going that way first, at its own 10 points.
+    scrolls_across: Box<dyn Fn(f32, f32) -> bool>,
     /// Which pan this gesture is for.
     current: RefCell<Option<PanTarget>>,
+}
+
+thread_local! {
+    /// The window's recognizers (iOS's one window), for the row pan's methods.
+    static CURRENT: RefCell<Option<Rc<State>>> = const { RefCell::new(None) };
+}
+
+/// The innermost row with a swipe under a point, if any.
+fn row_target_at(state: &State, x: f32, y: f32) -> Option<PanTarget> {
+    let scene = state.scene.borrow();
+    let hits = scene.hit_test_all(x, y);
+    pans().into_iter().rev().find(|target| {
+        target.across.is_some()
+            && target.node.is_some_and(|node| {
+                scene.contains(node)
+                    && hits
+                        .iter()
+                        .any(|hit| *hit == node || scene.ancestors(*hit).any(|above| above == node))
+            })
+    })
+}
+
+/// A `UIPanGestureRecognizer` that begins as UIKit's row swipes do: a pan
+/// begins by its own at 10 points, whichever way, too soon to tell a swipe from
+/// a scroll, so it hears no move until `swipe_pan` says.
+fn row_pan_class() -> &'static AnyClass {
+    static CLASS: std::sync::OnceLock<&'static AnyClass> = std::sync::OnceLock::new();
+    extern "C-unwind" fn began(this: &AnyObject, _: Sel, touches: &AnyObject, event: &AnyObject) {
+        // SAFETY: UIKit's own methods, on the main thread, with what it passed.
+        unsafe {
+            let _: () = msg_send![super(this, class!(UIPanGestureRecognizer)), touchesBegan: touches, withEvent: event];
+            let Some(state) = CURRENT.with(|current| current.borrow().clone()) else {
+                return;
+            };
+            let touch: Option<Retained<AnyObject>> = msg_send![touches, anyObject];
+            let Some(touch) = touch else {
+                return;
+            };
+            let at: CGPoint = msg_send![&*touch, locationInView: &*state.root];
+            state.row_start.set(at);
+            let (x, y) = (at.x as f32, at.y as f32);
+            zgx::native_control::watch_touch(zgx::native_control::TouchWatch::Down, x, y);
+            // UIGestureRecognizerStateFailed: nothing here to swipe, and what
+            // waits on this goes on at once.
+            if row_target_at(&state, x, y).is_none() || (state.scrolls_across)(x, y) {
+                // Still to hear a lift while a row is open, then fails then.
+                if !zgx::native_control::touch_watched() {
+                    let _: () = msg_send![this, setState: 5isize];
+                }
+            }
+        }
+    }
+    extern "C-unwind" fn moved(this: &AnyObject, _: Sel, touches: &AnyObject, event: &AnyObject) {
+        // SAFETY: as `began`.
+        unsafe {
+            let Some(state) = CURRENT.with(|current| current.borrow().clone()) else {
+                return;
+            };
+            let phase: isize = msg_send![this, state];
+            // UIGestureRecognizerStatePossible: still to decide.
+            if phase == 0 {
+                let touch: Option<Retained<AnyObject>> = msg_send![touches, anyObject];
+                let Some(touch) = touch else {
+                    return;
+                };
+                let at: CGPoint = msg_send![&*touch, locationInView: &*state.root];
+                let start = state.row_start.get();
+                match zgx::native_control::swipe_pan(
+                    (at.x - start.x) as f32,
+                    (at.y - start.y) as f32,
+                ) {
+                    zgx::native_control::SwipePan::Waits => return,
+                    zgx::native_control::SwipePan::Fails => {
+                        let _: () = msg_send![this, setState: 5isize];
+                        return;
+                    }
+                    zgx::native_control::SwipePan::Begins => {}
+                }
+            }
+            let _: () = msg_send![super(this, class!(UIPanGestureRecognizer)), touchesMoved: touches, withEvent: event];
+        }
+    }
+    extern "C-unwind" fn ended(this: &AnyObject, _: Sel, touches: &AnyObject, event: &AnyObject) {
+        // SAFETY: as `began`.
+        unsafe {
+            let phase: isize = msg_send![this, state];
+            if phase == 0
+                && let Some(state) = CURRENT.with(|current| current.borrow().clone())
+            {
+                let touch: Option<Retained<AnyObject>> = msg_send![touches, anyObject];
+                if let Some(touch) = touch {
+                    let at: CGPoint = msg_send![&*touch, locationInView: &*state.root];
+                    zgx::native_control::watch_touch(
+                        zgx::native_control::TouchWatch::Up,
+                        at.x as f32,
+                        at.y as f32,
+                    );
+                }
+            }
+            let _: () = msg_send![super(this, class!(UIPanGestureRecognizer)), touchesEnded: touches, withEvent: event];
+        }
+    }
+    CLASS.get_or_init(|| {
+        let mut builder = ClassBuilder::new(c"ZgxRowPan", class!(UIPanGestureRecognizer))
+            .expect("one class of this name");
+        // SAFETY: each has its selector's signature.
+        unsafe {
+            builder.add_method(
+                sel!(touchesBegan:withEvent:),
+                began as extern "C-unwind" fn(_, _, _, _),
+            );
+            builder.add_method(
+                sel!(touchesMoved:withEvent:),
+                moved as extern "C-unwind" fn(_, _, _, _),
+            );
+            builder.add_method(
+                sel!(touchesEnded:withEvent:),
+                ended as extern "C-unwind" fn(_, _, _, _),
+            );
+        }
+        builder.register()
+    })
 }
 
 define_class!(
@@ -82,11 +217,26 @@ define_class!(
             let is_edge = std::ptr::eq(recognizer, &*state.edge);
             // SAFETY: UIGestureRecognizer's method, UIKit calling on the main thread.
             let at: CGPoint = unsafe { msg_send![recognizer, locationInView: &*state.root] };
+            if std::ptr::eq(recognizer, &*state.row) {
+                let start = state.row_start.get();
+                let target = row_target_at(state, start.x as f32, start.y as f32).filter(|target| {
+                    let dx = (at.x - start.x) as f32;
+                    target.can_begin.as_ref().is_none_or(|can| can())
+                        && target.across.as_ref().is_some_and(|across| across(dx))
+                });
+                let begins = target.is_some();
+                *state.current.borrow_mut() = target;
+                log(&format!("row should_begin at={:.0},{:.0} -> {begins}", at.x, at.y));
+                return Bool::new(begins);
+            }
+            zgx::native_control::prune_pans(&state.scene.borrow());
             let target = {
                 let scene = state.scene.borrow();
                 let under = (!is_edge).then(|| scene.hit_test_all(at.x as f32, at.y as f32));
                 pans().into_iter().rev().find(|target| {
-                    if target.node.is_some_and(|node| !scene.contains(node)) {
+                    if target.across.is_some()
+                        || target.node.is_some_and(|node| !scene.contains(node))
+                    {
                         return false;
                     }
                     let here = match (target.node, &under) {
@@ -134,6 +284,7 @@ define_class!(
                     y: 0.,
                     vx: vx as f32,
                     vy: 0.,
+                    at: (x as f32, 0.),
                 });
             }
             state.window.request_redraw();
@@ -142,11 +293,12 @@ define_class!(
         fn panned(&self, recognizer: &AnyObject) {
             let state = self.ivars();
             // SAFETY: UIPanGestureRecognizer's getters, on the main thread.
-            let (phase, moved, speed): (isize, CGPoint, CGPoint) = unsafe {
+            let (phase, moved, speed, at): (isize, CGPoint, CGPoint, CGPoint) = unsafe {
                 (
                     msg_send![recognizer, state],
                     msg_send![recognizer, translationInView: &*state.root],
                     msg_send![recognizer, velocityInView: &*state.root],
+                    msg_send![recognizer, locationInView: &*state.root],
                 )
             };
             let phase = match phase {
@@ -169,6 +321,7 @@ define_class!(
                     y: moved.y as f32,
                     vx: speed.x as f32,
                     vy: speed.y as f32,
+                    at: (at.x as f32, at.y as f32),
                 });
             }
             // What the app does next (a spring's timer) runs as the host's loop
@@ -185,6 +338,7 @@ pub(crate) fn install(
     window: &Arc<winit::window::Window>,
     scene: Rc<RefCell<Scene>>,
     scroller_pan: Option<Retained<AnyObject>>,
+    scrolls_across: impl Fn(f32, f32) -> bool + 'static,
 ) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
@@ -218,15 +372,25 @@ pub(crate) fn install(
         // UIRectEdgeLeft.
         let _: () = msg_send![&*edge, setEdges: 2usize];
         let pan: Retained<AnyObject> = msg_send![class!(UIPanGestureRecognizer), new];
-        let handler = Handler::alloc(mtm).set_ivars(Rc::new(State {
+        let row: Retained<AnyObject> = msg_send![row_pan_class(), new];
+        // One finger, as a row's swipe; a navigation's edge swipe goes first,
+        // as a table's cell leaves it to the navigation controller.
+        let _: () = msg_send![&*row, setMaximumNumberOfTouches: 1usize];
+        let _: () = msg_send![&*row, requireGestureRecognizerToFail: &*edge];
+        let state = Rc::new(State {
             scene,
             window: window.clone(),
             root: root.clone(),
             edge: edge.clone(),
+            row: row.clone(),
+            row_start: Cell::new(CGPoint { x: 0., y: 0. }),
+            scrolls_across: Box::new(scrolls_across),
             current: RefCell::new(None),
-        }));
+        });
+        CURRENT.with(|current| *current.borrow_mut() = Some(state.clone()));
+        let handler = Handler::alloc(mtm).set_ivars(state);
         let handler: Retained<Handler> = msg_send![super(handler), init];
-        for recognizer in [&edge, &pan] {
+        for recognizer in [&edge, &pan, &row] {
             let _: () = msg_send![&**recognizer, addTarget: &*handler, action: sel!(panned:)];
             let _: () = msg_send![&**recognizer, setDelegate: &*handler];
             let _: () = msg_send![&*root, addGestureRecognizer: &**recognizer];

@@ -95,8 +95,9 @@ fn pull_refresh(lua: &Lua, table: Table) -> mlua::Result<()> {
     Ok(())
 }
 
-/// `ui.native_pan { edge = "left" | element = …, can_begin, on_pan }`: a pan the
-/// platform recognizes. `on_pan` hears `{ phase, x, y, vx, vy }`.
+/// `ui.native_pan { edge = "left" | element = …, can_begin, across, on_pan }`: a
+/// pan the platform recognizes. `across`: a row's swipe, told the move's way.
+/// `on_pan` hears `{ phase, x, y, vx, vy }`.
 fn native_pan(lua: &Lua, table: Table) -> mlua::Result<()> {
     use zgx::native_control::{PanEvent, PanPhase, PanTarget, add_pan};
     let node = match table.get::<Option<mlua::UserDataRef<crate::element::ElementUd>>>("element")? {
@@ -107,6 +108,7 @@ fn native_pan(lua: &Lua, table: Table) -> mlua::Result<()> {
         None => None,
     };
     let can_begin: Option<Function> = table.get("can_begin")?;
+    let across: Option<Function> = table.get("across")?;
     let on_pan: Function = table.get("on_pan")?;
     let told = lua.create_table()?;
     add_pan(PanTarget {
@@ -114,6 +116,10 @@ fn native_pan(lua: &Lua, table: Table) -> mlua::Result<()> {
         can_begin: can_begin.map(|can| {
             std::rc::Rc::new(move || can.call::<bool>(()).unwrap_or(false))
                 as std::rc::Rc<dyn Fn() -> bool>
+        }),
+        across: across.map(|across| {
+            std::rc::Rc::new(move |dx: f32| across.call::<bool>(dx).unwrap_or(false))
+                as std::rc::Rc<dyn Fn(f32) -> bool>
         }),
         on_pan: std::rc::Rc::new(move |event: PanEvent| {
             let phase = match event.phase {
@@ -128,6 +134,8 @@ fn native_pan(lua: &Lua, table: Table) -> mlua::Result<()> {
                 told.raw_set("y", event.y)?;
                 told.raw_set("vx", event.vx)?;
                 told.raw_set("vy", event.vy)?;
+                told.raw_set("at_x", event.at.0)?;
+                told.raw_set("at_y", event.at.1)?;
                 on_pan.call::<()>(told.clone())
             })();
         }),
@@ -143,37 +151,40 @@ fn system_menu(
     let Some(node) = element.0.read(|_, id| id) else {
         return Ok(());
     };
-    zgx::native_control::set_system_menu(
-        node,
-        std::rc::Rc::new(move || {
-            let mut actions = Vec::new();
-            let Ok(listed) = build.call::<Table>(()) else {
-                return actions;
-            };
-            for item in listed.sequence_values::<Table>().flatten() {
-                let Ok(title) = item.get::<String>("title") else {
-                    continue;
-                };
-                let on_choose = item.get::<Option<Function>>("on_choose").ok().flatten();
-                actions.push(zgx::native_control::MenuAction {
-                    title,
-                    symbol: item.get("symbol").ok().flatten(),
-                    destructive: item
-                        .get::<Option<String>>("style")
-                        .ok()
-                        .flatten()
-                        .is_some_and(|style| style == "destructive"),
-                    run: std::rc::Rc::new(move || {
-                        if let Some(on_choose) = &on_choose {
-                            let _ = on_choose.call::<()>(());
-                        }
-                    }),
-                });
-            }
-            actions
-        }),
-    );
+    zgx::native_control::set_system_menu(node, menu_builder(build));
     Ok(())
+}
+
+/// What makes a menu's or a node's actions from a script's list of
+/// `{ title, symbol, style, on_choose }`s.
+fn menu_builder(build: Function) -> zgx::native_control::MenuBuilder {
+    std::rc::Rc::new(move || {
+        let mut actions = Vec::new();
+        let Ok(listed) = build.call::<Table>(()) else {
+            return actions;
+        };
+        for item in listed.sequence_values::<Table>().flatten() {
+            let Ok(title) = item.get::<String>("title") else {
+                continue;
+            };
+            let on_choose = item.get::<Option<Function>>("on_choose").ok().flatten();
+            actions.push(zgx::native_control::MenuAction {
+                title,
+                symbol: item.get("symbol").ok().flatten(),
+                destructive: item
+                    .get::<Option<String>>("style")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|style| style == "destructive"),
+                run: std::rc::Rc::new(move || {
+                    if let Some(on_choose) = &on_choose {
+                        let _ = on_choose.call::<()>(());
+                    }
+                }),
+            });
+        }
+        actions
+    })
 }
 
 /// `ui.glass`, `ui.glass_group` and `ui.symbol`, made the first time a script
@@ -191,6 +202,8 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
             "system_menu",
             "on_escape",
             "native_pan",
+            "custom_actions",
+            "touch_watch",
             "gesture_log",
             "share",
             "native_edge",
@@ -220,6 +233,32 @@ pub(crate) fn install_glass(lazy: &crate::lazy::Lazy) {
             )?;
             ui.set("system_menu", lua.create_function(system_menu)?)?;
             ui.set("native_pan", lua.create_function(native_pan)?)?;
+            ui.set(
+                "custom_actions",
+                lua.create_function(
+                    |_, (element, build): (mlua::UserDataRef<crate::element::ElementUd>, Function)| {
+                        if let Some(node) = element.0.read(|_, id| id) {
+                            zgx::native_control::set_custom_actions(node, menu_builder(build));
+                        }
+                        Ok(())
+                    },
+                )?,
+            )?;
+            ui.set(
+                "touch_watch",
+                lua.create_function(|_, watch: Option<Function>| {
+                    zgx::native_control::set_touch_watch(watch.map(|watch| {
+                        std::rc::Rc::new(move |phase, x: f32, y: f32| {
+                            let phase = match phase {
+                                zgx::native_control::TouchWatch::Down => "down",
+                                zgx::native_control::TouchWatch::Up => "up",
+                            };
+                            watch.call::<bool>((phase, x, y)).unwrap_or(false)
+                        }) as zgx::native_control::TouchWatcher
+                    }));
+                    Ok(())
+                })?,
+            )?;
             ui.set("pull_refresh", lua.create_function(pull_refresh)?)?;
             ui.set(
                 "native_edge",

@@ -40,14 +40,14 @@ local function declare_titles()
 		return
 	end
 	titles_declared = true
-	ui.theme.tokens {
+	ui.theme.tokens({
 		ios = {
 			title = {
 				large = { size = 34, line = 40.667, ascender = 32.373 },
 				small = { size = 17, line = 20.667 },
 			},
 		},
-	}
+	})
 end
 -- The large title's top and the bar's height with it, as UIKit places them for
 -- the large title's font.
@@ -245,9 +245,9 @@ function ios.section(props)
 	for index, row in ipairs(props) do
 		rows[index] = row
 	end
-	return ui.column {
+	return ui.column({
 		mb = 35,
-		props.header and ui.text {
+		props.header and ui.text({
 			props.header,
 			-- A heading, as a table's section header is (VoiceOver's headings rotor).
 			heading = 2,
@@ -256,28 +256,28 @@ function ios.section(props)
 			mb = 7,
 			text_size = "$font.size.xs",
 			color = "$text.secondary",
-		} or nil,
-		ui.column {
+		}) or nil,
+		ui.column({
 			mx = 20,
 			rounded = 26,
 			bg = "$ios.cell",
 			overflow = "hidden",
 			rows,
-		},
-		props.footer and ui.text {
+		}),
+		props.footer and ui.text({
 			props.footer,
 			mx = 36,
 			wrap = true,
 			mt = 7,
 			text_size = "$font.size.xs",
 			color = "$text.secondary",
-		} or nil,
-	}
+		}) or nil,
+	})
 end
 
 -- The white symbol on a coloured tile that leads a Settings row.
 function ios.tile(symbol, tint)
-	return ui.div {
+	return ui.div({
 		w = 29,
 		h = 29,
 		rounded = 7,
@@ -285,16 +285,564 @@ function ios.tile(symbol, tint)
 		items = "center",
 		justify = "center",
 		shrink = 0,
-		ui.symbol { name = symbol, size = 16, color = "#ffffff" },
-	}
+		ui.symbol({ name = symbol, size = 16, color = "#ffffff" }),
+	})
+end
+
+-- A row's swipe actions, as UITableView's, read from UIKit 26.5:
+-- `_UISwipeHandler`'s `_swipeRecognizerChanged:` and `…Ended:wasCancelled:`,
+-- `UISwipeActionDynamicPullView`'s `_moveToOffset:…`,
+-- `UISwipeOccurrence`'s `confirmationDistanceForPrimaryActionInSwipeActionPullView:`.
+local SWIPE_PAD = 10
+-- UIKit's in-process engine moves the row and the buttons' places and sizes on
+-- these (`FluidSpringAnimation`, read off the view's animation info with `Mirror`):
+-- one spring retargeted at each move, keeping its speed. Under the finger, then
+-- from when it lifts or a full swipe jumps.
+local SWIPE_TRACK = uikit_spring(0.85, 0.15)
+local SWIPE_ROW = uikit_spring(1, 0.5)
+-- The look a row takes on as it's swiped: CASpring with those numbers, which Core
+-- Animation settles in 0.9235 s, a critical spring of response 0.628.
+local SWIPE_LOOK = uikit_spring(1, 0.628)
+-- A performed action's: `_animatorForDuration:0.4`, CASpring k 465.65, c 43.16.
+local SWIPE_COMMIT = { stiffness = 465.65, damping = 43.158 }
+-- A button's scale and its opacity (read the same way).
+local SWIPE_SCALE = uikit_spring(0.7, 0.5)
+local SWIPE_ALPHA = uikit_spring(0.85, 0.15)
+-- The speed past which a release goes the way it's going, in points a second.
+local SWIPE_FLICK = 50
+-- Past the limit, the distance goes as this power.
+local SWIPE_STRETCH = 0.7
+-- A button's label, its text's padding, and with a symbol its size and gap.
+local SWIPE_TEXT_SIZE = 13
+local SWIPE_TEXT_ROOM = 24
+local SWIPE_SYMBOL_ONLY_WIDTH = 60
+local SWIPE_SYMBOL_ROOM = 29.33
+local SWIPE_SYMBOL_GAP = 4
+local SWIPE_SYMBOL_SIZE = 14.33
+-- Its corners: a capsule with a symbol; with text alone, 16 on a 43 button.
+local SWIPE_BUTTON_ROUND = 16
+local SWIPE_BUTTON_ROUND_SYMBOL = 21.5
+-- The row's own corners while swiped: half its height, at most this.
+local SWIPE_ROW_ROUND = 26
+-- The room above and below a button in its row, at any height.
+local SWIPE_BUTTON_TOP, SWIPE_BUTTON_BOTTOM = 4.67, 4.33
+-- The row showing its actions: one at a time, as in a table.
+local swipe_open
+
+-- How far a swipe of a row `width` wide goes before it performs the first action.
+local function swipe_confirmation(width, trailing, destructive, open)
+	if destructive then
+		return width - (if trailing then 29 else 64)
+	end
+	return math.min(math.max(0.525 * width, open + 20), width)
+end
+-- Far enough along for a full swipe, with the finger near the far edge: for a
+-- destructive action alone, sooner the faster it goes.
+local function swipe_early(width, speed, moved, confirmation, near)
+	local wide = width >= 414
+	local zone = if wide then 90 elseif width == 375 then 75 else 50
+	local lowest, most = 0.66, 0.8
+	if wide then
+		lowest, most = 0.5, 0.75
+	end
+	local k = clamp(math.abs(speed) / 2500, lowest, most)
+	return near < zone and math.abs(moved) > confirmation * k
+end
+ios._swipe_confirmation = swipe_confirmation
+ios._swipe_early = swipe_early
+
+-- The buttons of one side, mounted as a swipe starts: fixed at the row's edge,
+-- each scaling and fading in as the row uncovers it.
+local SwipeButtons = ui.component(function(props)
+	local host, direction, list = props.host, props.direction, props.list
+	local scales, alphas = {}, {}
+	for i in list do
+		scales[i] = ui.use_state(0)
+		alphas[i] = ui.use_state(0)
+	end
+	host.scales, host.alphas = scales, alphas
+	host.laid_out()
+	local nodes = {}
+	for i, action in list do
+		local round = if action.symbol then SWIPE_BUTTON_ROUND_SYMBOL else SWIPE_BUTTON_ROUND
+		nodes[i] = ui.button({
+			absolute = true,
+			top = SWIPE_BUTTON_TOP,
+			bottom = SWIPE_BUTTON_BOTTOM,
+			right = if direction < 0
+				then function()
+					return (i - 1) * (host.button_width(direction) + SWIPE_PAD) + SWIPE_PAD
+				end
+				else nil,
+			left = if direction > 0
+				then function()
+					return (i - 1) * (host.button_width(direction) + SWIPE_PAD) + SWIPE_PAD
+				end
+				else nil,
+			w = function()
+				return host.button_width(direction) + (if i == 1 then host.grow:get() else 0)
+			end,
+			p = 0,
+			rounded = round,
+			bg = action.color or (if action.style == "destructive" then "$ios.red" else "$ios.gray3"),
+			hover = {},
+			active = {},
+			scale = function()
+				return scales[i]:get()
+			end,
+			opacity = function()
+				return alphas[i]:get()
+			end,
+			direction = "row",
+			items = "center",
+			justify = "center",
+			gap = SWIPE_SYMBOL_GAP,
+			aria_hidden = true,
+			on_click = function()
+				host.perform(action, false)
+			end,
+			action.symbol and ui.symbol({
+				name = action.symbol,
+				size = if action.title then SWIPE_SYMBOL_SIZE else 20,
+				color = "#ffffff",
+			}) or nil,
+			action.title and ui.text({
+				action.title,
+				text_size = SWIPE_TEXT_SIZE,
+				color = "#ffffff",
+				on_resize = function(size)
+					local key = direction .. ":" .. i
+					local known = host.widths:get()
+					if known[key] ~= size.w then
+						local changed = table.clone(known)
+						changed[key] = size.w
+						host.widths:set(changed)
+					end
+				end,
+			}) or nil,
+		})
+	end
+	return ui.div({ absolute = true, left = 0, top = 0, w = "100%", h = "100%", aria_hidden = true, nodes })
+end)
+
+local SwipeRow = ui.component(function(props)
+	-- Where the row shows: left negative.
+	local shown = ui.use_state(0)
+	local look = ui.use_state(0)
+	-- Its height, once it collapses; nil before.
+	local collapse = ui.use_state(-1)
+	-- Actions of the side swiped (primary first), the widest label, what was laid out.
+	local side = ui.use_state(0)
+	local widths = ui.use_state({})
+	local grow = ui.use_state(0)
+	-- What the buttons share with the row; their own states come with them.
+	local host = { widths = widths, grow = grow }
+	local running, running_look
+	local runs = {}
+	local row
+	local width = 0
+	local function actions_of(direction)
+		return (if direction < 0 then props.trailing else props.leading) or {}
+	end
+	-- Each button's own width: labels measured, the widest for all.
+	local function button_width(direction)
+		local list = actions_of(direction)
+		local measured = widths:get()
+		local most = 0
+		for i, action in list do
+			local text = measured[direction .. ":" .. i]
+			local own = if action.symbol and action.title
+				then SWIPE_SYMBOL_SIZE + SWIPE_SYMBOL_GAP + (text or 0) + SWIPE_SYMBOL_ROOM
+				elseif action.symbol then SWIPE_SYMBOL_ONLY_WIDTH
+				else (text or 0) + SWIPE_TEXT_ROOM
+			most = math.max(most, own)
+		end
+		return most
+	end
+	local function open_width(direction)
+		local list = actions_of(direction)
+		return #list * button_width(direction) + (#list + 1) * SWIPE_PAD
+	end
+	-- One gesture's say, as `_currentSwipeConfig` holds it.
+	local config
+	local function configure(direction)
+		local list = actions_of(direction)
+		local primary = list[1]
+		local open = open_width(direction)
+		config = {
+			direction = direction,
+			open = open,
+			can_confirm = props.full ~= false and primary ~= nil,
+			destructive = primary ~= nil and primary.style == "destructive",
+			confirm = 0,
+		}
+		if config.can_confirm then
+			config.confirm = swipe_confirmation(width, direction < 0, config.destructive, open)
+		end
+	end
+	local function move_row(target, spring)
+		local carried = if running then running() else 0
+		running = settle(
+			shown,
+			target,
+			function()
+				running = nil
+			end,
+			nil,
+			{
+				stiffness = spring.stiffness,
+				damping = spring.damping,
+				velocity = carried,
+			}
+		)
+	end
+	local function to_look(target)
+		if running_look then
+			running_look()
+		end
+		running_look = settle(look, target, function()
+			running_look = nil
+		end, nil, SWIPE_LOOK)
+	end
+	local function ease_to(state, slot, target, spring)
+		if state:get() == target and not runs[slot] then
+			return
+		end
+		local carried = if runs[slot] then runs[slot]() else 0
+		runs[slot] = settle(state, target, function()
+			runs[slot] = nil
+		end, nil, { stiffness = spring.stiffness, damping = spring.damping, velocity = carried })
+	end
+	-- What `_moveToOffset:` does to the buttons for a row `o` along.
+	local function lay_out(o, armed, tracking)
+		local direction = config.direction
+		local list = actions_of(direction)
+		local w = button_width(direction)
+		local scales, alphas = host.scales, host.alphas
+		if not scales then
+			return
+		end
+		local fraction = if config.confirm > 0 then math.min(o / config.confirm, 1) else 0
+		local past_open = o > config.open and config.can_confirm
+		for i in list do
+			local slot_end = (i - 1) * w + SWIPE_PAD * i + w + SWIPE_PAD
+			local from = slot_end - w + 2 * SWIPE_PAD
+			local p = if o >= slot_end then 1 else math.max(o - from, 0) / (slot_end - from)
+			local alpha = if p >= 0.3 then p else 0
+			local scale = p
+			if past_open and i > 1 then
+				alpha = 1 - 0.7 * fraction
+				if armed and not config.destructive then
+					alpha, scale = 0, 0
+				end
+			end
+			ease_to(scales[i], "scale" .. i, scale, SWIPE_SCALE)
+			ease_to(alphas[i], "alpha" .. i, alpha, SWIPE_ALPHA)
+		end
+		local extra = if past_open and not (armed and not config.destructive) then o - config.open else 0
+		ease_to(grow, "grow", extra, if tracking then SWIPE_TRACK else SWIPE_ROW)
+	end
+	local function ended_closing()
+		if math.abs(shown:get()) < 0.5 then
+			side:set(0)
+			host.scales, host.alphas = nil, nil
+			runs = {}
+			grow:set(0)
+		end
+	end
+	local close_row
+	local function settle_open(open_to)
+		local carried = if running then running() else 0
+		running = settle(
+			shown,
+			open_to,
+			function()
+				running = nil
+				ended_closing()
+			end,
+			nil,
+			{
+				stiffness = SWIPE_ROW.stiffness,
+				damping = SWIPE_ROW.damping,
+				velocity = carried,
+			}
+		)
+	end
+	local function stop_watching()
+		if swipe_open and swipe_open.row == row then
+			swipe_open = nil
+			ui.touch_watch(nil)
+		end
+	end
+	close_row = function()
+		stop_watching()
+		settle_open(0)
+		to_look(0)
+		if config then
+			lay_out(0, false)
+		end
+	end
+	-- Whether a window point is on this row's buttons, on the row, or elsewhere.
+	local function where(x, y)
+		if not (row and row.mounted and row.x) then
+			return "elsewhere"
+		end
+		if y < row.y or y > row.y + row.height or x < row.x or x > row.x + row.width then
+			return "elsewhere"
+		end
+		local o = shown:get()
+		local on_buttons = if o < 0 then x > row.x + row.width + o else x < row.x + o
+		return if on_buttons then "buttons" else "row"
+	end
+	local function resting_open()
+		if swipe_open and swipe_open.row ~= row then
+			swipe_open.close()
+		end
+		swipe_open = { row = row, close = close_row }
+		-- A touch elsewhere closes it and is nothing else; one on the row, when it
+		-- lifts, unless it's swiped on from there.
+		ui.touch_watch(function(phase, x, y)
+			local at = where(x, y)
+			if at == "buttons" then
+				return false
+			end
+			if at == "elsewhere" then
+				if phase == "down" then
+					close_row()
+				end
+				return true
+			end
+			if phase == "up" then
+				close_row()
+			end
+			return true
+		end)
+	end
+	local start, base, adjustment, armed, proposed = 0, 0, 0, false, -1
+	-- A performed action: the row's way out, or back when its `done` says.
+	local function perform(action, full)
+		stop_watching()
+		local direction = config.direction
+		if full then
+			local to = direction * width
+			local carried = if running then running() else 0
+			running = settle(
+				shown,
+				to,
+				function()
+					running = nil
+				end,
+				nil,
+				{
+					stiffness = SWIPE_COMMIT.stiffness,
+					damping = SWIPE_COMMIT.damping,
+					velocity = carried,
+				}
+			)
+			ease_to(grow, "grow", width - config.open, SWIPE_COMMIT)
+		end
+		local finished = false
+		action.action(function(performed)
+			if finished then
+				return
+			end
+			finished = true
+			if performed and action.style == "destructive" then
+				local height = if row and row.height then row.height else 0
+				collapse:set(height)
+				settle(collapse, 0, function()
+					if props.on_delete then
+						props.on_delete()
+					end
+				end, nil, SWIPE_COMMIT)
+			else
+				close_row()
+			end
+		end)
+	end
+	local content = {}
+	for i, child in ipairs(props) do
+		content[i] = child
+	end
+	host.button_width = button_width
+	host.perform = perform
+	host.laid_out = function()
+		if config then
+			lay_out(math.abs(shown:get()), armed, true)
+		end
+	end
+	return ui.div({
+		w = "100%",
+		overflow = "hidden",
+		h = function()
+			local h = collapse:get()
+			return if h >= 0 then h else nil
+		end,
+		on_mount = function(element)
+			row = element
+			ui.custom_actions(element, function()
+				local list = {}
+				for _, side_list in { props.trailing or {}, props.leading or {} } do
+					for _, action in side_list do
+						table.insert(list, {
+							title = action.title or action.symbol or "",
+							on_choose = function()
+								if not config then
+									width = element.width or 0
+									configure(if action == (props.trailing or {})[1] then -1 else 1)
+								end
+								perform(action, false)
+							end,
+						})
+					end
+				end
+				return list
+			end)
+			ui.native_pan({
+				element = element,
+				across = function(dx)
+					proposed = if dx < 0 then -1 else 1
+					if shown:get() ~= 0 then
+						return true
+					end
+					return #actions_of(proposed) > 0
+				end,
+				on_pan = function(e)
+					if e.phase == "began" then
+						width = element.width or 0
+						local o = shown:get()
+						local direction = if o ~= 0 then (if o < 0 then -1 else 1) else proposed
+						side:set(direction)
+						configure(direction)
+						base, start, adjustment, armed = e.x, o, 0, false
+						if swipe_open and swipe_open.row ~= row then
+							swipe_open.close()
+						end
+						stop_watching()
+						to_look(1)
+					elseif e.phase == "changed" then
+						configure(config.direction)
+						local direction = config.direction
+						local signed_limit = direction * (if config.can_confirm then config.confirm else config.open)
+						local t = e.x - base + start + adjustment
+						local jumped = false
+						local was = armed
+						armed = false
+						if config.can_confirm then
+							local signed_confirm = direction * config.confirm
+							if (direction < 0 and t <= signed_confirm) or (direction > 0 and t >= signed_confirm) then
+								armed = true
+							elseif config.destructive then
+								local near = if direction < 0
+									then (e.at_x or 0) - (element.x or 0)
+									else (element.x or 0) + width - (e.at_x or 0)
+								if swipe_early(width, e.vx, t, config.confirm, near) then
+									armed = true
+									if adjustment == 0 then
+										adjustment = signed_confirm - t
+										t = signed_confirm
+										jumped = true
+									end
+								end
+							end
+						end
+						if armed ~= was then
+							ui.haptic("selection")
+						end
+						-- Past the limit (the confirmation, or the open width), a power.
+						local high = math.max(signed_limit, 0)
+						local low = math.min(signed_limit, 0)
+						if t > high then
+							t = high + (t - high) ^ SWIPE_STRETCH
+						elseif t < low then
+							t = low - (low - t) ^ SWIPE_STRETCH
+						end
+						move_row(t, if jumped then SWIPE_ROW else SWIPE_TRACK)
+						lay_out(math.abs(t), armed, true)
+					else
+						local v = if e.phase == "ended" then e.vx else 0
+						local direction = config.direction
+						if e.phase == "ended" and armed then
+							local primary = actions_of(direction)[1]
+							perform(primary, true)
+							return
+						end
+						local open_to = direction * config.open
+						local opens
+						if math.abs(v) > SWIPE_FLICK then
+							opens = (direction < 0 and v < -SWIPE_FLICK) or (direction > 0 and v > SWIPE_FLICK)
+						else
+							local t = e.x - base + start
+							opens = if direction < 0 then t < open_to / 2 else t > open_to / 2
+						end
+						if opens and config.open > 0 then
+							resting_open()
+							settle_open(open_to)
+							lay_out(config.open, false)
+						else
+							close_row()
+						end
+					end
+				end,
+			})
+		end,
+		ui.show(function()
+			return side:get() == -1
+		end, SwipeButtons({ host = host, direction = -1, list = props.trailing or {} })),
+		ui.show(function()
+			return side:get() == 1
+		end, SwipeButtons({ host = host, direction = 1, list = props.leading or {} })),
+		ui.div({
+			w = "100%",
+			x = function()
+				return shown:get()
+			end,
+			rounded = function()
+				local half = if row and row.height then row.height / 2 else SWIPE_ROW_ROUND
+				return math.min(half, SWIPE_ROW_ROUND) * look:get()
+			end,
+			overflow = "hidden",
+			ui.div({
+				absolute = true,
+				left = 0,
+				top = 0,
+				w = "100%",
+				h = "100%",
+				bg = "$ios.gray5",
+				opacity = function()
+					return look:get()
+				end,
+				aria_hidden = true,
+			}),
+			content,
+		}),
+	})
+end)
+function ios.swipe_row(props)
+	if not (props.leading or props.trailing) then
+		return ui.div({ w = "100%", table.unpack(props) })
+	end
+	return SwipeRow(props)
 end
 
 -- A row of a section: 60 points at the body text size, growing with it.
 -- `icon`, `tint`, `title`, `detail`, `toggle` (a state: the row is a switch),
--- `chevron`, `on_click`, `last` (no separator).
+-- `chevron`, `on_click`, `last` (no separator), `swipe` (`ios.swipe_row`'s table).
 function ios.row(props)
+	if props.swipe then
+		local inner = table.clone(props)
+		inner.swipe = nil
+		local swipe = props.swipe
+		return ios.swipe_row({
+			leading = swipe.leading,
+			trailing = swipe.trailing,
+			full = swipe.full,
+			on_delete = swipe.on_delete,
+			ios.row(inner),
+		})
+	end
 	local toggle = props.toggle
-	return ui.button {
+	return ui.button({
 		min_h = 60,
 		hidden = props.hidden,
 		-- `menu`: a function giving what a long press shows (`ui.system_menu`).
@@ -326,7 +874,7 @@ function ios.row(props)
 		props.icon and ios.tile(props.icon, props.tint or "$ios.blue") or nil,
 		-- The detail beside the title, or under it where the text is too large
 		-- for both, as a Settings row does.
-		ui.row {
+		ui.row({
 			ml = if props.icon then 16 else 0,
 			grow = 1,
 			shrink = 1,
@@ -334,35 +882,35 @@ function ios.row(props)
 			flex_wrap = true,
 			items = "center",
 			justify = "between",
-			ui.text {
+			ui.text({
 				props.title,
 				wrap = true,
 				min_w = 0,
 				text_size = "$font.size.md",
 				color = props.color or "$text.primary",
-			},
-			props.detail and ui.text {
+			}),
+			props.detail and ui.text({
 				props.detail,
 				wrap = true,
 				min_w = 0,
 				text_size = "$font.size.md",
 				color = "$text.secondary",
 				mr = 8,
-			} or nil,
-		},
-		toggle and ui.native_switch { value = toggle, label = props.title, aria_hidden = true } or nil,
+			}) or nil,
+		}),
+		toggle and ui.native_switch({ value = toggle, label = props.title, aria_hidden = true }) or nil,
 		(props.chevron ~= false and not toggle)
-				and ui.symbol { name = "chevron.forward", size = 14, weight = 600, color = "$text.tertiary" }
+				and ui.symbol({ name = "chevron.forward", size = 14, weight = 600, color = "$text.tertiary" })
 			or nil,
-		not props.last and ui.div {
+		not props.last and ui.div({
 			absolute = true,
 			left = if props.icon then 61 else 16,
 			right = 16,
 			bottom = 0,
 			h = 0.34,
 			bg = "$border",
-		} or nil,
-	}
+		}) or nil,
+	})
 end
 
 -- A bar that goes with the keyboard: a chat's composer. It sits where the app
@@ -382,7 +930,7 @@ function ios.keyboard_bar(props)
 		table.insert(
 			box,
 			1,
-			ui.div {
+			ui.div({
 				absolute = true,
 				left = 0,
 				right = 0,
@@ -395,7 +943,7 @@ function ios.keyboard_bar(props)
 						up:set(lift)
 					end)
 				end,
-			}
+			})
 		)
 	end
 	return ui.div(box)
@@ -442,7 +990,7 @@ function ios.composer(props)
 	local fade = ui.use_state(1)
 	local ROW = 40
 	local function button(options)
-		return ui.button {
+		return ui.button({
 			absolute = true,
 			bottom = 0,
 			left = options.left,
@@ -463,14 +1011,14 @@ function ios.composer(props)
 			aria_hidden = options.aria_hidden,
 			on_click = options.on_click,
 			options.symbol,
-		}
+		})
 	end
-	return ios.keyboard_bar {
+	return ios.keyboard_bar({
 		absolute = true,
 		left = channel(focused, 36, 8),
 		right = channel(focused, 36, 8),
 		bottom = props.bottom or 100,
-		ui.glass {
+		ui.glass({
 			radius = channel(focused, 20, 24),
 			interactive = true,
 			direction = "column",
@@ -481,15 +1029,15 @@ function ios.composer(props)
 			end or nil,
 			opacity = if still then ui.tween(fade, { duration = 120 }) else nil,
 			-- Add first, as VoiceOver reads left to right: it sits before the text.
-			button {
+			button({
 				left = 4,
 				w = 32,
 				label = "Add",
 				on_click = props.on_plus,
-				symbol = ui.symbol { name = "plus", size = 18, weight = 500, color = "$text.secondary" },
-			},
+				symbol = ui.symbol({ name = "plus", size = 18, weight = 500, color = "$text.secondary" }),
+			}),
 			-- The text: beside the buttons at rest, above them open.
-			ui.div {
+			ui.div({
 				ml = channel(focused, 38, 14),
 				mr = channel(focused, 42, 14),
 				mt = channel(focused, 9, 12),
@@ -500,7 +1048,7 @@ function ios.composer(props)
 				relative = true,
 				-- The lines' height comes from their text, laid out unseen beneath
 				-- the editor, which fills what that makes and scrolls past the limit.
-				ui.text {
+				ui.text({
 					function()
 						local text = value:get()
 						return if text == "" then " " else text .. " "
@@ -519,8 +1067,8 @@ function ios.composer(props)
 						end
 						measured:set(size.h)
 					end,
-				},
-				ui.textarea {
+				}),
+				ui.textarea({
 					absolute = true,
 					left = 0,
 					right = 0,
@@ -559,11 +1107,11 @@ function ios.composer(props)
 							end)
 						end
 					end,
-				},
-			},
+				}),
+			}),
 			-- The buttons' row: nothing at rest, where they sit beside the text.
-			ui.div { h = channel(focused, 0, ROW - 9) },
-			button {
+			ui.div({ h = channel(focused, 0, ROW - 9) }),
+			button({
 				right = 4,
 				w = 36,
 				label = "Send",
@@ -581,15 +1129,15 @@ function ios.composer(props)
 					end
 					value:set("")
 				end,
-				symbol = ui.symbol { name = "arrow.up.circle.fill", size = 30, color = "$ios.blue" },
-			},
-		},
-	}
+				symbol = ui.symbol({ name = "arrow.up.circle.fill", size = 30, color = "$ios.blue" }),
+			}),
+		}),
+	})
 end
 
 -- A search field on glass, the system's keyboard over zgx's editor.
 function ios.search(props)
-	return ui.glass {
+	return ui.glass({
 		mx = props.mx or 16,
 		min_h = 48,
 		radius = 24,
@@ -598,8 +1146,8 @@ function ios.search(props)
 		items = "center",
 		pl = 16,
 		pr = 12,
-		ui.symbol { name = "magnifyingglass", size = 17, weight = 500, color = "$text.secondary" },
-		ui.input {
+		ui.symbol({ name = "magnifyingglass", size = 17, weight = 500, color = "$text.secondary" }),
+		ui.input({
 			value = props.value,
 			label = props.placeholder or "Search",
 			placeholder = props.placeholder or "Search",
@@ -615,8 +1163,8 @@ function ios.search(props)
 			text_size = "$font.size.md",
 			-- The body's line, which its height is made from, not 1.4 times its size.
 			line_height = "$font.line.md",
-		},
-	}
+		}),
+	})
 end
 
 -- A page of a stack: a scrolling body under a bar whose large title gives way to
@@ -642,11 +1190,11 @@ function ios.page(props)
 		local _, bar = large_title()
 		return offset:get() >= bar - BAR
 	end)
-	return ui.div {
+	return ui.div({
 		w = "100%",
 		h = "100%",
 		bg = props.bg or "$ios.grouped",
-		ui.scroll {
+		ui.scroll({
 			w = "100%",
 			h = "100%",
 			offset = offset,
@@ -657,7 +1205,7 @@ function ios.page(props)
 				if not props.on_refresh then
 					return
 				end
-				ui.pull_refresh {
+				ui.pull_refresh({
 					element = element,
 					top = function()
 						return safe:get().top + 44
@@ -674,9 +1222,9 @@ function ios.page(props)
 						ui.after(REFRESH_MOST, finish)
 						props.on_refresh(finish)
 					end,
-				}
+				})
 			end,
-			ui.column {
+			ui.column({
 				pt = function()
 					return safe:get().top + BAR
 				end,
@@ -689,7 +1237,7 @@ function ios.page(props)
 				pr = function()
 					return safe:get().right
 				end,
-				ui.text {
+				ui.text({
 					props.title,
 					heading = 1,
 					ml = 16,
@@ -708,21 +1256,21 @@ function ios.page(props)
 					weight = 700,
 					color = "$text.primary",
 					opacity = ui.tween(collapsed, { duration = 200, ease = LARGE_TITLE_EASE, from = 1, to = 0 }),
-				},
+				}),
 				children,
-			},
-		},
+			}),
+		}),
 		-- The system's edge under the bar as content passes under it, then its
 		-- small title and its buttons on glass, above it.
-		ios.scroll_edge {
+		ios.scroll_edge({
 			size = function()
 				return safe:get().top + BAR
 			end,
 			shown = function()
 				return offset:get() > 0
 			end,
-		},
-		ui.div {
+		}),
+		ui.div({
 			absolute = true,
 			left = 0,
 			right = 0,
@@ -739,24 +1287,24 @@ function ios.page(props)
 			),
 			items = "center",
 			justify = "center",
-			ui.text {
+			ui.text({
 				props.title,
 				text_size = "$ios.title.small.size",
 				line_height = "$ios.title.small.line",
 				weight = 600,
 				color = "$text.primary",
 				aria_hidden = true,
-			},
-		},
-		props.trailing and ui.div {
+			}),
+		}),
+		props.trailing and ui.div({
 			absolute = true,
 			right = 16,
 			top = function()
 				return safe:get().top + 3
 			end,
 			props.trailing,
-		} or nil,
-	}
+		}) or nil,
+	})
 end
 
 -- Where a page's own state lives.
@@ -771,7 +1319,7 @@ ios.stack = ui.component(function(props)
 	-- State holds no functions: its list is of ids into `builders`.
 	local builders = { props.root }
 	local next_id = 1
-	local pages = ui.use_state { 1 }
+	local pages = ui.use_state({ 1 })
 	local width = 402
 	local drag = ui.use_state(0)
 	local entering = ui.use_state(0)
@@ -901,7 +1449,7 @@ ios.stack = ui.component(function(props)
 	local fading_in = ui.use_state(0)
 	local fading_out = ui.use_state(0)
 	local crossfading = ui.use_state(false)
-	local faded = ui.use_state {}
+	local faded = ui.use_state({})
 	local function reduced()
 		return ui.prefers.reduced_motion:get()
 	end
@@ -913,7 +1461,7 @@ ios.stack = ui.component(function(props)
 	-- Pages a slide uncovers show as they are.
 	local function unfade()
 		if next(faded:get()) then
-			faded:set {}
+			faded:set({})
 		end
 	end
 	local function crossfade(arriving, going, done)
@@ -998,7 +1546,7 @@ ios.stack = ui.component(function(props)
 	local function shows()
 		return not props.active or props.active()
 	end
-	ui.native_pan {
+	ui.native_pan({
 		edge = "left",
 		can_begin = function()
 			return #pages:get() > 1 and shows()
@@ -1060,7 +1608,7 @@ ios.stack = ui.component(function(props)
 				end
 			end
 		end,
-	}
+	})
 	-- VoiceOver's two-finger scrub back. `active`: whether this stack shows.
 	ui.on_escape(function()
 		if #pages:get() < 2 or (props.active and not props.active()) then
@@ -1069,7 +1617,7 @@ ios.stack = ui.component(function(props)
 		nav.pop()
 		return true
 	end)
-	return ui.div {
+	return ui.div({
 		w = "100%",
 		h = "100%",
 		overflow = "hidden",
@@ -1080,7 +1628,7 @@ ios.stack = ui.component(function(props)
 		-- shows from a push and goes when the pop is done; its chevron fades. First
 		-- in the tree, as VoiceOver reads a navigation bar before the page, and
 		-- raised over the pages that follow it.
-		ui.glass {
+		ui.glass({
 			absolute = true,
 			z = 1,
 			left = 16,
@@ -1094,7 +1642,7 @@ ios.stack = ui.component(function(props)
 			hidden = function()
 				return #pages:get() < 2
 			end,
-			ui.button {
+			ui.button({
 				w = 44,
 				h = 44,
 				p = 0,
@@ -1114,9 +1662,9 @@ ios.stack = ui.component(function(props)
 				on_click = function()
 					nav.pop()
 				end,
-				ui.symbol { name = "chevron.backward", size = 18, weight = 600, color = "$text.primary" },
-			},
-		},
+				ui.symbol({ name = "chevron.backward", size = 18, weight = 600, color = "$text.primary" }),
+			}),
+		}),
 		ui.each(pages, function(id, index)
 			-- What lies under the top page moves as a navigation controller's does.
 			local function page_x(at)
@@ -1132,7 +1680,7 @@ ios.stack = ui.component(function(props)
 			local on_top = function()
 				return index == #pages:get()
 			end
-			return ui.div {
+			return ui.div({
 				absolute = true,
 				left = 0,
 				top = 0,
@@ -1162,11 +1710,11 @@ ios.stack = ui.component(function(props)
 						or (index < depth and drag:get() == 0 and entering:get() == 0 and not crossfading:get())
 				end,
 				pointer_events = on_top,
-				Page { build = builders[id], nav = nav_of(id) },
+				Page({ build = builders[id], nav = nav_of(id) }),
 				-- What a navigation controller lays over the page behind, and the
 				-- soft edge of the page coming over it (measured beside one:
 				-- black at 10%, gone as the top page goes; a 9 point edge).
-				ui.div {
+				ui.div({
 					absolute = true,
 					left = 0,
 					top = 0,
@@ -1181,8 +1729,8 @@ ios.stack = ui.component(function(props)
 					opacity = function()
 						return 0.1 * (1 - clamp((drag:get() + entering:get()) / width, 0, 1))
 					end,
-				},
-				ui.div {
+				}),
+				ui.div({
 					absolute = true,
 					left = -9,
 					top = 0,
@@ -1202,10 +1750,10 @@ ios.stack = ui.component(function(props)
 						local moved = drag:get()
 						return if moved > 0 then 1 - clamp(moved / width, 0, 1) else 0
 					end,
-				},
-			}
+				}),
+			})
 		end, { display = "contents" }),
-	}
+	})
 end)
 
 -- A sheet that rises from the bottom over a dimmed page, on glass where the
@@ -1308,7 +1856,7 @@ ios.sheet = ui.component(function(props)
 		function()
 			return open:get() or rise:get() > 0
 		end,
-		ui.div {
+		ui.div({
 			absolute = true,
 			left = 0,
 			right = 0,
@@ -1319,7 +1867,7 @@ ios.sheet = ui.component(function(props)
 				resting:set(1)
 				run(rise, target(1))
 			end,
-			ui.button {
+			ui.button({
 				absolute = true,
 				left = 0,
 				right = 0,
@@ -1337,8 +1885,8 @@ ios.sheet = ui.component(function(props)
 					return SHEET_DIM * clamp(rise:get() / target(1), 0, 1)
 				end,
 				on_click = dismiss,
-			},
-			ui.glass {
+			}),
+			ui.glass({
 				absolute = true,
 				left = 0,
 				right = 0,
@@ -1365,7 +1913,7 @@ ios.sheet = ui.component(function(props)
 				-- iOS recognizes the drag, anywhere on the sheet, and tells every
 				-- ending. Up is more of the sheet, so the speeds are negated.
 				on_mount = function(element)
-					ui.native_pan {
+					ui.native_pan({
 						element = element,
 						on_pan = function(e)
 							if e.phase == "began" then
@@ -1427,10 +1975,10 @@ ios.sheet = ui.component(function(props)
 								run(rise, target(detent), nil, speed, spring)
 							end
 						end,
-					}
+					})
 				end,
 				-- Large is opaque, on the page's background.
-				ui.div {
+				ui.div({
 					absolute = true,
 					left = 0,
 					right = 0,
@@ -1438,12 +1986,12 @@ ios.sheet = ui.component(function(props)
 					bottom = 0,
 					bg = "$surface.base",
 					opacity = largeness,
-				},
+				}),
 				-- UIKit's grabber: 36 by 5, 5 points below the top. A tap (and
 				-- VoiceOver's) goes to the detent before the current one, the
 				-- largest after the smallest, as `_indexOfActiveDetentForTappingGrabber`
 				-- does; its name and value are UIKit's own strings.
-				ui.button {
+				ui.button({
 					h = 15,
 					pt = 5,
 					p = 0,
@@ -1478,11 +2026,11 @@ ios.sheet = ui.component(function(props)
 						resting:set(detent)
 						run(rise, target(detent), nil, 0, SHEET_SPRING)
 					end,
-					ui.div { w = 36, h = 5, rounded = 2.5, bg = "$text.tertiary", aria_hidden = true },
-				},
+					ui.div({ w = 36, h = 5, rounded = 2.5, bg = "$text.tertiary", aria_hidden = true }),
+				}),
 				props.build(),
-			},
-		}
+			}),
+		})
 	)
 end)
 

@@ -937,3 +937,290 @@ fn a_long_session_of_the_showcase_and_mail_comes_back_to_where_it_was() {
     );
     assert_returns("mail", &mail);
 }
+
+/// A row with swipe actions, driven as UIKit's recognizer would tell it.
+fn swipe_harness(extra: &str) -> Harness {
+    let h = Harness::inline(&format!(
+        r#"local ios = ui.ios
+        local log = ui.state("log", "")
+        local function note(word) log:set(log:get() .. word .. " ") end
+        return ui.column {{
+            w = 402, h = 800,
+            ui.text {{ id = "log", "{{log}}" }},
+            ios.swipe_row {{
+                on_delete = function() note("deleted") end,
+                trailing = {{
+                    {{ title = "Delete", style = "destructive", action = function(done)
+                        note("delete"); done(true)
+                    end }},
+                    {{ title = "More", action = function(done)
+                        note("more"); done(true)
+                    end }},
+                }},
+                leading = {{
+                    {{ title = "Read", action = function(done)
+                        note("read"); done(false)
+                    end }},
+                }},
+                {extra}
+                ui.div {{ id = "content", w = "100%", h = 52 }},
+            }},
+        }}"#
+    ));
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    h
+}
+
+fn pan(h: &mut Harness, phase: zgx::native_control::PanPhase, x: f32, vx: f32, at: f32) {
+    let target = zgx::native_control::pans()
+        .into_iter()
+        .rev()
+        .find(|t| t.across.is_some())
+        .expect("the row's swipe");
+    (target.on_pan)(zgx::native_control::PanEvent {
+        phase,
+        x,
+        y: 0.,
+        vx,
+        vy: 0.,
+        at: (at, 30.),
+    });
+    h.frames(1);
+    assert_eq!(h.error(), None);
+}
+
+/// A swipe's start, across `dx`: asked, told, then its buttons mounted and
+/// measured.
+fn swipe_begins(h: &mut Harness, at: f32, dx: f32) {
+    let target = zgx::native_control::pans()
+        .into_iter()
+        .rev()
+        .find(|t| t.across.is_some())
+        .expect("the row's swipe");
+    assert!(target.across.as_ref().is_some_and(|across| across(dx)));
+    pan(h, zgx::native_control::PanPhase::Began, 0., 0., at);
+    h.advance_ms(50.);
+}
+
+#[test]
+fn a_row_swipe_opens_and_closes_as_uikits_release_decides() {
+    use zgx::native_control::PanPhase::{Changed, Ended};
+    let mut h = swipe_harness("");
+    // A slow drag past half the buttons' width opens it, on its spring.
+    swipe_begins(&mut h, 300., -25.);
+    pan(&mut h, Changed, -120., -10., 180.);
+    pan(&mut h, Ended, -120., -10., 180.);
+    h.advance_ms(1200.);
+    let open = h.bounds("content").x;
+    assert!((-300.0..-100.).contains(&open), "open: {open}");
+    // A flick the other way closes it, however little it moved.
+    swipe_begins(&mut h, 200., 25.);
+    pan(&mut h, Ended, 20., 400., 220.);
+    h.advance_ms(1200.);
+    assert!(h.bounds("content").x.abs() < 0.5, "closed");
+    // A slow drag short of half closes it.
+    swipe_begins(&mut h, 300., -25.);
+    pan(&mut h, Changed, -30., -10., 270.);
+    pan(&mut h, Ended, -30., -10., 270.);
+    h.advance_ms(1200.);
+    assert!(h.bounds("content").x.abs() < 0.5, "closed again");
+    // A flick toward the buttons opens it, however little it moved.
+    swipe_begins(&mut h, 300., -25.);
+    pan(&mut h, Ended, -5., -400., 295.);
+    h.advance_ms(1200.);
+    assert!((h.bounds("content").x - open).abs() < 0.5, "open at once");
+}
+
+#[test]
+fn a_full_swipe_performs_the_first_action_and_a_destructive_one_collapses_the_row() {
+    use zgx::native_control::PanPhase::{Changed, Ended};
+    let mut h = swipe_harness("");
+    swipe_begins(&mut h, 395., -25.);
+    // Past UIKit's destructive confirmation, width - 29 at the trailing edge.
+    pan(&mut h, Changed, -374., -300., 21.);
+    h.advance_ms(600.);
+    let far = h.bounds("content").x;
+    assert!((far + 373.).abs() < 3., "held at the confirmation: {far}");
+    pan(&mut h, Ended, -374., -300., 21.);
+    assert_eq!(h.text("log"), "delete ");
+    h.advance_ms(600.);
+    // Collapsed, then the app's told to take the item away.
+    assert!(h.bounds("content").height <= 52.);
+    assert_eq!(h.text("log"), "delete deleted ");
+}
+
+#[test]
+fn past_the_limit_a_row_goes_as_uikits_power_and_only_arms_where_it_should() {
+    use zgx::native_control::PanPhase::Changed;
+    // A plain first action arms only past its own confirmation:
+    // max(0.525 width, open + 20).
+    let mut h = swipe_harness("");
+    swipe_begins(&mut h, 10., 25.);
+    pan(&mut h, Changed, 100., 100., 110.);
+    h.advance_ms(800.);
+    assert!((h.bounds("content").x - 100.).abs() < 1.);
+    // `full = false`: the limit is the open width, past it a power of the rest.
+    let mut h = swipe_harness("full = false,");
+    swipe_begins(&mut h, 395., -25.);
+    pan(&mut h, Changed, -300., -100., 95.);
+    h.advance_ms(800.);
+    let x = h.bounds("content").x;
+    let open = -x - (300. - (-x)).max(0.).powf(0.7);
+    assert!(x < -100. && x > -300., "stretched: {x} (open {open})");
+}
+
+#[test]
+fn a_rows_swipe_actions_are_actions_of_the_row_to_assistive_technology() {
+    let mut h = swipe_harness("");
+    h.frames(1);
+    let node = zgx::native_control::pans()
+        .into_iter()
+        .rev()
+        .find(|t| t.across.is_some())
+        .and_then(|t| t.node)
+        .expect("the row");
+    let titles: Vec<_> = zgx::native_control::custom_actions_of(node)
+        .expect("its actions")
+        .into_iter()
+        .map(|action| action.title)
+        .collect();
+    assert_eq!(titles, ["Delete", "More", "Read"]);
+    // What VoiceOver has reached is what's in the row, as in a table's cell.
+    let inside = h.find("content").expect("the row's content");
+    let delete = {
+        let scene = h.ui.scene.borrow();
+        zgx::native_control::custom_actions_around(&scene, inside)
+            .expect("the row's actions, from within it")
+            .into_iter()
+            .next()
+            .unwrap()
+    };
+    (delete.run)();
+    h.frames(1);
+    assert_eq!(h.text("log"), "delete ");
+}
+
+#[test]
+fn an_open_row_closes_at_a_touch_elsewhere_and_that_touch_is_nothing_else() {
+    use zgx::native_control::{
+        PanPhase::{Changed, Ended},
+        TouchWatch, take_swallowed_touch, watch_touch,
+    };
+    let mut h = swipe_harness("");
+    swipe_begins(&mut h, 300., -25.);
+    pan(&mut h, Changed, -120., -10., 180.);
+    pan(&mut h, Ended, -120., -10., 180.);
+    h.advance_ms(1200.);
+    assert!(h.bounds("content").x < -100.);
+    // On its buttons, the touch is theirs.
+    let row = h.bounds("content");
+    watch_touch(TouchWatch::Down, 395., row.y + 20.);
+    assert!(!take_swallowed_touch());
+    // Elsewhere: it closes, and the window hears nothing of that finger.
+    watch_touch(TouchWatch::Down, 100., 600.);
+    assert!(take_swallowed_touch());
+    h.advance_ms(1200.);
+    assert!(h.bounds("content").x.abs() < 0.5);
+    // Closed, nothing watches.
+    assert!(!zgx::native_control::touch_watched());
+    assert_eq!(h.error(), None);
+}
+
+#[test]
+fn a_deleted_row_of_a_keyed_list_collapses_once_and_those_after_it_follow() {
+    use zgx::native_control::PanPhase::{Changed, Ended};
+    let mut h = Harness::inline(
+        r#"local ios = ui.ios
+        local items = {}
+        for i = 1, 50 do
+            items[i] = { id = i }
+        end
+        local rows = ui.state("rows", items)
+        return ui.list {
+            id = "list",
+            w = 402,
+            h = 600,
+            height = 52,
+            measured = true,
+            data = rows,
+            key = "id",
+            row = function(row)
+                local id = row.id
+                return ios.swipe_row {
+                    on_delete = function()
+                        rows:update(function(list)
+                            local kept = {}
+                            for _, item in list do
+                                if item.id ~= id then
+                                    table.insert(kept, item)
+                                end
+                            end
+                            return kept
+                        end)
+                    end,
+                    trailing = {
+                        { title = "Delete", style = "destructive", action = function(done) done(true) end },
+                    },
+                    ui.div { id = "row" .. id, w = "100%", h = 52 },
+                }
+            end,
+        }"#,
+    );
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    // The first mounted rows: the latest pan added is a later row, so aim at row 3 by node.
+    let row3 = h.find("row3").expect("row 3");
+    let target = zgx::native_control::pans()
+        .into_iter()
+        .find(|t| {
+            let scene = h.ui.scene.borrow();
+            t.node.is_some_and(|node| {
+                t.across.is_some() && (scene.ancestors(row3).any(|above| above == node))
+            })
+        })
+        .expect("row 3's swipe");
+    let send = |phase, x: f32, vx: f32, at: f32| {
+        (target.on_pan)(zgx::native_control::PanEvent {
+            phase,
+            x,
+            y: 0.,
+            vx,
+            vy: 0.,
+            at: (at, 130.),
+        });
+    };
+    assert!(target.across.as_ref().is_some_and(|across| across(-25.)));
+    send(zgx::native_control::PanPhase::Began, 0., 0., 395.);
+    h.advance_ms(50.);
+    send(Changed, -374., -300., 21.);
+    h.advance_ms(200.);
+    let before = h.bounds("row4").y;
+    assert_eq!(before, 156., "row 4 where it was");
+    send(Ended, -374., -300., 21.);
+    // Collapsing: each frame row 4 moves up, never by a jump, down to row 3's place.
+    let mut last = before;
+    let mut most: f32 = 0.;
+    for _ in 0..60 {
+        h.frame();
+        if h.find("row4").is_some() {
+            let y = h.bounds("row4").y;
+            assert!(y <= last + 0.01, "only up: {y} after {last}");
+            most = most.max(last - y);
+            last = y;
+        }
+    }
+    assert_eq!(h.error(), None);
+    assert!(
+        (last - 104.).abs() < 0.5,
+        "row 4 now where row 3 was: {last}"
+    );
+    assert!(
+        most < 20.,
+        "a collapse, not a jump: the most in a frame {most}"
+    );
+    assert!(h.find("row3").is_none(), "row 3 is gone");
+    // And stays there: taking the item didn't move it a second time.
+    h.frames(10);
+    assert!((h.bounds("row4").y - 104.).abs() < 0.5);
+}
