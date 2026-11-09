@@ -41,6 +41,13 @@ pub(crate) struct ViewOptions {
     /// (`(attachment: <name>)`) are a run of their own the look may draw
     /// as its chip.
     pub attached: Option<Rc<std::collections::HashSet<String>>>,
+    /// The top-level block being built, as it is now (one being written,
+    /// followed), and the place in it of the block being built (`order`):
+    /// where a part nested in it stands among its parts.
+    pub(crate) top: Option<Signal<Value>>,
+    pub(crate) path: Rc<[usize]>,
+    /// In a quote: its words in the quote's ink.
+    pub(crate) quoted: bool,
 }
 
 /// `veil = { key = …, seed = … }`: the reply's key, which keeps what each
@@ -61,13 +68,22 @@ impl ViewOptions {
     fn fading(&self, n: u32) -> Option<Fading> {
         Some(Fading(self.veil_state.clone()?, (self.block_at?, n)))
     }
-    /// How a paragraph of the block being built, its `n`th, is drawn: its
-    /// veil, what the text carries, and a find's marks.
-    fn para(&self, n: u32) -> Para {
+    /// How a paragraph of the block being built is drawn: its veil, what
+    /// the text carries, and a find's marks, by its place in its top-level
+    /// block (the top-level one itself is its block's first).
+    fn para(&self) -> Para {
+        let nested = !self.path.is_empty() && self.top.is_some();
         Para {
-            fading: self.fading(n),
+            fading: if nested { None } else { self.fading(1) },
             attached: self.attached.clone(),
             find_at: self.block_at.filter(|_| self.look.is_some()),
+            nested: nested.then(|| {
+                (
+                    self.veil_state.clone().zip(self.block_at),
+                    self.top.clone().expect("nested in one"),
+                    self.path.clone(),
+                )
+            }),
         }
     }
 }
@@ -75,11 +91,22 @@ impl ViewOptions {
 /// How a paragraph is drawn beyond its runs: fading in (its place in the
 /// veil), the names of what the text carries, and the top-level block a
 /// find counts its matches in.
+/// A nested paragraph's: the veil and its top-level block's place, the
+/// block as it is now, and the paragraph's place in it.
+type Nested = (
+    Option<(Rc<RefCell<Veil>>, usize)>,
+    Signal<Value>,
+    Rc<[usize]>,
+);
 #[derive(Clone, Default)]
 struct Para {
     fading: Option<Fading>,
     attached: Option<Rc<std::collections::HashSet<String>>>,
     find_at: Option<usize>,
+    /// Nested in a top-level block: the veil and the block's place, the
+    /// block as it is now, and the paragraph's place in it, which say its
+    /// place in the veil and its matches' numbers as it is drawn.
+    nested: Option<Nested>,
 }
 
 /// A run of a paragraph, as a look is asked to draw it: its text, its
@@ -121,6 +148,11 @@ pub(crate) trait Look {
     fn reveal(&self, block: zgx::compose::NodeHandle);
     /// A paragraph (its runs' rich text) with the style's own options.
     fn paragraph(&self, view: View) -> View;
+    /// Whether the style names part `name` (`h1`, `list`, `quote`, `rule`…).
+    fn has(&self, name: &str) -> bool;
+    /// `view` with the style's options for part `name` (none if it names
+    /// none).
+    fn part(&self, name: &str, view: View) -> View;
     /// The top-level blocks' list with the style's room between them (the
     /// view's own where it gives none).
     fn blocks(&self, view: View) -> View;
@@ -367,7 +399,19 @@ fn spans(
         .find_at
         .and_then(|at| look?.find(at))
         .map(|(q, k)| (q.to_ascii_lowercase(), k));
-    if para.fading.is_none() && para.attached.is_none() && find.is_none() {
+    // Nested: its place in the veil and the words before it in its block,
+    // from the block as it is (each change to it draws it again, as the
+    // app's own drew the whole block again).
+    let (fading, before) = match &para.nested {
+        Some((veil, top, path)) => {
+            let (n, before) = top.with(|t| super::order::before(t, path));
+            let fading = veil.clone().map(|(v, at)| Fading(v, (at, n + 1)));
+            (fading, before)
+        }
+        None => (para.fading.clone(), Vec::new()),
+    };
+    let fading = fading.as_ref();
+    if fading.is_none() && para.attached.is_none() && find.is_none() {
         return runs
             .iter()
             .map(
@@ -380,19 +424,26 @@ fn spans(
     }
     let pieces = pieces(runs, para.attached.as_deref());
     let words: String = pieces.iter().map(|p| &*p.text).collect();
-    let chunks: Vec<Chunk> = match &para.fading {
+    let chunks: Vec<Chunk> = match fading {
         Some(Fading(veil, at)) => veil
             .borrow_mut()
             .chunks(*at, &words, zgx::compose::fade_now()),
         None => Vec::new(),
     };
-    // (A paragraph's matches are numbered on from its block's first: a
-    // top-level paragraph is its block.)
-    let (marks, current) = match &find {
-        Some((q, k)) => (occurrences(&words, q), *k),
-        None => (Vec::new(), 0),
+    // (A paragraph's matches are numbered on from those before it in its
+    // top-level block.)
+    let (marks, current, base) = match &find {
+        Some((q, k)) => (
+            occurrences(&words, q),
+            *k,
+            before
+                .iter()
+                .map(|w| occurrences(w, q).len())
+                .sum::<usize>(),
+        ),
+        None => (Vec::new(), 0, 0),
     };
-    let mark_of = |i: usize| if i + 1 == current { 2 } else { 1 };
+    let mark_of = |i: usize| if base + i + 1 == current { 2 } else { 1 };
     let mut out = Vec::with_capacity(pieces.len());
     let mut pos = 0;
     for p in &pieces {
@@ -699,7 +750,7 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
                     "s",
                     false,
                     options.look.clone(),
-                    options.para(1),
+                    options.para(),
                 ),
                 None => faded_runs(b.field("s"), false, None, None).into(),
             };
@@ -779,6 +830,10 @@ fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
     let cells: Rc<RefCell<Vec<Option<Signal<Value>>>>> = Rc::default();
     let (keeping, building, reading, options) =
         (cells.clone(), cells, list.clone(), options.clone());
+    // In a look, every prose block follows its value in place (as the app
+    // drew a block again only when its value changed): none is built again
+    // as the one after it comes.
+    let styled = options.look.is_some();
     keyed(
         move || {
             list.with(|blocks| {
@@ -794,7 +849,7 @@ fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
                 blocks
                     .iter()
                     .enumerate()
-                    .map(|(i, b)| place(i, i == last, b))
+                    .map(|(i, b)| place(i, i == last || styled, b))
                     .collect()
             })
         },
@@ -804,11 +859,17 @@ fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
                 Place::Whole(i, _) => (i, false),
             };
             let b = reading.with_untracked(|l| l.list().get(index).cloned().unwrap_or(Value::Nil));
+            let heading = matches!(b.field("t"), Some(Value::Str(t)) if &**t == "h");
             // (The veil's places and a find's numbers count from the
             // top-level blocks.)
             let mut options = options.clone();
-            options.block_at = top.then_some(index);
-            let options = &options;
+            if top {
+                options.block_at = Some(index);
+                options.path = Rc::from([]);
+            } else {
+                options.path = super::order::on(&options.path, &[index]);
+            }
+            let options = &mut options;
             let (view, cell) = if !live {
                 if let Some(slot) = building.borrow_mut().get_mut(index) {
                     *slot = None;
@@ -819,10 +880,32 @@ fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
                 if let Some(slot) = building.borrow_mut().get_mut(index) {
                     *slot = Some(cell.clone());
                 }
+                if top {
+                    options.top = Some(cell.clone());
+                }
                 (block(cell.clone(), options, cx), Some(cell))
             };
             match &options.look {
-                Some(look) if top && look.finds() => revealed(view, index, look.clone(), cell, cx),
+                Some(look) if top && look.finds() => {
+                    // Its box, as the app's: a block a find marks sits in a
+                    // box of its own (a heading pulled toward what it heads,
+                    // `pull`), which is what is revealed, holding it as the
+                    // app's swap of a block as its marks change holds it (a
+                    // one-cell grid, its content stretched).
+                    let inner = column()
+                        .grid()
+                        .grid_cols(1)
+                        .grid_rows(1)
+                        .items_stretch()
+                        .w_full()
+                        .min_w(0.)
+                        .child(column().contents().child(view));
+                    let mut outer = div().w_full().min_w(0.).child(inner);
+                    if heading {
+                        outer = look.part("pull", outer);
+                    }
+                    revealed(outer, index, look.clone(), cell, cx)
+                }
                 _ => view,
             }
         },
@@ -981,6 +1064,119 @@ fn code(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
         )
 }
 
+/// A prose block in the look's own structure, where its style names the
+/// kind (`h1`, `list`, `quote`, `rule`): each part the element the app
+/// draws, with the style's options for it. None for a kind it doesn't
+/// name (drawn as the view's own), and a paragraph (`block`'s).
+fn look_block(
+    kind: &str,
+    b: &Value,
+    cell: Signal<Value>,
+    look: &Rc<dyn Look>,
+    options: &ViewOptions,
+    cx: &mut Context,
+) -> Option<View> {
+    match kind {
+        "h" if look.has("h1") => {
+            let level = b.field("l").and_then(Value::as_f64).unwrap_or(1.) as usize;
+            let part = ["h1", "h2", "h3"][level.clamp(1, 3) - 1];
+            let runs = para_runs(cell, "s", false, Some(look.clone()), options.para());
+            let mut view = look.part(part, look.paragraph(runs));
+            if options.quoted {
+                view = look.part("quote_ink", view);
+            }
+            Some(view.heading(level))
+        }
+        "ul" | "ol" if look.has("list") => {
+            Some(look_list(kind == "ol", b, cell, look, options, cx))
+        }
+        "quote" if look.has("quote") => {
+            let mut inner = options.clone();
+            inner.quoted = true;
+            let body = block_list(field_cell(&cell, "b", cx), &inner, false);
+            Some(
+                look.part(
+                    "quote",
+                    row()
+                        .child(look.part("quote_rail", div()))
+                        .child(look.part("quote_body", body)),
+                ),
+            )
+        }
+        "hr" if look.has("rule") => Some(look.part("rule", div())),
+        _ => None,
+    }
+}
+
+/// A list in the look: each item a row of its marker (a dot, or its number)
+/// hanging in its gutter and its blocks, built once for its place and
+/// following its value.
+fn look_list(
+    ordered: bool,
+    b: &Value,
+    cell: Signal<Value>,
+    look: &Rc<dyn Look>,
+    options: &ViewOptions,
+    cx: &mut Context,
+) -> View {
+    let start = b.field("start").and_then(Value::as_f64).unwrap_or(1.) as usize;
+    let items = field_cell(&cell, "items", cx);
+    let (options, look, outer) = (options.clone(), look.clone(), look.clone());
+    let cells: Rc<RefCell<Vec<Option<Signal<Value>>>>> = Rc::default();
+    let (keeping, building, reading) = (cells.clone(), cells, items.clone());
+    let list = keyed(
+        move || {
+            items.with(|l| {
+                let list = l.list();
+                let mut cells = keeping.borrow_mut();
+                cells.resize(list.len(), None);
+                for (cell, item) in cells.iter().zip(list) {
+                    if let Some(cell) = cell {
+                        put(cell, item);
+                    }
+                }
+                // By place and how many blocks: an item of one (the usual,
+                // a line of text) draws its block alone.
+                list.iter()
+                    .enumerate()
+                    .map(|(i, item)| (i, item.list().len().min(2)))
+                    .collect::<Vec<(usize, usize)>>()
+            })
+        },
+        move |(i, blocks): (usize, usize), cx: &mut Context| {
+            let item = cx
+                .runtime()
+                .signal(reading.with_untracked(|l| l.list().get(i).cloned().unwrap_or(Value::Nil)));
+            if let Some(slot) = building.borrow_mut().get_mut(i) {
+                *slot = Some(item.clone());
+            }
+            let mut inner = options.clone();
+            inner.path = super::order::on(&options.path, &[i]);
+            let body = match blocks {
+                1 => {
+                    let mut first = inner.clone();
+                    first.path = super::order::on(&inner.path, &[0]);
+                    look.part("item_body", column().child(single(item, &first, cx)))
+                }
+                _ => look.part("item_body", block_list(item, &inner, false)),
+            };
+            let marker: View = if ordered {
+                look.part("number", text(format!("{}.", start + i)))
+            } else {
+                look.part("bullet", row().child(look.part("bullet_dot", div())))
+            };
+            look.part(
+                "item",
+                row()
+                    .role(Role::ListItem)
+                    .child(marker.accessible_hidden())
+                    .child(body),
+            )
+        },
+    );
+    outer.part("list", list.role(Role::List))
+}
+
 /// A paragraph of the runs field `field` of `cell` holds, following it.
 fn runs_of(
     cell: Signal<Value>,
@@ -1013,19 +1209,28 @@ fn para_runs(
     look: Option<Rc<dyn Look>>,
     para: Para,
 ) -> View {
-    zgx::compose::rich_text_signal(move || {
+    // In a look, as wide as what holds it, as the app's own paragraph is
+    // (stretched across its column): its box, not only its words.
+    let stretched = look.is_some();
+    let view = zgx::compose::rich_text_signal(move || {
         cell.with(|b| {
             b.field(field)
                 .map(|runs| spans(runs.list(), bold, look.as_deref(), &para))
                 .unwrap_or_default()
         })
     })
-    .text_wrap(true)
+    .text_wrap(true);
+    if stretched { view.w_full() } else { view }
 }
 
 fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
     let b = cell.with_untracked(Clone::clone);
     let kind = text_of(b.field("t"));
+    if let Some(look) = options.look.clone()
+        && let Some(view) = look_block(&kind, &b, cell.clone(), &look, options, cx)
+    {
+        return view;
+    }
     match kind.as_str() {
         "h" => {
             let level = b.field("l").and_then(Value::as_f64).unwrap_or(1.) as usize;
@@ -1142,8 +1347,10 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
         "img" => zgx::compose::text_signal(move || cell.with(|b| text_of(b.field("alt"))))
             .text_color(themed("text.secondary")),
         _ => {
-            let runs = para_runs(cell, "s", false, options.look.clone(), options.para(1));
+            let runs = para_runs(cell, "s", false, options.look.clone(), options.para());
             match &options.look {
+                // (In a quote, its ink over the paragraph's.)
+                Some(look) if options.quoted => look.part("quote_ink", look.paragraph(runs)),
                 Some(look) => look.paragraph(runs),
                 None => runs,
             }
