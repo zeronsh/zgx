@@ -491,3 +491,108 @@ fn an_orbit_turns_by_keyboard_focused_and_a_flick_coasts_to_a_stop() {
     h.frames(10);
     assert_eq!(frame_id(&mut h, "scene"), settled, "still once stopped");
 }
+
+/// A square of two triangles facing the camera at z = 0.5, its own
+/// geometry (`FACES` its per-triangle form), clicked as a box is.
+const OWN: &str = r##"
+local clicked = ui.state("clicked", "none")
+local square = {
+    positions = { -0.5, -0.5, 0.5,  0.5, -0.5, 0.5,  0.5, 0.5, 0.5,  -0.5, 0.5, 0.5 },
+    indices = { 1, 2, 3,  1, 3, 4 },
+    FACES
+}
+return ui.column {
+    ui.text { id = "clicked", "{clicked}" },
+    ui.scene3d {
+        id = "scene",
+        w = 200,
+        h = 200,
+        orbit = true,
+        camera = { position = { 0, 0, 4 }, fov = 40 },
+        ui.mesh {
+            geometry = square,
+            material = { double_sided = true },
+            on_click = function(hit) clicked:set(string.format("%.2f", hit.z)) end,
+        },
+    },
+}
+"##;
+
+#[test]
+fn a_mesh_of_its_own_triangles_shows_and_is_clicked() {
+    for faces in [
+        "",
+        "colors = { 1, 0, 0,  0, 1, 0,  0, 0, 1,  1, 1, 1 }",
+        "face_normals = { 0, 0, 1,  0, 0, 1 }, face_colors = { 1, 0, 0,  0, 0, 1 }",
+        "flat = true",
+    ] {
+        let mut h = Harness::inline(&OWN.replace("FACES", faces));
+        assert_eq!(h.error(), None, "{faces}");
+        h.frame();
+        assert!(frame_id(&mut h, "scene").is_some(), "{faces}");
+        press(&mut h, "scene", (100., 100.), 0.);
+        assert_eq!(h.text("clicked"), "0.50", "{faces}");
+    }
+}
+
+#[test]
+fn a_mesh_of_its_own_triangles_is_checked() {
+    let made = |g: &str| raised(&format!("ui.mesh {{ geometry = {g} }}"));
+    assert!(made("{}").contains("positions"));
+    assert!(made("{ positions = { 0, 0 } }").contains("three a vertex"));
+    assert!(made(r#"{ positions = { 0, 0, "z" } }"#).contains("`positions`[3]"));
+    assert!(made("{ positions = { 0, 0, 0 }, indices = { 1, 1, 2 } }").contains("from 1 to 1"));
+    assert!(made("{ positions = { 0, 0, 0 }, indices = { 0, 1, 1 } }").contains("from 1 to 1"));
+    assert!(
+        made("{ positions = { 0,0,0, 1,0,0, 0,1,0 }, indices = { 1, 2 } }")
+            .contains("three a triangle")
+    );
+    assert!(
+        made("{ positions = { 0,0,0, 1,0,0, 0,1,0 }, colors = { 1, 0 } }")
+            .contains("three or four")
+    );
+    assert!(
+        made("{ positions = { 0,0,0, 1,0,0, 0,1,0 }, face_normals = { 0, 0 } }")
+            .contains("face_normals")
+    );
+    assert!(made("true").contains("geometry"));
+    assert_eq!(made("{ positions = { 0,0,0, 1,0,0, 0,1,0 } }"), "no error");
+}
+
+/// A plugin granted nothing shows a scene of its own triangles, and hears
+/// clicks on them: `ui.scene3d` asks no capability.
+#[test]
+fn a_plugin_granted_nothing_shows_and_picks_its_own_mesh() {
+    use zgx_script::{Plugin, ScriptHost};
+    let dir = std::env::temp_dir().join(format!("zgx-scene3d-plugin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("init.luau");
+    let plugin = OWN
+        .replace("FACES", "face_colors = { 1, 0, 0,  0, 0, 1 }")
+        .replace(
+            "return ui.column {",
+            "ui.contribute { target = \"#slot\", after = ui.column {",
+        )
+        .trim_end()
+        .to_owned()
+        + " }\n";
+    std::fs::write(&entry, plugin).unwrap();
+    let mut h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.column { ui.text { id = "slot", "app" } }"#,
+        );
+        host.set_plugins(vec![Plugin {
+            name: "cad".into(),
+            entry,
+            grants: vec![],
+        }]);
+        host
+    });
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    assert!(frame_id(&mut h, "scene").is_some(), "{}", h.tree());
+    press(&mut h, "scene", (100., 100.), 0.);
+    assert_eq!(h.text("clicked"), "0.50");
+}
