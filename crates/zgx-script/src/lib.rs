@@ -51,6 +51,12 @@ mod file_events;
 #[cfg(target_os = "linux")]
 #[path = "file_events_linux.rs"]
 mod file_events;
+#[cfg(target_os = "ios")]
+#[path = "file_events_kqueue.rs"]
+mod file_events;
+// Its tests run where tests run: kqueue is macOS's too.
+#[cfg(all(test, target_os = "macos"))]
+mod file_events_kqueue;
 mod folder;
 mod form;
 mod handlers;
@@ -3496,10 +3502,20 @@ impl ScriptHost {
         }
         let host = self.clone();
         async move {
+            // A signed app's files never change: nothing to watch at all.
+            if !can_change(
+                matches!(host.0.files, Files::Bundle(_)),
+                !host.0.managed.borrow().is_empty(),
+                cfg!(target_os = "ios"),
+                cfg!(debug_assertions),
+            ) && cfg!(target_os = "ios")
+            {
+                return;
+            }
             // A bundle never changes; the plugins beside it (on the disk)
             // are watched as any file is.
             // The kernel says when a file changes; nothing runs meanwhile.
-            #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+            #[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
             if let Some(mut events) = file_events::FileEvents::new() {
                 // A reload (new plugins) has the watched files looked at again.
                 let (rewatch, mut rewatched) = zgx::task::latest::<()>();
@@ -3539,7 +3555,7 @@ impl ScriptHost {
                     host.poll_check();
                 }
             }
-            if !polls_files(
+            if !can_change(
                 matches!(host.0.files, Files::Bundle(_)),
                 !host.0.managed.borrow().is_empty(),
                 cfg!(target_os = "ios"),
@@ -3557,7 +3573,7 @@ impl ScriptHost {
     /// Every file a reload depends on: the scripts, what they required, the
     /// images they read and the theme files.
     #[cfg_attr(
-        not(any(target_os = "macos", windows, target_os = "linux")),
+        not(any(target_os = "macos", windows, target_os = "linux", target_os = "ios")),
         allow(dead_code)
     )]
     fn watched_files(&self) -> Vec<PathBuf> {
@@ -3570,7 +3586,7 @@ impl ScriptHost {
     /// The directories whose every entry a reload depends on: the plugins',
     /// so the first plugin dropped into an empty one loads.
     #[cfg_attr(
-        not(any(target_os = "macos", windows, target_os = "linux")),
+        not(any(target_os = "macos", windows, target_os = "linux", target_os = "ios")),
         allow(dead_code)
     )]
     fn watched_dirs(&self) -> Vec<PathBuf> {
@@ -4459,26 +4475,25 @@ impl ScriptHost {
 
 /// How long a save's writes must stop for before it reloads (`watch`): an
 /// editor's save as a write and a rename comes within a millisecond or two.
-#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
 const SETTLE: Duration = Duration::from_millis(10);
 /// At most this long after a change, it reloads even if writes go on.
-#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
 const SETTLE_MAX: Duration = Duration::from_millis(100);
 
-/// Whether a host with no way to hear files change stats them `every` so
-/// often. Not for a bundle, with no managed plugins beside it: nothing there
-/// changes. Nor for a release build on iOS, where an app's scripts are in its
-/// signed bundle and four `stat`s a second were the only thing waking a
-/// resting app (240 wakeups a minute, measured in the simulator; a static
-/// UIKit app has none). A debug build keeps hot reload there.
-fn polls_files(bundle: bool, managed: bool, ios: bool, debug: bool) -> bool {
+/// Whether a host's files can change, to be watched at all. Not a bundle's,
+/// with no managed plugins beside it. Nor those of a release build on iOS, in
+/// its signed bundle: a resting app there had nothing else waking it (240
+/// wakeups a minute, from stat-ing its scripts, measured in the simulator; a
+/// static UIKit app has none). A debug build keeps hot reload there.
+fn can_change(bundle: bool, managed: bool, ios: bool, debug: bool) -> bool {
     if managed {
         return true;
     }
     !bundle && (!ios || debug)
 }
 /// What woke `watch`.
-#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
 enum Woke {
     /// A watched file changed.
     Changed,
@@ -4490,7 +4505,7 @@ enum Woke {
     Timer,
 }
 /// The first of a change, a reload's rewatch, or `after` going by.
-#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux", target_os = "ios"))]
 async fn wake(
     events: &mut file_events::FileEvents,
     rewatched: &mut zgx::task::LatestReceiver<()>,
@@ -4568,19 +4583,19 @@ fn trim_idle(inner: &Inner) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn only_what_can_change_is_polled() {
-        use super::polls_files;
-        // Files on a disk, where nothing says they changed: stat them.
-        assert!(polls_files(false, false, false, false));
-        assert!(polls_files(false, false, false, true));
+    fn only_what_can_change_is_watched() {
+        use super::can_change;
+        // Files on a disk, where nothing says they changed: watch them.
+        assert!(can_change(false, false, false, false));
+        assert!(can_change(false, false, false, true));
         // A bundle doesn't change, but managed plugins beside it can.
-        assert!(!polls_files(true, false, false, false));
-        assert!(polls_files(true, true, false, false));
+        assert!(!can_change(true, false, false, false));
+        assert!(can_change(true, true, false, false));
         // iOS: an app's files are in its signed bundle, so a release build
         // rests; a debug build keeps hot reload.
-        assert!(!polls_files(false, false, true, false));
-        assert!(polls_files(false, false, true, true));
-        assert!(polls_files(false, true, true, false));
+        assert!(!can_change(false, false, true, false));
+        assert!(can_change(false, false, true, true));
+        assert!(can_change(false, true, true, false));
     }
     use super::*;
 
