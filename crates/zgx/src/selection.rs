@@ -235,9 +235,6 @@ pub(crate) struct State {
     /// Virtual list rows in selectable regions, and their indices.
     rows: HashMap<NodeId, crate::reactive::Signal<usize>>,
     /// Those rows' keys (each list's key, hashed).
-    /// Those lists' keys (`RowSource::keys`), by the node holding their
-    /// rows: a selection's end in a row is found again by its key.
-    row_keys: HashMap<NodeId, RowKeys>,
     /// Virtual lists' row text for copying rows they have not mounted
     /// (`View::row_text`), by the node holding their rows.
     row_texts: HashMap<NodeId, RowText>,
@@ -268,49 +265,33 @@ pub(crate) struct State {
 /// Rows a copy takes from one list's row text at most.
 const MAX_PROVIDED_ROWS: usize = 1_000_000;
 
-/// A virtual list's plain text of row `index`, `None` past its end.
-pub(crate) type RowText = Rc<ListRows>;
+/// A virtual list's rows as a selection reads them (`View::row_text`).
+pub(crate) type RowText = Rc<dyn ListRows>;
 
-/// A virtual list's rows as a selection reads them: their plain text (it
-/// calls as `Fn(usize) -> Option<String>`) and, from the list itself, its
-/// keys.
-pub(crate) struct ListRows {
-    text: Box<dyn Fn(usize) -> Option<String>>,
-    keys: Option<RowKeys>,
-}
-
-impl ListRows {
-    pub(crate) fn new(
-        text: impl Fn(usize) -> Option<String> + 'static,
-        keys: Option<RowKeys>,
-    ) -> RowText {
-        Rc::new(Self {
-            text: Box::new(text),
-            keys,
-        })
+/// A virtual list's rows as a selection reads them: their plain text and,
+/// for a list that has them, their keys (`RowSource::rows`). A function of
+/// a row's index is its text alone, so a list's row text stays one
+/// allocation, its keys in it.
+pub(crate) trait ListRows {
+    /// Row `index`'s plain text, `None` past its end.
+    fn text(&self, index: usize) -> Option<String>;
+    /// Row `index`'s key, if the list has keys.
+    fn key(&self, _index: usize) -> Option<Rc<dyn Any>> {
+        None
+    }
+    /// Where the row with `key` (the list's key type) is now, last seen at
+    /// `seen`: there if it still is, else found down the list; `None` once
+    /// no row has it.
+    fn find(&self, _key: &dyn Any, seen: usize) -> Option<usize> {
+        Some(seen)
     }
 }
 
-impl std::ops::Deref for ListRows {
-    type Target = dyn Fn(usize) -> Option<String>;
-    fn deref(&self) -> &Self::Target {
-        &*self.text
+impl<F: Fn(usize) -> Option<String>> ListRows for F {
+    fn text(&self, index: usize) -> Option<String> {
+        self(index)
     }
 }
-
-/// A virtual list's keys, for a selection's ends in its rows
-/// (`RowSource::keys`): row `index`'s key, and where a key is now (its
-/// list's key type), last seen at an index: there if it still is, else found
-/// down the list; `None` once no row has it.
-pub(crate) struct ListKeys {
-    pub(crate) key: Box<KeyAt>,
-    pub(crate) find: Box<FindKey>,
-}
-/// Row `index`'s key (`ListKeys::key`).
-pub(crate) type KeyAt = dyn Fn(usize) -> Option<Rc<dyn Any>>;
-/// Where a key is now, last seen at an index (`ListKeys::find`).
-pub(crate) type FindKey = dyn Fn(&dyn Any, usize) -> Option<usize>;
-pub(crate) type RowKeys = Rc<ListKeys>;
 
 /// A row's key, as its list gave it: what finds the row again.
 #[derive(Clone)]
@@ -342,7 +323,6 @@ impl Drop for RowTextGuard {
             state.list_texts.remove(&self.root);
             if let Some(content) = self.content {
                 state.row_texts.remove(&content);
-                state.row_keys.remove(&content);
             }
         }
     }
@@ -370,9 +350,6 @@ pub(crate) fn mount_row_text(ui: &mut Ui, root: NodeId, text: RowText) {
         let mut state = state.borrow_mut();
         state.list_texts.insert(root, text.clone());
         if let Some(content) = content {
-            if let Some(keys) = &text.keys {
-                state.row_keys.insert(content, keys.clone());
-            }
             state.row_texts.insert(content, text);
         }
     }
@@ -1035,7 +1012,7 @@ impl Ui {
                            old: Option<TextPoint>,
                            kept: &Option<RowAddress>| match point {
                     Some(point) if Some(point) == old => kept.clone(),
-                    Some(point) => row_address(&state.rows, &state.row_keys, &scene, point),
+                    Some(point) => row_address(&state.rows, &state.row_texts, &scene, point),
                     None => None,
                 };
                 (
@@ -1073,7 +1050,7 @@ impl Ui {
         let (anchor, focus) = {
             let scene = self.scene.borrow();
             let end = |point: Option<TextPoint>, row: &Option<RowAddress>| match point {
-                Some(point) => revive(&state.rows, &state.row_keys, &scene, point, row.as_ref()),
+                Some(point) => revive(&state.rows, &state.row_texts, &scene, point, row.as_ref()),
                 None => End::Gone,
             };
             (
@@ -1702,7 +1679,7 @@ impl Ui {
         let scene = self.scene.borrow();
         let rows = &state.rows;
         let end = |point: Option<TextPoint>, row: &Option<RowAddress>| match point {
-            Some(point) => revive(rows, &state.row_keys, &scene, point, row.as_ref()),
+            Some(point) => revive(rows, &state.row_texts, &scene, point, row.as_ref()),
             None => End::Gone,
         };
         let (anchor, focus) = (
@@ -1802,7 +1779,7 @@ impl Ui {
                         }
                         (Some((row, from)), None) => row[from.min(row.len())..].to_owned(),
                         (None, Some((row, to))) => row[..to.min(row.len())].to_owned(),
-                        _ => match text(index) {
+                        _ => match text.text(index) {
                             Some(row) => row,
                             None => break,
                         },
@@ -2793,7 +2770,7 @@ fn row_of(
 /// Where `point` lies in a virtual list's row, as a `RowAddress`.
 fn row_address(
     rows: &HashMap<NodeId, crate::reactive::Signal<usize>>,
-    keys: &HashMap<NodeId, RowKeys>,
+    lists: &HashMap<NodeId, RowText>,
     scene: &Scene,
     point: TextPoint,
 ) -> Option<RowAddress> {
@@ -2811,9 +2788,9 @@ fn row_address(
                 index,
                 // Read from its list only here, as an end is set in it: a
                 // row costs nothing more as it mounts.
-                key: keys
+                key: lists
                     .get(&parent)
-                    .and_then(|keys| (keys.key)(index))
+                    .and_then(|list| list.key(index))
                     .map(RowKey),
                 path,
                 copied: row_copy(scene, at, point),
@@ -2886,7 +2863,7 @@ fn resolve_row(
 /// `point` as it stands, found again in its row if that was recycled.
 fn revive(
     rows: &HashMap<NodeId, crate::reactive::Signal<usize>>,
-    keys: &HashMap<NodeId, RowKeys>,
+    lists: &HashMap<NodeId, RowText>,
     scene: &Scene,
     point: TextPoint,
     row: Option<&RowAddress>,
@@ -2901,8 +2878,8 @@ fn revive(
     // where it is now (one read when it hasn't moved), so it comes back on
     // its own row, never on the one now at its old index. A key no row has
     // any more ends it.
-    let moved = match (&row.key, keys.get(&row.content)) {
-        (Some(key), Some(keys)) => match (keys.find)(&*key.0, row.index) {
+    let moved = match (&row.key, lists.get(&row.content)) {
+        (Some(key), Some(list)) => match list.find(&*key.0, row.index) {
             None => return End::Gone,
             Some(index) => (index != row.index).then(|| RowAddress {
                 index,
