@@ -960,3 +960,93 @@ fn a_replayed_terminal_draws_what_it_is_fed() {
     );
     assert_eq!(term.state().get().pid, 0);
 }
+
+/// The pictures drawn, in paint order: each one's bounds, and whether a
+/// row's canvas was drawn before it.
+#[cfg(unix)]
+fn pictures_drawn(app: &Harness) -> Vec<(zgx::scene::Rect, bool)> {
+    let scene = app.ui.scene.borrow();
+    let mut canvas_before = false;
+    let mut pictures = Vec::new();
+    for item in scene.paint_items() {
+        match item.kind {
+            NodeKind::Canvas(_) => canvas_before = true,
+            NodeKind::Image(_) => pictures.push((scene.transformed_bounds(item.id), canvas_before)),
+            _ => {}
+        }
+    }
+    pictures
+}
+
+/// A picture a program places (the kitty graphics protocol) is drawn over
+/// the cells it covers, stretched to the columns and rows it asked for;
+/// under the text when its z is negative; and it scrolls away with its
+/// lines.
+#[cfg(unix)]
+#[test]
+fn a_placed_picture_is_drawn_over_its_cells_and_scrolls_with_them() {
+    let mut app = Harness::new();
+    // Ten lines down, 2 by 2 red pixels over 3 by 2 cells below "top";
+    // again under the text after "next". Then, asked, four lines (the
+    // screen scrolls, the pictures still on it), and forty.
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(
+            r"i=0; while [ $i -lt 10 ]; do echo; i=$((i+1)); done; printf 'top\r\n\033_Ga=T,f=32,s=2,v=2,c=3,r=2,i=1,q=2;/wAA//8AAP//AAD//wAA/w==\033\\\r\nnext\033_Ga=p,i=1,z=-1,C=1,q=2\033\\\r\n'; read x; printf 'a\nb\nc\nd'; read x; i=0; while [ $i -lt 40 ]; do echo; i=$((i+1)); done; sleep 30",
+        ),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.until("the pictures", |app| {
+        app.shows("next") && pictures_drawn(app).len() == 2
+    });
+    let bounds = |app: &Harness, text: &str| {
+        let scene = app.ui.scene.borrow();
+        scene
+            .paint_items()
+            .find_map(|item| match scene.kind(item.id) {
+                NodeKind::Text { text: shown, .. } if &**shown == text => {
+                    Some(scene.transformed_bounds(item.id))
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    let check = |app: &Harness| {
+        let (top, next) = (bounds(app, "top"), bounds(app, "next"));
+        let line = (next.y - top.y) / 3.;
+        let cell = top.width / 3.;
+        let pictures = pictures_drawn(app);
+        // Under the text: drawn before the rows; over it, after them.
+        let (under, over) = (pictures[0], pictures[1]);
+        assert!(!under.1 && over.1, "{pictures:?}");
+        let over = over.0;
+        assert!(
+            near(over.x, top.x)
+                && near(over.y, top.y + line)
+                && near(over.width, 3. * cell)
+                && near(over.height, 2. * line),
+            "{over:?} for cells {cell} by {line} from {top:?}"
+        );
+        let under = under.0;
+        assert!(
+            near(under.x, top.x + 4. * cell) && near(under.y, next.y),
+            "{under:?}"
+        );
+        top.y
+    };
+    let was = check(&app);
+    // The screen scrolled: they move up with their lines.
+    term.input("\n");
+    app.until("the screen scrolled", |app| app.shows("d"));
+    assert!(check(&app) < was - 1.);
+    // Forty lines later both are in the scrollback, and drawn no more.
+    term.input("\n");
+    app.until("the pictures scrolled away", |app| {
+        !app.shows("next") && pictures_drawn(app).is_empty()
+    });
+}

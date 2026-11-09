@@ -6,6 +6,9 @@
 //! damaged are worked out again, and only those that differ draw again.
 //! Canvases stand at their lines in a container that moves up as the screen
 //! scrolls, so a scroll draws the new lines alone: the rest move with it.
+//! Pictures programs place (the kitty graphics protocol) are image nodes
+//! over the rows, or under them below the text; a screen without any pays
+//! one comparison as it draws.
 //! Keys go to the program through a hidden editor at the cursor, so input
 //! methods compose there and place their candidates at the cursor on every
 //! platform; what they commit is sent, never kept.
@@ -40,6 +43,9 @@ use zgx::{
 /// Around the grid, in points (as the Ghostty backend's padding).
 const PAD_X: f32 = 10.;
 const PAD_Y: f32 = 6.;
+/// The pixels a point has, as programs are told the cell's size (whole
+/// pixels, rounded down): pictures they size by it are drawn by it.
+const PIXELS_PER_POINT: f32 = 2.;
 /// The font size when the session's options give none.
 const FONT_SIZE: f32 = 13.;
 /// How long after output the foreground process is checked again: a
@@ -87,6 +93,15 @@ struct Engine {
     look: Signal<Look>,
     /// Where the hidden editor sits: the cursor's cell, in points.
     caret: Signal<(f32, f32)>,
+    /// The pictures on the screen, lowest first, and whether there were
+    /// any when it last drew (the rows' container holds their layers only
+    /// then).
+    pictures: Signal<Rc<[Picture]>>,
+    pictured: Signal<bool>,
+    /// Whether `pictured` holds, read as each paint begins; and the
+    /// pictures a paint worked out, for its batch to show.
+    any_pictures: Cell<bool>,
+    pictures_due: Cell<Option<Rc<[Picture]>>>,
     /// An input method's composition, drawn at the cursor.
     preedit: Signal<String>,
     /// What a screen reader is told of the latest output (a live region's
@@ -199,6 +214,10 @@ impl EngineTerminal {
             font: RefCell::new(font),
             look: runtime.signal(Look::default()),
             caret: runtime.signal((PAD_X, PAD_Y)),
+            pictures: runtime.signal(Rc::from([])),
+            pictured: runtime.signal(false),
+            any_pictures: Cell::new(false),
+            pictures_due: Cell::new(None),
             preedit: runtime.signal(String::new()),
             news: runtime.signal(String::new()),
             typed: RefCell::new(String::new()),
@@ -509,6 +528,9 @@ impl Engine {
                     ));
                 }
             });
+            if !term.placements().is_empty() || self.any_pictures.get() {
+                self.work_out_pictures(&term, session, metrics);
+            }
             term.reset_damage();
         }
         self.fit_slots(screen_rows);
@@ -550,10 +572,34 @@ impl Engine {
                 }
             }
             self.caret.set(caret);
+            if let Some(pictures) = self.pictures_due.take() {
+                self.show_pictures(pictures);
+            }
             if !news.is_empty() {
                 self.publish_news(news);
             }
         });
+    }
+
+    /// The pictures on the screen now, for the batch to show. Out of line:
+    /// a screen without any draws as before.
+    #[cold]
+    #[inline(never)]
+    fn work_out_pictures(&self, term: &crate::Term, session: &Session, metrics: Metrics) {
+        self.pictures_due
+            .set(Some(shown_pictures(term, session, metrics)));
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn show_pictures(&self, pictures: Rc<[Picture]>) {
+        let any = !pictures.is_empty();
+        if self.any_pictures.replace(any) != any {
+            self.pictured.set(any);
+        }
+        if self.pictures.with_untracked(|shown| **shown != *pictures) {
+            self.pictures.set(pictures);
+        }
     }
 
     /// Tell readers `news` with the frame's accessibility update: added to
@@ -674,13 +720,12 @@ impl Engine {
         let rows = ((size.1 - 2. * PAD_Y) / metrics.cell_height)
             .floor()
             .max(1.) as u16;
-        let scale = 2.;
         self.with_session(|session| {
             session.resize(GridSize {
                 columns,
                 rows,
-                cell_width: (metrics.cell_width * scale) as u16,
-                cell_height: (metrics.cell_height * scale) as u16,
+                cell_width: (metrics.cell_width * PIXELS_PER_POINT) as u16,
+                cell_height: (metrics.cell_height * PIXELS_PER_POINT) as u16,
             })
         });
         if let Some(term) = self.controller() {
@@ -1613,20 +1658,33 @@ fn view(engine: Rc<Engine>) -> View {
         keyed(
             {
                 // Slots in screen order, so readers meet rows top to bottom;
-                // a scroll moves slots rather than making them again.
+                // a scroll moves slots rather than making them again. The
+                // pictures' layers, under the rows and over them, only
+                // while pictures show: a screen without any has no more
+                // nodes to lay out.
                 let layout = engine.layout.clone();
                 let order = engine.order.clone();
+                let pictured = engine.pictured.clone();
                 move || {
                     let (_, generation) = layout.get();
+                    let pictured = pictured.get();
                     order.with(|order| {
-                        order
-                            .iter()
-                            .map(|slot| (*slot, generation))
-                            .collect::<Vec<_>>()
+                        let rows = order.iter().map(|slot| (*slot, generation));
+                        if !pictured {
+                            return rows.collect::<Vec<_>>();
+                        }
+                        std::iter::once((UNDER, 0))
+                            .chain(rows)
+                            .chain(std::iter::once((OVER, 0)))
+                            .collect()
                     })
                 }
             },
-            move |(slot, _), _cx| row_view(&engine, slot),
+            move |(slot, _), _cx| match slot {
+                UNDER => pictures_view(&engine, true),
+                OVER => pictures_view(&engine, false),
+                slot => row_view(&engine, slot),
+            },
         )
     };
     // The rows' container, moved up over their lines as the screen scrolls:
@@ -1793,6 +1851,125 @@ fn view(engine: Rc<Engine>) -> View {
                 handle.retain(effect);
             }
         })
+}
+
+/// The keys of the pictures' layers among the rows' (a slot and a
+/// generation): slots no row has. The rows' own keys stay as they were, made
+/// again at each scroll.
+const UNDER: usize = usize::MAX;
+const OVER: usize = usize::MAX - 1;
+
+/// A picture as the view draws it, in points from the view's corner.
+#[derive(Clone, Debug, PartialEq)]
+struct Picture {
+    image: Arc<zgx::image::ImageData>,
+    /// Where it shows: x, y, width and height.
+    rect: [f32; 4],
+    /// Where the whole image is drawn, relative to `rect`, so that the
+    /// part shown fills it.
+    whole: [f32; 4],
+    z: i32,
+}
+
+/// The pictures on the screen (scrolled back or not), lowest first.
+fn shown_pictures(term: &crate::Term, session: &Session, metrics: Metrics) -> Rc<[Picture]> {
+    let offset = term.grid().display_offset() as i32;
+    let rows = term.screen_lines() as i32;
+    // Programs size pictures by the cell in whole pixels they're told: in
+    // points by it, a picture fills the cells it was made for.
+    let points = |cell: f32| cell / (cell * PIXELS_PER_POINT).floor().max(1.);
+    let (across, down) = (points(metrics.cell_width), points(metrics.cell_height));
+    let mut shown: Vec<Picture> = term
+        .placements()
+        .iter()
+        .filter(|p| {
+            let lines = p.line_range();
+            lines.end.0 + offset > 0 && lines.start.0 + offset < rows
+        })
+        .filter_map(|p| {
+            let image = session.image(p.image)?;
+            let [sx, sy, sw, sh] = p.source.map(|n| n as f32);
+            let (width, height) = match p.size {
+                // Over its cells, but the offset into the first.
+                [0, 0] => (
+                    p.columns as f32 * metrics.cell_width - p.offset[0] as f32 * across,
+                    p.lines as f32 * metrics.cell_height - p.offset[1] as f32 * down,
+                ),
+                [width, height] => (width as f32 * across, height as f32 * down),
+            };
+            let rect = [
+                PAD_X + p.point.column.0 as f32 * metrics.cell_width + p.offset[0] as f32 * across,
+                PAD_Y
+                    + (p.point.line.0 + offset) as f32 * metrics.cell_height
+                    + p.offset[1] as f32 * down,
+                width,
+                height,
+            ];
+            let (x_scale, y_scale) = (width / sw.max(1.), height / sh.max(1.));
+            let whole = [
+                -sx * x_scale,
+                -sy * y_scale,
+                image.width() as f32 * x_scale,
+                image.height() as f32 * y_scale,
+            ];
+            Some(Picture {
+                image,
+                rect,
+                whole,
+                z: p.z,
+            })
+        })
+        .collect();
+    // Placed later over placed earlier, at one z.
+    shown.sort_by_key(|p| p.z);
+    shown.into()
+}
+
+/// The pictures under the text (negative z), or over it.
+fn pictures_view(engine: &Rc<Engine>, below: bool) -> View {
+    let pictures = engine.pictures.clone();
+    let lookup = engine.pictures.clone();
+    let engine = engine.clone();
+    keyed(
+        move || {
+            pictures.with(|all| {
+                all.iter()
+                    .enumerate()
+                    .filter(|(_, p)| (p.z < 0) == below)
+                    .map(|(index, p)| {
+                        let bits = |n: [f32; 4]| n.map(f32::to_bits);
+                        (index, p.image.id(), bits(p.rect), bits(p.whole))
+                    })
+                    .collect::<Vec<_>>()
+            })
+        },
+        move |(index, ..), _cx| {
+            let picture = lookup.with_untracked(|all| all[index].clone());
+            let [x, y, width, height] = picture.rect;
+            let [left, top, whole_width, whole_height] = picture.whole;
+            // At its place on the screen, in the rows' container: moved
+            // down as far as the container is moved up.
+            let scrolled = engine.scrolled.clone();
+            let cell = engine.metrics.get().cell_height;
+            div()
+                .absolute()
+                .left(x)
+                .top(y)
+                .w(width)
+                .h(height)
+                .reactive_style(move || Styles::new().translate(0., scrolled.get() as f32 * cell))
+                .overflow_hidden()
+                .accessible_hidden()
+                .child(
+                    image("", picture.image)
+                        .absolute()
+                        .left(left)
+                        .top(top)
+                        .w(whole_width)
+                        .h(whole_height),
+                )
+        },
+    )
 }
 
 fn row_view(engine: &Rc<Engine>, slot: usize) -> View {
