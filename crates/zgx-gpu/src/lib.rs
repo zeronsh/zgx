@@ -1665,22 +1665,10 @@ struct LayerCache {
     /// At a zoom's scale exactly: composited with its corner on a pixel,
     /// texel for pixel.
     exact: bool,
-    /// Drawn in part: what showed of it, magnified past what fits whole
-    /// (`prepare_layer`).
-    cropped: bool,
-    /// Pixels its largest glyph takes per unit of raster scale, once a
-    /// magnified raster found one too large for the atlas (0 until then):
-    /// it rasterizes no finer than that glyph fits.
-    glyphs: f32,
-    /// Where it landed in its target (`Placed::grid`) and how magnified,
-    /// in the last frame it was prepared in (the scene's flush serial
-    /// first), and in the one before (`prepare_layer`): unchanged since
-    /// then, it is still; changed, it moves, and keeps its raster.
-    seen: Seen,
-    /// Where its texel grid lies from its box's corner, within a texel:
-    /// kept as it is while it moves, never worked out again from where its
-    /// texels landed (`prepare_layer`).
-    phase: (f32, f32),
+    /// What placing it at its scale keeps (`Placement`): `None` for one
+    /// never placed (a fade band's), as `PLAIN`. Boxed, so that every
+    /// layer's entry is as small as before placing was.
+    placement: Option<Box<Placement>>,
     /// Promoted by a local transform rather than isolation: kept a while
     /// once back at identity (`LAYER_PARK_FRAMES`).
     transformed: bool,
@@ -1704,6 +1692,61 @@ impl LayerCache {
     fn live_bytes(&self) -> usize {
         let (w, h) = (self.texture.width() as f32, self.texture.height() as f32);
         (w * self.uv[0]).round() as usize * (h * self.uv[1]).round() as usize * 4
+    }
+}
+/// What a layer's raster keeps of where and how it was placed
+/// (`LayerCache::placement`).
+struct Placement {
+    /// Drawn in part: what showed of it, magnified past what fits whole
+    /// (`prepare_layer`).
+    cropped: bool,
+    /// Pixels its largest glyph takes per unit of raster scale, once a
+    /// magnified raster found one too large for the atlas (0 until then):
+    /// it rasterizes no finer than that glyph fits.
+    glyphs: f32,
+    /// Where it landed in its target (`Placed::grid`) and how magnified,
+    /// in the last frame it was prepared in (the scene's flush serial
+    /// first), and in the one before (`prepare_layer`): unchanged since
+    /// then, it is still; changed, it moves, and keeps its raster.
+    seen: Seen,
+    /// Where its texel grid lies from its box's corner, within a texel:
+    /// kept as it is while it moves, never worked out again from where its
+    /// texels landed (`prepare_layer`).
+    phase: (f32, f32),
+}
+/// A layer's `Placement` before it has one.
+const PLACEMENT: Placement = Placement {
+    cropped: false,
+    glyphs: 0.,
+    seen: Seen {
+        frame: 0,
+        magnification: 1.,
+        before: 1.,
+        grids: None,
+    },
+    phase: (0., 0.),
+};
+/// `PLACEMENT`, to read.
+static PLAIN: Placement = PLACEMENT;
+impl LayerCache {
+    /// What placing it keeps.
+    #[inline]
+    fn placement(&self) -> &Placement {
+        self.placement.as_deref().unwrap_or(&PLAIN)
+    }
+    /// What placing it keeps, to change.
+    #[inline(always)]
+    fn placement_mut(&mut self) -> &mut Placement {
+        if self.placement.is_none() {
+            self.place();
+        }
+        self.placement.as_deref_mut().expect("placed above")
+    }
+    /// A `Placement` of its own, for a layer that had none.
+    #[cold]
+    #[inline(never)]
+    fn place(&mut self) {
+        self.placement = Some(Box::new(PLACEMENT));
     }
 }
 /// `LayerCache::seen`: what a layer was in the frame last prepared, and in
@@ -1823,7 +1866,7 @@ fn plan_placed(
     let held = cached.map(|cache| {
         // What it was in the frame before this one (a frame may prepare it
         // twice: `layer_shifted`).
-        let seen = &cache.seen;
+        let seen = &cache.placement().seen;
         let grids = seen.grids.as_deref();
         let (before_grid, before) = match seen.frame == serial {
             true => (grids.and_then(|grids| grids.before), seen.before),
@@ -6348,8 +6391,8 @@ impl GpuRenderer {
         let magnifying = magnification > 1. && magnification.is_finite();
         if !magnifying
             && let Some(cache) = self.layers.get_mut(&id)
-            && !cache.cropped
-            && cache.seen.grids.is_none()
+            && !cache.placement().cropped
+            && cache.placement().seen.grids.is_none()
             && cache.revision == scene.layer_revision(id)
             && !cache.incomplete
         {
@@ -6362,20 +6405,18 @@ impl GpuRenderer {
             if cache.step == step && cache.factor == factor.to_bits() {
                 let root = scene.bounds(id);
                 let serial = scene.flush_serial();
-                let before = match cache.seen.frame == serial {
-                    true => cache.seen.before,
-                    false => cache.seen.magnification,
+                let seen = &cache.placement().seen;
+                let before = match seen.frame == serial {
+                    true => seen.before,
+                    false => seen.magnification,
                 };
                 cache.bounds.x += root.x - cache.root_origin.0;
                 cache.bounds.y += root.y - cache.root_origin.1;
                 cache.content.x += root.x - cache.root_origin.0;
                 cache.content.y += root.y - cache.root_origin.1;
                 cache.root_origin = (root.x, root.y);
-                cache.transformed = !local.is_identity()
-                    || zoom != 1.
-                    || scene.filter_blur(id) > 0.
-                    || scene.mask(id).is_some();
-                cache.seen = Seen {
+                cache.transformed = !local.is_identity() || zoom != 1. || scene.blurs_or_masks(id);
+                cache.placement_mut().seen = Seen {
                     frame: serial,
                     magnification,
                     before,
@@ -6452,14 +6493,16 @@ impl GpuRenderer {
         // One look at what it holds: every layer comes here every frame.
         let cached = self.layers.get(&id);
         let (cropped, current, glyphs) = cached.map_or((false, None, 0.), |cache| {
-            (cache.cropped, Some(cache.step), cache.glyphs)
+            let placement = cache.placement();
+            (placement.cropped, Some(cache.step), placement.glyphs)
         });
         let serial = scene.flush_serial();
         // Where it lands, for one that reads it: magnified, drawn in part
         // when it was, or placed the frame before. Any other is planned as
         // a layer always was, at no cost of this.
-        let placing_read =
-            magnifying || cropped || cached.is_some_and(|cache| cache.seen.grids.is_some());
+        let placing_read = magnifying
+            || cropped
+            || cached.is_some_and(|cache| cache.placement().seen.grids.is_some());
         let (placed, moving, kept, seen) = match placing_read {
             true => plan_placed(
                 placing,
@@ -6469,11 +6512,13 @@ impl GpuRenderer {
                 serial,
             ),
             false => {
-                let before =
-                    cached.map_or(magnification, |cache| match cache.seen.frame == serial {
-                        true => cache.seen.before,
-                        false => cache.seen.magnification,
-                    });
+                let before = cached.map_or(magnification, |cache| {
+                    let seen = &cache.placement().seen;
+                    match seen.frame == serial {
+                        true => seen.before,
+                        false => seen.magnification,
+                    }
+                });
                 let seen = Seen {
                     frame: serial,
                     magnification,
@@ -6548,7 +6593,7 @@ impl GpuRenderer {
             && cache.factor == factor.to_bits()
             && !off_pixels(cache)
             // Drawn in part: that part still holds all that shows.
-            && (!cache.cropped
+            && (!cache.placement().cropped
                 || visible.is_some_and(|visible| {
                     let moved = |r: Rect| {
                         Rect::new(
@@ -6569,7 +6614,7 @@ impl GpuRenderer {
             cache.content.y += root.y - cache.root_origin.1;
             cache.root_origin = (root.x, root.y);
             cache.transformed = transformed;
-            cache.seen = seen;
+            cache.placement_mut().seen = seen;
             cache.used = frame;
             cache.parked = false;
             cache.watched = shown.and_then(|shown| shown.window(cache.content));
@@ -6662,7 +6707,7 @@ impl GpuRenderer {
             .layers
             .get(&id)
             .filter(|cache| moving && cache.factor == factor.to_bits())
-            .map(|cache| cache.phase);
+            .map(|cache| cache.placement().phase);
         let phase = kept_phase.unwrap_or((0., 0.));
         // The grid's line at or before `edge`, from `from` (the box's
         // corner): a whole texel past it or short of it when `edge` lies a
@@ -6808,7 +6853,8 @@ impl GpuRenderer {
         self.layer_shifted = shifted;
         self.prepare_effects(scene, &items)?;
         if let Some(damage) = partial {
-            let cache = self.layers.remove(&id).expect("kept above");
+            let mut cache = self.layers.remove(&id).expect("kept above");
+            cache.placement_mut().seen = seen;
             self.banding = banding;
             let (texture, result) =
                 self.paint_layer(scene, items, bounds, cache.texture, scale, &damage, false);
@@ -6821,7 +6867,6 @@ impl GpuRenderer {
                     used: frame,
                     watched: window,
                     incomplete: std::mem::take(&mut self.layer_incomplete),
-                    seen,
                     ..cache
                 },
             );
@@ -6899,7 +6944,9 @@ impl GpuRenderer {
             width.next_multiple_of(64).min(limit),
             height.next_multiple_of(64).min(limit),
         );
-        let existing = self.layers.remove(&id);
+        let mut existing = self.layers.remove(&id);
+        // Its placement's box, kept: drawn again, it allocates nothing more.
+        let placement = existing.as_mut().and_then(|cache| cache.placement.take());
         let (texture, bind) = if let Some(cache) = existing.filter(|cache| {
             let (w, h) = (cache.texture.width(), cache.texture.height());
             w >= width
@@ -6950,10 +6997,16 @@ impl GpuRenderer {
                 step,
                 factor: factor.to_bits(),
                 exact: exact && factor != 1.,
-                cropped,
-                glyphs: found,
-                seen,
-                phase,
+                placement: Some({
+                    let mut placement = placement.unwrap_or_else(|| Box::new(PLACEMENT));
+                    *placement = Placement {
+                        cropped,
+                        glyphs: found,
+                        seen,
+                        phase,
+                    };
+                    placement
+                }),
                 transformed,
                 used: frame,
                 parked: false,

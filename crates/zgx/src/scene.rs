@@ -4109,7 +4109,6 @@ impl Scene {
         node.isolated || node.transformed() || node.effect_layer()
     }
     /// `id`'s content blur (`Effects::filter_blur`).
-    #[inline]
     pub fn filter_blur(&self, id: NodeId) -> f32 {
         self.node(id).effects.filter_blur
     }
@@ -4122,8 +4121,14 @@ impl Scene {
         };
         self.set_effects(id, effects);
     }
-    /// `id`'s mask, if it has one.
+    /// Whether `id` blurs or masks its content (`filter_blur`, `mask`),
+    /// from one look at it.
     #[inline]
+    pub fn blurs_or_masks(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        node.effects.filter_blur > 0. || node.image_mask.is_some()
+    }
+    /// `id`'s mask, if it has one.
     pub fn mask(&self, id: NodeId) -> Option<&ImageMask> {
         self.node(id).image_mask.as_deref()
     }
