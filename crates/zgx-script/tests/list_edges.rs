@@ -154,3 +154,87 @@ fn an_infinite_offset_is_the_end_in_every_list_kind_as_in_a_scroll_view() {
         assert_eq!(ends_shown(list), want, "{kind}");
     }
 }
+
+/// A list of rows `row-1` to `row-60`, 20 points each in a 200-point view
+/// at `offset`, `list` its options past the rows: commands put five items
+/// in at the top (`row-1001` first) and take two away there. Where
+/// `id` shows below the list's top after each command, and the offset.
+fn after_changes_above(list: &str, offset: f32, id: &str) -> Vec<(Option<f32>, f32)> {
+    let mut h = Harness::inline(&format!(
+        r#"local rows = {{}}
+        for n = 1, 60 do rows[n] = {{ id = n }} end
+        local items = ui.state("rows", rows)
+        local offset = ui.state("offset", {offset})
+        ui.command {{ id = "add", run = function()
+            for n = 1005, 1001, -1 do items:insert(1, {{ id = n }}) end
+        end }}
+        ui.command {{ id = "drop", run = function()
+            items:remove(1)
+            items:remove(1)
+        end }}
+        return ui.column {{
+            ui.text {{ id = "offset", function() return tostring(offset:get()) end }},
+            ui.list {{
+                id = "list", w = 200, h = 200, offset = offset, data = items,
+                row = function(r) return ui.text {{ id = `row-{{r.id}}`, h = 20, tostring(r.id) }} end,
+                {list}
+            }},
+        }}"#
+    ));
+    h.frames(3);
+    let mut seen = Vec::new();
+    for command in ["add", "drop"] {
+        assert!(h.host.run_command(command));
+        h.frames(4);
+        let list = h.find("list").unwrap();
+        let top = h.ui.scene.borrow().transformed_bounds(list).y;
+        let shown = h
+            .find(id)
+            .map(|node| h.ui.scene.borrow().transformed_bounds(node).y - top);
+        let offset = h.text("offset").parse().unwrap();
+        seen.push((shown, offset));
+    }
+    assert_eq!(h.error(), None);
+    seen
+}
+
+/// Items put in or taken away above a keyed list's view leave the rows in
+/// view where they are, as a browser's scroll anchoring does: the offset
+/// moves by what was added above (five rows, then two fewer).
+#[test]
+fn items_added_above_a_keyed_list_leave_its_rows_in_view_where_they_are() {
+    for list in [
+        r#"key = "id", measured = true, height = 20"#,
+        r#"key = "id", heights = function() return table.create(#items:get(), 20) end"#,
+    ] {
+        // Row 21 at the top, then row 22 ten points into it.
+        assert_eq!(
+            after_changes_above(list, 400., "row-21"),
+            vec![(Some(0.), 500.), (Some(0.), 460.)],
+            "{list}"
+        );
+        assert_eq!(
+            after_changes_above(list, 410., "row-22"),
+            vec![(Some(10.), 510.), (Some(10.), 470.)],
+            "{list}"
+        );
+    }
+}
+
+/// Resting at the top, nothing anchors: what comes in above shows, a
+/// feed's newest. Rows by place keep their offset, as before.
+#[test]
+fn at_the_top_or_by_place_a_list_keeps_its_offset_as_items_come_in_above() {
+    assert_eq!(
+        after_changes_above(
+            r#"key = "id", measured = true, height = 20"#,
+            0.,
+            "row-1001"
+        ),
+        vec![(Some(0.), 0.), (None, 0.)]
+    );
+    assert_eq!(
+        after_changes_above("measured = true, height = 20", 400., "row-21"),
+        vec![(Some(100.), 400.), (Some(60.), 400.)]
+    );
+}
