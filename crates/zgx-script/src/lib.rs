@@ -28,7 +28,7 @@ mod actions;
 mod anim;
 mod anime;
 mod apps;
-pub use apps::AppLaunch;
+pub use apps::{AppLaunch, AppSpec};
 pub mod app_config;
 pub mod app_types;
 mod bundle;
@@ -2492,11 +2492,16 @@ impl ScriptHost {
         self.0.read_only_shared.borrow_mut().insert(key.clone());
         self.0.exposed_shared.borrow_mut().insert(key, capability);
     }
-    /// Asks `vet` before any script starts a program (`ui.app`), the app's
-    /// own and every plugin's (`AppLaunch::plugin` names it): an `Err`
-    /// stops it, its text the script's error, and nothing starts. A plugin
-    /// also needs `Capability::Apps`. The last one set applies, at once.
-    pub fn vet_apps(&self, vet: impl Fn(&AppLaunch) -> Result<(), String> + 'static) {
+    /// Decides what scripts' programs run (`ui.app`), the app's own and
+    /// every plugin's (`AppLaunch::plugin` names it): `vet` is given the
+    /// whole spec asked for (command, args, cwd, env) and returns the spec
+    /// to start (a resolved path, pinned arguments, a filtered
+    /// environment), which is started exactly, or an `Err` whose text is
+    /// the script's error, nothing started. It is asked again each time a
+    /// script reaches a running session (`AppLaunch::running`), where an
+    /// `Err` refuses it. Without one, what is asked starts. A plugin also
+    /// needs `Capability::Apps`. The last one set applies, at once.
+    pub fn vet_apps(&self, vet: impl Fn(&AppLaunch) -> Result<AppSpec, String> + 'static) {
         self.0.apps.set_vet(Rc::new(vet));
     }
     /// Keep names under `prefix` (`"zeron"`: `zeron` and `zeron.…`) for the

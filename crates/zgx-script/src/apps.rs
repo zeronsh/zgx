@@ -5,19 +5,84 @@
 //!
 //! Sessions belong to the host, as terminals do: reloading keeps every
 //! program running, and the run that asks for `id` again gets the same one
-//! (its `on_exit` replaces the last run's). A plugin's ids are its own (two
-//! plugins' `"game"` are two sessions). A program ends with `app:close()`,
-//! the host, or its plugin's removal (`ScriptHost::set_plugins`); one that
-//! exited starts again when `ui.app` is given options for it.
+//! (its `on_exit` replaces the last run's). Sessions are the script's who
+//! started them: a plugin reaches only those it started (two plugins'
+//! `"game"` are two sessions, and neither is the app's). A program ends with
+//! `app:close()`, the host, or its plugin's removal
+//! (`ScriptHost::set_plugins`); one that exited starts again when `ui.app`
+//! is given options for it.
 //!
-//! A plugin starts programs only if granted `Capability::Apps`, and every
-//! start (the app's own too) is asked of the host's vetting hook
-//! (`ScriptHost::vet_apps`) if it set one; the app's VM asks its guard too
-//! (`GuardKind::App`, by the command).
+//! What may run is the host's: a plugin needs `Capability::Apps`, and the
+//! whole spec asked for (command, args, cwd, env) goes to the host's hook
+//! (`ScriptHost::vet_apps`), which refuses it or says exactly what to start
+//! (a resolved path, pinned arguments, a filtered environment); the app's VM
+//! asks its guard too (`GuardKind::App`, named by the spec as JSON). Both
+//! are asked again each time a script reaches a running session, so a
+//! permission taken back holds from then on.
 use mlua::{Lua, Table};
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
-/// What a script asks to start, as the host's vetting hook
+/// A program to start: no shell, `command` run with `args`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AppSpec {
+    /// The program: a path, or a name looked up on `PATH`.
+    pub command: String,
+    /// Its arguments.
+    pub args: Vec<String>,
+    /// Where it starts; the host's own directory if `None`.
+    pub cwd: Option<PathBuf>,
+    /// Variables added to the host's environment for it, sorted by name.
+    pub env: Vec<(String, String)>,
+}
+impl AppSpec {
+    /// `command` with `args`, no `cwd` or `env`.
+    pub fn new(
+        command: impl Into<String>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            args: args.into_iter().map(Into::into).collect(),
+            ..Self::default()
+        }
+    }
+    /// With `cwd`.
+    pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+    /// With `env` (sorted by name).
+    pub fn env(mut self, env: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.env = env.into_iter().collect();
+        self.env.sort();
+        self
+    }
+    /// As JSON, `{ "command", "args"?, "cwd"?, "env"? }` (an object of
+    /// names to values), leaving out what is empty: what `GuardKind::App`
+    /// is named by.
+    pub fn to_json(&self) -> String {
+        let mut object = serde_json::Map::new();
+        object.insert("command".into(), self.command.clone().into());
+        if !self.args.is_empty() {
+            object.insert("args".into(), self.args.clone().into());
+        }
+        if let Some(cwd) = &self.cwd {
+            object.insert("cwd".into(), cwd.to_string_lossy().into_owned().into());
+        }
+        if !self.env.is_empty() {
+            let env: serde_json::Map<String, serde_json::Value> = self
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone().into()))
+                .collect();
+            object.insert("env".into(), env.into());
+        }
+        serde_json::Value::Object(object).to_string()
+    }
+}
+
+/// What a script asks to start or reach, as the host's hook
 /// (`ScriptHost::vet_apps`) is told.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -26,17 +91,16 @@ pub struct AppLaunch {
     pub plugin: Option<String>,
     /// The session's id, as the script gave it.
     pub id: String,
-    /// The program, as given (a path, or a name looked up on `PATH`).
-    pub command: String,
-    /// Its arguments.
-    pub args: Vec<String>,
-    /// Where it starts, if given.
-    pub cwd: Option<PathBuf>,
-    /// The variables it adds to the environment.
-    pub env: Vec<(String, String)>,
+    /// What it asked to start (for a running session: what it asked as
+    /// the session started).
+    pub asked: AppSpec,
+    /// The session is running and the script is reaching it again (a
+    /// reload, a lookup): an `Err` refuses it; what an `Ok` returns is
+    /// not started.
+    pub running: bool,
 }
 
-pub(crate) type Vet = dyn Fn(&AppLaunch) -> Result<(), String>;
+pub(crate) type Vet = dyn Fn(&AppLaunch) -> Result<AppSpec, String>;
 
 /// The host's sessions, and what it vets them with.
 #[derive(Default)]
@@ -49,12 +113,14 @@ impl Apps {
     pub fn set_vet(&self, vet: Rc<Vet>) {
         *self.vet.borrow_mut() = Some(vet);
     }
+    /// What to start for `launch`: the hook's answer, or with no hook what
+    /// was asked.
     #[cfg(feature = "apps")]
-    fn vet(&self, launch: &AppLaunch) -> Result<(), String> {
+    fn vet(&self, launch: &AppLaunch) -> Result<AppSpec, String> {
         let vet = self.vet.borrow().clone();
         match vet {
             Some(vet) => vet(launch),
-            None => Ok(()),
+            None => Ok(launch.asked.clone()),
         }
     }
     /// Where sessions read their programs' messages: the host view's tasks.
@@ -92,7 +158,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, apps: Rc<Apps>) -> mlua::Result<()>
 
 #[cfg(feature = "apps")]
 mod running {
-    use super::{AppLaunch, Apps};
+    use super::{AppLaunch, AppSpec, Apps};
     use crate::{Vm, node::env};
     use mlua::{Function, Lua, Table, UserData, Value as LuaValue};
     use std::{
@@ -103,10 +169,14 @@ mod running {
     };
     use zgx_surface::host::{App, AppOptions, AppStatus};
 
+    /// A session by who started it (a plugin's name, or `None` for the
+    /// app's scripts) and the id it gave: a script reaches only its own.
+    type Key = (Option<Rc<str>>, String);
+
     struct Entry {
         app: App,
-        /// The plugin that started it; `None` for the app's.
-        plugin: Option<Rc<str>>,
+        /// What the script asked to start: vetted again on each reuse.
+        asked: AppSpec,
         handlers: Rc<RefCell<Handlers>>,
     }
     #[derive(Default)]
@@ -117,7 +187,7 @@ mod running {
 
     #[derive(Default)]
     pub(super) struct Sessions {
-        entries: RefCell<HashMap<String, Entry>>,
+        entries: RefCell<HashMap<Key, Entry>>,
         runner: RefCell<Option<zgx::compose::TaskRunner>>,
     }
     impl Sessions {
@@ -130,14 +200,14 @@ mod running {
         pub fn keep_plugins(&self, kept: &[String]) {
             let gone: Vec<Entry> = {
                 let mut entries = self.entries.borrow_mut();
-                let keys: Vec<String> = entries
-                    .iter()
-                    .filter(|(_, e)| {
-                        e.plugin
+                let keys: Vec<Key> = entries
+                    .keys()
+                    .filter(|(plugin, _)| {
+                        plugin
                             .as_ref()
                             .is_some_and(|p| !kept.iter().any(|k| **k == **p))
                     })
-                    .map(|(k, _)| k.clone())
+                    .cloned()
                     .collect();
                 keys.iter().filter_map(|k| entries.remove(k)).collect()
             };
@@ -150,15 +220,14 @@ mod running {
     /// `ui.app(id)`'s value: a session.
     #[derive(Clone)]
     pub(crate) struct AppUd {
-        id: String,
-        key: String,
+        key: Key,
         pub(crate) app: App,
         apps: Weak<Apps>,
     }
     impl UserData for AppUd {
         fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
             // Tracked: a text or computed reading one follows it.
-            fields.add_field_method_get("id", |_, a| Ok(a.id.clone()));
+            fields.add_field_method_get("id", |_, a| Ok(a.key.1.clone()));
             fields.add_field_method_get("status", |_, a| Ok(a.app.status().with(AppStatus::name)));
             fields.add_field_method_get("title", |_, a| Ok(a.app.title().get()));
             fields.add_field_method_get("pid", |_, a| Ok(a.app.pid()));
@@ -179,15 +248,20 @@ mod running {
             methods.add_method("close", |_, a, ()| {
                 a.app.close();
                 if let Some(apps) = a.apps.upgrade() {
-                    let removed = apps.sessions.entries.borrow_mut().remove(&a.key);
-                    drop(removed);
+                    let mut entries = apps.sessions.entries.borrow_mut();
+                    // Only this session: the id may since name another.
+                    if entries.get(&a.key).is_some_and(|e| e.app.ptr_eq(&a.app)) {
+                        let removed = entries.remove(&a.key);
+                        drop(entries);
+                        drop(removed);
+                    }
                 }
                 Ok(())
             });
         }
     }
 
-    fn options(id: &str, opts: &Table) -> mlua::Result<(AppOptions, Option<Function>)> {
+    fn options(id: &str, opts: &Table) -> mlua::Result<(AppSpec, Option<Function>)> {
         for (key, _) in opts.clone().pairs::<String, LuaValue>().flatten() {
             if !matches!(key.as_str(), "command" | "args" | "cwd" | "env" | "on_exit") {
                 return Err(mlua::Error::runtime(format!(
@@ -221,7 +295,7 @@ mod running {
         }
         env.sort();
         Ok((
-            AppOptions {
+            AppSpec {
                 command,
                 args,
                 cwd,
@@ -229,6 +303,26 @@ mod running {
             },
             opts.get::<Option<Function>>("on_exit")?,
         ))
+    }
+
+    /// What the app's guard and the host's hook say of `asked`: the spec
+    /// to start, or the script's error.
+    fn check(
+        apps: &Apps,
+        lua: &Lua,
+        plugin: &Option<Rc<str>>,
+        id: &str,
+        asked: &AppSpec,
+        running: bool,
+    ) -> mlua::Result<AppSpec> {
+        crate::rules::guard(lua, crate::GuardKind::App, &asked.to_json())?;
+        apps.vet(&AppLaunch {
+            plugin: plugin.as_deref().map(str::to_owned),
+            id: id.to_owned(),
+            asked: asked.clone(),
+            running,
+        })
+        .map_err(|why| mlua::Error::runtime(format!("ui.app `{id}`: {why}")))
     }
 
     fn session(
@@ -242,14 +336,9 @@ mod running {
             crate::Grants::All => None,
             crate::Grants::Only(_) => Some(env.owner.clone()),
         };
-        // A plugin's ids are its own.
-        let key = match &plugin {
-            Some(plugin) => format!("{plugin}/{id}"),
-            None => id.clone(),
-        };
+        let key: Key = (plugin.clone(), id.clone());
         let parsed = opts.as_ref().map(|opts| options(&id, opts)).transpose()?;
         let ud = |app: App| AppUd {
-            id: id.clone(),
             key: key.clone(),
             app,
             apps: Rc::downgrade(apps),
@@ -258,42 +347,43 @@ mod running {
             vm: env.vm.clone(),
             exit,
         };
-        {
-            let entries = apps.sessions.entries.borrow();
-            if let Some(entry) = entries.get(&key) {
-                let ended = matches!(
-                    entry.app.status().with_untracked(Clone::clone),
-                    AppStatus::Exited(_) | AppStatus::Failed(_)
-                );
-                match &parsed {
-                    // A lookup, or a run asking again for one still going:
-                    // the same session, the run's handler replacing the last.
-                    None => return Ok(Some(ud(entry.app.clone()))),
-                    Some((_, exit)) if !ended => {
-                        *entry.handlers.borrow_mut() = handlers(exit.clone());
-                        return Ok(Some(ud(entry.app.clone())));
-                    }
-                    // Ended, and asked with options: started again.
-                    Some(_) => {}
+        let existing = apps
+            .sessions
+            .entries
+            .borrow()
+            .get(&key)
+            .map(|e| (e.app.clone(), e.asked.clone(), e.handlers.clone()));
+        if let Some((app, asked, entry_handlers)) = existing {
+            let ended = matches!(
+                app.status().with_untracked(Clone::clone),
+                AppStatus::Exited(_) | AppStatus::Failed(_)
+            );
+            // Ended, and asked with options: started again below.
+            if !(ended && parsed.is_some()) {
+                // Reached again: what it runs is asked again, so a
+                // permission taken back holds.
+                check(apps, lua, &plugin, &id, &asked, !ended)?;
+                if let Some((_, exit)) = &parsed {
+                    *entry_handlers.borrow_mut() = handlers(exit.clone());
                 }
+                return Ok(Some(ud(app)));
             }
         }
-        let Some((options, exit)) = parsed else {
+        let Some((asked, exit)) = parsed else {
             return Ok(None);
         };
-        crate::rules::guard(lua, crate::GuardKind::App, &options.command)?;
-        apps.vet(&AppLaunch {
-            plugin: plugin.as_deref().map(str::to_owned),
-            id: id.clone(),
-            command: options.command.clone(),
-            args: options.args.clone(),
-            cwd: options.cwd.clone(),
-            env: options.env.clone(),
-        })
-        .map_err(|why| mlua::Error::runtime(format!("ui.app `{id}`: {why}")))?;
-        let command = options.command.clone();
-        let app = App::spawn(&env.runtime, options)
-            .unwrap_or_else(|error| App::failed(&env.runtime, format!("{command}: {error}")));
+        let start = check(apps, lua, &plugin, &id, &asked, false)?;
+        let command = start.command.clone();
+        let app = App::spawn(
+            &env.runtime,
+            AppOptions {
+                command: start.command,
+                args: start.args,
+                cwd: start.cwd,
+                env: start.env,
+            },
+        )
+        .unwrap_or_else(|error| App::failed(&env.runtime, format!("{command}: {error}")));
         if let Some(runner) = apps.sessions.runner.borrow().as_ref() {
             app.attach(runner);
         }
@@ -320,7 +410,7 @@ mod running {
             key.clone(),
             Entry {
                 app: app.clone(),
-                plugin,
+                asked,
                 handlers,
             },
         );

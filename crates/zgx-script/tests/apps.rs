@@ -11,7 +11,7 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
-use zgx_script::{AppLaunch, Capability, GuardKind, Plugin, ScriptHost};
+use zgx_script::{AppLaunch, AppSpec, Capability, GuardKind, Plugin, ScriptHost};
 
 fn plugin(name: &str, code: &str) -> PathBuf {
     static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -149,9 +149,9 @@ return ui.column {
             );
             host.vet_apps(move |launch| {
                 asked.borrow_mut().push(launch.clone());
-                match launch.command.as_str() {
+                match launch.asked.command.as_str() {
                     "forbidden" => Err("not on the list".into()),
-                    _ => Ok(()),
+                    _ => Ok(launch.asked.clone()),
                 }
             });
             host.set_plugins(vec![
@@ -178,17 +178,18 @@ return ui.column {
     // The plugin without the grant reached no hook.
     let named: Vec<_> = asked
         .iter()
-        .map(|l| (l.plugin.clone(), l.command.as_str()))
+        .map(|l| (l.plugin.clone(), l.asked.command.as_str()))
         .collect();
     assert!(named.contains(&(Some("game".into()), "sleep")), "{named:?}");
     assert!(named.contains(&(None, "forbidden")), "{named:?}");
     assert_eq!(named.len(), 2, "{named:?}");
     let game = asked.iter().find(|l| l.plugin.is_some()).unwrap();
     assert_eq!(
-        (game.id.as_str(), game.args.clone()),
+        (game.id.as_str(), game.asked.args.clone()),
         ("game", vec!["30".to_owned()])
     );
-    assert_eq!(game.cwd, Some(PathBuf::from("/")));
+    assert_eq!(game.asked.cwd, Some(PathBuf::from("/")));
+    assert!(!game.running);
 }
 
 #[test]
@@ -225,24 +226,27 @@ ui.contribute("bar", ui.text { id = "pid", tostring(app.pid) })
 }
 
 #[test]
-fn the_app_guard_is_asked_by_command() {
+fn the_app_guard_is_asked_with_the_whole_spec() {
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::inline(
             runtime,
             "app",
             r#"
-local ok, err = pcall(ui.app, "x", { command = "sleep", args = { "30" } })
+local ok, err = pcall(ui.app, "x", { command = "sleep", args = { "30" }, env = { B = "2", A = "1" } })
 return ui.text { id = "x", ok and "started" or tostring(err) }
 "#,
         );
         host.guard(|kind, name| match (kind, name) {
-            (GuardKind::App, "sleep") => Err("a preview starts nothing".into()),
+            (GuardKind::App, r#"{"args":["30"],"command":"sleep","env":{"A":"1","B":"2"}}"#) => {
+                Err("a preview starts nothing".into())
+            }
+            (GuardKind::App, other) => panic!("asked {other}"),
             _ => Ok(()),
         });
         host
     });
     let x = h.text("x");
-    assert!(x.contains("App `sleep`: a preview starts nothing"), "{x}");
+    assert!(x.contains("a preview starts nothing"), "{x}");
 }
 
 #[test]
@@ -406,4 +410,143 @@ fn the_surface_forwards_input_and_locks_the_pointer_on_request() {
         "Escape ends the lock and reaches no one"
     );
     let _ = HostMessage::Close;
+}
+
+/// The host's hook says what runs: the spec asked for (args, cwd, env and
+/// all) goes to it, and what it returns starts, exactly.
+#[test]
+fn the_hook_decides_exactly_what_starts() {
+    let mut h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"
+local app = ui.app("game", { command = "horizon", args = { "--world", "x" }, cwd = "/tmp", env = { LANG = "C" } })
+return ui.text { id = "pid", tostring(app.pid) }
+"#,
+        );
+        host.vet_apps(|launch| {
+            assert_eq!(launch.asked.command, "horizon");
+            assert_eq!(launch.asked.args, ["--world", "x"]);
+            assert_eq!(launch.asked.cwd, Some(PathBuf::from("/tmp")));
+            assert_eq!(launch.asked.env, [("LANG".to_owned(), "C".to_owned())]);
+            // Resolved to a file, its arguments pinned, its environment kept.
+            Ok(AppSpec::new("/bin/sleep", ["29"]).cwd("/"))
+        });
+        host
+    });
+    let pid: i32 = h.text("pid").parse().expect("started what the hook said");
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+    assert_eq!(cmdline, b"/bin/sleep\x0029\x00");
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap();
+    assert_eq!(cwd, PathBuf::from("/"));
+}
+
+/// Reaching a running session again (a reload, a lookup) asks the hook
+/// again: a permission taken back holds from then on.
+#[test]
+fn a_session_reached_again_is_vetted_again() {
+    let allowed = Rc::new(std::cell::Cell::new(true));
+    let checks: Rc<RefCell<Vec<bool>>> = Rc::default();
+    let mut h = Harness::new({
+        let (allowed, checks) = (allowed.clone(), checks.clone());
+        move |runtime| {
+            let host = ScriptHost::inline(
+                runtime,
+                "app",
+                r#"
+local ok, err = pcall(ui.app, "s", { command = "sleep", args = { "30" } })
+local found, again = pcall(ui.app, "s")
+return ui.column {
+    ui.text { id = "x", ok and tostring(err.pid) or tostring(err) },
+    ui.text { id = "y", found and tostring(again and again.pid) or tostring(again) },
+}
+"#,
+            );
+            host.vet_apps(move |launch| {
+                checks.borrow_mut().push(launch.running);
+                match allowed.get() {
+                    true => Ok(launch.asked.clone()),
+                    false => Err("taken back".into()),
+                }
+            });
+            host
+        }
+    });
+    let pid: i32 = h.text("x").parse().unwrap();
+    assert_eq!(h.text("y"), pid.to_string(), "a lookup reaches it");
+    assert_eq!(
+        *checks.borrow(),
+        [false, true],
+        "started, then reached again"
+    );
+    allowed.set(false);
+    h.host.reload().unwrap();
+    h.settle();
+    assert!(
+        h.text("x").contains("ui.app `s`: taken back"),
+        "{}",
+        h.text("x")
+    );
+    assert!(
+        h.text("y").contains("ui.app `s`: taken back"),
+        "{}",
+        h.text("y")
+    );
+}
+
+/// A plugin reaches only the sessions it started: not the app's, not
+/// another plugin's of the same id.
+#[test]
+fn a_plugin_reaches_only_its_own_sessions() {
+    let lookup = |name: &str| {
+        plugin(
+            name,
+            r#"
+local found = ui.app("shared")
+local mine = ui.app("shared", { command = "sleep", args = { "30" } })
+ui.contribute("bar", ui.text { id = `PLUGIN`, `{found and found.pid or "none"} {mine.pid}` })
+"#
+            .replace("PLUGIN", name)
+            .as_str(),
+        )
+    };
+    let (a, b) = (lookup("a"), lookup("b"));
+    let mut h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"
+local app = ui.app("shared", { command = "sleep", args = { "30" } })
+return ui.column { ui.text { id = "app", tostring(app.pid) }, ui.slot("bar", { id = "bar" }) }
+"#,
+        );
+        host.set_plugins(vec![
+            Plugin {
+                name: "a".into(),
+                entry: a,
+                grants: vec![Capability::Apps],
+            },
+            Plugin {
+                name: "b".into(),
+                entry: b,
+                grants: vec![Capability::Apps],
+            },
+        ]);
+        host
+    });
+    let app = h.text("app");
+    let (a, b) = (h.text("a"), h.text("b"));
+    let (a_found, a_pid) = a.split_once(' ').unwrap();
+    let (b_found, b_pid) = b.split_once(' ').unwrap();
+    assert_eq!(
+        (a_found, b_found),
+        ("none", "none"),
+        "neither found another's"
+    );
+    let pids = [app.as_str(), a_pid, b_pid];
+    assert!(
+        pids[0] != pids[1] && pids[1] != pids[2] && pids[0] != pids[2],
+        "{pids:?}"
+    );
 }
