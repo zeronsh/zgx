@@ -1775,6 +1775,23 @@ mod tests {
             ])
         );
         assert_eq!(sides("| a | b |\n|---|---|\n| 1 | 2 |"), None);
+        // The next table says its own: none after one that aligned.
+        let blocks = parse("| a |\n|--:|\n| 1 |\n\n| b |\n|---|\n| 2 |", &plain());
+        assert_eq!(kinds(&blocks), ["table", "table"]);
+        assert!(blocks[0].field("align").is_some());
+        assert!(blocks[1].field("align").is_none());
+        // In a list item.
+        let blocks = parse("- | a |\n  |:-:|\n  | 1 |", &plain());
+        let Some(Value::List(items)) = blocks[0].field("items") else {
+            panic!()
+        };
+        let Value::List(first) = &items[0] else {
+            panic!()
+        };
+        let Some(Value::List(align)) = first[0].field("align") else {
+            panic!()
+        };
+        assert!(matches!(&align[0], Value::Str(side) if &**side == "center"));
     }
 
     #[test]
