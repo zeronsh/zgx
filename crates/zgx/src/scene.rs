@@ -12045,7 +12045,22 @@ impl Scene {
         // streamed reply's column, every chunk): its subtree paints as it
         // did but where its children move, and each child whose box changes
         // damages itself, so its subtree is neither damaged nor covered.
-        let resized = changed && !childless && self.resized_in_place(node, bounds);
+        // On the grid (`CELLS`, a large layout's walk), asked only where it
+        // decides something: under an ancestor's damage (`covered`) nothing
+        // here is damaged, and its children are covered either way; and its
+        // corner compared here, as most that changed moved. A list's walk
+        // (few changes, each cheap against all it does) asks as it did.
+        let resized = changed
+            && !childless
+            && match CELLS {
+                false => self.resized_in_place(node, bounds),
+                true => {
+                    !covered
+                        && node.bounds.x == x
+                        && node.bounds.y == y
+                        && self.paints_nothing_itself(node)
+                }
+            };
         let changed_paint = changed && !resized;
         let damage = changed_paint && !covered;
         // A leaf, nothing transformed or filtered: what it painted is damaged
@@ -12140,6 +12155,24 @@ impl Scene {
             && !node.style.fade_overflow
             && !node.layered
             && self.transformed + self.filtered.get() == 0
+    }
+    /// `resized_in_place` for the grid's walk, its corner compared by the
+    /// caller: fields, cheapest first, any fade band set taken for a fade.
+    /// Cold, so that `arrange` keeps no register for it.
+    #[cold]
+    #[inline(never)]
+    fn paints_nothing_itself(&self, node: &Node) -> bool {
+        let style = &node.style;
+        self.transformed + self.filtered.get() == 0
+            && matches!(node.kind, NodeKind::Container(_))
+            && node.effects.blur_radius <= 0.
+            && !node.layered
+            && clip_axes(style) == (false, false)
+            // Fading nothing: any band set, whatever its value, is taken for
+            // a fade.
+            && style.fade_edges == [0.; 2]
+            && style.fade_edges_x == [0.; 2]
+            && !style.fade_overflow
     }
     /// `arrange::<true>` for a leaf: placed, its damage added, with no
     /// children to walk. The same work in the same order.
