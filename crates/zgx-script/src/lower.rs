@@ -4741,6 +4741,13 @@ fn element_view(
         })
 }
 
+/// How much of a point a `layout` box's size may change by and be taken at
+/// once rather than eased: text measured again or a shrinking parent's
+/// share moves one by thousandths, more than layout's own tolerance for a
+/// size told again (zgx's `SIZE_NOISE`, a 1024th), and easing that would
+/// lay the box out each frame for nothing. Under any change anyone sees.
+const EASED_SIZE_NOISE: f32 = 0.01;
+
 /// The springy default for size changes, as for moves.
 fn layout_ease(layout: &LayoutAnim) -> (crate::anime::ease::Ease, f64) {
     crate::motion::Timing {
@@ -4947,10 +4954,12 @@ fn layout_box(inner: View, layout: &LayoutAnim, vm: &Rc<Vm>, low: &Rc<Lowering>)
                     // Entering grows from nothing; a first size otherwise holds.
                     None if enter => 0.,
                     None => continue,
-                    // Under a hundredth of a point is rounding (text
-                    // measured again, a shrinking parent's share): easing
-                    // it would lay the box out again each frame for nothing.
-                    Some(before) if before == now || (before - now).abs() < 0.01 => continue,
+                    // Rounding (text measured again, a shrinking parent's
+                    // share): easing it would lay the box out again each
+                    // frame for nothing.
+                    Some(before) if before == now || (before - now).abs() < EASED_SIZE_NOISE => {
+                        continue;
+                    }
                     Some(before) => before + current(prop).unwrap_or(0.),
                 };
                 let margin = (shown - now) as f64;
