@@ -5424,6 +5424,30 @@ export type MarkdownStyle = {
 	-- A find's matches and its current one (`find`).
 	mark: SpanProps?,
 	mark_current: SpanProps?,
+	-- Headings by level (over `paragraph`'s; levels past 3 as 3's).
+	h1: RichProps?,
+	h2: RichProps?,
+	h3: RichProps?,
+	-- A list: its column, each item's row, the column of an item's
+	-- blocks, an unordered item's marker (a row holding a dot) and an
+	-- ordered one's (its number's text).
+	list: Props?,
+	item: Props?,
+	item_body: Props?,
+	bullet: Props?,
+	bullet_dot: Props?,
+	number: TextProps?,
+	-- A quote: its row, its rail, the column of its blocks, and its words'
+	-- ink (a colour).
+	quote: Props?,
+	quote_rail: Props?,
+	quote_body: Props?,
+	quote_ink: Color?,
+	-- A rule.
+	rule: Props?,
+	-- A heading's pull toward what it heads where it sits in a box of its
+	-- own (a find's: its `mb`).
+	pull: Props?,
 }
 -- `ui.span`'s options are plain values.
 export type SpanProps = {

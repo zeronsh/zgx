@@ -539,3 +539,72 @@ fn a_finds_matches_are_marked_and_the_block_holding_the_current_one_revealed() {
     assert!(!seen.is_empty(), "the second block revealed");
     assert_eq!(app.error(), None);
 }
+
+#[test]
+fn a_styles_headings_lists_quotes_and_rules_are_its_elements() {
+    let mut app = TestApp::inline(
+        r##"return ui.column { w = 600, selectable = true,
+            ui.markdown_view { id = "md", w_full = true,
+                "# Title\n\n- one\n- two\n\n3. three\n\n> quoted\n\n---",
+                style = {
+                    paragraph = { color = "#dddddd" },
+                    h1 = { text_size = 30, line_height = 36, pt = 12 },
+                    list = { gap = 6 },
+                    item = { items = "start" },
+                    item_body = { grow = 1, min_w = 0 },
+                    bullet = { id = "bullet", w = 24, h = 24, items = "center" },
+                    bullet_dot = { w = 5, h = 5, bg = "#ff0000" },
+                    number = { id = "number", w = 24, tabular = true },
+                    quote = { gap = 16 },
+                    quote_rail = { id = "rail", w = 2, bg = "#00ff00" },
+                    quote_body = { grow = 1 },
+                    quote_ink = "#888888",
+                    rule = { id = "rule", w_full = true, h = 1, bg = "#0000ff" },
+                } },
+        }"##,
+    );
+    app.frames(2);
+    assert_eq!(app.error(), None);
+    let paras = paragraphs(&mut app, "md");
+    let texts: Vec<&str> = paras.iter().map(|p| p.1.as_str()).collect();
+    assert_eq!(texts, ["Title", "one", "two", "three", "quoted"]);
+    assert_eq!(paras[0].2[0].font_size, 30.);
+    assert_eq!(
+        paras[4].2[0].color,
+        zgx::scene::Color(0x88, 0x88, 0x88, 255),
+        "the quote's ink"
+    );
+    assert_eq!(
+        paras[1].2[0].color,
+        zgx::scene::Color(0xdd, 0xdd, 0xdd, 255)
+    );
+    for id in ["bullet", "number", "rail", "rule"] {
+        assert!(app.find(id).is_some(), "{id} drawn:\n{}", app.tree());
+    }
+    assert_eq!(app.bounds("number").width, 24.);
+    let roles: Vec<zgx::semantics::Role> = (app.ui.semantics.borrow().iter())
+        .map(|(_, s)| s.role)
+        .filter(|r| {
+            matches!(
+                r,
+                zgx::semantics::Role::List
+                    | zgx::semantics::Role::ListItem
+                    | zgx::semantics::Role::Heading
+            )
+        })
+        .collect();
+    assert_eq!(
+        roles
+            .iter()
+            .filter(|r| **r == zgx::semantics::Role::ListItem)
+            .count(),
+        3
+    );
+    assert_eq!(
+        roles
+            .iter()
+            .filter(|r| **r == zgx::semantics::Role::List)
+            .count(),
+        2
+    );
+}

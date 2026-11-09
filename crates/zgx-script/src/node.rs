@@ -1487,6 +1487,11 @@ pub(crate) struct MarkdownLook {
     pub paragraph: Option<Rc<Node>>,
     /// `style.gap`: room between the top-level blocks (a node holding it).
     pub blocks: Option<Rc<Node>>,
+    /// The style's parts beyond paragraphs (`h1`…`h3`, `list`, `item`,
+    /// `item_body`, `bullet`, `bullet_dot`, `number`, `quote`, `quote_rail`,
+    /// `quote_body`, `quote_ink`, `rule`): a node holding each one's
+    /// options, as the element drawing it takes them.
+    pub parts: std::collections::HashMap<&'static str, Rc<Node>>,
     /// `style.strong`, `em`, `strike`, `code` and `link`: a run's options,
     /// as `ui.span`'s, laid over one another in that order for a run of
     /// several kinds (the kind's defaults where the style names none).
@@ -1520,6 +1525,24 @@ pub(crate) struct MarkdownFind {
     pub current: Function,
     pub reveal: Option<Function>,
 }
+/// The parts of a markdown style beyond paragraphs and runs.
+const PARTS: [&str; 15] = [
+    "h1",
+    "h2",
+    "h3",
+    "list",
+    "item",
+    "item_body",
+    "bullet",
+    "bullet_dot",
+    "number",
+    "quote",
+    "quote_rail",
+    "quote_body",
+    "quote_ink",
+    "rule",
+    "pull",
+];
 /// How many kinds of run a markdown style names (`MarkdownLook::runs`).
 pub(crate) const RUN_KINDS: usize = 7;
 const RUN_KIND_NAMES: [&str; RUN_KINDS] = [
@@ -1605,13 +1628,18 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
     style.for_each::<mlua::Value, mlua::Value>(|key, _| {
         let known = key.as_string().is_some_and(|k| {
             let k = k.as_bytes();
-            &*k == b"paragraph" || &*k == b"gap" || RUN_KIND_NAMES.iter().any(|n| n.as_bytes() == &*k)
+            &*k == b"paragraph"
+                || &*k == b"gap"
+                || RUN_KIND_NAMES.iter().any(|n| n.as_bytes() == &*k)
+                || PARTS.iter().any(|n| n.as_bytes() == &*k)
         });
         if known {
             Ok(())
         } else {
             Err(mlua::Error::runtime(format!(
-                "ui.markdown_view's style has no `{}` (paragraph, gap, strong, em, strike, code, link, mark, mark_current)",
+                "ui.markdown_view's style has no `{}` (paragraph, gap, strong, em, strike, code, link, mark, mark_current, \
+                 h1, h2, h3, list, item, item_body, bullet, bullet_dot, number, quote, \
+                 quote_rail, quote_body, quote_ink, rule, pull)",
                 key.to_string().unwrap_or_default()
             )))
         }
@@ -1645,6 +1673,36 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
             )?
         }
     };
+    let mut parts = std::collections::HashMap::new();
+    for name in PARTS {
+        let given = match style.get::<mlua::Value>(name)? {
+            mlua::Value::Nil => continue,
+            // A quote's ink: a colour, its words' (`color`).
+            ink if name == "quote_ink" => {
+                let t = lua.create_table()?;
+                t.raw_set("color", ink)?;
+                t
+            }
+            mlua::Value::Table(t) => copied(lua, &t)?,
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "ui.markdown_view's style.{name} is a table of options, not {}",
+                    other.type_name()
+                )));
+            }
+        };
+        let kind = match name {
+            "h1" | "h2" | "h3" | "quote_ink" => Kind::Rich(RichSpans::Listed(Vec::new())),
+            "number" => Kind::Text(Text::Literal(String::new())),
+            "item" | "bullet" | "quote" => Kind::Row,
+            "list" | "item_body" | "quote_body" => Kind::Column,
+            _ => Kind::Div,
+        };
+        let node = plain(fill(lua, Node::new(owner(lua)?, kind), Some(&given))?, name)?;
+        if let Some(node) = node {
+            parts.insert(name, node);
+        }
+    }
     let mut runs = Vec::with_capacity(RUN_KINDS);
     for (kind, name) in RUN_KIND_NAMES.iter().enumerate() {
         runs.push(match style.get::<Option<Table>>(*name)? {
@@ -1655,6 +1713,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
     Ok(Some(Rc::new(MarkdownLook {
         paragraph,
         blocks,
+        parts,
         runs: runs.try_into().expect("one table a kind"),
         on_link,
         link_menu,
@@ -5479,6 +5538,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 veil_state: None,
                 block_at: None,
                 attached: markdown_attached(&table)?,
+                top: None,
+                path: Rc::from([]),
+                quoted: false,
             };
             let look = markdown_look(lua, &table)?;
             let mut args = TextArgs::default();

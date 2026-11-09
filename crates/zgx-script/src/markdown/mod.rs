@@ -24,6 +24,7 @@
 //! `ui.each` over them, a reconciling [`crate::Shared`]) skips them at a
 //! pointer's glance.
 mod mend;
+mod order;
 mod veil;
 pub(crate) mod view;
 

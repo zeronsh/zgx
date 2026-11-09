@@ -8515,6 +8515,15 @@ impl crate::markdown::view::Look for ScriptLook {
             vm.report(error);
         }
     }
+    fn has(&self, name: &str) -> bool {
+        self.look.parts.contains_key(name)
+    }
+    fn part(&self, name: &str, view: View) -> View {
+        match self.look.parts.get(name) {
+            Some(node) => styled(view, node, &self.vm, &self.low, None, None),
+            None => view,
+        }
+    }
     fn paragraph(&self, view: View) -> View {
         match &self.look.paragraph {
             Some(node) => styled(view, node, &self.vm, &self.low, None, None),
