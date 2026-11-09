@@ -3,13 +3,17 @@ pub use cosmic_text::Affinity;
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
 
 /// `key`'s glyph image: swash's, or for a face whose shapes swash can't
-/// draw (macOS 26's PingFang, `hvgl` only) Core Text's. Asked only where
-/// swash gave none: a glyph cache miss with nothing to show.
+/// draw (macOS 26's PingFang, `hvgl` only; iOS's emoji) Core Text's. Asked
+/// only on a glyph cache miss.
 pub(crate) fn glyph_image(
     swash: &mut cosmic_text::SwashCache,
     fonts: &mut FontSystem,
     key: cosmic_text::CacheKey,
 ) -> Option<cosmic_text::SwashImage> {
+    #[cfg(target_os = "ios")]
+    if let Some(image) = crate::core_text_glyphs::color_glyph_image(fonts, key) {
+        return Some(image);
+    }
     let image = swash.get_image_uncached(fonts, key);
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     if image

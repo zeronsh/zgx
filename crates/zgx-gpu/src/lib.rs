@@ -5269,6 +5269,8 @@ impl GpuRenderer {
             self.flush_pending();
             self.recycle_atlas();
             self.scale = scale;
+            #[cfg(target_os = "ios")]
+            core_text_glyphs::set_scale(scale);
             self.layers.clear();
             self.shapes.clear();
             // GPU views draw their next frames at the new scale.

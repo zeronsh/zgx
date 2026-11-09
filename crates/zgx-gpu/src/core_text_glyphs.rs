@@ -1,9 +1,11 @@
-//! Glyphs swash can't draw, drawn by Core Text (macOS): faces whose shapes
-//! are only in Apple's `hvgl` table, as macOS 26's PingFang keeps them
-//! (zgx-cosmic-text's `Font::needs_platform_outlines`). The glyph comes out
-//! as swash's would: an alpha mask at the cache key's size and subpixel
-//! offset, placed from the pen position, for the atlas to take like any
-//! other. Text in faces swash draws never comes here.
+//! Glyphs swash can't draw, drawn by Core Text: faces whose shapes are only
+//! in Apple's `hvgl` table, as macOS 26's PingFang keeps them
+//! (zgx-cosmic-text's `Font::needs_platform_outlines`), and on iOS the emoji,
+//! whose bitmaps Apple compresses (`sbix` strikes of type `emjc`). The glyph
+//! comes out as swash's would: an alpha mask (or for emoji straight RGBA) at
+//! the cache key's size and subpixel offset, placed from the pen position,
+//! for the atlas to take like any other. Text in faces swash draws never
+//! comes here.
 use cosmic_text::{CacheKey, CacheKeyFlags, FontSystem, Placement, SwashContent, SwashImage};
 use std::{cell::RefCell, collections::HashMap, ffi::c_void};
 
@@ -103,6 +105,10 @@ unsafe extern "C" {
         bitmap_info: u32,
     ) -> CFTypeRef;
     fn CGContextSetGrayFillColor(context: CFTypeRef, gray: f64, alpha: f64);
+    #[cfg(target_os = "ios")]
+    fn CGColorSpaceCreateDeviceRGB() -> CFTypeRef;
+    #[cfg(target_os = "ios")]
+    fn CGContextScaleCTM(context: CFTypeRef, sx: f64, sy: f64);
     fn CGContextSetShouldAntialias(context: CFTypeRef, on: bool);
     fn CGContextSetShouldSmoothFonts(context: CFTypeRef, on: bool);
     fn CGContextSetAllowsFontSubpixelPositioning(context: CFTypeRef, on: bool);
@@ -112,6 +118,9 @@ unsafe extern "C" {
 }
 /// `kCGImageAlphaOnly`: a context of one alpha byte a pixel.
 const ALPHA_ONLY: u32 = 7;
+/// `kCGImageAlphaPremultipliedLast`: RGBA bytes, colour times alpha.
+#[cfg(target_os = "ios")]
+const PREMULTIPLIED_LAST: u32 = 1;
 /// `kCTFontOrientationHorizontal`.
 const HORIZONTAL: u32 = 1;
 /// `kCFStringEncodingUTF8`.
@@ -145,6 +154,28 @@ struct Cache {
 thread_local! {
     static CACHE: RefCell<Cache> = RefCell::new(Cache::default());
 }
+/// Pixels per point of the glyphs drawn (`set_scale`): iOS's emoji are
+/// drawn at their point size, as UIKit draws them, since Core Text sizes an
+/// emoji's picture by its points (up to 1.25 times the size below 24).
+#[cfg(target_os = "ios")]
+static SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+/// The renderer's pixels per point, for colour glyphs drawn from here.
+#[cfg(target_os = "ios")]
+pub(crate) fn set_scale(scale: f32) {
+    SCALE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+/// Pixels per point a glyph is drawn at: its points times this are the
+/// cache key's size. 1 but for iOS's colour glyphs.
+fn points_scale(color: bool) -> f64 {
+    #[cfg(target_os = "ios")]
+    if color {
+        return f64::from(f32::from_bits(
+            SCALE.load(std::sync::atomic::Ordering::Relaxed),
+        ));
+    }
+    let _ = color;
+    1.
+}
 
 /// `key`'s glyph through Core Text, if its face's shapes are where only
 /// the platform draws them (`Font::needs_platform_outlines`).
@@ -153,14 +184,24 @@ pub(crate) fn glyph_image(fonts: &mut FontSystem, key: CacheKey) -> Option<Swash
     if !font.needs_platform_outlines() {
         return None;
     }
-    draw(fonts, key)
+    draw(fonts, key, false)
+}
+/// On iOS, `key`'s glyph in its own colours if its face is a colour one:
+/// iOS's emoji, whose bitmaps only Core Text reads (swash would draw the
+/// face's placeholder outline, two empty lines), as UIKit draws them.
+#[cfg(target_os = "ios")]
+pub(crate) fn color_glyph_image(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
+    if !fonts.get_font(key.font_id, key.font_weight)?.is_color() {
+        return None;
+    }
+    draw(fonts, key, true)
 }
 
 /// `key`'s glyph through Core Text whatever its face; for tests to set
 /// against swash's.
 #[doc(hidden)]
 pub fn core_text_glyph(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
-    draw(fonts, key)
+    draw(fonts, key, false)
 }
 
 /// The descriptor of face `id`, found by its PostScript name: the system's
@@ -191,10 +232,14 @@ fn descriptor(fonts: &mut FontSystem, id: cosmic_text::fontdb::ID) -> Option<Own
             return None;
         }
         // Core Text gives another font for a name it doesn't know: kept only
-        // if its name is the face's.
-        let by_name = Owned(CTFontDescriptorCreateWithNameAndSize(cf_name.0, 0.));
-        if !by_name.0.is_null() && named(by_name.0, &name) {
-            return Some(Owned(CFRetain(by_name.0)));
+        // if its name is the face's. iOS answers a hidden face's name (the
+        // emoji's `.AppleColorEmojiUI`) with Times and a console note: those
+        // come from their file.
+        if !(cfg!(target_os = "ios") && name.starts_with('.')) {
+            let by_name = Owned(CTFontDescriptorCreateWithNameAndSize(cf_name.0, 0.));
+            if !by_name.0.is_null() && named(by_name.0, &name) {
+                return Some(Owned(CFRetain(by_name.0)));
+            }
         }
         let all = match path.as_deref().and_then(|path| path.to_str()) {
             Some(path) => CTFontManagerCreateFontDescriptorsFromURL(
@@ -255,9 +300,20 @@ unsafe fn named(descriptor: CFTypeRef, name: &str) -> bool {
 
 /// The Core Text font for `key`: its face at its size, slanted as swash
 /// slants a synthetic italic (14 degrees).
-fn font_for(cache: &mut Cache, fonts: &mut FontSystem, key: CacheKey) -> Option<CFTypeRef> {
+fn font_for(
+    cache: &mut Cache,
+    fonts: &mut FontSystem,
+    key: CacheKey,
+    scale: f64,
+) -> Option<CFTypeRef> {
     let italic = key.flags.contains(CacheKeyFlags::FAKE_ITALIC);
-    let slot = (key.font_id, key.font_size_bits, italic, key.font_weight.0);
+    let size = f64::from(f32::from_bits(key.font_size_bits)) / scale;
+    let slot = (
+        key.font_id,
+        (size as f32).to_bits(),
+        italic,
+        key.font_weight.0,
+    );
     if let Some(font) = cache.fonts.get(&slot) {
         return Some(font.0);
     }
@@ -274,7 +330,6 @@ fn font_for(cache: &mut Cache, fonts: &mut FontSystem, key: CacheKey) -> Option<
         tx: 0.,
         ty: 0.,
     };
-    let size = f64::from(f32::from_bits(key.font_size_bits));
     // SAFETY: the descriptor lives in the cache; what is made is owned.
     let font = unsafe {
         // At the weight it was shaped at, as swash sets `wght` (PingFang is
@@ -307,10 +362,13 @@ fn font_for(cache: &mut Cache, fonts: &mut FontSystem, key: CacheKey) -> Option<
     Some(font)
 }
 
-fn draw(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
+/// `key`'s glyph drawn by Core Text: an alpha mask, or with `color` (iOS's
+/// emoji) its own colours, straight RGBA as swash gives a colour bitmap.
+fn draw(fonts: &mut FontSystem, key: CacheKey, color: bool) -> Option<SwashImage> {
     CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let font = font_for(&mut cache, fonts, key)?;
+        let scale = points_scale(color);
+        let font = font_for(&mut cache, fonts, key, scale)?;
         let glyph = key.glyph_id;
         let (dx, dy) = match key.flags.contains(CacheKeyFlags::PIXEL_FONT) {
             true => (key.x_bin.as_float().round(), key.y_bin.as_float().round()),
@@ -325,23 +383,27 @@ fn draw(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
         }
         // Whole pixels round its box (y up), a pixel of room each side for
         // antialiasing, as swash's outlines have.
-        let left = (rect.origin.x + dx).floor() as i32 - 1;
-        let right = (rect.origin.x + rect.size.width + dx).ceil() as i32 + 1;
-        let bottom = (rect.origin.y + dy).floor() as i32 - 1;
-        let top = (rect.origin.y + rect.size.height + dy).ceil() as i32 + 1;
+        let (x, y) = (rect.origin.x * scale, rect.origin.y * scale);
+        let (w, h) = (rect.size.width * scale, rect.size.height * scale);
+        let left = (x + dx).floor() as i32 - 1;
+        let right = (x + w + dx).ceil() as i32 + 1;
+        let bottom = (y + dy).floor() as i32 - 1;
+        let top = (y + h + dy).ceil() as i32 + 1;
         let (width, height) = ((right - left) as u32, (top - bottom) as u32);
-        let mut data = vec![0u8; width as usize * height as usize];
+        let texel = if color { 4 } else { 1 };
+        let mut data = vec![0u8; width as usize * height as usize * texel];
         // SAFETY: `data` is the context's `width` by `height` bytes and
         // outlives it; the context is released before `data` is moved.
         unsafe {
+            let (space, info) = colors(color);
             let context = CGBitmapContextCreate(
                 data.as_mut_ptr().cast(),
                 width as usize,
                 height as usize,
                 8,
-                width as usize,
-                std::ptr::null(),
-                ALPHA_ONLY,
+                width as usize * texel,
+                space.as_ref().map_or(std::ptr::null(), |space| space.0),
+                info,
             );
             if context.is_null() {
                 return None;
@@ -354,15 +416,24 @@ fn draw(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
             CGContextSetShouldSubpixelPositionFonts(context.0, true);
             CGContextSetAllowsFontSubpixelQuantization(context.0, false);
             CGContextSetShouldSubpixelQuantizeFonts(context.0, false);
+            // Drawn in points, as UIKit draws (`scale` pixels each).
+            #[cfg(target_os = "ios")]
+            if scale != 1. {
+                CGContextScaleCTM(context.0, scale, scale);
+            }
             // The pen where its offset puts it, from the box's corner.
             let at = CGPoint {
-                x: dx - f64::from(left),
-                y: dy - f64::from(bottom),
+                x: (dx - f64::from(left)) / scale,
+                y: (dy - f64::from(bottom)) / scale,
             };
             CTFontDrawGlyphs(font, &glyph, &at, 1, context.0);
         }
         let mut image = SwashImage::new();
         image.content = SwashContent::Mask;
+        if color {
+            unpremultiply(&mut data);
+            image.content = SwashContent::Color;
+        }
         image.placement = Placement {
             left,
             top,
@@ -372,4 +443,44 @@ fn draw(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
         image.data = data;
         Some(image)
     })
+}
+/// The colour space and bitmap layout a glyph is drawn in: alpha alone, or
+/// on iOS device RGB with alpha for a colour glyph.
+fn colors(color: bool) -> (Option<Owned>, u32) {
+    #[cfg(target_os = "ios")]
+    if color {
+        // SAFETY: a new colour space, owned.
+        let space = unsafe { CGColorSpaceCreateDeviceRGB() };
+        return ((!space.is_null()).then(|| Owned(space)), PREMULTIPLIED_LAST);
+    }
+    let _ = color;
+    (None, ALPHA_ONLY)
+}
+/// Core Graphics' premultiplied RGBA as straight RGBA, as swash's colour
+/// bitmaps (and so the atlas) have it.
+fn unpremultiply(data: &mut [u8]) {
+    for texel in data.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(texel[3]);
+        if alpha != 0 && alpha != 255 {
+            for channel in &mut texel[..3] {
+                *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unpremultiplied_colour_keeps_its_alpha_and_opaque_texels() {
+        let mut data = [
+            128, 64, 0, 128, 10, 20, 30, 255, 0, 0, 0, 0, 200, 200, 200, 100,
+        ];
+        super::unpremultiply(&mut data);
+        assert_eq!(
+            data,
+            [
+                255, 128, 0, 128, 10, 20, 30, 255, 0, 0, 0, 0, 255, 255, 255, 100
+            ]
+        );
+    }
 }
