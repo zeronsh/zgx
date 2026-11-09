@@ -649,6 +649,8 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             // focus goes with it (the keyboard's, not a scroll's).
             let mut pending_reveal: Option<(usize, RowAlign, f32, Option<NodeId>, bool)> = None;
             let mut anchor: Option<Anchor> = None;
+            // The heights' revision the last pass that kept rows saw (`settled`).
+            let mut kept_revision: Option<u64> = None;
             // The anchor row's key, for a list that keeps its place: rows
             // added or removed above it move it by as many, and it is found
             // there by its key. Beside the anchor, not in it, so that other
@@ -943,9 +945,15 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     });
                 }
                 if let Some(kept) = &mut kept {
-                    let settled = anchor
-                        .as_ref()
-                        .is_none_or(|anchor| anchor.revision != revision);
+                    // Rows' heights changing under the view, not a scroll.
+                    // One scrolled by the view around it keeps no anchor (that
+                    // view keeps its place): its own last pass says.
+                    let settled = match &anchor {
+                        Some(anchor) => anchor.revision != revision,
+                        None if ancestor => kept_revision.is_none_or(|was| was != revision),
+                        None => true,
+                    };
+                    kept_revision = Some(revision);
                     merge_kept(
                         kept,
                         &mut keys,
