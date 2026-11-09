@@ -1470,6 +1470,35 @@ declare extern type Term with
 	-- End the session (its process is hung up).
 	function close(self): ()
 end
+-- `ui.app(id, opts)`: a program started (no shell) with an external
+-- surface's connection, shown by `ui.surface { app = a }`. Sessions outlive
+-- reloads: the run that asks for `id` again gets the same one. A plugin's
+-- ids are its own; it needs the `apps` grant. Its fields are tracked.
+declare extern type App with
+	id: string
+	-- "starting" until it connects, then "running"; "exited" or "failed".
+	status: "starting" | "running" | "exited" | "failed"
+	-- What the program set as its title; "" until it does.
+	title: string
+	pid: number?
+	-- Its exit code once it exited (nil if a signal ended it).
+	exit_code: number?
+	-- Why it couldn't start, with "failed".
+	error: string?
+	-- End the session: the program is told to close, and killed if it
+	-- hasn't exited a moment later.
+	function close(self): ()
+end
+export type AppOptions = {
+	-- The program: a path, or a name looked up on PATH. No shell.
+	command: string,
+	args: { string }?,
+	-- Where it starts ("~" is home); nil is the app's own directory.
+	cwd: string?,
+	env: { [string]: string }?,
+	-- Its exit code (nil if a signal ended it); the latest run's is called.
+	on_exit: ((code: number?) -> ...unknown)?,
+}
 export type TermOptions = {
 	-- A command line; nil runs the login shell.
 	command: string?,
@@ -3418,6 +3447,9 @@ export type WebViewProps = Merge<Props, Merge<WebOptions, {
 	on_download: ((d: Download) -> ...unknown)?,
 }>>
 export type TerminalProps = Merge<Props, { term: Term }>
+-- `app`'s frames, its input forwarded while focused (keys) or under the
+-- pointer; it may lock the pointer just after a press.
+export type SurfaceProps = Merge<Props, { app: App }>
 -- `from`: only what that plugin (by name) contributes.
 export type SlotProps = Merge<Props, { context: unknown?, from: string? }>
 -- What a plugin targets: an element by its `id` (`"#save"`), declared hook
@@ -3634,6 +3666,10 @@ declare ui: {
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,
+	-- The session for `id`, started with `opts` the first time (or again
+	-- once it ended); without options only looked up (nil if none).
+	app: ((id: string, opts: AppOptions) -> App) & ((id: string) -> App?),
+	surface: (props: SurfaceProps) -> Node,
 	command: (opts: CommandOptions) -> (),
 	-- Keys ("cmd+shift+z") as this platform shows them: "⇧⌘Z" on macOS,
 	-- "Ctrl+Shift+Z" elsewhere (`cmd` is Command on macOS, Control

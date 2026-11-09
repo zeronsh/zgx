@@ -1,4 +1,4 @@
-# Web views, terminals, commands: webview, web, terminal, term, command
+# Web views, terminals, apps, commands: webview, web, terminal, term, surface, app, command
 
 Native content laid out as nodes, and the app's menu commands. A web view is a WebKit page (macOS), a WebView2 page (Windows, the desktop host's `webview2` feature) or a WebKitGTK page drawn as an image (Linux, the `webkitgtk` feature, which `zgx-run` has; see [the Linux notes](../linux.md#web-views)), and a terminal is drawn by zgx (every platform, the desktop host's `terminal` feature, which zgx-run turns on) or is a Ghostty surface (macOS, the `ghostty` feature, which wins there); each is placed, sized, rounded and clipped like any node, and zgx draws over it (a frosted popover over a page works). Without a native host (headless, other platforms) each shows a labelled placeholder box and its controller still answers. Pages and sessions belong to the host, not to a run, so a reload keeps them.
 
@@ -8,6 +8,8 @@ ui.web(opts: WebOptions?) -> Web
 ui.web(id: string, opts: WebOptions?) -> Web
 ui.terminal(props: TerminalProps) -> Node
 ui.term(id: string, opts: TermOptions?) -> Term
+ui.surface(props: SurfaceProps) -> Node
+ui.app(id: string, opts: AppOptions?) -> App?
 ui.command(opts: CommandOptions) -> ()
 ```
 
@@ -17,6 +19,8 @@ ui.command(opts: CommandOptions) -> ()
 | `web` | a page's controller, usable before and after its view mounts. `ui.web(opts)` makes a page for this run; `ui.web(id, opts)` returns the host's page for `id`, made with `opts` the first time, kept across reloads until `web:close()` |
 | `terminal` | shows a session (`term = ui.term(id)`) |
 | `term` | the session for `id`, started the first time with `opts`; later calls return the same session, their handlers replacing the previous run's |
+| `surface` | shows a program's frames (`app = ui.app(id, …)`), its input forwarded |
+| `app` | the program session for `id`, started the first time with `opts` (no shell); later calls return the same session, their `on_exit` replacing the previous run's |
 | `command` | an app command: the host shows it as a menu item (`ScriptHost::commands`) and runs it when chosen, its key working wherever focus is |
 
 ## Web view options
@@ -69,6 +73,42 @@ A `Web` controller's `url`, `title`, `loading`, `progress`, `can_go_back`, `can_
 A `Term`'s `id`, `title`, `pwd`, `process`, `pid`, `focused`, `bell` (it rang since it last had focus), `progress` (OSC 9;4: 0 to 1, negative while indeterminate, nil when none), `exited` (the exit code, once it ended), `columns`, `rows` and `pointer` are tracked like state. Its methods: `focus()`, `blur()`, `input(text)` (as typed: `"ls\r"` runs ls), `paste(text)`, `binding(action)` (a Ghostty binding action: `"copy_to_clipboard"`, `"clear_screen"`, `"increase_font_size:1"`), `needs_confirm()` (whether closing would end something other than an idle shell), `snapshot(max_width?)` (a picture of what it shows now, at most `max_width` pixels wide, 480 if not given: the `src` of a `ui.image` showing it, as `"host:…"`, replaced by each call and forgotten as it closes; nil before it shows or where the platform takes none, macOS taking it from Ghostty's last frame) and `close()`.
 
 A terminal's colours come from the theme where it shows, through the tokens `$terminal.foreground`, `$terminal.background`, `$terminal.cursor`, `$terminal.cursor_text` (text under a block cursor), `$terminal.selection_background`, `$terminal.selection_foreground` and `$terminal.ansi.0` to `$terminal.ansi.15` (the ANSI colours by number; 8 to 15 are the bright ones). No built-in theme sets them, and an unset one keeps the terminal's own colour. Under Ghostty that is the user's Ghostty configuration (`foreground`, `background`, `cursor-color`, `cursor-text`, `selection-background`, `selection-foreground`, `palette`), which the tokens set go over. In the engine-drawn terminal it is its built-in palette. A theme switch, a followed system appearance or a `theme` over the node recolours what the terminal shows live, scrollback included, without restarting the program: `ui.terminal { term = term, theme = { ["terminal.foreground"] = "#202124", ["terminal.ansi.1"] = "#b00020" } }`. Ghostty's colours are opaque, so a token's alpha is dropped there. A VS Code theme sets these tokens from its `terminal.*` colours.
+
+## Apps
+
+A program another process draws, its frames shown in a node and its input forwarded to it: a game, an emulator, a renderer of its own. The program is a client of zgx's external surfaces (`zgx-surface`; see [External surfaces](../external-surfaces.md) for how one is written): on Linux its frames are Vulkan images on zgx's own GPU, no pixel copied by a CPU; elsewhere, and for a client that can't share its GPU's memory, shared memory. zgx-run has it (zgx-script's `apps` feature); without it `ui.app` raises.
+
+```luau
+local game = ui.app("game", {
+	command = "horizon-client",
+	args = { "--zgx-surface" },
+	on_exit = function(code) print("game ended", code) end,
+})
+return ui.surface {
+	app = game,
+	w = "100%",
+	grow = 1,
+	rounded = 16,
+	on_pointer_lock = function(locked) paused:set(not locked) end,
+}
+```
+
+`ui.app` takes these; `ui.surface` takes `app` and any property and event:
+
+| Option | Type | Default | |
+| --- | --- | --- | --- |
+| `app` (`surface`) | `App` | required | the session to show |
+| `command` | `string` | required to start | the program: a path, or a name looked up on `PATH`. No shell |
+| `args` | `{ string }` | none | its arguments |
+| `cwd` | `string` | the app's own | where it starts; `"~"` is home |
+| `env` | `{ [string]: string }` | none | added to the environment |
+| `on_exit` | `(code: number?) -> ()` | none | it exited, with its code (nil when a signal ended it) |
+
+An `App`'s `id`, `status` (`"starting"` until the program connects, `"running"`, `"exited"`, `"failed"`), `title` (what the program set), `pid`, `exit_code` and `error` (why it couldn't start) are tracked like state. `app:close()` ends it: the program is told to close and killed if it hasn't exited 1.5 s later. Sessions belong to the host, so a reload keeps the program running; `ui.app(id)` without options only looks one up (nil if none), and options given for a session that ended start it again. A script reaches only the sessions it started: a plugin's `"game"` is neither the app's nor another plugin's.
+
+The node is focusable: a press focuses it, and while it has focus its keys are the program's (by physical key, as the DOM's `KeyboardEvent.code`), Command or Control chords going on to the app's shortcuts too. The pointer over it, its buttons and the wheel are the program's. The program may lock the pointer just after a press (a game looking about): the node takes the lock as `el:lock_pointer()` does, its `on_pointer_lock(locked)` hears it, and Escape always lets it go. A new size reaches the program once it has held for 120 ms; meanwhile its last frame shows stretched.
+
+What may run is the host's to decide. A plugin needs the `apps` grant (`Capability::Apps`); the host's hook (`ScriptHost::vet_apps`) is given the whole spec asked for and returns what to start (a resolved path, pinned arguments, a filtered environment) or an error, which `ui.app` raises; the app's own VM asks its guard too (`GuardKind::App`). Each is asked again whenever a script reaches a running session: refused, the program is killed and the handles to it raise.
 
 ## Command options
 

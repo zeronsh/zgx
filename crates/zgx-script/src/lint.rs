@@ -267,6 +267,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "loop",
     "web",
     "term",
+    "app",
     "command",
     "on_mount",
     "null",

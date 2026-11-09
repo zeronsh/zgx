@@ -117,6 +117,7 @@ Plugin { name: "stamps".into(), entry, grants: vec![
 | `Picture` | a remote picture (`ui.image`, `ui.svg`, `bg_image`) | the URL |
 | `Socket` | `ui.socket`, each time it opens | the URL |
 | `Term` | `ui.term`, which raises when refused: nothing starts | the command, or the login shell |
+| `App` | `ui.app`, starting a program or reaching a running one, which raises when refused: nothing starts, and a running one is killed | the spec asked for as JSON: `{"command", "args"?, "cwd"?, "env"?}` |
 | `TermInput` | a terminal's `:input`, `:paste`, `:binding` | the session's id |
 | `Web` | a page: `src`, `:load`, `:html`, `html`, and each navigation the platform starts | the URL (`html`'s base, or `about:blank`) |
 | `Clipboard` | `ui.clipboard` | `read`, `write`, `read_image`, `write_image` |
@@ -182,7 +183,7 @@ An app run with `zgx run` has no Rust of its own. Its `zgx.json` sets both sides
   - `hooks` maps a target, or an `@app/…` module, to `"override"` when a plugin may replace or filter it. Adding before and after is open, so `"open"` changes nothing. `"*": "override"` offers every target.
 - **`plugins`** names each plugin's folder (its `init.luau`) or file, and its `allow` list:
   - `shared:<key>`, `action:<name>` and `override:<target>` for what `expose` offers (`override:*` is every element; a module is named, `override:@app/…`, or `override-module:*` for all of them), and `package:<name>` for a package in `packages` (lent below);
-  - `fetch`, `clipboard`, `files`, `folders`, `terminals`, `web` and `windows` for the sandbox. `folders` is `ui.open_folder`, and the host can refuse it to every script (`ScriptHost::refuse_folders`).
+  - `fetch`, `clipboard`, `files`, `folders`, `terminals`, `apps`, `web` and `windows` for the sandbox. `apps` is `ui.app`, and what each start runs is the host's (`ScriptHost::vet_apps`, see [External surfaces](external-surfaces.md#who-may-start-what)). `folders` is `ui.open_folder`, and the host can refuse it to every script (`ScriptHost::refuse_folders`).
 - **A grant beyond what's exposed is an error as the app loads**, naming the plugin and the grant: ``plugin `focus` is allowed `action:complete`, which the app doesn't expose (add "complete" to expose.actions)``. So is an unknown grant or a missing path.
 - **The app's script defines its actions** with `ui.actions`. Plugins call them as they call a Rust host's: `ui.invoke("complete", id)`, or `ui.action("complete", id)` as a handler. The app calls them the same way. A plugin can't define actions.
 

@@ -8190,6 +8190,15 @@ impl NodeHandle {
         };
         ui.input.lock_pointer(&ui.scene, self.node)
     }
+    /// While focus is in the node, every key is its own (`on`) or key
+    /// bindings and the menus' shortcuts take theirs again (`!on`): as
+    /// `capture_keys` sets it as the node mounts, changed now (a game whose
+    /// keys are its own while it holds the pointer).
+    pub fn capture_keys(&self, on: bool) {
+        if let Some(ui) = self.ui.upgrade() {
+            ui.input.set_capture_keys(self.node, on);
+        }
+    }
     /// Let the pointer go, if the node holds its lock.
     pub fn unlock_pointer(&self) {
         let Some(ui) = self.ui.upgrade() else {

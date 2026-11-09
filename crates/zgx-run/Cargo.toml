@@ -14,7 +14,7 @@ description = "Run a zgx Luau script as a desktop app, with hot reload: `zgx-run
 # mimalloc as the runner's allocator (zgx-desktop's `mimalloc`): 6-10%
 # less CPU for script, text and layout work, for about 2 MB more memory.
 # `--no-default-features` keeps the system's.
-default = ["mimalloc", "inspect", "fetch", "socket", "scene3d", "i18n", "gltf", "webkitgtk", "terminal"]
+default = ["mimalloc", "inspect", "fetch", "socket", "scene3d", "i18n", "gltf", "webkitgtk", "terminal", "apps"]
 mimalloc = ["zgx-desktop/mimalloc"]
 # Devtools for agents (`zgx run --inspect`, `zgx inspect`): a user-only
 # local socket a running app answers on, when asked. A build for shipping
@@ -32,6 +32,9 @@ fetch = ["dep:ureq"]
 # it. Without it, `ui.socket` stays closed unless the host brings a
 # connector of its own.
 socket = ["dep:tungstenite", "dep:rustls", "dep:webpki-roots", "dep:polling"]
+# `ui.app` and `ui.surface` (zgx-script's `apps`): programs started and
+# shown in the window, their frames shared on the GPU (zgx-surface).
+apps = ["zgx-script/apps"]
 # `ui.scene3d` (zgx-script's `scene3d`): 3D scenes, drawn with zgx-3d.
 scene3d = ["zgx-script/scene3d"]
 # Localized messages' plural rules and numbers for every locale
