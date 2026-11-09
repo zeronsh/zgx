@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **An external surface's frames are shared on the GPU on Windows** (zgx-surface): a zgx host on Direct3D 12 allocates each buffer as a Direct3D 12 texture on a shared heap, duplicates its NT handle into the program it started, and the program opens it on the same adapter (matched by LUID) and draws into it, so no CPU copies a pixel, as Vulkan images do on Linux. A wgpu 29 client offers it with `wgpu29::dxgi_offer`, picks the host's adapter with `wgpu29::adapter_for_luid` and opens buffers with `wgpu29::import`; `zgx_surface::dxgi` does the same on raw COM pointers for a client on another wgpu, and `vulkan::import_d3d12_image` for a Vulkan one. `Welcome` gains `adapter`, the host adapter's LUID. Closing a session on Windows now ends its program (`TerminateProcess`) if it hasn't exited, and the host's side of the surface builds on Windows (an in-process connection there too).

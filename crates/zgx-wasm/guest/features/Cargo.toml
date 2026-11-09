@@ -1,0 +1,12 @@
+[package]
+name = "features"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zgx-app = { path = "../zgx-app" }

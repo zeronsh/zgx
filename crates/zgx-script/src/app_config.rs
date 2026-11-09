@@ -238,6 +238,8 @@ pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, S
                         "files" => Capability::Files,
                         "folders" => Capability::Folders,
                         "terminals" => Capability::Terminals,
+                        "apps" => Capability::Apps,
+                        "wasm" => Capability::Wasm,
                         "web" => Capability::Web,
                         "windows" => Capability::Windows,
                         _ => {
@@ -245,7 +247,7 @@ pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, S
                                 "plugin `{name}`: unknown grant `{grant}` (shared:<key>, \
                                  action:<name>, override:<target>, override-module:<@app/module \
                                  or *>, package:<name>, fetch, \
-                                 clipboard, files, terminals, web or windows)"
+                                 clipboard, files, terminals, apps, wasm, web or windows)"
                             ));
                         }
                     },

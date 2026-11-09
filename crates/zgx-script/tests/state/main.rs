@@ -5,6 +5,8 @@
 #![allow(clippy::duplicate_mod)]
 #[path = "../app_api.rs"]
 mod app_api;
+#[path = "../apps.rs"]
+mod apps;
 #[path = "../async_handlers.rs"]
 mod async_handlers;
 #[path = "../calls.rs"]
@@ -79,5 +81,7 @@ mod streaming;
 mod ui_errors;
 #[path = "../upload.rs"]
 mod upload;
+#[path = "../wasm_apps.rs"]
+mod wasm_apps;
 #[path = "../windows.rs"]
 mod windows;
