@@ -6870,6 +6870,10 @@ export type ModelProps = {
 	-- The animation it plays, round and round: a clip's name, or its place
 	-- in the file (from 1).
 	animation: (string | number)?,
+	-- Seconds into `animation` to pose it at, in place of playing it: a
+	-- video's frame, a slider's or a scrubbed timeline's says where it is.
+	-- The same time gives the same pose. Requires `animation`.
+	time: Reactive<number>?,
 	-- As a group's: it hears its meshes'.
 	on_click: ((hit: Hit3D) -> ())?,
 	on_hover: ((over: boolean) -> ())?,

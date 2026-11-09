@@ -624,3 +624,94 @@ fn a_file_that_is_no_model_says_so_whichever_way_it_is_read() {
         }
     }
 }
+
+/// A model sliding a unit a second (`animation = "slide"`) posed at `time`,
+/// the state `t` starting at T, counting the clicks that land on it. The
+/// camera 6 back sees x 1 at 40 points right of the middle.
+#[cfg(feature = "gltf")]
+const POSED_MODEL: &str = r#"
+local t = ui.state("t", T)
+local hits = ui.state("hits", 0)
+return ui.column {
+    ui.text { id = "hits", "{hits}" },
+    ui.button { id = "on", w = 10, h = 10, on_click = function() t:set(t:get() + 0.5) end },
+    ui.scene3d {
+        id = "scene", w = 200, h = 200,
+        camera = { position = { 0, 0, 6 } },
+        ui.model {
+            src = "square.glb",
+            animation = "slide",
+            time = t,
+            on_click = function() hits:set(hits:get() + 1) end,
+        },
+    },
+}
+"#;
+
+/// Whether a click at `x` in the scene lands on the model.
+#[cfg(feature = "gltf")]
+fn lands(h: &mut zgx_script::testing::TestApp, x: f32) -> bool {
+    let px = 100. + x / (6. * 22.5_f32.to_radians().tan()) * 100.;
+    let before = h.text("hits");
+    press(h, "scene", (px, 100.), 0.);
+    h.text("hits") != before
+}
+
+#[cfg(feature = "gltf")]
+#[test]
+fn time_poses_the_clip_follows_its_state_and_does_not_play() {
+    // Both ways of reading: a frame drawn whole, and a window's off its thread.
+    for whole in [true, false] {
+        let _whole = whole.then(WholeFrames::on);
+        let mut h = beside_a_model(&format!("time-{whole}"), &POSED_MODEL.replace("T)", "1)"));
+        assert_eq!(h.error(), None);
+        // At 1 s it is a unit along (the square 0.5 either side of x 1)...
+        assert!(
+            h.wait_until(|h| {
+                h.frame();
+                lands(h, 1.3)
+            }),
+            "not at its time: {}",
+            h.tree()
+        );
+        assert!(!lands(&mut h, 0.3), "still where it starts");
+        // ...and stays there however many frames go by: nothing plays it.
+        h.frames(120);
+        assert!(lands(&mut h, 1.2), "it played on");
+        assert!(!lands(&mut h, 2.2), "it played on");
+        // Half a second more on the state: half a unit along.
+        h.click("on");
+        h.frame();
+        assert!(lands(&mut h, 1.8), "didn't follow its state");
+        assert!(!lands(&mut h, 0.8), "didn't follow its state");
+    }
+}
+
+#[cfg(feature = "gltf")]
+#[test]
+fn the_same_time_gives_the_same_pose_however_it_got_there() {
+    // A chunk of a render starting at 1.5 s, and one that came there through
+    // 0.5 s and 1 s: where each edge lies, to a hair either side of it.
+    let edges = |h: &mut Harness| [1.9, 1.95, 2.05, 2.1].map(|x| lands(h, x));
+    let _whole = WholeFrames::on();
+    let mut direct = beside_a_model("same-direct", &POSED_MODEL.replace("T)", "1.5)"));
+    direct.frame();
+    let mut stepped = beside_a_model("same-stepped", &POSED_MODEL.replace("T)", "0.5)"));
+    stepped.frame();
+    stepped.click("on");
+    stepped.frame();
+    stepped.click("on");
+    stepped.frame();
+    assert_eq!(edges(&mut direct), edges(&mut stepped));
+    assert_eq!(edges(&mut direct), [true, true, false, false]);
+}
+
+#[cfg(feature = "gltf")]
+#[test]
+fn time_without_an_animation_says_so() {
+    let error = raised(r#"ui.scene3d { ui.model { src = "a.glb", time = 1 } }"#);
+    assert!(
+        error.contains("`time`") && error.contains("animation"),
+        "{error}"
+    );
+}
