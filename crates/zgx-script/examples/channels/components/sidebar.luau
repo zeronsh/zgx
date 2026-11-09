@@ -32,7 +32,7 @@ return ui.component(function()
 					rounded = 8,
 					bg = "$accent",
 					color = "$accent.text",
-					size = 11,
+					text_size = 11,
 					function()
 						return tostring(state.unread:get()[channel.id] or 0)
 					end,

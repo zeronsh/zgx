@@ -241,9 +241,9 @@ local function cell(name: string, effect, on_press: ((e: PointerEvent) -> ...unk
 			rounded = 14,
 			id = id,
 			on_press = on_press,
-			ui.text { "Sample", color = "#ffffff", size = 18, p = 10 },
+			ui.text { "Sample", color = "#ffffff", text_size = 18, p = 10 },
 		})),
-		ui.text { name, absolute = true, left = 6, top = 146, size = 12, color = "#ffffff" },
+		ui.text { name, absolute = true, left = 6, top = 146, text_size = 12, color = "#ffffff" },
 	}
 end
 
@@ -274,7 +274,7 @@ table.insert(
 			w = 140,
 			h = 84,
 			radius = 14,
-			ui.text { "Glass", color = "#ffffff", size = 18, p = 10 },
+			ui.text { "Glass", color = "#ffffff", text_size = 18, p = 10 },
 		},
 	}
 )
@@ -298,9 +298,9 @@ table.insert(
 			layer_clock = true,
 			layer_bleed = 76,
 			layer_params = { { 50, 0, 0, 0 } },
-			ui.text { "Melt", color = "#ffffff", size = 18, p = 10 },
+			ui.text { "Melt", color = "#ffffff", text_size = 18, p = 10 },
 		},
-		ui.text { "melt: this file's own", absolute = true, left = 6, top = 146, size = 12, color = "#ffffff" },
+		ui.text { "melt: this file's own", absolute = true, left = 6, top = 146, text_size = 12, color = "#ffffff" },
 	}
 )
 for _, made in
@@ -321,7 +321,7 @@ do
 			w = 220,
 			h = 170,
 			panel(made.shader, made.class, made.tag, made.color),
-			ui.text { made.name, absolute = true, left = 6, top = 146, size = 12, color = "#ffffff" },
+			ui.text { made.name, absolute = true, left = 6, top = 146, text_size = 12, color = "#ffffff" },
 		}
 	)
 end
