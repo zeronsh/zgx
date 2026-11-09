@@ -1510,6 +1510,12 @@ pub(crate) struct MarkdownLook {
     /// `find = { query, current, reveal }`: a find over the text, its
     /// matches marked (`style.mark`, `style.mark_current`).
     pub find: Option<MarkdownFind>,
+    /// `block(b, at)`: the app's own drawing of a block the view doesn't
+    /// draw in its style (code, tables, pictures…): a node.
+    pub block: Option<Function>,
+    /// `pictures = true`: a paragraph with pictures among its words goes to
+    /// `block` (the app shows them).
+    pub pictures: bool,
     /// `links = "web"`: only web addresses are links; any other target is
     /// styled as one and goes nowhere (no click, menu or address).
     pub web_only: bool,
@@ -1591,6 +1597,8 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
     let on_link: Option<Function> = table.get("on_link")?;
     let link_menu: Option<Function> = table.get("link_menu")?;
     let chip: Option<Function> = table.get("chip")?;
+    let block: Option<Function> = table.get("block")?;
+    let pictures = table.get::<Option<bool>>("pictures")?.unwrap_or(false);
     let find = match table.get::<Option<Table>>("find")? {
         Some(t) => Some(MarkdownFind {
             query: t.get("query")?,
@@ -1608,7 +1616,16 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
             )));
         }
     };
-    for name in ["style", "on_link", "link_menu", "links", "chip", "find"] {
+    for name in [
+        "style",
+        "on_link",
+        "link_menu",
+        "links",
+        "chip",
+        "find",
+        "block",
+        "pictures",
+    ] {
         table.raw_set(name, mlua::Value::Nil)?;
     }
     if style.is_none()
@@ -1616,6 +1633,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
         && link_menu.is_none()
         && chip.is_none()
         && find.is_none()
+        && block.is_none()
         && !web_only
     {
         return Ok(None);
@@ -1720,6 +1738,8 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
         link_menu,
         chip,
         find,
+        block,
+        pictures,
         web_only,
         made: RefCell::new(vec![None; 1 << RUN_KINDS]),
     })))
