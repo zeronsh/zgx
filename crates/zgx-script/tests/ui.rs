@@ -640,6 +640,12 @@ fn a_press_inside_what_keeps_focus_leaves_it_where_it_is() {
             },
             ui.text { id = "count", function() return tostring(n:get()) end },
             ui.button { id = "elsewhere", w = 120, h = 20, "elsewhere" },
+            -- A press layer under a row the pointer passes through.
+            ui.div { relative = true, w = 120, h = 20,
+                ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0,
+                    focus_on_press = false, on_press = function() end },
+                ui.row { id = "over", pointer_events = "none", w = 120, h = 20 },
+            },
         }"##,
     );
     h.frames(2);
@@ -657,6 +663,15 @@ fn a_press_inside_what_keeps_focus_leaves_it_where_it_is() {
     // Its blank room: the same.
     h.click("blank");
     assert_eq!(h.ui.input.focused(), h.find("field"));
+    // A press layer under a row the pointer passes through: the press is
+    // the layer's, and focus stays.
+    h.click("field");
+    h.click("over");
+    assert_eq!(
+        h.ui.input.focused(),
+        h.find("field"),
+        "the layer under kept it"
+    );
     // Outside it, a press moves focus as ever.
     h.click("elsewhere");
     assert_eq!(h.ui.input.focused(), h.find("elsewhere"));
