@@ -343,6 +343,14 @@ impl TextSpan {
             .line_height = Some(LineHeight::px(px));
         self
     }
+    /// The font's own line and `px` points between lines, after each but the
+    /// last (`LineHeight::with_leading`).
+    pub fn leading(mut self, px: f32) -> Self {
+        self.styles
+            .fields_mut(crate::style::bit::LINE_HEIGHT)
+            .line_height = Some(LineHeight::with_leading(px));
+        self
+    }
     /// `px` points added between characters.
     pub fn letter_spacing(mut self, px: f32) -> Self {
         self.styles.rare_mut().letter_spacing = Some(LetterSpacing::px(px));

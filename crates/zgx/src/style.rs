@@ -2536,6 +2536,16 @@ pub trait Styled: Sized {
             Some(crate::text_layout::LineHeight::px(pixels));
         self
     }
+    /// Inherited normal line spacing and `pixels` between lines, after each
+    /// but the last (`LineHeight::with_leading`): a font's leading, as UIKit's
+    /// text styles add it. It takes `line_height`'s place: whichever is set
+    /// last holds. Zero is the normal line.
+    fn leading(mut self, pixels: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, pixels, crate::theme::Field::Leading);
+        self.styles_mut().fields_mut(bit::LINE_HEIGHT).line_height =
+            Some(crate::text_layout::LineHeight::with_leading(pixels));
+        self
+    }
     /// Reset inherited line spacing to the normal metric for each text size.
     fn line_height_normal(mut self) -> Self {
         self.styles_mut().fields_mut(bit::LINE_HEIGHT).line_height =
