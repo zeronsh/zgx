@@ -7498,6 +7498,9 @@ fn list_edges(mut list: View, rare: &crate::node::ListRare, vm: &Rc<Vm>) -> View
     if rare.ancestor {
         list = list.virtualize_in_ancestor();
     }
+    if let Some(ahead) = rare.ahead {
+        list = list.list_ahead(ahead);
+    }
     if let Some(padding) = &rare.scroll_padding {
         list = with_scroll_padding(list, padding, vm);
     }

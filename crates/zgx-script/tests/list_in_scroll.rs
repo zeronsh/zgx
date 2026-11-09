@@ -315,3 +315,39 @@ fn a_list_in_a_box_easing_open_builds_the_rows_the_box_shows() {
         "{shut:?}"
     );
 }
+
+#[test]
+fn a_list_builds_as_far_ahead_as_it_says_in_a_windows_spare_time() {
+    let mut h = Harness(zgx_script::testing::TestApp::with_spare_time(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r#"local top = ui.state("top", 0)
+            local function list(ahead: number, name: string)
+                return ui.list { count = 1000, height = 20, h = 100, w = 200, overscan = 0, ahead = ahead, offset = top,
+                    row = function(i)
+                        return ui.text { `{name} {i}`, h = 20 }
+                    end }
+            end
+            return ui.column {
+                ui.button { id = "move", on_click = ui.set(top, 1), "Move" },
+                list(2, "row"),
+                list(0, "plain"),
+            }"#,
+        )
+    }));
+    assert!(built(&mut h).len() <= 6);
+    // Nothing ahead until the view moves.
+    assert!(!h.ui.spare_work_wanted());
+    h.click("#move");
+    h.frames(1);
+    assert!(h.ui.spare_work_wanted());
+    h.spend_spare_time();
+    h.frames(1);
+    // What shows, and two viewports of five below (none above, at the top).
+    let rows = built(&mut h);
+    assert!(rows.contains(&15), "{rows:?}");
+    assert!(!rows.contains(&30), "{rows:?}");
+    let tree = h.tree();
+    assert!(!tree.contains("\"plain 7\""), "{tree}");
+}
