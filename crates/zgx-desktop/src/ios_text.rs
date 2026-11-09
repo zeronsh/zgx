@@ -636,6 +636,10 @@ extern "C-unwind" fn caret_rect(_: &AnyObject, _: Sel, at: *mut AnyObject) -> CG
     let at = offset_of(at);
     let mut rect = as_field_line(area(at, at));
     rect.size.width = rect.size.width.max(2.);
+    if let Some(state) = state() {
+        rect.origin.x =
+            crate::text_store::uikit_caret_x(rect.origin.x, state.window.scale_factor());
+    }
     rect
 }
 extern "C-unwind" fn selection_rects(

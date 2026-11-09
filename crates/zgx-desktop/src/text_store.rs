@@ -609,6 +609,13 @@ pub(crate) fn word_at(units: &[u16], caret: usize) -> Option<(usize, usize)> {
     }
     found
 }
+/// Where UIKit's caret goes for a text edge at `x` in its view (`scale` pixels
+/// to a point), as UITextField's and UITextView's `caretRectForPosition:` both
+/// answer: a point left of the edge on a whole pixel, inside the view.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn uikit_caret_x(x: f64, scale: f64) -> f64 {
+    (((x - 1.) * scale).round() / scale).max(0.)
+}
 /// Where a tap that focuses a field leaves the caret, from the offset `caret`
 /// nearest it, as UITextField's first tap does (measured in a reference app
 /// across a line; a tap once focused is `UITextInteraction`'s own): a word's
@@ -634,6 +641,26 @@ pub(crate) fn first_tap_caret(units: &[u16], caret: usize) -> usize {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_caret_goes_where_uitextfield_says() {
+        // Text edges in the field's view and UIKit's caret there (the view at
+        // 16 in the window), as read at 3x.
+        for (edge, caret) in [
+            (0., 0.),
+            (10.343, 9.333),
+            (19.914, 19.),
+            (29.194, 28.333),
+            (33.543, 32.667),
+            (43.471, 42.333),
+            (52.959, 52.),
+            (153.639, 152.667),
+        ] {
+            let got = super::uikit_caret_x(edge, 3.);
+            assert!((got - caret).abs() < 0.001, "{edge}: {got}, not {caret}");
+        }
+        // UITextView's line start, 5 in from its view: a point left of it.
+        assert_eq!(super::uikit_caret_x(5., 3.), 4.);
+    }
     #[test]
     fn a_first_tap_goes_to_a_word_edge_as_uitextfields_does() {
         // Every offset of this line and where UIKit puts the caret for it.
