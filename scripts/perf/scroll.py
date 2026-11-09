@@ -495,6 +495,7 @@ def sha(path):
 def collect(pid, future, begin, out, target):
     cursor = begin['frame']
     frames, polls = {}, []
+    coasting, drain_deadline = None, None
     while True:
         queried = time.monotonic()
         batch = request(pid, 'frames', n=400, since=cursor, runs=0)['data']
@@ -506,6 +507,10 @@ def collect(pid, future, begin, out, target):
             frames[f['frame']] = f
         if batch:
             cursor = max(f['frame'] for f in batch)
+            for f in sorted(batch, key=lambda f: f['frame']):
+                state = scroll_motion.coast_state(f)
+                if state is not None:
+                    coasting = state
         # Numeric cursor is the last frame actually read, so a frame drawn
         # between this read and the next mark is never lost.
         mark = request(pid, 'mark', name='drain')['data']
@@ -513,9 +518,31 @@ def collect(pid, future, begin, out, target):
         polls.append(mark)
         if future.done():
             future.result()
-            break
+            if coasting is not True:
+                break
+            if drain_deadline is None:
+                drain_deadline = time.monotonic()+10
+            elif time.monotonic() >= drain_deadline:
+                raise RuntimeError('app coast did not settle within the capture drain budget')
         time.sleep(1)
     return sorted(frames.values(), key=lambda f: f['frame']), polls
+
+
+def settle_warm_coast(pid):
+    """A warm replay can reply before its generated coast has ended."""
+    deadline = time.monotonic()+10
+    coasting = None
+    while True:
+        frames = request(pid, 'frames', n=40, runs=0)['data']
+        for frame in sorted(frames, key=lambda f: f['frame']):
+            state = scroll_motion.coast_state(frame)
+            if state is not None:
+                coasting = state
+        if coasting is not True:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError('warm coast did not settle before resetting the measured view')
+        time.sleep(.1)
 
 
 def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present, unavailable=None, real_reference=False):
@@ -690,6 +717,7 @@ return ui.overlay {""")
                 else:
                     # Visit a long fling's range before measuring the warmed path.
                     request(process.pid, 'replay', target='#transcript', tape=tape('fling',hz), timeout=15)
+                    settle_warm_coast(process.pid)
                     if real_app:
                         request(process.pid,'command',id='bench.reset')
                         if getattr(args,'reset_row',0)>0 and gesture!='stream':

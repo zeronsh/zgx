@@ -10,6 +10,26 @@ import scroll_motion
 
 
 class ScrollMetrics(unittest.TestCase):
+    def test_capture_drains_observed_coast_after_replay_reply(self):
+        from concurrent.futures import Future
+        future=Future();future.set_result({})
+        batches=iter([[dict(frame=1,notes=['frame source: view link (coasting true)'])],
+                      [dict(frame=2,notes=['frame source: view link (coasting false)'])]])
+        def reply(pid,command,**kwargs):
+            if command=='frames':return {'data':next(batches)}
+            return {'data':{'frame':0}}
+        with tempfile.TemporaryDirectory() as directory, patch.object(scroll,'request',side_effect=reply), patch.object(scroll.time,'sleep'):
+            frames,polls=scroll.collect(1,future,{'frame':0},Path(directory),'#transcript')
+        self.assertEqual([f['frame'] for f in frames],[1,2])
+        self.assertEqual(len(polls),2)
+
+    def test_warm_reset_waits_for_the_apps_coast(self):
+        batches=iter([[dict(frame=1,notes=['frame source: view link (coasting true)'])],
+                      [dict(frame=2,notes=['frame source: view link (coasting false)'])]])
+        with patch.object(scroll,'request',side_effect=lambda *a,**k:{'data':next(batches)}), patch.object(scroll.time,'sleep') as sleep:
+            scroll.settle_warm_coast(1)
+        sleep.assert_called_once_with(.1)
+
     def test_normal_gate_records_a_new_default_without_assuming_an_old_mode(self):
         metrics={'frame_source_counts':{'view link':100},'render_frames':100}
         self.assertEqual(scroll.behavior_checks(metrics,[],[],'0',True),{})

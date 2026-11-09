@@ -449,7 +449,9 @@ context or unclassified long intervals fail coverage rather than certify a pass.
 Non-rendering frames carry the last position. Position ranges across canceled
 frames still detect skipped intermediate movement. Moving coast intervals must meet the refresh deadline even when the step is
 one pixel. Long one-pixel steps are also reported separately; only pixel-limited
-finger input can use that exemption. Finger and coast late counts are separate.
+finger input can use that exemption. Finger and coast late counts are separate. A replay reply does not end the
+capture while the host still reports an active coast; polling continues until it
+settles, with a bounded drain timeout that invalidates an unfinished capture.
 Historical raw-input-demand tables are explicitly qualified and cannot be used
 as app missed-refresh certification. Capture snapshots include `scroll_motion.py`;
 comparison fingerprints include it, preventing a silent rescore mid-batch.
