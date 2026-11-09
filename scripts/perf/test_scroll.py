@@ -104,6 +104,20 @@ class ScrollMetrics(unittest.TestCase):
         self.assertLessEqual(high-low,122)
         self.assertEqual(offset,0)
 
+    def test_drawable_reference_uses_view_link_without_an_explicit_view_flag(self):
+        m={'wait_ms':{'p99':0},'scroll_frames':40,'render_frames':20,'frame_source_counts':{'view link':20}}
+        checks=scroll.behavior_checks(m,[],[(1,1,1,.99)],'1',True,True)
+        self.assertTrue(checks['frame_source_is_view link'])
+        checks=scroll.behavior_checks(m,[],[(1,1,1,.99)],'auto',True,True)
+        self.assertTrue(checks['frame_source_is_view link'])
+
+    def test_lead_marker_probe_cannot_silently_bypass_the_hold(self):
+        import contextlib,io
+        from unittest.mock import patch
+        with patch('sys.argv',['scroll.py','reference','--host-env','ZGX_LEAD_US=4000']),contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:scroll.main()
+        self.assertEqual(result.exception.code,2)
+
     def test_material_condition_must_match_effective_ui_state(self):
         self.assertTrue(scroll.material_matches({'bench_effective_frost':False},'opaque'))
         self.assertFalse(scroll.material_matches({'bench_effective_frost':False},'translucent'))

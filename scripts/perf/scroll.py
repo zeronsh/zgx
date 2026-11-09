@@ -169,8 +169,10 @@ def behavior_checks(metrics, overrides, presents, present, reference, require_so
     if pacing or require_source or counts:
         timer=flags.get('ZGX_HANDOVER_ASAP')=='1' or 'ZGX_LEAD_US' in flags or (not reference and flags.get('ZGX_SCROLL_LINK')!='1')
         expected='timer on the grid' if timer else 'view link' if flags.get('ZGX_VIEW_CLOCK')=='1' else 'display link'
+        if not timer and (present=='1' or (present=='auto' and any(len(r)>3 and r[3]>0 for r in presents)) or (flags.get('ZGX_SCROLL_DRAWABLES')=='1' and not reference)):
+            expected='view link'
         total=sum(counts.values())
-        checks['frame_source_is_'+expected]=total>=10 and total>=.8*metrics.get('scroll_frames',0) and counts.get(expected,0)>=.95*total
+        checks['frame_source_is_'+expected]=total>=10 and total>=.8*metrics.get('render_frames',metrics.get('scroll_frames',0)) and counts.get(expected,0)>=.95*total
     return checks
 
 
@@ -324,6 +326,7 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
                 motion_window_work=workload(motion_frames),
                 work_selection="motion-window frame intervals plus noted scroll frames; spare excluded",
                 noted_scroll_frames=noted_frames,frame_source_counts=dict(frame_sources),
+                render_frames=sum(f.get('gpu_micros') is not None for f in scroll_frames),
                 worst_main_frame=max(scroll_frames,key=app_work_ms,default=None),
                 shown_frames_tape=len(shown_in_tape),
                 shown_frames_motion=sum(any(a<=r[1]*1000-anchor<=b for a,b in windows) for r in shown_in_tape),
@@ -877,6 +880,8 @@ def main():
     for item in args.host_env:
         if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1','ZGX_SCROLL_DRAWABLES=0','ZGX_SCROLL_DRAWABLES=1','ZGX_HANDOVER_ASAP=0','ZGX_HANDOVER_ASAP=1','ZGX_LEAD_US=4000','ZGX_LEAD_US=5500','ZGX_GPU_STATS=1'):
             p.error('unsupported diagnostic host environment override')
+    if args.command=='reference' and any(item.startswith('ZGX_LEAD_US=') for item in args.host_env) and args.reference_refresh_grid!='on':
+        p.error('LEAD_US marker probes require --reference-refresh-grid on to exercise the hold')
     if args.command == 'headless':
         env = dict(os.environ)
         if args.strict:
