@@ -48,6 +48,19 @@ pub(crate) struct BandPhase<'a> {
     pub(crate) draws: Vec<Draw>,
 }
 
+/// Whether `item` can be drawn apart from its run in a band, faded as one with
+/// it: no backdrop filter (it samples what is under it in the window) and no
+/// layer composited otherwise than plainly. One that can't has the whole run
+/// fade item by item wherever it paints (`band_strips`).
+pub(crate) fn fades_apart(scene: &Scene, item: &PaintItem<'_>) -> bool {
+    item.effects.blur_radius <= 0.
+        && (!item.isolated
+            || item.effects.filter_blur <= 0.
+                && scene.mask(item.id).is_none()
+                && scene.layer_shader(item.id).is_none()
+                && scene.blend(item.id) == zgx::scene::BlendMode::Normal)
+}
+
 /// `strips` in groups that touch (a fade's top and left bands meet at a
 /// corner, drawn once through one texture), groups apart from each other.
 fn apart(strips: Vec<Pixels>) -> Vec<Vec<Pixels>> {
@@ -475,17 +488,6 @@ impl GpuRenderer {
             .map(|strip| strip.meet(content))
             .filter(|strip| !strip.empty())
             .collect();
-        // Drawn apart in a band: no backdrop filter (it samples what is
-        // under it in the window) and no layer composited otherwise than
-        // plainly.
-        let apart = |item: &PaintItem<'_>| {
-            item.effects.blur_radius <= 0.
-                && (!item.isolated
-                    || item.effects.filter_blur <= 0.
-                        && scene.mask(item.id).is_none()
-                        && scene.layer_shader(item.id).is_none()
-                        && scene.blend(item.id) == zgx::scene::BlendMode::Normal)
-        };
         let crossing = |item: &PaintItem<'_>| {
             item.effects.opacity > 0.
                 && strips
@@ -495,7 +497,7 @@ impl GpuRenderer {
         if run
             .iter()
             .filter(|item| crossing(item))
-            .any(|item| !apart(item))
+            .any(|item| !fades_apart(scene, item))
         {
             return None;
         }

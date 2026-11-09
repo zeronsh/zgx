@@ -317,7 +317,11 @@ What the runs tell you:
 | few or cheap runs, yet `layout`, `text` or `paint` is most of the frame | the cost is the interface's size or drawing, not the script | a box laid out from its content (no `w`/`h`), a long text re-measured, a blur or shadow redrawn; `zgx inspect tree --depth 2` shows which boxes are large or deep enough to cost |
 | a slow frame with no writes and no runs | a scroll or an animation laying out or drawing a lot | the same as above: the phases say which |
 | `why: scroll @n repainted its view: @m … draws over it` | a node (a sticky header, a floating nav) painting over the scroll view, so its pixels can't simply move | keep what draws over a scroll view outside its box: make the scroll view start beside it |
-| `why: … reads what is under it` | a backdrop blur, a blend or a shader reading the backdrop in the scroll view's content: what it draws depends on pixels that don't move with it (a mask, a fade or a layer that does move with it copies) | keep such a node out of what scrolls, or accept the repaint |
+| `why: … reads what is under it or the window, or runs passes each frame` | in the scroll view's content, a backdrop blur, a blend, or a shader reading the backdrop or the window or running passes each frame: what it draws doesn't simply move with it (a fade or a plain layer does, and copies) | keep such a node out of what scrolls, or accept the repaint |
+| `why: … is a dithered picture` | its dots lie on the screen's grid while the picture slides under them | as above |
+| `why: … is a blurred, masked or shaded layer under a fade` | a fade's bands draw differently with such a layer in their run, so a copy's bands would not match | move the layer out from under the fade, or accept the repaint |
+| `why: … is a loop a layer plays` | a baked loop (a spinner, a shimmer) in the scroll view's content (macOS) | keep it out of what scrolls |
+| `why: it lies under two fades around it` | the scroll view and an ancestor both fade their edges | fade one of them |
 | `why: … shows under it` | the scroll view has no opaque fill of its own, so what lies beneath shows through | give the scroll view an opaque `bg`, exactly its box |
 | `present` far above `gpu`, frames 16.7 ms apart at 120 Hz with `waited a refresh more to keep the last frame's cadence` | the GPU or the window server took long once, and the frames after kept the slower cadence | make each frame cheaper (the notes above), then measure with `--repeat` |
 
