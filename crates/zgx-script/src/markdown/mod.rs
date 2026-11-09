@@ -128,6 +128,11 @@ impl Incremental {
     pub fn last_parse_bytes(&self) -> usize {
         self.last_parse_bytes
     }
+    /// Gives back the room its text and blocks grew into (a stream resting).
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.source.shrink_to_fit();
+        self.tops.shrink_to_fit();
+    }
     /// The text so far: an append takes the incremental path, anything else
     /// parses afresh.
     pub fn set_text(&mut self, text: &str) {
@@ -734,7 +739,10 @@ pub(crate) fn install(lua: &mlua::Lua) {
 }
 
 /// A VM at rest: its parsed texts and the streams not asked for lately go. What
-/// is on show keeps its blocks; only something built again parses again.
+/// is on show keeps its blocks; only something built again parses again. A
+/// stream resting a while (a reply waiting on a tool) keeps only its parse, so
+/// its next chunk still parses only its tail: its last answer and that answer's
+/// table go, and the next is converted once.
 pub(crate) fn rest(lua: &mlua::Lua) {
     let Some(parsed) = lua.app_data_ref::<Parsed>() else {
         return;
@@ -751,6 +759,15 @@ pub(crate) fn rest(lua: &mlua::Lua) {
             streams.remove(&old);
         }
     }
+    for (key, _) in order
+        .iter()
+        .take_while(|(_, used)| now.duration_since(*used) > STREAM_RESTING)
+    {
+        if let Some((_, stream, last, kept)) = streams.get_mut(key) {
+            (*last, *kept) = (None, None);
+            stream.shrink_to_fit();
+        }
+    }
     streams.shrink_to_fit();
     order.shrink_to_fit();
 }
@@ -759,6 +776,8 @@ pub(crate) fn rest(lua: &mlua::Lua) {
 /// minute: a reply pausing on a tool call keeps its parser, and its next
 /// chunk doesn't parse the whole reply again.)
 const STREAM_QUIET: std::time::Duration = std::time::Duration::from_secs(60);
+/// A stream left this long keeps only its parse at rest (`rest`).
+const STREAM_RESTING: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How many texts and streams a script's `ui.markdown` keeps.
 const KEPT: usize = 256;
@@ -1704,6 +1723,13 @@ mod tests {
         );
         assert_eq!(ask(), first);
     }
+    /// Streams last asked for `ago`.
+    fn asked_ago(lua: &mlua::Lua, ago: std::time::Duration) {
+        let parsed = lua.app_data_ref::<Parsed>().expect("installed");
+        let then = std::time::Instant::now() - ago;
+        let mut order = parsed.stream_order.borrow_mut();
+        order.iter_mut().for_each(|(_, used)| *used = then);
+    }
     #[test]
     fn at_rest_a_stream_stays_until_it_has_been_quiet() {
         let lua = mlua::Lua::new();
@@ -1727,19 +1753,56 @@ mod tests {
         };
         rest(&lua);
         assert_eq!(streams(&lua), 1, "it may go on: asked for a moment ago");
-        {
-            let parsed = lua.app_data_ref::<Parsed>().expect("installed");
-            let mut order = parsed.stream_order.borrow_mut();
-            let long_ago =
-                std::time::Instant::now() - STREAM_QUIET - std::time::Duration::from_secs(1);
-            order.iter_mut().for_each(|(_, used)| *used = long_ago);
-        }
+        asked_ago(&lua, STREAM_RESTING + std::time::Duration::from_secs(1));
+        rest(&lua);
+        assert_eq!(streams(&lua), 1, "a reply waiting on a tool goes on");
+        asked_ago(&lua, STREAM_QUIET + std::time::Duration::from_secs(1));
         rest(&lua);
         assert_eq!(
             streams(&lua),
             0,
             "quiet this long, it has ended, or parses again if it goes on"
         );
+    }
+    #[test]
+    fn a_stream_resting_keeps_its_parse_alone_and_goes_on_from_its_tail() {
+        let lua = mlua::Lua::new();
+        install(&lua);
+        let paragraph = "Words arriving as a reply streams, with **bold** in them.\n\n";
+        let mut reply = paragraph.repeat(200);
+        let ask = |text: &str| {
+            let keyed = lua.create_table().unwrap();
+            keyed.set("key", "message-1").unwrap();
+            let text = mlua::Value::String(lua.create_string(text).unwrap());
+            script(&lua, (text, Some(keyed))).expect("its blocks")
+        };
+        ask(&reply);
+        reply.push_str(paragraph);
+        ask(&reply);
+        let held = |lua: &mlua::Lua| {
+            let parsed = lua.app_data_ref::<Parsed>().expect("installed");
+            let streams = parsed.streams.borrow();
+            let (_, stream, last, kept) = &streams["message-1"];
+            (last.is_some(), kept.is_some(), stream.last_parse_bytes())
+        };
+        assert!(held(&lua).0);
+        asked_ago(&lua, STREAM_RESTING + std::time::Duration::from_secs(1));
+        rest(&lua);
+        let (last, kept, _) = held(&lua);
+        assert!(!last && !kept, "its answer and table go at rest");
+        reply.push_str("And it goes on");
+        let blocks = ask(&reply);
+        let (last, _, bytes) = held(&lua);
+        assert!(last);
+        assert!(
+            bytes < paragraph.len() * 3,
+            "{bytes} bytes parsed: only the tail, not the {} of the reply",
+            reply.len()
+        );
+        let mlua::Value::Table(blocks) = blocks else {
+            panic!("its blocks: {blocks:?}");
+        };
+        assert_eq!(blocks.raw_len(), 202);
     }
     fn paths() -> Options {
         Options {
