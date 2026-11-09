@@ -20,7 +20,18 @@ wasmtime-wasi = { version = "48.0.8", default-features = false, features = ["p2"
 # The guest's standard output and error, as the session's log.
 bytes = "1"
 tokio = { version = "1", default-features = false, features = ["io-util"] }
+# Guests' shaders parsed ahead of wgpu, each loop's iterations counted
+# (loops.rs): the naga wgpu 29 uses, its modules handed to wgpu as they are.
+naga = { version = "29.0.4", default-features = false, features = ["wgsl-in"] }
+wgpu = { version = "29.0.4", default-features = false, features = ["naga-ir"] }
 # Popping an error scope (ready at once on native backends).
 pollster = "0.4"
 zgx = { path = "../zgx", version = "0.1.10", default-features = false }
 zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
+# The guest's own device shares its frames with zgx's as an external
+# surface's client does (Vulkan memory, IOSurfaces, Direct3D 12 handles).
+zgx-surface = { path = "../zgx-surface", version = "0.1.10", features = ["wgpu29"] }
+
+[target.'cfg(unix)'.dependencies]
+# An exit hook keeping released GPU devices from the driver's teardown.
+libc = "0.2"

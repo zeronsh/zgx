@@ -546,3 +546,178 @@ return ui.text {{ id = "s", function() return `{{app.status}}: {{app.error}}` en
     assert!(h.text("s").contains("not a component"), "{}", h.text("s"));
     let _ = WasmSpec::new("x");
 }
+
+/// Render `h` until `done`, for up to `seconds` of the wall clock: a GPU
+/// guest's frames come from a renderer drawing its element.
+fn render_until(
+    h: &mut Harness,
+    gpu: &mut zgx_gpu::GpuRenderer,
+    seconds: u64,
+    what: &str,
+    mut done: impl FnMut(&mut Harness) -> bool,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    while !done(h) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out: {what}\n{}",
+            h.tree()
+        );
+        render(h, gpu);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Each of the GPU's less common features works on the guest's device:
+/// overridable constants, the stencil, a render bundle, occlusion and
+/// timestamp queries (or a plain error where the adapter has none), and a
+/// pipeline made on another thread.
+#[test]
+fn the_gpu_features_each_work() {
+    let Some(mut gpu) = renderer() else { return };
+    let script = format!(
+        r#"local app = ui.app("f", {{ wasm = "{}" }})
+return ui.column {{
+    ui.text {{ id = "title", function() return `{{app.status}} {{app.error}} {{app.title}}` end }},
+    ui.surface {{ id = "f", app = app, w = 64, h = 64 }},
+}}"#,
+        guest("features").display()
+    );
+    let mut h = Harness::inline(&script);
+    render_until(&mut h, &mut gpu, 15, "every feature tried", |h| {
+        h.text("title").contains("async=")
+    });
+    let title = h.text("title");
+    for want in [
+        "constants=ok",
+        "stencil=ok",
+        "bundle=ok",
+        "occlusion=ok(",
+        "async=ok",
+    ] {
+        assert!(title.contains(want), "{want} in {title}");
+    }
+    assert!(
+        title.contains("timestamps=ok(") || title.contains("timestamps=unsupported"),
+        "{title}"
+    );
+    eprintln!("features: {title}");
+}
+
+/// A host's limits for the misbehaving guest's GPU: a short watchdog, few
+/// draws a submission.
+fn limited(script: &str) -> Harness {
+    let script = script.to_owned();
+    Harness::new(move |runtime| {
+        let host = ScriptHost::inline(runtime, "app", &script);
+        host.vet_wasm(|launch| {
+            Ok(launch
+                .asked
+                .clone()
+                .gpu_watchdog(std::time::Duration::from_millis(500))
+                .work_caps(100, 1 << 20)
+                .shader_loop_budget(1 << 16))
+        });
+        host
+    })
+}
+
+const GPU_TWO: &str = r#"
+local bad = ui.app("bad", { wasm = "{BAD}" })
+local good = ui.app("good", { wasm = "{GOOD}" })
+return ui.column {
+    ui.text { id = "bad", function() return `{bad.status}|{bad.error}|{bad.title}` end },
+    ui.text { id = "good", function() return `{good.status}|{good.title}` end },
+    ui.surface { id = "bad-surface", app = bad, w = 400, h = 120 },
+    ui.surface { id = "good-surface", app = good, w = 160, h = 100 },
+}
+"#;
+fn gpu_two() -> Option<(Harness, zgx_gpu::GpuRenderer)> {
+    let mut gpu = renderer()?;
+    let script = GPU_TWO
+        .replace("{BAD}", &guest("misbehave").to_string_lossy())
+        .replace("{GOOD}", &guest("cube").to_string_lossy());
+    let mut h = limited(&script);
+    render_until(&mut h, &mut gpu, 15, "both running", |h| {
+        h.text("bad").starts_with("running") && h.text("good").contains("fps")
+    });
+    Some((h, gpu))
+}
+
+/// Seconds of GPU work from a guest (ten submissions of a hundred draws of
+/// a shader looping two billion times a pixel): the loop budget keeps each
+/// invocation short, so the GPU turns to zgx's frames between them; the
+/// guest's own device's watchdog fails the session.
+#[test]
+fn a_stalling_shader_fails_its_session_and_zgx_keeps_drawing() {
+    let Some((mut h, mut gpu)) = gpu_two() else {
+        return;
+    };
+    click(&mut h, "bad-surface");
+    key(&mut h, "KeyG", None);
+    let started = std::time::Instant::now();
+    let mut slowest = std::time::Duration::ZERO;
+    let mut frames = 0;
+    let deadline = started + std::time::Duration::from_secs(15);
+    while !h.text("bad").starts_with("failed") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no watchdog: {}",
+            h.text("bad")
+        );
+        let at = std::time::Instant::now();
+        render(&mut h, &mut gpu);
+        let _ = gpu.readback().expect("zgx's frame");
+        slowest = slowest.max(at.elapsed());
+        frames += 1;
+    }
+    let failed_after = started.elapsed();
+    // After the failure, zgx goes on drawing while the guest's work may
+    // still run: frames come as fast as before.
+    for _ in 0..20 {
+        let at = std::time::Instant::now();
+        render(&mut h, &mut gpu);
+        let _ = gpu.readback().expect("zgx's frame");
+        slowest = slowest.max(at.elapsed());
+        frames += 1;
+    }
+    let bad = h.text("bad");
+    eprintln!(
+        "stall: failed after {:.2} s; zgx drew {frames} frames meanwhile, the slowest {:.1} ms; {bad}",
+        failed_after.as_secs_f64(),
+        slowest.as_secs_f64() * 1000.
+    );
+    assert!(
+        bad.contains("its GPU work for a call ran longer than 0.5 s: stopped"),
+        "{bad}"
+    );
+    // NVIDIA's driver turns to zgx's device between the guest's
+    // submissions: a frame waits for one at most (here about 150 ms).
+    assert!(
+        slowest < std::time::Duration::from_millis(400),
+        "zgx stalled: {slowest:?}"
+    );
+    assert_eq!(h.error(), None);
+    // The other guest, on a device of its own too, still runs.
+    let fps = h.text("good");
+    assert!(fps.starts_with("running"), "{fps}");
+}
+
+/// A submission past the host's caps (here 100 draws) is refused whole.
+#[test]
+fn a_submission_past_its_caps_is_refused() {
+    let Some((mut h, mut gpu)) = gpu_two() else {
+        return;
+    };
+    click(&mut h, "bad-surface");
+    key(&mut h, "KeyD", None);
+    render_until(&mut h, &mut gpu, 10, "the submission's answer", |h| {
+        h.text("bad").contains("submit=")
+    });
+    let bad = h.text("bad");
+    assert!(bad.starts_with("running"), "{bad}");
+    assert!(
+        bad.contains("submit=Err(\"submit: refused, draw: past a submission's 100 draws"),
+        "{bad}"
+    );
+}

@@ -122,6 +122,7 @@ impl App for Pixels {
             }
             InputEvent::Refresh(hz) => format!("refresh:{hz}"),
             InputEvent::GpuReset => "gpu-reset".into(),
+            InputEvent::PipelineReady(id) => format!("pipeline:{id}"),
         };
         self.title();
         host::request_frame();

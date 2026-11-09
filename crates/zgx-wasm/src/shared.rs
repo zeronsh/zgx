@@ -5,7 +5,6 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
-use zgx_gpu::wgpu;
 
 /// How a session ended.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,22 +28,24 @@ pub(crate) enum Note {
     RequestFrame,
     /// A frame to show (`Shared::frame`).
     Presented,
+    /// The guest's device can't import zgx's textures: it reads its frames
+    /// back, and zgx stops making them.
+    Unshared,
     Ended(Ended),
 }
 
 /// A frame the guest presented.
 pub(crate) enum Presented {
-    /// A texture on the renderer's device (the painter's `generation`th),
-    /// drawn by the GPU.
-    Texture {
-        texture: wgpu::Texture,
-        generation: u64,
-    },
-    /// RGBA8 premultiplied rows from the CPU (`present-pixels`).
+    /// One of zgx's shared textures, by its ring's generation and index,
+    /// drawn by the guest's device and its work done.
+    Shared { generation: u32, index: u32 },
+    /// Premultiplied rows from the CPU (`present-pixels`, RGBA) or read
+    /// back from the guest's device (BGRA).
     Pixels {
         pixels: Vec<u8>,
         width: u32,
         height: u32,
+        bgra: bool,
     },
 }
 
@@ -53,8 +54,9 @@ pub(crate) struct Shared {
     pub notes: Vec<Note>,
     /// The newest frame presented, not yet shown.
     pub frame: Option<Presented>,
-    /// Textures the UI no longer shows, the guest's to draw into again.
-    pub returned: Vec<wgpu::Texture>,
+    /// Shared textures zgx no longer reads (generation, index): the
+    /// guest's to draw into again.
+    pub released: Vec<(u32, u32)>,
 }
 
 /// The guest's way to the UI thread.
@@ -86,8 +88,8 @@ impl Link {
         // Every event sent was counted first (`Inner::input`).
         self.input.fetch_sub(1, Ordering::AcqRel);
     }
-    /// Textures the UI gave back.
-    pub fn returned(&self) -> Vec<wgpu::Texture> {
-        std::mem::take(&mut self.shared.lock().unwrap().returned)
+    /// Shared textures zgx gave back.
+    pub fn released(&self) -> Vec<(u32, u32)> {
+        std::mem::take(&mut self.shared.lock().unwrap().released)
     }
 }

@@ -100,9 +100,12 @@ interface types {
         /// The display's refresh rate, in Hz: as it is first known and as
         /// the window moves to another display.
         refresh(f32),
-        /// The host's GPU device changed: every GPU object made before is
+        /// The app's GPU device changed: every GPU object made before is
         /// dead. Make them again in the next frame.
         gpu-reset,
+        /// A pipeline made with `create-*-pipeline-async` is ready: its
+        /// future's `id`. Take it with the future's `take`.
+        pipeline-ready(u64),
     }
 
     enum cursor {
@@ -156,9 +159,11 @@ interface host {
     present-pixels: func(pixels: list<u8>, width: u32, height: u32) -> result<_, string>;
 }
 
-/// WebGPU on the host's own device: a subset of the W3C API, its names and
-/// rules (WGSL shaders, the same validation). Every object is the session's
-/// and goes with it; the host caps their count and memory.
+/// WebGPU on a device of the session's own, on the adapter zgx draws with: a
+/// subset of the W3C API, its names and rules (WGSL shaders, the same
+/// validation). Its frames are shared with zgx's device. Every object is
+/// the session's and goes with it; the host caps their count and memory, a
+/// submission's draws and workgroups, and how long a frame's GPU work takes.
 interface gpu {
     flags buffer-usage {
         map-read,
@@ -170,6 +175,7 @@ interface gpu {
         uniform,
         storage,
         indirect,
+        query-resolve,
     }
 
     flags texture-usage {
@@ -322,6 +328,23 @@ interface gpu {
         none,
         front,
         back,
+    }
+
+    enum stencil-operation {
+        keep,
+        zero,
+        replace,
+        invert,
+        increment-clamp,
+        decrement-clamp,
+        increment-wrap,
+        decrement-wrap,
+    }
+
+    enum query-type {
+        occlusion,
+        /// Needs the adapter's timestamp queries (`supports-timestamps`).
+        timestamp,
     }
 
     enum blend-factor {
@@ -557,11 +580,15 @@ interface gpu {
         attributes: list<vertex-attribute>,
     }
 
+    /// Pipeline-overridable constants (WGSL `override`), by name or id.
+    type constants = list<tuple<string, f64>>;
+
     record vertex-state {
         module: borrow<shader-module>,
         /// The module's only vertex entry point if none.
         entry-point: option<string>,
         buffers: list<vertex-buffer-layout>,
+        constants: constants,
     }
 
     record primitive-state {
@@ -572,10 +599,26 @@ interface gpu {
         unclipped-depth: bool,
     }
 
+    record stencil-face-state {
+        compare: compare-function,
+        fail-op: stencil-operation,
+        depth-fail-op: stencil-operation,
+        pass-op: stencil-operation,
+    }
+
+    record stencil-state {
+        front: stencil-face-state,
+        back: stencil-face-state,
+        read-mask: u32,
+        write-mask: u32,
+    }
+
     record depth-stencil-state {
         format: texture-format,
         depth-write-enabled: bool,
         depth-compare: compare-function,
+        /// None: every test passes and nothing is written.
+        stencil: option<stencil-state>,
         depth-bias: s32,
         depth-bias-slope-scale: f32,
         depth-bias-clamp: f32,
@@ -608,6 +651,7 @@ interface gpu {
         module: borrow<shader-module>,
         entry-point: option<string>,
         targets: list<option<color-target-state>>,
+        constants: constants,
     }
 
     record render-pipeline-descriptor {
@@ -626,6 +670,69 @@ interface gpu {
         layout: option<borrow<pipeline-layout>>,
         module: borrow<shader-module>,
         entry-point: option<string>,
+        constants: constants,
+    }
+
+    record query-set-descriptor {
+        label: option<string>,
+        kind: query-type,
+        /// At most 4096.
+        count: u32,
+    }
+
+    resource query-set {
+        count: func() -> u32;
+        kind: func() -> query-type;
+    }
+
+    /// Where a pass writes timestamps as it begins and ends.
+    record pass-timestamp-writes {
+        query-set: borrow<query-set>,
+        beginning-index: option<u32>,
+        end-index: option<u32>,
+    }
+
+    record render-bundle-depth-stencil {
+        format: texture-format,
+        depth-read-only: bool,
+        stencil-read-only: bool,
+    }
+
+    record render-bundle-encoder-descriptor {
+        label: option<string>,
+        color-formats: list<option<texture-format>>,
+        depth-stencil: option<render-bundle-depth-stencil>,
+        sample-count: u32,
+    }
+
+    /// Draws recorded once and run by many passes (`execute-bundles`).
+    resource render-bundle;
+
+    resource render-bundle-encoder {
+        set-pipeline: func(pipeline: borrow<render-pipeline>);
+        set-bind-group: func(index: u32, group: option<borrow<bind-group>>, dynamic-offsets: list<u32>);
+        set-vertex-buffer: func(slot: u32, buffer: borrow<buffer>, offset: u64, size: option<u64>);
+        set-index-buffer: func(buffer: borrow<buffer>, format: index-format, offset: u64, size: option<u64>);
+        draw: func(vertex-count: u32, instance-count: u32, first-vertex: u32, first-instance: u32);
+        draw-indexed: func(index-count: u32, instance-count: u32, first-index: u32, base-vertex: s32, first-instance: u32);
+        draw-indirect: func(indirect: borrow<buffer>, offset: u64);
+        draw-indexed-indirect: func(indirect: borrow<buffer>, offset: u64);
+        /// What was recorded; its errors are the `err`. The encoder is spent.
+        finish: static func(this: render-bundle-encoder, label: option<string>) -> result<render-bundle, string>;
+    }
+
+    /// A render pipeline being made on another thread.
+    resource render-pipeline-future {
+        /// What `pipeline-ready` names it by.
+        id: func() -> u64;
+        /// The pipeline (or why not) once made, the first time asked; none
+        /// before.
+        take: func() -> option<result<render-pipeline, string>>;
+    }
+
+    resource compute-pipeline-future {
+        id: func() -> u64;
+        take: func() -> option<result<compute-pipeline, string>>;
     }
 
     record buffer-copy {
@@ -656,12 +763,20 @@ interface gpu {
         depth-clear: option<f32>,
         depth-store: store-op,
         depth-read-only: bool,
+        /// A stencil format's: cleared to this first (kept if none) and
+        /// stored so. Both none: the stencil is read only (and a depth-only
+        /// format's must be).
+        stencil-clear: option<u32>,
+        stencil-store: option<store-op>,
     }
 
     record render-pass-descriptor {
         label: option<string>,
         color-attachments: list<option<render-pass-color-attachment>>,
         depth-stencil-attachment: option<render-pass-depth-attachment>,
+        timestamp-writes: option<pass-timestamp-writes>,
+        /// The occlusion queries `begin-occlusion-query` counts into.
+        occlusion-query-set: option<borrow<query-set>>,
     }
 
     /// A render pass being recorded: `end` (or dropping it) finishes it.
@@ -678,6 +793,9 @@ interface gpu {
         draw-indexed: func(index-count: u32, instance-count: u32, first-index: u32, base-vertex: s32, first-instance: u32);
         draw-indirect: func(indirect: borrow<buffer>, offset: u64);
         draw-indexed-indirect: func(indirect: borrow<buffer>, offset: u64);
+        execute-bundles: func(bundles: list<borrow<render-bundle>>);
+        begin-occlusion-query: func(query-index: u32);
+        end-occlusion-query: func();
         end: func();
     }
 
@@ -693,12 +811,15 @@ interface gpu {
     resource command-encoder {
         /// Errors of what is recorded show as `finish`'s or `submit`'s.
         begin-render-pass: func(descriptor: render-pass-descriptor) -> result<render-pass, string>;
-        begin-compute-pass: func(label: option<string>) -> result<compute-pass, string>;
+        begin-compute-pass: func(label: option<string>, timestamp-writes: option<pass-timestamp-writes>) -> result<compute-pass, string>;
         copy-buffer-to-buffer: func(source: borrow<buffer>, source-offset: u64, destination: borrow<buffer>, destination-offset: u64, size: u64);
         copy-buffer-to-texture: func(source: buffer-copy, destination: texture-copy, size: extent);
         copy-texture-to-buffer: func(source: texture-copy, destination: buffer-copy, size: extent);
         copy-texture-to-texture: func(source: texture-copy, destination: texture-copy, size: extent);
         clear-buffer: func(buffer: borrow<buffer>, offset: u64, size: option<u64>);
+        /// Queries' results into a `query-resolve` buffer: a u64 each
+        /// (timestamps in ticks: `get-timestamp-period` nanoseconds each).
+        resolve-query-set: func(query-set: borrow<query-set>, first-query: u32, query-count: u32, destination: borrow<buffer>, destination-offset: u64);
         /// What was recorded, to `submit`. The encoder is spent.
         finish: static func(this: command-encoder) -> result<command-buffer, string>;
     }
@@ -708,6 +829,11 @@ interface gpu {
     ready: func() -> bool;
     get-adapter-info: func() -> option<adapter-info>;
     get-limits: func() -> limits;
+    /// Whether timestamp queries can be made (the adapter's
+    /// `TIMESTAMP_QUERY`).
+    supports-timestamps: func() -> bool;
+    /// Nanoseconds a timestamp tick.
+    get-timestamp-period: func() -> f32;
     /// The format `current-texture` has: bgra8unorm, viewable as
     /// bgra8unorm-srgb where the device can (`texture-view-descriptor.format`).
     preferred-format: func() -> texture-format;
@@ -728,6 +854,13 @@ interface gpu {
     create-bind-group: func(label: option<string>, layout: borrow<bind-group-layout>, entries: list<bind-group-entry>) -> result<bind-group, string>;
     create-render-pipeline: func(descriptor: render-pipeline-descriptor) -> result<render-pipeline, string>;
     create-compute-pipeline: func(descriptor: compute-pipeline-descriptor) -> result<compute-pipeline, string>;
+    /// Made on another thread (compiling a pipeline can take a while):
+    /// `pipeline-ready` says when to `take` it.
+    create-render-pipeline-async: func(descriptor: render-pipeline-descriptor) -> result<render-pipeline-future, string>;
+    create-compute-pipeline-async: func(descriptor: compute-pipeline-descriptor) -> result<compute-pipeline-future, string>;
+    create-render-bundle-encoder: func(descriptor: render-bundle-encoder-descriptor) -> result<render-bundle-encoder, string>;
+    /// Timestamps without the adapter's support are an `err`.
+    create-query-set: func(descriptor: query-set-descriptor) -> result<query-set, string>;
     create-command-encoder: func(label: option<string>) -> result<command-encoder, string>;
 
     write-buffer: func(buffer: borrow<buffer>, offset: u64, data: list<u8>) -> result<_, string>;

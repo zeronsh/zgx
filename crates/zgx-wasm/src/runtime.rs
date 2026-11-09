@@ -11,7 +11,7 @@
 //! ends that session alone.
 use crate::{
     WasmOptions,
-    gpu::Gpu,
+    device::{Gpu, HostGpu, WorkCaps},
     shared::{Ended, Link, Note, Presented},
 };
 use bindings::zgx::app::types as wit;
@@ -29,7 +29,6 @@ use wasmtime::{
     component::{Component, HasSelf, Linker, ResourceTable},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
-use zgx_gpu::wgpu;
 
 pub(crate) mod bindings {
     wasmtime::component::bindgen!({
@@ -51,6 +50,11 @@ pub(crate) mod bindings {
             "zgx:app/gpu.command-encoder": crate::gpu::CommandEncoder,
             "zgx:app/gpu.render-pass": crate::gpu::RenderPass,
             "zgx:app/gpu.compute-pass": crate::gpu::ComputePass,
+            "zgx:app/gpu.query-set": crate::bundles::QuerySet,
+            "zgx:app/gpu.render-bundle": crate::bundles::RenderBundle,
+            "zgx:app/gpu.render-bundle-encoder": crate::bundles::RenderBundleEncoder,
+            "zgx:app/gpu.render-pipeline-future": crate::pipelines::RenderPipelineFuture,
+            "zgx:app/gpu.compute-pipeline-future": crate::pipelines::ComputePipelineFuture,
         },
     });
 }
@@ -122,17 +126,22 @@ fn runtime() -> Result<&'static Runtime, String> {
 
 /// What the UI thread tells the guest's.
 pub(crate) enum ToGuest {
-    /// The renderer's device (again after it changed), and whether its
-    /// textures can be viewed as sRGB.
-    Device {
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        srgb_views: bool,
-        generation: u64,
+    /// The adapter zgx draws with (again as it changes): the guest's own
+    /// device is made on it.
+    Device(HostGpu),
+    /// zgx's textures for its frames, a ring's generation (none: nothing
+    /// is shared; it reads its frames back).
+    Buffers {
+        generation: u32,
+        buffers: Vec<zgx_surface::protocol::Buffer>,
+        /// zgx's clearing of them, to wait for before drawing.
+        cleared: Option<crate::device::Cleared>,
     },
     /// The element's size, scale and refresh rate: the first is `init`.
     Resize(wit::SurfaceInfo),
     Event(wit::InputEvent),
+    /// A pipeline made on another thread is ready (`pipeline-ready`).
+    PipelineReady(u64),
     /// Draw a frame for this time (seconds since the session began).
     Frame(f64),
     Close,
@@ -270,6 +279,10 @@ pub(crate) struct Guest {
     timeout: Duration,
     timed_out: bool,
     closing: Arc<AtomicBool>,
+    /// Its own thread's channel, for pipelines made elsewhere to say so.
+    pub(crate) to_self: mpsc::Sender<ToGuest>,
+    pub(crate) pending: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) next_future: u64,
 }
 impl WasiView for Guest {
     fn ctx(&mut self) -> WasiCtxView<'_> {
@@ -337,6 +350,7 @@ impl bindings::zgx::app::host::Host for Guest {
             pixels,
             width,
             height,
+            bgra: false,
         });
         self.gpu.take_back(replaced);
         Ok(Ok(()))
@@ -349,6 +363,7 @@ impl bindings::zgx::app::host::Host for Guest {
 pub(crate) fn start(
     options: WasmOptions,
     rx: mpsc::Receiver<ToGuest>,
+    to_self: mpsc::Sender<ToGuest>,
     link: Link,
     log: Log,
     closing: Arc<AtomicBool>,
@@ -359,7 +374,15 @@ pub(crate) fn start(
         .name("zgx-wasm guest".into())
         .spawn(move || {
             let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(options, rx, link.clone(), log, closing, frame_asked)
+                run(
+                    options,
+                    rx,
+                    to_self,
+                    link.clone(),
+                    log,
+                    closing,
+                    frame_asked,
+                )
             }))
             .unwrap_or_else(|panic| {
                 let why = panic
@@ -382,6 +405,7 @@ pub(crate) fn start(
 fn run(
     options: WasmOptions,
     rx: mpsc::Receiver<ToGuest>,
+    to_self: mpsc::Sender<ToGuest>,
     link: Link,
     log: Log,
     closing: Arc<AtomicBool>,
@@ -449,7 +473,16 @@ fn run(
             wasi,
             table: ResourceTable::new(),
             limits,
-            gpu: Gpu::new(options.gpu_bytes, options.gpu_objects),
+            gpu: Gpu::new(
+                options.gpu_bytes,
+                options.gpu_objects,
+                options.gpu_watchdog,
+                WorkCaps {
+                    draws: options.max_draws,
+                    workgroups: options.max_workgroups,
+                },
+                options.shader_loop_budget,
+            ),
             link: link.clone(),
             log: log.clone(),
             calling: "instantiate",
@@ -457,6 +490,9 @@ fn run(
             timeout: options.timeout,
             timed_out: false,
             closing: closing.clone(),
+            to_self,
+            pending: Arc::default(),
+            next_future: 0,
         },
     );
     store.limiter(|guest| &mut guest.limits);
@@ -472,7 +508,7 @@ fn run(
         Ok(UpdateDeadline::Continue(1))
     });
     let mut session = Session {
-        store,
+        store: Some(store),
         ticker: runtime.ticker.clone(),
     };
     let app = match session.call("instantiate", |store| {
@@ -494,30 +530,33 @@ fn run(
         for message in std::iter::once(first).chain(rx.try_iter()) {
             match message {
                 ToGuest::Close => return Ended::Closed,
-                ToGuest::Device {
-                    device,
-                    queue,
-                    srgb_views,
+                ToGuest::Device(host) => {
+                    let guest = session.data();
+                    match guest.gpu.set_host(&host, &guest.log) {
+                        Ok(reset) => {
+                            if reset
+                                && inited
+                                && let Err(ended) = session.event(&app, &wit::InputEvent::GpuReset)
+                            {
+                                return ended;
+                            }
+                        }
+                        Err(why) => guest.log.line(format!("no GPU: {why}")),
+                    }
+                }
+                ToGuest::Buffers {
                     generation,
+                    buffers,
+                    cleared,
                 } => {
-                    let reset = session
-                        .store
-                        .data_mut()
-                        .gpu
-                        .set_device(device, queue, srgb_views, generation);
-                    if reset
-                        && inited
-                        && let Err(ended) = session.event(&app, &wit::InputEvent::GpuReset)
-                    {
-                        return ended;
+                    let guest = session.data();
+                    if let Err(why) = guest.gpu.set_buffers(generation, buffers, cleared) {
+                        guest.log.line(why);
+                        link.note(Note::Unshared);
                     }
                 }
                 ToGuest::Resize(info) => {
-                    session
-                        .store
-                        .data_mut()
-                        .gpu
-                        .set_size(info.width, info.height);
+                    session.data().gpu.set_size(info.width, info.height);
                     if !inited {
                         match session.call("init", |store| app.call_init(&mut *store, info)) {
                             Ok(Ok(())) => {}
@@ -544,20 +583,29 @@ fn run(
                         return ended;
                     }
                 }
+                ToGuest::PipelineReady(id) => {
+                    if inited
+                        && let Err(ended) = session.event(&app, &wit::InputEvent::PipelineReady(id))
+                    {
+                        return ended;
+                    }
+                }
                 ToGuest::Frame(time) => frame = Some(time),
             }
         }
         if let Some(time) = frame {
             if inited {
-                session.store.data_mut().gpu.begin_frame();
+                session.data().gpu.begin_frame();
                 let drawn = session.call("frame", |store| app.call_frame(&mut *store, time));
-                let guest = session.store.data_mut();
-                if let Some((texture, generation)) = guest.gpu.end_frame() {
-                    let replaced = guest.link.present(Presented::Texture {
-                        texture,
-                        generation,
-                    });
-                    guest.gpu.take_back(replaced);
+                let guest = session.data();
+                // Its GPU work done (the watchdog), then shown.
+                match guest.gpu.end_frame() {
+                    Ok(Some(frame)) => {
+                        let replaced = guest.link.present(frame);
+                        guest.gpu.take_back(replaced);
+                    }
+                    Ok(None) => {}
+                    Err(why) => return Ended::Failed(why),
                 }
                 if let Err(ended) = drawn {
                     return ended;
@@ -565,14 +613,37 @@ fn run(
             }
             frame_asked.store(false, Ordering::Release);
         }
+        if let Some(lost) = session.data().gpu.lost() {
+            return Ended::Failed(lost);
+        }
     }
 }
 
 struct Session {
-    store: Store<Guest>,
+    /// Taken as it ends, to be dropped once its GPU work is done (`reap`).
+    store: Option<Store<Guest>>,
     ticker: Arc<Ticker>,
 }
+impl Drop for Session {
+    fn drop(&mut self) {
+        let Some(store) = self.store.take() else {
+            return;
+        };
+        match store.data().gpu.device.as_ref().map(|d| d.device.clone()) {
+            Some(device) => crate::device::reap(device, store),
+            None => drop(store),
+        }
+    }
+}
 impl Session {
+    fn store(&mut self) -> &mut Store<Guest> {
+        self.store
+            .as_mut()
+            .expect("the store, until the session drops")
+    }
+    fn data(&mut self) -> &mut Guest {
+        self.store().data_mut()
+    }
     fn event(&mut self, app: &bindings::App, event: &wit::InputEvent) -> Result<(), Ended> {
         self.call("event", |store| app.call_event(&mut *store, event))
     }
@@ -585,28 +656,28 @@ impl Session {
         f: impl FnOnce(&mut Store<Guest>) -> wasmtime::Result<R>,
     ) -> Result<R, Ended> {
         {
-            let guest = self.store.data_mut();
+            let guest = self.data();
             guest.calling = what;
             guest.deadline = Instant::now() + guest.timeout;
+            guest.gpu.since = Instant::now();
             guest.timed_out = false;
         }
-        let scope = self.store.data().gpu.scope();
-        self.store.set_epoch_deadline(1);
+        let scope = self.data().gpu.scope();
+        self.store().set_epoch_deadline(1);
         self.ticker.enter();
-        let result = f(&mut self.store);
+        let result = f(self.store());
         self.ticker.leave();
         if let Some(scope) = scope {
             for error in scope.pop() {
-                self.store
-                    .data()
+                self.data()
                     .log
                     .line(format!("gpu error in `{what}`: {error}"));
             }
         }
         result.map_err(|error| self.ended(what, error))
     }
-    fn ended(&self, what: &str, error: wasmtime::Error) -> Ended {
-        let guest = self.store.data();
+    fn ended(&mut self, what: &str, error: wasmtime::Error) -> Ended {
+        let guest = self.data();
         if let Some(exit) = error.downcast_ref::<wasmtime_wasi::I32Exit>() {
             return Ended::Exited(Some(exit.0));
         }

@@ -7,8 +7,9 @@
 //! lines of its log), and before wgpu where a mistake would panic it (a
 //! buffer's range). The session's objects are capped in count and bytes.
 use crate::{
+    bundles::{QuerySet, RenderBundle},
+    device::{Device, Scope},
     runtime::{Guest, bindings::zgx::app::gpu as wit},
-    shared::Presented,
 };
 use std::{borrow::Cow, num::NonZeroU64, time::Duration};
 use wasmtime::component::Resource;
@@ -18,9 +19,6 @@ use zgx_gpu::wgpu;
 const MAX_WGSL: usize = 4 << 20;
 /// The most a buffer read back may be.
 const MAX_READ: u64 = 64 << 20;
-/// Frame textures alive at once: one showing, one waiting, one drawn into,
-/// and one more while a new size takes over.
-const FRAME_TEXTURES: usize = 4;
 
 pub struct Buffer {
     pub(crate) buffer: wgpu::Buffer,
@@ -33,19 +31,19 @@ pub struct Texture {
 }
 pub struct TextureView(wgpu::TextureView);
 pub struct Sampler(wgpu::Sampler);
-pub struct ShaderModule(wgpu::ShaderModule);
+pub struct ShaderModule(pub(crate) wgpu::ShaderModule);
 pub struct BindGroupLayout(wgpu::BindGroupLayout);
-pub struct PipelineLayout(wgpu::PipelineLayout);
-pub struct BindGroup(wgpu::BindGroup);
-pub struct RenderPipeline(wgpu::RenderPipeline);
-pub struct ComputePipeline(wgpu::ComputePipeline);
+pub struct PipelineLayout(pub(crate) wgpu::PipelineLayout);
+pub struct BindGroup(pub(crate) wgpu::BindGroup);
+pub struct RenderPipeline(pub(crate) wgpu::RenderPipeline);
+pub struct ComputePipeline(pub(crate) wgpu::ComputePipeline);
 pub struct CommandBuffer(wgpu::CommandBuffer);
 pub struct CommandEncoder(Option<wgpu::CommandEncoder>);
 pub struct RenderPass(Option<wgpu::RenderPass<'static>>);
 pub struct ComputePass(Option<wgpu::ComputePass<'static>>);
 
 /// What an object costs the session.
-trait Charged: Send + 'static {
+pub(crate) trait Charged: Send + 'static {
     fn bytes(&self) -> u64 {
         0
     }
@@ -73,190 +71,14 @@ impl Charged for CommandEncoder {}
 impl Charged for RenderPass {}
 impl Charged for ComputePass {}
 
-struct Device {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    srgb_views: bool,
-}
-
-/// The session's GPU: the renderer's device once the element is drawn, its
-/// frame textures, and what the guest holds.
-pub(crate) struct Gpu {
-    device: Option<Device>,
-    max_bytes: u64,
-    max_objects: u32,
-    bytes: u64,
-    objects: u32,
-    /// The element's size in device pixels.
-    size: (u32, u32),
-    in_frame: bool,
-    /// This frame's texture, once asked for.
-    current: Option<wgpu::Texture>,
-    /// Frame textures of this device, and those free to draw into.
-    pool: Vec<wgpu::Texture>,
-    free: Vec<wgpu::Texture>,
-    /// The painter's number for the device (`Presented::Texture`).
-    generation: u64,
-}
-
-/// Errors captured on the guest's thread while it is alive.
-pub(crate) struct Scope {
-    guards: Vec<wgpu::ErrorScopeGuard>,
-}
-impl Scope {
-    fn push(device: &wgpu::Device) -> Self {
-        Self {
-            guards: [
-                wgpu::ErrorFilter::Validation,
-                wgpu::ErrorFilter::OutOfMemory,
-                wgpu::ErrorFilter::Internal,
-            ]
-            .into_iter()
-            .map(|filter| device.push_error_scope(filter))
-            .collect(),
-        }
-    }
-    pub fn pop(mut self) -> Vec<String> {
-        let mut errors = Vec::new();
-        while let Some(guard) = self.guards.pop() {
-            if let Some(error) = pollster::block_on(guard.pop()) {
-                errors.push(error.to_string());
-            }
-        }
-        errors
-    }
-}
-
-impl Gpu {
-    pub fn new(max_bytes: u64, max_objects: u32) -> Self {
-        Self {
-            device: None,
-            max_bytes,
-            max_objects,
-            bytes: 0,
-            objects: 0,
-            size: (0, 0),
-            in_frame: false,
-            current: None,
-            pool: Vec::new(),
-            free: Vec::new(),
-            generation: 0,
-        }
-    }
-    /// The renderer's device: whether it replaced another (every object the
-    /// guest made is then dead: `gpu-reset`).
-    pub fn set_device(
-        &mut self,
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        srgb_views: bool,
-        generation: u64,
-    ) -> bool {
-        self.generation = generation;
-        if self.device.as_ref().is_some_and(|d| d.device == device) {
-            return false;
-        }
-        let reset = self.device.is_some();
-        self.pool.clear();
-        self.free.clear();
-        self.current = None;
-        self.device = Some(Device {
-            device,
-            queue,
-            srgb_views,
-        });
-        reset
-    }
-    pub fn set_size(&mut self, width: u32, height: u32) {
-        self.size = (width, height);
-        let size = self.size;
-        // Free ones of another size go now; those still in use (showing,
-        // waiting) as they come back (`give_back`).
-        let stale: Vec<wgpu::Texture> = self
-            .free
-            .iter()
-            .filter(|t| (t.width(), t.height()) != size)
-            .cloned()
-            .collect();
-        self.free.retain(|t| (t.width(), t.height()) == size);
-        self.pool.retain(|t| !stale.contains(t));
-    }
-    /// Errors the guest's call leaves uncaught, captured from now.
-    pub fn scope(&self) -> Option<Scope> {
-        self.device.as_ref().map(|d| Scope::push(&d.device))
-    }
-    pub fn begin_frame(&mut self) {
-        self.in_frame = true;
-        self.current = None;
-    }
-    /// The frame's texture, if the guest drew one.
-    pub fn end_frame(&mut self) -> Option<(wgpu::Texture, u64)> {
-        self.in_frame = false;
-        self.current.take().map(|t| (t, self.generation))
-    }
-    /// A frame replaced unseen, or shown and given back: free to draw into
-    /// again if it is this device's and the element's size.
-    pub fn take_back(&mut self, frame: Option<Presented>) {
-        if let Some(Presented::Texture { texture, .. }) = frame {
-            self.give_back(texture);
-        }
-    }
-    fn give_back(&mut self, texture: wgpu::Texture) {
-        let Some(at) = self.pool.iter().position(|t| *t == texture) else {
-            return;
-        };
-        if (texture.width(), texture.height()) != self.size {
-            self.pool.swap_remove(at);
-        } else if !self.free.contains(&texture) {
-            self.free.push(texture);
-        }
-    }
-    /// A texture to draw this frame into.
-    fn acquire(&mut self, returned: Vec<wgpu::Texture>) -> Result<wgpu::Texture, String> {
-        for texture in returned {
-            self.give_back(texture);
-        }
-        let Some(device) = &self.device else {
-            return Err("current-texture: no GPU device".into());
-        };
-        let (width, height) = self.size;
-        if width == 0 || height == 0 {
-            return Err("current-texture: the element has no size".into());
-        }
-        if let Some(texture) = self.free.pop() {
-            return Ok(texture);
-        }
-        if self.pool.len() >= FRAME_TEXTURES {
-            return Err("current-texture: every frame texture is in use".into());
-        }
-        let srgb = [wgpu::TextureFormat::Bgra8UnormSrgb];
-        let texture = device.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("zgx-wasm frame"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Bgra8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::COPY_DST,
-            view_formats: if device.srgb_views { &srgb } else { &[] },
-        });
-        self.pool.push(texture.clone());
-        Ok(texture)
-    }
-}
-
-const NO_DEVICE: &str = "no GPU device yet: GPU objects are made in `frame`";
+pub(crate) const NO_DEVICE: &str = "no GPU device yet: GPU objects are made in `frame`";
 
 impl Guest {
     /// `f` on the device, its wgpu errors the `Err`.
-    fn checked<T>(&self, f: impl FnOnce(&Device) -> Result<T, String>) -> Result<T, String> {
+    pub(crate) fn checked<T>(
+        &self,
+        f: impl FnOnce(&Device) -> Result<T, String>,
+    ) -> Result<T, String> {
         let device = self.gpu.device.as_ref().ok_or(NO_DEVICE)?;
         let scope = Scope::push(&device.device);
         let value = f(device);
@@ -268,7 +90,10 @@ impl Guest {
         }
     }
     /// An object for the guest, counted against the session's caps.
-    fn hold<T: Charged>(&mut self, value: T) -> wasmtime::Result<Result<Resource<T>, String>> {
+    pub(crate) fn hold<T: Charged>(
+        &mut self,
+        value: T,
+    ) -> wasmtime::Result<Result<Resource<T>, String>> {
         let bytes = value.bytes();
         if self.gpu.objects >= self.gpu.max_objects {
             return Ok(Err(format!(
@@ -286,17 +111,34 @@ impl Guest {
         self.gpu.bytes += bytes;
         Ok(Ok(self.table.push(value)?))
     }
-    fn release<T: Charged>(&mut self, handle: Resource<T>) -> wasmtime::Result<T> {
+    pub(crate) fn release<T: Charged>(&mut self, handle: Resource<T>) -> wasmtime::Result<T> {
         let value = self.table.delete(handle)?;
         self.gpu.objects = self.gpu.objects.saturating_sub(1);
         self.gpu.bytes = self.gpu.bytes.saturating_sub(value.bytes());
         Ok(value)
     }
+    /// Count `draws` and `workgroups` against the submission's caps: past
+    /// them the command is left out and the submission refused.
+    pub(crate) fn spend(&mut self, draws: u64, workgroups: u64, what: &str) -> bool {
+        let gpu = &mut self.gpu;
+        gpu.draws = gpu.draws.saturating_add(draws);
+        gpu.workgroups = gpu.workgroups.saturating_add(workgroups);
+        if gpu.draws > gpu.caps.draws || gpu.workgroups > gpu.caps.workgroups {
+            if gpu.over.is_none() {
+                gpu.over = Some(format!(
+                    "{what}: past a submission's {} draws or {} workgroups",
+                    gpu.caps.draws, gpu.caps.workgroups
+                ));
+            }
+            return false;
+        }
+        true
+    }
     /// A line of the log for what a method with no result got wrong.
-    fn misuse(&self, what: &str, why: impl std::fmt::Display) {
+    pub(crate) fn misuse(&self, what: &str, why: impl std::fmt::Display) {
         self.log.line(format!("gpu: {what}: {why}"));
     }
-    fn buffer(&self, handle: &Resource<Buffer>) -> wasmtime::Result<wgpu::Buffer> {
+    pub(crate) fn buffer(&self, handle: &Resource<Buffer>) -> wasmtime::Result<wgpu::Buffer> {
         Ok(self.table.get(handle)?.buffer.clone())
     }
     fn texture_copy(
@@ -318,7 +160,7 @@ impl Guest {
 
 /// `offset..offset + size` (to its end if `size` is none) of `buffer`, or
 /// why not: wgpu panics on an empty or overlong slice.
-fn range(
+pub(crate) fn range(
     buffer: &wgpu::Buffer,
     offset: u64,
     size: Option<u64>,
@@ -574,6 +416,9 @@ impl wit::HostRenderPass for Guest {
             self.misuse("draw", "counts past 2³²");
             return Ok(());
         };
+        if !self.spend(1, 0, "draw") {
+            return Ok(());
+        }
         if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
             pass.draw(first_vertex..vertices, first_instance..instances);
         }
@@ -595,6 +440,9 @@ impl wit::HostRenderPass for Guest {
             self.misuse("draw-indexed", "counts past 2³²");
             return Ok(());
         };
+        if !self.spend(1, 0, "draw-indexed") {
+            return Ok(());
+        }
         if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
             pass.draw_indexed(first_index..indices, base_vertex, first_instance..instances);
         }
@@ -607,6 +455,9 @@ impl wit::HostRenderPass for Guest {
         offset: u64,
     ) -> wasmtime::Result<()> {
         let buffer = self.buffer(&indirect)?;
+        if !self.spend(1, 0, "draw-indirect") {
+            return Ok(());
+        }
         if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
             pass.draw_indirect(&buffer, offset);
         }
@@ -619,8 +470,47 @@ impl wit::HostRenderPass for Guest {
         offset: u64,
     ) -> wasmtime::Result<()> {
         let buffer = self.buffer(&indirect)?;
+        if !self.spend(1, 0, "draw-indexed-indirect") {
+            return Ok(());
+        }
         if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
             pass.draw_indexed_indirect(&buffer, offset);
+        }
+        Ok(())
+    }
+    fn execute_bundles(
+        &mut self,
+        this: Resource<RenderPass>,
+        bundles: Vec<Resource<RenderBundle>>,
+    ) -> wasmtime::Result<()> {
+        let mut held = Vec::new();
+        let mut draws = 0u64;
+        for bundle in &bundles {
+            let bundle = self.table.get(bundle)?;
+            draws = draws.saturating_add(bundle.draws);
+            held.push(bundle.bundle.clone());
+        }
+        if !self.spend(draws, 0, "execute-bundles") {
+            return Ok(());
+        }
+        if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
+            pass.execute_bundles(held.iter());
+        }
+        Ok(())
+    }
+    fn begin_occlusion_query(
+        &mut self,
+        this: Resource<RenderPass>,
+        query_index: u32,
+    ) -> wasmtime::Result<()> {
+        if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
+            pass.begin_occlusion_query(query_index);
+        }
+        Ok(())
+    }
+    fn end_occlusion_query(&mut self, this: Resource<RenderPass>) -> wasmtime::Result<()> {
+        if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
+            pass.end_occlusion_query();
         }
         Ok(())
     }
@@ -668,6 +558,10 @@ impl wit::HostComputePass for Guest {
         y: u32,
         z: u32,
     ) -> wasmtime::Result<()> {
+        let groups = u64::from(x) * u64::from(y) * u64::from(z);
+        if !self.spend(0, groups, "dispatch-workgroups") {
+            return Ok(());
+        }
         if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
             pass.dispatch_workgroups(x, y, z);
         }
@@ -719,6 +613,18 @@ impl wit::HostCommandEncoder for Guest {
             Some(d) => Some((self.table.get(&d.view)?.0.clone(), d)),
             None => None,
         };
+        let timestamps = match &descriptor.timestamp_writes {
+            Some(t) => Some((
+                self.table.get(&t.query_set)?.set.clone(),
+                t.beginning_index,
+                t.end_index,
+            )),
+            None => None,
+        };
+        let occlusion = match &descriptor.occlusion_query_set {
+            Some(set) => Some(self.table.get(set)?.set.clone()),
+            None => None,
+        };
         let Some(encoder) = &mut self.table.get_mut(&this)?.0 else {
             return Ok(Err("begin-render-pass: the encoder is finished".into()));
         };
@@ -754,9 +660,27 @@ impl wit::HostCommandEncoder for Guest {
                         },
                         store: store_op(d.depth_store),
                     }),
-                    stencil_ops: None,
+                    // Neither said: the stencil is read only (a depth-only
+                    // format's must be).
+                    stencil_ops: (d.stencil_clear.is_some() || d.stencil_store.is_some()).then(
+                        || wgpu::Operations {
+                            load: match d.stencil_clear {
+                                Some(value) => wgpu::LoadOp::Clear(value),
+                                None => wgpu::LoadOp::Load,
+                            },
+                            store: d.stencil_store.map_or(wgpu::StoreOp::Store, store_op),
+                        },
+                    ),
                 }
             }),
+            timestamp_writes: timestamps.as_ref().map(|(set, beginning, end)| {
+                wgpu::RenderPassTimestampWrites {
+                    query_set: set,
+                    beginning_of_pass_write_index: *beginning,
+                    end_of_pass_write_index: *end,
+                }
+            }),
+            occlusion_query_set: occlusion.as_ref(),
             ..Default::default()
         });
         let pass = pass.forget_lifetime();
@@ -766,17 +690,52 @@ impl wit::HostCommandEncoder for Guest {
         &mut self,
         this: Resource<CommandEncoder>,
         label: Option<String>,
+        timestamp_writes: Option<wit::PassTimestampWrites>,
     ) -> wasmtime::Result<Result<Resource<ComputePass>, String>> {
+        let timestamps = match &timestamp_writes {
+            Some(t) => Some((
+                self.table.get(&t.query_set)?.set.clone(),
+                t.beginning_index,
+                t.end_index,
+            )),
+            None => None,
+        };
         let Some(encoder) = &mut self.table.get_mut(&this)?.0 else {
             return Ok(Err("begin-compute-pass: the encoder is finished".into()));
         };
         let pass = encoder
             .begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: label.as_deref(),
-                timestamp_writes: None,
+                timestamp_writes: timestamps.as_ref().map(|(set, beginning, end)| {
+                    wgpu::ComputePassTimestampWrites {
+                        query_set: set,
+                        beginning_of_pass_write_index: *beginning,
+                        end_of_pass_write_index: *end,
+                    }
+                }),
             })
             .forget_lifetime();
         self.hold(ComputePass(Some(pass)))
+    }
+    fn resolve_query_set(
+        &mut self,
+        this: Resource<CommandEncoder>,
+        query_set: Resource<QuerySet>,
+        first_query: u32,
+        query_count: u32,
+        destination: Resource<Buffer>,
+        destination_offset: u64,
+    ) -> wasmtime::Result<()> {
+        let set = self.table.get(&query_set)?.set.clone();
+        let buffer = self.buffer(&destination)?;
+        let Some(end) = first_query.checked_add(query_count) else {
+            self.misuse("resolve-query-set", "queries past 2³²");
+            return Ok(());
+        };
+        if let Some(encoder) = &mut self.table.get_mut(&this)?.0 {
+            encoder.resolve_query_set(&set, first_query..end, &buffer, destination_offset);
+        }
+        Ok(())
     }
     fn copy_buffer_to_buffer(
         &mut self,
@@ -962,23 +921,10 @@ impl wit::Host for Guest {
         Ok(wit::TextureFormat::Bgra8unorm)
     }
     fn current_texture(&mut self) -> wasmtime::Result<Result<Resource<Texture>, String>> {
-        if !self.gpu.in_frame {
-            return Ok(Err("current-texture: only inside `frame`".into()));
+        match self.gpu.current_texture(&self.link) {
+            Ok(texture) => self.hold(Texture { texture, bytes: 0 }),
+            Err(why) => Ok(Err(why)),
         }
-        let texture = match self.gpu.current.clone() {
-            Some(texture) => texture,
-            None => {
-                let returned = self.link.returned();
-                match self.gpu.acquire(returned) {
-                    Ok(texture) => {
-                        self.gpu.current = Some(texture.clone());
-                        texture
-                    }
-                    Err(why) => return Ok(Err(why)),
-                }
-            }
-        };
-        self.hold(Texture { texture, bytes: 0 })
     }
     fn create_buffer(
         &mut self,
@@ -1106,12 +1052,22 @@ impl wit::Host for Guest {
                 wgsl.len()
             )));
         }
+        // Its loops counted against the budget of an invocation.
+        let module = match crate::loops::bounded(&wgsl, self.gpu.loop_budget) {
+            Ok((module, note)) => {
+                if let Some(note) = note {
+                    self.log.line(format!("gpu: {note}"));
+                }
+                module
+            }
+            Err(why) => return Ok(Err(why)),
+        };
         let made = self.checked(|device| {
             Ok(device
                 .device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: label.as_deref(),
-                    source: wgpu::ShaderSource::Wgsl(Cow::Owned(wgsl)),
+                    source: wgpu::ShaderSource::Naga(Cow::Owned(module)),
                 }))
         });
         match made {
@@ -1234,120 +1190,8 @@ impl wit::Host for Guest {
         &mut self,
         d: wit::RenderPipelineDescriptor,
     ) -> wasmtime::Result<Result<Resource<RenderPipeline>, String>> {
-        let layout = match &d.layout {
-            Some(layout) => Some(self.table.get(layout)?.0.clone()),
-            None => None,
-        };
-        let vertex_module = self.table.get(&d.vertex.module)?.0.clone();
-        let fragment_module = match &d.fragment {
-            Some(f) => Some(self.table.get(&f.module)?.0.clone()),
-            None => None,
-        };
-        let attributes: Vec<Vec<wgpu::VertexAttribute>> = d
-            .vertex
-            .buffers
-            .iter()
-            .map(|b| {
-                b.attributes
-                    .iter()
-                    .map(|a| wgpu::VertexAttribute {
-                        format: vertex_format(a.format),
-                        offset: a.offset,
-                        shader_location: a.shader_location,
-                    })
-                    .collect()
-            })
-            .collect();
-        let buffers: Vec<wgpu::VertexBufferLayout<'_>> = d
-            .vertex
-            .buffers
-            .iter()
-            .zip(&attributes)
-            .map(|(b, attributes)| wgpu::VertexBufferLayout {
-                array_stride: b.array_stride,
-                step_mode: match b.step_mode {
-                    wit::VertexStepMode::Vertex => wgpu::VertexStepMode::Vertex,
-                    wit::VertexStepMode::Instance => wgpu::VertexStepMode::Instance,
-                },
-                attributes,
-            })
-            .collect();
-        let targets: Vec<Option<wgpu::ColorTargetState>> = d
-            .fragment
-            .as_ref()
-            .map(|f| {
-                f.targets
-                    .iter()
-                    .map(|t| {
-                        t.as_ref().map(|t| wgpu::ColorTargetState {
-                            format: format(t.format),
-                            blend: t.blend.map(|b| wgpu::BlendState {
-                                color: blend(b.color),
-                                alpha: blend(b.alpha),
-                            }),
-                            write_mask: writes(t.write_mask),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let made = self.checked(|device| {
-            Ok(device
-                .device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: d.label.as_deref(),
-                    layout: layout.as_ref(),
-                    vertex: wgpu::VertexState {
-                        module: &vertex_module,
-                        entry_point: d.vertex.entry_point.as_deref(),
-                        compilation_options: Default::default(),
-                        buffers: &buffers,
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        topology: topology(d.primitive.topology),
-                        strip_index_format: d.primitive.strip_index_format.map(index),
-                        front_face: match d.primitive.front_face {
-                            wit::FrontFace::Ccw => wgpu::FrontFace::Ccw,
-                            wit::FrontFace::Cw => wgpu::FrontFace::Cw,
-                        },
-                        cull_mode: match d.primitive.cull_mode {
-                            wit::CullMode::None => None,
-                            wit::CullMode::Front => Some(wgpu::Face::Front),
-                            wit::CullMode::Back => Some(wgpu::Face::Back),
-                        },
-                        unclipped_depth: d.primitive.unclipped_depth,
-                        polygon_mode: wgpu::PolygonMode::Fill,
-                        conservative: false,
-                    },
-                    depth_stencil: d.depth_stencil.map(|s| wgpu::DepthStencilState {
-                        format: format(s.format),
-                        depth_write_enabled: Some(s.depth_write_enabled),
-                        depth_compare: Some(compare(s.depth_compare)),
-                        stencil: Default::default(),
-                        bias: wgpu::DepthBiasState {
-                            constant: s.depth_bias,
-                            slope_scale: s.depth_bias_slope_scale,
-                            clamp: s.depth_bias_clamp,
-                        },
-                    }),
-                    multisample: wgpu::MultisampleState {
-                        count: d.multisample.count,
-                        mask: d.multisample.mask,
-                        alpha_to_coverage_enabled: d.multisample.alpha_to_coverage_enabled,
-                    },
-                    fragment: d.fragment.as_ref().zip(fragment_module.as_ref()).map(
-                        |(f, module)| wgpu::FragmentState {
-                            module,
-                            entry_point: f.entry_point.as_deref(),
-                            compilation_options: Default::default(),
-                            targets: &targets,
-                        },
-                    ),
-                    multiview_mask: None,
-                    cache: None,
-                }))
-        });
-        match made {
+        let parts = self.render_parts(&d)?;
+        match self.checked(|device| Ok(parts.create(&device.device))) {
             Ok(pipeline) => self.hold(RenderPipeline(pipeline)),
             Err(why) => Ok(Err(why)),
         }
@@ -1356,27 +1200,45 @@ impl wit::Host for Guest {
         &mut self,
         d: wit::ComputePipelineDescriptor,
     ) -> wasmtime::Result<Result<Resource<ComputePipeline>, String>> {
-        let layout = match &d.layout {
-            Some(layout) => Some(self.table.get(layout)?.0.clone()),
-            None => None,
-        };
-        let module = self.table.get(&d.module)?.0.clone();
-        let made = self.checked(|device| {
-            Ok(device
-                .device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: d.label.as_deref(),
-                    layout: layout.as_ref(),
-                    module: &module,
-                    entry_point: d.entry_point.as_deref(),
-                    compilation_options: Default::default(),
-                    cache: None,
-                }))
-        });
-        match made {
+        let parts = self.compute_parts(&d)?;
+        match self.checked(|device| Ok(parts.create(&device.device))) {
             Ok(pipeline) => self.hold(ComputePipeline(pipeline)),
             Err(why) => Ok(Err(why)),
         }
+    }
+    fn create_render_pipeline_async(
+        &mut self,
+        d: wit::RenderPipelineDescriptor,
+    ) -> wasmtime::Result<Result<Resource<crate::pipelines::RenderPipelineFuture>, String>> {
+        self.render_pipeline_async(d)
+    }
+    fn create_compute_pipeline_async(
+        &mut self,
+        d: wit::ComputePipelineDescriptor,
+    ) -> wasmtime::Result<Result<Resource<crate::pipelines::ComputePipelineFuture>, String>> {
+        self.compute_pipeline_async(d)
+    }
+    fn create_render_bundle_encoder(
+        &mut self,
+        d: wit::RenderBundleEncoderDescriptor,
+    ) -> wasmtime::Result<Result<Resource<crate::bundles::RenderBundleEncoder>, String>> {
+        self.bundle_encoder(d)
+    }
+    fn create_query_set(
+        &mut self,
+        d: wit::QuerySetDescriptor,
+    ) -> wasmtime::Result<Result<Resource<QuerySet>, String>> {
+        self.query_set(d)
+    }
+    fn supports_timestamps(&mut self) -> wasmtime::Result<bool> {
+        Ok(self.gpu.device.as_ref().is_some_and(|d| d.timestamps))
+    }
+    fn get_timestamp_period(&mut self) -> wasmtime::Result<f32> {
+        Ok(self
+            .gpu
+            .device
+            .as_ref()
+            .map_or(1., |d| d.queue.get_timestamp_period()))
     }
     fn create_command_encoder(
         &mut self,
@@ -1443,6 +1305,18 @@ impl wit::Host for Guest {
         for buffer in buffers {
             commands.push(self.release(buffer)?.0);
         }
+        // What was recorded since the last submission, counted: past the
+        // caps, none of it runs.
+        self.gpu.draws = 0;
+        self.gpu.workgroups = 0;
+        if let Some(over) = self.gpu.over.take() {
+            return Ok(Err(format!("submit: refused, {over}")));
+        }
+        // One submission on the GPU at a time: a GPU turns to another
+        // device's work between submissions (not inside one, on NVIDIA's
+        // driver), so zgx's frames get it between the guest's. Past the
+        // watchdog, the session ends.
+        self.gpu.settle().map_err(wasmtime::Error::msg)?;
         Ok(self.checked(|device| {
             device.queue.submit(commands);
             Ok(())
@@ -1528,7 +1402,7 @@ fn aspect(a: wit::TextureAspect) -> wgpu::TextureAspect {
         wit::TextureAspect::DepthOnly => wgpu::TextureAspect::DepthOnly,
     }
 }
-fn index(f: wit::IndexFormat) -> wgpu::IndexFormat {
+pub(crate) fn index(f: wit::IndexFormat) -> wgpu::IndexFormat {
     match f {
         wit::IndexFormat::Uint16 => wgpu::IndexFormat::Uint16,
         wit::IndexFormat::Uint32 => wgpu::IndexFormat::Uint32,
@@ -1547,7 +1421,7 @@ fn filter(f: wit::FilterMode) -> wgpu::FilterMode {
         wit::FilterMode::Linear => wgpu::FilterMode::Linear,
     }
 }
-fn compare(c: wit::CompareFunction) -> wgpu::CompareFunction {
+pub(crate) fn compare(c: wit::CompareFunction) -> wgpu::CompareFunction {
     use wgpu::CompareFunction as C;
     match c {
         wit::CompareFunction::Never => C::Never,
@@ -1560,7 +1434,7 @@ fn compare(c: wit::CompareFunction) -> wgpu::CompareFunction {
         wit::CompareFunction::Always => C::Always,
     }
 }
-fn topology(t: wit::PrimitiveTopology) -> wgpu::PrimitiveTopology {
+pub(crate) fn topology(t: wit::PrimitiveTopology) -> wgpu::PrimitiveTopology {
     use wgpu::PrimitiveTopology as P;
     match t {
         wit::PrimitiveTopology::PointList => P::PointList,
@@ -1570,7 +1444,7 @@ fn topology(t: wit::PrimitiveTopology) -> wgpu::PrimitiveTopology {
         wit::PrimitiveTopology::TriangleStrip => P::TriangleStrip,
     }
 }
-fn blend(b: wit::BlendComponent) -> wgpu::BlendComponent {
+pub(crate) fn blend(b: wit::BlendComponent) -> wgpu::BlendComponent {
     use wgpu::BlendFactor as F;
     let factor = |f: wit::BlendFactor| match f {
         wit::BlendFactor::Zero => F::Zero,
@@ -1599,7 +1473,7 @@ fn blend(b: wit::BlendComponent) -> wgpu::BlendComponent {
         },
     }
 }
-fn writes(w: wit::ColorWrite) -> wgpu::ColorWrites {
+pub(crate) fn writes(w: wit::ColorWrite) -> wgpu::ColorWrites {
     let mut out = wgpu::ColorWrites::empty();
     for (ours, theirs) in [
         (wit::ColorWrite::RED, wgpu::ColorWrites::RED),
@@ -1639,6 +1513,7 @@ fn buffer_usage(u: wit::BufferUsage) -> wgpu::BufferUsages {
         (wit::BufferUsage::UNIFORM, B::UNIFORM),
         (wit::BufferUsage::STORAGE, B::STORAGE),
         (wit::BufferUsage::INDIRECT, B::INDIRECT),
+        (wit::BufferUsage::QUERY_RESOLVE, B::QUERY_RESOLVE),
     ] {
         if u.contains(ours) {
             out |= theirs;
@@ -1719,7 +1594,7 @@ fn binding_type(t: &wit::BindingType) -> wgpu::BindingType {
         },
     }
 }
-fn vertex_format(f: wit::VertexFormat) -> wgpu::VertexFormat {
+pub(crate) fn vertex_format(f: wit::VertexFormat) -> wgpu::VertexFormat {
     use wgpu::VertexFormat as V;
     use wit::VertexFormat as W;
     match f {
@@ -1784,7 +1659,7 @@ const FORMATS: [(wit::TextureFormat, wgpu::TextureFormat); 23] = {
         (W::Depth32float, T::Depth32Float),
     ]
 };
-fn format(f: wit::TextureFormat) -> wgpu::TextureFormat {
+pub(crate) fn format(f: wit::TextureFormat) -> wgpu::TextureFormat {
     FORMATS
         .iter()
         .find(|(ours, _)| *ours == f)

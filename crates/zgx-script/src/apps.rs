@@ -128,6 +128,16 @@ pub struct WasmSpec {
     pub data_dir: Option<PathBuf>,
     /// Whether it reads the time of day (it reads the Unix epoch if not).
     pub wall_clock: bool,
+    /// How long a frame's GPU work may take on its own device before the
+    /// session fails (2 s).
+    pub gpu_watchdog: Duration,
+    /// Draws a GPU submission may record (10 000).
+    pub max_draws: u64,
+    /// Compute workgroups a GPU submission may dispatch (2²⁴).
+    pub max_workgroups: u64,
+    /// Loop iterations one shader invocation may run, its loops together
+    /// (2¹⁶; 0 leaves them as written).
+    pub shader_loop_budget: u32,
 }
 impl WasmSpec {
     /// `module` with the default limits and nothing granted.
@@ -140,6 +150,10 @@ impl WasmSpec {
             gpu_objects: 16384,
             data_dir: None,
             wall_clock: false,
+            gpu_watchdog: Duration::from_secs(2),
+            max_draws: 10_000,
+            max_workgroups: 1 << 24,
+            shader_loop_budget: 1 << 16,
         }
     }
     /// With `memory_limit`.
@@ -165,6 +179,22 @@ impl WasmSpec {
     /// With a folder of its own (`/data`).
     pub fn data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.data_dir = Some(dir.into());
+        self
+    }
+    /// With `gpu_watchdog`.
+    pub fn gpu_watchdog(mut self, watchdog: Duration) -> Self {
+        self.gpu_watchdog = watchdog;
+        self
+    }
+    /// With `shader_loop_budget`.
+    pub fn shader_loop_budget(mut self, iterations: u32) -> Self {
+        self.shader_loop_budget = iterations;
+        self
+    }
+    /// With `max_draws` and `max_workgroups`.
+    pub fn work_caps(mut self, draws: u64, workgroups: u64) -> Self {
+        self.max_draws = draws;
+        self.max_workgroups = workgroups;
         self
     }
     /// With the time of day granted, or not.
@@ -735,7 +765,10 @@ mod running {
                     .timeout(start.timeout)
                     .gpu_bytes(start.gpu_bytes)
                     .gpu_objects(start.gpu_objects)
-                    .wall_clock(start.wall_clock);
+                    .wall_clock(start.wall_clock)
+                    .gpu_watchdog(start.gpu_watchdog)
+                    .work_caps(start.max_draws, start.max_workgroups)
+                    .shader_loop_budget(start.shader_loop_budget);
                 if let Some(dir) = start.data_dir {
                     options = options.data_dir(dir);
                 }

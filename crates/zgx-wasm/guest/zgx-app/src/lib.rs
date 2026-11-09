@@ -130,6 +130,7 @@ pub mod util {
             format,
             depth_write_enabled: true,
             depth_compare: compare,
+            stencil: None,
             depth_bias: 0,
             depth_bias_slope_scale: 0.,
             depth_bias_clamp: 0.,
@@ -168,6 +169,24 @@ pub mod util {
                 has_dynamic_offset: false,
                 min_binding_size: None,
             }),
+        }
+    }
+    /// A stencil face that always passes, doing `pass` with what passes.
+    pub fn stencil_face(compare: CompareFunction, pass: StencilOperation) -> StencilFaceState {
+        StencilFaceState {
+            compare,
+            fail_op: StencilOperation::Keep,
+            depth_fail_op: StencilOperation::Keep,
+            pass_op: pass,
+        }
+    }
+    /// The same test and operation on both faces, every bit.
+    pub fn stencil(compare: CompareFunction, pass: StencilOperation) -> StencilState {
+        StencilState {
+            front: stencil_face(compare, pass),
+            back: stencil_face(compare, pass),
+            read_mask: 0xff,
+            write_mask: 0xff,
         }
     }
     pub fn view(texture: &Texture) -> TextureView {

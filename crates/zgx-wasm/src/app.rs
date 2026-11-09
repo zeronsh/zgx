@@ -48,6 +48,17 @@ pub struct WasmOptions {
     pub data_dir: Option<PathBuf>,
     /// Whether it may read the time of day; it reads the Unix epoch if not.
     pub wall_clock: bool,
+    /// How long a frame's GPU work may take on its device before the
+    /// session fails and the device is let go (2 s).
+    pub gpu_watchdog: Duration,
+    /// Draws a submission may record (10 000), and compute workgroups it
+    /// may dispatch (2²⁴): past them it is refused.
+    pub max_draws: u64,
+    pub max_workgroups: u64,
+    /// Loop iterations one shader invocation may run, all its loops
+    /// together (2¹⁶; 0 leaves loops as written): a GPU preempts between
+    /// invocations, not inside one.
+    pub shader_loop_budget: u32,
 }
 impl WasmOptions {
     /// `module`, with the default limits and nothing granted.
@@ -60,6 +71,10 @@ impl WasmOptions {
             gpu_objects: 16384,
             data_dir: None,
             wall_clock: false,
+            gpu_watchdog: Duration::from_secs(2),
+            max_draws: 10_000,
+            max_workgroups: 1 << 24,
+            shader_loop_budget: crate::loops::DEFAULT_BUDGET,
         }
     }
     pub fn memory_limit(mut self, bytes: u64) -> Self {
@@ -84,6 +99,20 @@ impl WasmOptions {
     }
     pub fn wall_clock(mut self, granted: bool) -> Self {
         self.wall_clock = granted;
+        self
+    }
+    pub fn gpu_watchdog(mut self, watchdog: Duration) -> Self {
+        self.gpu_watchdog = watchdog;
+        self
+    }
+    pub fn shader_loop_budget(mut self, iterations: u32) -> Self {
+        self.shader_loop_budget = iterations;
+        self
+    }
+    /// With `max_draws` and `max_workgroups`.
+    pub fn work_caps(mut self, draws: u64, workgroups: u64) -> Self {
+        self.max_draws = draws;
+        self.max_workgroups = workgroups;
         self
     }
 }
@@ -131,6 +160,13 @@ pub(crate) struct Inner {
     woken: RefCell<Option<zgx::task::LatestReceiver<()>>>,
     pump: RefCell<Option<TaskToken>>,
     runner: RefCell<Option<TaskRunner>>,
+    resizing: RefCell<Option<TaskToken>>,
+    polling: RefCell<Option<TaskToken>>,
+    polling_done: Rc<Cell<bool>>,
+    /// Releases of shared textures waiting for zgx's GPU work.
+    pub(crate) awaiting: Arc<AtomicUsize>,
+    /// The guest's device can't import zgx's textures (`Note::Unshared`).
+    pub(crate) unshared: Cell<bool>,
     pub(crate) view: GpuView,
     status: Signal<WasmStatus>,
     title: Signal<String>,
@@ -166,11 +202,12 @@ impl WasmApp {
     /// mounts). A module that can't start is a failed session.
     pub fn spawn(runtime: &Runtime, options: WasmOptions) -> WasmApp {
         let (tx, rx) = mpsc::channel();
-        let app = Self::new(runtime, tx);
+        let app = Self::new(runtime, tx.clone());
         let link = app.0.link.clone();
         crate::runtime::start(
             options,
             rx,
+            tx,
             link,
             app.0.log.clone(),
             app.0.closing.clone(),
@@ -202,6 +239,11 @@ impl WasmApp {
             woken: RefCell::new(Some(woken)),
             pump: RefCell::default(),
             runner: RefCell::default(),
+            resizing: RefCell::default(),
+            polling: RefCell::default(),
+            polling_done: Rc::new(Cell::new(true)),
+            awaiting: Arc::default(),
+            unshared: Cell::new(false),
             view: zgx_gpu::viewport::view(Painter::new(weak.clone())),
             status: runtime.signal(WasmStatus::Starting),
             title: runtime.signal(String::new()),
@@ -345,6 +387,10 @@ impl WasmApp {
                     self.0.view.invalidate();
                 }
                 Note::Presented => self.0.view.invalidate(),
+                Note::Unshared => {
+                    self.0.unshared.set(true);
+                    self.0.view.invalidate();
+                }
                 Note::Ended(ended) => self.0.ended(ended),
             }
         }
@@ -594,20 +640,44 @@ impl Inner {
         let seconds = time.saturating_duration_since(self.started).as_secs_f64();
         self.send(ToGuest::Frame(seconds));
     }
-    /// The renderer's device, for the guest's GPU.
-    pub(crate) fn device(
-        &self,
-        device: &zgx_gpu::wgpu::Device,
-        queue: &zgx_gpu::wgpu::Queue,
-        srgb_views: bool,
-        generation: u64,
-    ) {
-        self.send(ToGuest::Device {
-            device: device.clone(),
-            queue: queue.clone(),
-            srgb_views,
-            generation,
-        });
+    /// Draw again after `delay` (a size held long enough for a new ring).
+    pub(crate) fn invalidate_after(&self, delay: Duration) {
+        let Some(runner) = self.runner.borrow().clone() else {
+            return;
+        };
+        let view = self.view.clone();
+        let task = runner.spawn(Box::pin(async move {
+            zgx::timer::sleep(delay).await;
+            view.invalidate();
+        }));
+        *self.resizing.borrow_mut() = Some(task);
+    }
+    /// Poll zgx's device until the shared textures waiting on its work are
+    /// given back: wgpu calls them back only when polled, and a guest out
+    /// of textures draws nothing that would make zgx draw.
+    pub(crate) fn poll_until_released(&self, device: &zgx_gpu::wgpu::Device) {
+        // One at a time: a task running polls for every release.
+        if !self.polling_done.get() {
+            return;
+        }
+        let Some(runner) = self.runner.borrow().clone() else {
+            return;
+        };
+        let (awaiting, device) = (self.awaiting.clone(), device.clone());
+        let polling = Rc::downgrade(&self.polling_done);
+        let task = runner.spawn(Box::pin(async move {
+            let mut wait = Duration::from_millis(2);
+            while awaiting.load(Ordering::Acquire) > 0 {
+                zgx::timer::sleep(wait).await;
+                let _ = device.poll(zgx_gpu::wgpu::PollType::Poll);
+                wait = (wait * 2).min(Duration::from_millis(50));
+            }
+            if let Some(done) = polling.upgrade() {
+                done.set(true);
+            }
+        }));
+        self.polling_done.set(false);
+        *self.polling.borrow_mut() = Some(task);
     }
     /// Tell the guest its display's refresh rate once running, and again as
     /// it changes: awaited from the frame clock at most every two seconds.

@@ -1,7 +1,7 @@
 # Guests of zgx-wasm: built for wasm32-wasip2, so a workspace of their own
 # (`./build.sh` builds them into built/, which tests and examples run).
 [workspace]
-members = ["zgx-app", "cube", "pixels", "misbehave"]
+members = ["zgx-app", "cube", "pixels", "misbehave", "features"]
 resolver = "2"
 
 [workspace.package]

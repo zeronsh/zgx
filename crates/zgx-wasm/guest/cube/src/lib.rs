@@ -1,6 +1,9 @@
-//! A lit 3D scene drawn with WebGPU on the host's device: a cube turning
-//! inside a ring of cubes, over a floor, with a wall of a cube for each
-//! character typed. Drag to orbit (or press the right button to lock the
+//! A lit 3D scene drawn with WebGPU on a device of its own: a cube turning
+//! inside a ring of cubes, mirrored in a glossy floor (the stencil keeps the
+//! reflection to the floor; its pipeline is made on another thread), with a
+//! wall of a cube for each character typed. The cubes are a render bundle,
+//! recorded again only as their count changes; where the GPU stamps
+//! timestamps, the title says how long the pass took. Drag to orbit (or press the right button to lock the
 //! pointer and look about; Escape lets go), wheel or arrows to zoom, Space
 //! pauses, R reverses, C changes colours, 1 to 4 set the ring's cubes. It
 //! animates by the display's clock, so it turns as fast at 60 Hz as at
@@ -12,6 +15,7 @@ use zgx_app::{
 };
 
 const SAMPLES: u32 = 4;
+const DEPTH: TextureFormat = TextureFormat::Depth24plusStencil8;
 const MAX_INSTANCES: usize = 1 + 24 + 1 + 64;
 const SHADER: &str = r#"
 struct Scene { view_proj: mat4x4<f32>, eye: vec4<f32>, light: vec4<f32>, params: vec4<f32> }
@@ -53,8 +57,12 @@ struct Out {
     var c = albedo * (sky * 0.7 + diffuse * vec3<f32>(1.0, 0.93, 0.82) * 1.6) + vec3<f32>(specular);
     let fog = clamp((length(scene.eye.xyz - i.world) - 8.0) / 16.0, 0.0, 1.0);
     c = mix(c, vec3<f32>(0.012, 0.014, 0.022), fog);
+    // Reflections are dimmer than what they mirror.
+    c = c * mix(1.0, 0.5, scene.params.y);
     c = vec3<f32>(1.0) - exp(-c * 1.3);
-    return vec4<f32>(pow(c, vec3<f32>(1.0 / 2.2)), 1.0);
+    // The floor lets its reflections show through.
+    let alpha = select(1.0, 0.72, i.color.a < 0.2);
+    return vec4<f32>(pow(c, vec3<f32>(1.0 / 2.2)), alpha);
 }
 "#;
 
@@ -66,14 +74,36 @@ const PALETTES: [[[f32; 3]; 3]; 4] = [
 ];
 
 struct Resources {
+    /// The cubes; the floor, blended over their reflections; the floor
+    /// marked in the stencil; the cubes mirrored in it, only where it is
+    /// marked (made on another thread: none until it's ready).
     pipeline: RenderPipeline,
+    floor: RenderPipeline,
+    mask: RenderPipeline,
+    reflect: Option<RenderPipeline>,
+    reflect_future: Option<RenderPipelineFuture>,
     bind_group: BindGroup,
+    mirrored_group: BindGroup,
     uniforms: gpu::Buffer,
+    mirrored: gpu::Buffer,
     vertices: gpu::Buffer,
     indices: gpu::Buffer,
     instances: gpu::Buffer,
-    /// The multisampled colour and depth targets, and their size.
+    /// The cubes' draw, recorded once for each count of cubes.
+    bundle: Option<(u32, RenderBundle)>,
+    /// The pass's beginning and end, stamped where the GPU can.
+    timer: Option<Timer>,
+    /// The multisampled colour and depth-stencil targets, and their size.
     targets: Option<((u32, u32), TextureView, TextureView)>,
+}
+
+struct Timer {
+    set: QuerySet,
+    resolved: gpu::Buffer,
+    read: gpu::Buffer,
+    /// A frame's stamps were copied to `read` (its work is done by the
+    /// next frame: the host waits for it).
+    pending: bool,
 }
 
 struct Cube {
@@ -97,6 +127,8 @@ struct Cube {
     fps: f32,
     keys: u32,
     last_key: String,
+    /// The last frame's pass on the GPU, where it stamps them.
+    gpu_ms: f64,
 }
 
 impl App for Cube {
@@ -122,6 +154,7 @@ impl App for Cube {
             fps: 0.,
             keys: 0,
             last_key: String::new(),
+            gpu_ms: 0.,
         };
         cube.title();
         Ok(cube)
@@ -213,6 +246,11 @@ impl App for Cube {
             // The host's device changed: what was made on the old one is
             // dead, made again in the next frame.
             InputEvent::GpuReset => self.gpu = None,
+            InputEvent::PipelineReady(id) => {
+                if let Some(res) = &mut self.gpu {
+                    res.take_reflect(id);
+                }
+            }
             _ => {}
         }
     }
@@ -221,7 +259,7 @@ impl App for Cube {
 impl Cube {
     fn title(&self) {
         host::set_title(&format!(
-            "cube · typed {} · keys {}{} · {:.0} Hz · {:.0} fps{}",
+            "cube · typed {} · keys {}{} · {:.0} Hz · {:.0} fps{}{}",
             self.typed,
             self.keys,
             if self.last_key.is_empty() {
@@ -231,6 +269,11 @@ impl Cube {
             },
             self.refresh,
             self.fps,
+            if self.gpu_ms > 0. {
+                format!(" · gpu {:.2} ms", self.gpu_ms)
+            } else {
+                String::new()
+            },
             if self.locked { " · looking" } else { "" }
         ));
     }
@@ -249,7 +292,12 @@ impl Cube {
         let target = gpu::current_texture()?;
         let (width, height) = (target.width(), target.height());
         let instances = self.instances();
+        let count = (instances.len() / 20) as u32;
         let res = self.gpu.as_mut().expect("made above");
+        if let Some(ns) = res.gpu_time()? {
+            self.gpu_ms = ns / 1e6;
+        }
+        res.record_cubes(count)?;
         if res
             .targets
             .as_ref()
@@ -268,7 +316,7 @@ impl Cube {
                 "cube depth",
                 width,
                 height,
-                TextureFormat::Depth32float,
+                DEPTH,
                 usage,
                 SAMPLES,
             ))?;
@@ -295,8 +343,31 @@ impl Cube {
         uniforms.extend_from_slice(&[-0.5, -1.0, -0.35, 0.]);
         uniforms.extend_from_slice(&[self.spin as f32, 0., 0., 0.]);
         gpu::write_buffer(&res.uniforms, 0, &bytes(&uniforms))?;
-        let count = instances.len() / 20;
+        // The same scene mirrored in the floor's top (y = -0.86), dimmed.
+        let floor = -0.86;
+        let mirror = [
+            1.,
+            0.,
+            0.,
+            0., //
+            0.,
+            -1.,
+            0.,
+            0., //
+            0.,
+            0.,
+            1.,
+            0., //
+            0.,
+            2. * floor,
+            0.,
+            1.,
+        ];
+        uniforms[..16].copy_from_slice(&mul(&view_proj, &mirror));
+        uniforms[25] = 1.;
+        gpu::write_buffer(&res.mirrored, 0, &bytes(&uniforms))?;
         gpu::write_buffer(&res.instances, 0, &bytes(&instances))?;
+        let cubes = &res.bundle.as_ref().expect("recorded above").1;
 
         let frame = target.create_view(None)?;
         let encoder = gpu::create_command_encoder(Some("cube"))?;
@@ -319,15 +390,41 @@ impl Cube {
                     depth_clear: Some(1.),
                     depth_store: StoreOp::Discard,
                     depth_read_only: false,
+                    stencil_clear: Some(0),
+                    stencil_store: Some(StoreOp::Discard),
                 }),
+                timestamp_writes: res.timer.as_ref().map(|t| PassTimestampWrites {
+                    query_set: &t.set,
+                    beginning_index: Some(0),
+                    end_index: Some(1),
+                }),
+                occlusion_query_set: None,
             })?;
-            pass.set_pipeline(&res.pipeline);
-            pass.set_bind_group(0, Some(&res.bind_group), &[]);
             pass.set_vertex_buffer(0, &res.vertices, 0, None);
-            pass.set_vertex_buffer(1, &res.instances, 0, Some((count * 80) as u64));
+            pass.set_vertex_buffer(1, &res.instances, 0, Some(u64::from(count) * 80));
             pass.set_index_buffer(&res.indices, IndexFormat::Uint16, 0, None);
-            pass.draw_indexed(36, count as u32, 0, 0, 0);
+            pass.set_stencil_reference(1);
+            // The floor marked in the stencil, then the cubes mirrored only
+            // there.
+            pass.set_bind_group(0, Some(&res.bind_group), &[]);
+            pass.set_pipeline(&res.mask);
+            pass.draw_indexed(36, 1, 0, 0, 0);
+            if let Some(reflect) = &res.reflect {
+                pass.set_bind_group(0, Some(&res.mirrored_group), &[]);
+                pass.set_pipeline(reflect);
+                pass.draw_indexed(36, count - 1, 0, 0, 1);
+            }
+            // The floor over them, then the cubes, from their bundle.
+            pass.set_bind_group(0, Some(&res.bind_group), &[]);
+            pass.set_pipeline(&res.floor);
+            pass.draw_indexed(36, 1, 0, 0, 0);
+            pass.execute_bundles(&[cubes]);
             pass.end();
+        }
+        if let Some(timer) = &mut res.timer {
+            encoder.resolve_query_set(&timer.set, 0, 2, &timer.resolved, 0);
+            encoder.copy_buffer_to_buffer(&timer.resolved, 0, &timer.read, 0, 16);
+            timer.pending = true;
         }
         let commands = CommandEncoder::finish(encoder)?;
         gpu::submit(vec![commands])
@@ -342,6 +439,12 @@ impl Cube {
             out.extend_from_slice(&m);
             out.extend_from_slice(&[c[0], c[1], c[2], shine]);
         };
+        // The floor, first: drawn apart from the cubes (instance 0).
+        push(
+            model([0., -0.9, 0.], 0., 0., [14., 0.08, 14.]),
+            [0.16, 0.16, 0.18],
+            0.1,
+        );
         // The cube in the middle, bobbing.
         push(
             model(
@@ -369,12 +472,6 @@ impl Cube {
                 1.,
             );
         }
-        // The floor.
-        push(
-            model([0., -0.9, 0.], 0., 0., [14., 0.08, 14.]),
-            [0.16, 0.16, 0.18],
-            0.1,
-        );
         // A wall of what was typed, eight a row.
         for i in 0..self.typed.min(64) {
             let (col, row) = ((i % 8) as f32, (i / 8) as f32);
@@ -409,71 +506,129 @@ impl Resources {
             offset,
             shader_location: location,
         };
-        let pipeline = gpu::create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("cube".into()),
-            layout: Some(&pipeline_layout),
-            vertex: VertexState {
-                module: &module,
-                entry_point: Some("vs".into()),
-                buffers: vec![
-                    VertexBufferLayout {
-                        array_stride: 24,
-                        step_mode: VertexStepMode::Vertex,
-                        attributes: vec![
-                            VertexAttribute {
-                                format: VertexFormat::Float32x3,
-                                offset: 0,
-                                shader_location: 0,
-                            },
-                            VertexAttribute {
-                                format: VertexFormat::Float32x3,
-                                offset: 12,
-                                shader_location: 1,
-                            },
-                        ],
+        let buffers = vec![
+            VertexBufferLayout {
+                array_stride: 24,
+                step_mode: VertexStepMode::Vertex,
+                attributes: vec![
+                    VertexAttribute {
+                        format: VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
                     },
-                    VertexBufferLayout {
-                        array_stride: 80,
-                        step_mode: VertexStepMode::Instance,
-                        attributes: vec![
-                            float4(2, 0),
-                            float4(3, 16),
-                            float4(4, 32),
-                            float4(5, 48),
-                            float4(6, 64),
-                        ],
+                    VertexAttribute {
+                        format: VertexFormat::Float32x3,
+                        offset: 12,
+                        shader_location: 1,
                     },
                 ],
             },
-            primitive: util::primitive(PrimitiveTopology::TriangleList, CullMode::Back),
-            depth_stencil: Some(util::depth(
-                TextureFormat::Depth32float,
-                CompareFunction::Less,
-            )),
-            multisample: util::multisample(SAMPLES),
-            fragment: Some(FragmentState {
-                module: &module,
-                entry_point: Some("fs".into()),
-                targets: vec![Some(util::target(TextureFormat::Bgra8unorm))],
-            }),
-        })?;
-        let uniforms = gpu::create_buffer(&BufferDescriptor {
-            label: Some("cube scene".into()),
-            size: 112,
-            usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-        })?;
-        let bind_group = gpu::create_bind_group(
-            Some("cube"),
-            &layout,
-            &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Buffer(BufferBinding {
-                    buffer: &uniforms,
-                    offset: 0,
-                    size: None,
+            VertexBufferLayout {
+                array_stride: 80,
+                step_mode: VertexStepMode::Instance,
+                attributes: vec![
+                    float4(2, 0),
+                    float4(3, 16),
+                    float4(4, 32),
+                    float4(5, 48),
+                    float4(6, 64),
+                ],
+            },
+        ];
+        // One shader, four ways to draw with it.
+        let describe = |cull: CullMode,
+                        depth: DepthStencilState,
+                        target: ColorTargetState|
+         -> RenderPipelineDescriptor<'_> {
+            RenderPipelineDescriptor {
+                label: Some("cube".into()),
+                layout: Some(&pipeline_layout),
+                vertex: VertexState {
+                    module: &module,
+                    entry_point: Some("vs".into()),
+                    buffers: buffers.clone(),
+                    constants: Vec::new(),
+                },
+                primitive: util::primitive(PrimitiveTopology::TriangleList, cull),
+                depth_stencil: Some(depth),
+                multisample: util::multisample(SAMPLES),
+                fragment: Some(FragmentState {
+                    module: &module,
+                    entry_point: Some("fs".into()),
+                    targets: vec![Some(target)],
+                    constants: Vec::new(),
                 }),
-            }],
-        )?;
+            }
+        };
+        let depth = util::depth(DEPTH, CompareFunction::Less);
+        let opaque = util::target(TextureFormat::Bgra8unorm);
+        let pipeline = gpu::create_render_pipeline(&describe(CullMode::Back, depth, opaque))?;
+        let over = BlendComponent {
+            operation: BlendOperation::Add,
+            src_factor: BlendFactor::SrcAlpha,
+            dst_factor: BlendFactor::OneMinusSrcAlpha,
+        };
+        let floor = gpu::create_render_pipeline(&describe(
+            CullMode::Back,
+            depth,
+            ColorTargetState {
+                blend: Some(BlendState {
+                    color: over,
+                    alpha: over,
+                }),
+                ..opaque
+            },
+        ))?;
+        let mask = gpu::create_render_pipeline(&describe(
+            CullMode::Back,
+            DepthStencilState {
+                depth_write_enabled: false,
+                stencil: Some(util::stencil(
+                    CompareFunction::Always,
+                    StencilOperation::Replace,
+                )),
+                ..depth
+            },
+            ColorTargetState {
+                write_mask: ColorWrite::empty(),
+                ..opaque
+            },
+        ))?;
+        // Mirrored, its faces turn the other way.
+        let reflect_future = gpu::create_render_pipeline_async(&describe(
+            CullMode::Front,
+            DepthStencilState {
+                stencil: Some(util::stencil(
+                    CompareFunction::Equal,
+                    StencilOperation::Keep,
+                )),
+                ..depth
+            },
+            opaque,
+        ))?;
+        let uniform = |label: &str| {
+            gpu::create_buffer(&BufferDescriptor {
+                label: Some(label.into()),
+                size: 112,
+                usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            })
+        };
+        let group = |buffer: &gpu::Buffer| {
+            gpu::create_bind_group(
+                Some("cube"),
+                &layout,
+                &[BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                }],
+            )
+        };
+        let (uniforms, mirrored) = (uniform("cube scene")?, uniform("cube mirrored")?);
+        let (bind_group, mirrored_group) = (group(&uniforms)?, group(&mirrored)?);
         let (vertices, indices) = box_mesh();
         let vertices = gpu::create_buffer_with_data(
             Some("cube vertices"),
@@ -493,15 +648,97 @@ impl Resources {
             size: (MAX_INSTANCES * 80) as u64,
             usage: BufferUsage::VERTEX | BufferUsage::COPY_DST,
         })?;
+        let timer = if gpu::supports_timestamps() {
+            Some(Timer {
+                set: gpu::create_query_set(&QuerySetDescriptor {
+                    label: Some("cube pass".into()),
+                    kind: QueryType::Timestamp,
+                    count: 2,
+                })?,
+                resolved: gpu::create_buffer(&BufferDescriptor {
+                    label: None,
+                    size: 16,
+                    usage: BufferUsage::QUERY_RESOLVE | BufferUsage::COPY_SRC,
+                })?,
+                read: gpu::create_buffer(&BufferDescriptor {
+                    label: None,
+                    size: 16,
+                    usage: BufferUsage::COPY_DST | BufferUsage::MAP_READ,
+                })?,
+                pending: false,
+            })
+        } else {
+            None
+        };
         Ok(Resources {
             pipeline,
+            floor,
+            mask,
+            reflect: None,
+            reflect_future: Some(reflect_future),
             bind_group,
+            mirrored_group,
             uniforms,
+            mirrored,
             vertices,
             indices,
             instances,
+            bundle: None,
+            timer,
             targets: None,
         })
+    }
+    /// The reflections' pipeline, made on another thread.
+    fn take_reflect(&mut self, id: u64) {
+        let Some(future) = &self.reflect_future else {
+            return;
+        };
+        if future.id() != id {
+            return;
+        }
+        match future.take() {
+            Some(Ok(pipeline)) => self.reflect = Some(pipeline),
+            Some(Err(why)) => zgx_app::log(format!("cube: reflections: {why}")),
+            None => return,
+        }
+        self.reflect_future = None;
+    }
+    /// The bundle drawing the cubes (instances 1 to `count`), recorded
+    /// again only as their count changes.
+    fn record_cubes(&mut self, count: u32) -> Result<(), String> {
+        if self.bundle.as_ref().is_none_or(|(n, _)| *n != count) {
+            let encoder = gpu::create_render_bundle_encoder(&RenderBundleEncoderDescriptor {
+                label: Some("cubes".into()),
+                color_formats: vec![Some(TextureFormat::Bgra8unorm)],
+                depth_stencil: Some(RenderBundleDepthStencil {
+                    format: DEPTH,
+                    depth_read_only: false,
+                    stencil_read_only: true,
+                }),
+                sample_count: SAMPLES,
+            })?;
+            encoder.set_pipeline(&self.pipeline);
+            encoder.set_bind_group(0, Some(&self.bind_group), &[]);
+            encoder.set_vertex_buffer(0, &self.vertices, 0, None);
+            encoder.set_vertex_buffer(1, &self.instances, 0, None);
+            encoder.set_index_buffer(&self.indices, IndexFormat::Uint16, 0, None);
+            encoder.draw_indexed(36, count - 1, 0, 0, 1);
+            self.bundle = Some((count, RenderBundleEncoder::finish(encoder, Some("cubes"))?));
+        }
+        Ok(())
+    }
+    /// The last frame's pass, in nanoseconds, where the GPU stamps them.
+    fn gpu_time(&mut self) -> Result<Option<f64>, String> {
+        let Some(timer) = &mut self.timer else {
+            return Ok(None);
+        };
+        if !std::mem::take(&mut timer.pending) {
+            return Ok(None);
+        }
+        let stamps = gpu::read_buffer(&timer.read, 0, 16)?;
+        let begin = u64::from_le_bytes(stamps[..8].try_into().unwrap());
+        let end = u64::from_le_bytes(stamps[8..].try_into().unwrap());
+        Ok((end > begin).then(|| (end - begin) as f64 * f64::from(gpu::get_timestamp_period())))
     }
 }
 

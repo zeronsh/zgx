@@ -1,30 +1,57 @@
-//! The GPU view's painter: hands the guest the renderer's device and the
-//! element's size, draws the newest frame it presented over the whole box
-//! (a texture of the same device, sampled as it is; or its CPU pixels,
-//! uploaded), and asks for the next.
-use crate::{app::Inner, shared::Presented};
-use std::rc::Weak;
+//! The GPU view's painter: tells the guest the adapter zgx draws with (it
+//! opens a device of its own there), makes the ring of textures the guest's
+//! device draws into and shares them, draws the newest frame presented over
+//! the whole box (a shared texture sampled as it is, or pixels uploaded),
+//! gives the one it replaced back once zgx's GPU is done reading it, and
+//! asks for the next frame.
+use crate::{
+    app::Inner,
+    device::{HostGpu, Sharing},
+    runtime::ToGuest,
+    shared::Presented,
+};
+use std::{
+    rc::Weak,
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 use zgx_gpu::{
     viewport::{Viewport, ViewportFrame},
     wgpu,
 };
 
+/// How long a new size holds before a new ring is made for it (a window
+/// being dragged shows the last frame stretched until then).
+const RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
+
 pub(crate) struct Painter {
     app: Weak<Inner>,
     blit: Option<Blit>,
     device: Option<wgpu::Device>,
-    /// The device's number, as the guest is told it: a texture presented
-    /// for an older one is never drawn.
-    generation: u64,
+    /// The adapter the guest was told of.
+    host: Option<HostGpu>,
+    sharing: Sharing,
+    ring: Option<Ring>,
+    generation: u32,
+    /// The guest was told it shares nothing (and reads its frames back).
+    told_readback: bool,
+    /// When the box first had a size its ring isn't.
+    resizing: Option<Instant>,
     shown: Option<Shown>,
-    /// The CPU's pixels, uploaded.
+    /// Pixels from the CPU (or read back), uploaded.
     upload: Option<wgpu::Texture>,
+}
+/// zgx's shared textures at one size.
+struct Ring {
+    generation: u32,
+    size: (u32, u32),
+    textures: Vec<wgpu::Texture>,
 }
 struct Shown {
     bind: wgpu::BindGroup,
     texture: wgpu::Texture,
-    /// One of the guest's frame textures, to give back once replaced.
-    guests: bool,
+    /// A ring's texture (generation, index), to give back once replaced.
+    shared: Option<(u32, u32)>,
 }
 struct Blit {
     pipeline: wgpu::RenderPipeline,
@@ -39,7 +66,12 @@ impl Painter {
             app,
             blit: None,
             device: None,
+            host: None,
+            sharing: Sharing::Readback,
+            ring: None,
             generation: 0,
+            told_readback: false,
+            resizing: None,
             shown: None,
             upload: None,
         }
@@ -48,6 +80,66 @@ impl Painter {
         self.blit = None;
         self.shown = None;
         self.upload = None;
+        self.ring = None;
+        self.resizing = None;
+        self.told_readback = false;
+    }
+    /// A ring at `size` for the guest: at once for the first, else once a
+    /// new size has held for `RESIZE_DEBOUNCE`.
+    fn size_ring(&mut self, app: &Inner, frame: &ViewportFrame<'_>, size: (u32, u32)) {
+        let sharing = if app.unshared.get() {
+            Sharing::Readback
+        } else {
+            self.sharing
+        };
+        if sharing == Sharing::Readback {
+            if !self.told_readback {
+                self.ring = None;
+                self.told_readback = true;
+                self.generation += 1;
+                app.send(ToGuest::Buffers {
+                    generation: self.generation,
+                    buffers: Vec::new(),
+                    cleared: None,
+                });
+            }
+            return;
+        }
+        match &self.ring {
+            Some(ring) if ring.size == size => {
+                self.resizing = None;
+                return;
+            }
+            Some(_) => {
+                let since = *self.resizing.get_or_insert(frame.time);
+                let held = frame.time.saturating_duration_since(since);
+                if held < RESIZE_DEBOUNCE {
+                    app.invalidate_after(RESIZE_DEBOUNCE - held);
+                    return;
+                }
+            }
+            None => {}
+        }
+        self.resizing = None;
+        match crate::device::export_ring(frame.device, frame.queue, sharing, size) {
+            Ok((textures, buffers, cleared)) => {
+                self.generation += 1;
+                self.ring = Some(Ring {
+                    generation: self.generation,
+                    size,
+                    textures,
+                });
+                app.send(ToGuest::Buffers {
+                    generation: self.generation,
+                    buffers,
+                    cleared,
+                });
+            }
+            Err(error) => {
+                eprintln!("zgx-wasm: textures to share can't be made ({error}): read back instead");
+                self.sharing = Sharing::Readback;
+            }
+        }
     }
 }
 
@@ -63,15 +155,18 @@ impl Viewport for Painter {
         if self.device.as_ref() != Some(frame.device) {
             self.forget();
             self.device = Some(frame.device.clone());
-            self.generation += 1;
-            app.device(
-                frame.device,
-                frame.queue,
-                frame.target_srgb.is_some(),
-                self.generation,
-            );
+            self.sharing = crate::device::sharing_of(frame.device);
+            let host = HostGpu::of(frame.device);
+            // The same adapter again (a device made anew): the guest's device
+            // stays; only the ring is new.
+            if self.host.as_ref() != Some(&host) {
+                app.send(ToGuest::Device(host.clone()));
+                self.host = Some(host);
+            }
         }
-        app.resize(frame.size.0.max(1), frame.size.1.max(1), frame.scale);
+        let size = (frame.size.0.max(1), frame.size.1.max(1));
+        self.size_ring(&app, frame, size);
+        app.resize(size.0, size.1, frame.scale);
         app.tell_refresh();
         if self.blit.as_ref().is_none_or(|b| b.format != frame.format) {
             self.blit = Some(Blit::new(frame.device, frame.format));
@@ -79,23 +174,34 @@ impl Viewport for Painter {
         let newest = app.link.shared.lock().unwrap().frame.take();
         let blit = self.blit.as_ref().expect("made above");
         let replaced = match newest {
-            Some(Presented::Texture {
-                texture,
-                generation,
-            }) if generation == self.generation => self.shown.replace(Shown {
-                bind: blit.bind(frame.device, &texture),
-                texture,
-                guests: true,
-            }),
-            // Drawn on a device gone since: the guest draws again.
-            Some(Presented::Texture { .. }) => None,
+            Some(Presented::Shared { generation, index }) => match &self.ring {
+                Some(ring) if ring.generation == generation => {
+                    let texture = ring.textures[index as usize].clone();
+                    self.shown.replace(Shown {
+                        bind: blit.bind(frame.device, &texture),
+                        texture,
+                        shared: Some((generation, index)),
+                    })
+                }
+                // A ring gone since: the guest draws into the new one.
+                _ => None,
+            },
             Some(Presented::Pixels {
                 pixels,
                 width,
                 height,
+                bgra,
             }) => {
+                let format = if bgra {
+                    wgpu::TextureFormat::Bgra8Unorm
+                } else {
+                    wgpu::TextureFormat::Rgba8Unorm
+                };
                 let upload = match &self.upload {
-                    Some(upload) if (upload.width(), upload.height()) == (width, height) => {
+                    Some(upload)
+                        if (upload.width(), upload.height(), upload.format())
+                            == (width, height, format) =>
+                    {
                         upload.clone()
                     }
                     _ => {
@@ -109,7 +215,7 @@ impl Viewport for Painter {
                             mip_level_count: 1,
                             sample_count: 1,
                             dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            format,
                             usage: wgpu::TextureUsages::TEXTURE_BINDING
                                 | wgpu::TextureUsages::COPY_DST,
                             view_formats: &[],
@@ -138,16 +244,23 @@ impl Viewport for Painter {
                     self.shown.replace(Shown {
                         bind: blit.bind(frame.device, &upload),
                         texture: upload,
-                        guests: false,
+                        shared: None,
                     })
                 }
             }
             None => None,
         };
-        // The frames that read it were submitted before this one, on this
-        // queue: the guest's next drawing into it comes after them.
-        if let Some(old) = replaced.filter(|old| old.guests) {
-            app.link.shared.lock().unwrap().returned.push(old.texture);
+        // Given back once zgx's GPU has read it: the frames that did were
+        // submitted before this one, on its queue; the guest's device is
+        // another and orders nothing after them.
+        if let Some(released) = replaced.and_then(|old| old.shared) {
+            let (link, awaiting) = (app.link.clone(), app.awaiting.clone());
+            awaiting.fetch_add(1, Ordering::AcqRel);
+            frame.queue.on_submitted_work_done(move || {
+                link.shared.lock().unwrap().released.push(released);
+                awaiting.fetch_sub(1, Ordering::AcqRel);
+            });
+            app.poll_until_released(frame.device);
         }
         draw(frame, self.shown.as_ref().zip(self.blit.as_ref()));
         app.ask_frame(frame.time);

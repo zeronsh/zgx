@@ -4,11 +4,11 @@
 //! zgx-surface's external surfaces (another process).
 //!
 //! ```no_run
-//! # fn demo(cx: &mut zgx::compose::Context, runtime: &zgx::reactive::Runtime) {
+//! # fn demo(runtime: &zgx::reactive::Runtime) -> zgx::compose::View {
 //! use zgx::compose::prelude::*;
 //! use zgx_wasm::{WasmApp, WasmOptions, surface};
 //! let app = WasmApp::spawn(runtime, WasmOptions::new("cube.wasm"));
-//! cx.render(surface(&app).w(640.).h(400.).rounded(16.));
+//! surface(&app).w(640.).h(400.).rounded(16.)
 //! # }
 //! ```
 //!
@@ -22,8 +22,12 @@
 //! call running too long ends its session alone. docs/wasm-apps.md says
 //! more.
 mod app;
+mod bundles;
+mod device;
 mod gpu;
+mod loops;
 mod painter;
+mod pipelines;
 mod runtime;
 mod shared;
 
