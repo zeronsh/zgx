@@ -1,5 +1,14 @@
 # Real Zeron baseline and independent native references
 
+**Historical fixture and cadence qualification:** the model catalog was not
+checked for completion; the fixture could retain the model-chip Skeleton's
+30 Hz animation. Its Wing cadence also used raw tape motion windows, including
+system momentum macOS zgx intentionally ignores. The 5.25%/3.87% values below
+are preserved historical diagnostics, not certified app missed-refresh rates.
+Headline decisions require the settled catalog and actual applied-input/app-coast
+scorer. The independent native continuous references do not use this fixture or
+wheel tape; the old zgx marker still needs the corrected fixture condition.
+
 Engine e875c5e0 with opt-in telemetry; actual Zeron native host source
 506e1af795452fd1c3a473c4ab16bfa6b6d348b7, isolated fixture geometry and
 reference hook. Only `scroll_fixture.luau` omits the disconnected chat publisher
