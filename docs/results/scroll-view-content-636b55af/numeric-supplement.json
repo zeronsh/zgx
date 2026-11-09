@@ -1,0 +1,1670 @@
+[
+  {
+    "case": "t01-01-default-view-clock-base",
+    "arm": "default-view-clock",
+    "role": "base",
+    "trial": 0,
+    "late_frames": 328,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 328,
+        "observed_handover_phase_ms": {
+          "p50": 6.611083000898363,
+          "p99": 8.308707346518837,
+          "max": 8.332333346207939
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.555,
+          "p99": 25.73325,
+          "max": 25.871167
+        },
+        "gpu_wait_ms": {
+          "p50": 4.253,
+          "p99": 6.658,
+          "max": 7.246
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "on_time": {
+        "count": 5267,
+        "observed_handover_phase_ms": {
+          "p50": 6.667332977056505,
+          "p99": 7.8330419957637805,
+          "max": 8.307707995176317
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.332667,
+          "p99": 18.649959,
+          "max": 18.665584
+        },
+        "gpu_wait_ms": {
+          "p50": 3.729,
+          "p99": 5.787,
+          "max": 6.612
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7878,
+      "handover_records": 7878,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": null,
+      "p99": null,
+      "max": null
+    },
+    "submit_to_shown_ms": {
+      "p50": 18.357333,
+      "p99": 25.315459,
+      "max": 25.871167
+    },
+    "rss_kib": {
+      "before": 252608,
+      "after": 273472,
+      "delta": 20864
+    },
+    "motion_window_work": {
+      "frames": 5590,
+      "main_ms": {
+        "p50": 0.698,
+        "p99": 2.17,
+        "max": 4.77
+      },
+      "main_over_4ms": 2,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.087,
+        "p99": 5.29725,
+        "max": 6.0815
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.169,
+          "p99": 0.686,
+          "max": 1.17,
+          "mean": 0.18520590339892637,
+          "total": 1035.3009999999983,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.145,
+          "p99": 0.317,
+          "max": 0.831,
+          "mean": 0.14780930232558087,
+          "total": 826.2539999999971,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.166,
+          "p99": 6.594,
+          "max": 8.912,
+          "mean": 4.143269051878351,
+          "total": 23160.87399999998,
+          "over4ms": 2946
+        },
+        "wait": {
+          "p50": 0.78,
+          "p99": 6.099,
+          "max": 6.449,
+          "mean": 1.205451162790731,
+          "total": 6738.472000000186,
+          "over4ms": 298
+        },
+        "rest": {
+          "p50": 0.373,
+          "p99": 1.522,
+          "max": 4.526000000000001,
+          "mean": 0.4060279069767447,
+          "total": 2269.6960000000026,
+          "over4ms": 1
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 2,
+    "full_gate_main_ms": {
+      "p50": 0.695,
+      "p99": 2.24,
+      "max": 4.77
+    }
+  },
+  {
+    "case": "t01-01-default-view-clock-variant",
+    "arm": "default-view-clock",
+    "role": "variant",
+    "trial": 0,
+    "late_frames": 389,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 389,
+        "observed_handover_phase_ms": {
+          "p50": 5.718665987253191,
+          "p99": 8.211041321357094,
+          "max": 8.28845798969269
+        },
+        "submit_to_shown_ms": {
+          "p50": 19.293376,
+          "p99": 25.323167,
+          "max": 25.808751
+        },
+        "gpu_wait_ms": {
+          "p50": 3.179,
+          "p99": 6.095,
+          "max": 6.784
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "on_time": {
+        "count": 5184,
+        "observed_handover_phase_ms": {
+          "p50": 6.411000013351442,
+          "p99": 7.929208010435106,
+          "max": 8.316707968711855
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.584375,
+          "p99": 23.910126,
+          "max": 25.588042
+        },
+        "gpu_wait_ms": {
+          "p50": 4.32,
+          "p99": 5.753,
+          "max": 6.205
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7825,
+      "handover_records": 7825,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": null,
+      "p99": null,
+      "max": null
+    },
+    "submit_to_shown_ms": {
+      "p50": 18.651667,
+      "p99": 24.377667,
+      "max": 26.911167
+    },
+    "rss_kib": {
+      "before": 253152,
+      "after": 275056,
+      "delta": 21904
+    },
+    "motion_window_work": {
+      "frames": 5992,
+      "main_ms": {
+        "p50": 0.676,
+        "p99": 1.792,
+        "max": 4.452
+      },
+      "main_over_4ms": 1,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.45275,
+        "p99": 5.20925,
+        "max": 6.052042
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.168,
+          "p99": 0.588,
+          "max": 1.461,
+          "mean": 0.18008578104138906,
+          "total": 1079.0740000000033,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.142,
+          "p99": 0.274,
+          "max": 0.7,
+          "mean": 0.1443681575433916,
+          "total": 865.0540000000026,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.563,
+          "p99": 6.454,
+          "max": 7.314,
+          "mean": 4.430054572763699,
+          "total": 26544.887000000082,
+          "over4ms": 3767
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 0,
+          "mean": 0.0,
+          "total": 0,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.35800000000000004,
+          "p99": 1.0659999999999998,
+          "max": 2.6889999999999996,
+          "mean": 0.3806338451268351,
+          "total": 2280.757999999996,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 1,
+    "full_gate_main_ms": {
+      "p50": 0.678,
+      "p99": 1.781,
+      "max": 4.452
+    }
+  },
+  {
+    "case": "t01-02-hybrid-drawables-base",
+    "arm": "hybrid-drawables",
+    "role": "base",
+    "trial": 0,
+    "late_frames": 266,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 266,
+        "observed_handover_phase_ms": {
+          "p50": 6.612875014543535,
+          "p99": 8.307833333810173,
+          "max": 8.324624319871269
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.518251,
+          "p99": 25.552292,
+          "max": 25.817667
+        },
+        "gpu_wait_ms": {
+          "p50": 3.17,
+          "p99": 6.398,
+          "max": 6.852
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "on_time": {
+        "count": 5490,
+        "observed_handover_phase_ms": {
+          "p50": 6.65912500023842,
+          "p99": 7.749749004840853,
+          "max": 8.244832992553713
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.340834,
+          "p99": 18.65325,
+          "max": 18.668667
+        },
+        "gpu_wait_ms": {
+          "p50": 3.488,
+          "p99": 5.751,
+          "max": 6.389
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 8035,
+      "handover_records": 8035,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": null,
+      "p99": null,
+      "max": null
+    },
+    "submit_to_shown_ms": {
+      "p50": 18.357208,
+      "p99": 25.194333,
+      "max": 28.489625
+    },
+    "rss_kib": {
+      "before": 254576,
+      "after": 277504,
+      "delta": 22928
+    },
+    "motion_window_work": {
+      "frames": 5588,
+      "main_ms": {
+        "p50": 0.664,
+        "p99": 1.891,
+        "max": 3.194
+      },
+      "main_over_4ms": 0,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 2.849583,
+        "p99": 5.23,
+        "max": 6.0305
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.154,
+          "p99": 0.61,
+          "max": 1.131,
+          "mean": 0.16731800286327872,
+          "total": 934.9730000000015,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.14,
+          "p99": 0.265,
+          "max": 0.658,
+          "mean": 0.1403342877594844,
+          "total": 784.1879999999987,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 3.798,
+          "p99": 6.411,
+          "max": 27.903,
+          "mean": 3.9550658554044236,
+          "total": 22100.90799999992,
+          "over4ms": 2585
+        },
+        "wait": {
+          "p50": 1.125,
+          "p99": 5.951,
+          "max": 6.642,
+          "mean": 1.2904438081603709,
+          "total": 7211.000000000152,
+          "over4ms": 208
+        },
+        "rest": {
+          "p50": 0.36000000000000004,
+          "p99": 1.2279999999999998,
+          "max": 2.377,
+          "mean": 0.3850656764495341,
+          "total": 2151.7469999999967,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 0,
+    "full_gate_main_ms": {
+      "p50": 0.657,
+      "p99": 1.876,
+      "max": 3.194
+    }
+  },
+  {
+    "case": "t01-02-hybrid-drawables-variant",
+    "arm": "hybrid-drawables",
+    "role": "variant",
+    "trial": 0,
+    "late_frames": 200,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 200,
+        "observed_handover_phase_ms": {
+          "p50": 2.208625018596651,
+          "p99": 7.374833335479103,
+          "max": 7.602250327666603
+        },
+        "submit_to_shown_ms": {
+          "p50": 23.04225,
+          "p99": 31.3495,
+          "max": 31.848083
+        },
+        "gpu_wait_ms": {
+          "p50": 0.0,
+          "p99": 0.002,
+          "max": 0.003
+        },
+        "acquisition_ms": {
+          "p50": 0.031,
+          "p99": 0.192,
+          "max": 7.918
+        }
+      },
+      "on_time": {
+        "count": 5707,
+        "observed_handover_phase_ms": {
+          "p50": 2.0183329880237597,
+          "p99": 4.208999007940294,
+          "max": 6.614333003759386
+        },
+        "submit_to_shown_ms": {
+          "p50": 22.981667,
+          "p99": 24.050875,
+          "max": 24.23425
+        },
+        "gpu_wait_ms": {
+          "p50": 0.0,
+          "p99": 3.587,
+          "max": 5.119
+        },
+        "acquisition_ms": {
+          "p50": 0.026,
+          "p99": 6.17,
+          "max": 14.13
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 8106,
+      "handover_records": 8106,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": 0.026,
+      "p99": 6.112,
+      "max": 14.13
+    },
+    "submit_to_shown_ms": {
+      "p50": 22.933917,
+      "p99": 24.442709,
+      "max": 32.047917
+    },
+    "rss_kib": {
+      "before": 240896,
+      "after": 262560,
+      "delta": 21664
+    },
+    "motion_window_work": {
+      "frames": 5240,
+      "main_ms": {
+        "p50": 0.708,
+        "p99": 7.773,
+        "max": 15.812
+      },
+      "main_over_4ms": 578,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.2825,
+        "p99": 5.31025,
+        "max": 6.1791670000000005
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.197,
+          "p99": 7.383,
+          "max": 15.336,
+          "mean": 0.9078311068702317,
+          "total": 4757.035000000014,
+          "over4ms": 559
+        },
+        "encode": {
+          "p50": 0.135,
+          "p99": 0.288,
+          "max": 0.804,
+          "mean": 0.1389541984732824,
+          "total": 728.1199999999998,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 0.002,
+          "p99": 0.01,
+          "max": 3.461,
+          "mean": 0.004283206106870161,
+          "total": 22.443999999999644,
+          "over4ms": 0
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 4.615,
+          "mean": 0.0008807251908396947,
+          "total": 4.615,
+          "over4ms": 1
+        },
+        "rest": {
+          "p50": 0.3510000000000001,
+          "p99": 1.361,
+          "max": 2.3729999999999998,
+          "mean": 0.3825320610687034,
+          "total": 2004.4680000000058,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 666,
+    "full_gate_main_ms": {
+      "p50": 0.708,
+      "p99": 7.751,
+      "max": 15.812
+    }
+  },
+  {
+    "case": "t02-01-hybrid-drawables-base",
+    "arm": "hybrid-drawables",
+    "role": "base",
+    "trial": 1,
+    "late_frames": 310,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 310,
+        "observed_handover_phase_ms": {
+          "p50": 6.605332970619203,
+          "p99": 8.300999333461128,
+          "max": 8.32862531145414
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.538501,
+          "p99": 25.507667,
+          "max": 25.609
+        },
+        "gpu_wait_ms": {
+          "p50": 3.713,
+          "p99": 6.499,
+          "max": 6.763
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "on_time": {
+        "count": 5421,
+        "observed_handover_phase_ms": {
+          "p50": 6.6595830023288745,
+          "p99": 7.78912401199341,
+          "max": 8.316125005483629
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.340417,
+          "p99": 18.651709,
+          "max": 18.682084
+        },
+        "gpu_wait_ms": {
+          "p50": 3.802,
+          "p99": 5.746,
+          "max": 6.548
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7946,
+      "handover_records": 7946,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": null,
+      "p99": null,
+      "max": null
+    },
+    "submit_to_shown_ms": {
+      "p50": 18.359709,
+      "p99": 25.30275,
+      "max": 25.822417
+    },
+    "rss_kib": {
+      "before": 251360,
+      "after": 271744,
+      "delta": 20384
+    },
+    "motion_window_work": {
+      "frames": 5794,
+      "main_ms": {
+        "p50": 0.669,
+        "p99": 2.1,
+        "max": 3.173
+      },
+      "main_over_4ms": 0,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.166792,
+        "p99": 5.348458,
+        "max": 6.247
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.157,
+          "p99": 0.637,
+          "max": 1.266,
+          "mean": 0.17238091128753916,
+          "total": 998.7750000000018,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.14,
+          "p99": 0.295,
+          "max": 0.707,
+          "mean": 0.14252571625819843,
+          "total": 825.7940000000017,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.157,
+          "p99": 6.47,
+          "max": 7.493,
+          "mean": 4.140739903348293,
+          "total": 23991.44700000001,
+          "over4ms": 3139
+        },
+        "wait": {
+          "p50": 0.787,
+          "p99": 6.117,
+          "max": 6.534,
+          "mean": 1.1959936140835699,
+          "total": 6929.587000000203,
+          "over4ms": 277
+        },
+        "rest": {
+          "p50": 0.36500000000000005,
+          "p99": 1.387,
+          "max": 2.214,
+          "mean": 0.3921370383155002,
+          "total": 2272.042000000008,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 0,
+    "full_gate_main_ms": {
+      "p50": 0.669,
+      "p99": 2.129,
+      "max": 3.288
+    }
+  },
+  {
+    "case": "t02-01-hybrid-drawables-variant",
+    "arm": "hybrid-drawables",
+    "role": "variant",
+    "trial": 1,
+    "late_frames": 172,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 172,
+        "observed_handover_phase_ms": {
+          "p50": 2.222333014011385,
+          "p99": 7.773416330417,
+          "max": 8.010125329097114
+        },
+        "submit_to_shown_ms": {
+          "p50": 23.176001,
+          "p99": 31.218375,
+          "max": 31.56325
+        },
+        "gpu_wait_ms": {
+          "p50": 0.0,
+          "p99": 0.003,
+          "max": 1.879
+        },
+        "acquisition_ms": {
+          "p50": 0.029,
+          "p99": 7.245,
+          "max": 7.522
+        }
+      },
+      "on_time": {
+        "count": 5671,
+        "observed_handover_phase_ms": {
+          "p50": 1.9826660156250018,
+          "p99": 4.358415991067888,
+          "max": 7.548124998807909
+        },
+        "submit_to_shown_ms": {
+          "p50": 23.017334,
+          "p99": 24.058834,
+          "max": 24.20575
+        },
+        "gpu_wait_ms": {
+          "p50": 0.0,
+          "p99": 3.905,
+          "max": 6.275
+        },
+        "acquisition_ms": {
+          "p50": 0.026,
+          "p99": 6.297,
+          "max": 13.217
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 8080,
+      "handover_records": 8080,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": 0.027,
+      "p99": 6.428,
+      "max": 14.092
+    },
+    "submit_to_shown_ms": {
+      "p50": 22.964417,
+      "p99": 27.259042,
+      "max": 31.856834
+    },
+    "rss_kib": {
+      "before": 241280,
+      "after": 264240,
+      "delta": 22960
+    },
+    "motion_window_work": {
+      "frames": 5242,
+      "main_ms": {
+        "p50": 0.736,
+        "p99": 7.997,
+        "max": 15.649
+      },
+      "main_over_4ms": 779,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.482958,
+        "p99": 5.439917,
+        "max": 6.213
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.209,
+          "p99": 7.44,
+          "max": 15.023,
+          "mean": 1.1456384967569622,
+          "total": 6005.436999999995,
+          "over4ms": 749
+        },
+        "encode": {
+          "p50": 0.137,
+          "p99": 0.386,
+          "max": 0.692,
+          "mean": 0.14271747424647074,
+          "total": 748.1249999999997,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 0.002,
+          "p99": 0.011,
+          "max": 3.935,
+          "mean": 0.0037623044639450913,
+          "total": 19.72200000000017,
+          "over4ms": 0
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 0,
+          "mean": 0.0,
+          "total": 0,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.357,
+          "p99": 1.342,
+          "max": 2.229,
+          "mean": 0.3896533765738269,
+          "total": 2042.5630000000008,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 905,
+    "full_gate_main_ms": {
+      "p50": 0.733,
+      "p99": 7.933,
+      "max": 15.649
+    }
+  },
+  {
+    "case": "t02-02-default-view-clock-base",
+    "arm": "default-view-clock",
+    "role": "base",
+    "trial": 1,
+    "late_frames": 452,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 452,
+        "observed_handover_phase_ms": {
+          "p50": 6.56087499856949,
+          "p99": 8.313041319449745,
+          "max": 8.331666370232902
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.552459,
+          "p99": 25.783084,
+          "max": 25.9145
+        },
+        "gpu_wait_ms": {
+          "p50": 4.28,
+          "p99": 6.723,
+          "max": 10.04
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "on_time": {
+        "count": 4955,
+        "observed_handover_phase_ms": {
+          "p50": 6.649665981531145,
+          "p99": 7.840083032846453,
+          "max": 8.307666987180712
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.350334,
+          "p99": 18.652083,
+          "max": 18.669959
+        },
+        "gpu_wait_ms": {
+          "p50": 3.812,
+          "p99": 5.737,
+          "max": 6.646
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7702,
+      "handover_records": 7702,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": null,
+      "p99": null,
+      "max": null
+    },
+    "submit_to_shown_ms": {
+      "p50": 18.376625,
+      "p99": 25.352584,
+      "max": 26.084125
+    },
+    "rss_kib": {
+      "before": 252480,
+      "after": 270288,
+      "delta": 17808
+    },
+    "motion_window_work": {
+      "frames": 5558,
+      "main_ms": {
+        "p50": 0.724,
+        "p99": 2.452,
+        "max": 4.313
+      },
+      "main_over_4ms": 1,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.223,
+        "p99": 5.245583,
+        "max": 6.215958
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.176,
+          "p99": 0.683,
+          "max": 1.775,
+          "mean": 0.1912770780856425,
+          "total": 1063.118000000001,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.147,
+          "p99": 0.398,
+          "max": 0.751,
+          "mean": 0.1520080964375673,
+          "total": 844.860999999999,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.171,
+          "p99": 6.662,
+          "max": 11.207,
+          "mean": 4.182293270960765,
+          "total": 23245.185999999936,
+          "over4ms": 3091
+        },
+        "wait": {
+          "p50": 0.857,
+          "p99": 6.212,
+          "max": 6.628,
+          "mean": 1.2923181000360213,
+          "total": 7182.704000000207,
+          "over4ms": 414
+        },
+        "rest": {
+          "p50": 0.389,
+          "p99": 1.7599999999999996,
+          "max": 2.8539999999999996,
+          "mean": 0.44419629363080265,
+          "total": 2468.843000000001,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 1,
+    "full_gate_main_ms": {
+      "p50": 0.721,
+      "p99": 2.428,
+      "max": 4.313
+    }
+  },
+  {
+    "case": "t02-02-default-view-clock-variant",
+    "arm": "default-view-clock",
+    "role": "variant",
+    "trial": 1,
+    "late_frames": 443,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 443,
+        "observed_handover_phase_ms": {
+          "p50": 5.902208030223848,
+          "p99": 8.247415989637377,
+          "max": 8.302165985107424
+        },
+        "submit_to_shown_ms": {
+          "p50": 19.101584,
+          "p99": 25.090333,
+          "max": 25.4555
+        },
+        "gpu_wait_ms": {
+          "p50": 3.319,
+          "p99": 6.106,
+          "max": 6.422
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "on_time": {
+        "count": 4956,
+        "observed_handover_phase_ms": {
+          "p50": 6.180790990591051,
+          "p99": 7.970915973186495,
+          "max": 8.323707997798921
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.796584,
+          "p99": 24.388209,
+          "max": 24.7385
+        },
+        "gpu_wait_ms": {
+          "p50": 4.106,
+          "p99": 5.8,
+          "max": 6.351
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7691,
+      "handover_records": 7691,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": null,
+      "p99": null,
+      "max": null
+    },
+    "submit_to_shown_ms": {
+      "p50": 18.844001,
+      "p99": 24.588458,
+      "max": 25.814833
+    },
+    "rss_kib": {
+      "before": 250944,
+      "after": 271696,
+      "delta": 20752
+    },
+    "motion_window_work": {
+      "frames": 5942,
+      "main_ms": {
+        "p50": 0.721,
+        "p99": 1.987,
+        "max": 3.445
+      },
+      "main_over_4ms": 0,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.280417,
+        "p99": 5.275,
+        "max": 6.095292000000001
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.174,
+          "p99": 0.606,
+          "max": 1.349,
+          "mean": 0.1860950858296878,
+          "total": 1105.777000000005,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.149,
+          "p99": 0.281,
+          "max": 0.958,
+          "mean": 0.14997744867048113,
+          "total": 891.1659999999988,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.394,
+          "p99": 6.559,
+          "max": 7.553,
+          "mean": 4.32508431504542,
+          "total": 25699.650999999885,
+          "over4ms": 3519
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 0,
+          "mean": 0.0,
+          "total": 0,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.386,
+          "p99": 1.384,
+          "max": 3.0349999999999997,
+          "mean": 0.4085383709188823,
+          "total": 2427.5349999999985,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 0,
+    "full_gate_main_ms": {
+      "p50": 0.719,
+      "p99": 2.174,
+      "max": 3.445
+    }
+  },
+  {
+    "case": "t03-01-default-view-clock-base",
+    "arm": "default-view-clock",
+    "role": "base",
+    "trial": 2,
+    "late_frames": 288,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 288,
+        "observed_handover_phase_ms": {
+          "p50": 6.612457990646364,
+          "p99": 8.315458347400032,
+          "max": 8.331583311160408
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.535333,
+          "p99": 25.724001,
+          "max": 26.758292
+        },
+        "gpu_wait_ms": {
+          "p50": 3.53,
+          "p99": 6.667,
+          "max": 7.33
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "on_time": {
+        "count": 5459,
+        "observed_handover_phase_ms": {
+          "p50": 6.667165964841844,
+          "p99": 7.796875029802324,
+          "max": 8.249667018651964
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.332834,
+          "p99": 18.649709,
+          "max": 18.681209
+        },
+        "gpu_wait_ms": {
+          "p50": 3.195,
+          "p99": 5.721,
+          "max": 6.293
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7964,
+      "handover_records": 7964,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": null,
+      "p99": null,
+      "max": null
+    },
+    "submit_to_shown_ms": {
+      "p50": 18.35225,
+      "p99": 25.331333,
+      "max": 31.522667
+    },
+    "rss_kib": {
+      "before": 252432,
+      "after": 273280,
+      "delta": 20848
+    },
+    "motion_window_work": {
+      "frames": 5622,
+      "main_ms": {
+        "p50": 0.669,
+        "p99": 2.068,
+        "max": 3.838
+      },
+      "main_over_4ms": 0,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 2.641125,
+        "p99": 5.327458,
+        "max": 6.031375
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.16,
+          "p99": 0.669,
+          "max": 1.086,
+          "mean": 0.17519726076129513,
+          "total": 984.9590000000012,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.14,
+          "p99": 0.3,
+          "max": 0.681,
+          "mean": 0.14295517609391672,
+          "total": 803.6939999999998,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 3.685,
+          "p99": 6.48,
+          "max": 9.328,
+          "mean": 3.983941302027747,
+          "total": 22397.717999999993,
+          "over4ms": 2534
+        },
+        "wait": {
+          "p50": 1.178,
+          "p99": 6.117,
+          "max": 6.535,
+          "mean": 1.363610814656733,
+          "total": 7666.220000000153,
+          "over4ms": 309
+        },
+        "rest": {
+          "p50": 0.36300000000000004,
+          "p99": 1.3609999999999995,
+          "max": 2.6340000000000003,
+          "mean": 0.3917780149413008,
+          "total": 2202.575999999993,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 0,
+    "full_gate_main_ms": {
+      "p50": 0.669,
+      "p99": 2.137,
+      "max": 3.838
+    }
+  },
+  {
+    "case": "t03-01-default-view-clock-variant",
+    "arm": "default-view-clock",
+    "role": "variant",
+    "trial": 2,
+    "late_frames": 347,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 347,
+        "observed_handover_phase_ms": {
+          "p50": 5.593665987253191,
+          "p99": 8.117875009775164,
+          "max": 8.167583018541338
+        },
+        "submit_to_shown_ms": {
+          "p50": 19.389542,
+          "p99": 24.69225,
+          "max": 25.572542
+        },
+        "gpu_wait_ms": {
+          "p50": 3.071,
+          "p99": 6.161,
+          "max": 10.236
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "on_time": {
+        "count": 5209,
+        "observed_handover_phase_ms": {
+          "p50": 6.131292015314104,
+          "p99": 7.896416008472444,
+          "max": 8.325208008289339
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.861792,
+          "p99": 23.796417,
+          "max": 24.745834
+        },
+        "gpu_wait_ms": {
+          "p50": 3.993,
+          "p99": 5.812,
+          "max": 6.471
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7871,
+      "handover_records": 7871,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": null,
+      "p99": null,
+      "max": null
+    },
+    "submit_to_shown_ms": {
+      "p50": 18.95575,
+      "p99": 23.943751,
+      "max": 25.572542
+    },
+    "rss_kib": {
+      "before": 252432,
+      "after": 272160,
+      "delta": 19728
+    },
+    "motion_window_work": {
+      "frames": 5919,
+      "main_ms": {
+        "p50": 0.674,
+        "p99": 1.642,
+        "max": 3.944
+      },
+      "main_over_4ms": 0,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.208792,
+        "p99": 5.2747079999999995,
+        "max": 6.214
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.16,
+          "p99": 0.593,
+          "max": 1.48,
+          "mean": 0.17112890690995108,
+          "total": 1012.9120000000005,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.143,
+          "p99": 0.258,
+          "max": 0.779,
+          "mean": 0.14318922115222138,
+          "total": 847.5369999999983,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.247,
+          "p99": 6.473,
+          "max": 10.55,
+          "mean": 4.220608717688799,
+          "total": 24981.783000000003,
+          "over4ms": 3281
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 2.699,
+          "mean": 0.00045598918736273016,
+          "total": 2.699,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.3640000000000001,
+          "p99": 1.004,
+          "max": 2.617,
+          "mean": 0.38483730359858037,
+          "total": 2277.851999999997,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 0,
+    "full_gate_main_ms": {
+      "p50": 0.677,
+      "p99": 1.693,
+      "max": 3.944
+    }
+  },
+  {
+    "case": "t03-02-hybrid-drawables-base",
+    "arm": "hybrid-drawables",
+    "role": "base",
+    "trial": 2,
+    "late_frames": 360,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 360,
+        "observed_handover_phase_ms": {
+          "p50": 6.520792007446291,
+          "p99": 8.313124348719917,
+          "max": 8.326541324456535
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.559001,
+          "p99": 25.529375,
+          "max": 25.559
+        },
+        "gpu_wait_ms": {
+          "p50": 4.217,
+          "p99": 6.609,
+          "max": 7.704
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "on_time": {
+        "count": 5226,
+        "observed_handover_phase_ms": {
+          "p50": 6.669124990701677,
+          "p99": 7.853083014488222,
+          "max": 8.301873981952669
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.33075,
+          "p99": 18.650876,
+          "max": 18.664584
+        },
+        "gpu_wait_ms": {
+          "p50": 3.973,
+          "p99": 5.923,
+          "max": 6.431
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7788,
+      "handover_records": 7788,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": null,
+      "p99": null,
+      "max": null
+    },
+    "submit_to_shown_ms": {
+      "p50": 18.356501,
+      "p99": 25.340751,
+      "max": 29.764834
+    },
+    "rss_kib": {
+      "before": 252288,
+      "after": 271440,
+      "delta": 19152
+    },
+    "motion_window_work": {
+      "frames": 5598,
+      "main_ms": {
+        "p50": 0.691,
+        "p99": 2.146,
+        "max": 4.549
+      },
+      "main_over_4ms": 1,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.29975,
+        "p99": 5.406125,
+        "max": 6.15625
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.174,
+          "p99": 0.62,
+          "max": 1.554,
+          "mean": 0.18918417291889905,
+          "total": 1059.052999999997,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.142,
+          "p99": 0.307,
+          "max": 0.921,
+          "mean": 0.1452886745266169,
+          "total": 813.3260000000014,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.38,
+          "p99": 6.641,
+          "max": 8.801,
+          "mean": 4.309532511611283,
+          "total": 24124.762999999963,
+          "over4ms": 3325
+        },
+        "wait": {
+          "p50": 0.53,
+          "p99": 6.183,
+          "max": 6.651,
+          "mean": 1.131150946766743,
+          "total": 6332.183000000228,
+          "over4ms": 308
+        },
+        "rest": {
+          "p50": 0.3680000000000001,
+          "p99": 1.4959999999999998,
+          "max": 2.828,
+          "mean": 0.4042577706323671,
+          "total": 2263.034999999991,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 1,
+    "full_gate_main_ms": {
+      "p50": 0.691,
+      "p99": 2.232,
+      "max": 4.549
+    }
+  },
+  {
+    "case": "t03-02-hybrid-drawables-variant",
+    "arm": "hybrid-drawables",
+    "role": "variant",
+    "trial": 2,
+    "late_frames": 169,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 169,
+        "observed_handover_phase_ms": {
+          "p50": 2.4764999747276324,
+          "p99": 8.132832338412605,
+          "max": 8.296958317359291
+        },
+        "submit_to_shown_ms": {
+          "p50": 22.951709,
+          "p99": 30.208375,
+          "max": 30.221001
+        },
+        "gpu_wait_ms": {
+          "p50": 0.0,
+          "p99": 0.005,
+          "max": 2.19
+        },
+        "acquisition_ms": {
+          "p50": 0.034,
+          "p99": 0.195,
+          "max": 3.434
+        }
+      },
+      "on_time": {
+        "count": 5846,
+        "observed_handover_phase_ms": {
+          "p50": 2.0970830023288745,
+          "p99": 4.894041001796724,
+          "max": 7.176625013351442
+        },
+        "submit_to_shown_ms": {
+          "p50": 22.902626,
+          "p99": 24.027167,
+          "max": 24.188833
+        },
+        "gpu_wait_ms": {
+          "p50": 0.0,
+          "p99": 3.18,
+          "max": 4.987
+        },
+        "acquisition_ms": {
+          "p50": 0.027,
+          "p99": 6.111,
+          "max": 8.911
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 8215,
+      "handover_records": 8215,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": 0.027,
+      "p99": 6.205,
+      "max": 8.911
+    },
+    "submit_to_shown_ms": {
+      "p50": 22.873876,
+      "p99": 24.523917,
+      "max": 31.515209
+    },
+    "rss_kib": {
+      "before": 241888,
+      "after": 261328,
+      "delta": 19440
+    },
+    "motion_window_work": {
+      "frames": 5334,
+      "main_ms": {
+        "p50": 0.759,
+        "p99": 7.886,
+        "max": 13.358
+      },
+      "main_over_4ms": 488,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.249,
+        "p99": 5.258,
+        "max": 6.073167000000001
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.205,
+          "p99": 7.405,
+          "max": 12.949,
+          "mean": 0.7956406074240775,
+          "total": 4243.947000000029,
+          "over4ms": 473
+        },
+        "encode": {
+          "p50": 0.143,
+          "p99": 0.358,
+          "max": 0.943,
+          "mean": 0.14686445444319388,
+          "total": 783.3749999999961,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 0.002,
+          "p99": 0.011,
+          "max": 0.227,
+          "mean": 0.0025363704536933724,
+          "total": 13.529000000000448,
+          "over4ms": 0
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 0,
+          "mean": 0.0,
+          "total": 0,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.38000000000000006,
+          "p99": 1.3699999999999997,
+          "max": 3.457,
+          "mean": 0.4102227221597284,
+          "total": 2188.127999999991,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 628,
+    "full_gate_main_ms": {
+      "p50": 0.76,
+      "p99": 7.805,
+      "max": 13.358
+    }
+  }
+]
