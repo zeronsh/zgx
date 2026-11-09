@@ -837,7 +837,9 @@ enum CopyBlocker {
     NoContent,
     /// Something not of the content paints between its items.
     Between(NodeId),
-    /// A content item is masked, isolated (a layer) or blurred.
+    /// A content item reads what lies under it (a backdrop blur, a blend, a
+    /// shader reading the backdrop), plays a loop of its own, or the view
+    /// lies under two fades.
     Effect(NodeId),
     /// A content item fades with this mask (`fade_edges`): the move copies
     /// within its interior, if the mask holds still (`scroll_copies`).
@@ -855,10 +857,14 @@ impl CopyBlocker {
         match self {
             Self::NoContent => "none of its content paints in its view".into(),
             Self::Between(id) => format!("{} paints between its content's items", node(id)),
-            Self::Effect(id) => format!("{} in it is masked, a layer or blurred", node(id)),
+            Self::Effect(id) => format!(
+                "{} in it reads what is under it, plays a loop of its own, or lies under two \
+                 fades around its view",
+                node(id)
+            ),
             Self::Fade(id, _) => format!(
-                "{} in it fades with bands that move as it scrolls (`fade_overflow`) or are \
-                 not its view's own",
+                "{} in it fades with bands cut short as it scrolls (`fade_overflow`) or not \
+                 its view's own",
                 node(id)
             ),
             Self::Over(id) => format!(
@@ -875,13 +881,15 @@ impl CopyBlocker {
 }
 /// Whether moving `scroll`'s pixels reproduces the frame (`None`), and what
 /// keeps it from it otherwise: its content is one contiguous run of paint
-/// items free of masks, layers and filters; beneath it the clip shows a
+/// items none of which reads what lies under it; beneath it the clip shows a
 /// single opaque rectangle (or the window background); above it nothing
 /// paints in the clip outside this frame's damage. What paints above or
 /// shows beneath it and repaints where it is still had its pixels in the
 /// frame copied: `carried` gets where the copy puts them, to repaint.
-/// Content under one fade mask (`fade_edges`) is no obstacle: `fade` gets
-/// the mask, for the move to copy within its interior (`scroll_copies`).
+/// Masks, fades, layers and filters of the content's own move with it, and
+/// after a move of whole pixels draw what they drew (`cut_fades` for those
+/// that don't). A fade around the content is no obstacle: `fade` gets the
+/// mask, for the move to copy within its interior (`scroll_copies`).
 fn copy_blocker(
     scene: &Scene,
     scroll: &zgx::scene::ScrollMove,
@@ -897,6 +905,15 @@ fn copy_blocker(
         return Some(CopyBlocker::NoContent);
     };
     let last = items.iter().rposition(content).expect("found above");
+    // What the content has from around it, which holds still as it moves:
+    // the extras its own node was given. Any other an item has is its own.
+    let Some(around) = items[first..=last].iter().find(|i| i.id == scroll.node) else {
+        return Some(CopyBlocker::Effect(items[first].id));
+    };
+    if around.outer_mask().is_some() {
+        return Some(CopyBlocker::Effect(scroll.node));
+    }
+    *fade = around.mask();
     let paints = |item: &zgx::scene::PaintItem<'_>| -> Option<Rect> {
         let bounds = match item.kind {
             // A layer: all it holds, turned and scaled as it is.
@@ -930,11 +947,14 @@ fn copy_blocker(
                 && d.y + d.height >= rect.y + rect.height
         })
     };
+    let mut looked: Option<*const zgx::scene::PaintExtras> = None;
     for item in &items[first..=last] {
         if !content(item) {
             return Some(CopyBlocker::Between(item.id));
         }
-        if item.isolated || item.effects.blur_radius > 0. {
+        // What reads the pixels under it reads the view's, which hold still
+        // where the content moves over them.
+        if item.effects.blur_radius > 0. || (item.isolated && reads_under(scene, item.id)) {
             return Some(CopyBlocker::Effect(item.id));
         }
         // A loop a layer plays moves with the view's repaint, not its copy.
@@ -944,16 +964,13 @@ fn copy_blocker(
         }) {
             return Some(CopyBlocker::Effect(item.id));
         }
-        // Under two fades: copied pixels would carry the outer one's bands
-        // to where its content moves.
-        if item.outer_mask().is_some() {
-            return Some(CopyBlocker::Effect(item.id));
-        }
-        if let Some(mask) = item.mask() {
-            match fade {
-                None => *fade = Some(mask),
-                Some(other) if *other == mask => {}
-                Some(_) => return Some(CopyBlocker::Effect(item.id)),
+        // (A subtree shares its extras: looked at once.)
+        if let Some(extras) = &item.extras
+            && !looked.is_some_and(|at| std::ptr::eq(at, &**extras))
+        {
+            looked = Some(&**extras);
+            if item.mask() != around.mask() {
+                cut_fades(scene, item, around.mask(), scroll, carried);
             }
         }
     }
@@ -1001,6 +1018,10 @@ fn copy_blocker(
             if quad.fill.3 == 255 && quad.radius <= 0. && quad.shadow.is_none() && quad.decoration.is_none())
             && item.effects.opacity >= 1.
             && item.effects.edge_fade <= 0.
+            // Under no mask, rounded clip or colour filter of the content's
+            // own, which would show what lies under it.
+            && !item.isolated
+            && item.extras == around.extras
     };
     if spans_cover(
         clip,
@@ -1043,6 +1064,90 @@ fn copy_blocker(
         carried.extend(carry(rect));
     }
     None
+}
+/// Whether layer `id` draws from what lies under it: a blend, a shader
+/// reading the backdrop, or a backdrop filter anywhere in it.
+fn reads_under(scene: &Scene, id: NodeId) -> bool {
+    scene.blend(id) != zgx::scene::BlendMode::Normal
+        || scene
+            .layer_shader(id)
+            .is_some_and(zgx::scene::LayerShader::reads_backdrop)
+        || scene.backdrop_read_within(id)
+}
+/// A fade in scroll content draws what it drew after the move only where its
+/// band's edge moved with it. Its box comes from its clip, so an edge the
+/// view's own clip cuts (the content's foot past the view's, a band on a node
+/// that clips nothing) stays at the view's edge as the content moves: `carried`
+/// gets what lies under such a fade, to repaint. `around` is the fade the
+/// content has from around it, which `scroll_copies` keeps.
+#[cold]
+#[inline(never)]
+fn cut_fades(
+    scene: &Scene,
+    item: &zgx::scene::PaintItem<'_>,
+    around: Option<zgx::scene::FadeMask>,
+    scroll: &zgx::scene::ScrollMove,
+    carried: &mut Vec<Rect>,
+) {
+    // The largest of the insets taken off the fades between it and the view:
+    // the clips the boxes came from reach at least that far out, no further
+    // than the view's edge if cut.
+    let mut insets = [0_f32; 4];
+    let mut at = scene.parent(item.id);
+    while let Some(node) = at {
+        let style = scene.style(node);
+        let [top, bottom] = style.fade_insets;
+        let [left, right] = style.fade_insets_x;
+        for (most, inset) in insets.iter_mut().zip([top, right, bottom, left]) {
+            if inset.is_finite() {
+                *most = most.max(inset);
+            }
+        }
+        if node == scroll.node {
+            break;
+        }
+        at = scene.parent(node);
+    }
+    let view = scroll.clip;
+    let (view_right, view_bottom) = (view.x + view.width, view.y + view.height);
+    for (rect, [top, right, bottom, left]) in [item.mask(), item.outer_mask()].into_iter().flatten()
+    {
+        if Some((rect, [top, right, bottom, left])) == around {
+            continue;
+        }
+        let clip = Rect::new(
+            rect.x - insets[3],
+            rect.y - insets[0],
+            rect.width + insets[3] + insets[1],
+            rect.height + insets[0] + insets[2],
+        );
+        let (clip_right, clip_bottom) = (clip.x + clip.width, clip.y + clip.height);
+        // Across the move nothing about a band changes; along it, its edge
+        // lies inside the view before the move and after. An inset comes off
+        // what's left of the clip, so with one either edge cut moves the band.
+        let (dx, dy) = (scroll.dx, scroll.dy);
+        let [cut_top, cut_bottom, cut_left, cut_right] = [
+            clip.y.min(clip.y - dy) <= view.y,
+            clip_bottom.max(clip_bottom - dy) >= view_bottom,
+            clip.x.min(clip.x - dx) <= view.x,
+            clip_right.max(clip_right - dx) >= view_right,
+        ];
+        let cut = (dy != 0.
+            && ((top > 0. && cut_top)
+                || (bottom > 0. && cut_bottom)
+                || ((top > 0. || bottom > 0.)
+                    && insets[0] + insets[2] > 0.
+                    && (cut_top || cut_bottom))))
+            || (dx != 0.
+                && ((left > 0. && cut_left)
+                    || (right > 0. && cut_right)
+                    || ((left > 0. || right > 0.)
+                        && insets[1] + insets[3] > 0.
+                        && (cut_left || cut_right))));
+        if cut {
+            carried.extend(clip.intersection(view));
+        }
+    }
 }
 /// Whether `item` paints one colour over all of `clip` but its rounded
 /// corners: a plain fill whose box holds the clip inside its border, with any
@@ -10179,7 +10284,14 @@ impl GpuRenderer {
             if defer && end == draws.len() {
                 stats.render_passes += 1;
                 let blur = vertical.take();
-                let direct = whole && self.whole_frames > 0 && segment == 0 && blur.is_none();
+                // (Not while a view scrolls over pixels this frame made new:
+                // a frame left out of the target refuses the next one's copy,
+                // which paints whole and goes direct, and so on while it moves.)
+                let direct = whole
+                    && self.whole_frames > 0
+                    && segment == 0
+                    && blur.is_none()
+                    && !(self.fresh && !scene.scroll_moves().is_empty());
                 self.whole_frames = if whole {
                     self.whole_frames.saturating_add(1)
                 } else {

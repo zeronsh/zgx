@@ -732,9 +732,10 @@ impl GpuRenderer {
     /// mask is 1, on the device pixels its bands end on, as `band_strips`
     /// puts them): the copy `pixels` makes of it, and what of
     /// the view repaints (its bands, and the interior the copy leaves). Only
-    /// for a fade around the content, its bands holding still (no
-    /// `fade_overflow`) and the content's own nothing of it: the frame
-    /// before drew the same interior.
+    /// for a fade around the content, its bands its own in full (a
+    /// `fade_overflow` band cut short moves as the content does, and one that
+    /// changes repaints all the node shows) and the content's own nothing of
+    /// it: the frame before drew the same interior.
     pub(crate) fn fade_copy(
         &self,
         scene: &Scene,
@@ -764,7 +765,7 @@ impl GpuRenderer {
             band(style.fade_edges[1]),
             band(style.fade_edges_x[0]),
         ];
-        if style.fade_overflow || own != bands {
+        if own != bands {
             return None;
         }
         let scale = self.scale;
