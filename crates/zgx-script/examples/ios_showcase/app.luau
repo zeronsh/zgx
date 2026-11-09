@@ -302,6 +302,7 @@ end
 local function TextPage(nav: any)
 	local function page(ride: "native" | "attached")
 		return ios.page {
+		keyboard_dismiss = "interactive",
 			title = "Notes",
 			nav = nav,
 			keyboard_ride = ride,

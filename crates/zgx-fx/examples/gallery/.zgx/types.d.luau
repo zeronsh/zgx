@@ -4036,6 +4036,10 @@ export type ScrollProps = {
 	-- ease-in-out over the keyboard's duration; "attached", the field riding
 	-- the keyboard's edge on its spring, the gap between them held.
 	keyboard_ride: ("native" | "attached")?,
+	-- What dragging it does to a software keyboard, as UIScrollView's
+	-- keyboardDismissMode: "none" (the default, as UIKit's own), "on_drag", or
+	-- "interactive", the keyboard following the finger as in Messages.
+	keyboard_dismiss: ("none" | "on_drag" | "interactive")?,
 	-- What a focused control or a find keeps clear of scrolling into view
 	-- (CSS's scroll-padding): a composer or a bar floating over its edges.
 	-- Points: one number for every side, or { top, bottom, left, right };
@@ -21147,6 +21151,8 @@ export type IosKit = {
 		bg: Color?,
 		-- How a focused field rides a software keyboard (default "native").
 		keyboard_ride: ("native" | "attached")?,
+		-- What dragging it does to a software keyboard (default "none").
+		keyboard_dismiss: ("none" | "on_drag" | "interactive")?,
 		[number]: any,
 	}) -> Node,
 	stack: (props: { root: (nav: any) -> Node }) -> Node,

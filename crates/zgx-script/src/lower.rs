@@ -2989,6 +2989,7 @@ fn kind_view(
             scrollbar,
             contain,
             ride,
+            dismiss,
             padding,
         } => {
             let offset = match offset {
@@ -3011,6 +3012,10 @@ fn kind_view(
             };
             let view = match ride {
                 Some(ride) => view.keyboard_ride(*ride),
+                None => view,
+            };
+            let view = match dismiss {
+                Some(dismiss) => view.keyboard_dismiss(*dismiss),
                 None => view,
             };
             let view = match padding {

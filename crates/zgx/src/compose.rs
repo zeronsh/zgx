@@ -511,6 +511,9 @@ pub(crate) struct Rare {
     /// `View::keyboard_ride`: how it moves a field clear of a keyboard (iOS).
     #[cfg(any(target_os = "ios", test))]
     keyboard_ride: Option<crate::elastic::KeyboardRide>,
+    /// `View::keyboard_dismiss`: what dragging it does to a keyboard (iOS).
+    #[cfg(any(target_os = "ios", test))]
+    keyboard_dismiss: Option<crate::elastic::KeyboardDismiss>,
     /// `View::overscroll_contain`: a wheel over it stays with it.
     overscroll_contain: bool,
     animation: Option<animation::Animated>,
@@ -620,6 +623,10 @@ impl Rare {
         #[cfg(any(target_os = "ios", test))]
         if self.keyboard_ride.is_some() {
             inner.keyboard_ride = self.keyboard_ride;
+        }
+        #[cfg(any(target_os = "ios", test))]
+        if self.keyboard_dismiss.is_some() {
+            inner.keyboard_dismiss = self.keyboard_dismiss;
         }
         if self.overscroll_contain {
             inner.overscroll_contain = true;
@@ -926,6 +933,18 @@ impl View {
     /// goes on to them.
     pub fn overscroll_contain(mut self) -> Self {
         self.rare_mut().overscroll_contain = true;
+        self
+    }
+    /// What dragging this scroll view or virtual list does to a software
+    /// keyboard (iOS): nothing by default, as UIKit's own.
+    /// Elsewhere, where no software keyboard covers a view, it's kept nowhere.
+    pub fn keyboard_dismiss(mut self, dismiss: crate::elastic::KeyboardDismiss) -> Self {
+        #[cfg(any(target_os = "ios", test))]
+        {
+            self.rare_mut().keyboard_dismiss = Some(dismiss);
+        }
+        #[cfg(not(any(target_os = "ios", test)))]
+        let _ = (&mut self, dismiss);
         self
     }
     /// How this scroll view or virtual list moves a focused field in it
@@ -4944,6 +4963,8 @@ fn mount_element(
     let follow_end = rare.as_ref().and_then(|r| r.follow_end).unwrap_or(false);
     #[cfg(any(target_os = "ios", test))]
     let keyboard_ride = rare.as_ref().and_then(|r| r.keyboard_ride);
+    #[cfg(any(target_os = "ios", test))]
+    let keyboard_dismiss = rare.as_ref().and_then(|r| r.keyboard_dismiss);
     let mut opened = open_element(
         ui,
         parent,
@@ -4960,6 +4981,11 @@ fn mount_element(
         mount(ui, opened.child_parent, child, opened.environment.clone());
     }
     let root = close_element(ui, opened);
+    #[cfg(any(target_os = "ios", test))]
+    #[cfg(any(target_os = "ios", test))]
+    if let Some(dismiss) = keyboard_dismiss {
+        crate::elastic::set_keyboard_dismiss(ui, root, dismiss);
+    }
     #[cfg(any(target_os = "ios", test))]
     if let Some(ride) = keyboard_ride {
         crate::elastic::set_keyboard_ride(ui, root, ride);

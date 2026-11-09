@@ -1055,6 +1055,9 @@ pub(crate) enum Kind {
         /// `keyboard_ride = "native" | "attached"`: how it moves a focused
         /// field clear of a software keyboard.
         ride: Option<zgx::elastic::KeyboardRide>,
+        /// `keyboard_dismiss = "none" | "on_drag" | "interactive"`: what
+        /// dragging it does to a software keyboard.
+        dismiss: Option<zgx::elastic::KeyboardDismiss>,
         /// `scroll_padding`: kept clear as what it holds scrolls into view.
         padding: Option<Box<ScrollPadding>>,
     },
@@ -3523,6 +3526,7 @@ const LATE_FIELDS: &[&str] = &[
     "on_paste",
     "overscroll",
     "keyboard_ride",
+    "keyboard_dismiss",
     "capture_keys",
     "scroll_padding",
     "read_only",
@@ -3687,6 +3691,28 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 Kind::List { rare, .. } => rare.get_or_insert_default().contain = contain,
                 Kind::Input { rare, .. } => rare.get_or_insert_default().contain = contain,
                 _ => {}
+            }
+        }
+        "keyboard_dismiss" => {
+            use zgx::elastic::KeyboardDismiss;
+            let dismiss = match value {
+                mlua::Value::String(ref text) if &*text.to_str()? == "none" => {
+                    KeyboardDismiss::None
+                }
+                mlua::Value::String(ref text) if &*text.to_str()? == "on_drag" => {
+                    KeyboardDismiss::OnDrag
+                }
+                mlua::Value::String(ref text) if &*text.to_str()? == "interactive" => {
+                    KeyboardDismiss::Interactive
+                }
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "`keyboard_dismiss` is \"none\", \"on_drag\" or \"interactive\"",
+                    ));
+                }
+            };
+            if let Kind::Scroll { dismiss: set, .. } = &mut node.kind {
+                *set = Some(dismiss);
             }
         }
         "keyboard_ride" => {
@@ -5050,6 +5076,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             // Set as `fill` walks the table (`late_field`).
                             contain: false,
                             ride: None,
+                            dismiss: None,
                             padding: None,
                         },
                     ),

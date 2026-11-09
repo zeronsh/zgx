@@ -651,6 +651,7 @@ function ios.page(props)
 			h = "100%",
 			offset = offset,
 			keyboard_ride = props.keyboard_ride,
+			keyboard_dismiss = props.keyboard_dismiss,
 			-- The system's own: its spinner, its threshold, and it holds the page
 			-- down until `done`, which a page that forgets still gets in time.
 			on_mount = function(element)

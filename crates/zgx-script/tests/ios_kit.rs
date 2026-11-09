@@ -558,6 +558,50 @@ fn page_riding(ride: &str) -> Harness {
 }
 
 #[test]
+fn a_page_leaves_the_keyboard_alone_as_uikits_by_default_or_dismisses_when_it_says() {
+    use zgx::elastic::KeyboardDismiss;
+    let dismiss = |h: &mut Harness| {
+        h.ui.prepare_frame();
+        h.ui.scroll_driver_at(200., 500.)
+            .expect("the page's driver")
+            .keyboard_dismiss()
+    };
+    assert_eq!(dismiss(&mut page_riding("")), KeyboardDismiss::None);
+    // Kept only on iOS, where a software keyboard covers a page: elsewhere a
+    // scroll view holds none (zgx's `elastic::driven_tests` check it lands).
+    let kept = |dismiss: KeyboardDismiss| {
+        if cfg!(target_os = "ios") {
+            dismiss
+        } else {
+            KeyboardDismiss::None
+        }
+    };
+    assert_eq!(
+        dismiss(&mut page_riding(r#"keyboard_dismiss = "on_drag","#)),
+        kept(KeyboardDismiss::OnDrag)
+    );
+    assert_eq!(
+        dismiss(&mut page_riding(r#"keyboard_dismiss = "interactive","#)),
+        kept(KeyboardDismiss::Interactive)
+    );
+    let wrong = zgx_script::testing::TestApp::try_new(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.scroll { keyboard_dismiss = "away" }"#,
+        )
+    });
+    assert!(
+        wrong
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.contains("keyboard_dismiss")),
+        "{:?}",
+        wrong.err()
+    );
+}
+
+#[test]
 fn a_page_rides_the_keyboard_as_uikits_by_default_or_attached_when_it_says() {
     use zgx::elastic::KeyboardRide;
     let ride = |h: &mut Harness| {

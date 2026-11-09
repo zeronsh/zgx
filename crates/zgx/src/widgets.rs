@@ -638,6 +638,13 @@ const AWAY_MENU: u8 = 2;
 /// holding it. The selection it opened on stays drawn while it shows, as
 /// AppKit's does. `tracked`: a draw reading it is drawn again as the menu
 /// closes.
+/// Whether a press leaves focus on an editor (`focused`: whether what has
+/// focus is one, and takes text) given what it would focus instead (`next`,
+/// likewise): iOS's rule, that only a field takes the keyboard from a field.
+#[cfg(any(target_os = "ios", test))]
+fn press_keeps_field(focused: Option<bool>, next: Option<bool>) -> bool {
+    focused == Some(true) && next != Some(true)
+}
 fn context_menu_holds(storage: &std::rc::Weak<UiStorage>, editor: NodeId, tracked: bool) -> bool {
     let Some(storage) = storage.upgrade() else {
         return false;
@@ -1942,6 +1949,23 @@ impl Ui {
             wheel_in_window: Cell::new(false),
             document_listeners: RefCell::new(Vec::new()),
         });
+        // As a UITextField keeps first responder through a tap on a button, a
+        // switch or nothing (read in a reference app, iOS 26.5): only another
+        // field takes the keyboard from a field. It ends with `blur`.
+        #[cfg(target_os = "ios")]
+        {
+            let weak = Rc::downgrade(&storage);
+            storage.input.set_press_keeps_focus(move |focused, next| {
+                weak.upgrade().is_some_and(|storage| {
+                    let editors = storage.editors.borrow();
+                    press_keeps_field(
+                        editors.get(&focused).map(|e| !e.is_read_only()),
+                        next.and_then(|next| editors.get(&next))
+                            .map(|e| !e.is_read_only()),
+                    )
+                })
+            });
+        }
         storage.input.set_semantics(&storage.semantics);
         let ui = Self::from_storage(storage);
         // Tab out of a list's row goes on to the row next to it, built if
@@ -8838,6 +8862,23 @@ mod layout_drag_tests {
         eprintln!("drag: {passes:.2} passes, {measures:.0} measures a frame, {nodes} nodes");
         assert!(passes <= 3.2, "{passes:.2} passes a frame");
         assert!(measures <= 2200., "{measures:.0} measures a frame");
+    }
+}
+
+#[cfg(test)]
+mod press_keeps_field_tests {
+    use super::press_keeps_field as keeps;
+    #[test]
+    fn only_a_field_takes_the_keyboard_from_a_field() {
+        // A field has it: a press on nothing, a button, read-only text keeps it.
+        assert!(keeps(Some(true), None));
+        assert!(keeps(Some(true), Some(false)));
+        // Another field takes it.
+        assert!(!keeps(Some(true), Some(true)));
+        // Anything else moves focus as it does elsewhere.
+        assert!(!keeps(None, None));
+        assert!(!keeps(None, Some(true)));
+        assert!(!keeps(Some(false), None));
     }
 }
 

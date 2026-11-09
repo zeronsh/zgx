@@ -145,6 +145,30 @@ fn a_held_list_stays_drawn_where_it_is_as_its_offset_and_rows_go_on() {
 }
 
 #[test]
+fn a_views_keyboard_dismiss_reaches_its_driver() {
+    use crate::elastic::KeyboardDismiss;
+    for (dismiss, want) in [
+        (None, KeyboardDismiss::None),
+        (Some(KeyboardDismiss::OnDrag), KeyboardDismiss::OnDrag),
+        (
+            Some(KeyboardDismiss::Interactive),
+            KeyboardDismiss::Interactive,
+        ),
+    ] {
+        let mut ui = Ui::new(100., 100.);
+        let offset = ui.signal(0.);
+        let view = scroll(offset).w(100.).h(100.).child(div().w(100.).h(400.));
+        ui.mount(match dismiss {
+            Some(dismiss) => view.keyboard_dismiss(dismiss),
+            None => view,
+        });
+        ui.prepare_frame();
+        let driver = ui.scroll_driver_at(50., 50.).expect("the scroll view");
+        assert_eq!(driver.keyboard_dismiss(), want);
+    }
+}
+
+#[test]
 fn a_views_keyboard_ride_reaches_its_driver() {
     use crate::elastic::KeyboardRide;
     for (ride, want) in [

@@ -14,7 +14,7 @@ use objc2::{
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use zgx::elastic::{KeyboardRide, ScrollDriver};
+use zgx::elastic::{KeyboardDismiss, KeyboardRide, ScrollDriver};
 
 thread_local! {
     /// The window's scroller (iOS's one window), for its class's methods.
@@ -1206,6 +1206,16 @@ fn configure_pull(state: &State, view: &AnyObject, at: Option<CGPoint>, frame: &
 }
 
 fn configure(state: &State, view: &AnyObject, driver: ScrollDriver, at: Option<CGPoint>) {
+    // What dragging this scroll view does to the keyboard, its own choice.
+    let dismiss = match driver.keyboard_dismiss() {
+        KeyboardDismiss::None => 0isize,
+        KeyboardDismiss::OnDrag => 1,
+        KeyboardDismiss::Interactive => 2,
+    };
+    // SAFETY: UIScrollView's setter, on the main thread UIKit calls this on.
+    unsafe {
+        let _: () = msg_send![view, setKeyboardDismissMode: dismiss];
+    }
     let Some(metrics) = driver.metrics() else {
         return;
     };
@@ -1324,8 +1334,6 @@ impl NativeScroller {
             let _: () = msg_send![&*root, insertSubview: &*view, atIndex: 0isize];
             // Above the base plane's layer, where a refresh control shows; it draws
             // nothing else, and no touch lands on it.
-            // The keyboard leaves with a finger, as in Messages.
-            let _: () = msg_send![&*view, setKeyboardDismissMode: 2isize];
             install_tracker(&state, root);
             *state.scroller.borrow_mut() = Some(view.clone());
             let root_layer: Retained<AnyObject> = msg_send![&*root, layer];

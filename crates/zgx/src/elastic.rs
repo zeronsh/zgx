@@ -57,6 +57,9 @@ pub(crate) struct Elastic {
     /// How it moves a field clear of a keyboard (`View::keyboard_ride`).
     #[cfg(any(target_os = "ios", test))]
     keyboard: Cell<KeyboardRide>,
+    /// What dragging it does to a keyboard (`View::keyboard_dismiss`).
+    #[cfg(any(target_os = "ios", test))]
+    dismiss: Cell<KeyboardDismiss>,
 }
 /// What iOS's own scroller adds to a scroll view or list: room past its end
 /// while a keyboard covers that much of it (scrolling there is scrolling, not
@@ -167,6 +170,19 @@ impl Elastic {
     }
 }
 
+/// What dragging a scroll view does to a software keyboard (iOS), UIKit's
+/// `UIScrollView.KeyboardDismissMode`: `None` by default, as every UIKit scroll
+/// view (read in a reference app, iOS 26.5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeyboardDismiss {
+    /// Nothing: the keyboard stays.
+    #[default]
+    None,
+    /// It leaves as a drag begins.
+    OnDrag,
+    /// It follows the finger down, as in Messages.
+    Interactive,
+}
 /// How a scroll view moves a focused field clear of a software keyboard
 /// (iOS), the field's scroll view's choice (`View::keyboard_ride`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -182,6 +198,19 @@ pub enum KeyboardRide {
 }
 
 /// Scroll view `root`'s keyboard ride, once it is registered.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn set_keyboard_dismiss(ui: &Ui, root: NodeId, dismiss: KeyboardDismiss) {
+    let state = ui.elastic_state().borrow();
+    if let Some(view) = state
+        .views
+        .iter()
+        .rev()
+        .find(|(id, _)| *id == root)
+        .and_then(|(_, view)| view.upgrade())
+    {
+        view.dismiss.set(dismiss);
+    }
+}
 #[cfg(any(target_os = "ios", test))]
 pub(crate) fn set_keyboard_ride(ui: &Ui, root: NodeId, ride: KeyboardRide) {
     let state = ui.elastic_state().borrow();
@@ -251,6 +280,8 @@ pub(crate) fn register(
         driven,
         #[cfg(any(target_os = "ios", test))]
         keyboard: Cell::new(KeyboardRide::default()),
+        #[cfg(any(target_os = "ios", test))]
+        dismiss: Cell::new(KeyboardDismiss::default()),
     });
     {
         let mut state = ui.elastic_state().borrow_mut();
@@ -689,6 +720,16 @@ impl ScrollDriver {
         if view.shown.with_untracked(|s| *s) != stretch {
             view.shown.set(stretch);
         }
+    }
+    /// What dragging it does to a keyboard (iOS: the default elsewhere).
+    pub fn keyboard_dismiss(&self) -> KeyboardDismiss {
+        #[cfg(any(target_os = "ios", test))]
+        return self
+            .0
+            .upgrade()
+            .map_or(KeyboardDismiss::default(), |view| view.dismiss.get());
+        #[cfg(not(any(target_os = "ios", test)))]
+        KeyboardDismiss::default()
     }
     /// How it moves a focused field clear of a keyboard (iOS: the default
     /// elsewhere).
