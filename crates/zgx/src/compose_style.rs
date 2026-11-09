@@ -1330,7 +1330,8 @@ pub(crate) fn mount_style_with_intrinsic(
             || resolved.line_height.is_none()
             || resolved.rare().letter_spacing.is_none()
             || resolved.rare().underline.is_none()
-            || resolved.rare().underline_offset.is_none();
+            || resolved.rare().underline_offset.is_none()
+            || resolved.leading_set().is_none();
         let parent_version = inherited.version();
         if tracks_parent && !std::mem::replace(&mut parent_subscribed, true) {
             inherited.subscribe();
@@ -1393,6 +1394,7 @@ pub(crate) fn mount_style_with_intrinsic(
                         .letter_spacing
                         .unwrap_or(parent.font.letter_spacing),
                     masked: false,
+                    leading: resolved.leading_set().unwrap_or(parent.font.leading),
                     underline: {
                         let rare = resolved.rare();
                         let offset = rare

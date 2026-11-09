@@ -4633,6 +4633,9 @@ fn paragraph_effect<const LOCATING: bool>(
             if let Some(value) = spacing {
                 font.letter_spacing = value;
             }
+            if let Some(value) = span.styles.leading_set() {
+                font.leading = value;
+            }
             // An underlined paragraph underlines its runs (CSS's
             // `text-decoration` reaches inline children).
             let inherited = font.underline.map(|u| {

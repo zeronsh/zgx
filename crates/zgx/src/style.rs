@@ -763,6 +763,8 @@ pub(crate) struct ColdStyles {
     pub(crate) text_balance: Option<bool>,
     /// `Styled::lang`.
     pub(crate) lang: Option<std::sync::Arc<str>>,
+    /// `Styled::leading`.
+    pub(crate) leading: Option<crate::text_layout::Leading>,
 }
 /// What in `ColdStyles` paints a node as a layer (its gradients and drop
 /// shadow), behind one pointer: inline, each would make every `ColdStyles`
@@ -985,6 +987,9 @@ impl RareStyles {
             if theirs.lang.is_some() {
                 mine.lang = theirs.lang.clone();
             }
+            if theirs.leading.is_some() {
+                mine.leading = theirs.leading;
+            }
             if theirs.text_shadows.is_some() {
                 mine.text_shadows = theirs.text_shadows.clone();
             }
@@ -1144,6 +1149,12 @@ impl Styles {
             || self.rare().letter_spacing.is_some()
             || self.rare().underline.is_some()
             || self.rare().underline_offset.is_some()
+            || self.leading_set().is_some()
+    }
+    /// `Styled::leading`, if set.
+    #[inline]
+    pub(crate) fn leading_set(&self) -> Option<crate::text_layout::Leading> {
+        self.rare().cold.as_ref()?.leading
     }
     pub(crate) fn layout_options_mut(&mut self) -> &mut crate::layout::LayoutOptions {
         std::sync::Arc::make_mut(
@@ -2551,6 +2562,16 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Inherited space between lines in logical pixels, after each line but
+    /// the last ([`crate::text_layout::Leading`]): a font's leading as
+    /// UIKit's text styles add it. The first line keeps its own height. Zero
+    /// resets inherited leading.
+    fn leading(mut self, pixels: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, pixels, crate::theme::Field::Leading);
+        let cold = self.styles_mut().rare_mut().cold.get_or_insert_default();
+        cold.leading = Some(crate::text_layout::Leading::px(pixels));
+        self
+    }
     /// Underlined text, or not; inherited, like CSS's `text-decoration`
     /// (a hover style can underline a link's label).
     fn text_underline(mut self, on: bool) -> Self {

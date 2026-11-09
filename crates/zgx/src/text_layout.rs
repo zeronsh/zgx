@@ -78,6 +78,34 @@ impl LineHeight {
 fn normal_line_in(family: &FontFamily, size: f32, ios: bool) -> f32 {
     normal_line(size, ios && matches!(family, FontFamily::SansSerif))
 }
+/// Space added between lines, after each line but the last, in logical
+/// pixels: a font's leading as UIKit's text styles have it
+/// (`UIFont.leading` of `preferredFont(forTextStyle:)`, 1.71 points at
+/// body). A text's first line stays the font's own height, its baseline at the
+/// ascender, and each further line is the line and its leading below the last;
+/// nothing follows the last line. None by default, and negative values close
+/// lines up (caption 2's is -0.127). Held to 1/256 of a pixel, up to 128
+/// pixels either way, in two bytes a `FontStyle` had spare; nonfinite values
+/// are none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Leading(i16);
+impl Leading {
+    /// No space between lines beyond the line's own.
+    pub const ZERO: Self = Self(0);
+    /// `value` logical pixels between lines.
+    pub fn px(value: f32) -> Self {
+        if value.is_finite() {
+            Self((value * 256.).round().clamp(-32767., 32767.) as i16)
+        } else {
+            Self::ZERO
+        }
+    }
+    /// The space in logical pixels.
+    #[inline]
+    pub fn pixels(self) -> f32 {
+        f32::from(self.0) / 256.
+    }
+}
 /// The system font's line on iOS, in ems: SF's ascent and descent (1950 and
 /// 494 of 2048, no line gap), which UIKit gives as `UIFont.lineHeight` at
 /// every size and weight (read in a reference app, iOS 26.5). A label's first
@@ -396,6 +424,8 @@ pub struct FontStyle {
     pub masked: bool,
     /// Underlined (CSS `text-decoration: underline`): inherited.
     pub underline: Option<TextUnderline>,
+    /// Space between lines beyond the line's own (`Leading`): inherited.
+    pub leading: Leading,
 }
 /// An underline under text, `offset` logical pixels below the baseline
 /// (CSS `text-underline-offset`; unset, a tenth of the font size).
@@ -429,6 +459,7 @@ impl Default for FontStyle {
             },
             masked: false,
             underline: None,
+            leading: Leading::ZERO,
         }
     }
 }
@@ -1057,6 +1088,8 @@ impl FallbackTextLayout {
         let advance = (size as f64 * 0.6 + font.letter_spacing.pixels() as f64)
             .clamp(0., f32::MAX as f64) as f32;
         let height = font.line_height.resolve_in(&font.family, size);
+        // Each line the next's pitch below: its own and its leading.
+        let pitch = height + font.leading.pixels();
         let mut x = 0.;
         let mut y = 0.;
         let mut width = 0_f32;
@@ -1066,13 +1099,13 @@ impl FallbackTextLayout {
                 cell(range, Rect::new(x, y, 0., height));
                 width = width.max(x);
                 x = 0.;
-                y = (y + height).min(f32::MAX);
+                y = (y + pitch).min(f32::MAX);
                 return;
             }
             if max_width.is_some_and(|w| w > 0. && x > 0. && x + advance > w) {
                 width = width.max(x);
                 x = 0.;
-                y = (y + height).min(f32::MAX)
+                y = (y + pitch).min(f32::MAX)
             }
             cell(range, Rect::new(x, y, advance, height));
             x = (x + advance).min(f32::MAX);
@@ -1366,6 +1399,40 @@ mod tests {
             LineHeight::px(30.).resolve_in(&FontFamily::Monospace, 17.),
             30.
         );
+    }
+    #[test]
+    fn leading_goes_between_lines_and_not_after_the_last() {
+        // UIKit's text styles: a 3-line label is three lines and two
+        // leadings tall, each line its font's height, the next a line and a
+        // leading below.
+        let font = |leading| FontStyle {
+            line_height: LineHeight::px(20.),
+            leading: Leading::px(leading),
+            ..FontStyle::default()
+        };
+        let layout = FallbackTextLayout::with_font("a\nb\nc", 10., None, &font(1.7129));
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        let body = Leading::px(1.7129).pixels();
+        assert!((body - 1.7129).abs() < 1. / 512.);
+        assert!(near(layout.size().1, 3. * 20. + 2. * body));
+        assert!(near(layout.caret(2).y, 20. + body) && layout.caret(2).height == 20.);
+        assert!(near(layout.caret(4).y, 2. * (20. + body)));
+        let none = FallbackTextLayout::with_font("a\nb\nc", 10., None, &font(0.));
+        assert_eq!(none.size().1, 60.);
+        assert_eq!(
+            font(0.),
+            FontStyle {
+                line_height: LineHeight::px(20.),
+                ..FontStyle::default()
+            }
+        );
+        // Caption 2's closes its lines up.
+        let tight = FallbackTextLayout::with_font("a\nb", 10., None, &font(-0.127));
+        assert!((tight.size().1 - (40. - 0.127)).abs() < 1. / 512.);
+        assert_eq!(Leading::px(f32::NAN), Leading::ZERO);
+        assert_eq!(Leading::px(1000.).pixels(), 32767. / 256.);
+        // In bytes a font style had spare.
+        assert!(std::mem::size_of::<FontStyle>() <= 80);
     }
     #[test]
     fn explicit_pitch_keeps_wrapped_unicode_hit_selection_and_caret_aligned() {

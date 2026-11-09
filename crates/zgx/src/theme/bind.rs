@@ -64,6 +64,8 @@ pub enum Field {
     Height,
     /// One of a shader fill's four parameters (a colour, as 0 to 1).
     ShaderParam(u8),
+    /// The space between lines, `Styled::leading`.
+    Leading,
 }
 impl Field {
     /// Sides of padding or margin, else 15.
@@ -376,6 +378,9 @@ pub(crate) fn apply(styles: &mut Styles, field: Field, value: &TokenValue) {
         Field::LetterSpacing => {
             s.letter_spacing(number());
         }
+        Field::Leading => {
+            s.leading(number());
+        }
         Field::FontWeight => {
             s.font_weight(number().clamp(1., 1000.) as u16);
         }
@@ -472,6 +477,7 @@ fn sets(styles: &Styles, field: Field) -> u8 {
         Field::TextSize => all(styles.text_size.is_some()),
         Field::LineHeight => all(styles.line_height.is_some()),
         Field::LetterSpacing => all(styles.rare().letter_spacing.is_some()),
+        Field::Leading => all(styles.leading_set().is_some()),
         Field::FontWeight => all(styles.font_weight.is_some()),
         Field::FontFamily => all(styles.font_family.is_some()),
         Field::Shadow => all(styles.rare().shadow.is_some() || styles.rare().shadows.is_some()),

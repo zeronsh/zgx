@@ -348,6 +348,12 @@ impl TextSpan {
         self.styles.rare_mut().letter_spacing = Some(LetterSpacing::px(px));
         self
     }
+    /// `px` points between lines, after each but the last (`Leading`).
+    pub fn leading(mut self, px: f32) -> Self {
+        self.styles.rare_mut().cold.get_or_insert_default().leading =
+            Some(crate::text_layout::Leading::px(px));
+        self
+    }
 }
 /// Builder for inline children. Conversion to View retains a single paragraph.
 pub struct RichTextView {
