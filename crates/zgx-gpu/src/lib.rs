@@ -11263,6 +11263,15 @@ impl GpuRenderer {
                     blocker => (copy, blocker),
                 }
             });
+            // How far it moved this frame, in device pixels, for devtools.
+            zgx::profile::note(|| {
+                format!(
+                    "scroll @{} moved {} {} px",
+                    scroll.node.number(),
+                    (scroll.dx * self.scale).round(),
+                    (scroll.dy * self.scale).round()
+                )
+            });
             match refused {
                 Ok((copy, blocker)) => match blocker {
                     None => match scene.scroll_corners(scroll.node) {
