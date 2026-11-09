@@ -167,7 +167,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 };
                 #[cfg(target_os = "macos")]
-                appkit::move_across();
+                {
+                    appkit::move_across();
+                    appkit::second_below_targets();
+                }
                 for name in ["tip", "card", "row", "overlay"] {
                     if let Some(node) = view.find(name) {
                         let b = ui.scene.borrow().bounds(node);
@@ -248,6 +251,30 @@ mod appkit {
                 let at = w.frame().origin;
                 w.setFrameOrigin(objc2_foundation::NSPoint::new(at.x + dx, at.y));
             }
+        }
+    }
+    /// `POPUP_HOVER_SECOND`'s window over the first's lower part, its targets
+    /// uncovered, wherever the system put it.
+    pub fn second_below_targets() {
+        let mtm = MainThreadMarker::new().unwrap();
+        let Some(first) = main_window(mtm) else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let second = app.windows().iter().find(|w| {
+            w.level() == 0
+                && w.parentWindow().is_none()
+                && w.isVisible()
+                && w.windowNumber() != first.windowNumber()
+        });
+        if let Some(second) = second {
+            let (f, s) = (first.frame(), second.frame());
+            // Below the title bar's 28 and the four rows.
+            let top = f.origin.y + f.size.height - 28. - 200.;
+            second.setFrameOrigin(objc2_foundation::NSPoint::new(
+                f.origin.x + 40.,
+                top - s.size.height,
+            ));
         }
     }
     pub fn panel_showing() -> bool {

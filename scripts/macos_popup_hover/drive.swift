@@ -68,14 +68,22 @@ func order(_ pids: [Int32: String]) {
         say("  z\(i) \(name) #\(w[kCGWindowNumber as String] ?? 0) layer=\(w[kCGWindowLayer as String] ?? 0) \(b["X"] ?? 0),\(b["Y"] ?? 0) \(b["Width"] ?? 0)x\(b["Height"] ?? 0)")
     }
 }
+var underLast: Int?
 func owns(_ at: CGPoint, _ pid: Int32) -> Bool {
     for w in windows() {
         guard let d = w[kCGWindowBounds as String] as? NSDictionary, let r = CGRect(dictionaryRepresentation: d), r.contains(at) else { continue }
         let owner = w[kCGWindowOwnerName as String] as? String ?? "", name = w[kCGWindowName as String] as? String ?? ""
         let layer = w[kCGWindowLayer as String] as? Int ?? 0
         if owner == "WindowServer", name == "Cursor", r.width <= 64, r.height <= 64 { say("  (guard skips the cursor window)"); continue }
-        // Its own, of any layer: a popup it opened under the pointer.
-        if w[kCGWindowOwnerPID as String] as? Int32 == pid { return true }
+        // Its own, of any layer: a popup it opened under the pointer. Which of
+        // its windows, the log says: a window number, for the case to be read.
+        if w[kCGWindowOwnerPID as String] as? Int32 == pid {
+            if underLast != w[kCGWindowNumber as String] as? Int {
+                underLast = w[kCGWindowNumber as String] as? Int
+                say("  (pointer over window #\(underLast ?? 0), layer \(layer))")
+            }
+            return true
+        }
         say("STOP: at \(at) frontmost is \(owner) '\(name)' layer \(layer)"); return false
     }
     say("STOP: nothing at \(at)"); return false
