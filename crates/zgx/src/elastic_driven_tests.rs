@@ -186,3 +186,38 @@ fn a_paging_view_tells_the_platforms_scroller_and_others_dont() {
     let free = ui.scroll_driver_at(50., 75.).expect("the free view");
     assert!(!free.metrics().unwrap().paging);
 }
+
+#[test]
+fn a_view_saying_what_covers_it_tells_the_platforms_scroller_and_follows_it() {
+    use crate::scene::Insets;
+    let mut ui = Ui::new(100., 100.);
+    let (covered, free) = (ui.signal(0.), ui.signal(0.));
+    let below = ui.signal(34_f32);
+    let read = below.clone();
+    ui.mount(
+        div()
+            .child(
+                scroll(covered)
+                    .scroll_indicator_insets(move || Insets {
+                        top: 116.,
+                        bottom: read.get(),
+                        ..Insets::default()
+                    })
+                    .w(100.)
+                    .h(50.)
+                    .child(div().w(100.).h(400.)),
+            )
+            .child(scroll(free).w(100.).h(50.).child(div().w(100.).h(400.))),
+    );
+    ui.prepare_frame();
+    let driver = ui.scroll_driver_at(50., 25.).expect("the covered view");
+    let insets = driver.metrics().unwrap().indicator_insets.unwrap();
+    assert_eq!((insets.top, insets.bottom), (116., 34.));
+    below.set(83.);
+    ui.prepare_frame();
+    let insets = driver.metrics().unwrap().indicator_insets.unwrap();
+    assert_eq!((insets.top, insets.bottom), (116., 83.));
+    // The system's automatic insets are the others'.
+    let free = ui.scroll_driver_at(50., 75.).expect("the free view");
+    assert_eq!(free.metrics().unwrap().indicator_insets, None);
+}

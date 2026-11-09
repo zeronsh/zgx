@@ -28,6 +28,39 @@ pub struct TabsState {
     pub selected: std::cell::Cell<usize>,
     /// The person chose a tab.
     pub changed: Box<dyn Fn(usize)>,
+    /// Who hears its height (the system's, as the host reads it).
+    pub height: Option<Rc<TabBarHeight>>,
+}
+
+/// Provided around a [`native_tabs`] (`compose::provide`): hears how much of
+/// the window's bottom the bar takes while it is mounted, 0 once it is gone,
+/// as a page's content ends clear of it. The system's height on iOS, as its
+/// host reads it from the bar; the bar's box elsewhere.
+pub struct TabBarHeight {
+    report: Box<dyn Fn(f32)>,
+    last: std::cell::Cell<f32>,
+}
+impl TabBarHeight {
+    /// `report` hears each height.
+    pub fn new(report: impl Fn(f32) + 'static) -> Self {
+        Self {
+            report: Box::new(report),
+            last: std::cell::Cell::new(0.),
+        }
+    }
+    /// The bar's height now: told only when it changes.
+    pub fn report(&self, height: f32) {
+        if self.last.replace(height) != height {
+            (self.report)(height);
+        }
+    }
+}
+/// Reports 0 as the bar unmounts.
+struct TabBarGone(Rc<TabBarHeight>);
+impl Drop for TabBarGone {
+    fn drop(&mut self) {
+        self.0.report(0.);
+    }
 }
 
 /// The system's tab bar: its glass, and the lens that morphs between tabs,
@@ -42,10 +75,15 @@ pub fn native_tabs(
 ) -> View {
     component(move |cx| {
         let mut selected = selected;
+        let height = cx.try_service::<TabBarHeight>();
+        if let Some(height) = &height {
+            cx.retain(TabBarGone(height.clone()));
+        }
         let state = Rc::new(TabsState {
             selected: std::cell::Cell::new(selected()),
             changed: Box::new(set),
             items,
+            height,
         });
         let current = cx.state(state.selected.get());
         {
@@ -93,8 +131,17 @@ pub fn native_tabs(
         }
         #[cfg(not(target_os = "ios"))]
         {
-            let _ = &state;
-            bar
+            match state.height.clone() {
+                Some(height) => {
+                    let runtime = cx.runtime();
+                    bar.on_mount(move |handle| {
+                        if let Some(size) = handle.observe_size() {
+                            handle.retain(runtime.effect(move || height.report(size.get().1)));
+                        }
+                    })
+                }
+                None => bar,
+            }
         }
     })
 }

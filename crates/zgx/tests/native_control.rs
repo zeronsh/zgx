@@ -312,3 +312,43 @@ fn a_swipe_begins_as_uikits_row_swipes_do() {
     assert_eq!(swipe_pan(-20.1, -10.05), SwipePan::Fails);
     assert_eq!(swipe_pan(0., 10.5), SwipePan::Fails);
 }
+
+#[test]
+fn a_tab_bar_tells_its_height_while_it_is_mounted() {
+    let mut ui = Ui::new(400., 300.);
+    let heard = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mounted = ui.signal(true);
+    let (read, told) = (mounted.clone(), heard.clone());
+    ui.mount(div().child(switch(
+        move || read.get(),
+        move |mounted, _| {
+            if !mounted {
+                return div();
+            }
+            let told = told.clone();
+            div().w(400.).h(83.).child(zgx::compose::provide(
+                zgx::native_control::TabBarHeight::new(move |height| {
+                    told.borrow_mut().push(height);
+                }),
+                native_tabs(
+                    vec![("One".to_string(), "circle".to_string())],
+                    || 0,
+                    |_| {},
+                ),
+            ))
+        },
+    )));
+    ui.prepare_frame();
+    ui.prepare_frame();
+    assert_eq!(*heard.borrow(), [83.], "its height, once");
+    ui.prepare_frame();
+    assert_eq!(*heard.borrow(), [83.], "nothing while nothing changes");
+    mounted.set(false);
+    ui.prepare_frame();
+    assert_eq!(*heard.borrow(), [83., 0.], "and that it's gone");
+    // Told again by a new one, though it's the height the last one had.
+    mounted.set(true);
+    ui.prepare_frame();
+    ui.prepare_frame();
+    assert_eq!(*heard.borrow(), [83., 0., 83.]);
+}

@@ -73,6 +73,10 @@ pub(crate) struct Driven {
     /// It comes to rest on whole pages (`View::paging`).
     #[cfg(any(target_os = "ios", test))]
     pub(crate) paging: bool,
+    /// How far inside its edges its indicator stays
+    /// (`View::scroll_indicator_insets`).
+    #[cfg(any(target_os = "ios", test))]
+    pub(crate) indicator_insets: Option<Rc<Cell<crate::scene::Insets>>>,
 }
 impl Driven {
     pub(crate) fn new(ui: &mut Ui) -> Self {
@@ -81,6 +85,7 @@ impl Driven {
             end_room: Rc::default(),
             held: Some(ui.signal(None)),
             paging: false,
+            indicator_insets: None,
         };
         #[cfg(not(any(target_os = "ios", test)))]
         {
@@ -631,6 +636,10 @@ pub struct ScrollMetrics {
     /// It comes to rest on whole pages, each its own length (`View::paging`).
     #[cfg(any(target_os = "ios", test))]
     pub paging: bool,
+    /// How far inside its edges its indicator stays, where it says
+    /// (`View::scroll_indicator_insets`).
+    #[cfg(any(target_os = "ios", test))]
+    pub indicator_insets: Option<crate::scene::Insets>,
 }
 
 impl ScrollDriver {
@@ -645,6 +654,8 @@ impl ScrollDriver {
             stretch: view.shown.with_untracked(|s| *s),
             #[cfg(any(target_os = "ios", test))]
             paging: view.driven.paging,
+            #[cfg(any(target_os = "ios", test))]
+            indicator_insets: view.driven.indicator_insets.as_ref().map(|now| now.get()),
         })
     }
     /// Keep drawing it at `at` as its offset goes on (the host moves what is

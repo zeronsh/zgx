@@ -514,6 +514,9 @@ pub(crate) struct Rare {
     /// `View::paging`: it comes to rest on whole pages (iOS).
     #[cfg(any(target_os = "ios", test))]
     paging: bool,
+    /// `View::scroll_indicator_insets` (iOS).
+    #[cfg(any(target_os = "ios", test))]
+    indicator_insets: Option<Rc<std::cell::Cell<crate::scene::Insets>>>,
     /// `View::overscroll_contain`: a wheel over it stays with it.
     overscroll_contain: bool,
     /// `View::wheel_across`: a mouse wheel moves it sideways.
@@ -629,6 +632,10 @@ impl Rare {
         #[cfg(any(target_os = "ios", test))]
         if self.paging {
             inner.paging = true;
+        }
+        #[cfg(any(target_os = "ios", test))]
+        if self.indicator_insets.is_some() {
+            inner.indicator_insets = self.indicator_insets;
         }
         if self.overscroll_contain {
             inner.overscroll_contain = true;
@@ -981,6 +988,32 @@ impl View {
         #[cfg(not(any(target_os = "ios", test)))]
         let _ = (&mut self, paging);
         self
+    }
+    /// Keep a scroll view's scroll indicator this far inside its edges, as
+    /// `UIScrollView`'s `verticalScrollIndicatorInsets` with its automatic
+    /// insets off: `insets` says all that covers the view (the system's bars
+    /// and the safe area with them) and is read again when what it reads
+    /// changes. Only iOS has this indicator: elsewhere `insets` never runs.
+    pub fn scroll_indicator_insets(
+        mut self,
+        insets: impl FnMut() -> crate::scene::Insets + 'static,
+    ) -> Self {
+        #[cfg(any(target_os = "ios", test))]
+        {
+            let mut insets = insets;
+            let now = Rc::new(std::cell::Cell::new(crate::scene::Insets::default()));
+            self.rare_mut().indicator_insets = Some(now.clone());
+            self.on_mount(move |handle| {
+                if let Some(mut ui) = handle.ui.upgrade() {
+                    ui.bind(handle.node, move || now.set(insets()));
+                }
+            })
+        }
+        #[cfg(not(any(target_os = "ios", test)))]
+        {
+            let _ = (&mut self, insets);
+            self
+        }
     }
     /// Keep a scroll viewport at its end while its content grows, as long as
     /// it was at the end (a chat transcript); scrolling away releases it.
@@ -5160,6 +5193,9 @@ struct ScrollOpen {
     /// `View::paging` (iOS).
     #[cfg(any(target_os = "ios", test))]
     paging: bool,
+    /// `View::scroll_indicator_insets` (iOS).
+    #[cfg(any(target_os = "ios", test))]
+    indicator_insets: Option<Rc<std::cell::Cell<crate::scene::Insets>>>,
 }
 /// An element mounted up to its children: what the rest of its mounting
 /// needs once they are in (`mount_element`).
@@ -5606,6 +5642,8 @@ fn open_element(
                 across: rare.as_deref().is_some_and(|r| r.wheel_across),
                 #[cfg(any(target_os = "ios", test))]
                 paging: rare.as_deref().is_some_and(|r| r.paging),
+                #[cfg(any(target_os = "ios", test))]
+                indicator_insets: rare.as_deref().and_then(|r| r.indicator_insets.clone()),
             });
             root
         }
@@ -6764,6 +6802,7 @@ fn mount_scroll(
     #[cfg(any(target_os = "ios", test))]
     {
         driven.paging = scroll.paging;
+        driven.indicator_insets = scroll.indicator_insets;
     }
     let stretch = crate::elastic::register(
         ui,
