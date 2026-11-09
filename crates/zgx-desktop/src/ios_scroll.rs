@@ -447,7 +447,7 @@ fn unglue(state: &State) {
         return;
     };
     let shown = shown_translation(&page_views());
-    glue.driver.drive(glue.drawn - shown as f32);
+    drive(state, &glue.driver, glue.drawn - shown as f32);
     glue.driver.hold(None);
     *state.after_frame.borrow_mut() = Some(AfterFrame::Remove);
     state.window.request_redraw();
@@ -570,7 +570,7 @@ fn glue_to_keyboard(state: &State) {
         start_glue(&page_views(), &values, duration, 0.);
     } else {
         if !held {
-            driver.drive(drawn);
+            drive(state, &driver, drawn);
         }
         *state.after_frame.borrow_mut() = Some(AfterFrame::Start(values, duration));
         state.window.request_redraw();
@@ -705,13 +705,13 @@ fn keyboard_frame(state: &State, link: &AnyObject) {
         // Its offset goes on while what is drawn holds still: all that reads it
         // follows the page as it follows a scroll (a bar's title, an edge's fade).
         if glue.held {
-            glue.driver.drive(shown.max(0.) as f32);
+            drive(state, &glue.driver, shown.max(0.) as f32);
             state.window.request_redraw();
         }
     }
     let native = state.native_move.borrow().as_ref().map(|ride| {
         let (at, arrived) = ride.now();
-        ride.driver.drive(at);
+        drive(state, &ride.driver, at);
         arrived
     });
     if native == Some(true) {
@@ -731,7 +731,7 @@ fn keyboard_frame(state: &State, link: &AnyObject) {
             bottom,
         }) => {
             let need = (f64::from(*bottom + KEYBOARD_ROOM) - at_target).max(0.);
-            driver.drive(*offset + need as f32);
+            drive(state, driver, *offset + need as f32);
             crate::ios_gestures::log_follow_edge(edge, at_target, *offset as f64 + need);
             state.window.request_redraw();
         }
@@ -747,7 +747,7 @@ fn keyboard_frame(state: &State, link: &AnyObject) {
             } else {
                 1.
             };
-            driver.drive(*from + (*to - *from) * gone as f32);
+            drive(state, driver, *from + (*to - *from) * gone as f32);
             state.window.request_redraw();
         }
         None => {}
@@ -776,16 +776,16 @@ fn finish_keyboard_move(state: &State, edge: f64) {
         // The new offset's frame and the animation's end, in one transaction.
         glue.driver.hold(None);
         if (glue.target - glue.drawn).abs() < 0.5 {
-            glue.driver.drive(glue.target);
+            drive(state, &glue.driver, glue.target);
             remove_glue(&page_views());
         } else {
-            glue.driver.drive(glue.target);
+            drive(state, &glue.driver, glue.target);
             *state.after_frame.borrow_mut() = Some(AfterFrame::Remove);
             state.window.request_redraw();
         }
     }
     if let Some(ride) = state.native_move.borrow_mut().take() {
-        ride.driver.drive(ride.to);
+        drive(state, &ride.driver, ride.to);
         state.window.request_redraw();
     }
     if let Some(link) = state.keyboard_link.borrow_mut().take() {
@@ -932,6 +932,16 @@ fn set_indicator_insets(view: &AnyObject, insets: Option<zgx::scene::Insets>) {
     }
 }
 
+/// Move `driver`'s view to `at`, noting the offset it is left at: only a move
+/// the engine makes itself after this one shifts the scroller (`State::driven`),
+/// never one of the scroller's own or a keyboard ride's here.
+fn drive(state: &State, driver: &ScrollDriver, at: f32) {
+    driver.drive(at);
+    if let Some(metrics) = driver.metrics() {
+        *state.driven.borrow_mut() = Some((driver.clone(), metrics.offset));
+    }
+}
+
 /// `UIEdgeInsets`: top, left, bottom, right.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -990,7 +1000,7 @@ define_class!(
                         None => msg_send![&*layer, bounds],
                     }
                 };
-                driver.drive(at.origin.y as f32);
+                drive(state, &driver, at.origin.y as f32);
                 crate::ios_gestures::log_follow(at.origin.y);
                 state.window.request_redraw();
             }
@@ -1081,10 +1091,9 @@ define_class!(
                     }
                 }
             }
-            driver.drive(if horizontal { at.x } else { at.y } as f32);
+            drive(state, &driver, if horizontal { at.x } else { at.y } as f32);
             if let Some(metrics) = driver.metrics() {
                 (state.stretched)(metrics.stretch);
-                *state.driven.borrow_mut() = Some((driver.clone(), metrics.offset));
             }
             state.window.request_redraw();
         }
@@ -1876,7 +1885,7 @@ impl NativeScroller {
             if !still {
                 return;
             }
-            done_driver.drive(to);
+            drive(&done_state, &done_driver, to);
             stop_following(&done_state, &done_view);
             if inset.is_none() {
                 if let Some(driver) = done_state.inset_on.borrow_mut().take() {
