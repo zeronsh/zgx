@@ -937,3 +937,60 @@ fn a_long_session_of_the_showcase_and_mail_comes_back_to_where_it_was() {
     );
     assert_returns("mail", &mail);
 }
+
+/// `ios.text` sets a UIKit text style: its size, weight and leading, the
+/// default size's off iOS (read in a reference app) and the host's when it
+/// gives them (`ios.text.<style>.*`, read live from `preferredFont`).
+#[test]
+fn ios_text_takes_a_text_styles_size_weight_and_leading() {
+    let mut h = Harness::inline(
+        r#"local ios = ui.ios
+        return ui.column {
+            ios.text { "One\nTwo\nThree", id = "body" },
+            ios.text { "One\nTwo", id = "headline", style = "headline" },
+            ios.text { "One\nTwo", id = "caption", style = "caption2" },
+            ios.text { "One\nTwo", id = "own", style = "body", leading = 4 },
+        }"#,
+    );
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    let font = |h: &mut Harness, id: &str| {
+        let node = h.find(id).unwrap();
+        let scene = h.ui.scene.borrow();
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            if let zgx::scene::NodeKind::Text { font_size, .. } = scene.kind(n) {
+                return (*font_size, scene.font(n).clone());
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        panic!("no text in {id}")
+    };
+    use zgx::text_layout::LineHeight;
+    let (size, body) = font(&mut h, "body");
+    assert_eq!(
+        (size, body.weight, body.line_height),
+        (17., 400, LineHeight::with_leading(1.7129))
+    );
+    let (size, headline) = font(&mut h, "headline");
+    assert_eq!((size, headline.weight), (17., 600));
+    assert_eq!(
+        font(&mut h, "caption").1.line_height,
+        LineHeight::with_leading(-0.127)
+    );
+    assert_eq!(
+        font(&mut h, "own").1.line_height,
+        LineHeight::with_leading(4.)
+    );
+    // At a larger text size, the host's.
+    h.ui.theme().set_system_tokens(vec![
+        (zgx::theme::token("ios.text.body.size"), 19f32.into()),
+        (zgx::theme::token("ios.text.body.leading"), 1.9f32.into()),
+    ]);
+    h.frames(1);
+    let (size, body) = font(&mut h, "body");
+    assert_eq!(
+        (size, body.line_height),
+        (19., LineHeight::with_leading(1.9))
+    );
+}

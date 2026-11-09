@@ -49,6 +49,45 @@ local function declare_titles()
 		},
 	}
 end
+-- UIKit's text styles, as `preferredFont(forTextStyle:)` gives them: size,
+-- weight and leading (the space UIKit adds between a label's lines, after each
+-- but the last). The iOS host reads them live at the user's text size
+-- (`ios.text.<style>.*`); these defaults are the default size's, read in a
+-- reference app (iOS 26.5).
+local TEXT_STYLES = {
+	largeTitle = { size = 34, weight = 400, leading = 0.4258 },
+	title1 = { size = 28, weight = 400, leading = 0.5859 },
+	title2 = { size = 22, weight = 400, leading = 1.7461 },
+	title3 = { size = 20, weight = 400, leading = 1.1328 },
+	headline = { size = 17, weight = 600, leading = 1.7129 },
+	body = { size = 17, weight = 400, leading = 1.7129 },
+	callout = { size = 16, weight = 400, leading = 1.9062 },
+	subheadline = { size = 15, weight = 400, leading = 2.0996 },
+	footnote = { size = 13, weight = 400, leading = 2.4863 },
+	caption1 = { size = 12, weight = 400, leading = 1.6797 },
+	caption2 = { size = 11, weight = 400, leading = -0.127 },
+}
+local text_styles_declared = false
+-- Text in one of UIKit's text styles (`style`, UIKit's name: "body",
+-- "largeTitle", "caption2"...; "body" if none), as a UILabel in
+-- `preferredFont(forTextStyle:)` sets it: the style's size and weight, and
+-- its lines its leading apart. Its other props are a `ui.text`'s; its own
+-- `text_size`, `weight` or `leading` win.
+function ios.text(props)
+	if not text_styles_declared then
+		text_styles_declared = true
+		ui.theme.tokens { ios = { text = TEXT_STYLES } }
+	end
+	local style = props.style or "body"
+	assert(TEXT_STYLES[style], "ios.text: no text style " .. tostring(style))
+	local own = table.clone(props)
+	own.style = nil
+	local token = "$ios.text." .. style
+	own.text_size = own.text_size or token .. ".size"
+	own.weight = own.weight or token .. ".weight"
+	own.leading = own.leading or token .. ".leading"
+	return ui.text(own)
+end
 -- The large title's top and the bar's height with it, as UIKit places them for
 -- the large title's font.
 local function large_title()
