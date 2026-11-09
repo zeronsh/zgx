@@ -3539,7 +3539,12 @@ impl ScriptHost {
                     host.poll_check();
                 }
             }
-            if matches!(host.0.files, Files::Bundle(_)) && host.0.managed.borrow().is_empty() {
+            if !polls_files(
+                matches!(host.0.files, Files::Bundle(_)),
+                !host.0.managed.borrow().is_empty(),
+                cfg!(target_os = "ios"),
+                cfg!(debug_assertions),
+            ) {
                 return;
             }
             loop {
@@ -4460,6 +4465,18 @@ const SETTLE: Duration = Duration::from_millis(10);
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 const SETTLE_MAX: Duration = Duration::from_millis(100);
 
+/// Whether a host with no way to hear files change stats them `every` so
+/// often. Not for a bundle, with no managed plugins beside it: nothing there
+/// changes. Nor for a release build on iOS, where an app's scripts are in its
+/// signed bundle and four `stat`s a second were the only thing waking a
+/// resting app (240 wakeups a minute, measured in the simulator; a static
+/// UIKit app has none). A debug build keeps hot reload there.
+fn polls_files(bundle: bool, managed: bool, ios: bool, debug: bool) -> bool {
+    if managed {
+        return true;
+    }
+    !bundle && (!ios || debug)
+}
 /// What woke `watch`.
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 enum Woke {
@@ -4550,6 +4567,21 @@ fn trim_idle(inner: &Inner) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_what_can_change_is_polled() {
+        use super::polls_files;
+        // Files on a disk, where nothing says they changed: stat them.
+        assert!(polls_files(false, false, false, false));
+        assert!(polls_files(false, false, false, true));
+        // A bundle doesn't change, but managed plugins beside it can.
+        assert!(!polls_files(true, false, false, false));
+        assert!(polls_files(true, true, false, false));
+        // iOS: an app's files are in its signed bundle, so a release build
+        // rests; a debug build keeps hot reload.
+        assert!(!polls_files(false, false, true, false));
+        assert!(polls_files(false, false, true, true));
+        assert!(polls_files(false, true, true, false));
+    }
     use super::*;
 
     thread_local! {
