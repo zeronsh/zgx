@@ -749,6 +749,24 @@ pub(crate) fn driver_in(
         .map(|view| ScrollDriver(Rc::downgrade(&view)))
 }
 
+/// Where `driver`'s scroll view shows, in window points, while it is mounted.
+pub(crate) fn driver_frame(
+    scene: &crate::scene::Scene,
+    state: &State,
+    driver: &ScrollDriver,
+) -> Option<crate::scene::Rect> {
+    let (root, _) = state
+        .views
+        .iter()
+        .rev()
+        .find(|(_, view)| view.ptr_eq(&driver.0))?;
+    if !scene.contains(*root) {
+        return None;
+    }
+    let bounds = scene.world_bounds(*root);
+    Some(scene.window_rect(*root, bounds))
+}
+
 /// The tallest mounted scroll view with room to scroll: what a tap on the
 /// status bar scrolls to its top.
 pub(crate) fn main_driver(state: &State) -> Option<ScrollDriver> {

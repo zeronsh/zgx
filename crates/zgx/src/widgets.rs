@@ -3040,6 +3040,21 @@ impl Ui {
             crate::elastic::driver_in(&scene, &state, x, y, along)
         }
     }
+    /// What finds where a driven scroll view shows, its box in window
+    /// points, for a platform's own scroller to lie over it (iOS's draws its
+    /// scroll indicator there).
+    pub fn scroll_driver_frame_finder(
+        &self,
+    ) -> impl Fn(&crate::elastic::ScrollDriver) -> Option<crate::scene::Rect> + use<> {
+        let storage = Rc::downgrade(&self.storage);
+        let scene = Rc::downgrade(&self.scene);
+        move |driver| {
+            let (storage, scene) = (storage.upgrade()?, scene.upgrade()?);
+            let scene = scene.try_borrow().ok()?;
+            let state = storage.elastic.try_borrow().ok()?;
+            crate::elastic::driver_frame(&scene, &state, driver)
+        }
+    }
     /// What finds the tallest scroll view with room to scroll, for a
     /// platform's own scroller to drive (a tap on iOS's status bar).
     pub fn main_scroll_driver(&self) -> impl Fn() -> Option<crate::elastic::ScrollDriver> + use<> {

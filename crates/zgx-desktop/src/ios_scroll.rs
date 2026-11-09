@@ -25,10 +25,16 @@ unsafe extern "C" {
     static NSRunLoopCommonModes: *const AnyObject;
 }
 
+/// What finds where a scroll view shows (`State::frame_of`).
+type FrameOf = Box<dyn Fn(&ScrollDriver) -> Option<zgx::scene::Rect>>;
+
 struct State {
     /// What finds the zgx scroll view at a window point, scrolling across
     /// (`Some(true)`), down (`Some(false)`) or either way.
     at: Box<dyn Fn(f32, f32, Option<bool>) -> Option<ScrollDriver>>,
+    /// Where a scroll view shows, in window points: the scroller lies over
+    /// the one it stands for, and UIKit draws its scroll indicator there.
+    frame_of: FrameOf,
     /// Where the finger the pan follows landed, in the window.
     down: std::cell::Cell<CGPoint>,
     /// The scroll view across, while the scroller stands for two, one each
@@ -1072,12 +1078,32 @@ define_class!(
 /// tap on the status bar only finds a scroll view that takes interaction.
 fn scroller_class() -> &'static AnyClass {
     static CLASS: std::sync::OnceLock<&'static AnyClass> = std::sync::OnceLock::new();
+    /// No touch lands on it. A finger's hit test is the first UIKit hears
+    /// of it, before the pan is handed the touch and the scroll view decides
+    /// whether it tracks it (`_gestureRecognizer:shouldReceiveTouch:`, which
+    /// shows its indicator while it does): the scroller is set for what lies
+    /// under the finger here.
     extern "C-unwind" fn hit_test(
-        _: &AnyObject,
+        this: &AnyObject,
         _: Sel,
-        _: CGPoint,
-        _: *mut AnyObject,
+        at: CGPoint,
+        event: *mut AnyObject,
     ) -> *mut AnyObject {
+        // SAFETY: UIEvent's and UIView's own methods, on the main thread.
+        unsafe {
+            if let Some(event) = event.as_ref() {
+                // UIEventTypeTouches.
+                let kind: isize = msg_send![event, type];
+                if kind == 0
+                    && let Some(state) = CURRENT.with(|current| current.borrow().clone())
+                {
+                    let window: CGPoint = msg_send![this,
+                        convertPoint: at,
+                        toView: std::ptr::null::<AnyObject>()];
+                    land(&state, this, (window.x as f32, window.y as f32));
+                }
+            }
+        }
         std::ptr::null_mut()
     }
     /// A pan may start from a finger zgx never heard of, one on a hosted
@@ -1178,6 +1204,7 @@ fn scroller_class() -> &'static AnyClass {
                     let at: CGPoint =
                         msg_send![touch, locationInView: std::ptr::null::<AnyObject>()];
                     state.down.set(at);
+                    land(&state, this, (at.x as f32, at.y as f32));
                 }
             }
             let class = class!(UIScrollView);
@@ -1290,13 +1317,16 @@ fn configure(state: &State, view: &AnyObject, driver: ScrollDriver, at: Option<C
         },
     };
     let mut frame = CGRect {
-        origin: CGPoint { x: 0., y: 0. },
+        origin: origin(state, &driver),
         size,
     };
     configure_pull(state, view, at, &mut frame);
     // SAFETY: UIScrollView's setters, on the main thread.
     unsafe {
         let _: () = msg_send![view, setFrame: frame];
+        // UIKit's own indicator, along the way it scrolls, over the view.
+        let _: () = msg_send![view, setShowsVerticalScrollIndicator: !metrics.horizontal];
+        let _: () = msg_send![view, setShowsHorizontalScrollIndicator: metrics.horizontal];
         // A short list gives under a finger, as a table view does.
         let _: () = msg_send![view, setAlwaysBounceVertical: !metrics.horizontal];
         let _: () = msg_send![view, setContentSize: content];
@@ -1307,6 +1337,78 @@ fn configure(state: &State, view: &AnyObject, driver: ScrollDriver, at: Option<C
     *state.driver.borrow_mut() = Some(driver);
     state.across.borrow_mut().take();
     state.configuring.set(false);
+}
+
+/// A finger landed at `at` (where nothing scrolls, the finger is zgx's
+/// alone): set as UIKit hands the pan the touch, before the scroll view
+/// decides whether it tracks it (its indicator shows while it does). A scroller in motion keeps its scroll view: the finger catches
+/// it, as it does in a native list. Where one view scrolls across and
+/// another down, the scroller stands for both until the finger moves.
+fn land(state: &State, view: &AnyObject, at: (f32, f32)) {
+    let across = (state.at)(at.0, at.1, Some(true));
+    let down = (state.at)(at.0, at.1, Some(false));
+    if let (Some(across), Some(down)) = (&across, &down)
+        && !across.same(down)
+    {
+        // SAFETY: UIScrollView's getters, on the main thread.
+        let busy = unsafe {
+            let moving: bool = msg_send![view, isDecelerating];
+            let tracking: bool = msg_send![view, isTracking];
+            moving || tracking
+        };
+        let current = state.driver.borrow().clone();
+        let coasting = busy && current.is_some_and(|c| c.same(across) || c.same(down));
+        if !coasting {
+            configure_both(state, view, across.clone(), down.clone());
+        }
+        return;
+    }
+    let driver = across.or(down);
+    // SAFETY: UIScrollView's getters and setters, on the main thread.
+    unsafe {
+        let moving: bool = msg_send![view, isDecelerating];
+        let tracking: bool = msg_send![view, isTracking];
+        let same = match (&*state.driver.borrow(), &driver) {
+            (Some(current), Some(driver)) => current.same(driver),
+            _ => false,
+        };
+        // A finger on what is coasting catches it. What else is coasting has
+        // no claim on this finger (`should_begin`).
+        // UIKit may call it tracking before this hears of the touch: with
+        // nothing configured yet, this finger is still to be given a driver.
+        let held = state.driver.borrow().is_some();
+        if (tracking && held) || (moving && same) {
+            return;
+        }
+        match driver {
+            Some(driver) => {
+                let at = CGPoint {
+                    x: f64::from(at.0),
+                    y: f64::from(at.1),
+                };
+                configure(state, view, driver, Some(at));
+            }
+            // Left enabled: UIKit gathers a touch's recognizers before the
+            // view hears of the touch, so a disabled pan would miss it for
+            // good. With nothing to scroll it never begins.
+            None => {
+                *state.driver.borrow_mut() = None;
+                let empty = CGSize {
+                    width: 0.,
+                    height: 0.,
+                };
+                let _: () = msg_send![view, setContentSize: empty];
+            }
+        }
+    }
+}
+
+/// Where `driver`'s view shows in the window, for the scroller over it.
+fn origin(state: &State, driver: &ScrollDriver) -> CGPoint {
+    (state.frame_of)(driver).map_or(CGPoint { x: 0., y: 0. }, |rect| CGPoint {
+        x: f64::from(rect.x),
+        y: f64::from(rect.y),
+    })
 }
 
 /// Stand for two scroll views at once, `across` and `down`, nested one in the
@@ -1330,7 +1432,7 @@ fn configure_both(state: &State, view: &AnyObject, across: ScrollDriver, down: S
     // SAFETY: UIScrollView's setters, on the main thread.
     unsafe {
         let frame = CGRect {
-            origin: CGPoint { x: 0., y: 0. },
+            origin: origin(state, &down),
             size,
         };
         let _: () = msg_send![view, setFrame: frame];
@@ -1358,6 +1460,7 @@ impl NativeScroller {
         window: Arc<winit::window::Window>,
         top: impl Fn() -> Option<ScrollDriver> + 'static,
         at: impl Fn(f32, f32, Option<bool>) -> Option<ScrollDriver> + 'static,
+        frame_of: impl Fn(&ScrollDriver) -> Option<zgx::scene::Rect> + 'static,
         stretched: impl Fn(f32) + 'static,
         pull_at: impl Fn(f32, f32) -> Option<zgx::native_control::PullRefresh> + 'static,
     ) -> Option<Self> {
@@ -1368,6 +1471,7 @@ impl NativeScroller {
         };
         let state = Rc::new(State {
             at: Box::new(at),
+            frame_of: Box::new(frame_of),
             down: std::cell::Cell::new(CGPoint { x: 0., y: 0. }),
             across: RefCell::default(),
             stretched: Box::new(stretched),
@@ -1412,8 +1516,6 @@ impl NativeScroller {
             // Not hidden or transparent, which a tap on the status bar skips:
             // it has nothing to draw, and lies under the base plane.
             let _: () = msg_send![&*view, setAccessibilityElementsHidden: true];
-            let _: () = msg_send![&*view, setShowsVerticalScrollIndicator: false];
-            let _: () = msg_send![&*view, setShowsHorizontalScrollIndicator: false];
             // UIScrollViewContentInsetAdjustmentNever: zgx lays out by the
             // safe area itself.
             let _: () = msg_send![&*view, setContentInsetAdjustmentBehavior: 2isize];
@@ -1463,67 +1565,10 @@ impl NativeScroller {
             state,
         })
     }
-    /// A finger landed at `at` (where nothing scrolls, the finger is zgx's
-    /// alone). A scroller in motion keeps its scroll view: the finger catches
-    /// it, as it does in a native list. Where one view scrolls across and
-    /// another down, the scroller stands for both until the finger moves.
+    /// A finger landed at `at`: the scroller is set as it was handed the
+    /// touch (`land`); this one is zgx's to hear of, too.
     pub(crate) fn finger_down(&self, at: (f32, f32)) {
-        let across = (self.state.at)(at.0, at.1, Some(true));
-        let down = (self.state.at)(at.0, at.1, Some(false));
-        if let (Some(across), Some(down)) = (&across, &down)
-            && !across.same(down)
-        {
-            // SAFETY: UIScrollView's getters, on the main thread.
-            let busy = unsafe {
-                let moving: bool = msg_send![&*self.view, isDecelerating];
-                let tracking: bool = msg_send![&*self.view, isTracking];
-                moving || tracking
-            };
-            let current = self.state.driver.borrow().clone();
-            let coasting = busy && current.is_some_and(|c| c.same(across) || c.same(down));
-            if !coasting {
-                configure_both(&self.state, &self.view, across.clone(), down.clone());
-            }
-            return;
-        }
-        let driver = across.or(down);
-        // SAFETY: UIScrollView's getters and setters, on the main thread.
-        unsafe {
-            let moving: bool = msg_send![&*self.view, isDecelerating];
-            let tracking: bool = msg_send![&*self.view, isTracking];
-            let same = match (&*self.state.driver.borrow(), &driver) {
-                (Some(current), Some(driver)) => current.same(driver),
-                _ => false,
-            };
-            // A finger on what is coasting catches it. What else is coasting has
-            // no claim on this finger (`should_begin`).
-            // UIKit may call it tracking before this hears of the touch: with
-            // nothing configured yet, this finger is still to be given a driver.
-            let held = self.state.driver.borrow().is_some();
-            if (tracking && held) || (moving && same) {
-                return;
-            }
-            match driver {
-                Some(driver) => {
-                    let at = CGPoint {
-                        x: f64::from(at.0),
-                        y: f64::from(at.1),
-                    };
-                    configure(&self.state, &self.view, driver, Some(at));
-                }
-                // Left enabled: UIKit gathers a touch's recognizers before the
-                // view hears of the touch, so a disabled pan would miss it for
-                // good. With nothing to scroll it never begins.
-                None => {
-                    *self.state.driver.borrow_mut() = None;
-                    let empty = CGSize {
-                        width: 0.,
-                        height: 0.,
-                    };
-                    let _: () = msg_send![&*self.view, setContentSize: empty];
-                }
-            }
-        }
+        land(&self.state, &self.view, at);
     }
     /// Move `driver`'s scroll view to `to` as the keyboard moves: UIKit animates
     /// the scroller with its curve, in the same frames, and each frame zgx draws

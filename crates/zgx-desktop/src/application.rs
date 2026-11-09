@@ -4322,6 +4322,7 @@ impl Host {
                 window.clone(),
                 self.context.ui.main_scroll_driver(),
                 self.context.ui.scroll_driver_finder(),
+                self.context.ui.scroll_driver_frame_finder(),
                 {
                     let overscroll = self.context.window_info.overscroll.clone();
                     move |stretch| {

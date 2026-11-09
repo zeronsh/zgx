@@ -80,3 +80,38 @@ fn nested_views_give_a_finger_to_the_one_scrolling_its_way() {
     assert!(ui.scroll_driver_along(50., 70., false).unwrap().same(&down));
     assert!(ui.scroll_driver_along(50., 70., true).is_none());
 }
+
+/// iOS's scroller lies over the view it stands for, where UIKit draws the
+/// view's scroll indicator: the finder gives that view's box in the window.
+#[test]
+fn a_driven_view_is_found_where_it_shows() {
+    let mut ui = Ui::new(100., 200.);
+    let (page, row) = (ui.signal(0.), ui.signal(0.));
+    ui.mount(
+        scroll(page).w(100.).h(200.).child(
+            div()
+                .w(100.)
+                .h(1000.)
+                .child(div().h(30.))
+                .child(scroll_x(row).w(100.).h(40.).child(div().w(400.).h(40.))),
+        ),
+    );
+    ui.prepare_frame();
+    let frame_of = ui.scroll_driver_frame_finder();
+    let across = ui.scroll_driver_along(50., 50., true).expect("the row");
+    let down = ui.scroll_driver_along(50., 50., false).expect("the page");
+    let rect = frame_of(&across).unwrap();
+    assert_eq!(
+        (rect.x, rect.y, rect.width, rect.height),
+        (0., 30., 100., 40.)
+    );
+    let rect = frame_of(&down).unwrap();
+    assert_eq!(
+        (rect.x, rect.y, rect.width, rect.height),
+        (0., 0., 100., 200.)
+    );
+    // Scrolled, the row shows higher.
+    down.drive(20.);
+    ui.prepare_frame();
+    assert_eq!(frame_of(&across).unwrap().y, 10.);
+}
