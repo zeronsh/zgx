@@ -2415,10 +2415,11 @@ fn keyed_sticky_rows_follow_their_sections() {
     // Row 5 ("b", 60 down) has passed the top: its section holds it.
     h.click("down");
     assert_eq!(tops(&mut h), vec!["b@5".to_string()]);
-    // A section in front: the same row, its index moved on.
+    // A section in front: the view stays on it (the rows in view keep
+    // their place), the same row, its index moved on.
     let built = h.text("built");
     h.click("first");
-    assert_eq!(tops(&mut h), vec!["a@5".to_string()]);
+    assert_eq!(tops(&mut h), vec!["b@9".to_string()]);
     h.click("down");
     // Its section gone, the next takes over.
     h.click("drop");

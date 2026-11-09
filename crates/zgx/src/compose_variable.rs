@@ -7,7 +7,8 @@ use std::cell::Cell;
 ///
 /// Heights belong to positions; callers must reorder them with their data. A point
 /// update preserves the viewport's first visible index and intra-row offset.
-/// Count changes preserve/clamp the pixel offset. `variable_virtual_list` uses
+/// Count changes preserve/clamp the pixel offset, unless the list's keys find its
+/// anchor row moved (`variable_virtual_list`). `variable_virtual_list` uses
 /// supplied allocations; `measured_virtual_list` updates this cache from mounted
 /// natural content and permanently applies a one-pixel allocation floor.
 #[derive(Clone)]
@@ -127,8 +128,10 @@ struct Anchor {
 /// Rows take their allocated height from `heights`; child constructors run once
 /// per mounted key. Point height updates keep the first visible index anchored,
 /// unless the caller also changes `offset`. Keys are unique among mounted rows.
-/// Reordering data must also reorder its indexed heights; it does not relocate
-/// the viewport by key. Persistent offscreen row state belongs in the model.
+/// Reordering data must also reorder its indexed heights. Rows added or removed
+/// above the first visible row keep it where it shows when its key is found as
+/// many rows on (CSS's scroll anchoring); resting at the top, nothing anchors.
+/// Persistent offscreen row state belongs in the model.
 pub fn variable_virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     offset: Signal<f32>,
     heights: VariableHeights,
@@ -358,6 +361,40 @@ fn rows_of<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             true,
         )
     })
+}
+/// Rows added or removed above a list's anchor row (`previous`), `length`
+/// rows now: where the row it showed is, as many rows on, if its key is
+/// there. A list that keeps its place (`on_start`) knows the row's key
+/// (`kept`); any other finds it among the rows its last pass showed, as
+/// CSS's scroll anchoring does. At the top nothing anchors, and what comes
+/// in above shows (a feed's newest). Rows by place have their index as key,
+/// which a change of count moves. Out of the pass's way: only a change of
+/// count gets here, and a list nothing is added to pays the comparison
+/// alone.
+#[cold]
+#[inline(never)]
+fn anchor_moved<K: Eq + Clone>(
+    previous: &Anchor,
+    length: usize,
+    kept: Option<&Option<K>>,
+    entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
+    key: &mut impl FnMut(usize) -> K,
+) -> Option<usize> {
+    let shifted = previous.index as i64 + length as i64 - previous.length as i64;
+    if !(0..length as i64).contains(&shifted) {
+        return None;
+    }
+    let shown = match kept {
+        Some(kept) => kept.clone(),
+        None if previous.position > 0. => entries
+            .iter()
+            .find(|(_, entry)| entry.index.with_untracked(|index| *index) == previous.index)
+            .map(|(key, _)| key.clone()),
+        None => None,
+    };
+    shown
+        .is_some_and(|shown| shown == key(shifted as usize))
+        .then_some(shifted as usize)
 }
 struct Entry {
     node: NodeId,
@@ -666,17 +703,22 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                 // Rows added or removed above the anchor row: it is as many
                 // rows on, and the view stays on it if its key is there
                 // (asked before the index is borrowed: `key` is the app's).
-                let moved = match (&anchor, &anchor_key) {
-                    (Some(previous), Some(anchor_key))
+                let moved = match &anchor {
+                    Some(previous)
                         if previous.revision != revision && requested == previous.position =>
                     {
                         let length = heights.index.borrow().count();
-                        let shifted =
-                            previous.index as i64 + length as i64 - previous.length as i64;
-                        (length != previous.length
-                            && (0..length as i64).contains(&shifted)
-                            && *anchor_key == key(shifted as usize))
-                        .then_some(shifted as usize)
+                        if length == previous.length {
+                            None
+                        } else {
+                            anchor_moved(
+                                previous,
+                                length,
+                                keeps_place.then_some(&anchor_key),
+                                &entries,
+                                &mut key,
+                            )
+                        }
                     }
                     _ => None,
                 };
