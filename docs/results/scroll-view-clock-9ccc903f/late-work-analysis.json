@@ -1,0 +1,283 @@
+[
+  {
+    "role": "default",
+    "late_frames": 418,
+    "own_main_ms": {
+      "<2": 404,
+      ">4": 11,
+      "2-4": 3
+    },
+    "source": {
+      "view link": 418
+    },
+    "cross": [
+      {
+        "main_ms": "<2",
+        "source": "view link",
+        "n": 404
+      },
+      {
+        "main_ms": ">4",
+        "source": "view link",
+        "n": 11
+      },
+      {
+        "main_ms": "2-4",
+        "source": "view link",
+        "n": 3
+      }
+    ],
+    "neighbor_main_max_ms": {
+      "<2": 380,
+      ">4": 22,
+      "2-4": 16
+    },
+    "own_gpu_ms": {
+      "<4": 394,
+      ">=4": 24
+    },
+    "after_gesture_start_0_50ms": 59,
+    "within_gesture_start_plus_minus50ms": 81,
+    "gesture_starts": 196,
+    "unmatched": 0,
+    "max_join_residual_ns": 0.029103830456733704,
+    "under2_main_with_over4_main_in_prior50ms": 19
+  },
+  {
+    "role": "control",
+    "late_frames": 453,
+    "own_main_ms": {
+      ">4": 41,
+      "<2": 372,
+      "2-4": 40
+    },
+    "source": {
+      "timer on the grid": 451,
+      "unknown": 2
+    },
+    "cross": [
+      {
+        "main_ms": ">4",
+        "source": "timer on the grid",
+        "n": 41
+      },
+      {
+        "main_ms": "<2",
+        "source": "timer on the grid",
+        "n": 370
+      },
+      {
+        "main_ms": "2-4",
+        "source": "timer on the grid",
+        "n": 40
+      },
+      {
+        "main_ms": "<2",
+        "source": "unknown",
+        "n": 2
+      }
+    ],
+    "neighbor_main_max_ms": {
+      ">4": 43,
+      "<2": 363,
+      "2-4": 47
+    },
+    "own_gpu_ms": {
+      "<4": 237,
+      ">=4": 216
+    },
+    "after_gesture_start_0_50ms": 50,
+    "within_gesture_start_plus_minus50ms": 76,
+    "gesture_starts": 196,
+    "unmatched": 0,
+    "max_join_residual_ns": 0.029103830456733704,
+    "under2_main_with_over4_main_in_prior50ms": 5
+  },
+  {
+    "role": "default",
+    "late_frames": 449,
+    "own_main_ms": {
+      "<2": 436,
+      ">4": 12,
+      "2-4": 1
+    },
+    "source": {
+      "view link": 449
+    },
+    "cross": [
+      {
+        "main_ms": "<2",
+        "source": "view link",
+        "n": 436
+      },
+      {
+        "main_ms": ">4",
+        "source": "view link",
+        "n": 12
+      },
+      {
+        "main_ms": "2-4",
+        "source": "view link",
+        "n": 1
+      }
+    ],
+    "neighbor_main_max_ms": {
+      "2-4": 7,
+      ">4": 30,
+      "<2": 412
+    },
+    "own_gpu_ms": {
+      "<4": 427,
+      ">=4": 22
+    },
+    "after_gesture_start_0_50ms": 63,
+    "within_gesture_start_plus_minus50ms": 74,
+    "gesture_starts": 196,
+    "unmatched": 0,
+    "max_join_residual_ns": 0.029103830456733704,
+    "under2_main_with_over4_main_in_prior50ms": 30
+  },
+  {
+    "role": "default",
+    "late_frames": 575,
+    "own_main_ms": {
+      "2-4": 2,
+      "<2": 555,
+      ">4": 18
+    },
+    "source": {
+      "view link": 575
+    },
+    "cross": [
+      {
+        "main_ms": "2-4",
+        "source": "view link",
+        "n": 2
+      },
+      {
+        "main_ms": "<2",
+        "source": "view link",
+        "n": 555
+      },
+      {
+        "main_ms": ">4",
+        "source": "view link",
+        "n": 18
+      }
+    ],
+    "neighbor_main_max_ms": {
+      "2-4": 12,
+      "<2": 532,
+      ">4": 31
+    },
+    "own_gpu_ms": {
+      "<4": 537,
+      ">=4": 38
+    },
+    "after_gesture_start_0_50ms": 74,
+    "within_gesture_start_plus_minus50ms": 99,
+    "gesture_starts": 196,
+    "unmatched": 0,
+    "max_join_residual_ns": 0.029103830456733704,
+    "under2_main_with_over4_main_in_prior50ms": 18
+  },
+  {
+    "role": "control",
+    "late_frames": 456,
+    "own_main_ms": {
+      ">4": 30,
+      "<2": 393,
+      "2-4": 33
+    },
+    "source": {
+      "timer on the grid": 456
+    },
+    "cross": [
+      {
+        "main_ms": ">4",
+        "source": "timer on the grid",
+        "n": 30
+      },
+      {
+        "main_ms": "<2",
+        "source": "timer on the grid",
+        "n": 393
+      },
+      {
+        "main_ms": "2-4",
+        "source": "timer on the grid",
+        "n": 33
+      }
+    ],
+    "neighbor_main_max_ms": {
+      ">4": 32,
+      "<2": 384,
+      "2-4": 40
+    },
+    "own_gpu_ms": {
+      "<4": 205,
+      ">=4": 251
+    },
+    "after_gesture_start_0_50ms": 57,
+    "within_gesture_start_plus_minus50ms": 85,
+    "gesture_starts": 196,
+    "unmatched": 0,
+    "max_join_residual_ns": 0.029103830456733704,
+    "under2_main_with_over4_main_in_prior50ms": 5
+  },
+  {
+    "role": "control",
+    "late_frames": 429,
+    "own_main_ms": {
+      "<2": 369,
+      "2-4": 26,
+      ">4": 34
+    },
+    "source": {
+      "timer on the grid": 427,
+      "unknown": 2
+    },
+    "cross": [
+      {
+        "main_ms": "<2",
+        "source": "timer on the grid",
+        "n": 368
+      },
+      {
+        "main_ms": "2-4",
+        "source": "timer on the grid",
+        "n": 25
+      },
+      {
+        "main_ms": ">4",
+        "source": "timer on the grid",
+        "n": 34
+      },
+      {
+        "main_ms": "2-4",
+        "source": "unknown",
+        "n": 1
+      },
+      {
+        "main_ms": "<2",
+        "source": "unknown",
+        "n": 1
+      }
+    ],
+    "neighbor_main_max_ms": {
+      "<2": 365,
+      "2-4": 29,
+      ">4": 35
+    },
+    "own_gpu_ms": {
+      "<4": 200,
+      ">=4": 229
+    },
+    "after_gesture_start_0_50ms": 58,
+    "within_gesture_start_plus_minus50ms": 84,
+    "gesture_starts": 196,
+    "unmatched": 0,
+    "max_join_residual_ns": 0.029103830456733704,
+    "under2_main_with_over4_main_in_prior50ms": 3
+  }
+]
