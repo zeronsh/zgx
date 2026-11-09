@@ -18231,6 +18231,56 @@ mod copy_blocker_tests {
         }
     }
 
+    /// A clear square, or a clear rectangle (an overlay scrollbar's track
+    /// away from the pointer), over a scroll view paints nothing: the
+    /// scroll copies, as with nothing over it (main's case, kept).
+    #[test]
+    fn a_clear_node_over_a_scroll_view_lets_it_copy() {
+        for rect in [false, true] {
+            let mut ui = Ui::new(160., 120.);
+            let offset = ui.signal(0_f32);
+            let rows = virtual_list(
+                offset.clone(),
+                24.,
+                2,
+                || 1000,
+                |i| i,
+                |_, key, _| {
+                    div().size(144., 24.).bg(if key % 2 == 0 {
+                        rgb(0x223344)
+                    } else {
+                        rgb(0x334455)
+                    })
+                },
+            )
+            .w(160.)
+            .h(100.)
+            .p(8.)
+            .bg(rgb(0x101820));
+            let square = div()
+                .absolute()
+                .left(40.)
+                .top(40.)
+                .size(30., 30.)
+                .bg(rgba(0xffffff00));
+            ui.mount(overlay().w(160.).h(120.).bg(rgb(0x000000)).child(rows).child(square));
+            ui.prepare_frame();
+            if rect {
+                let mut scene = ui.scene.borrow_mut();
+                let square = *scene.children(scene.root()).last().unwrap();
+                scene.set_kind(square, NodeKind::Rect(zgx::scene::Color(255, 255, 255, 0)));
+            }
+            ui.scene.borrow_mut().flush();
+            offset.set(14.);
+            ui.prepare_frame();
+            let damage = ui.scene.borrow_mut().flush().damage;
+            let scene = ui.scene.borrow();
+            let scroll = scene.scroll_moves().last().expect("it moved").clone();
+            let blocker = copy_blocker(&scene, &scroll, &damage, 1., &mut Vec::new(), &mut None);
+            assert_eq!(blocker, None, "a clear {} paints nothing", if rect { "rect" } else { "square" });
+        }
+    }
+
     /// A list with no fill of its own on a see-through rounded card with an
     /// edge copies: the card is one colour across the list's view but for its
     /// corners, which repaint. Something of its own under the list (a square
