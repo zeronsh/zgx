@@ -478,3 +478,12 @@ compares and hashes by its bits, so grids of other cells are other keys. The cra
 `FontSystem::rest` gives back `ShapeBuffer`'s buffers. They hold what the longest
 text shaped since left there, kept for reuse: a visual line's lists, one per line
 of that text, for as long as the app runs. zgx-gpu calls it as a window goes idle.
+
+iOS's secure text draws what a secure `UITextField` does, read from its line
+fragments (`uikit_mask` in `shape.rs`): the system font's U+F79A, and for any
+other font the system font's U+2981 at the field's size, each at the face's
+advance at its axes rather than its defaults. Elsewhere it stays U+2022.
+
+iOS never hints (`hinted` in `swash.rs`): Core Text leaves outlines as drawn,
+and swash's hinting of a font with no instructions, as SF is, is skrifa's
+autohinter. Elsewhere hinting is as it was.
