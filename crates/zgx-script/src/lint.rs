@@ -29,6 +29,12 @@
 //! - `computed-markdown-state`: `ui.markdown(state, …)` inside a
 //!   `ui.computed`: given a state it answers a state of its blocks, kept
 //!   current in Rust, so the computed only makes one again each time it runs.
+//! - `computed-markdown-blocks`: a computed reading all of a `ui.markdown`
+//!   state's blocks: each chunk of a streamed reply converts and passes over
+//!   every block, where a row builder does its block alone.
+//! - `computed-markdown-rewrite`: `ui.markdown` given a computed's text, or a
+//!   rewrite of a state's text in a computed: each chunk rewrites the whole
+//!   reply and the parser can't follow its appends.
 //! - `list-key`: a positional `ui.list` over a list the file removes from or
 //!   inserts into: every row after the change is written again.
 //! - `list-measured`: a `ui.list` of fixed heights whose rows wrap text: a
@@ -144,6 +150,14 @@ pub const RULES: &[(&str, &str)] = &[
     (
         "computed-markdown-state",
         "ui.markdown given a state inside a computed: a state of blocks made again each run",
+    ),
+    (
+        "computed-markdown-blocks",
+        "a computed reading all of a ui.markdown state's blocks each chunk",
+    ),
+    (
+        "computed-markdown-rewrite",
+        "ui.markdown given text a computed rewrites whole each chunk",
     ),
     (
         "list-key",
@@ -612,6 +626,7 @@ fn lint_tokens(file: &Path, tokens: &[Token], comments: &[(u32, String)]) -> Vec
     };
     linter.run();
     linter.list_key();
+    linter.markdown_computed_text();
     linter.component_id();
     linter.list_measured();
     linter.reserved_system_key();
@@ -1955,6 +1970,41 @@ impl Linter<'_> {
         // `ui.computed(function() return ui.markdown(reply, …) end)` with
         // `reply` a state: given a state, `ui.markdown` keeps a state of
         // its blocks current itself, which the computed makes again each run.
+        // A computed reading all of a markdown state's blocks: each chunk
+        // converts them for the script and reads the result back whole.
+        if computes
+            && let Some(at) = body.clone().find(|&j| {
+                (self.is(j + 1, ":"))
+                    && (self.is(j + 2, "get") || self.is(j + 2, "peek"))
+                    && self.is(j + 3, "(")
+                    && self
+                        .name(j)
+                        .is_some_and(|name| self.holds_markdown_state(name))
+            })
+        {
+            self.report(
+                at,
+                "computed-markdown-blocks",
+                "this computed reads every block of a `ui.markdown` state each time a chunk \
+                 arrives, converting them all and reading its answer back whole, so a chunk \
+                 costs the reply's length: work on one block belongs in `ui.each`'s row builder, \
+                 which runs for the block that changed."
+                    .into(),
+            );
+        }
+        // A rewrite of a state's text as `ui.markdown`'s text, in a computed:
+        // `ui.markdown(reply:get(), …)` alone is followed as it grows.
+        if computes
+            && let Some(at) = body.clone().find(|&j| {
+                self.is(j, "ui")
+                    && self.is(j + 1, ".")
+                    && self.is(j + 2, "markdown")
+                    && self.is(j + 3, "(")
+                    && self.rewrites_a_read(j + 3)
+            })
+        {
+            self.report(at, "computed-markdown-rewrite", REWRITE_MESSAGE.into());
+        }
         if computes
             && let Some(at) = body.clone().find(|&j| {
                 self.is(j, "ui")
@@ -1975,6 +2025,79 @@ impl Linter<'_> {
                     .into(),
             );
         }
+    }
+    /// `ui.markdown(text, …)` outside a computed with `text` a computed's:
+    /// what it answers is whole each time, so the parser can't follow it.
+    fn markdown_computed_text(&mut self) {
+        let computeds: Vec<(usize, usize)> = (0..self.tokens.len())
+            .filter(|&j| {
+                self.is(j, "ui")
+                    && self.is(j + 1, ".")
+                    && self.is(j + 2, "computed")
+                    && self.is(j + 3, "(")
+            })
+            .map(|j| (j, self.closing(j + 3)))
+            .collect();
+        for at in 0..self.tokens.len() {
+            if self.is(at, "ui")
+                && self.is(at + 1, ".")
+                && self.is(at + 2, "markdown")
+                && self.is(at + 3, "(")
+                && (self.is(at + 5, ",") || self.is(at + 5, ")"))
+                && !computeds.iter().any(|&(from, to)| from < at && at < to)
+                && self.name(at + 4).is_some_and(|name| {
+                    (0..self.tokens.len()).any(|j| {
+                        self.name(j) == Some(name)
+                            && self.is(j + 1, "=")
+                            && self.is(j + 2, "ui")
+                            && self.is(j + 3, ".")
+                            && self.is(j + 4, "computed")
+                    })
+                })
+            {
+                self.report(at, "computed-markdown-rewrite", REWRITE_MESSAGE.into());
+            }
+        }
+    }
+    /// Whether the call opening at `open` has a first argument that calls
+    /// something on a state's read, rather than being that read alone.
+    fn rewrites_a_read(&self, open: usize) -> bool {
+        let close = self.closing(open);
+        let mut depth = 0;
+        let mut end = close;
+        for j in open + 1..close {
+            match self.tokens[j].text.as_str() {
+                _ if self.tokens[j].kind != Kind::Punct => {}
+                "(" | "{" | "[" => depth += 1,
+                ")" | "}" | "]" => depth -= 1,
+                "," if depth == 0 => {
+                    end = j;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let reads = (open + 1..end).any(|j| {
+            self.is(j, ":")
+                && (self.is(j + 1, "get") || self.is(j + 1, "peek"))
+                && self.is(j + 2, "(")
+        });
+        // `name:get()` is five tokens.
+        reads && end - (open + 1) != 5
+    }
+    /// Whether the file makes `name` a state of blocks: `name =
+    /// ui.markdown(state, …)`.
+    fn holds_markdown_state(&self, name: &str) -> bool {
+        (0..self.tokens.len()).any(|j| {
+            self.name(j) == Some(name)
+                && self.is(j + 1, "=")
+                && self.is(j + 2, "ui")
+                && self.is(j + 3, ".")
+                && self.is(j + 4, "markdown")
+                && self.is(j + 5, "(")
+                && (self.is(j + 7, ",") || self.is(j + 7, ")"))
+                && self.name(j + 6).is_some_and(|text| self.holds_state(text))
+        })
     }
     /// Whether the file makes `name` a state: `name = ui.state(…)`, or a
     /// shared, persisted, component, computed or sorted one.
@@ -1998,6 +2121,12 @@ impl Linter<'_> {
         })
     }
 }
+
+/// What `computed-markdown-rewrite` says, for its two shapes.
+const REWRITE_MESSAGE: &str = "this text is rewritten whole each time a chunk arrives, and the \
+    parser, given new text with no edits to follow, can't parse only what came, so a chunk \
+    costs the reply's length: rewrite each piece as it's appended (`reply:append(rewrite(piece))`, \
+    holding back a delimiter split across pieces) and give `ui.markdown` that state.";
 
 /// A call whose argument is a starting value, read once by design.
 fn is_initial_value(callee: &str) -> bool {
@@ -2345,6 +2474,89 @@ local function draw(source: string)
 end
 "##;
         assert_eq!(rules(source), one(4, "computed-markdown-state"));
+    }
+
+    #[test]
+    fn a_computed_over_a_markdown_states_blocks_is_reported() {
+        let source = r##"
+local reply = ui.state("reply", "")
+local blocks = ui.markdown(reply, { key = "reply" })
+local marked = ui.computed(function()
+    local out = {}
+    for i, b in blocks:get() do out[i] = b end
+    return out
+end)
+local peeked = ui.computed(function() return blocks:peek() end)
+local counted = ui.computed(function() return blocks:len() end) -- fine: no block read
+local first = ui.computed(function() return blocks:at(1) end) -- fine: one block
+local other = ui.state("other", {})
+local copied = ui.computed(function() return other:get() end) -- fine: not blocks
+"##;
+        assert_eq!(
+            rules(source),
+            vec![
+                (6, "computed-markdown-blocks".into()),
+                (9, "computed-markdown-blocks".into())
+            ]
+        );
+    }
+
+    /// The form that stays flat: each block's work in its row builder.
+    #[test]
+    fn a_row_builder_over_a_markdown_state_is_clean() {
+        let source = r##"
+local reply = ui.state("reply", "")
+local blocks = ui.markdown(reply, { key = "reply" })
+local function mark(b) return b end
+return ui.column {
+    ui.each(blocks, function(b) return ui.text { mark(b).t } end),
+}
+"##;
+        assert_eq!(rules(source), vec![]);
+    }
+
+    #[test]
+    fn markdown_given_a_rewritten_text_is_reported() {
+        let source = r##"
+local reply = ui.state("reply", "")
+local function rewrite(s) return s end
+local text = ui.computed(function() return rewrite(reply:get()) end)
+local fed = ui.markdown(text, { key = "fed" })
+local within = ui.computed(function()
+    return ui.markdown(rewrite(reply:get()), { key = "within" })
+end)
+local method = ui.computed(function()
+    return ui.markdown(reply:get():lower(), { key = "method" })
+end)
+local read = ui.computed(function()
+    return ui.markdown(reply:get(), { key = "read" }) -- fine: a string, followed
+end)
+"##;
+        assert_eq!(
+            rules(source),
+            vec![
+                (5, "computed-markdown-rewrite".into()),
+                (7, "computed-markdown-rewrite".into()),
+                (10, "computed-markdown-rewrite".into())
+            ]
+        );
+    }
+
+    /// The form that stays flat: each piece rewritten as it's appended, and
+    /// a rewrite of something other than a state's read.
+    #[test]
+    fn a_rewrite_of_each_piece_is_clean() {
+        let source = r##"
+local reply = ui.state("reply", "")
+local function rewrite(s) return s end
+local blocks = ui.markdown(reply, { key = "reply" })
+ui.command { id = "chunk", run = function()
+    reply:append(rewrite("a piece"))
+end }
+local once = ui.markdown(rewrite("# a title"))
+return ui.column { ui.each(blocks, function(b) return ui.text { b.t } end) }
+"##;
+        assert_eq!(rules(source), vec![]);
     }
 
     #[test]
