@@ -295,6 +295,7 @@ impl WordCache {
     /// `word` shaped in font `id`, found or shaped once; None where its
     /// glyphs set different line heights (it is measured from shaped lines:
     /// `Compact::of`).
+    #[inline(always)]
     fn shape(
         &mut self,
         fonts: &mut FontSystem,
@@ -314,6 +315,18 @@ impl WordCache {
         {
             return Some(shape.clone());
         }
+        self.shaped(fonts, (id, hash), word, blank, size)
+    }
+    /// `shape` of a word not shaped before: shaped and kept.
+    #[inline(never)]
+    fn shaped(
+        &mut self,
+        fonts: &mut FontSystem,
+        (id, hash): (u32, u64),
+        word: &str,
+        blank: bool,
+        size: f32,
+    ) -> Option<Arc<Shape>> {
         let shaped = ShapeWord::plain(fonts, word, &self.fonts[id as usize].1, blank);
         if !one_line_height(&shaped.glyphs) {
             return None;
@@ -503,13 +516,20 @@ impl Words {
     /// earlier at this width: the lines from its on), noting in `breaks`
     /// (a stream's, which grew from another: `grew`) each state after a word
     /// a line ended at.
-    fn visual_lines(
+    /// (`STREAM`: a stream's, which grew from another (`grew`); else from
+    /// the start, noting nothing, as before streams were.)
+    #[inline(always)]
+    fn visual_lines<const STREAM: bool>(
         &self,
         width: Option<f32>,
         from: &Break,
         breaks: &mut Vec<Break>,
     ) -> smallvec::SmallVec<[(At, At, f32); 2]> {
-        let record = self.grew.is_some();
+        let record = STREAM;
+        let from = match STREAM {
+            true => from,
+            false => &Break::START,
+        };
         let limit = width.unwrap_or(f32::INFINITY);
         let mut lines = smallvec::SmallVec::new();
         // The line being filled: its width, and the one range it takes.
@@ -619,29 +639,51 @@ impl Words {
             return;
         }
         self.laid = Some(width);
+        // A text that never grew from another lays out whole, noting no
+        // states: what a stream keeps costs it nothing.
+        match self.grew.is_some() {
+            true => self.lay_out_from::<true>(width),
+            false => self.lay_out_from::<false>(width),
+        }
+    }
+    /// `lay_out`, `STREAM` for a stream's text (`visual_lines`).
+    #[inline(always)]
+    fn lay_out_from<const STREAM: bool>(&mut self, width: Option<f32>) {
         // Its lines from the text it grew from, at this width, to where they
         // may change: unless a line's place in it depends on the widest
         // line (aligned in an unwrapped text).
-        let left = matches!(self.align, None | Some(Align::Left | Align::Justified));
-        let from = match self.resume.take() {
-            Some((at, from)) if at == width && (left || width.is_some()) => from,
-            _ => Break::START,
+        let from = match STREAM {
+            true => {
+                let left = matches!(self.align, None | Some(Align::Left | Align::Justified));
+                let from = match self.resume.take() {
+                    Some((at, from)) if at == width && (left || width.is_some()) => from,
+                    _ => Break::START,
+                };
+                if let Some((_, kept)) = &mut self.grew {
+                    *kept = from.lines;
+                }
+                from
+            }
+            false => Break::START,
         };
-        if let Some((_, kept)) = &mut self.grew {
-            *kept = from.lines;
-        }
-        let mut breaks = std::mem::take(&mut self.breaks);
-        breaks.truncate(
-            breaks
-                .iter()
-                .take_while(|done| done.next <= from.next)
-                .count(),
-        );
-        if from.next == 0 {
-            breaks.clear();
-        }
-        let visual = self.visual_lines(width, &from, &mut breaks);
-        self.breaks = breaks;
+        let visual = match STREAM {
+            true => {
+                let mut breaks = std::mem::take(&mut self.breaks);
+                breaks.truncate(
+                    breaks
+                        .iter()
+                        .take_while(|done| done.next <= from.next)
+                        .count(),
+                );
+                if from.next == 0 {
+                    breaks.clear();
+                }
+                let visual = self.visual_lines::<true>(width, &from, &mut breaks);
+                self.breaks = breaks;
+                visual
+            }
+            false => self.visual_lines::<false>(width, &from, &mut Vec::new()),
+        };
         let font_size = self.font_size;
         let line_width =
             width.unwrap_or_else(|| visual.iter().fold(0_f32, |w, line| w.max(line.2)));

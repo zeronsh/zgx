@@ -441,6 +441,7 @@ impl Compact {
     }
     /// `plain`'s words from `skip` packed in place, their advances from
     /// `first` (`of_words`).
+    #[inline(always)]
     fn pack(&self, plain: &words::Words, slab: &mut Slab, skip: usize, first: usize) {
         let font_size = plain.font_size;
         let words = self.words as usize;
@@ -1215,8 +1216,8 @@ impl Entry {
             // A stream's paragraph (`Breaks`): from where it, or the text
             // it grew from, left off breaking at this width.
             Some(compact)
-                if compact.resumes()
-                    && let Some(breaks) = &mut self.breaks =>
+                if let Some(breaks) = &mut self.breaks
+                    && compact.resumes() =>
             {
                 let mut states = match breaks.widths.iter().position(|(w, _)| *w == width) {
                     Some(at) => breaks.widths.remove(at).1,

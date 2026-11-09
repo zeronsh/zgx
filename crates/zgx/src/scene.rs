@@ -7421,15 +7421,7 @@ impl Scene {
             || matches!((&self.node(id).kind,&kind),(NodeKind::NativeSurface(old),NodeKind::NativeSurface(new)) if (old.width(),old.height())==(new.width(),new.height()) || (self.node(id).style.width.is_some() && self.node(id).style.height.is_some()));
         // Restyled rich text (a fade recolouring its newest words), or grown:
         // damaged once laid out, from where it changes (`damage_appended`).
-        let restyled = match (&self.node(id).kind, &kind) {
-            (NodeKind::RichText { text: old }, NodeKind::RichText { text: new })
-                if self.node(id).measurement.is_some() =>
-            {
-                new.restyled_from(old).map(|from| (old.text().len(), from))
-            }
-            _ => None,
-        };
-        if !restyled.is_some_and(|(length, from)| self.defer_damage(id, length, from)) {
+        if !(matches!(kind, NodeKind::RichText { .. }) && self.defer_restyled(id, &kind)) {
             self.damage_subtree(id);
         }
         if matches!((&self.node(id).kind, &kind), (NodeKind::Image(old), NodeKind::Image(new))
@@ -9523,6 +9515,22 @@ impl Scene {
         self.invalidate(id, PAINT);
         self.invalidate_content_layout(id);
     }
+    /// Leave the damage of rich text `id`, laid out, restyled or grown into
+    /// `kind` (`RichText::restyled_from`), until it is laid out again
+    /// (`defer_damage`). Whether it was left. Out of line: `set_kind` is hot
+    /// and most kinds aren't rich text.
+    #[inline(never)]
+    fn defer_restyled(&mut self, id: NodeId, kind: &NodeKind) -> bool {
+        let restyled = match (kind, &self.node(id).kind) {
+            (NodeKind::RichText { text: new }, NodeKind::RichText { text: old })
+                if self.node(id).measurement.is_some() =>
+            {
+                new.restyled_from(old).map(|from| (old.text().len(), from))
+            }
+            _ => None,
+        };
+        restyled.is_some_and(|(length, from)| self.defer_damage(id, length, from))
+    }
     /// Leave the damage of rich text `id`, grown at its end from a text of
     /// `length` bytes, until it is laid out (`damage_appended`), noting
     /// what it painted: where the measurer can say where its lines may
@@ -9583,6 +9591,7 @@ impl Scene {
     /// and the measurer knows where (`set_rich_text_unchanged_above`).
     /// Whether it was damaged so; else what it painted before is, and the
     /// caller damages what it paints now.
+    #[inline(never)]
     fn damage_appended(&mut self, id: NodeId) -> bool {
         if self.appended.is_empty() {
             return false;
@@ -9605,6 +9614,22 @@ impl Scene {
                 false
             }
         }
+    }
+    /// Damage what grown texts left until laid out (`defer_damage`), but not
+    /// repainted after all (gone, or hidden), painted before.
+    #[cold]
+    #[inline(never)]
+    fn damage_left_appended(&mut self) {
+        for was in std::mem::take(&mut self.appended) {
+            if let Some(damage) = was.damage {
+                self.add_damage(damage);
+            }
+        }
+    }
+    /// Whether `id`'s damage is left until it is laid out (`defer_damage`).
+    #[inline(never)]
+    fn is_appended(&self, id: NodeId) -> bool {
+        self.appended.iter().any(|appended| appended.id == id)
     }
     /// `damage_appended`'s damage, None where it can't tell.
     fn appended_damage(&self, id: NodeId, was: &Appended) -> Option<Option<Rect>> {
@@ -13539,10 +13564,7 @@ impl Scene {
         let leaf = damage && childless && self.transformed + self.filtered.get() == 0;
         // A paragraph grown or restyled, damaged once laid out where it was
         // and is from where it changes (`damage_appended`): not whole here.
-        let damage = damage
-            && !(leaf
-                && !self.appended.is_empty()
-                && self.appended.iter().any(|appended| appended.id == id));
+        let damage = damage && !(leaf && !self.appended.is_empty() && self.is_appended(id));
         // A moved leaf's damage where it was and where it lands, worked out
         // and added before its box changes: a leaf has no children, so no
         // other damage comes between, and nothing it paints changes.
@@ -14113,7 +14135,7 @@ impl Scene {
             if keep && flags & (PAINT | PAINTED | COMPOSITE | CHILDREN) != 0 {
                 self.repaints.push((*id, repaint_flags(flags)));
             }
-            if flags & PAINT != 0 && !self.damage_appended(*id) {
+            if flags & PAINT != 0 && (self.appended.is_empty() || !self.damage_appended(*id)) {
                 self.damage_node(*id);
             }
             if flags & COMPOSITE != 0 {
@@ -14127,10 +14149,8 @@ impl Scene {
         self.dirty.clear();
         // Grown texts not repainted after all (gone, or hidden): what they
         // painted before.
-        for was in std::mem::take(&mut self.appended) {
-            if let Some(damage) = was.damage {
-                self.add_damage(damage);
-            }
+        if !self.appended.is_empty() {
+            self.damage_left_appended();
         }
         self.measure_overflow_fades();
         // Backdrop-filter output depends on pixels behind it, even when its own node is clean.
