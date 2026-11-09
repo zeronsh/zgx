@@ -564,6 +564,10 @@ impl<'a> Attrs<'a> {
     /// `_hyp`), which no font is given: a box's span is never shaped. Its
     /// lines are marked as holding one with `Buffer::find_inline_boxes`.
     /// Nothing else is bigger: a box lives in its run.
+    ///
+    /// Give the span its [`Metrics`] as well: shaping places the box by them,
+    /// and the buffer's only come at layout. Without them it keeps its width,
+    /// but its line and any alignment to the text read a 1-pixel font.
     pub fn inline_box(mut self, inline: InlineBox) -> Self {
         let (align, raise) = match inline.align {
             InlineAlign::Baseline => (0, 0.),
