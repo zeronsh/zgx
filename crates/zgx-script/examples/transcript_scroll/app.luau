@@ -64,7 +64,10 @@ end
 local function code(): string
 	local out = { "```rust" }
 	for i = 1, 6 + next_number(14) do
-		out[#out + 1] = `{string.rep("    ", next_number(4))}let value_{i} = frame.{WORDS[next_number(#WORDS) + 1]}({next_number(1000)});`
+		out[#out + 1] =
+			`{string.rep("    ", next_number(4))}let value_{i} = frame.{WORDS[next_number(#WORDS) + 1]}({next_number(
+				1000
+			)});`
 	end
 	out[#out + 1] = "```"
 	return table.concat(out, "\n")
@@ -73,7 +76,8 @@ end
 local function markdown_table(): string
 	local out = { "| Stage | Time | Pixels | Note |", "| --- | --- | --- | --- |" }
 	for i = 1, 4 + next_number(8) do
-		out[#out + 1] = `| {WORDS[next_number(#WORDS) + 1]} {i} | {next_number(90)} ms | {next_number(9000)} | {sentence(4)} |`
+		out[#out + 1] =
+			`| {WORDS[next_number(#WORDS) + 1]} {i} | {next_number(90)} ms | {next_number(9000)} | {sentence(4)} |`
 	end
 	return table.concat(out, "\n")
 end

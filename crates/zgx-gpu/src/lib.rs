@@ -5724,18 +5724,16 @@ impl GpuRenderer {
             self.fresh = true;
             self.pruned_revision = None;
         }
-        self.sync_pictures(scene);
+        if self.scroll_pictures {
+            self.sync_pictures(scene);
+        }
         // Caches only go stale when nodes are added, removed or change kind.
         if self.pruned_revision != Some(scene.content_revision()) {
             self.pruned_revision = Some(scene.content_revision());
             self.prune(scene);
         }
         let frame = self.layer_frame;
-        let pictures = &self.pictures;
         self.layers.retain(|id, cache| {
-            if pictures.contains_key(id) {
-                return true;
-            }
             cache.parked = scene.contains(*id) && !scene.is_layer(*id);
             scene.contains(*id)
                 && (!cache.parked || cache.transformed && frame - cache.used < LAYER_PARK_FRAMES)
@@ -5758,7 +5756,7 @@ impl GpuRenderer {
             None => self.scroll_copies(scene, damage),
         };
         self.copies = copies;
-        let pictured = scene.has_pictures();
+        let pictured = self.scroll_pictures && scene.has_pictures();
         let extended;
         let damage = if repaint.is_empty() {
             damage
@@ -8204,7 +8202,10 @@ impl GpuRenderer {
                 let start = quads.len() as u32;
                 // A shader fill's draw uses its pipeline.
                 let mut fill_shading = None;
-                if item.isolated && self.pictures.contains_key(&item.id) {
+                if item.isolated
+                    && !self.pictures.is_empty()
+                    && self.pictures.contains_key(&item.id)
+                {
                     let plain = self.picture_quads(&item, &mut clips, &mut quads);
                     draws.push(Draw {
                         // Colour times a texture sample, unless a fade or a

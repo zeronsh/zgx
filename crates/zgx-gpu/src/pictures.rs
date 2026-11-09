@@ -114,6 +114,8 @@ impl GpuRenderer {
         self.pictures.len()
     }
     /// Tell the scene whether pictures may start, and let go of those over.
+    #[cold]
+    #[inline(never)]
     pub(crate) fn sync_pictures(&mut self, scene: &Scene) {
         let planes = self.views.as_ref().is_some_and(|views| views.has_planes());
         let allowed = self.scroll_pictures
@@ -152,6 +154,8 @@ impl GpuRenderer {
         }
     }
     /// Bring picture `id` up to date for a view showing it in `clip`.
+    #[cold]
+    #[inline(never)]
     pub(crate) fn prepare_picture(
         &mut self,
         scene: &Scene,
@@ -483,6 +487,8 @@ impl GpuRenderer {
     /// The quads that composite what picture `item` shows: one, or two where
     /// its rows wrap in the texture.
     /// Whether they draw plain: nothing but the view's scissor cuts them.
+    #[cold]
+    #[inline(never)]
     pub(crate) fn picture_quads(
         &self,
         item: &PaintItem<'_>,
