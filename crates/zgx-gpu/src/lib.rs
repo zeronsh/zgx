@@ -144,6 +144,9 @@ pub struct GpuStats {
     pub svg_rasterizations: usize,
     /// Times the instance geometry was rebuilt.
     pub geometry_rebuilds: usize,
+    /// Lines of texts grown at their end drawn as they were: their glyphs
+    /// and quads kept, the rest made again.
+    pub kept_text_lines: usize,
     /// Paint items patched into the window as kept, in a frame that drew
     /// the rest as they were (see `render_kept`); 0 for a frame drawn from
     /// the scene's walk.
@@ -1232,6 +1235,66 @@ fn styled_glyphs<'a>(
     }
     glyphs
 }
+/// Of `shaped`'s quads, drawn at `y` in its box `bounds`, those of the
+/// lines `damage` reaches (and of those a glyph's reach away, as
+/// `visible_lines` takes them), where they are most of its lines' and it
+/// keeps them line by line with nothing else among them (no decorations):
+/// what a frame drawn only where it is damaged shows of it. Else all.
+fn damaged_lines(
+    shaped: &Shaped,
+    damage: &[Rect],
+    bounds: Rect,
+    y: f32,
+    scale: f32,
+    font_size: f32,
+) -> std::ops::Range<usize> {
+    let all = 0..shaped.quads.len();
+    let lines = &shaped.line_glyphs;
+    if lines.len() < 3 || shaped.line_quads.len() != lines.len() || !shaped.decorations.is_empty() {
+        return all;
+    }
+    let Some(band) = damage
+        .iter()
+        .filter(|region| region.intersects(bounds))
+        .copied()
+        .reduce(Rect::union)
+    else {
+        return all;
+    };
+    if band.y <= bounds.y || band.height * 2. >= bounds.height {
+        return all;
+    }
+    // As `visible_lines` reaches.
+    let largest = shaped.rich.as_ref().map_or(font_size, |rich| {
+        rich.runs()
+            .iter()
+            .map(|run| run.font_size)
+            .fold(font_size, f32::max)
+    });
+    let reach = 3. * largest;
+    let (top, bottom) = (
+        (band.y - y - reach) * scale,
+        (band.y + band.height - y + reach) * scale,
+    );
+    // Each line's baseline, from its top: its first glyph's (a line of
+    // none, the next's). Lines go down.
+    let baseline = |at: &u32| {
+        shaped
+            .glyphs
+            .get(*at as usize)
+            .map_or(f32::INFINITY, |glyph| glyph.y)
+    };
+    let first = lines.partition_point(|at| baseline(at) < top);
+    let end = lines
+        .partition_point(|at| baseline(at) <= bottom)
+        .max(first);
+    let start = shaped.line_quads[first] as usize;
+    let end = shaped
+        .line_quads
+        .get(end)
+        .map_or(shaped.quads.len(), |at| *at as usize);
+    start..end.max(start)
+}
 /// A pixel rectangle: x, y, width, height.
 type Scissor = (u32, u32, u32, u32);
 /// A scroll copy's destination and the offset of its source.
@@ -1551,8 +1614,49 @@ struct Shaped {
     last_used: u64,
     /// The prepared text these glyphs were laid out from, kept while drawn.
     prepared: Option<u64>,
+    /// Where each line's glyphs start among `glyphs`, for prepared rich text
+    /// (else none), and their quads among `quads` (`glyph_quads`): a text
+    /// grown at its end keeps those of the lines it keeps (`kept_lines`).
+    line_glyphs: Vec<u32>,
+    line_quads: Vec<u32>,
+    /// The first of `quads` holding a colour glyph, or `u32::MAX`.
+    first_color: u32,
 }
 impl Shaped {
+    /// How many of its lines a text grown from it at its end (`new`, which
+    /// `RichText::appends` it) may keep as they are, laid out at `width`
+    /// in a box `height` tall at `scale` in the atlas of `epoch`, in `font`:
+    /// all, unless its lines may differ (`Laid::grew` says how many do not).
+    /// None where it keeps none: another width, scale or atlas, quads not
+    /// made line by line (decorations among them, or not prepared), or
+    /// decorations now.
+    fn kept_lines(
+        &self,
+        new: &zgx::rich_text::RichText,
+        (width, height, scale): (f32, f32, f32),
+        font: &zgx::text_layout::FontStyle,
+        epoch: u64,
+    ) -> Option<usize> {
+        let old = self.rich.as_ref()?;
+        let decorated = |rich: &zgx::rich_text::RichText| {
+            rich.runs().iter().any(|run| {
+                run.background.is_some() || run.underline.is_some() || run.strikethrough.is_some()
+            })
+        };
+        (self.atlas_epoch == epoch
+            && self.width == width
+            && self.height <= height
+            && self.scale == scale
+            && self.font == *font
+            && self.text_options == zgx::text_layout::TextOptions::default()
+            && self.decorations.is_empty()
+            && !self.line_glyphs.is_empty()
+            && self.line_quads.len() == self.line_glyphs.len()
+            && prepared::TextCache::handles(new)
+            && new.appends(old)
+            && !decorated(new))
+        .then_some(self.line_glyphs.len())
+    }
     fn bytes(&self) -> usize {
         self.rich
             .as_ref()
@@ -1730,6 +1834,7 @@ fn add_layer_stats(stats: &mut GpuStats, result: &GpuStats) {
     stats.canvas_rasterizations += result.canvas_rasterizations;
     stats.svg_rasterizations += result.svg_rasterizations;
     stats.geometry_rebuilds += result.geometry_rebuilds;
+    stats.kept_text_lines += result.kept_text_lines;
     stats.vertex_buffer_allocations += result.vertex_buffer_allocations;
     stats.layer_repaints += 1;
     stats.damaged_pixels += result.damaged_pixels;
@@ -2374,6 +2479,7 @@ impl GpuStats {
         self.canvas_quads += made.canvas_quads;
         self.svg_rasterizations += made.svg_rasterizations;
         self.geometry_rebuilds += made.geometry_rebuilds;
+        self.kept_text_lines += made.kept_text_lines;
     }
 }
 /// A backdrop filter's bounds, effects and corner radii (`Draw::blur`).
@@ -5981,6 +6087,7 @@ impl GpuRenderer {
         stats.canvas_rasterizations += layer_stats.canvas_rasterizations;
         stats.svg_rasterizations += layer_stats.svg_rasterizations;
         stats.geometry_rebuilds += layer_stats.geometry_rebuilds;
+        stats.kept_text_lines += layer_stats.kept_text_lines;
         stats.vertex_buffer_allocations += layer_stats.vertex_buffer_allocations;
         Ok(stats)
     }
@@ -8974,15 +9081,34 @@ impl GpuRenderer {
                         // A shape made this frame, held here until placed: into
                         // the map once, not in and out again to place it.
                         let mut fresh = None;
+                        // A text grown at its end: the line from which its
+                        // glyphs' quads are made (`glyph_quads`), those before
+                        // kept.
+                        let mut appended_from = None;
                         if stale {
                             // The old shape's glyphs and quads hold the new one's:
                             // a changed value is as many allocations fewer.
                             let (mut spare_glyphs, mut spare_quads) = (Vec::new(), Vec::new());
+                            // Grown at its end: its lines it may keep
+                            // (`Shaped::kept_lines`), and that text's length.
+                            let mut kept = None;
+                            let (mut line_glyphs, mut line_quads, mut first_color) =
+                                (Vec::new(), Vec::new(), u32::MAX);
                             if let Some(old) = self.shapes.remove(&item.id) {
                                 self.shaped_bytes -= old.bytes();
+                                kept = rich.as_ref().and_then(|new| {
+                                    let at = (wrap, bounds.height, self.scale);
+                                    let lines =
+                                        old.kept_lines(new, at, item.font, self.atlas_epoch)?;
+                                    Some((old.rich.as_ref()?.text().len(), lines))
+                                });
                                 (spare_glyphs, spare_quads) = (old.glyphs, old.quads);
-                                spare_glyphs.clear();
-                                spare_quads.clear();
+                                (line_glyphs, line_quads, first_color) =
+                                    (old.line_glyphs, old.line_quads, old.first_color);
+                                if kept.is_none() {
+                                    spare_glyphs.clear();
+                                    spare_quads.clear();
+                                }
                             }
                             let mut fonts = self.fonts.borrow_mut();
                             // Default-option rich text: the prepared lines layout
@@ -8990,6 +9116,7 @@ impl GpuRenderer {
                             let prepared = rich
                                 .as_ref()
                                 .filter(|rich| prepared::TextCache::handles(rich));
+                            let prepared_rich = prepared.is_some();
                             let plain = rich.is_none()
                                 && item.text_options == Default::default()
                                 && prepared::TextCache::handles_plain(text, font_size);
@@ -9062,18 +9189,58 @@ impl GpuRenderer {
                                 let mut cache = self.text_cache.borrow_mut();
                                 let laid = cache.layout(&mut fonts, rich, Some(wrap));
                                 let starts = laid.line_starts();
+                                // Grown from the text drawn before: the lines
+                                // its prepared text kept of that text's
+                                // (`Laid::grew`) keep their glyphs and quads.
+                                let keep = kept.and_then(|(text, lines)| {
+                                    let (from, held) = laid.grew()?;
+                                    let keep = lines.min(held);
+                                    (from == text && keep > 0).then_some(keep)
+                                });
+                                let mut glyphs = std::mem::take(&mut spare_glyphs);
+                                let skip = match keep {
+                                    Some(keep) => {
+                                        glyphs.truncate(line_glyphs[keep] as usize);
+                                        spare_quads.truncate(line_quads[keep] as usize);
+                                        line_glyphs.truncate(keep);
+                                        line_quads.truncate(keep);
+                                        if first_color as usize >= spare_quads.len() {
+                                            first_color = u32::MAX;
+                                        }
+                                        appended_from = Some(keep);
+                                        stats.kept_text_lines += keep;
+                                        keep
+                                    }
+                                    None => {
+                                        glyphs.clear();
+                                        spare_quads.clear();
+                                        line_glyphs.clear();
+                                        line_quads.clear();
+                                        first_color = u32::MAX;
+                                        0
+                                    }
+                                };
+                                let mut at = glyphs.len() as u32;
+                                for run in laid.runs(Some(bounds.height)).skip(skip) {
+                                    line_glyphs.push(at);
+                                    at += run.glyphs.len() as u32;
+                                }
                                 let glyphs = glyphs_of(
-                                    std::mem::take(&mut spare_glyphs),
-                                    laid.runs(Some(bounds.height)),
+                                    glyphs,
+                                    laid.runs(Some(bounds.height)).skip(skip),
                                     &starts,
                                     Some(rich),
                                     self.scale,
                                 );
-                                let decorations = text::rich_decorations_in(
-                                    laid.runs(Some(bounds.height)),
-                                    &starts,
-                                    rich,
-                                );
+                                // (Kept, it has none: `kept_lines`.)
+                                let decorations = match keep {
+                                    Some(_) => Vec::new(),
+                                    None => text::rich_decorations_in(
+                                        laid.runs(Some(bounds.height)),
+                                        &starts,
+                                        rich,
+                                    ),
+                                };
                                 Err((glyphs, decorations, Some(laid.key()), None))
                             } else if let Some(rich) = &rich {
                                 Ok(text::rich_buffer(
@@ -9145,6 +9312,20 @@ impl GpuRenderer {
                                 atlas_epoch: epoch.unwrap_or(0),
                                 last_used: self.frame,
                                 prepared,
+                                // (Only prepared rich text's are made line by
+                                // line, and kept.)
+                                line_glyphs: match prepared_rich {
+                                    true => line_glyphs,
+                                    false => Vec::new(),
+                                },
+                                line_quads: match prepared_rich {
+                                    true => line_quads,
+                                    false => Vec::new(),
+                                },
+                                first_color: match prepared_rich {
+                                    true => first_color,
+                                    false => u32::MAX,
+                                },
                             };
                             fresh = Some(shaped);
                             stats.shaped_nodes += 1;
@@ -9154,6 +9335,13 @@ impl GpuRenderer {
                                 }
                                 insert_in::<MODE, _, _>(&mut self.shaped_like, content, item.id);
                             }
+                        }
+                        // Kept from a line on: the quads of its glyphs after.
+                        if let Some(line) = appended_from
+                            && let Some(shaped) = &mut fresh
+                        {
+                            self.glyph_quads::<MODE>(shaped, line, &mut stats)?;
+                            shaped.atlas_epoch = self.atlas_epoch;
                         }
                         let snap = |value: f32| (value * self.scale).round() / self.scale;
                         let (x, y) = (snap(bounds.x), snap(bounds.y));
@@ -9362,12 +9550,22 @@ impl GpuRenderer {
                         // was placed in: its quads, borrowed where they are kept.
                         let whole =
                             !self.cull_glyphs || (holds(viewport) && item.clip.is_none_or(holds));
+                        // Drawn where this frame's damage reaches alone (a
+                        // paragraph growing at its end repaints its last
+                        // lines): the quads of its lines there.
+                        let only = |shaped: &Shaped| match MODE == FRAME
+                            && shadows.is_empty()
+                            && filled.is_none()
+                        {
+                            true => damaged_lines(shaped, damage, bounds, y, self.scale, font_size),
+                            false => 0..shaped.quads.len(),
+                        };
                         if whole
                             && let Some(mut shaped) =
                                 fresh.take_if(|shaped| shaped.atlas_epoch == self.atlas_epoch)
                         {
                             // (A twin's, placed in this atlas already.)
-                            place(&mut quads, &shaped.quads, shaped.colored);
+                            place(&mut quads, &shaped.quads[only(&shaped)], shaped.colored);
                             glyphs_alone = marks.is_empty()
                                 && highlight.is_none()
                                 && shaped.decorations.is_empty();
@@ -9379,7 +9577,7 @@ impl GpuRenderer {
                             && let Some(shaped) = self.shapes.get_mut(&item.id)
                             && shaped.atlas_epoch == self.atlas_epoch
                         {
-                            place(&mut quads, &shaped.quads, shaped.colored);
+                            place(&mut quads, &shaped.quads[only(shaped)], shaped.colored);
                             glyphs_alone = marks.is_empty()
                                 && highlight.is_none()
                                 && shaped.decorations.is_empty();
@@ -9411,36 +9609,9 @@ impl GpuRenderer {
                                         .filter(|d| d.background)
                                         .map(rich_decoration_quad),
                                 );
-                                shaped.quads.reserve(shaped.glyphs.len());
-                                shaped.colored = false;
-                                for glyph in &shaped.glyphs {
-                                    if let Some(a) = self.glyph::<MODE>(glyph.key, &mut stats)? {
-                                        shaped.colored |= a.color;
-                                        shaped.quads.push(TextQuad {
-                                            rect: [
-                                                (glyph.x + a.left as f32) / self.scale,
-                                                (glyph.y - a.top as f32) / self.scale,
-                                                a.width as f32 / self.scale,
-                                                a.height as f32 / self.scale,
-                                            ],
-                                            uv: [
-                                                a.x as f32 / self.atlas_size as f32,
-                                                a.y as f32 / self.atlas_size as f32,
-                                                a.width as f32 / self.atlas_size as f32,
-                                                a.height as f32 / self.atlas_size as f32,
-                                            ],
-                                            color: shaped.rich.as_ref().map_or([0.; 4], |rich| {
-                                                rgba(rich.runs()[glyph.run].color, 1.)
-                                            }),
-                                            paint: [
-                                                0.,
-                                                glyph_texture(a.color, self.scale),
-                                                if a.color { COLOR_GLYPH } else { 0. },
-                                                0.,
-                                            ],
-                                        });
-                                    }
-                                }
+                                shaped.line_quads.clear();
+                                shaped.first_color = u32::MAX;
+                                self.glyph_quads::<MODE>(&mut shaped, 0, &mut stats)?;
                                 for decoration in
                                     shaped.decorations.iter().filter(|d| !d.background)
                                 {
@@ -12839,6 +13010,67 @@ impl GpuRenderer {
     /// if that leaves out most of its glyphs; whether it did. Out of line:
     /// what the per-glyph loops of `render_flat` hold stays small.
     #[inline(never)]
+    /// `shaped`'s glyphs' quads from line `line` on (its glyphs from
+    /// `line_glyphs[line]`, all if it has no lines), after its quads so far,
+    /// noting where each line's start (`line_quads`) and its first colour
+    /// glyph's (`first_color`, and `colored`).
+    fn glyph_quads<const MODE: u8>(
+        &mut self,
+        shaped: &mut Shaped,
+        line: usize,
+        stats: &mut GpuStats,
+    ) -> Result<(), GpuError> {
+        let from = shaped.line_glyphs.get(line).map_or(0, |at| *at as usize);
+        shaped.quads.reserve(shaped.glyphs.len() - from);
+        let mut next = line;
+        for index in from..shaped.glyphs.len() {
+            while shaped
+                .line_glyphs
+                .get(next)
+                .is_some_and(|at| *at as usize == index)
+            {
+                shaped.line_quads.push(shaped.quads.len() as u32);
+                next += 1;
+            }
+            let glyph = shaped.glyphs[index].clone();
+            if let Some(a) = self.glyph::<MODE>(glyph.key, stats)? {
+                if a.color && shaped.first_color == u32::MAX {
+                    shaped.first_color = shaped.quads.len() as u32;
+                }
+                shaped.quads.push(TextQuad {
+                    rect: [
+                        (glyph.x + a.left as f32) / self.scale,
+                        (glyph.y - a.top as f32) / self.scale,
+                        a.width as f32 / self.scale,
+                        a.height as f32 / self.scale,
+                    ],
+                    uv: [
+                        a.x as f32 / self.atlas_size as f32,
+                        a.y as f32 / self.atlas_size as f32,
+                        a.width as f32 / self.atlas_size as f32,
+                        a.height as f32 / self.atlas_size as f32,
+                    ],
+                    color: shaped
+                        .rich
+                        .as_ref()
+                        .map_or([0.; 4], |rich| rgba(rich.runs()[glyph.run].color, 1.)),
+                    paint: [
+                        0.,
+                        glyph_texture(a.color, self.scale),
+                        if a.color { COLOR_GLYPH } else { 0. },
+                        0.,
+                    ],
+                });
+            }
+        }
+        // Lines of no glyphs at its end.
+        while next < shaped.line_glyphs.len() {
+            shaped.line_quads.push(shaped.quads.len() as u32);
+            next += 1;
+        }
+        shaped.colored = shaped.first_color != u32::MAX;
+        Ok(())
+    }
     fn visible_lines(
         &mut self,
         shaped: &Shaped,
@@ -17626,6 +17858,12 @@ fn install_text(
             .borrow_mut()
             .measure(&mut fonts.borrow_mut(), rich, width)
     });
+    // A paragraph grown at its end is damaged from the first line that may
+    // differ from the text it grew from: the line its measuring resumed at.
+    let cache = shared_cache.clone();
+    scene.set_rich_text_unchanged_above(move |rich, length, width| {
+        cache.borrow().unchanged_above(rich, length, width)
+    });
     // Plain text nodes, from the same prepared text.
     let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
     scene.set_font_text_measurer(move |text, size, width, font| {
@@ -18928,6 +19166,9 @@ mod atlas_glyph_errors_tests {
             colored: false,
             atlas_epoch: 0,
             last_used: 0,
+            line_glyphs: Vec::new(),
+            line_quads: Vec::new(),
+            first_color: u32::MAX,
             prepared: None,
         };
         let mut stats = GpuStats::default();
