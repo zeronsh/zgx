@@ -7080,8 +7080,16 @@ impl Scene {
             self.geometry_revision = self.geometry_revision.wrapping_add(1);
         }
         let colour = paints_only(&self.node(id).kind, &kind);
+        // Rich text recoloured (a fade's frame): it paints where it did, so
+        // the inks and boxes cached for it and its ancestors stand; worked
+        // out again, each frame of a fade walked every ancestor's children.
+        let recoloured = matches!((&self.node(id).kind, &kind),
+            (NodeKind::RichText { text: old }, NodeKind::RichText { text: new }) if new.recolours(old));
         self.node_mut(id).kind = kind;
-        self.invalidate(id, if colour { PAINT | PAINT_ONLY } else { PAINT });
+        match recoloured {
+            true => self.invalidate_with(id, PAINT, false, true, false),
+            false => self.invalidate(id, if colour { PAINT | PAINT_ONLY } else { PAINT }),
+        }
         if !layout_unchanged {
             self.invalidate_layout(id);
         }
@@ -9037,14 +9045,16 @@ impl Scene {
     // repaint (`PAINT_MIXED`, `CHANGED`) are worked out as it compiles.
     #[inline(always)]
     fn invalidate(&mut self, id: NodeId, flags: u8) {
-        self.invalidate_with(id, flags, false, true);
+        self.invalidate_with(id, flags, false, true, true);
     }
     /// `invalidate`, keeping (`keep_reads`) what a node's layout reads
     /// (`read_bits`) and its text sizes where a change leaves them. Inlined:
     /// each caller's `keep_reads` is a constant, `invalidate`'s false.
     /// `own`: the node itself changed, not one it lays out (`CHANGED`).
+    /// `ink`: where it paints may have changed (its and its ancestors'
+    /// cached inks and boxes go); not for a change of colour alone.
     #[inline(always)]
-    fn invalidate_with(&mut self, id: NodeId, flags: u8, keep_reads: bool, own: bool) {
+    fn invalidate_with(&mut self, id: NodeId, flags: u8, keep_reads: bool, own: bool, ink: bool) {
         if self.isolation_count + self.promoted_count > 0 {
             let mut current = Some(id);
             while let Some(ancestor) = current {
@@ -9057,7 +9067,7 @@ impl Scene {
                 current = node.parent;
             }
         }
-        let mut current = Some(id);
+        let mut current = ink.then_some(id);
         while let Some(ancestor) = current {
             let node = self.node(ancestor);
             if node.bounds_valid.replace(0) & BOUNDS_VALID == 0 {
@@ -9506,7 +9516,7 @@ impl Scene {
                 // than the walk marked.
                 let mut above = Some(parent);
                 while let Some(ancestor) = above {
-                    self.invalidate_with(ancestor, LAYOUT, false, false);
+                    self.invalidate_with(ancestor, LAYOUT, false, false, true);
                     self.expire_this_pass(ancestor);
                     above = self.node(ancestor).parent;
                 }
@@ -9636,7 +9646,7 @@ impl Scene {
     fn invalidate_layout_to_root(&mut self, mut id: NodeId) {
         let mut own = true;
         loop {
-            self.invalidate_with(id, LAYOUT, false, std::mem::take(&mut own));
+            self.invalidate_with(id, LAYOUT, false, std::mem::take(&mut own), true);
             match self.node(id).parent {
                 Some(parent) => id = parent,
                 None => break,
@@ -15565,6 +15575,95 @@ mod tests {
         assert!(
             plain[3][0] > 4 * plain[0][0],
             "filtering every child, inks asked a chunk at {sizes:?} blocks: {plain:?}"
+        );
+    }
+    /// A fade's frame recolours a streamed reply's last paragraph: the inks
+    /// of it and its ancestors are kept (where it paints is as it was), so
+    /// its damaged walk asks fewer (5 against 15 here) than after a change
+    /// that may move its paint (a wash behind a run), which works them out
+    /// again; as many with 800 blocks above it as with 100.
+    #[test]
+    fn a_recoloured_paragraph_keeps_its_ancestors_inks() {
+        use crate::rich_text::{RichText, TextRun};
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let rich = |alpha: u8, background: Option<Color>| {
+            let text = "the newest words";
+            let runs = vec![
+                TextRun {
+                    range: 0..4,
+                    ..TextRun::default()
+                },
+                TextRun {
+                    range: 4..text.len(),
+                    color: Color(255, 255, 255, alpha),
+                    background,
+                    ..TextRun::default()
+                },
+            ];
+            NodeKind::RichText {
+                text: std::sync::Arc::new(RichText::new(text, runs).unwrap()),
+            }
+        };
+        let per_frame = |blocks: usize| {
+            let mut scene = Scene::new(400., 300.);
+            let root = scene.root();
+            scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+            let view = scene.append(
+                root,
+                NodeKind::Container(Layout::Overlay),
+                Style {
+                    clip: true,
+                    ..sized(300., 300.)
+                },
+            );
+            let column = scene.append(view, NodeKind::Container(Layout::Column), Style::default());
+            for n in 0..blocks {
+                let fill = Color((n % 200) as u8, 60, 90, 255);
+                scene.append(column, NodeKind::Rect(fill), sized(200., 8.));
+            }
+            let paragraph = scene.append(column, rich(0, None), sized(200., 20.));
+            // Followed: its end at the view's bottom.
+            scene.flush();
+            let tall = scene.bounds(column).height;
+            scene.set_transform(
+                column,
+                Transform {
+                    x: 0.,
+                    y: 300. - tall,
+                },
+            );
+            let damage = scene.flush().damage;
+            scene.layer_items_within(None, Some(&damage));
+            let walk = |scene: &mut Scene| {
+                let damage = scene.flush().damage;
+                assert!(!damage.is_empty());
+                let before = scene.inks_asked.get();
+                let items = scene.layer_items_within(None, Some(&damage));
+                assert!(items.iter().any(|item| item.id == paragraph));
+                scene.inks_asked.get() - before
+            };
+            let mut asked = Vec::new();
+            for alpha in [60, 120, 180] {
+                scene.set_leaf_kind(paragraph, rich(alpha, None));
+                asked.push(walk(&mut scene));
+            }
+            scene.set_leaf_kind(paragraph, rich(255, Some(Color(0, 0, 0, 255))));
+            let washed = walk(&mut scene);
+            (asked, washed)
+        };
+        let (few, few_washed) = per_frame(100);
+        let (many, many_washed) = per_frame(800);
+        assert_eq!(few, many, "inks asked a recolour at 100 and 800 blocks");
+        assert_eq!(few_washed, many_washed);
+        // A wash may paint past the text: its and its ancestors' inks are
+        // worked out again, asking more than a recolour, which keeps them.
+        assert!(
+            few.iter().all(|asked| *asked < few_washed),
+            "inks asked a recolour {few:?}, a wash {few_washed}"
         );
     }
     #[test]

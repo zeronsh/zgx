@@ -252,6 +252,37 @@ impl RichText {
                         == b.strikethrough.map(|d| (d.thickness(), d.line))
             })
     }
+    /// Whether `self` is `old` with its runs' text colours alone changed
+    /// (`recoloured`: a fade's frame): laid out and painting where `old`
+    /// does. Every other field of each run is compared.
+    pub(crate) fn recolours(&self, old: &Self) -> bool {
+        self.options == old.options
+            && (Arc::ptr_eq(&self.text, &old.text) || self.text == old.text)
+            && self.runs.len() == old.runs.len()
+            && self.runs.iter().zip(old.runs.iter()).all(|(a, b)| {
+                let TextRun {
+                    range,
+                    font,
+                    font_size,
+                    color: _,
+                    background,
+                    underline,
+                    strikethrough,
+                    padding,
+                    radius,
+                    continues,
+                } = a;
+                *range == b.range
+                    && *font == b.font
+                    && *font_size == b.font_size
+                    && *background == b.background
+                    && *underline == b.underline
+                    && *strikethrough == b.strikethrough
+                    && *padding == b.padding
+                    && *radius == b.radius
+                    && *continues == b.continues
+            })
+    }
     /// Whether run `index` is the next piece of the run before's span
     /// (`TextRun::continues`), drawn as that span whole: marked so, and
     /// alike in font, size, padding, background and radius, right after it.
