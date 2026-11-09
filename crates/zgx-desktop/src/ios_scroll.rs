@@ -847,6 +847,16 @@ unsafe fn install_tracker(state: &State, root: *const AnyObject) {
 }
 
 /// Leave a move with the keyboard where it is: a finger took over.
+/// The scroller moves the page itself (a finger, a status bar tap): what held it
+/// for the keyboard lets go, the keyboard's room kept while it's up.
+fn let_page_go(state: &State, view: &AnyObject) {
+    stop_following(state, view);
+    unglue(state);
+    state.lock.borrow_mut().take();
+    state.following.borrow_mut().take();
+    start_keyboard_link(state);
+}
+
 fn stop_following(state: &State, view: &AnyObject) {
     if state.following.borrow_mut().take().is_none() {
         return;
@@ -1139,11 +1149,7 @@ define_class!(
             crate::ios_gestures::log("scroll dragging");
             let state = self.ivars();
             state.scrubbing.set(false);
-            stop_following(state, view);
-            unglue(state);
-            state.lock.borrow_mut().take();
-            state.following.borrow_mut().take();
-            start_keyboard_link(state);
+            let_page_go(state, view);
             state.dragging.set(true);
             state.refresh_ending.0.set(true);
             state.window.request_redraw();
@@ -1155,6 +1161,9 @@ define_class!(
             let Some(driver) = driver else {
                 return Bool::NO;
             };
+            // UIKit scrolls to the top with the keyboard up, which stays up: the
+            // page is no longer held at its edge, as when a finger moves it.
+            let_page_go(state, view);
             configure(state, view, driver, None);
             Bool::YES
         }
