@@ -211,7 +211,8 @@ impl NativeHost {
     }
     /// Whether a native view now on show splits the window into planes. One
     /// hidden with its tab, or its panel, keeps its place in `active` and splits
-    /// nothing.
+    /// nothing. (Only macOS asks: its caret is Core Animation's.)
+    #[cfg(target_os = "macos")]
     pub fn splits_planes(&self) -> bool {
         !self.split.is_empty()
     }
