@@ -244,16 +244,20 @@ fn a_players_translucent_picture_shows_over_what_is_behind_it_as_drawn() {
         },
     )
     .unwrap();
-    let player = held.unwrap();
+    let _player = held.unwrap();
+    // Until the view shows its frame: the first may come as bytes (opened
+    // before the view asked for pixel buffers) and the view's after it.
     let deadline = Instant::now() + Duration::from_secs(30);
-    while player.image.with_untracked(Option::is_none) {
+    let mut pixels = Vec::new();
+    loop {
         stage.step().unwrap();
+        stage.draw(&mut pixels).unwrap();
+        if pixel(&pixels, 100, 50, 25) != [255, 255, 255, 255] {
+            break;
+        }
         assert!(Instant::now() < deadline, "no frame came");
         std::thread::sleep(Duration::from_millis(2));
     }
-    stage.step().unwrap();
-    let mut pixels = Vec::new();
-    stage.draw(&mut pixels).unwrap();
     // Half red over white: (255, 127, 127). Premultiplied twice, its red
     // fell to about 191.
     let [r, g, b, _] = pixel(&pixels, 100, 50, 25);
@@ -739,5 +743,96 @@ fn images_held_unread_never_stall_a_players_view() {
     // Each kept image is still the frame it was.
     for (image, frame) in kept.iter().zip([10, 20, 30, 40]) {
         assert_eq!(bar_width(image), frame, "a kept image changed");
+    }
+}
+
+/// A player's own view on macOS shows pixel buffers: scrubbed while paused,
+/// it keeps them (no bytes), shows a kept frame again without drawing it,
+/// and gives them back at rest.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_views_player_keeps_scrubbed_frames_as_pixel_buffers_until_rest() {
+    let dir = temp_dir("player-cache-surfaces");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let mut held = None;
+    let path = dir.to_path_buf();
+    let mut stage = Stage::new(
+        StageOptions {
+            width: 100.,
+            height: 50.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            player.open("Bar", json!({ "color": "#00ff00" }), 40);
+            let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
+            held = Some(player);
+            Ok(view)
+        },
+    )
+    .unwrap();
+    let player = held.unwrap();
+    player.keep_frames_for(Duration::from_millis(300));
+    // A buffer of 100 by 50, counted as its pixels.
+    let frame_bytes = 100 * 50 * 4;
+    for frame in [40, 20, 10] {
+        player.seek(frame);
+        drawn_at(&mut stage, &player, frame);
+    }
+    assert_eq!(player.cached_bytes(), 3 * frame_bytes, "kept no buffers");
+    // Back to one kept: shown, the right picture, and nothing more kept.
+    player.seek(20);
+    let shown = drawn_at(&mut stage, &player, 20);
+    let image = player.image.with_untracked(Clone::clone).expect("an image");
+    assert_eq!(bar_width(&image), 20, "showed another frame");
+    assert!(
+        image.pixels() == &shown[..],
+        "the view shows another picture"
+    );
+    assert_eq!(player.cached_bytes(), 3 * frame_bytes);
+    // At rest: given back.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while player.cached_bytes() != 0 {
+        stage.step().unwrap();
+        assert!(Instant::now() < deadline, "kept its buffers at rest");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Asks that show the frame it's at again (a reload, a view asking for
+/// pixel buffers, seen again) keep a frame asked for just before them: an
+/// open at 40 and a reload asked together show 40, not the frame it was at.
+#[test]
+fn a_frame_asked_for_survives_a_reload_asked_with_it() {
+    let dir = temp_dir("player-seek-kept");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let path = dir.to_path_buf();
+    for _ in 0..10 {
+        let mut held = None;
+        let mut stage = Stage::new(
+            StageOptions {
+                width: 100.,
+                height: 50.,
+                fps: 60.,
+                scale: 1.,
+                background: Color(255, 255, 255, 255),
+                ..Default::default()
+            },
+            |setting| {
+                let player = Player::new(setting.runtime, &path, 1.)?;
+                // Asked together: its thread takes both in one go.
+                player.open("Bar", json!({ "color": "#00ff00" }), 40);
+                player.reload();
+                let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
+                held = Some(player);
+                Ok(view)
+            },
+        )
+        .unwrap();
+        let player = held.unwrap();
+        drawn_at(&mut stage, &player, 40);
     }
 }

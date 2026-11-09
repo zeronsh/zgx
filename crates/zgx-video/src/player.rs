@@ -75,11 +75,23 @@ const CACHE_BYTES: usize = 512 << 20;
 /// holds no frames.
 const CACHE_KEPT: Duration = Duration::from_secs(5);
 
+/// A frame kept: its bytes (for a script), its pixel buffer (for a view on
+/// macOS, outside the pool's count once the pool's are held), or both, as
+/// what showed it wanted.
+#[derive(Clone)]
+struct Kept {
+    pixels: Option<Arc<[u8]>>,
+    #[cfg(target_os = "macos")]
+    buffer: Option<zgx_gpu::PixelBuffer>,
+    /// Bytes it holds: a buffer's counted as its pixels.
+    bytes: usize,
+}
+
 /// Frames drawn for this script, as they were: those shown while paused or
 /// scrubbing, not those played (played on, a frame isn't asked for again).
 /// `held` says how many bytes, for the player to read.
 struct Cache {
-    frames: HashMap<u64, Arc<[u8]>>,
+    frames: HashMap<u64, Kept>,
     order: VecDeque<u64>,
     bytes: usize,
     held: Arc<AtomicUsize>,
@@ -93,20 +105,21 @@ impl Cache {
             held,
         }
     }
-    fn get(&mut self, frame: u64) -> Option<Arc<[u8]>> {
+    fn get(&mut self, frame: u64) -> Option<Kept> {
         self.frames.get(&frame).cloned()
     }
-    fn put(&mut self, frame: u64, pixels: Arc<[u8]>) {
-        self.bytes += pixels.len();
-        if self.frames.insert(frame, pixels).is_none() {
-            self.order.push_back(frame);
+    fn put(&mut self, frame: u64, kept: Kept) {
+        self.bytes += kept.bytes;
+        match self.frames.insert(frame, kept) {
+            Some(was) => self.bytes -= was.bytes,
+            None => self.order.push_back(frame),
         }
         while self.bytes > CACHE_BYTES {
             let Some(oldest) = self.order.pop_front() else {
                 break;
             };
             if let Some(gone) = self.frames.remove(&oldest) {
-                self.bytes -= gone.len();
+                self.bytes -= gone.bytes;
             }
         }
         self.held.store(self.bytes, Ordering::Relaxed);
@@ -174,16 +187,26 @@ impl Preview {
             self.build()?;
         }
         let (width, height) = self.stage.as_ref().map_or((1, 1), |s| s.stage.pixel_size());
-        // Bytes kept serve only those who want bytes.
+        // A frame kept serves if it holds what's wanted: bytes for a
+        // script, a pixel buffer for a view.
         let bytes_wanted = !self.surfaces || self.pixels_wanted;
-        if let Some(pixels) = self.cache.get(frame).filter(|_| bytes_wanted) {
-            self.say(Event::Frame {
-                frame,
-                width,
-                height,
-                pixels,
-            });
-            return Ok(());
+        if let Some(kept) = self.cache.get(frame) {
+            let serves = kept.pixels.is_some() || !bytes_wanted;
+            #[cfg(target_os = "macos")]
+            let serves = serves && (kept.buffer.is_some() || !self.surfaces);
+            if serves {
+                #[cfg(target_os = "macos")]
+                if let Some(buffer) = kept.buffer.filter(|_| self.surfaces) {
+                    let _ = self.surfaces_to.send((frame, buffer));
+                }
+                self.say(Event::Frame {
+                    frame,
+                    width,
+                    height,
+                    pixels: kept.pixels.unwrap_or_else(|| Arc::from(&[][..])),
+                });
+                return Ok(());
+            }
         }
         if self
             .stage
@@ -214,8 +237,17 @@ impl Preview {
                 self.say(Event::Tracks(tracks));
             }
             let pixels: Arc<[u8]> = pixels.into();
-            if keep && self.pixels_wanted {
-                self.cache.put(frame, pixels.clone());
+            if keep {
+                let wanted = self.pixels_wanted.then(|| pixels.clone());
+                self.cache.put(
+                    frame,
+                    Kept {
+                        bytes: wanted.as_ref().map_or(0, |p| p.len())
+                            + width as usize * height as usize * 4,
+                        pixels: wanted,
+                        buffer: Some(buffer.clone()),
+                    },
+                );
             }
             let _ = self.surfaces_to.send((frame, buffer));
             self.say(Event::Frame {
@@ -235,7 +267,15 @@ impl Preview {
         }
         let pixels: Arc<[u8]> = pixels.into();
         if keep {
-            self.cache.put(frame, pixels.clone());
+            self.cache.put(
+                frame,
+                Kept {
+                    bytes: pixels.len(),
+                    pixels: Some(pixels.clone()),
+                    #[cfg(target_os = "macos")]
+                    buffer: None,
+                },
+            );
         }
         self.say(Event::Frame {
             frame,
@@ -318,6 +358,11 @@ pub(crate) fn run(
                 Ok(ask) => Some(ask),
                 Err(RecvTimeoutError::Timeout) => {
                     preview.cache.clear();
+                    // Its pixel buffers too: only the one shown stays.
+                    #[cfg(target_os = "macos")]
+                    if let Some(stage) = &preview.stage {
+                        stage.film.stage.release_surfaces();
+                    }
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -330,6 +375,9 @@ pub(crate) fn run(
         // The latest of what's waiting: scrubbing runs ahead of drawing.
         let mut asked = ask.into_iter().collect::<Vec<_>>();
         asked.extend(asks.try_iter());
+        // Where to show: the last frame asked for. An ask that only shows
+        // the frame it's at again (seen, another form, built anew) keeps a
+        // frame asked for before it in the same batch.
         let mut seek = None;
         let mut result = Ok(());
         for ask in asked {
@@ -386,7 +434,7 @@ pub(crate) fn run(
                     // Seen again: playing, it draws the frame due now
                     // (below); else the one it moved to unseen.
                     if on && !watched && stale && playing.is_none() {
-                        seek = Some(at);
+                        seek.get_or_insert(at);
                     }
                     watched = on;
                 }
@@ -398,20 +446,20 @@ pub(crate) fn run(
                     if preview.surfaces != on {
                         preview.surfaces = on;
                         if preview.composition.is_some() {
-                            seek = Some(at);
+                            seek.get_or_insert(at);
                         }
                     }
                 }
                 Ask::Pixels(on) => {
                     if preview.pixels_wanted != on {
                         preview.pixels_wanted = on;
-                        seek = Some(at);
+                        seek.get_or_insert(at);
                     }
                 }
                 Ask::Reload => {
                     preview.cache.clear();
                     result = preview.build();
-                    seek = Some(at);
+                    seek.get_or_insert(at);
                 }
             }
         }
