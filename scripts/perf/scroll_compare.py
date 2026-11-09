@@ -93,10 +93,11 @@ def run_one(args, descriptor, arm, role, trial, position):
           '--sizes',c.get('size','W'),'--hz',str(c.get('hz',120)),
           '--scale',str(c.get('scale',2)),'--backgrounds',c.get('background','translucent'),
           '--present',str(c.get('present','0')),'--repeats','1','--native-floor',
-          '--reset-row',str(c.get('reset_row',160)), '--output',str(output)]
+          '--reset-row',str(c.get('reset_row',160)), '--reference-refresh-grid',c.get('reference_refresh_grid','off'),'--output',str(output)]
     for key in ('engine_source','engine_pin','zeron_source','zeron_runner','runner','reference_runner'):
         if key in descriptor:argv+=['--'+key.replace('_','-'),str(descriptor[key])]
     for value in descriptor.get('env',[]):argv+=['--host-env',value]
+    if descriptor.get('require_frame_source'):argv+=['--require-frame-source']
     console=args.output/'console'/f'{label}.log'
     print('START',label,time.strftime('%H:%M:%S',time.gmtime()),flush=True)
     with console.open('w') as log:completed=subprocess.run(argv,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
@@ -110,7 +111,7 @@ def run_one(args, descriptor, arm, role, trial, position):
     native_valid=bool(refs) and all(ref.get(k,{}).get('status')=='valid' for ref in refs for k in ('native_floor_before','native_floor_after'))
     sample=dict(arm=arm['name'],role=role,trial=trial,condition=c,descriptor=descriptor,
                 valid=valid and native_valid,status=r['status'],metrics=m,
-                failures=r.get('failures',[]),setup_anchor=r.get('setup_anchor',{}),
+                failures=r.get('failures',[]),behavior_checks=r.get('behavior_checks',{}),host_env_verified=r.get('host_env_verified',{}),setup_anchor=r.get('setup_anchor',{}),
                 references=refs,evidence=str(output),exit_code=completed.returncode)
     output.mkdir(parents=True,exist_ok=True)
     result_file.write_text(json.dumps(sample,indent=2)+'\n')
@@ -152,10 +153,19 @@ def main():
                 for role,descriptor in [('base',manifest['baseline']),('variant',arm)]:
                     sample=run_one(args,descriptor,arm,role,trial,position)
                     pair.append(sample);samples.append(sample)
+                if any(value.startswith('ZGX_LEAD_US=') for value in arm.get('env',[])):
+                    waits=[s['metrics'].get('wait_ms',{}).get('p50') for s in pair]
+                    shorter=all(v is not None for v in waits) and waits[1]<waits[0]-.25
+                    pair[1]['behavior_checks']['lead_hold_shorter_than_unset']=shorter
+                    if not shorter:
+                        pair[1]['valid']=False;pair[1]['status']='invalid'
+                        pair[1]['failures'].append('lead arm did not shorten median wait versus paired baseline')
                 if arm.get('condition',{}).get('scene','zeron')=='zeron':
                     a,b=[anchor(s) for s in pair]
                     if a is None or b is None or a.get('id')!=b.get('id') or abs(a.get('dy',0)-b.get('dy',0))>.05:
-                        for s in pair:s['valid']=False;s['failures'].append('paired transcript anchors differ or are missing')
+                        for s in pair:s['valid']=False;s['status']='invalid';s['failures'].append('paired transcript anchors differ or are missing')
+                for sample in pair:
+                    (Path(sample['evidence'])/'comparison-sample.json').write_text(json.dumps(sample,indent=2)+'\n')
                 rows=summarize(samples,args.trials)
                 (args.output/'samples.json').write_text(json.dumps(samples,indent=2)+'\n')
                 (args.output/'summary.json').write_text(json.dumps(rows,indent=2)+'\n')

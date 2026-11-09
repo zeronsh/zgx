@@ -338,3 +338,29 @@ promotion, raster, and composite-only frames. Promotion and raster groups can
 overlap. The slowest main frame in each group retains its complete phases and
 notes, as does the slowest moving frame for the run. Empty groups mean no
 observed marker; they are not reported as zero-cost work.
+
+Motion-window work is independent of renderer notes. The work gate includes
+all non-spare frames whose trace interval intersects a requested input-motion
+window, plus any other frame with a scroll-path note. This catches row-build
+frames that abandon a scroll optimization without emitting its copy/repaint
+note. `motion_window_work` reports the window-only population, including
+paint/encode/present/wait/rest distributions. Earlier note-only row/main counts
+are superseded by reanalysis of the saved traces; presentation late percentages
+are unchanged.
+
+Every explicit diagnostic environment override is checked in the actual native
+child process. Inherited `ZGX_*` settings are intentionally stripped; use
+`--host-env ZGX_GPU_STATS=1` for renderer diagnostics. Missing requested stats
+or failed behaviour checks invalidate a run. Pacing probes require the engine's
+`frame source:` mode notes, with at least95% in the expected steady mode
+(the complete histogram retains transition frames). ASAP and view-link arms
+must show no hold, lead arms must shorten median wait versus their paired
+baseline, and hybrid presentation must show drawable callbacks during scroll
+and tile callbacks at rest. Historical unverified single clock trials are
+exploratory and cannot certify an arm.
+
+For a marker **pacing probe**, use `--reference-refresh-grid on` on both baseline
+and candidates. This deliberately exercises the latch, so LEAD_US can change
+its hold; the default off would bypass it. These marker numbers must not be
+compared with earlier minimum-host references taken with the grid off.
+Independent native brackets remain separate and contain no zgx pacing policy.

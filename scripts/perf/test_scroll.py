@@ -104,6 +104,46 @@ class ScrollMetrics(unittest.TestCase):
         self.assertLessEqual(high-low,122)
         self.assertEqual(offset,0)
 
+    def test_pacing_source_mismatch_invalidates_a_received_flag(self):
+        m={'wait_ms':{'p99':0},'scroll_frames':20,'frame_source_counts':{'timer on the grid':20}}
+        flags=['ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=1']
+        self.assertFalse(scroll.behavior_checks(m,flags,[],'0',False)['frame_source_is_view link'])
+        m['frame_source_counts']={'view link':20}
+        self.assertTrue(scroll.behavior_checks(m,flags,[],'0',False)['frame_source_is_view link'])
+
+    def test_flag_verification_checks_exact_actual_child_values(self):
+        checks=scroll.verify_environment_text('pid executable ZGX_LEAD_US=40000 ZGX_VIEW_CLOCK=1',
+                                               ['ZGX_LEAD_US=4000','ZGX_VIEW_CLOCK=1'])
+        self.assertFalse(checks['ZGX_LEAD_US=4000'])
+        self.assertTrue(checks['ZGX_VIEW_CLOCK=1'])
+
+    def test_flag_behavior_rejects_a_baseline_disguised_as_asap_or_hybrid(self):
+        m={'wait_ms':{'p99':4}}
+        checks=scroll.behavior_checks(m,['ZGX_HANDOVER_ASAP=1','ZGX_SCROLL_DRAWABLES=1'],[(1,1,1,0)],'0',False)
+        self.assertFalse(checks['asap_no_hold'])
+        self.assertFalse(checks['hybrid_drawables_during_scroll'])
+        self.assertTrue(scroll.behavior_checks(m,['ZGX_SCROLL_DRAWABLES=1'],[(1,1,1,0)],'0',True)['hybrid_tiles_at_rest'])
+
+    def test_unnoted_row_build_during_input_is_charged_to_scroll_work(self):
+        events=scroll.parse_tape(scroll.tape('fling',120))
+        frame=dict(frame=1,ended_ms=10,frame_micros=6000,notes=['list built row'],
+                   phases=[dict(phase='layout',micros=6000,instructions=1000)],gpu_micros=500)
+        m=scroll.summarize([frame],[],events,120,2,0,{},trace_to_host_ms=0)
+        self.assertEqual(m['rows_built_in_scroll_frames'],1)
+        self.assertEqual(m['main_over_4ms'],1)
+        self.assertEqual(m['main_work_ms']['max'],6)
+        self.assertEqual(m['motion_window_work']['rows_built'],1)
+        self.assertEqual(m['motion_window_work']['phases_ms']['rest']['max'],6)
+        self.assertEqual(m['noted_scroll_frames'],0)
+
+    def test_explicit_gpu_stats_survives_inherited_environment_sanitizing(self):
+        env=scroll.host_environment(['ZGX_GPU_STATS=1'],'0',
+             {'ZGX_GPU_STATS':'old','ZERON_DATA_DIR':'production','ZGUI_OLD':'1','PATH':'/bin'})
+        self.assertEqual(env['ZGX_GPU_STATS'],'1')
+        self.assertNotIn('ZERON_DATA_DIR',env)
+        self.assertNotIn('ZGUI_OLD',env)
+        self.assertEqual(env['PATH'],'/bin')
+
     def test_picture_cost_groups_overlap_and_retain_the_worst_frame(self):
         def frame(n, notes, work):
             return dict(frame=n,notes=notes,phases=[dict(phase='paint',micros=work,instructions=100)],gpu_micros=500)

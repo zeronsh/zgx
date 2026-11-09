@@ -124,6 +124,60 @@ def app_work_ms(frame):
     return sum(p['micros'] for p in frame['phases'] if p['phase'] not in ('wait', 'present')) / 1000
 
 
+def in_motion_window(frame, windows, trace_to_host_ms, anchor):
+    if trace_to_host_ms is None or 'ended_ms' not in frame:return False
+    end=trace_to_host_ms+frame['ended_ms']-anchor
+    start=end-frame.get('frame_micros',0)/1000
+    return any(start<=b and end>=a for a,b in windows)
+
+
+def workload(frames):
+    groups={name:[] for name in ('paint','encode','present','wait','rest')}
+    for frame in frames:
+        phases=Counter()
+        for phase in frame['phases']:phases[phase['phase']]+=phase['micros']/1000
+        for name in groups:
+            groups[name].append(sum(v for k,v in phases.items() if k not in ('paint','encode','present','wait')) if name=='rest' else phases[name])
+    return dict(frames=len(frames),main_ms=spread([app_work_ms(f) for f in frames]),
+                main_over_4ms=sum(app_work_ms(f)>4 for f in frames),
+                rows_built=sum(f.get('notes',[]).count('list built row') for f in frames),
+                gpu_ms=spread([f['gpu_micros']/1000 for f in frames if f.get('gpu_micros') is not None]),
+                phases_ms={name:dict(**spread(values),mean=sum(values)/len(values) if values else None,total=sum(values),over4ms=sum(v>4 for v in values)) for name,values in groups.items()},
+                worst_main_frame=max(frames,key=app_work_ms,default=None))
+
+
+def verify_environment_text(text, overrides):
+    return {item:bool(re.search(r'(?:^|\s)'+re.escape(item)+r'(?=\s|$)',text)) for item in overrides}
+
+
+def behavior_checks(metrics, overrides, presents, present, reference, require_source=False):
+    checks={}
+    if 'ZGX_HANDOVER_ASAP=1' in overrides:
+        checks['asap_no_hold']=metrics['wait_ms']['p99'] is not None and metrics['wait_ms']['p99']<=.5
+    if 'ZGX_VIEW_CLOCK=1' in overrides and present=='0' and (reference or 'ZGX_SCROLL_LINK=1' in overrides):
+        checks['view_clock_no_align_hold']=metrics['wait_ms']['p99'] is not None and metrics['wait_ms']['p99']<=.5
+    if 'ZGX_SCROLL_DRAWABLES=1' in overrides and present=='0':
+        exact=sum(len(r)>3 and r[1]>0 and r[3]>0 for r in presents)
+        checks['hybrid_tiles_at_rest' if reference else 'hybrid_drawables_during_scroll']=exact==0 if reference else exact>=10
+    flags=dict(value.split('=',1) for value in overrides)
+    pacing=any(flags.get(key)=='1' for key in ('ZGX_HANDOVER_ASAP','ZGX_VIEW_CLOCK','ZGX_SCROLL_LINK')) or 'ZGX_LEAD_US' in flags
+    counts=metrics.get('frame_source_counts',{})
+    if pacing or require_source or counts:
+        timer=flags.get('ZGX_HANDOVER_ASAP')=='1' or 'ZGX_LEAD_US' in flags or (not reference and flags.get('ZGX_SCROLL_LINK')!='1')
+        expected='timer on the grid' if timer else 'view link' if flags.get('ZGX_VIEW_CLOCK')=='1' else 'display link'
+        total=sum(counts.values())
+        checks['frame_source_is_'+expected]=total>=10 and total>=.8*metrics.get('scroll_frames',0) and counts.get(expected,0)>=.95*total
+    return checks
+
+
+def host_environment(overrides, present, inherited=None):
+    source=os.environ if inherited is None else inherited
+    env={k:v for k,v in source.items() if not k.startswith(('ZGX_','ZGUI_','ZERON_'))}
+    env.update(ZGX_SCROLL_BENCH='1',ZGX_PRESENT_DRAWABLE=present)
+    env.update(dict(value.split('=',1) for value in overrides))
+    return env
+
+
 def picture_costs(frames):
     groups = {name: [] for name in ('promotion', 'raster', 'composite_only')}
     for frame in frames:
@@ -214,12 +268,17 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     blockers = Counter()
     gpu, instructions, work, scroll_frames = [], [], [], []
     with_present, present_work, wait_work = [], [], []
+    motion_frames=[];noted_frames=0;frame_sources=Counter()
     for f in frames:
         notes = f.get('notes', [])
         moving = any('copied its pixels' in n or 'repainted its view:' in n or
                      'composited its picture' in n for n in notes)
-        if f.get('spare', False) or (not moving and not reference):
+        in_motion=in_motion_window(f,windows,trace_to_host_ms,anchor)
+        if f.get('spare', False) or (not moving and not reference and not in_motion):
             continue
+        frame_sources.update(n.removeprefix('frame source: ') for n in notes if n.startswith('frame source: '))
+        noted_frames+=moving or reference
+        if in_motion:motion_frames.append(f)
         scroll_frames.append(f)
         work.append(app_work_ms(f))
         present_ms = sum(p['micros'] for p in f['phases'] if p['phase'] == 'present')/1000
@@ -258,6 +317,9 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     shown_in_tape=[r for r in shown if 0<=r[1]*1000-anchor<=duration]
     return dict(frames=len(frames), sparse=sparse,
                 picture_costs=picture_costs(frames),
+                motion_window_work=workload(motion_frames),
+                work_selection="motion-window frame intervals plus noted scroll frames; spare excluded",
+                noted_scroll_frames=noted_frames,frame_source_counts=dict(frame_sources),
                 worst_main_frame=max(scroll_frames,key=app_work_ms,default=None),
                 shown_frames_tape=len(shown_in_tape),
                 shown_frames_motion=sum(any(a<=r[1]*1000-anchor<=b for a,b in windows) for r in shown_in_tape),
@@ -294,7 +356,7 @@ def failures(metrics, args):
         errors.append('insufficient actual presentation feedback during motion')
     if metrics['sparse'] and metrics['displayed_motion_frames'] < .8*metrics['expected_pixel_updates']:
         errors.append('missing sparse pixel-motion updates')
-    if metrics['scroll_frames'] < 10:
+    if metrics.get('noted_scroll_frames',metrics['scroll_frames']) < 10:
         errors.append('no sustained scrolling (wrong target, clamped edge, or missing trace)')
     if metrics['app_late_pct'] is not None and metrics['app_late_pct'] > args.max_late:
         errors.append(f"app/GPU-attributed late frames: {metrics['app_late_frames']} (target zero)")
@@ -431,9 +493,7 @@ return ui.overlay {""")
             (out / 'gesture.tape').write_text(text)
             events = parse_tape(text)
             result['tape_sha256'] = hashlib.sha256(text.encode()).hexdigest()
-            env = {k: v for k, v in os.environ.items() if not k.startswith(('ZGX_', 'ZGUI_', 'ZERON_'))}
-            env.update(ZGX_SCROLL_BENCH='1', ZGX_PRESENT_DRAWABLE=present)
-            env.update(dict(v.split('=',1) for v in args.host_env))
+            env = host_environment(args.host_env,present)
             result['host_env']=dict(v.split('=',1) for v in args.host_env)
             if real_app:
                 home = stage/'home'
@@ -458,6 +518,10 @@ return ui.overlay {""")
                 argv = [str(executable),'fixture=scroll_fixture.luau','--inspect'] if real_app else [str(executable),'--inspect',str(stage/'app'),scene,str(hz)]
                 process = subprocess.Popen(argv,
                                            env=env, stdout=log, stderr=log)
+                if args.host_env:
+                    actual_env=subprocess.check_output(['ps','eww','-p',str(process.pid)],text=True)
+                    result['host_env_verified']=verify_environment_text(actual_env,args.host_env)
+                    if not all(result['host_env_verified'].values()):raise RuntimeError('explicit diagnostic flags missing from actual host process')
                 deadline = time.monotonic() + 30
                 while True:
                     if process.poll() is not None:
@@ -473,8 +537,9 @@ return ui.overlay {""")
                 if scene in ('idle','zeron-idle'):
                     # The system floor must not include the app's optional
                     # cadence-holding policy; that policy is tested in scenes.
-                    request(process.pid, 'switch', name='refresh_grid', on=False)
-                    result['reference_switches'] = {'refresh_grid': False}
+                    grid=getattr(args,'reference_refresh_grid','off')=='on'
+                    request(process.pid, 'switch', name='refresh_grid', on=grid)
+                    result['reference_switches'] = {'refresh_grid': grid}
                 time.sleep(args.warmup)
                 errors = request(process.pid, 'errors')['text']
                 if 'error:' in errors or 'types:' in errors:
@@ -628,12 +693,17 @@ return ui.overlay {""")
                 metrics['start_to_present_ms'] = spread([(p-s)*1000 for s,p in latency if s*1000 >= replay_starts[-1]])
                 result['latency_samples'] = latency
                 result['metrics'] = metrics
+                result['behavior_checks']=behavior_checks(metrics,args.host_env,presents,present,scene in ('idle','zeron-idle'),getattr(args,'require_frame_source',False))
+                if not all(result['behavior_checks'].values()):raise RuntimeError('diagnostic arm failed observed behaviour check: '+str(result['behavior_checks']))
                 result['failures'] = failures(metrics, args)
                 latency_p99 = metrics['start_to_present_ms']['p99']
                 if present == '1' and latency_p99 is None:
                     result['failures'].append('missing frame start-to-presentation latency')
                 if latency_p99 is not None and latency_p99 > args.max_present_latency_ms:
                     result['failures'].append('frame start-to-presentation latency over budget')
+                if 'ZGX_GPU_STATS=1' in args.host_env:
+                    result['gpu_stats_lines']=sum(line.startswith('GPU_STATS ') for line in (out/'native.log').read_text().splitlines())
+                    if not result['gpu_stats_lines']:raise RuntimeError('GPU stats requested but host stderr has no GPU_STATS lines')
                 if args.damage_check and 'ZGX_DAMAGE_CHECK frame' in (out / 'native.log').read_text():
                     result['failures'].append('stale pixels detected')
                 result['status'] = 'fail' if result['failures'] else 'pass'
@@ -778,6 +848,8 @@ def main():
     p.add_argument('--sizes', default='S,M,L')
     p.add_argument('--hz', default='120')
     p.add_argument('--host-env',action='append',default=[],help='diagnostic ZGX_VIEW_CLOCK=0|1 or ZGX_SCROLL_LINK=0|1; repeat for both')
+    p.add_argument('--require-frame-source',action='store_true',help='invalidate a pacing arm without its observed source-mode note')
+    p.add_argument('--reference-refresh-grid',choices=['off','on'],default='off',help='on exercises latch holds in explicit pacing probes')
     p.add_argument('--native-floor',action='store_true',help='bracket each zgx idle reference with independent Swift/Metal references')
     p.add_argument('--set-refresh', action='store_true', help='select matching native display modes and restore the original')
     p.add_argument('--scale', default='2')
@@ -798,7 +870,7 @@ def main():
     p.add_argument('--strict', action='store_true', help='headless: require zero row builds and copies on the shared scene')
     args = p.parse_args()
     for item in args.host_env:
-        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1','ZGX_SCROLL_DRAWABLES=0','ZGX_SCROLL_DRAWABLES=1','ZGX_HANDOVER_ASAP=0','ZGX_HANDOVER_ASAP=1','ZGX_LEAD_US=4000','ZGX_LEAD_US=5500'):
+        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1','ZGX_SCROLL_DRAWABLES=0','ZGX_SCROLL_DRAWABLES=1','ZGX_HANDOVER_ASAP=0','ZGX_HANDOVER_ASAP=1','ZGX_LEAD_US=4000','ZGX_LEAD_US=5500','ZGX_GPU_STATS=1'):
             p.error('unsupported diagnostic host environment override')
     if args.command == 'headless':
         env = dict(os.environ)
