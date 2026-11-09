@@ -137,6 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 popover.arrow(8.)
             } else {
                 let menu = menu("File", open.clone(), anchor)
+                    .id("menu")
                     .w(200.)
                     .p(5.)
                     .children(items);
@@ -205,7 +206,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 // Zoomed (`POPUP_PROBE_ZOOM`): the File button's box, and
                 // the menu's as it opens, in the scene's points (`FILE`,
-                // `MENU` x,y,w,h), where the zoom draws them these times it.
+                // `MENU` x,y,w,h: its panel, not its shadows' ink, which
+                // its window geometry leaves out), where the zoom draws them
+                // these times it.
                 // Only then: the polling would keep an idle window awake.
                 if std::env::var_os("POPUP_PROBE_ZOOM").is_some() {
                     let (ui, opened) = (cx.ui.downgrade(), open.clone());
@@ -228,8 +231,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if open && !reported {
                                 sleep(200).await;
                                 let scene = ui.scene.borrow();
-                                let menu =
-                                    scene.popups().first().and_then(|r| scene.popup_bounds(*r));
+                                let menu = view
+                                    .find("menu")
+                                    .filter(|_| !scene.popups().is_empty())
+                                    .map(|menu| scene.bounds(menu));
                                 if let Some(menu) = menu {
                                     line("MENU", menu);
                                     reported = true;

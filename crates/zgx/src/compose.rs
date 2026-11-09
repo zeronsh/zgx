@@ -2035,6 +2035,8 @@ pub(crate) struct OverlayLook {
     pub(crate) popover_padding: f32,
     /// How far a menu item's shortcut sits from its label.
     pub(crate) shortcut_gap: f32,
+    /// The shadows a menu's and a popover's panel cast, if any.
+    pub(crate) panel_shadows: Option<&'static [crate::scene::BoxShadow]>,
     /// A text tooltip: its padding (across, above, below), corner radius
     /// and font size.
     pub(crate) tooltip_padding: (f32, f32, f32),
@@ -2057,6 +2059,7 @@ pub(crate) const BUILT_IN_OVERLAY: OverlayLook = OverlayLook {
     popover_radius: crate::theme::Themed::Token(tok::RADIUS_MD.0),
     popover_padding: 16.,
     shortcut_gap: 24.,
+    panel_shadows: None,
     tooltip_padding: (8., 4., 4.),
     tooltip_radius: crate::theme::Themed::Token(tok::RADIUS_SM.0),
     tooltip_font_size: crate::theme::Themed::Token(tok::FONT_SIZE_XS.0),
@@ -2104,6 +2107,7 @@ pub(crate) const LINUX_OVERLAY: OverlayLook = OverlayLook {
     popover_radius: crate::theme::Themed::Value(15.),
     popover_padding: 8.,
     shortcut_gap: 12.,
+    panel_shadows: Some(&GNOME_PANEL_SHADOWS),
     // A tooltip as libadwaita's (`widgets/_tooltip.scss`): dark and
     // translucent in either scheme, white text, a 1 border of white at 10%,
     // padded 10 by 6, rounded 9, its text the body's less a step. (When it
@@ -2120,6 +2124,23 @@ pub(crate) const LINUX_OVERLAY: OverlayLook = OverlayLook {
         crate::theme::Themed::Value(crate::scene::Color(255, 255, 255, 26)),
     ),
 };
+/// libadwaita's popover shadow (`popover > contents { box-shadow }`, its
+/// CSS blur halved to a Gaussian sigma): a 1 outline of black at 5%, then
+/// 1 down blurred 2.5 spread 1 at 9%, and 2 down blurred 7 spread 3 at 5%.
+const GNOME_PANEL_SHADOWS: [crate::scene::BoxShadow; 3] = [
+    panel_shadow(0., 0., 1., 13),
+    panel_shadow(1., 2.5, 1., 23),
+    panel_shadow(2., 7., 3., 13),
+];
+/// A black shadow `y` down, blurred `blur_radius`, grown `spread`.
+const fn panel_shadow(y: f32, blur_radius: f32, spread: f32, alpha: u8) -> crate::scene::BoxShadow {
+    crate::scene::BoxShadow {
+        color: crate::scene::Color(0, 0, 0, alpha),
+        offset: crate::scene::Transform { x: 0., y },
+        blur_radius,
+        spread,
+    }
+}
 pub(crate) const OVERLAY: OverlayLook = if cfg!(windows) {
     WINDOWS_OVERLAY
 } else if cfg!(target_os = "linux") {
@@ -4126,6 +4147,10 @@ fn mount_portal_panel(
         let card = match padding {
             (x, y) if x == y => card.p(x),
             (x, y) => card.px(x).py(y),
+        };
+        let card = match (OVERLAY.panel_shadows, anchored) {
+            (Some(shadows), true) => card.shadows(shadows.to_vec()),
+            _ => card,
         };
         card.bg(if is_menu {
             tok::MENU_BG
