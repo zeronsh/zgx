@@ -48,6 +48,10 @@ struct State {
     top: RefCell<Box<dyn Fn() -> Option<ScrollDriver>>>,
     /// Its positions are ours being set, not UIKit's motion.
     configuring: std::cell::Cell<bool>,
+    /// The scroll view it last moved, and the offset that left it at: one
+    /// found elsewhere since moved itself (rows added above it kept in
+    /// view), and UIKit goes on from there.
+    driven: RefCell<Option<(ScrollDriver, f32)>>,
     window: Arc<winit::window::Window>,
     /// What moves with the keyboard now, its display link, and the scroller.
     following: RefCell<Option<ScrollDriver>>,
@@ -1006,7 +1010,27 @@ define_class!(
                 return;
             };
             // SAFETY: UIScrollView's getter.
-            let at: CGPoint = unsafe { msg_send![view, contentOffset] };
+            let mut at: CGPoint = unsafe { msg_send![view, contentOffset] };
+            let horizontal = driver.metrics().is_some_and(|m| m.horizontal);
+            // The scroll view moved itself since this last moved it (rows
+            // came in above the rows in view, which stay where they are):
+            // UIKit's motion goes on from where it shows, or its next
+            // position would take the view back.
+            let moved = state.driven.borrow().as_ref().and_then(|(was, offset)| {
+                let now = driver.metrics()?;
+                (was.same(&driver) && now.offset != *offset).then_some(now.offset - offset)
+            });
+            if let Some(moved) = moved {
+                if horizontal {
+                    at.x += f64::from(moved);
+                } else {
+                    at.y += f64::from(moved);
+                }
+                state.configuring.set(true);
+                // SAFETY: UIScrollView's setter, on the main thread.
+                let _: () = unsafe { msg_send![view, setContentOffset: at] };
+                state.configuring.set(false);
+            }
             // A pull past where UIKit's refreshes, for the scroller's height.
             // The control draws from the scroller but doesn't fire with its pan on
             // another view.
@@ -1057,10 +1081,10 @@ define_class!(
                     }
                 }
             }
-            let horizontal = driver.metrics().is_some_and(|m| m.horizontal);
             driver.drive(if horizontal { at.x } else { at.y } as f32);
             if let Some(metrics) = driver.metrics() {
                 (state.stretched)(metrics.stretch);
+                *state.driven.borrow_mut() = Some((driver.clone(), metrics.offset));
             }
             state.window.request_redraw();
         }
@@ -1550,6 +1574,7 @@ fn configure(state: &State, view: &AnyObject, driver: ScrollDriver, at: Option<C
         set_bottom_inset(view, state.bottom_inset.get());
         let _: () = msg_send![view, setContentOffset: CGPoint { x: offset_x, y: offset_y }];
     }
+    *state.driven.borrow_mut() = Some((driver.clone(), metrics.offset));
     *state.driver.borrow_mut() = Some(driver);
     state.across.borrow_mut().take();
     state.configuring.set(false);
@@ -1662,6 +1687,7 @@ fn configure_both(state: &State, view: &AnyObject, across: ScrollDriver, down: S
         };
         let _: () = msg_send![view, setContentOffset: offset];
     }
+    *state.driven.borrow_mut() = Some((down.clone(), y.offset));
     *state.driver.borrow_mut() = Some(down);
     *state.across.borrow_mut() = Some(across);
     state.configuring.set(false);
@@ -1696,6 +1722,7 @@ impl NativeScroller {
             driver: RefCell::default(),
             top: RefCell::new(Box::new(top)),
             configuring: Default::default(),
+            driven: Default::default(),
             following: RefCell::default(),
             follow_link: RefCell::default(),
             scroller: RefCell::default(),
