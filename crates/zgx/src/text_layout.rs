@@ -122,7 +122,39 @@ const LEADING_KEPT: bool = cfg!(any(target_os = "ios", test, feature = "text-lea
 /// is the interface family.
 #[inline]
 fn normal_line_in(family: &FontFamily, size: f32, ios: bool) -> f32 {
+    // Compiled out elsewhere, so the measure path every text takes there is
+    // as it was: as dead code it still moved its inlining (+0.15% mount-text).
+    #[cfg(any(target_os = "ios", test))]
+    if ios && let Some(line) = ios_family_line(family) {
+        let line = size * line;
+        return if line.is_finite() { line } else { f32::MAX };
+    }
     normal_line(size, ios && matches!(family, FontFamily::SansSerif))
+}
+/// iOS's own fonts' lines, in ems: each face's ascent and descent, which UIKit
+/// gives as `UIFont.lineHeight` (read in a reference app, iOS 26.5). The 1.4
+/// times the size they took before set Menlo a fifth too tall. A font an app
+/// brings has none here, and keeps that until its face's line can be read.
+#[cfg(any(target_os = "ios", test))]
+#[inline(never)]
+fn ios_family_line(family: &FontFamily) -> Option<f32> {
+    Some(match family {
+        FontFamily::SansSerif => return None,
+        // What these two are on iOS (`font_cache`, and fontdb's default).
+        FontFamily::Monospace => 1.16406,
+        FontFamily::Serif => 1.10742,
+        FontFamily::Named(name) => match &**name {
+            "Menlo" => 1.16406,
+            "Courier" => 1.,
+            "Courier New" => 1.13281,
+            "Georgia" => 1.13623,
+            "Times New Roman" => 1.10742,
+            "Helvetica" => 1.15,
+            "Helvetica Neue" => 1.165,
+            "Arial" => 1.11719,
+            _ => return None,
+        },
+    })
 }
 /// The system font's line on iOS, in ems: SF's ascent and descent (1950 and
 /// 494 of 2048, no line gap), which UIKit gives as `UIFont.lineHeight` at
@@ -1411,16 +1443,28 @@ mod tests {
             assert!((normal_line(size, true) - uikit).abs() < 1e-3, "{size}");
         }
         assert_eq!(normal_line(10., false), 14.);
-        assert_eq!(normal_line(f32::MAX, true), f32::MAX);
-        // Only the interface family: a monospaced, serif or named face keeps
-        // its line (UIKit's are each face's own, not read yet).
-        for family in [
-            FontFamily::Monospace,
-            FontFamily::Serif,
-            FontFamily::Named("Inter".into()),
+        // iOS's own families, as UIFont's lineHeight has them at 100 points;
+        // elsewhere, and a font it doesn't know, 1.4 times the size.
+        for (family, line) in [
+            (FontFamily::Monospace, 116.406),
+            (FontFamily::Serif, 110.742),
+            (FontFamily::Named("Menlo".into()), 116.406),
+            (FontFamily::Named("Georgia".into()), 113.623),
+            (FontFamily::Named("Helvetica".into()), 115.),
+            (FontFamily::Named("Courier".into()), 100.),
+            (FontFamily::Named("Inter".into()), 140.),
         ] {
-            assert_eq!(normal_line_in(&family, 17., true), 24.);
+            assert!(
+                (normal_line_in(&family, 100., true) - line).abs() < 1e-3,
+                "{family:?}"
+            );
+            assert_eq!(normal_line_in(&family, 100., false), 140., "{family:?}");
         }
+        assert_eq!(
+            normal_line_in(&FontFamily::Monospace, f32::MAX, true),
+            f32::MAX
+        );
+        assert_eq!(normal_line(f32::MAX, true), f32::MAX);
         assert!((normal_line_in(&FontFamily::SansSerif, 17., true) - 20.2871).abs() < 1e-3);
         assert_eq!(normal_line_in(&FontFamily::SansSerif, 17., false), 24.);
         assert_eq!(
