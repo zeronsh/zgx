@@ -931,8 +931,6 @@ impl InputDispatcher {
             .retain(|n| *n != node && scene.contains(*n));
         state.navigators.push(node);
     }
-    /// Whether `target` or a view around it takes navigation
-    /// (`take_navigation`). Reads only.
     /// A trackpad gesture's phase: a new gesture, or the end of the last
     /// one's momentum, lets go of the scroll view that one latched to, so
     /// the next scroll goes to the view under the pointer, as AppKit's does,
@@ -943,6 +941,8 @@ impl InputDispatcher {
             self.state.borrow_mut().scroll_latch = None;
         }
     }
+    /// Whether `target` or a view around it takes navigation
+    /// (`take_navigation`). Reads only.
     pub(crate) fn navigates(&self, scene: &Scene, target: NodeId) -> bool {
         let state = self.state.borrow();
         !state.navigators.is_empty()
