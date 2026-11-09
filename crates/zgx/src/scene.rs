@@ -9251,12 +9251,36 @@ impl Scene {
                 let mut above = Some(parent);
                 while let Some(ancestor) = above {
                     self.invalidate_with(ancestor, LAYOUT, false, false);
+                    self.expire_this_pass(ancestor);
                     above = self.node(ancestor).parent;
                 }
             }
         }
         self.alone_pending = false;
         self.held_alone.clear();
+    }
+    /// `id`, around a child just found not to stand: what it answered this
+    /// pass, if it was laid out alone too (a stop this one is inside, which
+    /// stood on what this one still answered from before), serves no more.
+    fn expire_this_pass(&mut self, id: NodeId) {
+        let pass = self.layout_pass;
+        let earlier = pass.wrapping_sub(1);
+        let node = self.tree_node_mut(id);
+        if let Some(result) = &mut node.measurement
+            && result.pass == pass
+        {
+            result.pass = earlier;
+        }
+        for result in &mut node.alternates {
+            if result.pass == pass {
+                result.pass = earlier;
+            }
+        }
+        for size in &mut node.sizes {
+            if size.pass == pass {
+                size.pass = earlier;
+            }
+        }
     }
     /// A laid-out container with an explicit width and height: parents measure
     /// it from those (or from their own flex allocation), never from its
@@ -14881,6 +14905,63 @@ mod tests {
     /// the kept union, its tail worked out again), a block behind the tail
     /// grows and pushes those after it (worked out over every child: they
     /// moved), and blocks shrink, go, hide and scroll.
+    /// Two texts changed in one flush, one under a stop inside the other's:
+    /// the outer stop stands on what its inner one still answers from before.
+    fn nested_stops(align: Align, first: &str, second: &str) -> Option<String> {
+        let measurer = |text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+        };
+        let wrap = Style {
+            text_wrap: true,
+            ..Style::default()
+        };
+        let build = |header: &str, last: &str| {
+            let mut scene = Scene::new(300.0, 4000.0);
+            scene.set_text_measurer(measurer);
+            let column = |align| Style {
+                align,
+                ..Style::default()
+            };
+            let wrapper = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                Style {
+                    width: Some(280.0),
+                    ..column(align)
+                },
+            );
+            let header = scene.append(wrapper, text(header), wrap.clone());
+            let outer = scene.append(wrapper, NodeKind::Container(Layout::Column), column(align));
+            let inner = scene.append(outer, NodeKind::Container(Layout::Column), column(align));
+            let row = scene.append(inner, text(last), wrap.clone());
+            scene.flush();
+            (scene, header, [outer, inner, row])
+        };
+        let (mut scene, header, ids) = build("h", first);
+        scene.set_text(header, "h and a good deal more");
+        scene.set_text(ids[2], second);
+        scene.flush();
+        let (fresh, _, fresh_ids) = build("h and a good deal more", second);
+        let got = ids.map(|id| scene.bounds(id));
+        let want = fresh_ids.map(|id| fresh.bounds(id));
+        (got != want).then(|| format!("{align:?} {first:?} to {second:?}: {got:?}, not {want:?}"))
+    }
+    #[test]
+    fn a_stop_standing_doesnt_answer_for_one_inside_it_that_doesnt() {
+        let (long, longer) = ("w ".repeat(60), "w ".repeat(100));
+        for align in [Align::Start, Align::Stretch] {
+            for (first, second) in [
+                ("ab", "ab cd ef"),
+                (long.as_str(), longer.as_str()),
+                ("ab", longer.as_str()),
+                (longer.as_str(), "ab"),
+            ] {
+                assert_eq!(nested_stops(align, first, second), None);
+            }
+        }
+    }
     #[test]
     fn a_kept_ink_union_is_the_ink_worked_out_over_every_child() {
         let sized = |w: f32, h: f32| Style {
