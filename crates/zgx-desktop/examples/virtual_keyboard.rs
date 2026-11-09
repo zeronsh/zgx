@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 div().size(344.,32.)
                     .child(text(format!("Row {index}")).px(12.).py(6.))
             }
-        }).keyboard_navigation(true).id("list").size(360.,176.).p(8.).bg(rgb(0x203040));
+        }).keyboard_navigation(true).list_ahead(0.).id("list").size(360.,176.).p(8.).bg(rgb(0x203040));
         let view=cx.render(column().p(24.).gap(12.).text_size(14.).text_color(rgb(0xe5edf7))
             .child(text("One million keyboard rows").h(32.).text_size(22.)).child(rows));
         if smoke{
