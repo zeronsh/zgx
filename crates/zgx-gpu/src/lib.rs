@@ -841,10 +841,19 @@ enum CopyBlocker {
     /// Something not of the content paints between its items.
     Between(NodeId),
     /// A content item reads what lies under it or the window (a backdrop blur,
-    /// a blend, a shader reading either, a dithered picture), is a layer under a fade its bands
-    /// can't draw as one (`bands::fades_apart`), plays a loop of its own, or
-    /// the view lies under two fades.
-    Effect(NodeId),
+    /// a blend, a shader reading either), or its shader's inputs run on as
+    /// frames draw.
+    Reads(NodeId),
+    /// A dithered picture: its dots lie on the screen's grid.
+    Dots(NodeId),
+    /// A layer under a fade whose bands can't draw as one with it
+    /// (`bands::fades_apart`).
+    FilteredUnderFade(NodeId),
+    /// A loop a layer plays, in the content.
+    #[cfg(target_os = "macos")]
+    Loop(NodeId),
+    /// The view lies under two fades around it.
+    TwoFades,
     /// A content item fades with this mask (`fade_edges`): the move copies
     /// within its interior, if the mask holds still (`scroll_copies`).
     Fade(NodeId, zgx::scene::FadeMask),
@@ -861,12 +870,21 @@ impl CopyBlocker {
         match self {
             Self::NoContent => "none of its content paints in its view".into(),
             Self::Between(id) => format!("{} paints between its content's items", node(id)),
-            Self::Effect(id) => format!(
-                "{} in it reads what is under it or the window, runs passes each frame, is a \
-                 filtered layer under a fade, plays a loop of its own, or lies under two \
-                 fades around its view",
+            Self::Reads(id) => format!(
+                "{} in it reads what is under it or the window, or runs passes each frame",
                 node(id)
             ),
+            Self::Dots(id) => format!(
+                "{} in it is a dithered picture, its dots on the screen's grid",
+                node(id)
+            ),
+            Self::FilteredUnderFade(id) => format!(
+                "{} in it is a blurred, masked or shaded layer under a fade",
+                node(id)
+            ),
+            #[cfg(target_os = "macos")]
+            Self::Loop(id) => format!("{} in it is a loop a layer plays", node(id)),
+            Self::TwoFades => "it lies under two fades around it".into(),
             Self::Fade(id, _) => format!(
                 "{} in it fades with bands cut short as it scrolls (`fade_overflow`) or not \
                  its view's own",
@@ -913,10 +931,10 @@ fn copy_blocker(
     // What the content has from around it, which holds still as it moves:
     // the extras its own node was given. Any other an item has is its own.
     let Some(around) = items[first..=last].iter().find(|i| i.id == scroll.node) else {
-        return Some(CopyBlocker::Effect(items[first].id));
+        return Some(CopyBlocker::NoContent);
     };
     if around.outer_mask().is_some() {
-        return Some(CopyBlocker::Effect(scroll.node));
+        return Some(CopyBlocker::TwoFades);
     }
     *fade = around.mask();
     let paints = |item: &zgx::scene::PaintItem<'_>| -> Option<Rect> {
@@ -960,25 +978,25 @@ fn copy_blocker(
         // What reads the pixels under it reads the view's, which hold still
         // where the content moves over them.
         if item.effects.blur_radius > 0. || (item.isolated && reads_under(scene, item.id)) {
-            return Some(CopyBlocker::Effect(item.id));
+            return Some(CopyBlocker::Reads(item.id));
         }
         // Dots on the screen's grid stay put as the picture slides under them.
         if let NodeKind::Image(image) = item.kind
             && image.effect() != zgx::image::ImageEffect::Plain
         {
-            return Some(CopyBlocker::Effect(item.id));
+            return Some(CopyBlocker::Dots(item.id));
         }
         // Under a fade, such a layer has its whole run fade item by item
         // where it paints whole, and a copy's bands are walked without it.
         if item.mask().is_some() && !bands::fades_apart(scene, item) {
-            return Some(CopyBlocker::Effect(item.id));
+            return Some(CopyBlocker::FilteredUnderFade(item.id));
         }
         // A loop a layer plays moves with the view's repaint, not its copy.
         #[cfg(target_os = "macos")]
-        if scene.baked_loops().iter().any(|(node, _)| {
+        if let Some((node, _)) = scene.baked_loops().iter().find(|(node, _)| {
             std::iter::successors(Some(*node), |at| scene.parent(*at)).any(|at| at == scroll.node)
         }) {
-            return Some(CopyBlocker::Effect(item.id));
+            return Some(CopyBlocker::Loop(*node));
         }
         // (A subtree shares its extras: looked at once.)
         if let Some(extras) = &item.extras
@@ -20528,5 +20546,89 @@ mod premultiply_tests {
         let expected = exact(&pixels);
         super::premultiply(&mut pixels);
         assert!(pixels == expected, "a block differs from the division");
+    }
+}
+#[cfg(test)]
+mod copy_refusal_tests {
+    use super::*;
+    use zgx::{compose::prelude::*, widgets::Ui};
+
+    /// A view holding two stripes, wrapped by `around`, moved once: what
+    /// `copy_blocker` makes of it after `prepare` has seen its content.
+    fn refusal(
+        around: impl FnOnce(View) -> View,
+        prepare: impl FnOnce(&mut Scene, NodeId),
+    ) -> Option<(CopyBlocker, String)> {
+        let mut ui = Ui::new(240., 180.);
+        let offset = ui.signal(0_f32);
+        let page = column()
+            .w(240.)
+            .child(div().w(240.).h(400.).bg(rgb(0x5a7a9a)))
+            .child(div().w(240.).h(400.).bg(rgb(0x9a5a7a)));
+        let view = scroll(offset.clone())
+            .w(240.)
+            .h(180.)
+            .bg(rgb(0x101820))
+            .child(page);
+        ui.mount(around(view));
+        let step = |ui: &mut Ui| {
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush().damage
+        };
+        step(&mut ui);
+        offset.set(8.);
+        step(&mut ui);
+        let content = ui.scene.borrow().scroll_moves()[0].node;
+        prepare(&mut ui.scene.borrow_mut(), content);
+        offset.set(16.);
+        let damage = step(&mut ui);
+        let scene = ui.scene.borrow();
+        let moved = scene.scroll_moves()[0].clone();
+        copy_blocker(&scene, &moved, &damage, 1., &mut Vec::new(), &mut None).map(|blocker| {
+            let note = blocker.describe(&scene);
+            (blocker, note)
+        })
+    }
+
+    #[test]
+    fn a_plain_view_has_no_refusal() {
+        assert_eq!(refusal(|view| view, |_, _| {}), None);
+    }
+
+    #[test]
+    fn a_view_under_two_fades_says_so() {
+        let (blocker, note) = refusal(
+            |view| {
+                div()
+                    .w(240.)
+                    .h(180.)
+                    .overflow_hidden()
+                    .fade_edges(10., 10.)
+                    .child(view.fade_edges(20., 20.))
+            },
+            |_, _| {},
+        )
+        .expect("refused");
+        assert_eq!(blocker, CopyBlocker::TwoFades);
+        assert!(note.contains("two fades"), "{note}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_loop_in_the_content_says_so_and_names_its_node() {
+        let mut looping = None;
+        let (blocker, note) = refusal(
+            |view| view,
+            |scene, content| {
+                let node = scene.children(content)[0];
+                looping = Some(node);
+                let baked =
+                    zgx::scene::BakedLoop::new(vec![(1., 0.), (0.5, 0.)], 30., Box::new(|| {}));
+                scene.set_baked_loop(node, Some(std::rc::Rc::new(baked)));
+            },
+        )
+        .expect("refused");
+        assert_eq!(blocker, CopyBlocker::Loop(looping.expect("set")));
+        assert!(note.contains("loop"), "{note}");
     }
 }
