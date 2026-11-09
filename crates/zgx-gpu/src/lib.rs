@@ -1509,6 +1509,7 @@ fn push_gradient_text(
     for (start, end, shading, source) in runs {
         if end > start {
             draws.push(Draw {
+                own_shadow: false,
                 shading,
                 blur: None,
                 start,
@@ -2545,6 +2546,39 @@ struct Draw {
     /// Union of this draw's quads: nothing outside it is ever touched.
     bounds: Rect,
     source: TextureSource,
+    /// What of the next filter's shadows lies outside its box, drawn before
+    /// its blur: nothing it blurs lies there.
+    own_shadow: bool,
+}
+/// `rect` grown to the whole device pixels around it, at `scale` pixels a point.
+fn pixel_box(rect: Rect, scale: f32) -> Rect {
+    let left = (rect.x * scale).floor() / scale;
+    let top = (rect.y * scale).floor() / scale;
+    let right = ((rect.x + rect.width) * scale).ceil() / scale;
+    let bottom = ((rect.y + rect.height) * scale).ceil() / scale;
+    Rect::new(left, top, right - left, bottom - top)
+}
+/// What of `rect` lies outside `inner`: up to four strips, none overlapping.
+fn outside(rect: Rect, inner: Rect) -> impl Iterator<Item = Rect> {
+    let (right, bottom) = (rect.x + rect.width, rect.y + rect.height);
+    let (in_right, in_bottom) = (inner.x + inner.width, inner.y + inner.height);
+    let top_end = inner.y.clamp(rect.y, bottom);
+    let bottom_start = in_bottom.clamp(top_end, bottom);
+    let left_end = inner.x.clamp(rect.x, right);
+    let right_start = in_right.clamp(left_end, right);
+    [
+        Rect::new(rect.x, rect.y, rect.width, top_end - rect.y),
+        Rect::new(rect.x, bottom_start, rect.width, bottom - bottom_start),
+        Rect::new(rect.x, top_end, left_end - rect.x, bottom_start - top_end),
+        Rect::new(
+            right_start,
+            top_end,
+            right - right_start,
+            bottom_start - top_end,
+        ),
+    ]
+    .into_iter()
+    .filter(|strip| strip.width > 0. && strip.height > 0.)
 }
 /// A frame's damage, encoded at presentation so it can be drawn into the
 /// next retained target and the drawable in one pass (see `present_single_pass`).
@@ -4412,6 +4446,9 @@ pub struct GpuRenderer {
     /// What a popup's backdrop filters blur in place of its own target, the
     /// size of it (`set_backdrop`).
     backdrop: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// What of a blurred box's shadows lies outside it draws before its blur
+    /// (`ZGX_SHADOW_WHOLE=1` or `debug_keep_shadows_whole`: all of them after).
+    shadows_apart: bool,
     /// A popup's panel whose shadows go undrawn (`set_unshadowed`).
     unshadowed: Option<NodeId>,
     #[cfg(target_os = "macos")]
@@ -5078,6 +5115,7 @@ impl GpuRenderer {
             #[cfg(target_os = "macos")]
             plane_wake: None,
             backdrop: None,
+            shadows_apart: zgx::env::var_os("ZGX_SHADOW_WHOLE").is_none_or(|v| v == "0"),
             unshadowed: None,
             #[cfg(target_os = "macos")]
             zoom: 1.,
@@ -7773,6 +7811,7 @@ impl GpuRenderer {
                     }
                     kept_item.len = 1;
                     kept.draws[kept_item.draws.start as usize] = Draw {
+                        own_shadow: false,
                         shading: match self.split_shading {
                             true => shading(&quad, self.scale),
                             false => Shading::Full,
@@ -7792,6 +7831,7 @@ impl GpuRenderer {
                 let (draw_clip, culled) = cull_on_cpu(quads, 0, clip, viewport, self.scale);
                 if !quads.is_empty() {
                     let draw = Draw {
+                        own_shadow: false,
                         shading: Shading::Full,
                         source: TextureSource::Atlas,
                         blur: None,
@@ -8350,7 +8390,7 @@ impl GpuRenderer {
                 }) {
                     continue;
                 }
-                let start = quads.len() as u32;
+                let mut start = quads.len() as u32;
                 // A shader fill's draw uses its pipeline.
                 let mut fill_shading = None;
                 if item.isolated {
@@ -8460,6 +8500,7 @@ impl GpuRenderer {
                                 ..layer_quad
                             });
                             draws.push(Draw {
+                                own_shadow: false,
                                 shading: Shading::Full,
                                 start,
                                 end: start + 1,
@@ -8477,6 +8518,7 @@ impl GpuRenderer {
                         reads.push((draws.len(), read));
                     }
                     draws.push(Draw {
+                        own_shadow: false,
                         shading: match (&filter, blend) {
                             (Some((shader, _)), Some(_)) => Shading::FilterBlend(shader.id()),
                             (None, Some(_)) => Shading::Blend,
@@ -8640,7 +8682,7 @@ impl GpuRenderer {
                             } else {
                                 32
                             };
-                            for shadow in style.shadows().iter().take(shown) {
+                            let shadow_quad = |shadow: &zgx::scene::BoxShadow, at: Rect| {
                                 let core = bounds.expand(shadow.spread.max(0.));
                                 let core = Rect::new(
                                     core.x + shadow.offset.x,
@@ -8648,10 +8690,8 @@ impl GpuRenderer {
                                     core.width,
                                     core.height,
                                 );
-                                // Three sigmas out (`blur_radius` is the sigma).
-                                let outer = core.expand(shadow.blur_radius.max(0.) * 3.);
-                                quads.push(Quad {
-                                    rect: [outer.x, outer.y, outer.width, outer.height],
+                                Quad {
+                                    rect: [at.x, at.y, at.width, at.height],
                                     uv: [0.; 4],
                                     color: rgba(shadow.color, item.effects.opacity),
                                     fade: [core.x, core.y, core.width, core.height],
@@ -8669,7 +8709,77 @@ impl GpuRenderer {
                                         shadow.spread.max(0.),
                                     ),
                                     mask: NO_MASK,
-                                });
+                                }
+                            };
+                            // Three sigmas out (`blur_radius` is the sigma).
+                            let shadow_reach = |shadow: &zgx::scene::BoxShadow| {
+                                let core = bounds.expand(shadow.spread.max(0.));
+                                Rect::new(
+                                    core.x + shadow.offset.x,
+                                    core.y + shadow.offset.y,
+                                    core.width,
+                                    core.height,
+                                )
+                                .expand(shadow.blur_radius.max(0.) * 3.)
+                            };
+                            let shadows = || style.shadows().iter().take(shown);
+                            // Under a backdrop blur, what of its shadows lies
+                            // outside its box draws before the blur, in a draw
+                            // of its own: nothing it blurs lies there, and a
+                            // filter beside it that reads that shadow can then
+                            // share its batch, a split of the window's pass the
+                            // less. Each pixel shades the same, from its own
+                            // place, and only once: the box's edges are on
+                            // whole pixels, as the blur's area is.
+                            let around = (self.shadows_apart
+                                && item.effects.blur_radius > 0.
+                                && item.matrix().is_none()
+                                && item.mask().is_none()
+                                && item.outer_mask().is_none()
+                                && item.color().is_none()
+                                && item.rounded().iter().all(Option::is_none)
+                                && shadows().next().is_some())
+                            .then(|| pixel_box(bounds, self.scale));
+                            if let Some(inner) = around {
+                                for shadow in shadows() {
+                                    let reach = shadow_reach(shadow);
+                                    for strip in outside(reach, inner) {
+                                        quads.push(shadow_quad(shadow, strip));
+                                    }
+                                }
+                                let end = quads.len() as u32;
+                                if end > start {
+                                    let draw = Draw {
+                                        shading: Shading::Full,
+                                        blur: None,
+                                        start,
+                                        end,
+                                        clip,
+                                        bounds: quad_bounds(&quads[start as usize..]),
+                                        source: TextureSource::Atlas,
+                                        own_shadow: true,
+                                    };
+                                    push_draw(
+                                        &mut draws,
+                                        &quads,
+                                        draw,
+                                        self.split_shading,
+                                        false,
+                                        self.scale,
+                                        None,
+                                    );
+                                    start = end;
+                                }
+                            }
+                            for shadow in shadows() {
+                                let reach = shadow_reach(shadow);
+                                let at = match around {
+                                    Some(inner) => reach.intersection(inner),
+                                    None => Some(reach),
+                                };
+                                if let Some(at) = at {
+                                    quads.push(shadow_quad(shadow, at));
+                                }
                             }
                             // Drawn by its border pass instead (`border_over`).
                             let later = style.border_over && ring;
@@ -9778,6 +9888,7 @@ impl GpuRenderer {
                         );
                     }
                     let draw = Draw {
+                        own_shadow: false,
                         shading: fill_shading.unwrap_or(Shading::Full),
                         blur: (item.effects.blur_radius > 0.).then(|| {
                             Box::new((
@@ -9962,7 +10073,10 @@ impl GpuRenderer {
                         (*start..i).all(|k| {
                             let before = &draws[k];
                             let quads = before.bounds.intersection(before.clip);
-                            !reaches(before, area)
+                            // (Its own shadow lies right beside its area, in
+                            // the margin, and never in it.)
+                            draws[k..i].iter().all(|draw| draw.own_shadow)
+                                || !reaches(before, area)
                                 || filters.contains(&k)
                                     && quads.is_none_or(|quads| quads.intersection(area).is_none())
                                     && before.blur.as_deref().is_some_and(
@@ -13353,6 +13467,7 @@ impl GpuRenderer {
                 );
             }
             let draw = Draw {
+                own_shadow: false,
                 shading: Shading::Full,
                 blur: None,
                 start: from as u32,
@@ -14876,6 +14991,11 @@ impl GpuRenderer {
     /// Frames drawn in one pass with their presentation.
     pub fn debug_single_pass_frames(&self) -> u64 {
         self.single_pass_frames
+    }
+    /// Test hook: draw a blurred box's shadows whole, after its blur, to
+    /// compare with drawing what lies outside it before.
+    pub fn debug_keep_shadows_whole(&mut self) {
+        self.shadows_apart = false;
     }
     /// Test hook: copy scroll moves' pixels offscreen too, where the platform
     /// would repaint them (macOS without a layer of its own), so a test can
@@ -18269,6 +18389,7 @@ mod batch_order_tests {
     use super::*;
     fn draw(start: u32, end: u32, x: f32) -> Draw {
         Draw {
+            own_shadow: false,
             shading: Shading::Basic,
             blur: None,
             start,
