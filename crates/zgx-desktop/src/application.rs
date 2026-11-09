@@ -1232,6 +1232,16 @@ static SCROLL_LINK: std::sync::LazyLock<bool> =
 #[cfg(target_os = "macos")]
 static HANDOVER_ASAP: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_HANDOVER_ASAP").is_some_and(|v| v != "0"));
+/// `ZGX_LEAD_US=4000`: at a fast refresh, frames start at its boundary on the
+/// timer and hold, as ever, but to this long before the next refresh rather
+/// than `Latch::LEAD`: as steady, further from where the window server decides
+/// which refresh shows them.
+#[cfg(target_os = "macos")]
+static LEAD_US: std::sync::LazyLock<Option<std::time::Duration>> = std::sync::LazyLock::new(|| {
+    zgx::env::var_os("ZGX_LEAD_US")
+        .and_then(|v| v.to_str()?.parse().ok())
+        .map(std::time::Duration::from_micros)
+});
 /// The slowest refresh period frames align at (below 60 Hz's 16.7 ms).
 #[cfg(any(target_os = "macos", test))]
 const ALIGN_PERIOD: std::time::Duration = std::time::Duration::from_millis(12);
@@ -1425,6 +1435,13 @@ impl Latch {
     const STEP: std::time::Duration = std::time::Duration::from_millis(2);
     /// Frames rendered at once after a held one missed its refresh.
     const REST: u8 = 120;
+    /// How long before a refresh of `period` a frame presents.
+    fn lead(period: std::time::Duration) -> std::time::Duration {
+        match *LEAD_US {
+            Some(lead) if period < ALIGN_PERIOD => lead,
+            _ => Self::LEAD,
+        }
+    }
     /// When a frame complete at `now` presents, on the refresh grid through
     /// `origin` with `period`. `live`: a scroll is live (`Host::scroll_live`),
     /// and the frame never waits past its point: it keeps no later cadence,
@@ -1463,7 +1480,7 @@ impl Latch {
         // than the window server needs) or the one `at` is for, as it would
         // have; the main thread is free for the next frame meanwhile. `at`
         // stays the cadence frames keep to once the scroll ends.
-        let missed = at.saturating_duration_since(now) > period.saturating_sub(Self::LEAD);
+        let missed = at.saturating_duration_since(now) > period.saturating_sub(Self::lead(period));
         let hand_over = match live && missed {
             true => now,
             false => at,
@@ -1532,7 +1549,7 @@ impl Latch {
             None => (period_ns - origin.duration_since(ready).as_nanos() % period_ns) % period_ns,
         };
         let phase = std::time::Duration::from_nanos(since as u64);
-        let point = ready - phase + period.saturating_sub(Self::LEAD);
+        let point = ready - phase + period.saturating_sub(Self::lead(period));
         let first = if point >= ready {
             point
         } else {
@@ -6470,7 +6487,7 @@ impl Host {
             // updates, scrolling) a timer paces them on the grid the link last
             // reported, and the link (a thread spinning to each refresh) runs
             // again only to resync.
-            let asap = *HANDOVER_ASAP && self.frame_interval < ALIGN_PERIOD;
+            let asap = (*HANDOVER_ASAP || LEAD_US.is_some()) && self.frame_interval < ALIGN_PERIOD;
             let animating = wanted && rate.is_none() && (!scrolling || *SCROLL_LINK) && !asap;
             self.link_paced = animating;
             if let Some(renderer) = &mut self.renderer {
