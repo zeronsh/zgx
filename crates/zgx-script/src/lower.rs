@@ -8500,6 +8500,38 @@ impl crate::markdown::view::Look for ScriptLook {
     fn finds(&self) -> bool {
         self.look.find.is_some()
     }
+    fn tracks(&self) -> bool {
+        self.look.track.is_some()
+    }
+    fn track(&self, block: zgx::compose::NodeHandle) -> Option<Box<dyn std::any::Any>> {
+        let track = self.look.track.as_ref()?;
+        let element = Element::new(&self.low.runtime, None, Rc::from([]), "div");
+        element.attach(block);
+        let vm = &self.vm;
+        let gone = vm
+            .runtime
+            .clone()
+            .batch(|| vm.call::<Option<mlua::Function>>(track, crate::element::ElementUd(element)));
+        /// What a tracked block's going calls (`track`'s answer).
+        struct Gone(std::rc::Weak<Vm>, mlua::Function);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                if let Some(vm) = self.0.upgrade()
+                    && let Err(error) = vm.call::<()>(&self.1, ())
+                {
+                    vm.report(error);
+                }
+            }
+        }
+        match gone {
+            Ok(Some(f)) => Some(Box::new(Gone(Rc::downgrade(vm), f))),
+            Ok(None) => None,
+            Err(error) => {
+                vm.report(error);
+                None
+            }
+        }
+    }
     fn reveal(&self, block: zgx::compose::NodeHandle) {
         let Some(reveal) = self.look.find.as_ref().and_then(|f| f.reveal.clone()) else {
             return;
