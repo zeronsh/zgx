@@ -191,6 +191,23 @@ pub fn frame() {
     }
 }
 
+/// The frame currently being rendered, for asynchronous presentation
+/// feedback to name the same record as devtools. Zero without tracing.
+pub fn current_frame_index() -> u64 {
+    #[cfg(feature = "trace")]
+    {
+        if crate::trace::enabled() {
+            crate::trace::frame_index() + 1
+        } else {
+            0
+        }
+    }
+    #[cfg(not(feature = "trace"))]
+    {
+        0
+    }
+}
+
 /// Whether devtools trace frames now (`zgx inspect frames`): what [`note`]
 /// and [`gpu_time`] give is kept. Built without the `trace` feature, never.
 #[inline]

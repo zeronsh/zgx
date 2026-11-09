@@ -1,0 +1,36 @@
+name: Scroll performance
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit to measure
+        required: true
+      hz:
+        description: Actual display refresh (unsupported conditions fail)
+        default: '120'
+      sizes:
+        default: M,L
+      scales:
+        default: '1,2'
+jobs:
+  replay:
+    # A real, visible Mac desktop. Hosted macOS VMs cannot certify 120 Hz.
+    runs-on: [self-hosted, macOS, zgx-perf-gpu]
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --profile dist --locked -p zgx-run --no-default-features --features inspect,mimalloc
+      - name: Real-window replay gate
+        env:
+          SCROLL_HZ: ${{ inputs.hz }}
+          SCROLL_SIZES: ${{ inputs.sizes }}
+          SCROLL_SCALES: ${{ inputs.scales }}
+        run: python3 scripts/perf/scroll.py run --scenes transcript,tables --gestures wing,flick,reversals,stream --hz "$SCROLL_HZ" --sizes "$SCROLL_SIZES" --scale "$SCROLL_SCALES" --output target/scroll-ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scroll-evidence
+          path: target/scroll-ci

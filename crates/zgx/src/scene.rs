@@ -12393,7 +12393,7 @@ impl Scene {
         }
     }
     /// Device pixels a point, as the host set it (`set_pixel_scale`).
-    pub(crate) fn pixel_scale(&self) -> f32 {
+    pub fn pixel_scale(&self) -> f32 {
         self.pixel_scale
     }
     /// `transform` moved to the nearest whole device pixels.

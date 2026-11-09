@@ -47,6 +47,17 @@ No cross-framework speed or memory advantage is asserted before these GUI runs h
 
 For deterministic screenshots, set `ZGX_INITIAL_TICKS=120 ZGX_MODE=idle ZGX_SECONDS=10` for every executable. The shared workload first applies 120 combined streaming/scroll ticks, then stays idle. This produces identical text and a scroll offset of 1680px for visual inspection. Clear `ZGX_INITIAL_TICKS` for measurements. The adapters are functionally matched; text shaping and glyph baselines can differ across the three renderers, so pixel identity is not claimed.
 
+## Scroll regression gates
+
+The [scroll suite](scroll-benchmark.md) uses the shared transcript scene,
+recorded and synthetic wheel tapes, exact viewport/scale/refresh conditions,
+actual Metal presentation feedback, per-frame instructions and GPU timings.
+Its target is zero app/GPU-attributed late frames, with main-thread work p99
+and max ≤4 ms at 120 Hz, GPU p99 below half a refresh, zero warmed row builds
+and zero full scroll-view repaints. Matched idle references report the system floor.
+`scripts/perf/scroll.py` runs the native replay gate or deterministic headless
+checks; the existing instruction gate also includes four scroll scenes.
+
 ## Iterating on performance
 
 For a change's cost, compare instruction counts of the headless scenes:

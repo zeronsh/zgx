@@ -162,3 +162,7 @@ path = "tests/bundle.rs"
 [[test]]
 name = "reload_memory"
 path = "tests/reload_memory.rs"
+
+[[example]]
+name = "scroll_bench"
+required-features = ["inspect"]
