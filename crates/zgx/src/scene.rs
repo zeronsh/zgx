@@ -3071,8 +3071,8 @@ pub struct Scene {
     pictures: Vec<NodeId>,
     /// The window's renderer draws pictures (`allow_pictures`).
     pictures_allowed: std::cell::Cell<bool>,
-    /// Scroll content that can't be a picture, until the next `rest`.
-    pictures_refused: Vec<NodeId>,
+    /// Scroll content that can't be a picture, until the next `rest`, and why.
+    pictures_refused: Vec<(NodeId, String)>,
     /// What changed in moved pictures this flush (`picture_changes`).
     picture_changes: Vec<(NodeId, Rect)>,
     /// Children of pictures something in which changed since a renderer last
@@ -12552,19 +12552,26 @@ impl Scene {
     fn picture_moved(&mut self, id: NodeId, dx: f32, dy: f32, again: bool) -> bool {
         let mut pictured = self.is_picture(id);
         if pictured && dx != 0. {
-            self.demote_picture(id);
+            self.demote_picture(id, "it moved across".into());
             return false;
         }
         if !pictured {
-            if !self.pictures_allowed.get()
-                || dx != 0.
-                || (dy == 0. && !again)
-                || self.pictures_refused.contains(&id)
-            {
+            if !self.pictures_allowed.get() || (dx == 0. && dy == 0. && !again) {
                 return false;
             }
-            if !self.picture_fits(id) {
-                self.pictures_refused.push(id);
+            if dx != 0. {
+                crate::profile::note(|| {
+                    format!("scroll @{} no picture: it moved across", id.number())
+                });
+                return false;
+            }
+            if let Some((_, why)) = self.pictures_refused.iter().find(|(node, _)| *node == id) {
+                crate::profile::note(|| format!("scroll @{} no picture: {why}", id.number()));
+                return false;
+            }
+            if let Err(why) = self.picture_fits(id) {
+                crate::profile::note(|| format!("scroll @{} no picture: {why}", id.number()));
+                self.pictures_refused.push((id, why));
                 return false;
             }
             self.node_mut(id).isolated = true;
@@ -12596,9 +12603,10 @@ impl Scene {
         true
     }
     /// Back to painting as ever: all its view shows repaints.
-    fn demote_picture(&mut self, id: NodeId) {
+    fn demote_picture(&mut self, id: NodeId, why: String) {
+        crate::profile::note(|| format!("scroll @{} no picture: {why}", id.number()));
         self.pictures.retain(|node| *node != id);
-        self.pictures_refused.push(id);
+        self.pictures_refused.push((id, why));
         self.node_mut(id).isolated = false;
         self.isolation_count -= 1;
         let clip = self.world_clip(id).unwrap_or(self.viewport);
@@ -12607,60 +12615,80 @@ impl Scene {
     /// Whether scroll content `id` draws the same from a picture: it moves
     /// rigidly in its view, on whole pixels, in the window's own space, and
     /// nothing in it depends on what is behind it or on where the view is.
-    fn picture_fits(&self, id: NodeId) -> bool {
+    /// If not, why not, for devtools.
+    fn picture_fits(&self, id: NodeId) -> Result<(), String> {
+        let name = |node: NodeId| {
+            format!(
+                "@{} ({})",
+                node.number(),
+                crate::inspect::kind_name(self, node)
+            )
+        };
         let scale = self.pixel_scale;
-        if scale <= 0. || self.cold.as_ref().is_some_and(|c| !c.sticky.is_empty()) {
-            return false;
+        if scale <= 0. {
+            return Err("the scene has no pixel scale".into());
         }
-        if std::iter::once(id)
-            .chain(self.ancestors(id))
-            .any(|node| self.is_layer(node) || self.popups.contains(&node))
-        {
-            return false;
+        for node in std::iter::once(id).chain(self.ancestors(id)) {
+            if self.is_layer(node) {
+                return Err(format!("{} around it is a layer", name(node)));
+            }
+            if self.popups.contains(&node) {
+                return Err(format!("{} around it is a popup", name(node)));
+            }
         }
         let Some(clip) = self.world_clip(id) else {
-            return false;
+            return Err("it has no clip".into());
         };
         let whole = |value: f32| ((value * scale) - (value * scale).round()).abs() < 1e-3;
         if ![clip.x, clip.y, clip.x + clip.width, clip.y + clip.height]
             .into_iter()
             .all(whole)
         {
-            return false;
+            return Err(format!("its view {clip:?} falls between device pixels"));
         }
         #[cfg(target_os = "macos")]
-        if self
+        if let Some((node, _)) = self
             .baked_loops
             .iter()
-            .any(|(node, _)| self.is_within(*node, id))
+            .find(|(node, _)| self.is_within(*node, id))
         {
-            return false;
+            return Err(format!("{} in it plays a baked loop", name(*node)));
         }
         let mut stack = vec![id];
         while let Some(node) = stack.pop() {
-            if self.picture_refuses(node) {
-                return false;
+            if let Some(why) = self.picture_refuses(node) {
+                return Err(format!("{} in it {why}", name(node)));
             }
             stack.extend_from_slice(self.children(node));
         }
-        true
+        Ok(())
     }
-    /// Whether node `id` keeps the scroll content it is in from a picture.
-    fn picture_refuses(&self, id: NodeId) -> bool {
+    /// What in node `id` keeps the scroll content it is in from a picture.
+    fn picture_refuses(&self, id: NodeId) -> Option<&'static str> {
         let node = self.node(id);
-        // A fade down its clip's height: that clip is cut by the view, so the
-        // band stays at the view's edge, not on the content.
-        let fades_down = node.style.fade_edges.iter().any(|band| *band > 0.);
         #[cfg(target_os = "macos")]
         if matches!(node.kind, NodeKind::NativeSurface(_)) {
-            return true;
+            return Some("is a native surface");
         }
-        fades_down
-            || node.effects.edge_fade > 0.
-            || node.effects.blur_radius > 0.
-            || self.cold.as_ref().is_some_and(|cold| {
-                cold.backdrop_readers.contains(&id) || cold.sticky.contains_key(&id)
-            })
+        // A fade down its clip's height: that clip is cut by the view, so the
+        // band stays at the view's edge, not on the content.
+        if node.style.fade_edges.iter().any(|band| *band > 0.) {
+            return Some("fades down its height");
+        }
+        if node.effects.edge_fade > 0. {
+            return Some("fades at its edges");
+        }
+        if node.effects.blur_radius > 0. {
+            return Some("blurs what is behind it");
+        }
+        let cold = self.cold.as_ref()?;
+        if cold.backdrop_readers.contains(&id) {
+            return Some("reads what is behind it");
+        }
+        if cold.sticky.contains_key(&id) {
+            return Some("is sticky");
+        }
+        None
     }
     /// What changed this flush may keep content from staying a picture, and
     /// what it changed is noted by row, in or out of its view.
@@ -12684,17 +12712,26 @@ impl Scene {
                     at = parent;
                 }
             }
-            let refused = dirty.iter().any(|id| {
-                self.contains(*id) && self.picture_refuses(*id) && self.is_within(*id, picture)
+            let refused = dirty
+                .iter()
+                .filter(|id| self.contains(**id) && self.is_within(**id, picture))
+                .find_map(|id| self.picture_refuses(*id).map(|why| (*id, why)));
+            let why = refused.map(|(id, why)| {
+                format!(
+                    "@{} ({}) in it {why}",
+                    id.number(),
+                    crate::inspect::kind_name(self, id)
+                )
             });
             #[cfg(target_os = "macos")]
-            let refused = refused
-                || self
-                    .baked_loops
+            let why = why.or_else(|| {
+                self.baked_loops
                     .iter()
-                    .any(|(node, _)| self.is_within(*node, picture));
-            if refused {
-                self.demote_picture(picture);
+                    .any(|(node, _)| self.is_within(*node, picture))
+                    .then(|| "something in it plays a baked loop".to_string())
+            });
+            if let Some(why) = why {
+                self.demote_picture(picture, why);
             }
         }
     }

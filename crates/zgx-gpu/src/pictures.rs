@@ -113,12 +113,21 @@ impl GpuRenderer {
     /// Tell the scene whether pictures may start, and let go of those over.
     pub(crate) fn sync_pictures(&mut self, scene: &Scene) {
         let planes = self.views.as_ref().is_some_and(|views| views.has_planes());
-        scene.allow_pictures(
-            self.scroll_pictures
-                && zgx::switches::SCROLL_PICTURE.on()
-                && self.plane.is_none()
-                && !planes,
-        );
+        let allowed = self.scroll_pictures
+            && zgx::switches::SCROLL_PICTURE.on()
+            && self.plane.is_none()
+            && !planes;
+        scene.allow_pictures(allowed);
+        if !allowed && self.scroll_pictures && !scene.scroll_moves().is_empty() {
+            zgx::profile::note(|| {
+                format!(
+                    "scroll: no picture in this window (switched on: {}, native view plane: {}, \
+                     GPU view planes: {planes})",
+                    zgx::switches::SCROLL_PICTURE.on(),
+                    self.plane.is_some(),
+                )
+            });
+        }
         if !self.pictures.is_empty() {
             let layers = &mut self.layers;
             self.pictures.retain(|id, _| {
