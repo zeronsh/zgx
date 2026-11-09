@@ -382,6 +382,17 @@ pub struct PullRefresh {
 }
 /// Called when a refresh has finished.
 pub type RefreshDone = Rc<dyn Fn()>;
+
+/// How far past its top a scroll view `height` points tall is pulled before
+/// its pull to refresh fires, as `UIRefreshControl` decides (UIKitCore,
+/// iOS 26.5, `-_updateSnappingHeight`): half the height, rounded, held under
+/// the modern spinner's `maximumSnappingHeight`, 100 × 1.125 scaled by
+/// max(height, 372) / 568. 173.1 points on an 874-point screen.
+pub fn pull_refresh_threshold(height: f64) -> f64 {
+    let half = (height * 0.5).round();
+    let most = 100. * 1.125 * height.max(372.) / 568.;
+    half.min(most).max(0.)
+}
 type Pulls = std::collections::HashMap<crate::scene::NodeId, PullRefresh>;
 thread_local! {
     static PULLS: std::cell::RefCell<Pulls> = std::cell::RefCell::default();

@@ -915,9 +915,6 @@ unsafe impl objc2::Encode for UiEdgeInsets {
 }
 const NO_INSETS: UiEdgeInsets = UiEdgeInsets(0., 0., 0., 0.);
 
-/// How far past the top a pull refreshes, in points.
-const PULL_REFRESHES: f64 = 114.;
-
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -966,10 +963,13 @@ define_class!(
             };
             // SAFETY: UIScrollView's getter.
             let at: CGPoint = unsafe { msg_send![view, contentOffset] };
-            // A pull past where a table view's refreshes (114 points, measured).
+            // A pull past where UIKit's refreshes, for the scroller's height.
             // The control draws from the scroller but doesn't fire with its pan on
             // another view.
-            if at.y < -PULL_REFRESHES && state.pull.borrow().is_some() {
+            // SAFETY: UIView's getter, on the main thread.
+            let bounds: CGRect = unsafe { msg_send![view, bounds] };
+            let refreshes = zgx::native_control::pull_refresh_threshold(bounds.size.height);
+            if at.y < -refreshes && state.pull.borrow().is_some() {
                 let control = state.control.borrow().clone();
                 if let Some(control) = control {
                     // SAFETY: UIRefreshControl's and UIScrollView's methods, on the

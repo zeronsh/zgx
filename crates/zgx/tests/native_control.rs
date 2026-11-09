@@ -1,7 +1,9 @@
 //! The system's own controls where a host has them, drawn where not.
 use std::{cell::Cell, rc::Rc};
 use zgx::compose::prelude::*;
-use zgx::native_control::{MenuAction, escape, native_tabs, native_toggle, on_escape};
+use zgx::native_control::{
+    MenuAction, escape, native_tabs, native_toggle, on_escape, pull_refresh_threshold,
+};
 use zgx::semantics::Role;
 use zgx::widgets::Ui;
 
@@ -123,4 +125,17 @@ fn a_system_menu_is_found_from_a_point_inside_its_node() {
     assert_eq!((rect.width, rect.height), (200., 60.));
     assert_eq!(actions[0].title, "Copy");
     assert!(zgx::native_control::system_menu_at(&ui.scene.borrow(), 250., 150.).is_none());
+}
+
+#[test]
+fn a_pull_refreshes_where_uikit_snaps() {
+    // UIRefreshControl's `_snappingHeight`, read at runtime on an 874-point
+    // iPhone 17 Pro: 173.107.
+    assert!((pull_refresh_threshold(874.) - 173.107_394).abs() < 1e-3);
+    // Under 372 points the cap stops shrinking, at 112.5 × 372 / 568.
+    assert!((pull_refresh_threshold(300.) - 73.680).abs() < 1e-3);
+    assert!((pull_refresh_threshold(200.) - 73.680).abs() < 1e-3);
+    // A shorter one refreshes at half its height.
+    assert_eq!(pull_refresh_threshold(100.), 50.);
+    assert!(pull_refresh_threshold(912.) > pull_refresh_threshold(874.));
 }
