@@ -12707,6 +12707,29 @@ impl Scene {
         if node.effects.edge_fade > 0. {
             return Some("fades at its edges");
         }
+        // What a window's pixel draws depends on where it is, or draws anew
+        // each frame: rastered once and moved, it would be wrong.
+        match &node.kind {
+            NodeKind::Image(image)
+                if !matches!(image.effect(), crate::image::ImageEffect::Plain) =>
+            {
+                return Some("is an image drawn by window position");
+            }
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. }
+                if matches!(
+                    quad.decoration
+                        .as_deref()
+                        .and_then(|d| d.background.as_ref()),
+                    Some(crate::decoration::Background::Shader(_))
+                ) =>
+            {
+                return Some("is filled by a shader");
+            }
+            _ => {}
+        }
+        if node.blend != BlendMode::Normal {
+            return Some("blends with what is behind it");
+        }
         if node.effects.blur_radius > 0. {
             return Some("blurs what is behind it");
         }
@@ -12716,6 +12739,9 @@ impl Scene {
         }
         if cold.sticky.contains_key(&id) {
             return Some("is sticky");
+        }
+        if self.layer_shader(id).is_some() {
+            return Some("composites through a layer shader");
         }
         None
     }
