@@ -99,6 +99,9 @@ pub(crate) struct Picture {
     placed: FxHashMap<NodeId, Range<i64>>,
     /// The rows of content its children reach, once worked out.
     mounted: Option<Range<i64>>,
+    /// The rows of the boxes in it that fade down their height
+    /// (`Scene::picture_fades`).
+    fades: Vec<Range<i64>>,
 }
 
 impl GpuRenderer {
@@ -234,6 +237,7 @@ impl GpuRenderer {
             }
             picture.placed = placed;
             picture.mounted = None;
+            picture.fades = scene.picture_fades(id).into_iter().map(rows_of).collect();
             let changed = |rect: Rect| {
                 rect.intersection(clip)
                     .map(|rect| row(rect.y).floor() as i64..row(rect.y + rect.height).ceil() as i64)
@@ -250,6 +254,36 @@ impl GpuRenderer {
         {
             picture.valid = view.start..view.start;
             wanted.clear();
+        }
+        // A fading box a view's edge crosses, or crossed: its band keeps to
+        // where the view cuts it, so what shows of it draws again, and what
+        // lies past the view of it (cut there as it left) goes. Nothing is
+        // rastered ahead past one until it is wholly in view.
+        let (mut hold_ahead, mut hold_behind) = (false, false);
+        if !picture.fades.is_empty() {
+            let crossed = |rows: &Range<i64>, top: i64| {
+                let bottom = top + view.end - view.start;
+                (rows.start < top && rows.end > top) || (rows.start < bottom && rows.end > bottom)
+            };
+            let before = top - moved;
+            for fade in &picture.fades {
+                if !crossed(fade, top) && !crossed(fade, before) {
+                    continue;
+                }
+                let shows = fade.start.max(view.start)..fade.end.min(view.end);
+                if !shows.is_empty() {
+                    wanted.push(shows);
+                }
+                let valid = &mut picture.valid;
+                if fade.start < view.start && fade.end > valid.start {
+                    valid.start = valid.start.max(fade.end.min(view.start));
+                    hold_behind = true;
+                }
+                if fade.end > view.end && fade.start < valid.end {
+                    valid.end = valid.end.min(fade.start.max(view.end));
+                    hold_ahead = true;
+                }
+            }
         }
         // Nothing is rastered ahead past what's built: those rows would only
         // go again as they are built.
@@ -283,14 +317,14 @@ impl GpuRenderer {
         // Rows behind the scroll give way to those ahead of it.
         let ahead = moved.abs() + AHEAD_ROWS;
         let spare = (height - i64::from(rows)) * 3 / 4;
-        if moved >= 0 {
+        if moved >= 0 && !hold_ahead {
             let end = (valid.end + ahead).min(view.end + spare).min(mounted.end);
             if end > valid.end {
                 wanted.push(valid.end..end);
                 valid.end = end;
             }
         }
-        if moved <= 0 {
+        if moved <= 0 && !hold_behind {
             let start = (valid.start - ahead)
                 .max(view.start - spare)
                 .max(mounted.start);
@@ -308,7 +342,13 @@ impl GpuRenderer {
         let valid = valid.clone();
         for band in wanted {
             let band = band.start.max(valid.start)..band.end.min(valid.end);
-            self.raster_picture(scene, id, clip, top_of_content, band, stats)?;
+            // What shows, as it shows; what lies past the view, as it will.
+            let shows = band.start.max(view.start)..band.end.min(view.end);
+            let above = band.start..band.end.min(view.start);
+            let below = band.start.max(view.end)..band.end;
+            for (band, shown) in [(above, false), (shows, true), (below, false)] {
+                self.raster_picture(scene, id, clip, top_of_content, band, shown, stats)?;
+            }
         }
         let frame = self.layer_frame;
         if let Some(cache) = self.layers.get_mut(&id) {
@@ -371,11 +411,13 @@ impl GpuRenderer {
                 incomplete: false,
                 placed: FxHashMap::default(),
                 mounted: None,
+                fades: Vec::new(),
             },
         );
     }
     /// Raster rows `band` of content into picture `id`'s texture, in a pass
-    /// for each run between its wraps.
+    /// for each run between its wraps. `shown`: the view shows them now.
+    #[allow(clippy::too_many_arguments)]
     fn raster_picture(
         &mut self,
         scene: &Scene,
@@ -383,6 +425,7 @@ impl GpuRenderer {
         clip: Rect,
         top_of_content: f32,
         band: Range<i64>,
+        shown: bool,
         stats: &mut GpuStats,
     ) -> Result<(), GpuError> {
         let scale = self.scale;
@@ -403,7 +446,7 @@ impl GpuRenderer {
                 width / scale,
                 height as f32 / scale,
             );
-            let items = scene.picture_items(id, clip, &[run]);
+            let items = scene.picture_items(id, clip, shown, &[run]);
             let banding = self.band_capable() && scene.take_painted_fades();
             for item in &items {
                 if item.isolated && item.effects.opacity > 0. {

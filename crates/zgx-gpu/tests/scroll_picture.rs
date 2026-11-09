@@ -321,3 +321,74 @@ fn a_measured_list_re_anchoring_stays_as_painted() {
         });
     }
 }
+
+/// A box in a row fading down its height, as the view's edges cross it: its
+/// band keeps to where the view cuts it, so while crossing it doesn't move
+/// with the content, and every frame draws as painted.
+#[test]
+fn boxes_fading_down_their_height_cross_the_views_edges_as_painted() {
+    let _gpu = gpu_fixture();
+    // By steps small and large, both ways past both edges, and in one jump
+    // from out of view to wholly in it.
+    let steps = [
+        6_f32, 6., 8., 10., 40., 90., 8., 6., -4., -8., -30., -60., 300., -300., 8., 500., -500.,
+    ];
+    for scale in SCALES {
+        // (At a fractional scale a band's value rounds a level apart between
+        // a texture's coordinates and the window's.)
+        let levels = if scale.fract() == 0. { 0 } else { 1 };
+        run_within("fading down", scale, &steps, levels, 0., |ui, offset| {
+            let row = |key: usize| {
+                div()
+                    .w(200.)
+                    .h(if key.is_multiple_of(3) { 96. } else { 24. })
+                    .mb(4.)
+                    .bg(rgb(0x5a7a9a))
+                    .overflow_hidden()
+                    .fade_edges(16., 24.)
+                    .child(text(format!("row {key}")).text_color(rgb(0xffffff)))
+                    .child(div().w(180.).h(80.).bg(rgb(0x9a5a7a)))
+            };
+            ui.mount(
+                scroll(offset)
+                    .w(W)
+                    .h(H)
+                    .bg(rgb(0x101820))
+                    .children((0..60).map(row)),
+            );
+        });
+    }
+}
+
+/// A fade down the height of nothing it clips has the view's box: no picture
+/// can hold that, and the view goes on as it was.
+#[test]
+fn a_fade_with_the_views_box_refuses_a_picture() {
+    let _gpu = gpu_fixture();
+    let mut ui = Ui::new(W, H);
+    ui.scene.borrow_mut().set_pixel_scale(1.);
+    let offset = ui.signal(0_f32);
+    ui.mount(
+        scroll(offset.clone())
+            .w(W)
+            .h(H)
+            .bg(rgb(0x101820))
+            .children((0..40).map(|key| {
+                div()
+                    .w(200.)
+                    .h(24.)
+                    .fade_edges(8., 8.)
+                    .bg(rgb(0x5a7a9a))
+                    .child(text(format!("row {key}")).text_color(rgb(0xffffff)))
+            })),
+    );
+    let mut gpu = GpuRenderer::new(W as u32, H as u32).unwrap();
+    gpu.set_scroll_pictures(true);
+    for _ in 0..4 {
+        offset.update(|o| *o += 8.);
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        gpu.render(&ui.scene.borrow(), &damage).unwrap();
+        assert_eq!(gpu.debug_pictures(), 0);
+    }
+}

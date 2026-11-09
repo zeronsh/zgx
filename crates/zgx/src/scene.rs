@@ -12537,13 +12537,42 @@ impl Scene {
         self.ink(row)
             .map(|ink| ink.translated(Transform { x: dx, y: dy }))
     }
+    /// Where boxes fading down their height lie in picture `id`, in the
+    /// window. Such a box's band keeps to its clip, which the view cuts: while
+    /// a view's edge crosses it, it doesn't move with the content.
+    pub fn picture_fades(&self, id: NodeId) -> Vec<Rect> {
+        let mut fades = Vec::new();
+        let mut stack = vec![id];
+        while let Some(node) = stack.pop() {
+            if self
+                .node(node)
+                .style
+                .fade_edges
+                .iter()
+                .any(|band| *band > 0.)
+            {
+                fades.push(self.bounds(node));
+            }
+            stack.extend_from_slice(self.children(node));
+        }
+        fades
+    }
     /// The paint items of picture `id` within `bands`, as the window's walk
-    /// makes them but for the view's clip: `clip`'s across, none down, so
-    /// what lies past the view's edges draws as it will there.
-    pub fn picture_items(&self, id: NodeId, clip: Rect, bands: &[Rect]) -> Vec<PaintItem<'_>> {
+    /// makes them. `shown`: cut by the view (`clip`), as they show now; else
+    /// `clip`'s across and uncut down, as what lies past the view will draw
+    /// once wholly in it.
+    pub fn picture_items(
+        &self,
+        id: NodeId,
+        clip: Rect,
+        shown: bool,
+        bands: &[Rect],
+    ) -> Vec<PaintItem<'_>> {
         const FAR: f32 = 1e7;
-        self.walk_clip
-            .set(Some(Rect::new(clip.x, -FAR, clip.width, FAR * 2.)));
+        self.walk_clip.set(Some(match shown {
+            true => clip,
+            false => Rect::new(clip.x, -FAR, clip.width, FAR * 2.),
+        }));
         self.layer_items_within(Some(id), Some(bands))
     }
     /// Scroll content `id` moved by `dx`, `dy`: if it is a picture (it
@@ -12670,10 +12699,10 @@ impl Scene {
         if matches!(node.kind, NodeKind::NativeSurface(_)) {
             return Some("is a native surface");
         }
-        // A fade down its clip's height: that clip is cut by the view, so the
-        // band stays at the view's edge, not on the content.
-        if node.style.fade_edges.iter().any(|band| *band > 0.) {
-            return Some("fades down its height");
+        // A fade down the height of nothing it clips: its box is the view's
+        // (one of a box it clips is `picture_fades`).
+        if node.style.fade_edges.iter().any(|band| *band > 0.) && !clip_axes(&node.style).1 {
+            return Some("fades down the view's height");
         }
         if node.effects.edge_fade > 0. {
             return Some("fades at its edges");
