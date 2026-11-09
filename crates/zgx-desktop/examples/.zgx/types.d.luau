@@ -2431,6 +2431,11 @@ export type NodeProps = {
 	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: boolean?,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -2850,6 +2855,11 @@ export type Props = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -3230,6 +3240,7 @@ export type Props_class = string?
 export type Props_variants = (Variants | ((choice: any) -> Variants))?
 export type Props_ref = (Ref | { Ref })?
 export type Props_focusable = boolean?
+export type Props_focus_on_press = boolean?
 export type Props_capture_keys = boolean?
 export type Props_role = AriaRole?
 export type Props_heading = number?
@@ -3516,6 +3527,11 @@ export type ContainerProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -3949,6 +3965,11 @@ export type GlassProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -4391,6 +4412,11 @@ export type ScrollProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -4846,6 +4872,11 @@ export type TextProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -5264,6 +5295,11 @@ export type MarkdownViewProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -5760,6 +5796,11 @@ export type RichProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -6172,6 +6213,11 @@ export type ImageProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -6601,6 +6647,11 @@ export type SvgProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -7118,6 +7169,11 @@ export type Scene3DProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -7553,6 +7609,11 @@ export type CanvasProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -7997,6 +8058,11 @@ export type CheckboxProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -8419,6 +8485,11 @@ export type InputProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -8942,6 +9013,11 @@ export type ProgressProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -9355,6 +9431,11 @@ export type SliderProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -9783,6 +9864,11 @@ export type SegmentedProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -10207,6 +10293,11 @@ export type StepperProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -10632,6 +10723,11 @@ export type DisclosureProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -11068,6 +11164,11 @@ export type AccordionProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -11478,6 +11579,11 @@ export type SectionProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -11913,6 +12019,11 @@ export type SeparatorProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -12331,6 +12442,11 @@ export type TabsProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -12771,6 +12887,11 @@ export type TreeProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -13207,6 +13328,11 @@ export type DataGridProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -13639,6 +13765,11 @@ export type CalendarProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -14064,6 +14195,11 @@ export type DatePickerProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -14487,6 +14623,11 @@ export type TimeFieldProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -14909,6 +15050,11 @@ export type ComboboxProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -15339,6 +15485,11 @@ export type CommandPaletteProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -15757,6 +15908,11 @@ export type SelectProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -16182,6 +16338,11 @@ export type SplitProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -16663,6 +16824,11 @@ export type ListProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -17170,6 +17336,11 @@ export type LayerProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -17602,6 +17773,11 @@ export type ModalProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -18052,6 +18228,11 @@ export type PopoverProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -18512,6 +18693,11 @@ export type MenuItemProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -18929,6 +19115,11 @@ export type SubmenuProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -19367,6 +19558,11 @@ export type WebViewProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -19805,6 +20001,11 @@ export type TerminalProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -20218,6 +20419,11 @@ export type SlotProps = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -20682,6 +20888,11 @@ export type EachOptions = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
@@ -21110,6 +21321,11 @@ export type PresenceOptions = {
 	variants: Props_variants,
 	ref: Props_ref,
 	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
