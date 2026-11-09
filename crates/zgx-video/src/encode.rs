@@ -121,7 +121,11 @@ impl Sink {
             .name("zgx-video encode".into())
             .spawn(move || {
                 for (index, frame) in incoming.into_iter().enumerate() {
-                    encoder.write(&frame, index)?;
+                    if let Err(error) = encoder.write(&frame, index) {
+                        // A closed pipe says only that ffmpeg quit: what it
+                        // said as it did is why.
+                        return Err(encoder.finish().err().unwrap_or(error));
+                    }
                     let _ = give_back.try_send(frame);
                 }
                 encoder.finish()
