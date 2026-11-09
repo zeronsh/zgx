@@ -18,7 +18,17 @@ const STILL_GROWING: &[(Phase, &str)] = &[
 
 #[test]
 fn a_chunk_costs_the_same_however_long_the_reply() {
-    md_chunk::check(STILL_GROWING, false, || {
-        |_: &zgx::scene::Scene, _: &[zgx::scene::Rect]| {}
-    });
+    // As it starts: plainly, and with what is or looks like a link definition
+    // near its top, which once made every later chunk parse the whole reply.
+    for start in [
+        "",
+        "[x]: http://y\n\nWords.\n\n",
+        "- [x]: y\n\nWords.\n\n",
+        "foo]: y\n\nWords.\n\n",
+        "```\n[x]: y\n```\n\nWords.\n\n",
+    ] {
+        md_chunk::check(start, STILL_GROWING, false, || {
+            |_: &zgx::scene::Scene, _: &[zgx::scene::Rect]| {}
+        });
+    }
 }

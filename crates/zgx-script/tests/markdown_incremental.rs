@@ -23,6 +23,17 @@ impl Rng {
 
 /// Bits of Markdown that change what they join, and what comes before them.
 const BITS: &[&str] = &[
+    "[REF]",
+    "[Ref]: z\n",
+    "[a  b]",
+    "[a b]: q\n",
+    "![ref]",
+    "[t][ref]",
+    "[ref][]",
+    "[ref]: <u v> \"t\"\n",
+    "[other]: o\n",
+    "```\n[ref]: c\n```\n",
+    "foo]: y\n",
     " <div\n",
     "  <p>x</p>\n",
     "- m![]()\n",
@@ -295,6 +306,109 @@ fn a_definition_found_late_links_what_came_before() {
         "parsed {} bytes",
         parser.last_parse_bytes()
     );
+}
+
+/// What a definition costs: nothing for what only looks like one; nothing
+/// beyond its tail for one with no reference ahead of it, whose later
+/// references it links all the same; and for one with a reference ahead of
+/// it, one whole parse.
+#[test]
+fn a_definition_parses_the_whole_text_only_for_a_reference_ahead_of_it() {
+    let long: String = (0..60).map(|i| format!("Para {i}.\n\n")).collect();
+    let tail_only = |parser: &Incremental| parser.last_parse_bytes() < 100;
+    for looks_like_one in [
+        "```\n[x]: y\n```\n\n",
+        "foo]: y\n\n",
+        "see [x]: y and d[k]: v.\n\n",
+    ] {
+        let mut parser = Incremental::new(Options::default());
+        let mut text = format!("{long}{looks_like_one}Next");
+        parser.set_text(&text);
+        for piece in [" words", " more\n\nAfter", " this"] {
+            text.push_str(piece);
+            parser.set_text(&text);
+            assert!(
+                tail_only(&parser),
+                "{looks_like_one:?}: {}",
+                parser.last_parse_bytes()
+            );
+        }
+    }
+    // None ahead of it: its tail alone, as it comes and after, and a
+    // reference after it links.
+    let mut parser = Incremental::new(Options::default());
+    let mut text = long.clone();
+    parser.set_text(&text);
+    for piece in [
+        "[x]: ht",
+        "tp://y\n\n",
+        "Now [x] is a link",
+        " still\n\n",
+        "and more",
+    ] {
+        text.push_str(piece);
+        parser.set_text(&text);
+        assert!(
+            tail_only(&parser),
+            "{piece:?}: {}",
+            parser.last_parse_bytes()
+        );
+        assert_eq!(
+            parser.blocks(),
+            fresh(&text, &Options::default()),
+            "{piece:?}"
+        );
+    }
+    // One ahead of it: whole as it lands, then the tail again.
+    let mut parser = Incremental::new(Options::default());
+    let mut text = format!("[x] named first.\n\n{long}");
+    parser.set_text(&text);
+    text.push_str("[x]: http://y\n\n");
+    parser.set_text(&text);
+    assert_eq!(parser.last_parse_bytes(), text.len(), "parsed whole");
+    assert_eq!(parser.blocks(), fresh(&text, &Options::default()));
+    for piece in ["More", " words\n\nAfter", " this"] {
+        text.push_str(piece);
+        parser.set_text(&text);
+        assert!(
+            tail_only(&parser),
+            "{piece:?}: {}",
+            parser.last_parse_bytes()
+        );
+    }
+    // Those it parsed whole and found the same keep their values: all but
+    // the one naming it.
+    let mut whole = Incremental::new(Options::default());
+    let mut text = format!("[x] named first.\n\n{long}");
+    whole.set_text(&text);
+    let then = whole.blocks();
+    text.push_str("[x]: http://y\n\n");
+    whole.set_text(&text);
+    let at = |v: &Value| match v {
+        Value::Map(fields) => fields.as_ptr() as usize,
+        _ => 0,
+    };
+    let now = whole.blocks();
+    let kept = now
+        .iter()
+        .zip(&then)
+        .filter(|(a, b)| at(a) == at(b))
+        .count();
+    assert_eq!(kept, then.len() - 1, "all but the first");
+    // Defined again to elsewhere: first wins, however it streamed.
+    let pieces: Vec<String> = [
+        "[x]: first\n\n",
+        "words\n\n",
+        "more\n\n",
+        "again\n\n",
+        "[x]: second\n\n",
+        "[x] goes\n\n",
+        "on",
+    ]
+    .iter()
+    .map(|p| p.to_string())
+    .collect();
+    assert_eq!(disagreement(&pieces, &Options::default()), None);
 }
 
 #[test]

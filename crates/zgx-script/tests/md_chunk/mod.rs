@@ -78,6 +78,7 @@ fn piece(n: usize) -> String {
 /// `followed` or not (`script`). `draw` gets each frame's scene and damage
 /// after its flush, the whole reply's first.
 pub fn per_chunk(
+    start: &str,
     sections: usize,
     measured: usize,
     followed: bool,
@@ -88,7 +89,7 @@ pub fn per_chunk(
     host.reload().expect("the script loads");
     let _view = ui.mount(host.view());
     let chunks = sections * 3;
-    let text: String = (1..=chunks).map(piece).collect();
+    let text = start.to_string() + &(1..=chunks).map(piece).collect::<String>();
     host.set_state("reply", Value::from(text.as_str())).unwrap();
     host.set_state("chunks", Value::Num(chunks as f64)).unwrap();
     ui.prepare_frame();
@@ -142,6 +143,7 @@ const AGAIN: usize = 2;
 /// `still_growing`, with whose it is, and a listed one that went flat fails
 /// until it is taken off.
 pub fn check<D: FnMut(&Scene, &[Rect])>(
+    start: &str,
     still_growing: &[(Phase, &str)],
     followed: bool,
     mut draw: impl FnMut() -> D,
@@ -153,7 +155,7 @@ pub fn check<D: FnMut(&Scene, &[Rect])>(
     let mut measure = || -> Vec<Vec<(Phase, u64)>> {
         sizes
             .iter()
-            .map(|&s| per_chunk(s, 9, followed, draw()))
+            .map(|&s| per_chunk(start, s, 9, followed, draw()))
             .collect()
     };
     let mut runs = measure();
@@ -182,7 +184,7 @@ pub fn check<D: FnMut(&Scene, &[Rect])>(
     if !first_read.is_empty() && wrong.is_empty() {
         eprintln!("rescued by measuring again; the first read: {first_read:?}");
     }
-    eprintln!("per chunk, thousands of instructions, at {sizes:?} sections:");
+    eprintln!("per chunk, thousands of instructions, at {sizes:?} sections, after {start:?}:");
     for (i, (phase, _)) in runs[0].iter().enumerate() {
         let thousands: Vec<u64> = runs.iter().map(|r| r[i].1 / 1000).collect();
         let (grows, listed) = verdict(&runs, i, still_growing);
