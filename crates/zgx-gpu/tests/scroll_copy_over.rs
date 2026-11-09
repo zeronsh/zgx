@@ -1213,3 +1213,242 @@ fn a_dithered_picture_in_the_content_still_blocks() {
         assert_eq!(copies, 0, "dithered at {scale}x copied");
     }
 }
+
+/// A reply streaming into a transcript that follows its end: short lines of
+/// dialogue and long ones that wrap, its last line growing, a working line at
+/// its foot that goes when the reply ends; scrolled up and back down during
+/// the stream and after. Every frame is the frame painted whole.
+fn streamed_story(name: &str, scale: f32, fade: bool) {
+    const STORY: [&str; 6] = [
+        "“What?”",
+        "“He was complaining about mine.”",
+        "She came in and sat down. Arthur poured her tea. Daniel went into the garden and did not come back for an hour, and when he did his boots were wet.",
+        "“Is it,” she said.",
+        "Daniel found his mother asleep in the chair by the window, the cup gone cold beside her.",
+        "“Never mind.”",
+    ];
+    let (w, h) = ((W * scale) as u32, (H * scale) as u32);
+    let mut gpu = GpuRenderer::new(w, h).unwrap();
+    let mut whole = GpuRenderer::new(w, h).unwrap();
+    let mut ui = Ui::new(W, H);
+    ui.scene.borrow_mut().set_pixel_scale(scale);
+    for gpu in [&mut gpu, &mut whole] {
+        gpu.set_scale_factor(scale);
+        gpu.debug_enable_single_pass();
+    }
+    gpu.debug_allow_scroll_copies();
+    gpu.install_text(&mut ui.scene.borrow_mut());
+    let offset = ui.signal(0_f32);
+    // (Lines written, and how much of the last.)
+    let written = ui.signal((0_usize, 0_usize));
+    let streaming = ui.signal(true);
+    let (keys, read) = (written.clone(), written.clone());
+    let lines = keyed(
+        move || {
+            let (lines, last) = keys.get();
+            (0..lines)
+                .map(|i| (i, if i + 1 == lines { last } else { usize::MAX }))
+                .collect()
+        },
+        move |(i, chars), _| {
+            let line = STORY[i % STORY.len()];
+            let shown: String = line.chars().take(chars).collect();
+            text(shown)
+                .w(W - 24.)
+                .text_size(14.)
+                .text_color(rgb(0xe8e8f0))
+        },
+    );
+    let _ = read;
+    let working = streaming.clone();
+    let mut view = scroll(offset.clone())
+        .w(W)
+        .h(H)
+        .bg(rgb(0x14181f))
+        .follow_end(true)
+        .child(
+            column().w(W).p(12.).gap(10.).child(lines).child(
+                text("Working… 3s")
+                    .h(20.)
+                    .text_size(13.)
+                    .text_color(rgb(0x9098a8))
+                    .reactive_style(move || {
+                        if working.get() {
+                            Styles::new()
+                        } else {
+                            Styles::new().hidden()
+                        }
+                    }),
+            ),
+        );
+    if fade {
+        view = view.fade_edges(24., 24.);
+    }
+    ui.mount(overlay().w(W).h(H).bg(rgb(0x000000)).child(view));
+    let full = Rect::new(0., 0., W, H);
+    let mut frame = |ui: &mut Ui, label: &str| {
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        gpu.render(&ui.scene.borrow(), &damage).unwrap();
+        let partial = gpu.debug_present_offscreen().unwrap();
+        whole.render(&ui.scene.borrow(), &[full]).unwrap();
+        let fresh = whole.debug_present_offscreen().unwrap();
+        let wrong = partial
+            .chunks(4)
+            .zip(fresh.chunks(4))
+            .position(|(a, b)| a != b);
+        let w = w as usize;
+        assert!(
+            wrong.is_none(),
+            "{name} at {scale}x, {label}: a stale pixel at points {:?}",
+            wrong.map(|p| ((p % w) as f32 / scale, (p / w) as f32 / scale)),
+        );
+    };
+    frame(&mut ui, "first");
+    let mut step = 0;
+    for line in 1..=24_usize {
+        let len = STORY[(line - 1) % STORY.len()].chars().count();
+        for chars in (0..=len).step_by(12).chain([len]) {
+            written.set((line, chars));
+            // Scrolled up a while, mid-stream, and back to the end.
+            if (40..48).contains(&step) {
+                offset.update(|o| *o -= 7.);
+            }
+            if step == 60 {
+                offset.set(100_000.);
+            }
+            frame(&mut ui, &format!("streaming, step {step}"));
+            step += 1;
+        }
+    }
+    streaming.set(false);
+    frame(&mut ui, "the reply ended");
+    for n in 0..30 {
+        offset.update(|o| *o += if n < 15 { -9. } else { 9. });
+        frame(&mut ui, &format!("after, scroll {n}"));
+    }
+    let _ = frame;
+    assert!(
+        gpu.debug_scroll_copies() > 0,
+        "{name} at {scale}x: nothing copied"
+    );
+}
+
+#[test]
+fn a_streamed_story_scrolled_while_and_after_it_streams() {
+    let _gpu = gpu_fixture();
+    for scale in [2., 1.] {
+        streamed_story("plain", scale, false);
+        streamed_story("fading", scale, true);
+    }
+}
+
+/// A long measured list of lines that paint little of their room (text, the
+/// view's fill around it), scrolled up, then sent to its end in one jump of
+/// many views, as a "jump to latest" does; the rows it passes go and those
+/// it reaches mount and measure, correcting where the list stands. Every
+/// frame, the jump's and those after, is the frame painted whole.
+fn jumped(name: &str, scale: f32, from: f32, to: f32, fade: bool) {
+    let (w, h) = ((W * scale) as u32, (H * scale) as u32);
+    let mut gpu = GpuRenderer::new(w, h).unwrap();
+    let mut whole = GpuRenderer::new(w, h).unwrap();
+    let mut ui = Ui::new(W, H);
+    ui.scene.borrow_mut().set_pixel_scale(scale);
+    for gpu in [&mut gpu, &mut whole] {
+        gpu.set_scale_factor(scale);
+        gpu.debug_enable_single_pass();
+    }
+    gpu.debug_allow_scroll_copies();
+    let offset = ui.signal(from);
+    let heights = VariableHeights::new(&ui.runtime, 400, 40.);
+    let list = measured_virtual_list(
+        offset.clone(),
+        heights,
+        2,
+        |i| i,
+        |_, i, _| {
+            // Lines of a story: one short, some long (two or three lines), with
+            // room between paragraphs; each paints a little of its width.
+            let lines = [1, 1, 3, 1, 2][i % 5];
+            let mut row = column().w_full().gap(4.).pb(10.);
+            for line in 0..lines {
+                let width = 30. + ((i * 7 + line * 13) % 9) as f32 * 20.;
+                row = row.child(
+                    div()
+                        .w(width)
+                        .h(10.)
+                        .bg(rgb(0xd8dce4 - (i as u32 % 7) * 0x0a0a0a)),
+                );
+            }
+            row
+        },
+    )
+    .w_full()
+    .h_full();
+    let view = scroll_view(list, fade);
+    ui.mount(overlay().w(W).h(H).bg(rgb(0x000000)).child(view));
+    let full = Rect::new(0., 0., W, H);
+    let mut frame = |ui: &mut Ui, label: &str| {
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        gpu.render(&ui.scene.borrow(), &damage).unwrap();
+        let partial = gpu.debug_present_offscreen().unwrap();
+        whole.render(&ui.scene.borrow(), &[full]).unwrap();
+        let fresh = whole.debug_present_offscreen().unwrap();
+        let wrong = partial
+            .chunks(4)
+            .zip(fresh.chunks(4))
+            .position(|(a, b)| a != b);
+        let w = w as usize;
+        let count = partial
+            .chunks(4)
+            .zip(fresh.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            wrong.is_none(),
+            "{name} at {scale}x, {label}: {count} stale pixels, the first at points {:?}",
+            wrong.map(|p| ((p % w) as f32 / scale, (p / w) as f32 / scale)),
+        );
+    };
+    for n in 0..4 {
+        frame(&mut ui, &format!("settling {n}"));
+    }
+    // A little scrolling first, which copies.
+    for n in 0..6 {
+        offset.update(|o| *o += 6.);
+        frame(&mut ui, &format!("scrolled {n}"));
+    }
+    offset.set(to);
+    for n in 0..8 {
+        frame(&mut ui, &format!("{n} after the jump"));
+    }
+    // And scrolling again from there.
+    for n in 0..8 {
+        offset.update(|o| *o -= 6.);
+        frame(&mut ui, &format!("{n} scrolling back"));
+    }
+}
+
+/// The view the lists scroll in: its own list (`measured_virtual_list` is its
+/// own scroll view), on an opaque fill, fading at top and bottom if `fade`.
+fn scroll_view(list: View, fade: bool) -> View {
+    let list = list.bg(rgb(0x14181f));
+    if fade {
+        list.fade_edges(24., 24.)
+    } else {
+        list
+    }
+}
+
+#[test]
+fn a_jump_of_many_views_to_a_measured_lists_end() {
+    let _gpu = gpu_fixture();
+    for scale in [2., 1.] {
+        for fade in [false, true] {
+            jumped("to the end", scale, 0., 1_000_000., fade);
+            jumped("to the middle", scale, 0., 6_000., fade);
+            jumped("from the middle back", scale, 6_000., 0., fade);
+        }
+    }
+}

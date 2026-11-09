@@ -336,3 +336,8 @@ What the runs tell you:
 Devtools are built only with zgx-run's `inspect` feature (on by default for development) or zgx-script's `inspect`; an app built without it cannot be driven, whatever its environment says. Even when built in, nothing listens unless the host serves it: there is no thread, socket or bookkeeping until then. The socket belongs to the user who started the app: a Unix socket (mode 0600) in `$TMPDIR/zgx-inspect-<uid>` (0700); on Windows a loopback port that answers only requests carrying the token written beside it in `%LOCALAPPDATA%\zgx-inspect`.
 
 A Rust host serves devtools with `zgx_script::inspect::serve(Session::new(&cx.ui, handle, &host, Some(cx.inspector.clone())), "my app", |task| cx.tasks.spawn(task))`, where `handle` is what `cx.render(host.view())` returned.
+
+## A frame that doesn't match: `ZGX_PAINT_CHECK`
+
+A frame drawn from its damage (a scroll copy, a kept frame patched, a partial repaint) that leaves stale pixels is hard to catch after the fact: the next whole frame clears it. `ZGX_PAINT_CHECK=1` (or `=<folder>`) checks every frame the window shows against the same scene drawn whole by a second renderer, leaving the window's own renderer as it is. A frame that differs logs `ZGX_PAINT_CHECK frame N: …`, and the first 20 save `N-shown.ppm`, `N-before.ppm` (the frame before), `N-whole.ppm` and `N.txt`: the frame's damage, its scroll moves, its copies, and its notes on why each scroll copied or repainted. `ZGX_PAINT_CHECK_LEVELS` (2) and `ZGX_PAINT_CHECK_PIXELS` (8) set what counts as differing; `ZGX_PAINT_CHECK_SELFTEST=n` corrupts frame `n`'s reference, to see the check catch it. It costs a whole frame and two reads of it every frame; unset, nothing. At exit it prints how many frames it compared.
+
