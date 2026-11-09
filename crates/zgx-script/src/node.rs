@@ -1513,6 +1513,9 @@ pub(crate) struct MarkdownLook {
     /// `block(b, at)`: the app's own drawing of a block the view doesn't
     /// draw in its style (code, tables, pictures…): a node.
     pub block: Option<Function>,
+    /// `track(element)`: each top-level block's box as it mounts, which
+    /// gives back what to call as it goes.
+    pub track: Option<Function>,
     /// `pictures = true`: a paragraph with pictures among its words goes to
     /// `block` (the app shows them).
     pub pictures: bool,
@@ -1598,6 +1601,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
     let link_menu: Option<Function> = table.get("link_menu")?;
     let chip: Option<Function> = table.get("chip")?;
     let block: Option<Function> = table.get("block")?;
+    let track: Option<Function> = table.get("track")?;
     let pictures = table.get::<Option<bool>>("pictures")?.unwrap_or(false);
     let find = match table.get::<Option<Table>>("find")? {
         Some(t) => Some(MarkdownFind {
@@ -1625,6 +1629,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
         "find",
         "block",
         "pictures",
+        "track",
     ] {
         table.raw_set(name, mlua::Value::Nil)?;
     }
@@ -1634,6 +1639,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
         && chip.is_none()
         && find.is_none()
         && block.is_none()
+        && track.is_none()
         && !web_only
     {
         return Ok(None);
@@ -1739,6 +1745,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
         chip,
         find,
         block,
+        track,
         pictures,
         web_only,
         made: RefCell::new(vec![None; 1 << RUN_KINDS]),

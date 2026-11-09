@@ -5364,7 +5364,8 @@ export type MarkdownViewProps = {
 	-- Open the context menu under the node, from its left edge (a tab's),
 	-- rather than at the pointer.
 	context_menu_below: Props_context_menu_below,
-	[number]: Text,
+	-- (A state's text is followed by its edits: a reply appended to.)
+	[number]: Text | State<string>,
 	literal: boolean?,
 	-- Single newlines break lines, as people's messages show them.
 	breaks: boolean?,
@@ -5427,6 +5428,10 @@ export type MarkdownViewProps = {
 	-- A paragraph with pictures among its words goes to `block` (the app
 	-- shows them); else they are links, by their alt or file name.
 	pictures: boolean?,
+	-- Each top-level block, in a box of its own, told as it mounts (its
+	-- element); what it gives back is called as the box goes (a reader
+	-- keeping its place by the block it is on).
+	track: ((block: Element) -> (() -> ())?)?,
 	find: {
 		query: () -> string,
 		current: () -> (number?, number?),

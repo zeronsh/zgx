@@ -638,3 +638,35 @@ fn a_block_the_style_doesnt_draw_is_the_hooks() {
         assert!(app.find(id).is_some(), "{id}:\n{}", app.tree());
     }
 }
+
+#[test]
+fn each_top_level_block_is_told_to_track_as_it_mounts_and_goes() {
+    let app = TestApp::inline(
+        r##"local reply = ui.state("reply", "One.\n\nTwo.")
+        local seen = ui.state("seen", 0)
+        return ui.column { w = 600,
+            ui.markdown_view { "{reply}", id = "md", w_full = true, style = {},
+                track = function(block)
+                    seen:set(seen:peek() + 1)
+                    return function() seen:set(seen:peek() - 1) end
+                end },
+        }"##,
+    );
+    app.frames(2);
+    let seen = |app: &TestApp| {
+        (app.host.states().into_iter())
+            .find(|(name, _)| name == "seen")
+            .map(|(_, v)| v.to_string())
+            .unwrap()
+    };
+    assert_eq!(seen(&app), "2");
+    app.host
+        .set_state("reply", Value::from("One.\n\nTwo.\n\nThree."))
+        .unwrap();
+    app.frames(2);
+    assert_eq!(seen(&app), "3");
+    app.host.set_state("reply", Value::from("One.")).unwrap();
+    app.frames(2);
+    assert_eq!(seen(&app), "1", "the boxes gone told so");
+    assert_eq!(app.error(), None);
+}

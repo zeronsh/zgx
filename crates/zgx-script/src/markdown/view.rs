@@ -235,6 +235,11 @@ pub(crate) trait Look {
     fn find(&self, block: usize) -> Option<(Rc<str>, usize)>;
     /// Whether the view has a find.
     fn finds(&self) -> bool;
+    /// Whether the look is told of each top-level block's box (`track`).
+    fn tracks(&self) -> bool;
+    /// A top-level block's box, mounted: told to the look, and what it gives
+    /// back to be dropped (telling it the box is gone) as the box goes.
+    fn track(&self, block: zgx::compose::NodeHandle) -> Option<Box<dyn std::any::Any>>;
     /// The top-level block holding the current match, laid out: brought
     /// into view as the find says.
     fn reveal(&self, block: zgx::compose::NodeHandle);
@@ -1031,9 +1036,11 @@ fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
                     if heading {
                         outer = look.part("pull", outer);
                     }
-                    revealed(outer, index, look.clone(), cell, cx)
+                    let view = revealed(outer, index, look.clone(), cell, cx);
+                    tracked(view, look, top, cx)
                 }
-                _ => view,
+                Some(look) => tracked(view, look, top, cx),
+                None => view,
             }
         },
     )
@@ -1045,6 +1052,21 @@ fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
     } else {
         list
     }
+}
+
+/// A top-level block's `view` in a box the look is told of (`Look::track`)
+/// as it mounts, and told it's gone as it goes: a reader keeping its place
+/// by the block it is on. Nested blocks, or a look tracking none: as is.
+fn tracked(view: View, look: &Rc<dyn Look>, top: bool, cx: &mut Context) -> View {
+    if !top || !look.tracks() {
+        return view;
+    }
+    let held: Rc<RefCell<Option<Box<dyn std::any::Any>>>> = Rc::default();
+    cx.retain(held.clone());
+    let look = look.clone();
+    div().w_full().min_w(0.).child(view).on_mount(move |node| {
+        *held.borrow_mut() = look.track(node.clone());
+    })
 }
 
 /// Top-level block `index`'s `view`, brought into view (`Look::reveal`) a
