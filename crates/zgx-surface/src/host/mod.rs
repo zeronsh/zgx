@@ -535,7 +535,9 @@ impl App {
                 }
             }
             InputEvent::KeyDown {
-                modifiers, repeat, ..
+                key,
+                modifiers,
+                repeat,
             } => {
                 let message = HostMessage::Key(KeyEvent {
                     code: event.key_code().unwrap_or_default().to_owned(),
@@ -548,6 +550,14 @@ impl App {
                 // unless the program holds the pointer: then they're its own.
                 if self.0.locked.get() || !modifiers.primary_shortcut() {
                     event.prevent_default();
+                    // A key prevented types nothing (the window makes text
+                    // only of keys no one took), so what it types is sent
+                    // here: a game's chat, a sign, a search field.
+                    if let Some(text) = typed(key, *modifiers) {
+                        self.0.out.input(message);
+                        self.0.out.input(HostMessage::Text(text));
+                        return;
+                    }
                 }
                 message
             }
@@ -892,6 +902,18 @@ fn button_of(button: PointerButton) -> Button {
         PointerButton::Other(4) => Button::Back,
         PointerButton::Other(5) => Button::Forward,
         PointerButton::Other(n) => Button::Other(n),
+    }
+}
+/// What a key types, held with `modifiers`: a character or a space, and
+/// nothing with Control, Alt or Command held (those are chords).
+fn typed(key: &zgx::input::Key, modifiers: zgx::input::Modifiers) -> Option<String> {
+    if modifiers.control || modifiers.alt || modifiers.meta {
+        return None;
+    }
+    match key {
+        zgx::input::Key::Character(text) if !text.chars().any(char::is_control) => Some(text.clone()),
+        zgx::input::Key::Space => Some(" ".to_owned()),
+        _ => None,
     }
 }
 fn modifiers_of(modifiers: zgx::input::Modifiers) -> Modifiers {
