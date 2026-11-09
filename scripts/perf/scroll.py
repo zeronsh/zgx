@@ -146,6 +146,10 @@ def workload(frames):
                 worst_main_frame=max(frames,key=app_work_ms,default=None))
 
 
+def material_matches(state, background):
+    return state.get('bench_effective_frost') is (background=='translucent')
+
+
 def verify_environment_text(text, overrides):
     return {item:bool(re.search(r'(?:^|\s)'+re.escape(item)+r'(?=\s|$)',text)) for item in overrides}
 
@@ -587,6 +591,7 @@ return ui.overlay {""")
                     state = request(process.pid,'state')['data']
                     (out/'fixture_state.json').write_text(json.dumps(state,indent=2)+'\n')
                     result['fixture_state'] = {k:v for k,v in state.items() if 'bench_' in k}
+                    if not material_matches(result['fixture_state'],background):raise RuntimeError('actual shell material differs from requested background')
                 if scene in ('idle','zeron-idle'):
                     # Never seed a reference with wheel state, even in warmup:
                     # gesture/coast grace periods can change the tick source.

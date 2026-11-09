@@ -364,3 +364,5 @@ and candidates. This deliberately exercises the latch, so LEAD_US can change
 its hold; the default off would bypass it. These marker numbers must not be
 compared with earlier minimum-host references taken with the grid off.
 Independent native brackets remain separate and contain no zgx pacing policy.
+
+The actual shell also verifies `bench_effective_frost` against the requested background. A setting or platform policy that keeps the effective material opaque invalidates a requested frosted cell rather than silently changing the condition.

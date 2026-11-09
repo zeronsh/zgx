@@ -104,6 +104,12 @@ class ScrollMetrics(unittest.TestCase):
         self.assertLessEqual(high-low,122)
         self.assertEqual(offset,0)
 
+    def test_material_condition_must_match_effective_ui_state(self):
+        self.assertTrue(scroll.material_matches({'bench_effective_frost':False},'opaque'))
+        self.assertFalse(scroll.material_matches({'bench_effective_frost':False},'translucent'))
+        self.assertFalse(scroll.material_matches({},'opaque'))
+        self.assertTrue(scroll.material_matches({'bench_effective_frost':True},'translucent'))
+
     def test_pacing_source_mismatch_invalidates_a_received_flag(self):
         m={'wait_ms':{'p99':0},'scroll_frames':20,'frame_source_counts':{'timer on the grid':20}}
         flags=['ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=1']
