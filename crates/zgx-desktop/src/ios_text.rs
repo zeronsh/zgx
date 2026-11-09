@@ -994,7 +994,9 @@ impl TextInput {
                         let _: () = msg_send![&*parent, bringSubviewToFront: &*self.view];
                     }
                     let _: Bool = msg_send![&*self.view, becomeFirstResponder];
+                    selection_display(&self.view, Some(true));
                 } else {
+                    selection_display(&self.view, Some(false));
                     let _: Bool = msg_send![&*self.view, resignFirstResponder];
                 }
             }
@@ -1022,6 +1024,9 @@ impl TextInput {
         // SAFETY: UIView's setter, on the main thread.
         unsafe {
             let _: () = msg_send![&*self.view, setFrame: frame];
+        }
+        if self.focused.get() {
+            selection_display(&self.view, None);
         }
     }
     /// Return was pressed since the last call.
@@ -1066,6 +1071,49 @@ impl TextInput {
                     sel!(selectionDidChange:),
                     || {},
                 ),
+            }
+        }
+        // The caret and handles where the editor's text now lies (a field
+        // scrolled to the caret, lines rewrapped): the display interaction
+        // keeps its range and places it again. Edits and moves reach it
+        // through the keyboard's own path or `tell`.
+        if self.focused.get() {
+            selection_display(&self.view, None);
+        }
+    }
+}
+/// UIKit's caret, selection and handles over the input view: its
+/// `UITextSelectionDisplayInteraction`, which `UITextInteraction` adds but
+/// leaves deactivated on a view of one's own (read in a reference app: a
+/// UITextField's is activated as it takes the keyboard; zgx's showed no
+/// caret). `Some(on)` (de)activates it, as the view takes or gives up the
+/// keyboard; `None` has it lay out again where the editor's text moved.
+fn selection_display(view: &AnyObject, activate: Option<bool>) {
+    // SAFETY: UIView's `interactions`, and the display interaction's
+    // `setActivated:` and `setNeedsSelectionUpdate` (iOS 17), on the main
+    // thread.
+    unsafe {
+        let Some(display) = AnyClass::get(c"UITextSelectionDisplayInteraction") else {
+            return;
+        };
+        let interactions: Retained<AnyObject> = msg_send![view, interactions];
+        let count: usize = msg_send![&*interactions, count];
+        for index in 0..count {
+            let interaction: *mut AnyObject = msg_send![&*interactions, objectAtIndex: index];
+            let Some(interaction) = interaction.as_ref() else {
+                continue;
+            };
+            let found: Bool = msg_send![interaction, isKindOfClass: display];
+            if !found.as_bool() {
+                continue;
+            }
+            match activate {
+                Some(on) => {
+                    let _: () = msg_send![interaction, setActivated: Bool::new(on)];
+                }
+                None => {
+                    let _: () = msg_send![interaction, setNeedsSelectionUpdate];
+                }
             }
         }
     }
