@@ -1,13 +1,14 @@
 //! `ZGX_PAINT_CHECK`: each frame the window shows, checked against the same
-//! scene drawn whole by a second renderer of its own, to catch a frame drawn
+//! scene drawn whole by a second renderer on the window's GPU context (its
+//! fonts and shaped text, so lines break alike), to catch a frame drawn
 //! from its damage (a copy, a patch, a partial repaint) that differs. The
 //! window's renderer is left as it is, so what goes wrong stays wrong for the
 //! next frame to carry, as it would on screen.
 //!
 //! `ZGX_PAINT_CHECK=1` writes to a folder of its own in the temporary
 //! directory; any other value names the folder. Each frame that differs logs
-//! a line, and the first `ZGX_PAINT_CHECK_SAVES` (20) save, under its frame
-//! number: what the window showed, the frame before it, the frame drawn whole
+//! a line; the first `ZGX_PAINT_CHECK_SAVES` (20) of those where a scroll
+//! moved, and the first 3 others, save under their frame number: what the window showed, the frame before it, the frame drawn whole
 //! (PPM), and its damage, scroll moves, copies and notes. A pixel differs
 //! when a channel does by more than `ZGX_PAINT_CHECK_LEVELS` (2), and a frame
 //! when more than `ZGX_PAINT_CHECK_PIXELS` (8) pixels do. Loops a layer plays
@@ -27,10 +28,15 @@ pub(crate) struct PaintCheck {
     /// Frames compared, and those that differed.
     compared: u64,
     differed: u64,
+    /// Frames left unchecked: pictures decoding, nothing read back.
+    decoding: u64,
+    unread: u64,
     /// `ZGX_PAINT_CHECK_SELFTEST=n`: frame `n`'s reference has a box cut out,
     /// so a check that works reports it.
     selftest: Option<u64>,
     saved: usize,
+    /// Frames saved that moved no scroll.
+    still: usize,
     saves: usize,
     levels: u8,
     pixels: usize,
@@ -41,6 +47,8 @@ struct Frame {
     whole: Vec<u8>,
     width: usize,
     report: String,
+    /// The frame moved a scroll view's content.
+    scrolled: bool,
     /// Device-pixel boxes left out (loops a layer plays).
     masks: Vec<(usize, usize, usize, usize)>,
 }
@@ -79,9 +87,12 @@ impl PaintCheck {
             frame: 0,
             compared: 0,
             differed: 0,
+            decoding: 0,
+            unread: 0,
             selftest: zgx::env::var_os("ZGX_PAINT_CHECK_SELFTEST")
                 .and_then(|value| value.to_str()?.parse().ok()),
             saved: 0,
+            still: 0,
             saves: env_number("ZGX_PAINT_CHECK_SAVES", 20),
             levels: env_number("ZGX_PAINT_CHECK_LEVELS", 2),
             pixels: env_number("ZGX_PAINT_CHECK_PIXELS", 8),
@@ -103,7 +114,7 @@ impl PaintCheck {
         let scale = renderer.scale_factor();
         let reference = match &mut self.reference {
             Some(reference) if reference.size() == (width, height) => reference,
-            _ => match Self::reference_for(width, height) {
+            _ => match Self::reference_for(renderer, width, height) {
                 Ok(reference) => self.reference.insert(reference),
                 Err(error) => {
                     eprintln!("ZGX_PAINT_CHECK: no reference renderer: {error}");
@@ -125,12 +136,15 @@ impl PaintCheck {
         // Pictures still decoding draw later in one than the other.
         if reference.images_decoded() {
             self.pending = None;
+            self.decoding += 1;
             return;
         }
         let Some(mut whole) = Self::pixels(reference) else {
+            self.unread += 1;
             return;
         };
-        if self.selftest == Some(self.frame) {
+        if self.selftest.is_some_and(|at| self.frame >= at) {
+            self.selftest = None;
             let row = width as usize * 4;
             for line in whole.chunks_mut(row).skip(10).take(20) {
                 for byte in line.iter_mut().skip(40).take(80) {
@@ -178,6 +192,7 @@ impl PaintCheck {
             whole,
             width: width as usize,
             report,
+            scrolled: !moves.is_empty(),
             masks,
         });
         // Elsewhere the window's frame is its target, drawn already.
@@ -190,14 +205,18 @@ impl PaintCheck {
     /// After the window's renderer presented: its frame, compared.
     #[cfg(target_os = "macos")]
     pub(crate) fn presented(&mut self, renderer: &GpuRenderer) {
-        if let Some((_, _, shown)) = renderer.debug_bare_pixels() {
-            self.shown(shown);
+        match renderer.debug_bare_pixels() {
+            Some((_, _, shown)) => self.shown(shown),
+            None => self.unread += 1,
         }
     }
 
     fn shown(&mut self, shown: Vec<u8>) {
         let Some(frame) = self.pending.take() else {
             self.before = Some(shown);
+            if self.frame.is_multiple_of(120) {
+                self.progress();
+            }
             return;
         };
         let masked = |index: usize| {
@@ -208,6 +227,9 @@ impl PaintCheck {
                 .any(|&(x0, y0, x1, y1)| x >= x0 && x < x1 && y >= y0 && y < y1)
         };
         self.compared += 1;
+        if self.compared == 1 || self.compared.is_multiple_of(120) {
+            self.progress();
+        }
         let (mut count, mut most) = (0, 0);
         let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
         for (index, (a, b)) in shown.chunks(4).zip(frame.whole.chunks(4)).enumerate() {
@@ -229,10 +251,24 @@ impl PaintCheck {
             let n = self.frame;
             eprintln!(
                 "ZGX_PAINT_CHECK frame {n}: {count} pixels differ from the frame drawn whole, in \
-                 ({x0},{y0})..({x1},{y1}) device pixels, by up to {most}"
+                 ({x0},{y0})..({x1},{y1}) device pixels, by up to {most}{}",
+                if frame.scrolled {
+                    ", as a scroll moved"
+                } else {
+                    ""
+                }
             );
-            if self.saved < self.saves {
-                self.saved += 1;
+            // Saved: frames whose scroll moved, and a few others (`still`),
+            // so a frame wrong at rest doesn't take every save.
+            let room = match frame.scrolled {
+                true => self.saved < self.saves,
+                false => self.still < 3,
+            };
+            if room {
+                match frame.scrolled {
+                    true => self.saved += 1,
+                    false => self.still += 1,
+                }
                 let height = shown.len() / 4 / frame.width.max(1);
                 let ppm = |name: &str, pixels: &[u8]| {
                     let mut out = format!("P6\n{} {height}\n255\n", frame.width).into_bytes();
@@ -269,16 +305,30 @@ impl PaintCheck {
         }
     }
 
+    /// A renderer on `window`'s context: its fonts, its fallback and the text
+    /// it prepared, so lines shape and break as the window's do.
     #[cfg(target_os = "macos")]
-    fn reference_for(width: u32, height: u32) -> Result<GpuRenderer, zgx_gpu::GpuError> {
-        let mut reference =
-            GpuRenderer::debug_for_layer(objc2_quartz_core::CALayer::new(), width, height)?;
+    fn reference_for(
+        window: &GpuRenderer,
+        width: u32,
+        height: u32,
+    ) -> Result<GpuRenderer, zgx_gpu::GpuError> {
+        let mut reference = GpuRenderer::debug_for_layer_with_context(
+            objc2_quartz_core::CALayer::new(),
+            width,
+            height,
+            &window.context(),
+        )?;
         reference.set_paint_reference(true);
         Ok(reference)
     }
     #[cfg(not(target_os = "macos"))]
-    fn reference_for(width: u32, height: u32) -> Result<GpuRenderer, zgx_gpu::GpuError> {
-        let mut reference = GpuRenderer::new(width, height)?;
+    fn reference_for(
+        window: &GpuRenderer,
+        width: u32,
+        height: u32,
+    ) -> Result<GpuRenderer, zgx_gpu::GpuError> {
+        let mut reference = GpuRenderer::new_with_context(width, height, &window.context())?;
         reference.set_paint_reference(true);
         Ok(reference)
     }
@@ -296,11 +346,17 @@ impl PaintCheck {
         }
     }
 }
+impl PaintCheck {
+    fn progress(&self) {
+        eprintln!(
+            "ZGX_PAINT_CHECK: {} of {} frames compared, {} differed ({} left while pictures \
+             decode, {} unread)",
+            self.compared, self.frame, self.differed, self.decoding, self.unread
+        );
+    }
+}
 impl Drop for PaintCheck {
     fn drop(&mut self) {
-        eprintln!(
-            "ZGX_PAINT_CHECK: {} of {} frames shown compared, {} differed",
-            self.compared, self.frame, self.differed
-        );
+        self.progress();
     }
 }

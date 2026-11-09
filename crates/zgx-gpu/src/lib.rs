@@ -15097,6 +15097,28 @@ impl GpuRenderer {
     pub fn debug_warms(&self) -> u64 {
         self.warms
     }
+    /// `debug_for_layer` on `context`: shaping with its fonts and text.
+    #[cfg(target_os = "macos")]
+    #[doc(hidden)]
+    pub fn debug_for_layer_with_context(
+        host: objc2::rc::Retained<objc2_quartz_core::CALayer>,
+        width: u32,
+        height: u32,
+        context: &GpuContext,
+    ) -> Result<Self, GpuError> {
+        let mut renderer = Self::create(None, width, height, context)?;
+        if renderer.info.backend != wgpu::Backend::Metal {
+            return Err(GpuError(
+                "layer presentation needs the Metal backend".into(),
+            ));
+        }
+        renderer.layer_present = Some(LayerPresent {
+            host: Some(host),
+            plain_only: true,
+            ..Default::default()
+        });
+        Ok(renderer)
+    }
     /// Test hook: a renderer presenting through surfaces of its own, as a
     /// window's does, into `host` (a layer of the caller's), without a
     /// window: `width` by `height` pixels.
