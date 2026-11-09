@@ -34,8 +34,9 @@ pub(crate) struct ViewOptions {
     pub veil: Option<VeilOptions>,
     /// The veil kept by its key, once the view is made.
     pub(crate) veil_state: Option<Rc<RefCell<Veil>>>,
-    /// The top-level block being built, for the veil's places.
-    pub(crate) veil_at: Option<usize>,
+    /// The top-level block being built: the veil's places and a find's
+    /// numbering count from it.
+    pub(crate) block_at: Option<usize>,
     /// `attached`: the names of what the text carries; words naming one
     /// (`(attachment: <name>)`) are a run of their own the look may draw
     /// as its chip.
@@ -58,8 +59,27 @@ struct Fading(Rc<RefCell<Veil>>, (usize, u32));
 impl ViewOptions {
     /// The veil's place for the top-level block's `n`th paragraph.
     fn fading(&self, n: u32) -> Option<Fading> {
-        Some(Fading(self.veil_state.clone()?, (self.veil_at?, n)))
+        Some(Fading(self.veil_state.clone()?, (self.block_at?, n)))
     }
+    /// How a paragraph of the block being built, its `n`th, is drawn: its
+    /// veil, what the text carries, and a find's marks.
+    fn para(&self, n: u32) -> Para {
+        Para {
+            fading: self.fading(n),
+            attached: self.attached.clone(),
+            find_at: self.block_at.filter(|_| self.look.is_some()),
+        }
+    }
+}
+
+/// How a paragraph is drawn beyond its runs: fading in (its place in the
+/// veil), the names of what the text carries, and the top-level block a
+/// find counts its matches in.
+#[derive(Clone, Default)]
+struct Para {
+    fading: Option<Fading>,
+    attached: Option<Rc<std::collections::HashSet<String>>>,
+    find_at: Option<usize>,
 }
 
 /// A run of a paragraph, as a look is asked to draw it: its text, its
@@ -76,6 +96,8 @@ pub(crate) struct Run<'a> {
     /// Words naming an item the text carries (`(attachment: <name>)`, where
     /// the view's `attached` holds the name): the name.
     pub attached: Option<&'a str>,
+    /// A find's match it is (1), the current one (2), or none (0).
+    pub mark: u8,
 }
 
 /// What draws a markdown view's prose where the script gave a look
@@ -88,6 +110,15 @@ pub(crate) trait Look {
     /// item carried, named), as one, whole: a chip is never cut by a fade.
     /// None for a run drawn as words.
     fn chip(&self, run: &Run) -> Option<zgx::compose::TextSpan>;
+    /// A find over the text, if the view has one: its query as typed and
+    /// the current match's place among top-level block `block`'s (from 1;
+    /// 0 when it is elsewhere). Tracked. None with no query.
+    fn find(&self, block: usize) -> Option<(Rc<str>, usize)>;
+    /// Whether the view has a find.
+    fn finds(&self) -> bool;
+    /// The top-level block holding the current match, laid out: brought
+    /// into view as the find says.
+    fn reveal(&self, block: zgx::compose::NodeHandle);
     /// A paragraph (its runs' rich text) with the style's own options.
     fn paragraph(&self, view: View) -> View;
     /// The top-level blocks' list with the style's room between them (the
@@ -155,7 +186,7 @@ impl<'a> RunFields<'a> {
 /// A run of text as a span: bold, italic, struck, code or a link; drawn
 /// by the look, if there is one.
 fn span(run: &Value, bold: bool, look: Option<&dyn Look>) -> zgx::compose::TextSpan {
-    span_of(run, None, bold, look)
+    span_of(run, None, bold, look, 0)
 }
 /// A run's text: its words (a picture's alt).
 fn run_text(run: &Value) -> Rc<str> {
@@ -170,6 +201,7 @@ fn span_of(
     text: Option<&str>,
     bold: bool,
     look: Option<&dyn Look>,
+    mark: u8,
 ) -> zgx::compose::TextSpan {
     let fields = RunFields::of(run);
     if let Some(look) = look {
@@ -191,6 +223,7 @@ fn span_of(
             code: fields.code,
             link,
             attached: None,
+            mark,
         });
     }
     let mut out = zgx::compose::text_span(match text {
@@ -306,51 +339,113 @@ fn pieces<'a>(
     out
 }
 
-/// A paragraph's runs as spans: those the look draws as chips whole, and,
-/// with a veil, the rest cut where a fading chunk starts and ends, its
-/// pieces fading in.
+/// Where `q` (lower case, not empty) falls in `words`, case aside (ASCII's,
+/// as a script's `string.lower`): each match's bytes, not overlapping.
+fn occurrences(words: &str, q: &str) -> Vec<(usize, usize)> {
+    let hay = words.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(i) = hay[at..].find(q) {
+        out.push((at + i, at + i + q.len()));
+        at += i + q.len();
+    }
+    out
+}
+
+/// A paragraph's runs as spans: those the look draws as chips whole, and
+/// the rest cut where a find's match starts and ends (each washed), or,
+/// with no match, where a fading chunk of the veil does, its pieces fading
+/// in.
 fn spans(
     runs: &[Value],
     bold: bool,
     look: Option<&dyn Look>,
-    fading: Option<&Fading>,
-    attached: Option<&std::collections::HashSet<String>>,
+    para: &Para,
 ) -> Vec<zgx::compose::TextSpan> {
-    if fading.is_none() && attached.is_none() {
+    // A find's query and the current match's place in this block.
+    let find = para
+        .find_at
+        .and_then(|at| look?.find(at))
+        .map(|(q, k)| (q.to_ascii_lowercase(), k));
+    if para.fading.is_none() && para.attached.is_none() && find.is_none() {
         return runs
             .iter()
             .map(
-                |r| match look.and_then(|look| chip_of(r, None, bold, look)) {
+                |r| match look.and_then(|look| chip_of(r, None, bold, look, 0)) {
                     Some(chip) => chip,
                     None => span(r, bold, look),
                 },
             )
             .collect();
     }
-    let pieces = pieces(runs, attached);
-    let chunks: Vec<Chunk> = match fading {
-        Some(Fading(veil, at)) => {
-            let words: String = pieces.iter().map(|p| &*p.text).collect();
-            veil.borrow_mut()
-                .chunks(*at, &words, zgx::compose::fade_now())
-        }
+    let pieces = pieces(runs, para.attached.as_deref());
+    let words: String = pieces.iter().map(|p| &*p.text).collect();
+    let chunks: Vec<Chunk> = match &para.fading {
+        Some(Fading(veil, at)) => veil
+            .borrow_mut()
+            .chunks(*at, &words, zgx::compose::fade_now()),
         None => Vec::new(),
     };
+    // (A paragraph's matches are numbered on from its block's first: a
+    // top-level paragraph is its block.)
+    let (marks, current) = match &find {
+        Some((q, k)) => (occurrences(&words, q), *k),
+        None => (Vec::new(), 0),
+    };
+    let mark_of = |i: usize| if i + 1 == current { 2 } else { 1 };
     let mut out = Vec::with_capacity(pieces.len());
     let mut pos = 0;
     for p in &pieces {
         let (from, to) = (pos, pos + p.text.len());
         pos = to;
-        if let Some(chip) = look.and_then(|look| chip_of(p.run, Some(p), bold, look)) {
+        if p.run.field("img").is_some() {
+            out.push(span_of(p.run, Some(&p.text), bold, look, 0));
+            continue;
+        }
+        // A chip is one piece, one wash: never cut by a fade or a find; a
+        // match in it washes the whole chip.
+        let washed = (marks.iter().enumerate())
+            .rfind(|(_, m)| m.0 < to && m.1 > from)
+            .map_or(0, |(i, _)| mark_of(i));
+        if let Some(chip) = look.and_then(|look| chip_of(p.run, Some(p), bold, look, washed)) {
             out.push(chip);
             continue;
         }
-        if chunks.is_empty() || p.run.field("img").is_some() {
-            out.push(span_of(p.run, Some(&p.text), bold, look));
+        if !marks.is_empty() {
+            let mut at = from;
+            for (i, m) in marks.iter().enumerate() {
+                let (s, e) = (m.0.max(from), m.1.min(to));
+                if s < e {
+                    if s > at {
+                        out.push(span_of(
+                            p.run,
+                            Some(&p.text[at - from..s - from]),
+                            bold,
+                            look,
+                            0,
+                        ));
+                    }
+                    out.push(span_of(
+                        p.run,
+                        Some(&p.text[s - from..e - from]),
+                        bold,
+                        look,
+                        mark_of(i),
+                    ));
+                    at = e;
+                }
+            }
+            if at < to {
+                out.push(span_of(p.run, Some(&p.text[at - from..]), bold, look, 0));
+            }
+            continue;
+        }
+        if chunks.is_empty() {
+            out.push(span_of(p.run, Some(&p.text), bold, look, 0));
             continue;
         }
         for (s, e, chunk) in super::veil::pieces(&chunks, from, to) {
-            let piece = span_of(p.run, Some(&p.text[s - from..e - from]), bold, look);
+            let piece = span_of(p.run, Some(&p.text[s - from..e - from]), bold, look, 0);
             out.push(match chunk {
                 Some(c) => piece.fade_in(c.fade()),
                 None => piece,
@@ -367,6 +462,7 @@ fn chip_of(
     piece: Option<&Piece>,
     bold: bool,
     look: &dyn Look,
+    mark: u8,
 ) -> Option<zgx::compose::TextSpan> {
     let attached = piece.and_then(|p| p.attached.as_deref());
     let link = match run.field("a") {
@@ -391,6 +487,7 @@ fn chip_of(
         code: fields.code,
         link: if attached.is_some() { None } else { link },
         attached,
+        mark,
     })
 }
 
@@ -411,7 +508,13 @@ fn faded_runs(
     fading: Option<&Fading>,
 ) -> zgx::compose::RichTextView {
     let spans = list
-        .map(|l| spans(l.list(), bold, look, fading, None))
+        .map(|l| {
+            let para = Para {
+                fading: fading.cloned(),
+                ..Para::default()
+            };
+            spans(l.list(), bold, look, &para)
+        })
         .unwrap_or_default();
     zgx::compose::rich_text().children(spans).text_wrap(true)
 }
@@ -591,13 +694,12 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
             // read (a chip's answer, an ink following a setting) makes them
             // again, the paragraph kept.
             let runs: View = match &options.look {
-                Some(_) => faded_runs_with(
+                Some(_) => para_runs(
                     cx.runtime().signal(b.clone()),
                     "s",
                     false,
                     options.look.clone(),
-                    options.fading(1),
-                    options.attached.clone(),
+                    options.para(1),
                 ),
                 None => faded_runs(b.field("s"), false, None, None).into(),
             };
@@ -702,24 +804,70 @@ fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
                 Place::Whole(i, _) => (i, false),
             };
             let b = reading.with_untracked(|l| l.list().get(index).cloned().unwrap_or(Value::Nil));
-            // (The veil's places count from the top-level blocks.)
+            // (The veil's places and a find's numbers count from the
+            // top-level blocks.)
             let mut options = options.clone();
-            options.veil_at = top.then_some(index);
+            options.block_at = top.then_some(index);
             let options = &options;
-            if !live {
+            let (view, cell) = if !live {
                 if let Some(slot) = building.borrow_mut().get_mut(index) {
                     *slot = None;
                 }
-                return static_block(&b, options, cx);
+                (static_block(&b, options, cx), None)
+            } else {
+                let cell = cx.runtime().signal(b);
+                if let Some(slot) = building.borrow_mut().get_mut(index) {
+                    *slot = Some(cell.clone());
+                }
+                (block(cell.clone(), options, cx), Some(cell))
+            };
+            match &options.look {
+                Some(look) if top && look.finds() => revealed(view, index, look.clone(), cell, cx),
+                _ => view,
             }
-            let cell = cx.runtime().signal(b);
-            if let Some(slot) = building.borrow_mut().get_mut(index) {
-                *slot = Some(cell.clone());
-            }
-            block(cell, options, cx)
         },
     )
     .w_full()
+}
+
+/// Top-level block `index`'s `view`, brought into view (`Look::reveal`) a
+/// tick after it is laid out holding a find's current match: as the match
+/// comes to it, the query changes while it has it, or (being written,
+/// `cell`) it grows.
+fn revealed(
+    view: View,
+    index: usize,
+    look: Rc<dyn Look>,
+    cell: Option<Signal<Value>>,
+    cx: &mut Context,
+) -> View {
+    let handle: Rc<RefCell<Option<zgx::compose::NodeHandle>>> = Rc::default();
+    let (mounted, held, tasks) = (handle.clone(), handle, cx.tasks());
+    let mut last: Option<(Rc<str>, usize)> = None;
+    cx.retain(cx.runtime().effect(move || {
+        let now = look.find(index);
+        let grew = cell.as_ref().is_some_and(|c| {
+            c.with(|_| ());
+            true
+        });
+        if now == last && !grew {
+            return;
+        }
+        last = now.clone();
+        if !now.is_some_and(|(_, k)| k > 0) {
+            return;
+        }
+        let (look, held) = (look.clone(), held.clone());
+        tasks.spawn(async move {
+            zgx::timer::sleep(Duration::ZERO).await;
+            if let Some(node) = held.borrow().clone() {
+                look.reveal(node);
+            }
+        });
+    }));
+    view.on_mount(move |node| {
+        *mounted.borrow_mut() = Some(node.clone());
+    })
 }
 
 /// The one block of the list of blocks `list` holds, following it: an
@@ -850,29 +998,25 @@ fn faded_runs_of(
     look: Option<Rc<dyn Look>>,
     fading: Option<Fading>,
 ) -> View {
-    faded_runs_with(cell, field, bold, look, fading, None)
+    let para = Para {
+        fading,
+        ..Para::default()
+    };
+    para_runs(cell, field, bold, look, para)
 }
-/// `faded_runs_of`, with the names of what the text carries.
-fn faded_runs_with(
+/// A paragraph of the runs field `field` of `cell` holds, drawn as `para`
+/// says, following it (and what drawing it reads: a find, a chip's answer).
+fn para_runs(
     cell: Signal<Value>,
     field: &'static str,
     bold: bool,
     look: Option<Rc<dyn Look>>,
-    fading: Option<Fading>,
-    attached: Option<Rc<std::collections::HashSet<String>>>,
+    para: Para,
 ) -> View {
     zgx::compose::rich_text_signal(move || {
         cell.with(|b| {
             b.field(field)
-                .map(|runs| {
-                    spans(
-                        runs.list(),
-                        bold,
-                        look.as_deref(),
-                        fading.as_ref(),
-                        attached.as_deref(),
-                    )
-                })
+                .map(|runs| spans(runs.list(), bold, look.as_deref(), &para))
                 .unwrap_or_default()
         })
     })
@@ -998,14 +1142,7 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
         "img" => zgx::compose::text_signal(move || cell.with(|b| text_of(b.field("alt"))))
             .text_color(themed("text.secondary")),
         _ => {
-            let runs = faded_runs_with(
-                cell,
-                "s",
-                false,
-                options.look.clone(),
-                options.fading(1),
-                options.attached.clone(),
-            );
+            let runs = para_runs(cell, "s", false, options.look.clone(), options.para(1));
             match &options.look {
                 Some(look) => look.paragraph(runs),
                 None => runs,

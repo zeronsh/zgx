@@ -8391,7 +8391,9 @@ impl crate::markdown::view::Look for ScriptLook {
             | usize::from(run.em) << 1
             | usize::from(run.strike) << 2
             | usize::from(run.code) << 3
-            | usize::from(run.link.is_some()) << 4;
+            | usize::from(run.link.is_some()) << 4
+            | usize::from(run.mark == 1) << 5
+            | usize::from(run.mark == 2) << 6;
         let mut span = match crate::node::look_span(&vm.lua, look, bits) {
             Ok(span) => span,
             Err(error) => {
@@ -8450,6 +8452,11 @@ impl crate::markdown::view::Look for ScriptLook {
             merged.raw_set("color", mlua::Value::Nil)?;
             chip.for_each::<mlua::Value, mlua::Value>(|k, v| merged.raw_set(k, v))?;
             merged.raw_set("link", mlua::Value::Nil)?;
+            // A find's match washes the whole chip.
+            if run.mark > 0 {
+                let mark = &look.runs[4 + usize::from(run.mark)];
+                mark.for_each::<mlua::Value, mlua::Value>(|k, v| merged.raw_set(k, v))?;
+            }
             if merged.raw_get::<mlua::Value>(1)?.is_nil() {
                 merged.raw_set(1, run.text)?;
             }
@@ -8471,6 +8478,46 @@ impl crate::markdown::view::Look for ScriptLook {
         match run.link.filter(|_| linked && !look.web_only) {
             Some(target) => Some(self.linked(out, &span, target)),
             None => Some(out),
+        }
+    }
+    fn find(&self, block: usize) -> Option<(Rc<str>, usize)> {
+        let (vm, find) = (&self.vm, self.look.find.as_ref()?);
+        let query = match vm.call::<Option<String>>(&find.query, ()) {
+            Ok(query) => query.unwrap_or_default(),
+            Err(error) => {
+                vm.report(error);
+                return None;
+            }
+        };
+        if query.is_empty() {
+            return None;
+        }
+        let current = match vm.call::<(Option<f64>, Option<f64>)>(&find.current, ()) {
+            Ok((Some(at), Some(k))) if at as usize == block + 1 => k as usize,
+            Ok(_) => 0,
+            Err(error) => {
+                vm.report(error);
+                0
+            }
+        };
+        Some((query.into(), current))
+    }
+    fn finds(&self) -> bool {
+        self.look.find.is_some()
+    }
+    fn reveal(&self, block: zgx::compose::NodeHandle) {
+        let Some(reveal) = self.look.find.as_ref().and_then(|f| f.reveal.clone()) else {
+            return;
+        };
+        let element = Element::new(&self.low.runtime, None, Rc::from([]), "div");
+        element.attach(block);
+        let vm = &self.vm;
+        if let Err(error) = vm
+            .runtime
+            .clone()
+            .batch(|| vm.call::<()>(&reveal, crate::element::ElementUd(element)))
+        {
+            vm.report(error);
         }
     }
     fn paragraph(&self, view: View) -> View {
