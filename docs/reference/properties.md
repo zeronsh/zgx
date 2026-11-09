@@ -19,7 +19,7 @@ The types: `Color` is `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `"rgb(…)"`, `"rgba
 | Property | Type | Default | |
 | --- | --- | --- | --- |
 | `w`, `h` | `Length` | its content's size | border-box: the border and padding are inside |
-| `size` | `Pair` | | `w` and `h` at once |
+| `size` | `Pair` | | `w` and `h` at once, on a box (`div`, `column`, `row`, `grid`, `overlay`, `scroll`, `presence`); a number is both. It does nothing on anything else (`zgx lint`: `size-inert`), and on `ui.split` it is the state its divider follows |
 | `min_w`, `max_w`, `min_h`, `max_h` | `Length` | | also [size math](#size-math) and [content sizes](#content-sizes) |
 | `w_full`, `h_full` | `boolean` | `false` | `w = "100%"`, `h = "100%"` |
 | `aspect` | `number` | | width over height; supplies the missing side |

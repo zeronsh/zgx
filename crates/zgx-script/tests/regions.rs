@@ -261,6 +261,82 @@ fn a_presence_box_follows_its_room_as_a_one_cell_grid_does() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// `size` is a box's width and height at once, a number or a pair, literal or
+/// followed, on a presence too (which it makes a box its content fills). On
+/// what is no box it does nothing, as it did everywhere.
+#[test]
+fn size_sizes_a_box_and_nothing_else() {
+    for element in ["ui.div", "ui.column", "ui.row", "ui.overlay", "ui.scroll"] {
+        for (size, width, height) in [("50", 50., 50.), ("{ 120, 60 }", 120., 60.)] {
+            let mut h = Harness::inline(&format!(
+                r#"return ui.column {{ w_full = true, h_full = true, items = "start",
+                    {element} {{ id = "box", size = {size} }},
+                }}"#
+            ));
+            h.run_frames(2);
+            let rect = h.rect("box");
+            assert_eq!(
+                (rect.width, rect.height),
+                (width, height),
+                "{element}: {size}"
+            );
+        }
+    }
+    for (size, width, height) in [("50", 50., 50.), ("{ 120, 60 }", 120., 60.)] {
+        let mut h = Harness::inline(&format!(
+            r#"local tab = ui.state("tab", "a")
+            return ui.column {{ w_full = true, h_full = true, items = "start",
+                ui.presence(tab, function()
+                    return ui.div {{ id = "content" }}
+                end, {{ size = {size} }}),
+            }}"#
+        ));
+        h.run_frames(2);
+        assert_eq!(
+            h.rect("content"),
+            Rect::new(0., 0., width, height),
+            "{size}"
+        );
+    }
+    let mut h = Harness::inline(
+        r#"local size = ui.state("size", { 120, 60 })
+        return ui.column { w_full = true, h_full = true, items = "start",
+            ui.div { id = "box", size = size },
+            ui.button { id = "grow", w = 4, h = 4, on_click = ui.set(size, { 200, 100 }) },
+        }"#,
+    );
+    h.run_frames(2);
+    assert_eq!(h.rect("box"), Rect::new(0., 0., 120., 60.));
+    h.click("grow");
+    h.run_frames(2);
+    assert_eq!(h.rect("box"), Rect::new(0., 0., 200., 100.));
+    // On a text and a button it is as if it weren't there, and so is a word
+    // a component's `size = "sm"` hands along to the box it builds.
+    for (with, without) in [
+        (
+            r#"ui.div { id = "it", size = "sm", w = 40, h = 20 }"#,
+            r#"ui.div { id = "it", w = 40, h = 20 }"#,
+        ),
+        (
+            r#"ui.text { id = "it", "words", size = 14 }"#,
+            r#"ui.text { id = "it", "words" }"#,
+        ),
+        (
+            r#"ui.button { id = "it", "Send", size = 24 }"#,
+            r#"ui.button { id = "it", "Send" }"#,
+        ),
+    ] {
+        let rects = [with, without].map(|element| {
+            let mut h = Harness::inline(&format!(
+                r#"return ui.column {{ w_full = true, h_full = true, items = "start", {element} }}"#
+            ));
+            h.run_frames(2);
+            h.rect("it")
+        });
+        assert_eq!(rects[0], rects[1], "{with}");
+    }
+}
+
 /// `mode = "wait"`: while the old content leaves, nothing takes its place
 /// and it stays where it was.
 #[test]

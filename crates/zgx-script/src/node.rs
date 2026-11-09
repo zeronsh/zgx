@@ -1327,6 +1327,19 @@ impl Kind {
     }
     /// A component of the library holding children (a disclosure's content,
     /// an accordion's sections), which it lowers itself.
+    /// Whether `size` is its width and height: a box's, not the field of a
+    /// widget or the leaf a script may mean a type size on (`fill_from`).
+    fn takes_size(&self) -> bool {
+        matches!(
+            self,
+            Kind::Column
+                | Kind::Row
+                | Kind::Div
+                | Kind::Overlay
+                | Kind::Scroll { .. }
+                | Kind::Presence { .. }
+        )
+    }
     pub(crate) fn library_takes_children(&self) -> bool {
         #[cfg(feature = "components")]
         if let Kind::Library(library) = self {
@@ -4458,6 +4471,14 @@ fn fill_from(
                 let range = (node.a11y.get_or_insert_default().range).get_or_insert_default();
                 range.value_text = Some(source(lua, Ty::Str, "value_text", value)?);
             }
+            // A box's width and height at once. On a split it is the state
+            // its divider follows, and on anything else it does nothing
+            // (`size-inert`), as it did everywhere: those scripts go on working.
+            // So does a box a component hands its own `size = "sm"` along to.
+            "size" if node.kind.takes_size() && !matches!(value, mlua::Value::String(_)) => {
+                let source = source_linted(lua, Prop::Size.ty(), "size", value, lint)?;
+                node.props.push((Prop::Size, source));
+            }
             name if WIDGET_FIELDS.contains(&name) => {}
             name => {
                 let Some(prop) = Prop::parse(name) else {
@@ -7140,8 +7161,9 @@ fn scroll_padding(lua: &Lua, value: mlua::Value) -> mlua::Result<zgx::scene::Ins
 mod tests {
     /// The constructors' own fields are matched before style properties
     /// (`fill_from`), so a name in both is the constructor's: `size` is the
-    /// one. A new field named like a style property fails here until it is
-    /// given a meaning on purpose.
+    /// one, a style property on a box alone (`Kind::takes_size`). A new field
+    /// named like a style property fails here until it is given a meaning on
+    /// purpose.
     #[test]
     fn constructor_fields_named_like_style_properties_keep_their_meaning() {
         use super::{Kind, LATE_FIELDS, Node, Prop, WIDGET_FIELDS, fill_from};
@@ -7161,13 +7183,18 @@ mod tests {
             .load("return { size = { 10, 20 }, w = 30 }")
             .eval()
             .unwrap();
-        let mut node = Node::new(Default::default(), Kind::Div);
-        fill_from(&lua, &mut node, &table, None, crate::DesignLint::Off).unwrap();
-        let props: Vec<_> = node.props.iter().map(|(prop, _)| prop.name()).collect();
+        let filled = |kind| {
+            let mut node = Node::new(Default::default(), kind);
+            fill_from(&lua, &mut node, &table, None, crate::DesignLint::Off).unwrap();
+            let mut props: Vec<_> = node.props.iter().map(|(prop, _)| prop.name()).collect();
+            props.sort();
+            props
+        };
+        assert_eq!(filled(Kind::Div), ["size", "w"], "size is a box's");
         assert_eq!(
-            props,
+            filled(Kind::Button),
             ["w"],
-            "size is the constructor's, not a style property"
+            "size is no style property on anything else"
         );
     }
 

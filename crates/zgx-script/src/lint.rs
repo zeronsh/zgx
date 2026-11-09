@@ -182,6 +182,10 @@ pub const RULES: &[(&str, &str)] = &[
         "an element's size computed from ui.window.size rather than laid out",
     ),
     (
+        "size-inert",
+        "`size` on an element that isn't a box: it does nothing",
+    ),
+    (
         "unknown-token",
         "a \"$…\" token nothing declares, or of the wrong kind for its field",
     ),
@@ -780,6 +784,26 @@ struct Frame {
     /// For a function: its parameters.
     params: Vec<String>,
 }
+
+/// Elements `size` does nothing on (`Kind::takes_size`): a box's width and
+/// height at once, on a split the state its divider follows.
+const SIZE_INERT: &[&str] = &[
+    "ui.text",
+    "ui.rich",
+    "ui.markdown_view",
+    "ui.button",
+    "ui.input",
+    "ui.textarea",
+    "ui.checkbox",
+    "ui.image",
+    "ui.canvas",
+    "ui.progress",
+    "ui.slider",
+    "ui.terminal",
+    "ui.webview",
+    "ui.glass",
+    "ui.menu_item",
+];
 
 /// Element fields layout sizes and places by itself.
 const LAID_OUT: &[&str] = &[
@@ -1645,6 +1669,27 @@ impl Linter<'_> {
                 format!("`ui.window` has no option `{key}`: it takes `{known}`."),
             );
         }
+        // `ui.text { size = 14 }`: a box's size, on what has none to set.
+        if let Some(frame) = stack.last()
+            && frame.open == Open::Brace
+            && let Some(callee) = frame.callee.as_deref()
+            && SIZE_INERT.contains(&callee)
+            && self.is(at, "size")
+            && self.is(at + 1, "=")
+        {
+            let instead = match callee {
+                "ui.text" | "ui.rich" | "ui.markdown_view" => "`text_size` for its type's size",
+                _ => "`w` and `h` for its width and height",
+            };
+            self.report(
+                at,
+                "size-inert",
+                format!(
+                    "`size` does nothing on `{callee}`: it is a box's width and height at once. \
+                     Use {instead}."
+                ),
+            );
+        }
         // `w = function() … ui.window.size … end`: a size from the window's.
         if self.is(at, "ui")
             && self.is(at + 1, ".")
@@ -2192,6 +2237,25 @@ ui.div { w = "30%", grow = 1 }
                 (2, "window-size-layout".to_string()),
                 (3, "window-size-layout".to_string())
             ]
+        );
+    }
+
+    #[test]
+    fn a_size_on_what_is_no_box_is_reported() {
+        let source = r##"
+ui.text { "a", size = 14 }
+ui.button { "b", size = 24 }
+ui.div { size = 50 }
+ui.column { size = { 120, 60 } }
+ui.presence(tab, build, { size = 50 })
+ui.split { size = width }
+Icon { name = "x", size = 16 }
+ui.text { "c", ui.window.size }
+ui.text { "d", text_size = 14 }
+"##;
+        assert_eq!(
+            rules(source),
+            [(2, "size-inert".to_string()), (3, "size-inert".to_string())]
         );
     }
 
