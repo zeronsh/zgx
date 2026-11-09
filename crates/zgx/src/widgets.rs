@@ -1725,6 +1725,10 @@ pub struct WeakUi {
     storage: Weak<UiStorage>,
 }
 impl WeakUi {
+    /// Whether `other` is the same `Ui`'s (a window's, as nodes are).
+    pub(crate) fn same(&self, other: &WeakUi) -> bool {
+        Weak::ptr_eq(&self.storage, &other.storage)
+    }
     /// The `Ui`, if it still exists.
     pub fn upgrade(&self) -> Option<Ui> {
         self.storage.upgrade().map(Ui::from_storage)

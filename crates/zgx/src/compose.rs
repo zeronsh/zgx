@@ -7868,12 +7868,17 @@ impl NodeHandle {
         self.node
     }
     /// Whether `other` lies inside this node (a descendant, not the node
-    /// itself); `false` once either or the UI is gone.
-    pub fn holds(&self, other: NodeId) -> bool {
+    /// itself), in the same window; `false` once either or the UI is gone.
+    pub fn holds(&self, other: &NodeHandle) -> bool {
+        // (Another window's node: ids say nothing across scenes.)
+        if !self.ui.same(&other.ui) {
+            return false;
+        }
         let Some(ui) = self.ui.upgrade() else {
             return false;
         };
         let scene = ui.scene.borrow();
+        let other = other.node;
         other != self.node
             && scene.contains(other)
             && scene.contains(self.node)

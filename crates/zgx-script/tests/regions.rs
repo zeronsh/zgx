@@ -310,6 +310,79 @@ fn a_layout_box_follows_one_easing_inside_it() {
     assert!((h.rect("after").y - full).abs() < 0.5);
 }
 
+/// A fold in a fold, with a row the outer one may take (`more`).
+const NESTED_FOLDS: &str = r##"local tall = ui.state("tall", false)
+    local more = ui.state("more", false)
+    return ui.column {
+        ui.column { id = "outer", layout = "height", layout_clip = true, layout_ease = "outQuart", layout_duration = 200,
+            ui.column { id = "inner", layout = "height", layout_clip = true, layout_ease = "outQuart", layout_duration = 260,
+                ui.div { w = 50, h = function() return tall:get() and 140 or 20 end } },
+            ui.div { id = "foot", w = 50, h = 10 },
+            ui.show(more, ui.div { w = 50, h = 60 }) },
+        ui.div { id = "after", w = 50, h = 10 },
+        ui.button { id = "go", w = 1, h = 1, absolute = true, left = 300, top = 0, on_click = function() tall:set(not tall:get()) end },
+        ui.button { id = "add", w = 1, h = 1, absolute = true, left = 340, top = 0, on_click = function() more:set(not more:get()) end },
+    }"##;
+
+/// Two windows (on one thread, their nodes numbered alike): a box easing in
+/// one is never taken for one inside a box of the other. The other's own
+/// change still eases while it does.
+#[test]
+fn a_layout_box_follows_only_boxes_in_its_own_window() {
+    let mut a = Harness::inline(NESTED_FOLDS);
+    let mut b = Harness::inline(NESTED_FOLDS);
+    a.run_frames(5);
+    b.run_frames(5);
+    // The other window's inner fold eases as this one's outer box takes a row.
+    b.click("go");
+    a.click("add");
+    for _ in 0..3 {
+        b.frame();
+        a.frame();
+    }
+    let after = a.rect("after").y;
+    let foot = a.rect("foot");
+    let full = foot.y + foot.height + 60.;
+    assert!(
+        after < full - 5.,
+        "its own change eases, whatever the other window does: {after} short of {full}"
+    );
+    a.run_frames(20);
+    assert!((a.rect("after").y - full).abs() < 0.5);
+}
+
+/// A page of size-animated boxes mounting (a long transcript's folds): no
+/// box looks through the others on its first size; a change later looks once
+/// for each box it reaches.
+#[test]
+fn layout_boxes_mounting_look_for_none_inside_them() {
+    let before = zgx_script::layout_box_scans();
+    let mut h = Harness::inline(
+        r##"local tall = ui.state("tall", false)
+        local folds = {}
+        for i = 1, 400 do
+            table.insert(folds, ui.column { layout = "height", layout_clip = true,
+                ui.column { layout = "height", layout_clip = true,
+                    ui.div { w = 20, h = function() return (i == 1 and tall:get()) and 30 or 10 end } } })
+        end
+        table.insert(folds, ui.button { id = "go", w = 1, h = 1, absolute = true, left = 300, top = 0, on_click = function() tall:set(not tall:get()) end })
+        return ui.column(folds)"##,
+    );
+    h.run_frames(5);
+    let mounted = zgx_script::layout_box_scans() - before;
+    assert_eq!(
+        mounted, 0,
+        "800 boxes mounting looked through the others {mounted} times"
+    );
+    h.click("go");
+    h.run_frames(3);
+    let changed = zgx_script::layout_box_scans() - before;
+    assert!(
+        changed > 0 && changed < 20,
+        "one fold's change looks a few times, not for every box: {changed}"
+    );
+}
+
 #[test]
 fn a_presence_box_showing_nothing_lets_the_pointer_through() {
     use zgx::input::{InputEvent, PointerButton};

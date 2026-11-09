@@ -4792,25 +4792,30 @@ fn margin_of(slack: &Element, prop: Prop) -> f32 {
 thread_local! {
     /// Every size-animated box mounted, for a box to find those inside it.
     static LIVE_BOXES: std::cell::RefCell<Vec<std::rc::Weak<LiveBox>>> = Default::default();
+    /// How many times a box has looked for those inside it (`layout_box_scans`).
+    static SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// How many times a size-animated box on this thread has looked through the
+/// others for those inside it: none for a box's first size (a page of them
+/// mounting), once per later change.
+pub(crate) fn layout_box_scans() -> u64 {
+    SCANS.with(std::cell::Cell::get)
 }
 /// The size-animated boxes nearest inside `outer` (none between them and it),
 /// by identity.
 fn boxes_inside(outer: &LiveBox) -> Vec<Rc<LiveBox>> {
+    SCANS.with(|n| n.set(n.get() + 1));
     let inside: Vec<Rc<LiveBox>> = LIVE_BOXES.with(|all| {
         let mut all = all.borrow_mut();
         all.retain(|b| b.strong_count() > 0);
         all.iter()
             .filter_map(std::rc::Weak::upgrade)
-            .filter(|b| outer.content.holds(b.content.node()))
+            .filter(|b| outer.content.holds(&b.content))
             .collect()
     });
     inside
         .iter()
-        .filter(|b| {
-            !inside
-                .iter()
-                .any(|other| other.content.holds(b.content.node()))
-        })
+        .filter(|b| !inside.iter().any(|other| other.content.holds(&b.content)))
         .cloned()
         .collect()
 }
@@ -4863,10 +4868,16 @@ fn layout_box(inner: View, layout: &LayoutAnim, vm: &Rc<Vm>, low: &Rc<Lowering>)
             // A box inside it that is moving (its content changed, or its
             // space eases), or was the last time it looked (its last frame):
             // the change is that box's, followed.
-            let moving: Vec<Rc<LiveBox>> = boxes_inside(&me)
-                .into_iter()
-                .filter(|b| b.moving())
-                .collect();
+            // (Not on its first size: nothing to follow yet, and a page of
+            // boxes mounting would each look through all the others.)
+            let moving: Vec<Rc<LiveBox>> = if previous.is_some() {
+                boxes_inside(&me)
+                    .into_iter()
+                    .filter(|b| b.moving())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let follows = previous.is_some()
                 && (!moving.is_empty()
                     || moving_before.borrow().iter().any(|b| b.strong_count() > 0));
