@@ -932,10 +932,10 @@ impl View {
     /// pointer leaves the wheel alone, so a page being read isn't caught by
     /// what scrolls past. Without Shift, at its edge the rest of the wheel's
     /// gesture stops there, as at any scroll view's edge (the gesture is
-    /// latched to it), and after a pause the wheel goes on to the views around
-    /// it. A trackpad, which has a sideways axis, moves it as any `scroll_x`,
-    /// except that a swipe mostly down leaves it still rather than moving it by
-    /// the swipe's drift. A Mac reports Shift and the wheel as sideways motion
+    /// latched to it), and after a pause, or once the pointer moves, the wheel
+    /// goes on to the views around it. A trackpad, which has a sideways axis,
+    /// moves it as any `scroll_x`, except that a swipe mostly down leaves it
+    /// still rather than moving it by the swipe's drift. A Mac reports Shift and the wheel as sideways motion
     /// itself, which every `scroll_x` takes.
     pub fn wheel_across(mut self) -> Self {
         self.rare_mut().wheel_across = true;
