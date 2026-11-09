@@ -34,7 +34,11 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp"] }
 
 [dev-dependencies]
-# The gate's bench (`examples/terminal_bench.rs`): text measured as a
-# renderer would, in the benches' bundled font.
+# The gate's benches (`examples/terminal_bench.rs`,
+# `examples/terminal_pictures_bench.rs`): text measured as a renderer would,
+# in the benches' bundled font. The second draws, by wgpu's no-op backend; the
+# gate builds this crate alone (Cargo would turn it on for every bench built
+# beside it).
 zgx-gpu = { path = "../zgx-gpu", default-features = false }
 zgx-workload = { path = "../../comparisons/workload" }
+wgpu = { version = "29.0.4", default-features = false, features = ["noop"] }
