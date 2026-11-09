@@ -32,6 +32,12 @@ unsafe extern "C" {
     static UIFontTextStyleSubheadline: *const AnyObject;
     static UIFontTextStyleFootnote: *const AnyObject;
     static UIFontTextStyleHeadline: *const AnyObject;
+    static UIFontTextStyleTitle1: *const AnyObject;
+    static UIFontTextStyleCallout: *const AnyObject;
+    static UIFontTextStyleCaption1: *const AnyObject;
+    static UIFontTextStyleCaption2: *const AnyObject;
+    static UIFontDescriptorTraitsAttribute: *const AnyObject;
+    static UIFontWeightTrait: *const AnyObject;
     static UIContentSizeCategoryLarge: *const AnyObject;
     static UIContentSizeCategoryExtraExtraLarge: *const AnyObject;
     fn UIContentSizeCategoryCompareToCategory(a: *const AnyObject, b: *const AnyObject) -> isize;
@@ -147,6 +153,81 @@ fn title_tokens(tokens: &mut Vec<(TokenId, TokenInput)>) {
     }
 }
 
+/// CSS's weight for a `UIFont.Weight` (ultraLight -0.8 … black 0.62, read
+/// from `systemFont(ofSize:weight:)`, iOS 26.5): the nearest of UIKit's nine,
+/// in CSS's order (100 the lightest, as WebKit's `system-ui`).
+fn css_weight(uikit: f64) -> f32 {
+    const WEIGHTS: [(f64, f32); 9] = [
+        (-0.8, 100.),
+        (-0.6, 200.),
+        (-0.4, 300.),
+        (0., 400.),
+        (0.23, 500.),
+        (0.3, 600.),
+        (0.4, 700.),
+        (0.56, 800.),
+        (0.62, 900.),
+    ];
+    WEIGHTS
+        .iter()
+        .min_by(|a, b| (a.0 - uikit).abs().total_cmp(&(b.0 - uikit).abs()))
+        .map_or(400., |(_, css)| *css)
+}
+
+/// Each of UIKit's text styles as `preferredFont(forTextStyle:)` gives it at
+/// the user's text size, read live: `ios.text.<style>.size`, `.leading` (the
+/// space UIKit adds between its lines, `UIFont.leading`: 1.71 at body) and
+/// `.weight` (CSS's, as the system font's faces map). Read with Bold Text
+/// off, which zgx applies itself (`zgx_gpu::text::shown_weight`).
+fn text_style_tokens(tokens: &mut Vec<(TokenId, TokenInput)>) {
+    // SAFETY: UIKit's class methods, getters and constants, on the main
+    // thread the host calls this from.
+    unsafe {
+        let styles = [
+            ("largeTitle", UIFontTextStyleLargeTitle),
+            ("title1", UIFontTextStyleTitle1),
+            ("title2", UIFontTextStyleTitle2),
+            ("title3", UIFontTextStyleTitle3),
+            ("headline", UIFontTextStyleHeadline),
+            ("body", UIFontTextStyleBody),
+            ("callout", UIFontTextStyleCallout),
+            ("subheadline", UIFontTextStyleSubheadline),
+            ("footnote", UIFontTextStyleFootnote),
+            ("caption1", UIFontTextStyleCaption1),
+            ("caption2", UIFontTextStyleCaption2),
+        ];
+        let current: Retained<AnyObject> =
+            msg_send![class!(UITraitCollection), currentTraitCollection];
+        // UILegibilityWeightRegular.
+        let regular: Retained<AnyObject> =
+            msg_send![class!(UITraitCollection), traitCollectionWithLegibilityWeight: 0isize];
+        let both = [&*current as *const AnyObject, &*regular as *const AnyObject];
+        let list: Retained<AnyObject> =
+            msg_send![class!(NSArray), arrayWithObjects: both.as_ptr(), count: 2usize];
+        let traits: Retained<AnyObject> =
+            msg_send![class!(UITraitCollection), traitCollectionWithTraitsFromCollections: &*list];
+        for (name, style) in styles {
+            let font: Retained<AnyObject> = msg_send![class!(UIFont),
+                preferredFontForTextStyle: style,
+                compatibleWithTraitCollection: &*traits];
+            let size: f64 = msg_send![&*font, pointSize];
+            let leading: f64 = msg_send![&*font, leading];
+            let descriptor: Retained<AnyObject> = msg_send![&*font, fontDescriptor];
+            let font_traits: Option<Retained<AnyObject>> =
+                msg_send![&*descriptor, objectForKey: UIFontDescriptorTraitsAttribute];
+            let weight = font_traits
+                .and_then(|font_traits| -> Option<Retained<AnyObject>> {
+                    msg_send![&*font_traits, objectForKey: UIFontWeightTrait]
+                })
+                .map_or(0., |weight| msg_send![&*weight, doubleValue]);
+            let token = |part: &str| zgx::theme::token(&format!("ios.text.{name}.{part}"));
+            tokens.push((token("size"), (size as f32).into()));
+            tokens.push((token("leading"), (leading as f32).into()));
+            tokens.push((token("weight"), css_weight(weight).into()));
+        }
+    }
+}
+
 /// The themes' tokens as UIKit has them: what makes a zgx app on iOS take the
 /// system's colours and text sizes before it asks for anything.
 pub(crate) fn tokens() -> Vec<(TokenId, TokenInput)> {
@@ -255,6 +336,7 @@ pub(crate) fn tokens() -> Vec<(TokenId, TokenInput)> {
         tokens.push((line_token, line.into()));
     }
     title_tokens(&mut tokens);
+    text_style_tokens(&mut tokens);
     // SAFETY: UIKit's plain getter.
     if unsafe { UIAccessibilityIsBoldTextEnabled() } {
         tokens.push((tok::FONT_WEIGHT_REGULAR.0, 600f32.into()));
