@@ -616,6 +616,54 @@ fn a_deep_push_draws_what_shows_and_keeps_it_while_that_holds() {
     assert_eq!(partial(&col), 0, "{col:?}");
 }
 
+/// What shows comes down through a layer that isn't magnified itself: one
+/// magnified inside it, past its budget whole, draws what the window shows of
+/// the two, not all that the layer around it holds.
+#[test]
+fn a_deep_push_inside_a_plain_layer_draws_what_the_window_shows() {
+    let _gpu_fixture = gpu_fixture();
+    const WINDOW: u32 = 400;
+    const WRAP: f32 = 1000.;
+    let (mut gpu, mut scene) = window(WINDOW);
+    let root = scene.root();
+    let wrap = scene.append(
+        root,
+        NodeKind::Container(Layout::Overlay),
+        Style {
+            clip: true,
+            ..fixed(WRAP, WRAP)
+        },
+    );
+    scene.set_isolated(wrap, true);
+    let stage = scene.append(
+        wrap,
+        NodeKind::Container(Layout::Overlay),
+        fixed(WRAP, WRAP),
+    );
+    // At 20× about the stage's centre, y = 485 lands at 200 in the window.
+    rect(&mut scene, stage, 0., 485., (WRAP, 1.), RED);
+    scene.flush();
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    scene.set_local_transform(stage, scaled(20.));
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    let cache = gpu.debug_cache_stats();
+    assert_eq!(cache.layers_coarser, 0);
+    // The plain layer's own 4 MB, and for the stage the window's 400 square
+    // and room around it (not the 1000 square the plain layer holds, 9 MB).
+    assert!(
+        cache.layer_bytes < 8 << 20,
+        "{} bytes of layers",
+        cache.layer_bytes
+    );
+    let p = gpu.readback().unwrap();
+    let col: Vec<u8> = (190..230)
+        .map(|y| pixel_in(&p, WINDOW, 200, y)[3])
+        .collect();
+    assert_eq!(col.iter().filter(|a| **a > 100).count(), 20, "{col:?}");
+}
+
 #[test]
 fn a_glyph_magnified_past_the_atlas_still_draws() {
     let _gpu_fixture = gpu_fixture();
@@ -917,7 +965,7 @@ fn layers_not_drawn_give_way_to_a_moving_layer_and_its_new_text() {
     let word = scene.append(
         board,
         NodeKind::Text {
-            text: "Zeron".into(),
+            text: "Hello".into(),
             color: Color(255, 255, 255, 255),
             font_size: 30.,
         },

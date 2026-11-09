@@ -1729,8 +1729,57 @@ impl Shown<'_> {
         within(self.clip, window).then_some(window)
     }
 }
+/// What says where a layer lands in its target, worked out only for a layer
+/// that reads it (`Placing::placed`): every layer of every frame has one,
+/// and few are magnified.
+#[derive(Clone, Copy)]
+struct Placing {
+    map: zgx::affine::Affine,
+    clip: Option<Rect>,
+    /// Where the target's pixels start, in its points.
+    origin: (f32, f32),
+    scale: f32,
+    /// What of the target can show.
+    shows: Rect,
+}
+impl Placing {
+    /// Where `item`, a layer, lands in a target whose pixels start at
+    /// `origin` (its points) at `scale`, `shows` of which can show. `None`
+    /// in perspective.
+    fn of(
+        item: &zgx::scene::PaintItem<'_>,
+        origin: (f32, f32),
+        scale: f32,
+        shows: Rect,
+    ) -> Option<Self> {
+        let map = match item.projective() {
+            Some(map) => map.affine()?,
+            None => zgx::affine::Affine::IDENTITY,
+        };
+        Some(Self {
+            map,
+            clip: item.clip,
+            origin,
+            scale,
+            shows,
+        })
+    }
+    fn placed(self) -> Placed {
+        use zgx::affine::Affine;
+        let grid = self
+            .map
+            .then(Affine::translation(-self.origin.0, -self.origin.1))
+            .then(Affine::scale(self.scale, self.scale));
+        let shows = match self.clip {
+            Some(clip) => clip.intersection(self.shows),
+            None => Some(self.shows),
+        };
+        let visible = shows.and_then(|shows| Some(self.map.inverse()?.bounds(shows)));
+        Placed { grid, visible }
+    }
+}
 /// Where a layer's texels land in the target it composites into, and what
-/// of it can show there (`GpuRenderer::placed`).
+/// of it can show there (`Placing::placed`).
 #[derive(Clone, Copy)]
 struct Placed {
     /// Its content's points onto the target's pixels.
@@ -5959,7 +6008,7 @@ impl GpuRenderer {
         for item in &items {
             if item.isolated && item.effects.opacity > 0. {
                 let shown = self.shown(item, damage, viewport);
-                let placed = Self::placed(item, self.layer_origin, self.scale, Some(viewport));
+                let placing = Placing::of(item, self.layer_origin, self.scale, viewport);
                 self.layer_shifted = false;
                 self.prepare_layer(
                     scene,
@@ -5967,7 +6016,7 @@ impl GpuRenderer {
                     1.,
                     true,
                     shown,
-                    placed,
+                    placing,
                     &mut layer_stats,
                     LAYER_ROOM,
                 )?;
@@ -6205,7 +6254,7 @@ impl GpuRenderer {
         magnified: f32,
         exact_around: bool,
         shown: Option<Shown<'_>>,
-        placed: Option<Placed>,
+        placing: Option<Placing>,
         stats: &mut GpuStats,
         room: usize,
     ) -> Result<(), GpuError> {
@@ -6240,6 +6289,12 @@ impl GpuRenderer {
         // glyphs and lines drawn afresh, on other pixels, each frame.
         // Still, it is drawn at its scale exactly (the first frame it
         // shows included).
+        // Where it lands, for one that reads it: magnified, or drawn in part
+        // when it was.
+        let cropped = self.layers.get(&id).is_some_and(|cache| cache.cropped);
+        let placed = placing
+            .filter(|_| magnifying || cropped)
+            .map(Placing::placed);
         let grid = placed.map(|placed| placed.grid);
         let serial = scene.flush_serial();
         let held = self.layers.get(&id).map(|cache| {
@@ -6297,12 +6352,13 @@ impl GpuRenderer {
         // the budget at that scale, while the part in view does. Not where
         // something reaches past its pixels (a blur, a mask, a shader, a
         // drop shadow).
-        let visible = placed.and_then(|placed| placed.visible).filter(|_| {
-            scene.filter_blur(id) <= 0.
-                && scene.mask(id).is_none()
-                && scene.layer_shader(id).is_none()
-                && scene.drop_shadow(id).is_none()
-        });
+        let reaches_past = scene.filter_blur(id) > 0.
+            || scene.mask(id).is_some()
+            || scene.layer_shader(id).is_some()
+            || scene.drop_shadow(id).is_some();
+        let visible = placed
+            .and_then(|placed| placed.visible)
+            .filter(|_| !reaches_past);
         let frame = self.layer_frame;
         // Still and at its scale, its texels on its target's pixels: drawn
         // again if they moved off them (it moved, and stopped).
@@ -6537,18 +6593,29 @@ impl GpuRenderer {
         // in it, and so does it.
         let mut shifted = false;
         // What of it shows, which is all its layers can show in.
-        let inside = (visible.and_then(|visible| visible.intersection(bounds))).unwrap_or(bounds);
+        // Worked out for its first layer, whether it itself is magnified or
+        // not: one further in may be.
+        let mut inside = None;
         for item in &items {
             if item.isolated && item.effects.opacity > 0. {
                 self.layer_shifted = false;
-                let placed = Self::placed(item, (bounds.x, bounds.y), scale, Some(inside));
+                let inside = *inside.get_or_insert_with(|| {
+                    let visible = match placed {
+                        Some(_) => visible,
+                        None => placing
+                            .and_then(|placing| placing.placed().visible)
+                            .filter(|_| !reaches_past),
+                    };
+                    (visible.and_then(|visible| visible.intersection(bounds))).unwrap_or(bounds)
+                });
+                let placing = Placing::of(item, (bounds.x, bounds.y), scale, inside);
                 self.prepare_layer(
                     scene,
                     item.id,
                     magnification,
                     exact,
                     None,
-                    placed,
+                    placing,
                     stats,
                     LAYER_ROOM,
                 )?;
@@ -6650,7 +6717,7 @@ impl GpuRenderer {
                 magnified,
                 exact_around,
                 shown,
-                placed,
+                placing,
                 stats,
                 room,
             );
@@ -6732,7 +6799,7 @@ impl GpuRenderer {
                 magnified,
                 exact_around,
                 shown,
-                placed,
+                placing,
                 stats,
                 room,
             );
@@ -6794,30 +6861,6 @@ impl GpuRenderer {
         self.layer_incomplete = self.images_awaited;
         self.images_awaited |= awaited;
         (texture, result)
-    }
-    /// Where `item`, a layer, lands in a target whose pixels start at
-    /// `origin` (its points) at `scale`, and what of it shows there, from
-    /// what of the target does (`shows`). `None` in perspective.
-    fn placed(
-        item: &zgx::scene::PaintItem<'_>,
-        origin: (f32, f32),
-        scale: f32,
-        shows: Option<Rect>,
-    ) -> Option<Placed> {
-        use zgx::affine::Affine;
-        let map = match item.projective() {
-            Some(map) => map.affine()?,
-            None => Affine::IDENTITY,
-        };
-        let grid = map
-            .then(Affine::translation(-origin.0, -origin.1))
-            .then(Affine::scale(scale, scale));
-        let shows = shows.and_then(|shows| match item.clip {
-            Some(clip) => clip.intersection(shows),
-            None => Some(shows),
-        });
-        let visible = shows.and_then(|shows| Some(map.inverse()?.bounds(shows)));
-        Some(Placed { grid, visible })
     }
     /// How `item`, a layer in the window's own pass, shows there: its map
     /// (none: as laid out), what of the window it can show in, and the
