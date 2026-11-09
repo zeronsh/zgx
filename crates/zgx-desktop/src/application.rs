@@ -6157,8 +6157,10 @@ impl Host {
                     renderer.trim_atlas();
                 }
             } else {
-                // Garbage scripts made (`zgx::idle`), first: what it frees,
-                // the trims below give back.
+                // What a large removal left where no frame came to free it,
+                // and garbage scripts made (`zgx::idle`), first: what they
+                // free, the trims below give back.
+                while self.context.ui.reclaim(zgx::widgets::RECLAIM_BUDGET) {}
                 zgx::idle::trim(&self.context.ui.runtime);
                 if let Some(renderer) = &mut self.renderer {
                     renderer.trim();
@@ -6390,6 +6392,20 @@ impl Host {
             return true;
         }
         self.scroll.active(now) || self.touch.flinging()
+    }
+    /// The idle trim arms as a frame presents. With no frame coming, what asks
+    /// for it arms it here: `zgx::idle::request`, and a large removal's nodes,
+    /// which frames free, in a window that isn't presenting any. Once: the
+    /// trim frees them, and nothing arms it again.
+    fn arm_trim_without_frames(&mut self) {
+        let ui = &self.context.ui;
+        let asked = zgx::idle::take_request(&ui.runtime);
+        if (asked || (ui.reclaiming() && !self.frames_presented()))
+            && (self.trim_at.is_none() || self.trim_atlas)
+        {
+            self.trim_at = Some(std::time::Instant::now() + TRIM_DELAY);
+            self.trim_atlas = false;
+        }
     }
     /// Start, stop or schedule this window's frame source to match demand.
     fn sync_frames(&mut self) {
@@ -8021,6 +8037,7 @@ impl WindowManager {
                     return;
                 }
             }
+            host.arm_trim_without_frames();
             #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
             host.sync_page_cursor(event_loop);
         }

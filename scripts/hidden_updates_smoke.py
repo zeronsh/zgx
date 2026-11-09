@@ -70,6 +70,8 @@ def main():
                 return {"image": name, "expected_rgb": rgb, "matching_pixels": matching}
 
             result = {"backend": "X11 / owned Xvfb / Openbox", "hidden_updates": 20, "hidden_map_state": map_state("IsUnMapped")}
+            wait_marker("HIDDEN freed")
+            result["hidden_large_removal_freed"] = True
             wait_marker("SHOWN 20")
             result["shown"] = pixels("shown.png", (40, 180, 80))
             wait_marker("MINIMIZED updated 40")

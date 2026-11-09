@@ -16,6 +16,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run(move |cx| {
             let count = cx.ui.signal(0_u32);
             let color = cx.ui.signal(Color(180, 40, 40, 255));
+            // Many nodes, for a removal that frees them over later frames.
+            let many = cx.ui.signal(true);
+            let holder = many.clone();
+            let ui = cx.ui.downgrade();
             cx.render(column().p(20.).gap(16.).children([
                 text("Updates survive hidden windows"),
                 text_signal({
@@ -26,6 +30,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let color = color.clone();
                     move || Styles::new().bg(color.get())
                 }),
+                zgx::compose::switch(
+                    move || holder.get(),
+                    |many, _| {
+                        if many {
+                            div().children((0..600).map(|_| div().w(1.).h(1.)))
+                        } else {
+                            div()
+                        }
+                    },
+                ),
             ]));
             if smoke {
                 let window = cx.window.clone();
@@ -41,7 +55,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     color.set(Color(40, 180, 80, 255));
                     assert_eq!(count.get(), 20);
                     println!("HIDDEN updated 20");
-                    sleep(Duration::from_secs(1)).await;
+                    // Removed with no frames coming: its nodes are still freed.
+                    many.set(false);
+                    sleep(Duration::from_millis(2500)).await;
+                    let ui = ui.upgrade().expect("the window's interface");
+                    assert!(
+                        !ui.reclaiming(),
+                        "a large removal in a hidden window was left unfreed"
+                    );
+                    println!("HIDDEN freed");
                     window.set_visible(true);
                     window.request_focus();
                     println!("SHOWN 20");
