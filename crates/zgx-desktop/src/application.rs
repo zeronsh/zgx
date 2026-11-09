@@ -5152,6 +5152,16 @@ impl Host {
                 if gesture == Some(zgx::input::ScrollGesture::Ended) {
                     crate::coast::fingers_down(false);
                 }
+                // A touchpad's scroll is a gesture to a paged view, not a wheel's
+                // notches (Wayland says when: libinput's axis stop). Paged views
+                // alone hear it: elsewhere it scrolls as ever.
+                #[cfg(target_os = "linux")]
+                if matches!(delta, MouseScrollDelta::PixelDelta(_))
+                    && phase == winit::event::TouchPhase::Started
+                {
+                    let ui = &self.context.ui;
+                    ui.paging_gesture(zgx::input::ScrollGesture::Began);
+                }
                 if let Some(
                     gesture @ (zgx::input::ScrollGesture::Began
                     | zgx::input::ScrollGesture::MomentumBegan),
@@ -5254,6 +5264,16 @@ impl Host {
                     let wheel = matches!(delta, MouseScrollDelta::LineDelta(x, y) if !continuous_lines(x, y));
                     self.dispatch_wheel(event, wheel)?;
                     self.after_scroll();
+                }
+                #[cfg(target_os = "linux")]
+                if matches!(delta, MouseScrollDelta::PixelDelta(_))
+                    && matches!(
+                        phase,
+                        winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled
+                    )
+                {
+                    let ui = &self.context.ui;
+                    ui.paging_gesture(zgx::input::ScrollGesture::Ended);
                 }
                 if let Some(
                     gesture @ (zgx::input::ScrollGesture::Ended
