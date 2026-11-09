@@ -4590,10 +4590,18 @@ fn mount_portal_panel(
     if anchored {
         let (screens, visible, position) = (screens, portal.visible.clone(), portal.position);
         let weak = ui.downgrade();
+        let role = match (is_menu || is_submenu, is_layer) {
+            (true, _) => crate::scene::PopupRole::Menu,
+            (_, true) => crate::scene::PopupRole::Tooltip,
+            _ => crate::scene::PopupRole::Popover,
+        };
         ui.bind(owner, move || {
             let popup = visible.get() && screens.with(|screens| !screens.is_empty());
             if let Some(ui) = weak.upgrade() {
                 let mut scene = ui.scene.borrow_mut();
+                if popup {
+                    scene.set_popup_role(position, role);
+                }
                 scene.set_popup(position, popup);
                 // Its trigger, which a platform placing it flips it around.
                 if popup && let Some(anchor) = anchor {

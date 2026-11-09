@@ -58,22 +58,22 @@ use windows::{
             Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
             WindowsAndMessaging::{
                 CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GA_ROOT,
-                GW_HWNDNEXT, GWL_EXSTYLE, GWLP_HWNDPARENT, GWLP_USERDATA, GetAncestor,
-                GetClientRect, GetCursorPos, GetWindow, GetWindowLongPtrW, GetWindowRect, HTCLIENT,
-                HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_APPSTARTING, IDC_ARROW, IDC_CROSS,
-                IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
-                IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT, IsWindowVisible, KillTimer, LoadCursorW,
-                MA_NOACTIVATE, RegisterClassExW, SPI_SETWORKAREA, SW_HIDE, SW_SHOWNOACTIVATE,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
-                SWP_SHOWWINDOW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-                WINDOWPOS, WM_ACTIVATEAPP, WM_DISPLAYCHANGE, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-                WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE,
-                WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_NCHITTEST,
-                WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCRBUTTONDOWN, WM_RBUTTONDBLCLK,
-                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_TIMER,
-                WM_WINDOWPOSCHANGED, WM_XBUTTONDBLCLK, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW,
-                WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
-                WindowFromPoint,
+                GW_HWNDNEXT, GW_HWNDPREV, GW_OWNER, GWL_EXSTYLE, GWLP_HWNDPARENT, GWLP_USERDATA,
+                GetAncestor, GetClientRect, GetCursorPos, GetWindow, GetWindowLongPtrW,
+                GetWindowRect, HTCLIENT, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_APPSTARTING,
+                IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL,
+                IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT, IsWindowVisible,
+                KillTimer, LoadCursorW, MA_NOACTIVATE, RegisterClassExW, SPI_SETWORKAREA, SW_HIDE,
+                SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+                SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos,
+                ShowWindow, WINDOWPOS, WM_ACTIVATEAPP, WM_DISPLAYCHANGE, WM_LBUTTONDBLCLK,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
+                WM_MOUSEACTIVATE, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
+                WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCRBUTTONDOWN,
+                WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE,
+                WM_TIMER, WM_WINDOWPOSCHANGED, WM_XBUTTONDBLCLK, WM_XBUTTONDOWN, WM_XBUTTONUP,
+                WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+                WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
             },
         },
     },
@@ -602,7 +602,11 @@ impl Panel {
             let _ = EnableWindow(self.hwnd, !preview);
             let _ = SetWindowPos(
                 self.hwnd,
-                Some(if preview { HWND_TOPMOST } else { HWND_TOP }),
+                Some(if preview {
+                    HWND_TOPMOST
+                } else {
+                    above_owner(self.hwnd, parent)
+                }),
                 0,
                 0,
                 0,
@@ -645,6 +649,27 @@ impl Panel {
             renderer.trim();
         }
     }
+}
+/// What to place popup `hwnd` under for it to lie just above its owner and the
+/// popups it already shows: at the top of the order an owned window takes its
+/// owner with it, over the app's other windows and other apps'. (Under a topmost
+/// window it would turn topmost itself; the owner is the top of the rest then.)
+///
+/// SAFETY: `hwnd` and `owner` are live windows of this thread.
+unsafe fn above_owner(hwnd: HWND, owner: HWND) -> HWND {
+    let mut window = owner;
+    // SAFETY: as this function's; a window gone meanwhile only ends the walk.
+    unsafe {
+        while let Ok(above) = GetWindow(window, GW_HWNDPREV) {
+            let own = above == hwnd || GetWindow(above, GW_OWNER).is_ok_and(|o| o == owner);
+            if !own {
+                let topmost = GetWindowLongPtrW(above, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0;
+                return if topmost { HWND_TOP } else { above };
+            }
+            window = above;
+        }
+    }
+    HWND_TOP
 }
 impl Drop for Panel {
     fn drop(&mut self) {

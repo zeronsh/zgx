@@ -325,3 +325,105 @@ fn a_reshow_waits_as_its_platforms_do() {
         "then shows"
     );
 }
+
+/// A menu and a tooltip in popup windows, as a desktop host has them.
+fn with_popup_windows() -> (Ui, zgx::reactive::Signal<bool>, Rc<RefCell<LocalExecutor>>) {
+    let mut ui = Ui::new(400., 300.);
+    let open = ui.signal(false);
+    ui.set_popup_screens(vec![zgx::scene::Rect::new(0., 0., 1000., 1000.)]);
+    let executor = Rc::new(RefCell::new(LocalExecutor::new()));
+    ui.mount(provide(
+        TaskRunner::from_executor(executor.clone()),
+        column()
+            .p(20.)
+            .gap(20.)
+            .child(
+                menu("Menu", open.clone(), button().size(60., 24.))
+                    .w(100.)
+                    .child(menu_item("Item")),
+            )
+            .child(div().size(60., 24.).tooltip("Tip")),
+    ));
+    ui.prepare_frame();
+    (ui, open, executor)
+}
+
+#[test]
+fn a_popup_wanted_while_the_app_is_at_the_back_waits_for_it_to_come_forward() {
+    let (ui, open, _executor) = with_popup_windows();
+    ui.set_app_active(false);
+    open.set(true);
+    ui.prepare_frame();
+    {
+        let scene = ui.scene.borrow();
+        assert!(scene.popups().is_empty(), "wanted, not shown");
+        // Nor is it there for the pointer, where it would be.
+        let root = view_root_of_open_popup(&ui);
+        let b = scene.bounds(root);
+        assert!(
+            !scene
+                .hit_test_all(b.x + b.width / 2., b.y + b.height / 2.)
+                .contains(&root)
+        );
+    }
+    assert!(open.get(), "the app's state isn't changed");
+    ui.set_app_active(true);
+    ui.prepare_frame();
+    assert_eq!(
+        ui.scene.borrow().popups().len(),
+        1,
+        "shows as it comes forward"
+    );
+    assert!(open.get());
+    // Going to the back again: what is open closes, as ever, and stays closed.
+    ui.dismiss_popups();
+    ui.set_app_active(false);
+    ui.prepare_frame();
+    assert!(!open.get());
+    ui.set_app_active(true);
+    ui.prepare_frame();
+    assert!(
+        ui.scene.borrow().popups().is_empty(),
+        "no flash of it coming back"
+    );
+}
+
+/// The open popup's root, held or not.
+fn view_root_of_open_popup(ui: &Ui) -> zgx::scene::NodeId {
+    let scene = ui.scene.borrow();
+    let mut pending = vec![scene.root()];
+    while let Some(node) = pending.pop() {
+        if scene.is_popup(node) {
+            return node;
+        }
+        pending.extend(scene.children(node).iter().copied());
+    }
+    panic!("no popup");
+}
+
+#[test]
+fn a_tooltip_at_the_back_does_not_show_until_the_app_comes_forward() {
+    let (mut ui, _open, executor) = with_popup_windows();
+    ui.set_app_active(false);
+    hover(&mut ui, 40., 80.);
+    let tick = |ui: &mut Ui, ms: u64| {
+        let end = std::time::Instant::now() + Duration::from_millis(ms);
+        while std::time::Instant::now() < end {
+            while executor.borrow_mut().tick() > 0 {}
+            ui.prepare_frame();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    tick(&mut ui, 900);
+    assert!(
+        ui.scene.borrow().popups().is_empty(),
+        "under the pointer, at the back"
+    );
+    ui.set_app_active(true);
+    ui.prepare_frame();
+    assert_eq!(ui.scene.borrow().popups().len(), 1);
+    assert_eq!(
+        ui.scene.borrow().popup_role(ui.scene.borrow().popups()[0]),
+        Some(zgx::scene::PopupRole::Tooltip)
+    );
+}

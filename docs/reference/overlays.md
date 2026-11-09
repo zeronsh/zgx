@@ -184,6 +184,7 @@ return ui.popover {
 
 ## Gotchas
 
+- While the app is at the back, none of its windows active, an anchored panel in a window of its own (a menu, a popover, a tooltip, a hover card) doesn't show, however it was opened. Its state isn't changed: set to open then, it stays set and the panel shows as the app comes forward, if it is still set. One open as the app goes to the back closes, as ever, and its state is set to closed.
 - `open` must be a state; the panel writes `false` back to it when it closes, so a toggle that reads it stays right.
 - The anchor is a node, given as `anchor = ui.button { … }`, not a child: the children are the panel's content. Opening on the anchor's click is yours to do (`on_click = ui.toggle(open)`).
 - A panel (and a tooltip or hover card) is built the first time it opens, so a list's hundreds of row menus and cards cost nothing until one opens; closed again, it keeps its content mounted (and its state), drawn and focused only while open. Before it first opens, nothing inside it is found by `id` or a ref.

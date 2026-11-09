@@ -1700,6 +1700,17 @@ const PENDING_CHILDREN_BIT: usize = 1usize << (usize::BITS - 1);
 // While popups are shown (`set_popup`), this bit routes damage through the
 // same exceptional path, where a popup's subtree is left out (its own window
 // draws it): windows without popups take the path they did, and pay nothing.
+/// What a popup window holds (`Scene::set_popup_role`): each platform stacks
+/// them differently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopupRole {
+    /// A menu or a submenu.
+    Menu,
+    /// A popover: anchored content that isn't a menu.
+    Popover,
+    /// A tooltip or a hover card.
+    Tooltip,
+}
 const POPUPS_BIT: usize = 1usize << (usize::BITS - 2);
 const _: () = assert!(std::mem::size_of::<Slot>() > 2);
 const BOUNDS_VALID: u8 = 1;
@@ -3044,6 +3055,13 @@ pub struct Scene {
     /// and those of them promoted for it (their layer revision counts
     /// changes inside them, `Node::promoted`).
     popups: Vec<NodeId>,
+    /// What each opened popup is (`set_popup_role`); a popup without one (a
+    /// drag preview) is never held.
+    popup_roles: Vec<(NodeId, PopupRole)>,
+    /// Whether popups wait for the app to come forward (`set_popups_held`),
+    /// and what `popups` lists meanwhile.
+    popups_held: bool,
+    popups_listed: Vec<NodeId>,
     /// Nodes whose declared loop plays baked (`set_baked_loop`).
     #[cfg(target_os = "macos")]
     baked_loops: Vec<(NodeId, std::rc::Rc<BakedLoop>)>,
@@ -3322,6 +3340,9 @@ impl Scene {
             cells_off: false,
             viewport: Rect::new(0.0, 0.0, width, height),
             popups: Vec::new(),
+            popup_roles: Vec::new(),
+            popups_held: false,
+            popups_listed: Vec::new(),
             #[cfg(target_os = "macos")]
             baked_loops: Vec::new(),
             #[cfg(target_os = "macos")]
@@ -3466,13 +3487,64 @@ impl Scene {
                 self.promoted_count -= 1;
             }
         }
+        self.popup_roles.retain(|(root, _)| *root != id || popup);
+        self.list_popups();
         self.damage_subtree(id);
         self.geometry_revision = self.geometry_revision.wrapping_add(1);
         self.invalidate(id, COMPOSITE);
     }
-    /// Roots shown in popup windows (`set_popup`), in the order set.
+    /// Roots shown in popup windows (`set_popup`), in the order set; those
+    /// held while the app is at the back (`set_popups_held`) aren't listed.
     pub fn popups(&self) -> &[NodeId] {
-        &self.popups
+        if self.popups_held {
+            &self.popups_listed
+        } else {
+            &self.popups
+        }
+    }
+    /// What popup root `id` is, for a host that stacks each kind as its
+    /// platform does; a root opened for the app to see waits for it to come
+    /// forward (`set_popups_held`). Set before `set_popup`.
+    pub fn set_popup_role(&mut self, id: NodeId, role: PopupRole) {
+        self.popup_roles.retain(|(root, _)| *root != id);
+        self.popup_roles.push((id, role));
+        self.list_popups();
+    }
+    /// What popup root `id` is (`set_popup_role`), if it says.
+    pub fn popup_role(&self, id: NodeId) -> Option<PopupRole> {
+        self.popup_roles
+            .iter()
+            .find(|(root, _)| *root == id)
+            .map(|(_, role)| *role)
+    }
+    /// The app went to the back, or came forward: a popup wanted while it is
+    /// at the back stays wanted, laid out, and isn't listed for its host to
+    /// show, nor hit, until it comes forward. Native apps don't draw a
+    /// tooltip or a menu over the app in front. (A drag preview goes on.)
+    pub fn set_popups_held(&mut self, held: bool) {
+        if std::mem::replace(&mut self.popups_held, held) == held {
+            return;
+        }
+        self.list_popups();
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        for at in 0..self.popups.len() {
+            let id = self.popups[at];
+            self.invalidate(id, COMPOSITE);
+        }
+    }
+    /// Whether popup root `id` waits for the app to come forward.
+    #[cold]
+    fn popup_held(&self, id: NodeId) -> bool {
+        self.popups.contains(&id) && self.popup_roles.iter().any(|(root, _)| *root == id)
+    }
+    fn list_popups(&mut self) {
+        if !self.popups_held {
+            return;
+        }
+        let mut listed = std::mem::take(&mut self.popups_listed);
+        listed.clear();
+        listed.extend(self.popups.iter().filter(|id| !self.popup_held(**id)));
+        self.popups_listed = listed;
     }
     /// The trigger popup root `id` opens against (a menu's button), for a
     /// host whose platform places popups itself (Wayland's
@@ -5527,6 +5599,10 @@ impl Scene {
             };
             let point = parent_point;
             let node = self.node(id);
+            // Held, it isn't there to take the pointer.
+            if POPUPS && self.popups_held && self.popup_held(id) {
+                continue;
+            }
             let inherited_clip = match POPUPS && self.popups.contains(&id) {
                 true => UNCLIPPED,
                 false => parent_clip,
@@ -5650,6 +5726,10 @@ impl Scene {
             };
             let point = parent_point;
             let node = self.node(id);
+            // Held, it isn't there to take the pointer.
+            if POPUPS && self.popups_held && self.popup_held(id) {
+                continue;
+            }
             let inherited_clip = match POPUPS && self.popups.contains(&id) {
                 true => UNCLIPPED,
                 false => parent_clip,
@@ -6949,6 +7029,8 @@ impl Scene {
             cold.geometry_nodes.retain(|(_, id)| live(id));
         }
         self.popups.retain(live);
+        self.popup_roles.retain(|(root, _)| live(root));
+        self.popups_listed.retain(live);
         self.popups_promoted.retain(live);
         self.overflow_fades.retain(|(id, _)| live(id));
         self.inert.retain(live);
@@ -7030,7 +7112,9 @@ impl Scene {
             self.blur_nodes.retain(|entry| *entry != id);
         }
         if !self.popups.is_empty() {
+            self.popup_roles.retain(|(entry, _)| *entry != id);
             self.popups.retain(|entry| *entry != id);
+            self.popups_listed.retain(|entry| *entry != id);
             self.popups_promoted.retain(|entry| *entry != id);
         }
         if node.style.fade_overflow {
