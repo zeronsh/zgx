@@ -34,6 +34,19 @@ def positions(frame):
     return result
 
 
+def applied(frame):
+    """Deltas dispatched after native momentum filtering and resampling."""
+    result = []
+    number = r'(-?\d+(?:\.\d+)?)'
+    pattern = (r'scroll-applied source=(direct|end|refresh|input|coast) dx='+number+
+               r' dy='+number+r'(?: delay_ms='+number+r' refresh_ms='+number+r')? at_ns=(\d+)')
+    for note in frame.get('notes', []):
+        match = re.fullmatch(pattern, note)
+        if match:
+            result.append((match[1], float(match[2]), float(match[3]), int(match[6])))
+    return result
+
+
 def coast_state(frame):
     values = [re.search(r'\bcoasting (true|false)\b', note)
               for note in frame.get('notes', []) if note.startswith('frame source: ')]
@@ -56,11 +69,15 @@ def select_view(node, initial_frames, scale, horizontal=False):
 
 
 class Motion:
-    def __init__(self, frames, view, initial_frames=()):
+    def __init__(self, frames, view, initial_frames=(), *, axis=1, scale=1):
         self.view = view
+        self.axis, self.scale = axis, scale
+        self.applied = {f['frame']: applied(f) for f in frames}
+        self.have_applied = any(self.applied.values())
         self.states = {}
         self.unknown = 0
         self.slow_steps = 0
+        self.finger_slow_steps = self.coast_slow_steps = 0
         self.stationary = 0
         self.coast_intervals = 0
         self.finger_intervals = self.finger_late = self.coast_late = 0
@@ -86,6 +103,16 @@ class Motion:
         ids = range(previous[2], current[2]+1) if previous[2] and current[2] >= previous[2] else []
         values = [self.states[i] for i in ids if i in self.states]
         coast = any(state is True for _, state in values)
+        dispatched = [v for i in range(previous[2]+1, current[2]+1)
+                      for v in self.applied.get(i, ())]
+        path = [0.]
+        for source, dx, dy, _ in dispatched:
+            if source != 'coast':
+                path.append(path[-1]+(dx,dy)[self.axis]*self.scale)
+        finger_distance = max(path)-min(path)
+        if self.have_applied:
+            finger = any(source != 'coast' and (dx,dy)[self.axis] != 0
+                         for source,dx,dy,_ in dispatched)
         gap = (current[1]-previous[1])*1000
         if not finger and not coast:
             return False, False
@@ -98,8 +125,8 @@ class Motion:
                        for axis in (0, 1))
         if distance == 0:
             self.stationary += 1
-            if finger and gap > 1.5*period:
-                self.unknown += 1  # lost input, clamping or cancellation needs evidence
+            if finger and gap > 1.5*period and (not self.have_applied or finger_distance >= 1):
+                self.unknown += 1  # dispatched motion without a position change needs evidence
             return False, False
         if coast and not finger:
             self.coast_intervals += 1
@@ -108,6 +135,8 @@ class Motion:
             self.finger_intervals += 1
         if gap > 1.5*period and distance <= 1:
             self.slow_steps += 1
+            if finger:self.finger_slow_steps += 1
+            else:self.coast_slow_steps += 1
             if not coast:
                 return True, False  # finger input can be pixel-limited
             # An observed moving coast is refresh-paced, even at a one-pixel step.
@@ -118,12 +147,16 @@ class Motion:
         return True, late
 
     def summary(self):
-        return dict(cadence_model='accepted-input-and-observed-coast',
-                    cadence_scoring_complete=self.metadata and self.have_positions and self.unknown == 0 and self.stale_render_context == 0,
+        return dict(cadence_model='applied-input-and-observed-coast',
+                    applied_finger_entries=sum(v[0] != 'coast' for values in self.applied.values() for v in values),
+                    applied_coast_entries=sum(v[0] == 'coast' for values in self.applied.values() for v in values),
+                    cadence_scoring_complete=self.metadata and self.have_applied and self.have_positions and self.unknown == 0 and self.stale_render_context == 0,
                     coast_context_missing_frames=self.stale_render_context,
                     finger_active_intervals=self.finger_intervals,
                     finger_late_intervals=self.finger_late,coast_late_intervals=self.coast_late,
                     coast_long_gap_intervals=self.coast_long_gaps,coast_active_intervals=self.coast_intervals,
-                    coast_slow_step_intervals=self.slow_steps,
+                    slow_step_intervals=self.slow_steps,
+                    finger_slow_step_intervals=self.finger_slow_steps,
+                    coast_slow_step_intervals=self.coast_slow_steps,
                     stationary_scroll_intervals=self.stationary,
                     unclassified_motion_intervals=self.unknown)

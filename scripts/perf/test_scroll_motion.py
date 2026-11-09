@@ -1,5 +1,5 @@
 import unittest
-from scroll_motion import accepted_events, Motion, select_view
+from scroll_motion import accepted_events, applied, Motion, select_view
 
 
 class MotionEvidence(unittest.TestCase):
@@ -16,6 +16,47 @@ class MotionEvidence(unittest.TestCase):
     def frame(self, n, y, coast=True):
         return dict(frame=n, notes=[f'scroll @7 position 0 {y} px',
                     f'frame source: view link (wanted true, rate None, scroll live true, coasting {str(coast).lower()}, input false)'])
+
+    def input_frame(self, n, y, source='refresh', dx=0, dy=-10):
+        frame=self.frame(n,y,False)
+        frame['notes'].append(f'scroll-applied source={source} dx={dx:.3f} dy={dy:.3f} delay_ms=0.2 refresh_ms=8.333 at_ns=123000000')
+        return frame
+
+    def test_applied_input_parser_keeps_only_known_dispatch_notes(self):
+        f=self.input_frame(1,0)
+        f['notes'].append('scroll-applied source=private dx=1 dy=1 at_ns=123')
+        self.assertEqual(applied(f),[('refresh',0.,-10.,123000000)])
+
+    def test_future_input_does_not_demand_an_old_presented_position(self):
+        m=Motion([self.frame(1,0,False),self.frame(2,0,False),self.input_frame(3,-10)],7)
+        self.assertEqual(m.interval((.001,.001,1,0),(.026,.026,2,0),True,1000/120),(False,False))
+        self.assertEqual(m.unknown,0)
+
+    def test_dispatched_fingers_demand_motion_without_nominal_tape_windows(self):
+        m=Motion([self.frame(1,0,False),self.input_frame(2,-10)],7)
+        self.assertEqual(m.interval((.001,.001,1,0),(.026,.026,2,0),False,1000/120),(True,True))
+        self.assertEqual(m.summary()['finger_late_intervals'],1)
+        self.assertTrue(m.summary()['cadence_scoring_complete'])
+
+    def test_horizontal_input_does_not_demand_vertical_root_motion(self):
+        m=Motion([self.frame(1,0,False),self.input_frame(2,0,dx=10,dy=0)],7,axis=1)
+        self.assertEqual(m.interval((.001,.001,1,0),(.026,.026,2,0),True,1000/120),(False,False))
+        self.assertEqual(m.unknown,0)
+
+    def test_unexplained_dispatched_motion_still_fails_coverage(self):
+        m=Motion([self.frame(1,0,False),self.input_frame(2,0)],7)
+        m.interval((.001,.001,1,0),(.026,.026,2,0),False,1000/120)
+        self.assertEqual(m.unknown,1)
+        self.assertFalse(m.summary()['cadence_scoring_complete'])
+
+    def test_subpixel_dispatched_fingers_can_leave_position_unchanged(self):
+        m=Motion([self.frame(1,0,False),self.input_frame(2,0,dy=.1)],7,scale=2)
+        m.interval((.001,.001,1,0),(.026,.026,2,0),False,1000/120)
+        self.assertEqual(m.unknown,0)
+
+    def test_position_and_coast_alone_do_not_certify_applied_input_coverage(self):
+        m=Motion([self.frame(1,0),self.frame(2,-10)],7)
+        self.assertFalse(m.summary()['cadence_scoring_complete'])
 
     def test_target_mapping_is_unique_and_uses_device_scale(self):
         frames=[self.frame(1,-200)]
@@ -35,6 +76,8 @@ class MotionEvidence(unittest.TestCase):
         m=Motion([self.frame(1,0,False),self.frame(2,-1,False)],7)
         self.assertEqual(m.interval((.001,.001,1,0),(.018,.018,2,0),True,1000/120),(True,False))
         self.assertEqual(m.summary()['finger_late_intervals'],0)
+        self.assertEqual(m.summary()['coast_slow_step_intervals'],0)
+        self.assertEqual(m.summary()['finger_slow_step_intervals'],1)
 
     def test_finger_and_coast_late_counts_are_separate(self):
         m=Motion([self.frame(1,0),self.frame(2,-10),self.frame(3,-20)],7)

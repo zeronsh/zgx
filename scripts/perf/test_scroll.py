@@ -30,6 +30,12 @@ class ScrollMetrics(unittest.TestCase):
             scroll.settle_warm_coast(1)
         sleep.assert_called_once_with(.1)
 
+    def test_disabled_deferral_arm_rejects_observed_deferrals(self):
+        good=scroll.behavior_checks({'deferred_drawable_frames':0,'drawn_on_drawable_arrival_frames':0},['ZGX_DRAWABLE_DEFER=0'],[],'0',False)
+        bad=scroll.behavior_checks({'deferred_drawable_frames':1},['ZGX_DRAWABLE_DEFER=0'],[],'0',False)
+        self.assertTrue(good['drawable_deferral_disabled'])
+        self.assertFalse(bad['drawable_deferral_disabled'])
+
     def test_normal_gate_records_a_new_default_without_assuming_an_old_mode(self):
         metrics={'frame_source_counts':{'view link':100},'render_frames':100}
         self.assertEqual(scroll.behavior_checks(metrics,[],[],'0',True),{})

@@ -82,17 +82,16 @@ trace entry. Callback records are bounded by the sampled frame indices, so
 frames submitted after the sample cannot become unaccounted-for late frames.
 The report preserves all raw presented times and frame-completion times.
 
-Idle tape gaps, isolated notches, and slow steps that accumulate less than one
-device pixel do not require a new picture every refresh. The analyzer derives
-motion windows from the tape, accumulates fractional device-pixel motion and
-counts long intervals only inside dense moving input. It reports idle intervals
-separately. These are **input-demand windows**, not a claim of optical pixel
-tracking or OS hardware-event latency. The app’s observed moving coast remains in the gate after finger input ends;
-system momentum events ignored by the host do not extend that demand. For
-pixel-limited `slow` and isolated `notches`, a 120 Hz interval distribution is
-not meaningful: sparse cells instead require at least 80% of the planned
-quantized pixel updates to appear, ten traced moving frames, and all the same
-work/GPU/row/repaint and late-attribution checks. Idle gaps remain separate.
+Idle gaps, isolated notches and pixel-limited finger steps do not require a
+new picture every refresh. Current cadence demand comes from actual dispatched
+scroll deltas and observed app coast, matched by trace frame to whole-device-pixel
+positions. Nominal tape motion windows remain diagnostic; they must not demand
+movement from an older queued presentation. The app’s moving coast stays in the
+gate until it settles; ignored system momentum does not extend it. These are
+instrumented presentation measurements, not optical pixel tracking or OS
+hardware-event latency. Sparse `slow` and `notches` cells also require at least
+80% of planned quantized updates, ten traced moving frames, and the same
+work/GPU/row/repaint and late-attribution checks. Idle intervals stay separate.
 
 The target is **zero late frames attributable to the app or GPU**. Every late
 or skipped presentation cites its frame record(s) in `late_attributions`:
@@ -439,19 +438,22 @@ locally, run the actual-shell command with `--gestures flick --model-catalog loa
 and retain the default three trials. The workflow still has only
 `workflow_dispatch` as a trigger and exports numeric summaries only.
 
-Cadence scoring filters macOS system momentum from the recorded tape with the
-host’s phase rules. Recording happens before that filter. Only accepted finger
-deltas and the app’s observed coast demand motion; raw OS momentum must not
-extend a stopped coast. Profiling records each scroll content’s whole-device-pixel
-translation and the host’s coast state. The setup maps the target to its unique
-renderer view from the initial offset; missing/ambiguous mapping, stale coast
-context or unclassified long intervals fail coverage rather than certify a pass.
-Non-rendering frames carry the last position. Position ranges across canceled
-frames still detect skipped intermediate movement. Moving coast intervals must meet the refresh deadline even when the step is
-one pixel. Long one-pixel steps are also reported separately; only pixel-limited
-finger input can use that exemption. Finger and coast late counts are separate. A replay reply does not end the
-capture while the host still reports an active coast; polling continues until it
-settles, with a bounded drain timeout that invalidates an unfinished capture.
-Historical raw-input-demand tables are explicitly qualified and cannot be used
-as app missed-refresh certification. Capture snapshots include `scroll_motion.py`;
-comparison fingerprints include it, preventing a silent rescore mid-batch.
+Cadence scoring uses the host’s actual dispatched deltas after macOS momentum
+filtering and resampling. Profiling records `scroll-applied` with the host-clock
+time in the frame that applies each delta. Only the target axis demands movement:
+vertical for transcript/list/grid cells, horizontal for the nested viewport.
+The app’s own coast remains demand while it moves. Missing applied-input notes,
+ambiguous target mapping, stale coast context or unexplained whole-pixel applied
+motion with no position change fail coverage instead of certifying zero late.
+
+Each scroll content’s whole-device-pixel translation is recorded on rendered
+frames; non-rendering frames carry its last position. Ranges across canceled
+frames still detect skipped intermediate movement. Moving coast intervals must
+meet the deadline even at a one-pixel step. Pixel-limited fingers can be exempt;
+slow-step, stationary, finger and coast counts remain separate. Captures and warm
+resets wait for the observed coast to settle, with a bounded timeout that
+invalidates unfinished captures.
+
+Historical raw-input-demand tables are qualified and cannot certify app missed
+refreshes. Capture snapshots and comparison fingerprints include
+`scroll_motion.py`, preventing a silent rescore mid-batch.

@@ -13,17 +13,17 @@ FIELDS = {
     'present': {'0', '1', 'auto'},
     'status': {'pass', 'fail', 'invalid'},
     'model_catalog': {'settled', 'loading'},
-    'cadence_model': {'accepted-input-and-observed-coast','continuous-reference','raw-input-demand-unfiltered'},
+    'cadence_model': {'accepted-input-and-observed-coast','applied-input-and-observed-coast','continuous-reference','raw-input-demand-unfiltered'},
 }
 SCALARS = ('hz', 'scale', 'repeat')
 METRICS = (
-    'frames', 'scroll_frames', 'active_intervals', 'late_frames', 'late_pct',
+    'deferred_drawable_frames','drawn_on_drawable_arrival_frames','frames', 'scroll_frames', 'active_intervals', 'late_frames', 'late_pct',
     'app_late_frames', 'app_late_pct', 'system_late_frames', 'unattributed_late_frames',
     'shown_frames_tape', 'shown_frames_motion', 'same_refresh_extra_frames',
     'double_then_skip_intervals', 'skipped_drawables', 'main_over_4ms', 'gpu_p99_ms',
     'copied_frames', 'repainted_frames', 'picture_frames', 'copy_pct', 'repaint_pct',
     'rows_built_in_scroll_frames', 'rows_prefetched', 'spare_frames',
-    'ignored_os_momentum_events','coast_active_intervals','coast_slow_step_intervals',
+    'slow_step_intervals','finger_slow_step_intervals','applied_finger_entries','applied_coast_entries','ignored_os_momentum_events','coast_active_intervals','coast_slow_step_intervals',
     'finger_active_intervals','finger_late_intervals','coast_late_intervals','coast_long_gap_intervals',
     'stationary_scroll_intervals','unclassified_motion_intervals','coast_context_missing_frames',
 )
@@ -87,6 +87,7 @@ def sanitize(row):
             'ZGX_SCROLL_DRAWABLES': {'0', '1'}, 'ZGX_HANDOVER_ASAP': {'0', '1'},
             'ZGX_LEAD_US': {'4000', '5500'}, 'ZGX_GPU_STATS': {'1'},
             'ZGX_SHADOW_WHOLE': {'1'}, 'ZGX_DRAWABLE_PREFETCH': {'0', '1'},
+            'ZGX_DRAWABLE_DEFER': {'0', '1'},
         }
         result['host_env'] = {key: value for key, value in flags.items()
                               if key in allowed and isinstance(value, str) and value in allowed[key]}

@@ -226,6 +226,8 @@ def verify_environment_text(text, overrides):
 
 def behavior_checks(metrics, overrides, presents, present, reference, require_source=False, expected_source=None):
     checks={}
+    if 'ZGX_DRAWABLE_DEFER=0' in overrides:
+        checks['drawable_deferral_disabled']=metrics.get('deferred_drawable_frames',0)==0 and metrics.get('drawn_on_drawable_arrival_frames',0)==0
     if 'ZGX_HANDOVER_ASAP=1' in overrides:
         checks['asap_no_hold']=metrics['wait_ms']['p99'] is not None and metrics['wait_ms']['p99']<=.5
     if 'ZGX_VIEW_CLOCK=1' in overrides and present=='0' and (reference or 'ZGX_SCROLL_LINK=1' in overrides):
@@ -288,11 +290,11 @@ def coalesce_presentations(records, period):
 
 
 def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=False,
-              main_budget=4., gpu_budget=4., sparse=False, trace_to_host_ms=None, motion_view=None, initial_motion_frames=()):
+              main_budget=4., gpu_budget=4., sparse=False, trace_to_host_ms=None, motion_view=None, initial_motion_frames=(), motion_axis=1):
     period = 1000 / hz
     accepted, ignored = scroll_motion.accepted_events(events)
     windows = [(0, events[-1][0])] if reference and events else motion_windows(accepted, period, scale)
-    movement = scroll_motion.Motion(frames, motion_view, initial_motion_frames)
+    movement = scroll_motion.Motion(frames, motion_view, initial_motion_frames, axis=motion_axis, scale=scale)
     # Feedback carries the exact trace index captured before presenting. An
     # older runner's two-field record remains readable but cannot certify
     # attribution: missing frame identity is an explicit gate failure.
@@ -356,10 +358,11 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     for f in frames:
         notes = f.get('notes', [])
         coasting = movement.states.get(f['frame'], (None, None))[1] is True
-        moving = coasting or any('copied its pixels' in n or 'repainted its view:' in n or
+        dispatched = any((dx,dy)[motion_axis] != 0 for _,dx,dy,_ in movement.applied.get(f['frame'], ()))
+        moving = coasting or dispatched or any('copied its pixels' in n or 'repainted its view:' in n or
                      'composited its picture' in n for n in notes)
         in_motion=in_motion_window(f,windows,trace_to_host_ms,anchor)
-        if f.get('spare', False) or (not moving and not reference and not in_motion):
+        if f.get('spare', False) or (not moving and not reference and (movement.have_applied or not in_motion)):
             continue
         frame_sources.update(n.removeprefix('frame source: ').split(' (',1)[0] for n in notes if n.startswith('frame source: '))
         noted_frames+=moving or reference
@@ -404,8 +407,10 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     return dict(**scoring, ignored_os_momentum_events=len(ignored),frames=len(frames), sparse=sparse,
                 presentation_timings=presentation_timings(scroll_frames,records,anchor,trace_to_host_ms),
                 picture_costs=picture_costs(frames),
+                deferred_drawable_frames=sum('frame deferred: its drawable has not come' in f.get('notes',[]) for f in frames),
+                drawn_on_drawable_arrival_frames=sum('frame drawn as its drawable came' in f.get('notes',[]) for f in frames),
                 motion_window_work=workload(motion_frames),
-                work_selection="accepted-input windows, observed app coast and noted scroll frames; spare excluded",
+                work_selection="applied-input frames, observed app coast and noted scroll frames; spare excluded",
                 noted_scroll_frames=noted_frames,frame_source_counts=dict(frame_sources),
                 render_frames=sum(f.get('gpu_micros') is not None for f in scroll_frames),
                 worst_main_frame=max(scroll_frames,key=app_work_ms,default=None),
@@ -834,7 +839,7 @@ return ui.overlay {""")
                                     memory,
                                     reference=scene in ('idle','zeron-idle'), main_budget=args.max_main_ms, gpu_budget=args.max_gpu_ms,
                                     sparse=gesture in ('slow','notches'),
-                                    trace_to_host_ms=begin['host_ns']/1e6-begin['trace_ms'], motion_view=motion_view, initial_motion_frames=initial_motion_frames)
+                                    trace_to_host_ms=begin['host_ns']/1e6-begin['trace_ms'], motion_view=motion_view, initial_motion_frames=initial_motion_frames, motion_axis=0 if scene=='nested' else 1)
                 if not metrics.get('cadence_scoring_complete',False):
                     metrics['late_pct'] = None
                     metrics['app_late_pct'] = None
@@ -1061,7 +1066,7 @@ def main():
     if not math.isfinite(args.rest_seconds) or not 0 <= args.rest_seconds <= 60:
         p.error('--rest-seconds must be finite and between 0 and 60')
     for item in args.host_env:
-        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1','ZGX_SCROLL_DRAWABLES=0','ZGX_SCROLL_DRAWABLES=1','ZGX_HANDOVER_ASAP=0','ZGX_HANDOVER_ASAP=1','ZGX_LEAD_US=4000','ZGX_LEAD_US=5500','ZGX_GPU_STATS=1','ZGX_SHADOW_WHOLE=1','ZGX_DRAWABLE_PREFETCH=0','ZGX_DRAWABLE_PREFETCH=1'):
+        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1','ZGX_SCROLL_DRAWABLES=0','ZGX_SCROLL_DRAWABLES=1','ZGX_HANDOVER_ASAP=0','ZGX_HANDOVER_ASAP=1','ZGX_LEAD_US=4000','ZGX_LEAD_US=5500','ZGX_GPU_STATS=1','ZGX_SHADOW_WHOLE=1','ZGX_DRAWABLE_PREFETCH=0','ZGX_DRAWABLE_PREFETCH=1','ZGX_DRAWABLE_DEFER=0','ZGX_DRAWABLE_DEFER=1'):
             p.error('unsupported diagnostic host environment override')
     if args.command=='reference' and any(item.startswith('ZGX_LEAD_US=') for item in args.host_env) and args.reference_refresh_grid!='on':
         p.error('LEAD_US marker probes require --reference-refresh-grid on to exercise the hold')
