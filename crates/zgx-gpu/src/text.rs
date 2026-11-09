@@ -1738,14 +1738,33 @@ pub(crate) fn truncated(
     if options.overflow == TextOverflow::Clip {
         return Some(make(fonts, end, false));
     }
+    // UILabel cuts at the character ("…brown fox jum…"), not at the wrap. A
+    // prefix too long still wraps and so doesn't fit, and the next word is as
+    // far as a cut can reach: it wrapped because it didn't fit whole.
+    #[cfg(test)]
+    let characters = CUT_CHARACTERS.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let characters = cfg!(target_os = "ios");
+    let last = if characters {
+        through_next_word(rich.text(), end)
+    } else {
+        end
+    };
     let mut boundaries: Vec<_> = rich
         .text()
         .grapheme_indices(true)
         .map(|(i, _)| i)
-        .take_while(|i| *i < end)
+        .take_while(|i| *i < last)
         .filter(|i| *i >= start)
+        .filter(|i| !characters || !ends_in_space(rich.text(), *i))
         .collect();
-    boundaries.push(end);
+    boundaries.push(last);
+    // Past the row the original's glyphs say nothing: the guess stays in it.
+    let in_row = if characters {
+        boundaries.partition_point(|i| *i <= end).max(1)
+    } else {
+        boundaries.len()
+    };
     let fits = |probe: &Buffer| {
         probe.layout_runs().count() <= limit
             && width.is_none_or(|w| probe.layout_runs().all(|r| r.line_w <= w + 0.001))
@@ -1775,7 +1794,7 @@ pub(crate) fn truncated(
         reach.sort_unstable_by_key(|&(end, _)| end);
         let (mut at, mut right) = (0, 0_f32);
         Some(
-            boundaries
+            boundaries[..in_row]
                 .iter()
                 .take_while(|&&cut| {
                     let cut = cut - offset;
@@ -1857,6 +1876,28 @@ thread_local! {
     /// Truncation searched by halving the row from its start alone, as it
     /// was before the guess (`rich_buffer`): what the guess must match.
     static HALVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
+thread_local! {
+    /// Truncation cutting at the character, as iOS's does.
+    static CUT_CHARACTERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// `end`, on through the word after it: past any white space, to the next.
+fn through_next_word(text: &str, end: usize) -> usize {
+    let rest = &text[end..];
+    let word = rest.len() - rest.trim_start().len();
+    end + word
+        + rest[word..]
+            .find(char::is_whitespace)
+            .unwrap_or(rest.len() - word)
+}
+/// Whether `text` before `at` ends in white space: no cut for an ellipsis,
+/// which UILabel sets against the word before it.
+fn ends_in_space(text: &str, at: usize) -> bool {
+    text[..at]
+        .chars()
+        .next_back()
+        .is_some_and(char::is_whitespace)
 }
 thread_local! {
     /// Ellipses' widths by the font and size they are shaped in
@@ -2103,6 +2144,110 @@ mod rich_tests {
             "the two families differ: {regular} {geist}"
         );
         assert_eq!(medium, regular, "its own Book, not Geist's Medium");
+    }
+    #[test]
+    fn ios_truncation_cuts_at_the_character_and_elsewhere_at_the_row() {
+        use zgx::text_layout::{TextOptions, TextOverflow};
+        assert_eq!(through_next_word("fox jumps over", 3), 9);
+        assert_eq!(through_next_word("fox jumps", 4), 9);
+        assert_eq!(through_next_word("fox", 3), 3);
+        assert!(ends_in_space("fox ", 4) && !ends_in_space("fox ", 3));
+
+        let mut fonts = FontSystem::new();
+        let text = "The quick brown fox jumps over the lazy dog";
+        let rich = |clamp| {
+            RichText::new(
+                text,
+                vec![TextRun {
+                    range: 0..text.len(),
+                    font_size: 20.,
+                    ..Default::default()
+                }],
+            )
+            .unwrap()
+            .with_options(TextOptions {
+                overflow: TextOverflow::Ellipsis,
+                line_clamp: std::num::NonZeroU32::new(clamp),
+            })
+        };
+        let shown = |buffer: &Buffer| {
+            buffer
+                .lines
+                .iter()
+                .map(|line| line.text().to_owned())
+                .collect::<String>()
+        };
+        for clamp in [1, 2] {
+            for width in (60..400).step_by(11) {
+                let width = width as f32 + 0.37;
+                let by_row = shown(&rich_buffer(&mut fonts, &rich(clamp), Some(width), None));
+                CUT_CHARACTERS.with(|c| c.set(true));
+                let buffer = rich_buffer(&mut fonts, &rich(clamp), Some(width), None);
+                CUT_CHARACTERS.with(|c| c.set(false));
+                let by_character = shown(&buffer);
+                assert!(
+                    buffer.layout_runs().count() <= clamp as usize,
+                    "{by_character:?}"
+                );
+                assert!(
+                    buffer.layout_runs().all(|r| r.line_w <= width + 0.001),
+                    "{by_character:?}"
+                );
+                let (Some(by_row), Some(kept)) =
+                    (by_row.strip_suffix('…'), by_character.strip_suffix('…'))
+                else {
+                    assert_eq!(by_row, by_character, "uncut either way at {width}");
+                    continue;
+                };
+                // Never fewer characters than the word cut kept, never a
+                // space before the ellipsis, and only ever more of the text.
+                assert!(
+                    kept.len() >= by_row.trim_end().len(),
+                    "{kept:?} < {by_row:?} at {width}"
+                );
+                assert_eq!(kept, kept.trim_end(), "{kept:?} at {width}");
+                assert!(text.starts_with(kept), "{kept:?} at {width}");
+                // Nothing further would have fitted: one more character is
+                // too wide, or wraps past the clamp.
+                let more = text[kept.len()..].chars().next().map_or(0, char::len_utf8);
+                if more > 0 && kept.len() + more < text.len() {
+                    let longer = format!("{}…", &text[..kept.len() + more]);
+                    if !longer.ends_with(" …") {
+                        let rich = RichText::new(
+                            longer.as_str(),
+                            vec![TextRun {
+                                range: 0..longer.len(),
+                                font_size: 20.,
+                                ..Default::default()
+                            }],
+                        )
+                        .unwrap();
+                        let buffer = rich_buffer(&mut fonts, &rich, Some(width), None);
+                        assert!(
+                            buffer.layout_runs().count() > clamp as usize,
+                            "{longer:?} would have fitted at {width}"
+                        );
+                    }
+                }
+            }
+        }
+        // A mid-word cut does happen.
+        let mut cut_a_word = false;
+        for width in (60..400).step_by(11) {
+            CUT_CHARACTERS.with(|c| c.set(true));
+            let kept = shown(&rich_buffer(
+                &mut fonts,
+                &rich(1),
+                Some(width as f32 + 0.37),
+                None,
+            ));
+            CUT_CHARACTERS.with(|c| c.set(false));
+            if let Some(kept) = kept.strip_suffix('…') {
+                let next = text[kept.len()..].chars().next();
+                cut_a_word |= next.is_some_and(|c| !c.is_whitespace());
+            }
+        }
+        assert!(cut_a_word);
     }
     #[test]
     fn display_line_clamp_shapes_ellipsis_and_excludes_hidden_link_geometry() {
