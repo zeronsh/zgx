@@ -245,6 +245,34 @@ impl RichText {
                         == b.strikethrough.map(|d| (d.thickness(), d.line))
             })
     }
+    /// Whether `self` is `old` with text added at its end (a streamed
+    /// paragraph grown by an append): `old`'s text and options, and its
+    /// runs alike in everything, colours too, but that its last (unpadded)
+    /// run may go on, and more may follow.
+    pub fn appends(&self, old: &Self) -> bool {
+        let Some((last, before)) = old.runs.split_last() else {
+            return false;
+        };
+        self.options == old.options
+            && self.text.len() > old.text.len()
+            && self.text.starts_with(&*old.text)
+            && self.runs.len() >= old.runs.len()
+            && self.runs[..before.len()] == *before
+            && {
+                let now = &self.runs[before.len()];
+                now.range.start == last.range.start
+                    && now.range.end >= last.range.end
+                    && last.padding == [0.; 2]
+                    && now.padding == last.padding
+                    && now.font_size == last.font_size
+                    && now.font == last.font
+                    && now.color == last.color
+                    && now.background == last.background
+                    && now.underline == last.underline
+                    && now.strikethrough == last.strikethrough
+                    && now.radius == last.radius
+            }
+    }
     pub(crate) fn same_metrics(&self, other: &Self) -> bool {
         self.options == other.options
             && self.text == other.text
