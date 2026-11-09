@@ -59,6 +59,7 @@ fn main() {
     });
     zgx::trace::set_enabled(true);
     let mut main_frames = Vec::new();
+    let mut after_spare = zgx::trace::frame_index();
     let mut draw = |app: &mut TestApp| {
         app.ui.prepare_frame();
         let damage = app.ui.scene.borrow_mut().flush().damage;
@@ -75,8 +76,9 @@ fn main() {
             assert!(partial == full, "stale paint after scroll");
         }
         app.frame();
-        main_frames.push(zgx::trace::frame_index());
+        main_frames.extend(after_spare + 1..=zgx::trace::frame_index());
         app.spend_spare_time();
+        after_spare = zgx::trace::frame_index();
     };
     app.frames(4);
     app.spend_spare_time();
@@ -104,6 +106,7 @@ fn main() {
         .into_iter()
         .filter(|f| f.index > from && main_frames.contains(&f.index))
         .collect();
+    assert!(frames.len() >= 96, "missing measured scroll trace entries");
     let rows: usize = frames
         .iter()
         .map(|f| {

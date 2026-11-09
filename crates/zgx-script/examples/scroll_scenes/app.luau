@@ -1,6 +1,6 @@
 -- Fixed data, shared by the native replay and headless instruction gates.
 local scene = ui.args[1] or "plain"
-local horizontal_offset = ui.state("horizontal_offset", 1000)
+local horizontal_offset = ui.state("horizontal_offset", 90000)
 local offset = ui.state("offset", 90000)
 local translucent = ui.state("translucent", false)
 -- Minimal idle reference: only this tiny marker changes each refresh. A
@@ -22,6 +22,21 @@ if scene == "idle" then
 			end,
 		},
 	}
+end
+
+-- Room for the complete recorded fling in either direction, with actual
+-- visible marks throughout the nested horizontal surface.
+local horizontal_cells: { Node } = {}
+if scene == "nested" then
+	for i = 1, 1024 do
+		horizontal_cells[i] = ui.div {
+			w = 160,
+			h = 72,
+			shrink = 0,
+			bg = if i % 2 == 0 then "#486078" else "#304050",
+			ui.text { `Horizontal cell {i}`, p = 8 },
+		}
+	end
 end
 
 local function row(i: number): Node
@@ -56,11 +71,12 @@ return ui.column {
 			h = 72,
 			w_full = true,
 			ui.scroll_x {
+				id = "horizontal-content",
 				w = 3000,
 				h = 72,
 				shrink = 0,
 				offset = horizontal_offset,
-				ui.text { "Nested horizontal scroll boundary", w = 12000, h = 72 },
+				ui.row { w = 163840, h = 72, horizontal_cells },
 			},
 		}
 		else nil,

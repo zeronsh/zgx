@@ -268,3 +268,15 @@ driver records its own main-frame indices before draining spare work, so no
 spare entry is charged as a moving frame even on baselines without `Frame.spare`.
 This was checked on the old API (3 transcript rows rebuilt over96 frames) and
 build-ahead API (zero rows on transcript/plain/grid/nested).
+
+The GPU headless path can close multiple trace entries per logical step; the
+driver keeps every entry between spare drains, requires at least96 measured
+entries and96 copy/picture frames, and compares partial/full pixels. Source
+freshness and trace filtering were checked against530d (3 rows,7 copies),
+507531eb (3 rows,96 copies),357def8f (3 rows,96 picture/copy frames) and
+aebda8a1 (0 rows,7 copies) on the transcript at2×.
+The nested horizontal fixture has repeated visible cells and enough extent for
+Wing's whole tape; its inner scroll is tracked while replay targets the visible
+outer box. Streaming gestures orbit120 points near the visible tail instead
+of demanding frames after clamping against its end. Marker warmup uses no
+wheel events, so no gesture grace period can seed a different tick source.

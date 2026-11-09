@@ -57,7 +57,8 @@ def tape(gesture, hz):
                 continue
             unit, dy, phase = 'lines', -3, 'moved'
         else:
-            dy = -8
+            # Orbit near the streaming tail instead of pushing into its edge.
+            dy = 2 if (i // (hz//2)) % 2 == 0 else -2
         events.append((t, unit, dx, dy, phase))
     events.append((4010., 'pixel', 0., 0., 'ended'))
     return '# zgx wheel tape 1\n' + ''.join(f'{t:.3f} {u} {x:.6f} {y:.6f} {p}\n' for t, u, x, y, p in events)
@@ -340,6 +341,8 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                 text = '# zgx wheel tape 1\n' + ''.join(
                     f'{t:.3f} {unit} {dy:.6f} 0 {phase}\n'
                     for t, unit, dx, dy, phase in parse_tape(text))
+            tracked_target='#horizontal-content' if scene=='nested' else target
+            result.update(replay_target=target,tracked_target=tracked_target)
             (out / 'gesture.tape').write_text(text)
             events = parse_tape(text)
             result['tape_sha256'] = hashlib.sha256(text.encode()).hexdigest()
@@ -410,7 +413,8 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                     time.sleep(.5)
                     scroll = request(process.pid, 'node', target='#transcript')['data']['scroll']
                     limit = float(re.search(r'of 0 to ([0-9.]+)', scroll).group(1))
-                    reset_offset = max(0, limit - 4000)
+                    viewport=float(re.search(r'x([0-9.]+)$',request(process.pid,'node',target='#transcript')['data']['box']).group(1))
+                    reset_offset = max(0, limit - viewport/2)
                     if real_app:
                         request(process.pid,'set',name='bench_offset',value=reset_offset)
                 if real_app:
@@ -427,15 +431,20 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                     state = request(process.pid,'state')['data']
                     (out/'fixture_state.json').write_text(json.dumps(state,indent=2)+'\n')
                     result['fixture_state'] = {k:v for k,v in state.items() if 'bench_' in k}
-                # Visit a long fling's range before measuring the warmed path.
-                warm = tape('fling', hz) if scene not in ('idle','zeron-idle') else '# zgx wheel tape 1\n0 pixel 0 0 started\n100 pixel 0 0 ended\n'
-                request(process.pid, 'replay', target='#transcript', tape=warm, timeout=15)
-                if real_app:
-                    request(process.pid,'command',id='bench.reset')
+                if scene in ('idle','zeron-idle'):
+                    # Never seed a reference with wheel state, even in warmup:
+                    # gesture/coast grace periods can change the tick source.
+                    result['reference_warmup']='no-wheel-events'
+                    time.sleep(args.warmup)
                 else:
-                    request(process.pid, 'set', name='offset', value=reset_offset)
+                    # Visit a long fling's range before measuring the warmed path.
+                    request(process.pid, 'replay', target='#transcript', tape=tape('fling',hz), timeout=15)
+                    if real_app:
+                        request(process.pid,'command',id='bench.reset')
+                    else:
+                        request(process.pid, 'set', name='offset', value=reset_offset)
                 if scene == 'nested':
-                    request(process.pid, 'set', name='horizontal_offset', value=1000)
+                    request(process.pid, 'set', name='horizontal_offset', value=90000)
                 time.sleep(.5)
                 if gesture == 'stream':
                     if scene not in ('transcript','zeron'):
@@ -464,7 +473,7 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                         future = pool.submit(request, process.pid, 'replay', target=target, tape=text,
                                              timeout=events[-1][0] / 1000 + 20)
                     try:
-                        frames, polls = collect(process.pid, future, begin, out, target)
+                        frames, polls = collect(process.pid, future, begin, out, tracked_target)
                     except Exception:
                         process.terminate()
                         process.wait(timeout=5)

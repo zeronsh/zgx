@@ -96,6 +96,14 @@ class ScrollMetrics(unittest.TestCase):
                                   max_instructions=50_000_000,max_gpu_ms=4)
         self.assertTrue(any('main-thread work max' in e for e in scroll.failures(m,args)))
 
+    def test_stream_motion_stays_near_its_visible_tail(self):
+        offset=low=high=0
+        for _,_,_,dy,_ in scroll.parse_tape(scroll.tape('stream',120)):
+            offset-=dy
+            low=min(low,offset);high=max(high,offset)
+        self.assertLessEqual(high-low,122)
+        self.assertEqual(offset,0)
+
     def test_real_tape_is_preserved_and_longer_than_a_minute(self):
         events = scroll.parse_tape(scroll.tape('wing', 120))
         self.assertGreater(events[-1][0], 94000)
