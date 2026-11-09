@@ -1,0 +1,2258 @@
+[
+  {
+    "arm": "idle-asap",
+    "role": "base",
+    "n": 3,
+    "required": 3,
+    "complete": true,
+    "condition": {
+      "scene": "zeron-idle",
+      "gesture": "reference",
+      "size": "W",
+      "present": "0",
+      "hz": 120,
+      "scale": 2,
+      "background": "translucent",
+      "reset_row": 160,
+      "command": "reference",
+      "reference_refresh_grid": "on"
+    },
+    "late_pct": {
+      "n": 3,
+      "mean": 1.7620827425692547,
+      "min": 0.6728343145500421,
+      "max": 2.3076923076923075,
+      "stdev": 0.9433173243259985,
+      "values": [
+        0.6728343145500421,
+        2.3057216054654144,
+        2.3076923076923075
+      ]
+    },
+    "interval_p99_ms": {
+      "n": 3,
+      "mean": 13.888944665590921,
+      "min": 8.333458989858627,
+      "max": 16.66670799255371,
+      "stdev": 4.811191725588354,
+      "values": [
+        8.333458989858627,
+        16.666667014360428,
+        16.66670799255371
+      ]
+    },
+    "main_over_4ms": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "gpu_p99_ms": {
+      "n": 3,
+      "mean": 0.48270833333333335,
+      "min": 0.449958,
+      "max": 0.517875,
+      "stdev": 0.03402291466546233,
+      "values": [
+        0.480292,
+        0.517875,
+        0.449958
+      ]
+    },
+    "shown_frames": {
+      "n": 3,
+      "mean": 1176.6666666666667,
+      "min": 1170,
+      "max": 1189,
+      "stdev": 10.692676621563626,
+      "values": [
+        1189,
+        1171,
+        1170
+      ]
+    },
+    "same_refresh_extra_frames": {
+      "n": 3,
+      "mean": 0.3333333333333333,
+      "min": 0,
+      "max": 1,
+      "stdev": 0.5773502691896258,
+      "values": [
+        0,
+        1,
+        0
+      ]
+    },
+    "double_then_skip": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "main_max_ms": {
+      "n": 3,
+      "mean": 0.9206666666666667,
+      "min": 0.765,
+      "max": 1.201,
+      "stdev": 0.24327008310380738,
+      "values": [
+        0.765,
+        0.796,
+        1.201
+      ]
+    },
+    "repaint_pct": {
+      "n": 3,
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "stdev": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "main_with_present_max_ms": {
+      "n": 3,
+      "mean": 4.136,
+      "min": 3.977,
+      "max": 4.41,
+      "stdev": 0.23830862342768896,
+      "values": [
+        4.41,
+        4.021,
+        3.977
+      ]
+    },
+    "rows_built": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "picture_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "exact_latency_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "estimated_latency_p99_ms": {
+      "n": 3,
+      "mean": 20.724583337704342,
+      "min": 20.586667001247406,
+      "max": 20.796041011810303,
+      "stdev": 0.11946520173635679,
+      "values": [
+        20.796041011810303,
+        20.791042000055313,
+        20.586667001247406
+      ]
+    },
+    "frame_end_to_shown_p99_ms": {
+      "n": 3,
+      "mean": 18.193777670462925,
+      "min": 18.182875007390976,
+      "max": 18.20008298754692,
+      "stdev": 0.00948052413432808,
+      "values": [
+        18.198375016450882,
+        18.20008298754692,
+        18.182875007390976
+      ]
+    },
+    "acquisition_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "gpu_wait_p99_ms": {
+      "n": 3,
+      "mean": 0.979,
+      "min": 0.967,
+      "max": 1.0,
+      "stdev": 0.018248287590894675,
+      "values": [
+        0.967,
+        0.97,
+        1.0
+      ]
+    },
+    "present_to_display_p99_ms": {
+      "n": 3,
+      "mean": 18.503889333333333,
+      "min": 18.501042,
+      "max": 18.509084,
+      "stdev": 0.004505654373488307,
+      "values": [
+        18.501042,
+        18.509084,
+        18.501542
+      ]
+    },
+    "rss_delta_kib": {
+      "n": 3,
+      "mean": 298.6666666666667,
+      "min": 224,
+      "max": 352,
+      "stdev": 66.61331198291624,
+      "values": [
+        320,
+        224,
+        352
+      ]
+    },
+    "all_gates_pass": false,
+    "paired_trials": [
+      {
+        "trial": 0,
+        "late_delta_pp": 0.08474144302571551,
+        "shown_delta": -1
+      },
+      {
+        "trial": 1,
+        "late_delta_pp": -1.5481458478896568,
+        "shown_delta": 17
+      },
+      {
+        "trial": 2,
+        "late_delta_pp": -1.4652323245415073,
+        "shown_delta": 17
+      }
+    ],
+    "paired_late_delta_pp": {
+      "n": 3,
+      "mean": -0.9762122431351495,
+      "min": -1.5481458478896568,
+      "max": 0.08474144302571551,
+      "stdev": 0.9197476318111651,
+      "values": [
+        0.08474144302571551,
+        -1.5481458478896568,
+        -1.4652323245415073
+      ]
+    },
+    "paired_shown_delta": {
+      "n": 3,
+      "mean": 11,
+      "min": -1,
+      "max": 17,
+      "stdev": 10.392304845413264,
+      "values": [
+        -1,
+        17,
+        17
+      ]
+    },
+    "shown_count_regression": false
+  },
+  {
+    "arm": "idle-asap",
+    "role": "variant",
+    "n": 3,
+    "required": 3,
+    "complete": true,
+    "condition": {
+      "scene": "zeron-idle",
+      "gesture": "reference",
+      "size": "W",
+      "present": "0",
+      "hz": 120,
+      "scale": 2,
+      "background": "translucent",
+      "reset_row": 160,
+      "command": "reference",
+      "reference_refresh_grid": "on"
+    },
+    "late_pct": {
+      "n": 3,
+      "mean": 0.7858704994341051,
+      "min": 0.7575757575757576,
+      "max": 0.8424599831508003,
+      "stdev": 0.04900793048570383,
+      "values": [
+        0.7575757575757576,
+        0.7575757575757576,
+        0.8424599831508003
+      ]
+    },
+    "interval_p99_ms": {
+      "n": 3,
+      "mean": 8.333472688992819,
+      "min": 8.33345901966095,
+      "max": 8.333500027656555,
+      "stdev": 2.3675977301744373e-05,
+      "values": [
+        8.33345901966095,
+        8.33345901966095,
+        8.333500027656555
+      ]
+    },
+    "main_over_4ms": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "gpu_p99_ms": {
+      "n": 3,
+      "mean": 0.176736,
+      "min": 0.1045,
+      "max": 0.32083300000000003,
+      "stdev": 0.12479180346881764,
+      "values": [
+        0.1045,
+        0.32083300000000003,
+        0.104875
+      ]
+    },
+    "shown_frames": {
+      "n": 3,
+      "mean": 1187.6666666666667,
+      "min": 1187,
+      "max": 1188,
+      "stdev": 0.5773502691896257,
+      "values": [
+        1188,
+        1188,
+        1187
+      ]
+    },
+    "same_refresh_extra_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "double_then_skip": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "main_max_ms": {
+      "n": 3,
+      "mean": 1.415,
+      "min": 1.367,
+      "max": 1.499,
+      "stdev": 0.0729931503635787,
+      "values": [
+        1.499,
+        1.367,
+        1.379
+      ]
+    },
+    "repaint_pct": {
+      "n": 3,
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "stdev": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "main_with_present_max_ms": {
+      "n": 3,
+      "mean": 4.180666666666667,
+      "min": 4.089,
+      "max": 4.232,
+      "stdev": 0.07957595951877243,
+      "values": [
+        4.221,
+        4.232,
+        4.089
+      ]
+    },
+    "rows_built": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "picture_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "exact_latency_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "estimated_latency_p99_ms": {
+      "n": 3,
+      "mean": 24.842042336861294,
+      "min": 24.74275103211403,
+      "max": 24.893916994333267,
+      "stdev": 0.08601767761651621,
+      "values": [
+        24.74275103211403,
+        24.88945898413658,
+        24.893916994333267
+      ]
+    },
+    "frame_end_to_shown_p99_ms": {
+      "n": 3,
+      "mean": 23.64822303255399,
+      "min": 23.623834043741226,
+      "max": 23.66812601685524,
+      "stdev": 0.022484169941119223,
+      "values": [
+        23.623834043741226,
+        23.652709037065506,
+        23.66812601685524
+      ]
+    },
+    "acquisition_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "gpu_wait_p99_ms": {
+      "n": 3,
+      "mean": 1.946,
+      "min": 1.718,
+      "max": 2.104,
+      "stdev": 0.20229681164071772,
+      "values": [
+        2.016,
+        2.104,
+        1.718
+      ]
+    },
+    "present_to_display_p99_ms": {
+      "n": 3,
+      "mean": 24.050264,
+      "min": 23.888625,
+      "max": 24.157417,
+      "stdev": 0.14243885692815586,
+      "values": [
+        23.888625,
+        24.10475,
+        24.157417
+      ]
+    },
+    "rss_delta_kib": {
+      "n": 3,
+      "mean": 277.3333333333333,
+      "min": 208,
+      "max": 368,
+      "stdev": 82.10562303115015,
+      "values": [
+        368,
+        208,
+        256
+      ]
+    },
+    "all_gates_pass": false,
+    "paired_trials": [
+      {
+        "trial": 0,
+        "late_delta_pp": 0.08474144302571551,
+        "shown_delta": -1
+      },
+      {
+        "trial": 1,
+        "late_delta_pp": -1.5481458478896568,
+        "shown_delta": 17
+      },
+      {
+        "trial": 2,
+        "late_delta_pp": -1.4652323245415073,
+        "shown_delta": 17
+      }
+    ],
+    "paired_late_delta_pp": {
+      "n": 3,
+      "mean": -0.9762122431351495,
+      "min": -1.5481458478896568,
+      "max": 0.08474144302571551,
+      "stdev": 0.9197476318111651,
+      "values": [
+        0.08474144302571551,
+        -1.5481458478896568,
+        -1.4652323245415073
+      ]
+    },
+    "paired_shown_delta": {
+      "n": 3,
+      "mean": 11,
+      "min": -1,
+      "max": 17,
+      "stdev": 10.392304845413264,
+      "values": [
+        -1,
+        17,
+        17
+      ]
+    },
+    "shown_count_regression": false
+  },
+  {
+    "arm": "idle-view-link",
+    "role": "base",
+    "n": 3,
+    "required": 3,
+    "complete": true,
+    "condition": {
+      "scene": "zeron-idle",
+      "gesture": "reference",
+      "size": "W",
+      "present": "0",
+      "hz": 120,
+      "scale": 2,
+      "background": "translucent",
+      "reset_row": 160,
+      "command": "reference",
+      "reference_refresh_grid": "on"
+    },
+    "late_pct": {
+      "n": 3,
+      "mean": 1.6409694056813293,
+      "min": 1.267962806424345,
+      "max": 1.870748299319728,
+      "stdev": 0.32591903803530053,
+      "values": [
+        1.267962806424345,
+        1.870748299319728,
+        1.784197111299915
+      ]
+    },
+    "interval_p99_ms": {
+      "n": 3,
+      "mean": 16.666666676600773,
+      "min": 16.66666603088379,
+      "max": 16.666667014360428,
+      "stdev": 5.594058126330808e-07,
+      "values": [
+        16.66666603088379,
+        16.666667014360428,
+        16.666666984558105
+      ]
+    },
+    "main_over_4ms": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "gpu_p99_ms": {
+      "n": 3,
+      "mean": 0.47661133333333333,
+      "min": 0.448125,
+      "max": 0.500167,
+      "stdev": 0.026369035749024536,
+      "values": [
+        0.48154199999999997,
+        0.500167,
+        0.448125
+      ]
+    },
+    "shown_frames": {
+      "n": 3,
+      "mean": 1178.6666666666667,
+      "min": 1176,
+      "max": 1183,
+      "stdev": 3.7859388972001824,
+      "values": [
+        1183,
+        1176,
+        1177
+      ]
+    },
+    "same_refresh_extra_frames": {
+      "n": 3,
+      "mean": 0.6666666666666666,
+      "min": 0,
+      "max": 2,
+      "stdev": 1.1547005383792517,
+      "values": [
+        0,
+        2,
+        0
+      ]
+    },
+    "double_then_skip": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "main_max_ms": {
+      "n": 3,
+      "mean": 1.084,
+      "min": 0.745,
+      "max": 1.383,
+      "stdev": 0.32087536521210225,
+      "values": [
+        1.124,
+        1.383,
+        0.745
+      ]
+    },
+    "repaint_pct": {
+      "n": 3,
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "stdev": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "main_with_present_max_ms": {
+      "n": 3,
+      "mean": 4.012666666666667,
+      "min": 3.701,
+      "max": 4.222,
+      "stdev": 0.275162376304126,
+      "values": [
+        3.701,
+        4.222,
+        4.115
+      ]
+    },
+    "rows_built": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "picture_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "exact_latency_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "estimated_latency_p99_ms": {
+      "n": 3,
+      "mean": 20.73605599006017,
+      "min": 20.626166969537735,
+      "max": 20.796459019184113,
+      "stdev": 0.09532309820662517,
+      "values": [
+        20.785541981458664,
+        20.796459019184113,
+        20.626166969537735
+      ]
+    },
+    "frame_end_to_shown_p99_ms": {
+      "n": 3,
+      "mean": 18.170764327049255,
+      "min": 18.160209000110626,
+      "max": 18.188416987657547,
+      "stdev": 0.015385114535670603,
+      "values": [
+        18.188416987657547,
+        18.160209000110626,
+        18.163666993379593
+      ]
+    },
+    "acquisition_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "gpu_wait_p99_ms": {
+      "n": 3,
+      "mean": 1.0196666666666667,
+      "min": 0.977,
+      "max": 1.072,
+      "stdev": 0.048232077845903935,
+      "values": [
+        1.01,
+        1.072,
+        0.977
+      ]
+    },
+    "present_to_display_p99_ms": {
+      "n": 3,
+      "mean": 18.500236666666666,
+      "min": 18.498292,
+      "max": 18.503709,
+      "stdev": 0.003014348409413619,
+      "values": [
+        18.498709,
+        18.503709,
+        18.498292
+      ]
+    },
+    "rss_delta_kib": {
+      "n": 3,
+      "mean": 245.33333333333334,
+      "min": 208,
+      "max": 272,
+      "stdev": 33.30665599145812,
+      "values": [
+        272,
+        256,
+        208
+      ]
+    },
+    "all_gates_pass": false,
+    "paired_trials": [
+      {
+        "trial": 0,
+        "late_delta_pp": -1.267962806424345,
+        "shown_delta": 14
+      },
+      {
+        "trial": 1,
+        "late_delta_pp": -1.870748299319728,
+        "shown_delta": 21
+      },
+      {
+        "trial": 2,
+        "late_delta_pp": -1.784197111299915,
+        "shown_delta": 20
+      }
+    ],
+    "paired_late_delta_pp": {
+      "n": 3,
+      "mean": -1.6409694056813293,
+      "min": -1.870748299319728,
+      "max": -1.267962806424345,
+      "stdev": 0.32591903803530053,
+      "values": [
+        -1.267962806424345,
+        -1.870748299319728,
+        -1.784197111299915
+      ]
+    },
+    "paired_shown_delta": {
+      "n": 3,
+      "mean": 18.333333333333332,
+      "min": 14,
+      "max": 21,
+      "stdev": 3.7859388972001824,
+      "values": [
+        14,
+        21,
+        20
+      ]
+    },
+    "shown_count_regression": false
+  },
+  {
+    "arm": "idle-view-link",
+    "role": "variant",
+    "n": 3,
+    "required": 3,
+    "complete": true,
+    "condition": {
+      "scene": "zeron-idle",
+      "gesture": "reference",
+      "size": "W",
+      "present": "0",
+      "hz": 120,
+      "scale": 2,
+      "background": "translucent",
+      "reset_row": 160,
+      "command": "reference",
+      "reference_refresh_grid": "on"
+    },
+    "late_pct": {
+      "n": 3,
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "stdev": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "interval_p99_ms": {
+      "n": 3,
+      "mean": 8.333458016316095,
+      "min": 8.333458006381989,
+      "max": 8.333458036184311,
+      "stdev": 1.7206378853011898e-08,
+      "values": [
+        8.333458036184311,
+        8.333458006381989,
+        8.333458006381989
+      ]
+    },
+    "main_over_4ms": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "gpu_p99_ms": {
+      "n": 3,
+      "mean": 0.10313866666666666,
+      "min": 0.101875,
+      "max": 0.104833,
+      "stdev": 0.0015253020465905555,
+      "values": [
+        0.101875,
+        0.102708,
+        0.104833
+      ]
+    },
+    "shown_frames": {
+      "n": 3,
+      "mean": 1197,
+      "min": 1197,
+      "max": 1197,
+      "stdev": 0.0,
+      "values": [
+        1197,
+        1197,
+        1197
+      ]
+    },
+    "same_refresh_extra_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "double_then_skip": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "main_max_ms": {
+      "n": 3,
+      "mean": 1.2436666666666667,
+      "min": 0.836,
+      "max": 1.647,
+      "stdev": 0.40551736502070207,
+      "values": [
+        0.836,
+        1.248,
+        1.647
+      ]
+    },
+    "repaint_pct": {
+      "n": 3,
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "stdev": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "main_with_present_max_ms": {
+      "n": 3,
+      "mean": 4.464333333333333,
+      "min": 3.738,
+      "max": 5.346,
+      "stdev": 0.8151762590589433,
+      "values": [
+        3.738,
+        4.309,
+        5.346
+      ]
+    },
+    "rows_built": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "picture_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "exact_latency_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "estimated_latency_p99_ms": {
+      "n": 3,
+      "mean": 24.533458322286606,
+      "min": 24.53229197859764,
+      "max": 24.534583002328873,
+      "stdev": 0.001146079983621922,
+      "values": [
+        24.533499985933304,
+        24.534583002328873,
+        24.53229197859764
+      ]
+    },
+    "frame_end_to_shown_p99_ms": {
+      "n": 3,
+      "mean": 23.681125322977703,
+      "min": 23.655333995819092,
+      "max": 23.707292020320892,
+      "stdev": 0.025981046064660875,
+      "values": [
+        23.68074995279312,
+        23.707292020320892,
+        23.655333995819092
+      ]
+    },
+    "acquisition_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "gpu_wait_p99_ms": {
+      "n": 3,
+      "mean": 1.4936666666666667,
+      "min": 1.413,
+      "max": 1.567,
+      "stdev": 0.07726146085425337,
+      "values": [
+        1.413,
+        1.501,
+        1.567
+      ]
+    },
+    "present_to_display_p99_ms": {
+      "n": 3,
+      "mean": 23.928208333333334,
+      "min": 23.925958,
+      "max": 23.930375,
+      "stdev": 0.0022096882887261233,
+      "values": [
+        23.930375,
+        23.925958,
+        23.928292
+      ]
+    },
+    "rss_delta_kib": {
+      "n": 3,
+      "mean": 309.3333333333333,
+      "min": 240,
+      "max": 448,
+      "stdev": 120.08885599144216,
+      "values": [
+        240,
+        448,
+        240
+      ]
+    },
+    "all_gates_pass": true,
+    "paired_trials": [
+      {
+        "trial": 0,
+        "late_delta_pp": -1.267962806424345,
+        "shown_delta": 14
+      },
+      {
+        "trial": 1,
+        "late_delta_pp": -1.870748299319728,
+        "shown_delta": 21
+      },
+      {
+        "trial": 2,
+        "late_delta_pp": -1.784197111299915,
+        "shown_delta": 20
+      }
+    ],
+    "paired_late_delta_pp": {
+      "n": 3,
+      "mean": -1.6409694056813293,
+      "min": -1.870748299319728,
+      "max": -1.267962806424345,
+      "stdev": 0.32591903803530053,
+      "values": [
+        -1.267962806424345,
+        -1.870748299319728,
+        -1.784197111299915
+      ]
+    },
+    "paired_shown_delta": {
+      "n": 3,
+      "mean": 18.333333333333332,
+      "min": 14,
+      "max": 21,
+      "stdev": 3.7859388972001824,
+      "values": [
+        14,
+        21,
+        20
+      ]
+    },
+    "shown_count_regression": false
+  },
+  {
+    "arm": "idle-lead4000",
+    "role": "base",
+    "n": 3,
+    "required": 3,
+    "complete": true,
+    "condition": {
+      "scene": "zeron-idle",
+      "gesture": "reference",
+      "size": "W",
+      "present": "0",
+      "hz": 120,
+      "scale": 2,
+      "background": "translucent",
+      "reset_row": 160,
+      "command": "reference",
+      "reference_refresh_grid": "on"
+    },
+    "late_pct": {
+      "n": 3,
+      "mean": 1.3267868661338678,
+      "min": 0.927487352445194,
+      "max": 1.699235344095157,
+      "stdev": 0.38657402168751953,
+      "values": [
+        0.927487352445194,
+        1.353637901861252,
+        1.699235344095157
+      ]
+    },
+    "interval_p99_ms": {
+      "n": 3,
+      "mean": 13.888930668433508,
+      "min": 8.33345901966095,
+      "max": 16.666666984558105,
+      "stdev": 4.811179577841281,
+      "values": [
+        8.33345901966095,
+        16.666666001081467,
+        16.666666984558105
+      ]
+    },
+    "main_over_4ms": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "gpu_p99_ms": {
+      "n": 3,
+      "mean": 0.44180566666666665,
+      "min": 0.417917,
+      "max": 0.459625,
+      "stdev": 0.02150620657701711,
+      "values": [
+        0.417917,
+        0.459625,
+        0.447875
+      ]
+    },
+    "shown_frames": {
+      "n": 3,
+      "mean": 1181.6666666666667,
+      "min": 1177,
+      "max": 1186,
+      "stdev": 4.509249752822894,
+      "values": [
+        1186,
+        1182,
+        1177
+      ]
+    },
+    "same_refresh_extra_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "double_then_skip": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "main_max_ms": {
+      "n": 3,
+      "mean": 0.7783333333333333,
+      "min": 0.745,
+      "max": 0.822,
+      "stdev": 0.039526362510776666,
+      "values": [
+        0.745,
+        0.822,
+        0.768
+      ]
+    },
+    "repaint_pct": {
+      "n": 3,
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "stdev": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "main_with_present_max_ms": {
+      "n": 3,
+      "mean": 6.265,
+      "min": 3.45,
+      "max": 11.774999999999999,
+      "stdev": 4.772177176090594,
+      "values": [
+        3.5700000000000003,
+        3.45,
+        11.774999999999999
+      ]
+    },
+    "rows_built": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "picture_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "exact_latency_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "estimated_latency_p99_ms": {
+      "n": 3,
+      "mean": 20.61612532536189,
+      "min": 20.576291978359222,
+      "max": 20.640416979789734,
+      "stdev": 0.03477300832806116,
+      "values": [
+        20.631667017936707,
+        20.640416979789734,
+        20.576291978359222
+      ]
+    },
+    "frame_end_to_shown_p99_ms": {
+      "n": 3,
+      "mean": 18.166903009017307,
+      "min": 18.153042018413544,
+      "max": 18.19216701388359,
+      "stdev": 0.02191375979461715,
+      "values": [
+        18.153042018413544,
+        18.19216701388359,
+        18.15549999475479
+      ]
+    },
+    "acquisition_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "gpu_wait_p99_ms": {
+      "n": 3,
+      "mean": 0.963,
+      "min": 0.909,
+      "max": 1.016,
+      "stdev": 0.053507008886686976,
+      "values": [
+        0.909,
+        0.964,
+        1.016
+      ]
+    },
+    "present_to_display_p99_ms": {
+      "n": 3,
+      "mean": 18.50231966666667,
+      "min": 18.501042,
+      "max": 18.503417,
+      "stdev": 0.0011977254832932695,
+      "values": [
+        18.5025,
+        18.501042,
+        18.503417
+      ]
+    },
+    "rss_delta_kib": {
+      "n": 3,
+      "mean": 368,
+      "min": 240,
+      "max": 576,
+      "stdev": 181.72506706560876,
+      "values": [
+        576,
+        240,
+        288
+      ]
+    },
+    "all_gates_pass": false,
+    "paired_trials": [
+      {
+        "trial": 0,
+        "late_delta_pp": 3.7053797804219384,
+        "shown_delta": -42
+      },
+      {
+        "trial": 1,
+        "late_delta_pp": 9.58241399804607,
+        "shown_delta": -103
+      },
+      {
+        "trial": 2,
+        "late_delta_pp": 1.3128128486759274,
+        "shown_delta": -15
+      }
+    ],
+    "paired_late_delta_pp": {
+      "n": 3,
+      "mean": 4.866868875714645,
+      "min": 1.3128128486759274,
+      "max": 9.58241399804607,
+      "stdev": 4.255392870379761,
+      "values": [
+        3.7053797804219384,
+        9.58241399804607,
+        1.3128128486759274
+      ]
+    },
+    "paired_shown_delta": {
+      "n": 3,
+      "mean": -53.333333333333336,
+      "min": -103,
+      "max": -15,
+      "stdev": 45.08140784551136,
+      "values": [
+        -42,
+        -103,
+        -15
+      ]
+    },
+    "shown_count_regression": true
+  },
+  {
+    "arm": "idle-lead4000",
+    "role": "variant",
+    "n": 3,
+    "required": 3,
+    "complete": true,
+    "condition": {
+      "scene": "zeron-idle",
+      "gesture": "reference",
+      "size": "W",
+      "present": "0",
+      "hz": 120,
+      "scale": 2,
+      "background": "translucent",
+      "reset_row": 160,
+      "command": "reference",
+      "reference_refresh_grid": "on"
+    },
+    "late_pct": {
+      "n": 3,
+      "mean": 6.193655741848513,
+      "min": 3.0120481927710845,
+      "max": 10.936051899907321,
+      "stdev": 4.186227955943361,
+      "values": [
+        4.6328671328671325,
+        10.936051899907321,
+        3.0120481927710845
+      ]
+    },
+    "interval_p99_ms": {
+      "n": 3,
+      "mean": 16.666735996802647,
+      "min": 16.66670799255371,
+      "max": 16.666750013828278,
+      "stdev": 2.4252395571107755e-05,
+      "values": [
+        16.666749984025955,
+        16.666750013828278,
+        16.66670799255371
+      ]
+    },
+    "main_over_4ms": {
+      "n": 3,
+      "mean": 0.3333333333333333,
+      "min": 0,
+      "max": 1,
+      "stdev": 0.5773502691896258,
+      "values": [
+        0,
+        1,
+        0
+      ]
+    },
+    "gpu_p99_ms": {
+      "n": 3,
+      "mean": 0.19395833333333334,
+      "min": 0.10075,
+      "max": 0.37475,
+      "stdev": 0.1565954348259659,
+      "values": [
+        0.106375,
+        0.37475,
+        0.10075
+      ]
+    },
+    "shown_frames": {
+      "n": 3,
+      "mean": 1128.3333333333333,
+      "min": 1079,
+      "max": 1162,
+      "stdev": 43.66157731156002,
+      "values": [
+        1144,
+        1079,
+        1162
+      ]
+    },
+    "same_refresh_extra_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "double_then_skip": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "main_max_ms": {
+      "n": 3,
+      "mean": 2.6216666666666666,
+      "min": 0.92,
+      "max": 6.012,
+      "stdev": 2.9361219888372028,
+      "values": [
+        0.933,
+        6.012,
+        0.92
+      ]
+    },
+    "repaint_pct": {
+      "n": 3,
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "stdev": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "main_with_present_max_ms": {
+      "n": 3,
+      "mean": 4.963666666666667,
+      "min": 3.707,
+      "max": 7.018,
+      "stdev": 1.79384624015921,
+      "values": [
+        3.707,
+        7.018,
+        4.1659999999999995
+      ]
+    },
+    "rows_built": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "picture_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "exact_latency_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "estimated_latency_p99_ms": {
+      "n": 3,
+      "mean": 22.43094464143117,
+      "min": 22.22912499308586,
+      "max": 22.68599995970726,
+      "stdev": 0.23304336762941782,
+      "values": [
+        22.377708971500397,
+        22.68599995970726,
+        22.22912499308586
+      ]
+    },
+    "frame_end_to_shown_p99_ms": {
+      "n": 3,
+      "mean": 20.227652996778488,
+      "min": 20.20558300614357,
+      "max": 20.264583975076675,
+      "stdev": 0.03218563809383302,
+      "values": [
+        20.21279200911522,
+        20.264583975076675,
+        20.20558300614357
+      ]
+    },
+    "acquisition_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "gpu_wait_p99_ms": {
+      "n": 3,
+      "mean": 1.547,
+      "min": 1.385,
+      "max": 1.826,
+      "stdev": 0.2426664377288298,
+      "values": [
+        1.43,
+        1.826,
+        1.385
+      ]
+    },
+    "present_to_display_p99_ms": {
+      "n": 3,
+      "mean": 20.61407,
+      "min": 20.606876,
+      "max": 20.6215,
+      "stdev": 0.007314855842736032,
+      "values": [
+        20.6215,
+        20.613834,
+        20.606876
+      ]
+    },
+    "rss_delta_kib": {
+      "n": 3,
+      "mean": 293.3333333333333,
+      "min": 224,
+      "max": 336,
+      "stdev": 60.57502235520292,
+      "values": [
+        336,
+        320,
+        224
+      ]
+    },
+    "all_gates_pass": false,
+    "paired_trials": [
+      {
+        "trial": 0,
+        "late_delta_pp": 3.7053797804219384,
+        "shown_delta": -42
+      },
+      {
+        "trial": 1,
+        "late_delta_pp": 9.58241399804607,
+        "shown_delta": -103
+      },
+      {
+        "trial": 2,
+        "late_delta_pp": 1.3128128486759274,
+        "shown_delta": -15
+      }
+    ],
+    "paired_late_delta_pp": {
+      "n": 3,
+      "mean": 4.866868875714645,
+      "min": 1.3128128486759274,
+      "max": 9.58241399804607,
+      "stdev": 4.255392870379761,
+      "values": [
+        3.7053797804219384,
+        9.58241399804607,
+        1.3128128486759274
+      ]
+    },
+    "paired_shown_delta": {
+      "n": 3,
+      "mean": -53.333333333333336,
+      "min": -103,
+      "max": -15,
+      "stdev": 45.08140784551136,
+      "values": [
+        -42,
+        -103,
+        -15
+      ]
+    },
+    "shown_count_regression": true
+  },
+  {
+    "arm": "idle-lead5500",
+    "role": "base",
+    "n": 3,
+    "required": 3,
+    "complete": true,
+    "condition": {
+      "scene": "zeron-idle",
+      "gesture": "reference",
+      "size": "W",
+      "present": "0",
+      "hz": 120,
+      "scale": 2,
+      "background": "translucent",
+      "reset_row": 160,
+      "command": "reference",
+      "reference_refresh_grid": "on"
+    },
+    "late_pct": {
+      "n": 3,
+      "mean": 1.4421713905971434,
+      "min": 1.0970464135021096,
+      "max": 2.0460358056265986,
+      "stdev": 0.5247425932284961,
+      "values": [
+        1.0970464135021096,
+        1.183431952662722,
+        2.0460358056265986
+      ]
+    },
+    "interval_p99_ms": {
+      "n": 3,
+      "mean": 16.666652649641037,
+      "min": 16.66662496328354,
+      "max": 16.66670799255371,
+      "stdev": 4.792837061148608e-05,
+      "values": [
+        16.66662496328354,
+        16.66662499308586,
+        16.66670799255371
+      ]
+    },
+    "main_over_4ms": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "gpu_p99_ms": {
+      "n": 3,
+      "mean": 0.4782083333333333,
+      "min": 0.45025,
+      "max": 0.532125,
+      "stdev": 0.0467039099897785,
+      "values": [
+        0.45225,
+        0.532125,
+        0.45025
+      ]
+    },
+    "shown_frames": {
+      "n": 3,
+      "mean": 1180.3333333333333,
+      "min": 1173,
+      "max": 1185,
+      "stdev": 6.429100507328636,
+      "values": [
+        1185,
+        1183,
+        1173
+      ]
+    },
+    "same_refresh_extra_frames": {
+      "n": 3,
+      "mean": 0.6666666666666666,
+      "min": 0,
+      "max": 2,
+      "stdev": 1.1547005383792517,
+      "values": [
+        0,
+        0,
+        2
+      ]
+    },
+    "double_then_skip": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "main_max_ms": {
+      "n": 3,
+      "mean": 1.0436666666666667,
+      "min": 0.785,
+      "max": 1.25,
+      "stdev": 0.2368761983259047,
+      "values": [
+        0.785,
+        1.096,
+        1.25
+      ]
+    },
+    "repaint_pct": {
+      "n": 3,
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "stdev": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "main_with_present_max_ms": {
+      "n": 3,
+      "mean": 3.965666666666667,
+      "min": 3.6390000000000002,
+      "max": 4.442,
+      "stdev": 0.4219032274507193,
+      "values": [
+        3.816,
+        3.6390000000000002,
+        4.442
+      ]
+    },
+    "rows_built": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "picture_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "exact_latency_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "estimated_latency_p99_ms": {
+      "n": 3,
+      "mean": 20.805611670017242,
+      "min": 20.80162599682808,
+      "max": 20.811709016561508,
+      "stdev": 0.005362946485390931,
+      "values": [
+        20.80162599682808,
+        20.80349999666214,
+        20.811709016561508
+      ]
+    },
+    "frame_end_to_shown_p99_ms": {
+      "n": 3,
+      "mean": 18.169403344392776,
+      "min": 18.146250009536743,
+      "max": 18.181584000587463,
+      "stdev": 0.02006047079823825,
+      "values": [
+        18.180376023054123,
+        18.146250009536743,
+        18.181584000587463
+      ]
+    },
+    "acquisition_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "gpu_wait_p99_ms": {
+      "n": 3,
+      "mean": 0.9936666666666667,
+      "min": 0.979,
+      "max": 1.006,
+      "stdev": 0.013650396819628858,
+      "values": [
+        0.979,
+        1.006,
+        0.996
+      ]
+    },
+    "present_to_display_p99_ms": {
+      "n": 3,
+      "mean": 18.503222666666666,
+      "min": 18.501167,
+      "max": 18.505709,
+      "stdev": 0.002301422675940867,
+      "values": [
+        18.505709,
+        18.501167,
+        18.502792
+      ]
+    },
+    "rss_delta_kib": {
+      "n": 3,
+      "mean": 458.6666666666667,
+      "min": 336,
+      "max": 576,
+      "stdev": 120.08885599144216,
+      "values": [
+        336,
+        464,
+        576
+      ]
+    },
+    "all_gates_pass": false,
+    "paired_trials": [
+      {
+        "trial": 0,
+        "late_delta_pp": 51.06580345927142,
+        "shown_delta": -399
+      },
+      {
+        "trial": 1,
+        "late_delta_pp": 75.59171597633137,
+        "shown_delta": -507
+      },
+      {
+        "trial": 2,
+        "late_delta_pp": 78.74065103249745,
+        "shown_delta": -511
+      }
+    ],
+    "paired_late_delta_pp": {
+      "n": 3,
+      "mean": 68.46605682270008,
+      "min": 51.06580345927142,
+      "max": 78.74065103249745,
+      "stdev": 15.151091077233374,
+      "values": [
+        51.06580345927142,
+        75.59171597633137,
+        78.74065103249745
+      ]
+    },
+    "paired_shown_delta": {
+      "n": 3,
+      "mean": -472.3333333333333,
+      "min": -511,
+      "max": -399,
+      "stdev": 63.54001363970056,
+      "values": [
+        -399,
+        -507,
+        -511
+      ]
+    },
+    "shown_count_regression": true
+  },
+  {
+    "arm": "idle-lead5500",
+    "role": "variant",
+    "n": 3,
+    "required": 3,
+    "complete": true,
+    "condition": {
+      "scene": "zeron-idle",
+      "gesture": "reference",
+      "size": "W",
+      "present": "0",
+      "hz": 120,
+      "scale": 2,
+      "background": "translucent",
+      "reset_row": 160,
+      "command": "reference",
+      "reference_refresh_grid": "on"
+    },
+    "late_pct": {
+      "n": 3,
+      "mean": 69.90822821329722,
+      "min": 52.162849872773535,
+      "max": 80.78668683812406,
+      "stdev": 15.498288629429748,
+      "values": [
+        52.162849872773535,
+        76.77514792899409,
+        80.78668683812406
+      ]
+    },
+    "interval_p99_ms": {
+      "n": 3,
+      "mean": 16.666791995366413,
+      "min": 16.6667919754982,
+      "max": 16.666792005300522,
+      "stdev": 1.7206378853011898e-08,
+      "values": [
+        16.6667919754982,
+        16.666792005300522,
+        16.666792005300522
+      ]
+    },
+    "main_over_4ms": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "gpu_p99_ms": {
+      "n": 3,
+      "mean": 0.277042,
+      "min": 0.193542,
+      "max": 0.39591699999999996,
+      "stdev": 0.10572347480574026,
+      "values": [
+        0.241667,
+        0.193542,
+        0.39591699999999996
+      ]
+    },
+    "shown_frames": {
+      "n": 3,
+      "mean": 708,
+      "min": 662,
+      "max": 786,
+      "stdev": 67.91170738539859,
+      "values": [
+        786,
+        676,
+        662
+      ]
+    },
+    "same_refresh_extra_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "double_then_skip": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "main_max_ms": {
+      "n": 3,
+      "mean": 1.3853333333333333,
+      "min": 1.029,
+      "max": 1.738,
+      "stdev": 0.35451422162352436,
+      "values": [
+        1.029,
+        1.389,
+        1.738
+      ]
+    },
+    "repaint_pct": {
+      "n": 3,
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "stdev": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "main_with_present_max_ms": {
+      "n": 3,
+      "mean": 3.94,
+      "min": 3.428,
+      "max": 4.584,
+      "stdev": 0.5891960624444122,
+      "values": [
+        3.428,
+        3.808,
+        4.584
+      ]
+    },
+    "rows_built": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "picture_frames": {
+      "n": 3,
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "stdev": 0.0,
+      "values": [
+        0,
+        0,
+        0
+      ]
+    },
+    "exact_latency_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "estimated_latency_p99_ms": {
+      "n": 3,
+      "mean": 24.085041344165802,
+      "min": 23.90470799803734,
+      "max": 24.341416001319885,
+      "stdev": 0.2280683686301731,
+      "values": [
+        23.90470799803734,
+        24.009000033140182,
+        24.341416001319885
+      ]
+    },
+    "frame_end_to_shown_p99_ms": {
+      "n": 3,
+      "mean": 21.819846997658413,
+      "min": 21.79908299446106,
+      "max": 21.85137501358986,
+      "stdev": 0.027758094202349433,
+      "values": [
+        21.85137501358986,
+        21.79908299446106,
+        21.809082984924316
+      ]
+    },
+    "acquisition_p99_ms": {
+      "n": 0,
+      "mean": null,
+      "min": null,
+      "max": null,
+      "stdev": null,
+      "values": []
+    },
+    "gpu_wait_p99_ms": {
+      "n": 3,
+      "mean": 1.5410000000000001,
+      "min": 1.332,
+      "max": 1.834,
+      "stdev": 0.2613292941864727,
+      "values": [
+        1.332,
+        1.457,
+        1.834
+      ]
+    },
+    "present_to_display_p99_ms": {
+      "n": 3,
+      "mean": 22.110889,
+      "min": 22.095125,
+      "max": 22.136292,
+      "stdev": 0.022211780950658375,
+      "values": [
+        22.10125,
+        22.095125,
+        22.136292
+      ]
+    },
+    "rss_delta_kib": {
+      "n": 3,
+      "mean": 645.3333333333334,
+      "min": 432,
+      "max": 880,
+      "stdev": 224.76061339419175,
+      "values": [
+        432,
+        624,
+        880
+      ]
+    },
+    "all_gates_pass": false,
+    "paired_trials": [
+      {
+        "trial": 0,
+        "late_delta_pp": 51.06580345927142,
+        "shown_delta": -399
+      },
+      {
+        "trial": 1,
+        "late_delta_pp": 75.59171597633137,
+        "shown_delta": -507
+      },
+      {
+        "trial": 2,
+        "late_delta_pp": 78.74065103249745,
+        "shown_delta": -511
+      }
+    ],
+    "paired_late_delta_pp": {
+      "n": 3,
+      "mean": 68.46605682270008,
+      "min": 51.06580345927142,
+      "max": 78.74065103249745,
+      "stdev": 15.151091077233374,
+      "values": [
+        51.06580345927142,
+        75.59171597633137,
+        78.74065103249745
+      ]
+    },
+    "paired_shown_delta": {
+      "n": 3,
+      "mean": -472.3333333333333,
+      "min": -511,
+      "max": -399,
+      "stdev": 63.54001363970056,
+      "values": [
+        -399,
+        -507,
+        -511
+      ]
+    },
+    "shown_count_regression": true
+  }
+]

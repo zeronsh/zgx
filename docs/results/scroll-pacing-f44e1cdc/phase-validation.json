@@ -1,0 +1,78 @@
+{
+  "reason": "CV link align hold had no Wait span on f44, making duration comparisons invalid; handover phase and timer-source independently certify LEAD behavior",
+  "tolerance_ms": 1,
+  "proofs": [
+    {
+      "arm": "idle-lead4000",
+      "trial": 0,
+      "valid": true,
+      "baseline_lead_ms": 1.4732298304637261,
+      "variant_lead_ms": 3.70381333430608,
+      "intended_lead_ms": 4.0,
+      "delta_ms": 2.230583503842354,
+      "baseline_samples": 1214,
+      "variant_samples": 1174,
+      "tolerance_ms": 1
+    },
+    {
+      "arm": "idle-lead5500",
+      "trial": 0,
+      "valid": true,
+      "baseline_lead_ms": 1.4726048459609338,
+      "variant_lead_ms": 5.1327093442281075,
+      "intended_lead_ms": 5.5,
+      "delta_ms": 3.6601044982671738,
+      "baseline_samples": 1208,
+      "variant_samples": 805,
+      "tolerance_ms": 1
+    },
+    {
+      "arm": "idle-lead4000",
+      "trial": 1,
+      "valid": true,
+      "baseline_lead_ms": 1.4763753314812966,
+      "variant_lead_ms": 3.7117503484090157,
+      "intended_lead_ms": 4.0,
+      "delta_ms": 2.235375016927719,
+      "baseline_samples": 1206,
+      "variant_samples": 1103,
+      "tolerance_ms": 1
+    },
+    {
+      "arm": "idle-lead5500",
+      "trial": 1,
+      "valid": true,
+      "baseline_lead_ms": 1.4621253212292977,
+      "variant_lead_ms": 5.220000346501667,
+      "intended_lead_ms": 5.5,
+      "delta_ms": 3.7578750252723694,
+      "baseline_samples": 1212,
+      "variant_samples": 695,
+      "tolerance_ms": 1
+    },
+    {
+      "arm": "idle-lead4000",
+      "trial": 2,
+      "valid": true,
+      "baseline_lead_ms": 1.467625339825947,
+      "variant_lead_ms": 3.705041339000065,
+      "intended_lead_ms": 4.0,
+      "delta_ms": 2.237415999174118,
+      "baseline_samples": 1205,
+      "variant_samples": 1191,
+      "tolerance_ms": 1
+    },
+    {
+      "arm": "idle-lead5500",
+      "trial": 2,
+      "valid": true,
+      "baseline_lead_ms": 1.4665003319581338,
+      "variant_lead_ms": 5.170062815149624,
+      "intended_lead_ms": 5.5,
+      "delta_ms": 3.70356248319149,
+      "baseline_samples": 1205,
+      "variant_samples": 682,
+      "tolerance_ms": 1
+    }
+  ]
+}
