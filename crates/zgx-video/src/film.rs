@@ -180,6 +180,32 @@ impl Film {
         self.blend.average_into(samples, pixels);
         Ok(())
     }
+    /// [`Film::draw_output`] into a pixel buffer for a window (macOS), and
+    /// into `pixels` too if `bytes`. A blurred frame, drawn of several
+    /// samples as bytes, is uploaded.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn draw_output_surface(
+        &mut self,
+        frame: u64,
+        pixels: &mut Vec<u8>,
+        bytes: bool,
+        hold_timeout: std::time::Duration,
+    ) -> Result<zgx_gpu::PixelBuffer, String> {
+        if self.ticks.samples > 1 {
+            self.draw_output(frame, pixels, hold_timeout)?;
+            return (self.stage.upload_surface(pixels)).map_err(|error| error.to_string());
+        }
+        self.step_to_tick(frame * u64::from(self.ticks.per_frame))?;
+        self.wait_for_holds(hold_timeout)?;
+        let buffer = self
+            .stage
+            .draw_surface()
+            .map_err(|error| error.to_string())?;
+        if bytes {
+            (self.stage.read_back(pixels)).map_err(|error| error.to_string())?;
+        }
+        Ok(buffer)
+    }
     /// Wait, in real time, for what the composition holds the render for
     /// (`video.hold`), letting it run; an error past `timeout`.
     pub fn wait_for_holds(&mut self, timeout: std::time::Duration) -> Result<(), String> {

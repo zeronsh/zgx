@@ -54,6 +54,9 @@ pub struct Stage {
     gpu: GpuRenderer,
     /// What frames are read back through, kept from one to the next.
     readback: zgx_gpu::Readback,
+    /// The pixel buffers frames are copied into for a window (macOS).
+    #[cfg(target_os = "macos")]
+    surfaces: zgx_gpu::SurfaceReadback,
     handle: ViewHandle,
     ui: Ui,
     executor: Rc<RefCell<LocalExecutor>>,
@@ -128,6 +131,8 @@ impl Stage {
         let mut stage = Self {
             gpu,
             readback: zgx_gpu::Readback::default(),
+            #[cfg(target_os = "macos")]
+            surfaces: zgx_gpu::SurfaceReadback::default(),
             handle,
             ui,
             executor,
@@ -227,6 +232,37 @@ impl Stage {
         drop(scene);
         self.gpu.readback_into(pixels, &mut self.readback)?;
         Ok(())
+    }
+    /// [`Stage::draw`], into a pixel buffer for a window to show as it is,
+    /// nothing read back.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn draw_surface(&mut self) -> Result<zgx_gpu::PixelBuffer, GpuError> {
+        let mut scene = self.ui.scene.borrow_mut();
+        scene.flush();
+        let whole = [scene.bounds(scene.root())];
+        self.gpu.render(&scene, &whole)?;
+        drop(scene);
+        self.gpu.readback_surface(&mut self.surfaces)
+    }
+    /// Pixels it drew as bytes (`pixels`, of its pixel size), in a pixel
+    /// buffer for a window.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn upload_surface(
+        &mut self,
+        pixels: &[u8],
+    ) -> Result<zgx_gpu::PixelBuffer, GpuError> {
+        let (width, height) = self.pixel_size();
+        self.surfaces.upload(width, height, pixels)
+    }
+    /// Read back what it drew last, not drawing again.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn read_back(&mut self, pixels: &mut Vec<u8>) -> Result<(), GpuError> {
+        self.gpu.readback_into(pixels, &mut self.readback)
+    }
+    /// Gives back the pixel buffers no window holds.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn release_surfaces(&self) {
+        self.surfaces.release_unused();
     }
     /// Draw the frame it stands at, whole, reading nothing back: what a frame
     /// costs to make, for measuring it.

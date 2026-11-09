@@ -189,7 +189,7 @@ On an Apple M-series Mac shared with other work, the showcase with 4-sample moti
 
 ## A player in any app
 
-`zgx_video::Player` plays a composition live inside any zgx app, as the studio's preview does. Its frames are made on a thread of its own, on that thread's virtual clock, through the code a render uses. While it's neither playing nor asked for a frame, that thread waits and does no work. While what it shows is unseen it draws nothing either, playing or not: its clock runs on, and seen again it draws the frame due then (a looping one, as far into its pass as time says). `Player::view` tells it so itself, from whether any of its box shows and its window shows; a script's player is told with `ui.invoke("clip.watch", seen)`.
+`zgx_video::Player` plays a composition live inside any zgx app, as the studio's preview does. Its frames are made on a thread of its own, on that thread's virtual clock, through the code a render uses. While it's neither playing nor asked for a frame, that thread waits and does no work. While what it shows is unseen it draws nothing either, playing or not: its clock runs on, and seen again it draws the frame due then (a looping one, as far into its pass as time says). `Player::view` tells it so itself, from whether any of its box shows and its window shows; a script's player is told with `ui.invoke("clip.watch", seen)`. On macOS its view shows its frames as pixel buffers copied on the GPU, never read back to bytes or uploaded again; a script's player (`expose`) gets bytes, as everywhere.
 
 ```rust
 let player = zgx_video::Player::new(&cx.ui.runtime, "videos/intro".as_ref(), 1.)?;

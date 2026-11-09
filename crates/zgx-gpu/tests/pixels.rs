@@ -7082,3 +7082,52 @@ fn reading_into_a_kept_buffer_reads_what_a_fresh_read_does() {
     gpu.readback_into(&mut kept, &mut staging).unwrap();
     assert_eq!(kept, fresh);
 }
+
+/// A frame copied into a pixel buffer on the GPU holds the target's pixels
+/// (as readback reads them), and the pool lends no more than it may hold.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_frame_copied_into_a_pixel_buffer_holds_the_targets_pixels() {
+    let _gpu = gpu_fixture();
+    let mut scene = Scene::new(32., 16.);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    let half = scene.append(
+        root,
+        NodeKind::Panel {
+            layout: Layout::Overlay,
+            quad: QuadStyle {
+                fill: Color(20, 200, 60, 255),
+                ..Default::default()
+            },
+        },
+        fixed(16., 16.),
+    );
+    scene.set_transform(half, Transform { x: 16., y: 0. });
+    scene.flush();
+    let mut gpu = GpuRenderer::new(32, 16).unwrap();
+    gpu.render(&scene, &[Rect::new(0., 0., 32., 16.)]).unwrap();
+    let rgba = gpu.readback().unwrap();
+    let mut staging = zgx_gpu::SurfaceReadback::default();
+    let buffer = gpu.readback_surface(&mut staging).unwrap();
+    // The buffer's BGRA, row by row, as RGBA.
+    let read = buffer.to_rgba();
+    assert!(read == rgba, "the buffer differs from the target");
+    // At most four lent at once: a fifth is a buffer of its own, with the
+    // same pixels, and once one is let go the pool lends again.
+    let mut held = vec![buffer];
+    while held.len() < 4 {
+        held.push(gpu.readback_surface(&mut staging).unwrap());
+    }
+    assert_eq!(staging.unpooled(), 0, "the pool lent fewer than four");
+    let fifth = gpu.readback_surface(&mut staging).unwrap();
+    assert_eq!(staging.unpooled(), 1, "the pool lent a fifth");
+    assert!(fifth.to_rgba() == rgba, "a fifth buffer differs");
+    drop(fifth);
+    held.pop();
+    gpu.readback_surface(&mut staging).unwrap();
+    assert_eq!(staging.unpooled(), 1, "the pool didn't lend again");
+    // Bytes drawn on the CPU (a blurred frame) uploaded hold the same.
+    let uploaded = staging.upload(32, 16, &rgba).unwrap();
+    assert!(uploaded.to_rgba() == rgba, "uploaded bytes differ");
+}

@@ -47,10 +47,30 @@ struct Pixels {
     /// frame of: here, behind the pixels' `Arc` (`drop_animation`), not a
     /// field of `ImageData`, whose drop glue every style's drop inlines.
     animation: std::mem::ManuallyDrop<Option<Arc<crate::animation::Animation>>>,
+    /// Pixels made when first read (`ImageData::on_demand`), dropped as
+    /// `kept` is (`drop_made`).
+    made: std::mem::ManuallyDrop<Option<Box<Made>>>,
+}
+/// What makes an image's pixels on demand (`ImageData::on_demand`).
+type Make = Box<dyn FnOnce() -> Arc<[u8]> + Send>;
+/// Pixels made when first read, and kept from then.
+struct Made {
+    make: std::sync::Mutex<Option<Make>>,
+    pixels: std::sync::OnceLock<Arc<[u8]>>,
+}
+impl std::fmt::Debug for Made {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Made")
+            .field("made", &self.pixels.get().is_some())
+            .finish_non_exhaustive()
+    }
 }
 impl Drop for Pixels {
     fn drop(&mut self) {
         drop_kept(&mut self.kept);
+        if self.made.is_some() {
+            drop_made(&mut self.made);
+        }
         if self.animation.is_some() {
             // Through a pointer the optimizer can't see into: an animation
             // holds frames, which hold pixels, so a direct call closed a
@@ -67,6 +87,11 @@ impl Drop for Pixels {
 extern "C" fn drop_kept(kept: &mut std::mem::ManuallyDrop<Option<Kept>>) {
     // SAFETY: once, from `Pixels::drop`; nothing reads it after.
     unsafe { std::mem::ManuallyDrop::drop(kept) }
+}
+/// Pixels made on demand, dropped as `Pixels::drop` says of `kept`.
+extern "C" fn drop_made(made: &mut std::mem::ManuallyDrop<Option<Box<Made>>>) {
+    // SAFETY: once, from `Pixels::drop`; nothing reads it after.
+    unsafe { std::mem::ManuallyDrop::drop(made) }
 }
 /// An animated still's animation, dropped as `Pixels::drop` says.
 extern "C" fn drop_animation(
@@ -226,6 +251,7 @@ impl ImageData {
                 premultiplied: false,
                 kept: std::mem::ManuallyDrop::new(None),
                 animation: std::mem::ManuallyDrop::new(None),
+                made: std::mem::ManuallyDrop::new(None),
             }),
             transform: crate::affine::Affine::IDENTITY,
             effect: ImageEffect::Plain,
@@ -251,6 +277,68 @@ impl ImageData {
     pub fn is_premultiplied(&self) -> bool {
         self.pixels.premultiplied
     }
+    /// A `width` by `height` image whose RGBA8 pixels `make` gives when they
+    /// are first read, and that are kept from then: for a picture held
+    /// somewhere else (a pixel buffer on screen) that few ask for as bytes.
+    /// Bytes of the wrong length read as transparent black.
+    pub fn on_demand(
+        width: u32,
+        height: u32,
+        make: impl FnOnce() -> Arc<[u8]> + Send + 'static,
+    ) -> Result<Self, &'static str> {
+        (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or("image size overflow")?;
+        if width == 0 || height == 0 {
+            return Err("image requires nonzero dimensions");
+        }
+        Ok(Self {
+            id: next_identity()?,
+            width,
+            height,
+            pixels: Arc::new(Pixels {
+                decoded: Arc::from(&[][..]),
+                premultiplied: false,
+                kept: std::mem::ManuallyDrop::new(None),
+                animation: std::mem::ManuallyDrop::new(None),
+                made: std::mem::ManuallyDrop::new(Some(Box::new(Made {
+                    make: std::sync::Mutex::new(Some(Box::new(make))),
+                    pixels: std::sync::OnceLock::new(),
+                }))),
+            }),
+            transform: crate::affine::Affine::IDENTITY,
+            effect: ImageEffect::Plain,
+            gpu: None,
+        })
+    }
+    /// [`ImageData::on_demand`] of RGBA8 pixels already premultiplied by
+    /// their alpha (a renderer's frame), as [`ImageData::new_premultiplied`].
+    pub fn on_demand_premultiplied(
+        width: u32,
+        height: u32,
+        make: impl FnOnce() -> Arc<[u8]> + Send + 'static,
+    ) -> Result<Self, &'static str> {
+        let mut image = Self::on_demand(width, height, make)?;
+        Arc::get_mut(&mut image.pixels)
+            .expect("made just now")
+            .premultiplied = true;
+        Ok(image)
+    }
+    /// Its pixels when not kept as a file: decoded, or made now if made on
+    /// demand (`on_demand`).
+    fn decoded(&self) -> &Arc<[u8]> {
+        match &*self.pixels.made {
+            Some(made) => made.pixels.get_or_init(|| {
+                let make = made.make.lock().ok().and_then(|mut make| make.take());
+                let len = self.width as usize * self.height as usize * 4;
+                make.map(|make| make())
+                    .filter(|pixels| pixels.len() == len)
+                    .unwrap_or_else(|| vec![0; len].into())
+            }),
+            None => &self.pixels.decoded,
+        }
+    }
     /// A frame of a GPU view, its pixels left to the renderer, which asks the
     /// view to draw them (`crate::gpu_view`).
     pub(crate) fn gpu(frame: crate::gpu_view::GpuFrame) -> Result<Self, &'static str> {
@@ -263,6 +351,7 @@ impl ImageData {
                 premultiplied: false,
                 kept: std::mem::ManuallyDrop::new(None),
                 animation: std::mem::ManuallyDrop::new(None),
+                made: std::mem::ManuallyDrop::new(None),
             }),
             transform: crate::affine::Affine::IDENTITY,
             effect: ImageEffect::Plain,
@@ -308,7 +397,7 @@ impl ImageData {
                     vec![0; self.width as usize * self.height as usize * 4].into()
                 })
             }),
-            None => &self.pixels.decoded,
+            None => self.decoded(),
         }
     }
     /// Share decoded pixels and GPU upload identity with a different paint
@@ -349,6 +438,7 @@ impl ImageData {
             premultiplied: first.pixels.premultiplied,
             kept: std::mem::ManuallyDrop::new(None),
             animation: std::mem::ManuallyDrop::new(Some(animation)),
+            made: std::mem::ManuallyDrop::new(None),
         });
         still
     }
@@ -487,6 +577,7 @@ impl ImageData {
                 pinned: std::sync::OnceLock::new(),
             })),
             animation: std::mem::ManuallyDrop::new(None),
+            made: std::mem::ManuallyDrop::new(None),
         });
         registry().push(Arc::downgrade(&pixels));
         Ok(Self {
@@ -505,6 +596,7 @@ impl ImageData {
     pub fn bytes(&self) -> usize {
         let own = match &*self.pixels.kept {
             Some(kept) => kept.encoded.len(),
+            None if self.pixels.made.is_some() => self.width as usize * self.height as usize * 4,
             None => self.pixels.decoded.len(),
         };
         // An animation's still: its other frames, or its stream, too.
@@ -521,7 +613,7 @@ impl ImageData {
                     vec![0; self.width as usize * self.height as usize * 4].into()
                 }),
             },
-            None => self.pixels.decoded.clone(),
+            None => self.decoded().clone(),
         }
     }
     /// Its pixels, straight, shared (`pixels`, by count).
@@ -532,7 +624,7 @@ impl ImageData {
                 let kept = self.pixels.kept.as_ref().expect("kept above");
                 kept.pinned.get().expect("pinned by `pixels`").clone()
             }
-            None => self.pixels.decoded.clone(),
+            None => self.decoded().clone(),
         }
     }
     /// When its kept file decodes as first drawn (`Decoding`); nothing for an

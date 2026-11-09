@@ -45,6 +45,10 @@ pub use layer_present::Caret;
 mod metal_frame;
 #[cfg(target_os = "macos")]
 mod native_surface;
+#[cfg(target_os = "macos")]
+mod surfaces;
+#[cfg(target_os = "macos")]
+pub use surfaces::{PixelBuffer, SurfaceReadback, blank_surface};
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod phase_watch;
 mod planes;
@@ -14605,6 +14609,31 @@ impl GpuRenderer {
             pixel.swap(0, 2);
         }
         Ok(pixels)
+    }
+    /// The target copied on the GPU into a pixel buffer of `staging`'s pool,
+    /// whole and finished, for a window to show as it is: no bytes read back.
+    /// A buffer of its own while the pool's are all held (shown, or held by
+    /// an app), so a frame is never skipped.
+    #[cfg(target_os = "macos")]
+    pub fn readback_surface(&self, staging: &mut SurfaceReadback) -> Result<PixelBuffer, GpuError> {
+        if let Some(reason) = self.context.lost() {
+            return Err(GpuError::device_lost(&reason));
+        }
+        self.flush_pending();
+        let size = self.target.size();
+        let buffer = staging.buffer(size.width, size.height)?;
+        let (texture, wrapper) =
+            staging.texture(&self.device, &buffer, (size.width, size.height))?;
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_texture(self.target.as_image_copy(), texture.as_image_copy(), size);
+        self.queue.submit([encoder.finish()]);
+        // Finished before it's handed over: the window reads it as it is.
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| GpuError(e.to_string()))?;
+        drop((texture, wrapper));
+        staging.flush();
+        Ok(PixelBuffer::new(buffer))
     }
     /// The target's pixels, RGBA, a row at a time.
     pub fn readback(&self) -> Result<Vec<u8>, GpuError> {
