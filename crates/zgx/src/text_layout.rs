@@ -59,7 +59,7 @@ impl LineHeight {
     /// zero and non-finite values are the normal line.
     pub fn with_leading(value: f32) -> Self {
         let units = (value * 256.).round().clamp(-32767., 32767.) as i16;
-        if value.is_finite() && units != 0 {
+        if LEADING_KEPT && value.is_finite() && units != 0 {
             Self(Self::LEADING | u32::from(units as u16))
         } else {
             Self::NORMAL
@@ -70,7 +70,7 @@ impl LineHeight {
     /// Whether it is the normal line with leading (`with_leading`).
     #[inline]
     pub fn has_leading(self) -> bool {
-        self.0 & Self::LEADING == Self::LEADING
+        LEADING_KEPT && self.0 & Self::LEADING == Self::LEADING
     }
     /// The leading in logical pixels (`with_leading`); none otherwise.
     #[inline]
@@ -114,6 +114,10 @@ impl LineHeight {
         }
     }
 }
+/// Whether leading is kept (`LineHeight::with_leading`): on iOS, whose text
+/// styles have it. Elsewhere it is the normal line and every read of it folds
+/// away, so text there is as it was; `text-leading` keeps it for host tests.
+const LEADING_KEPT: bool = cfg!(any(target_os = "ios", test, feature = "text-leading"));
 /// The normal line for `family`, iOS's system font's line where `ios` and it
 /// is the interface family.
 #[inline]

@@ -16,6 +16,8 @@ categories = ["gui", "rendering"]
 # feature. Canvases, gradients and shadows need none of them.
 [features]
 default = ["svg", "png", "jpeg", "gif"]
+# Leading kept off iOS, for host tests (`LineHeight::with_leading`).
+text-leading = ["zgx/text-leading", "cosmic-text/text-leading"]
 svg = ["dep:resvg"]
 png = ["image/png"]
 jpeg = ["dep:zune-jpeg"]

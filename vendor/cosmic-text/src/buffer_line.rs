@@ -18,6 +18,9 @@ pub struct BufferLine {
     align: Option<Align>,
     shape_opt: Cached<ShapeLine>,
     layout_opt: Cached<Vec<LayoutLine>>,
+    /// zgx: `set_leading`.
+    #[cfg(any(target_os = "ios", test, feature = "text-leading"))]
+    leading: f32,
     shaping: Shaping,
     metadata: Option<usize>,
 }
@@ -39,6 +42,8 @@ impl BufferLine {
             align: None,
             shape_opt: Cached::Empty,
             layout_opt: Cached::Empty,
+            #[cfg(any(target_os = "ios", test, feature = "text-leading"))]
+            leading: 0.,
             shaping,
             metadata: None,
         }
@@ -210,6 +215,16 @@ impl BufferLine {
         self.layout_opt.set_unused();
     }
 
+    /// zgx: the part of its line height that is leading, under its glyphs
+    /// (`Buffer::set_leading`), for the layouts after this one.
+    #[cfg(any(target_os = "ios", test, feature = "text-leading"))]
+    pub fn set_leading(&mut self, leading: f32) {
+        if leading != self.leading {
+            self.leading = leading;
+            self.layout_opt.set_unused();
+        }
+    }
+
     /// Shape line, will cache results
     #[allow(clippy::missing_panics_doc)]
     pub fn shape(&mut self, font_system: &mut FontSystem, tab_width: u16) -> &ShapeLine {
@@ -252,7 +267,6 @@ impl BufferLine {
         match_mono_width: Option<f32>,
         tab_width: u16,
         hinting: Hinting,
-        leading: f32,
     ) -> &[LayoutLine] {
         if self.layout_opt.is_unused() {
             let align = self.align;
@@ -284,9 +298,10 @@ impl BufferLine {
             );
             // zgx: leading lies in the line height and under the glyphs: as
             // much more descent keeps them where the line alone puts them.
-            if leading != 0. {
+            #[cfg(any(target_os = "ios", test, feature = "text-leading"))]
+            if self.leading != 0. {
                 for line in &mut layout {
-                    line.max_descent += leading;
+                    line.max_descent += self.leading;
                 }
             }
             self.layout_opt.set_used(layout);
@@ -326,6 +341,8 @@ impl BufferLine {
             align: None,
             shape_opt: Cached::Empty,
             layout_opt: Cached::Empty,
+            #[cfg(any(target_os = "ios", test, feature = "text-leading"))]
+            leading: 0.,
             shaping: Shaping::Advanced,
             metadata: None,
         }

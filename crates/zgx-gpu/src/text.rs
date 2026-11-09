@@ -221,10 +221,17 @@ fn system_tracking(size: f32) -> f32 {
 }
 /// The most leading of `rich`'s runs (`LineHeight::with_leading`), the part of
 /// its lines' height that is leading: none unless a run sets it.
+#[inline]
 pub(crate) fn runs_leading(rich: &zgx::rich_text::RichText) -> f32 {
-    (rich.runs().iter())
+    #[cfg(any(target_os = "ios", feature = "text-leading"))]
+    return (rich.runs().iter())
         .map(|run| run.font.line_height.leading())
-        .fold(0., f32::max)
+        .fold(0., f32::max);
+    #[cfg(not(any(target_os = "ios", feature = "text-leading")))]
+    {
+        let _ = rich;
+        0.
+    }
 }
 // Inlined where it is called, as it was before `spaced` took the rare part
 // out of it (LTO had stopped inlining it into the text cache).

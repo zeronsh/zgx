@@ -31,6 +31,9 @@ homepage = "https://github.com/pop-os/cosmic-text"
 features = ["vi"]
 
 [features]
+# zgx: leading in a line's height kept where iOS isn't, for host tests
+# (`Buffer::set_leading`).
+text-leading = []
 default = [
     "std",
     "swash",

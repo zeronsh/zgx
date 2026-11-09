@@ -389,6 +389,7 @@ pub struct Buffer {
     tab_width: u16,
     hinting: Hinting,
     /// zgx: `set_leading`.
+    #[cfg(any(target_os = "ios", test, feature = "text-leading"))]
     leading: f32,
     /// Dirty flags tracking which properties changed since last layout
     dirty: DirtyFlags,
@@ -408,6 +409,7 @@ impl Clone for Buffer {
             monospace_width: self.monospace_width,
             tab_width: self.tab_width,
             hinting: self.hinting,
+            #[cfg(any(target_os = "ios", test, feature = "text-leading"))]
             leading: self.leading,
             dirty: self.dirty,
         }
@@ -440,6 +442,7 @@ impl Buffer {
             monospace_width: None,
             tab_width: 8,
             hinting: Hinting::default(),
+            #[cfg(any(target_os = "ios", test, feature = "text-leading"))]
             leading: 0.0,
             dirty: DirtyFlags::empty(),
         }
@@ -751,6 +754,8 @@ impl Buffer {
         line_i: usize,
     ) -> Option<&[LayoutLine]> {
         let line = self.lines.get_mut(line_i)?;
+        #[cfg(any(target_os = "ios", test, feature = "text-leading"))]
+        line.set_leading(self.leading);
         Some(line.layout(
             font_system,
             self.metrics.font_size,
@@ -760,7 +765,6 @@ impl Buffer {
             self.monospace_width,
             self.tab_width,
             self.hinting,
-            self.leading,
         ))
     }
 
@@ -787,17 +791,26 @@ impl Buffer {
     /// zgx: the part of a line's height that is leading, under its glyphs
     /// (none by default): laying a line out, its glyphs keep the place they
     /// have in the line height without it.
+    /// Only on iOS (and for its tests): nothing elsewhere reads it.
+    #[inline]
     pub fn set_leading(&mut self, leading: f32) {
+        #[cfg(any(target_os = "ios", test, feature = "text-leading"))]
         if leading != self.leading {
             self.leading = leading;
             self.dirty |= DirtyFlags::RELAYOUT;
             self.redraw = true;
         }
+        #[cfg(not(any(target_os = "ios", test, feature = "text-leading")))]
+        let _ = leading;
     }
 
     /// zgx: the part of a line's height that is leading (`set_leading`).
+    #[inline]
     pub const fn leading(&self) -> f32 {
-        self.leading
+        #[cfg(any(target_os = "ios", test, feature = "text-leading"))]
+        return self.leading;
+        #[cfg(not(any(target_os = "ios", test, feature = "text-leading")))]
+        0.0
     }
 
     /// Get the current [`Hinting`] strategy.

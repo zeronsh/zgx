@@ -809,10 +809,14 @@ impl Entry {
     /// The part of each line height that is leading
     /// (`LineHeight::with_leading`): the most of its spans'. Asked where a
     /// size is worked out or lines are laid out, not of each measure.
+    #[inline]
     fn leading(&self) -> f32 {
-        (self.key.spans.iter())
+        #[cfg(any(target_os = "ios", feature = "text-leading"))]
+        return (self.key.spans.iter())
             .map(|(_, font, ..)| font.line_height.leading())
-            .fold(0., f32::max)
+            .fold(0., f32::max);
+        #[cfg(not(any(target_os = "ios", feature = "text-leading")))]
+        0.
     }
     fn shaped_bytes(&self) -> usize {
         match (&self.lines, &self.words) {
@@ -837,10 +841,13 @@ impl Entry {
             self.laid = Some(width);
             return;
         }
+        #[cfg(any(target_os = "ios", feature = "text-leading"))]
         let leading = self.leading();
         let lines = self.lines.as_mut().expect("shaped lines");
         for line in lines.iter_mut() {
             line.reset_layout();
+            #[cfg(any(target_os = "ios", feature = "text-leading"))]
+            line.set_leading(leading);
             line.layout(
                 fonts,
                 self.metrics.font_size,
@@ -850,7 +857,6 @@ impl Entry {
                 None,
                 TAB_WIDTH,
                 Hinting::default(),
-                leading,
             );
         }
         self.laid = Some(width);
@@ -2210,6 +2216,7 @@ mod tests {
     /// the bit: words and blanks, punctuation, hyphens, non-breaking and
     /// leading spaces, emoji and combining marks, at three sizes; and it is
     /// worked out so for ordinary words, not measured from the copy.
+    #[cfg(any(target_os = "ios", feature = "text-leading"))]
     #[test]
     fn leading_goes_between_lines_in_every_measure_and_layout() {
         let mut fonts = FontSystem::new();
@@ -3072,7 +3079,6 @@ mod tests {
                                 None,
                                 TAB_WIDTH,
                                 Hinting::default(),
-                                0.,
                             );
                         }
                         let expected = glyphs(LayoutRunIter::from_lines(
@@ -3210,7 +3216,6 @@ mod tests {
                         None,
                         TAB_WIDTH,
                         Hinting::default(),
-                        0.,
                     );
                 }
                 let expected = glyphs(LayoutRunIter::from_lines(

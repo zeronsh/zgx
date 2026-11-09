@@ -185,6 +185,9 @@ jobs:
       # `inspect` turns it on): what it keeps stays bounded. Quoted, as the
       # line below is.
       - run: "cargo test -p zgx --features trace --lib --locked -- trace::"
+      # Leading is kept only on iOS; these keep it where tests run.
+      - run: "cargo test -p zgx-gpu --features text-leading --lib --locked -- leading"
+      - run: "cargo test -p zgx-script --features text-leading --test ui --locked -- leading"
       # Words in Chinese, Japanese and Thai with `cjk-thai-words` off:
       # Unicode's word boundaries, as before the dictionaries.
       # Quoted: an unquoted `words:: ` would be read as a YAML key, and the

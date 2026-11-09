@@ -15,6 +15,8 @@ description = "Luau scripts that describe zgx component trees, with hot reload."
 [features]
 # Image formats (see zgx-gpu): all by default.
 default = ["components", "svg", "png", "jpeg", "gif", "cjk-thai-words"]
+# Leading kept off iOS, for host tests (`LineHeight::with_leading`).
+text-leading = ["zgx/text-leading", "zgx-gpu/text-leading"]
 # Words in Chinese, Japanese and Thai by dictionary (zgx's `cjk-thai-words`).
 cjk-thai-words = ["zgx/cjk-thai-words"]
 # The component library's `ui.*` (zgx-components): the data grid, tree,
