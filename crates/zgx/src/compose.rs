@@ -2948,16 +2948,28 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
     View::new(Kind::Region(Box::new(move |ui, root, environment| {
         let weak = ui.downgrade();
         let runtime = ui.runtime.clone();
-        let mut entries: HashMap<K, NodeId, crate::KeyHasher> =
+        // Each key's child, where the last pass that saw the key placed it,
+        // and that pass (a key met twice in one pass is a duplicate).
+        let mut entries: HashMap<K, Keyed, crate::KeyHasher> =
             HashMap::with_hasher(crate::key_hasher());
         // The last pass's keys and their children, in order.
         let mut last: (Vec<K>, Vec<NodeId>) = (Vec::new(), Vec::new());
+        // This pass, and whether the last one finished: one that did not
+        // (a constructor panicked, the region went) left `entries` marked
+        // for keys `last` does not hold.
+        let (mut pass, mut finished) = (0u64, true);
+        // A pass's children by key after the prefix, the keys with none yet
+        // (by place) and those built: kept from pass to pass, as is the
+        // order, so a pass allocates none of them.
+        let mut nodes: Vec<Option<NodeId>> = Vec::new();
+        let (mut fresh, mut added): (Vec<usize>, Vec<(usize, NodeId)>) = (Vec::new(), Vec::new());
         ui.bind(root, move || {
             let keys = keys();
             // The same keys in the same order, every child still mounted (a
             // list whose rows changed in place): nothing to add, remove or
             // move, and no key hashed to find out.
-            if keys == last.0
+            if finished
+                && keys == last.0
                 && let Some(ui) = weak.upgrade()
             {
                 let scene = ui.scene.borrow();
@@ -2972,9 +2984,9 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
             // streaming in, growing at its end or its last row built again):
             // only the rest is hashed, mounted or removed. While every child
             // of that prefix is still mounted, `entries` holds the last
-            // pass's keys alone (a pass that did not finish leaves more), and
-            // what is left to hash (the keys after it, then and now) is well
-            // under the whole list's: an edit near the front passes whole.
+            // pass's keys alone, and what is left to hash (the keys after
+            // it, then and now) is well under the whole list's: an edit near
+            // the front passes whole.
             let from = {
                 let prefix = keys
                     .iter()
@@ -2984,6 +2996,7 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
                 let rest = (last.0.len() - prefix) + 2 * (keys.len() - prefix);
                 let scene = ui.scene.borrow();
                 if prefix > 0
+                    && finished
                     && rest <= keys.len() / 2
                     && entries.len() == last.0.len()
                     && last.1[..prefix].iter().all(|node| scene.contains(*node))
@@ -2993,91 +3006,110 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
                     0
                 }
             };
-            let mut unique = std::collections::HashSet::with_capacity_and_hasher(
-                keys.len() - from,
-                crate::key_hasher(),
-            );
-            unique.extend(keys[from..].iter());
-            assert_eq!(
-                unique.len(),
-                keys.len() - from,
-                "duplicate component child key"
-            );
-            // Nor one of the prefix's again: `entries` holds the last pass's
-            // keys, the prefix's and those after it.
-            if from > 0 {
-                let after = &last.0[from..];
-                // (A stream's: a key or two, looked through.)
-                let repeats = if after.len() <= 8 {
-                    keys[from..]
-                        .iter()
-                        .any(|key| entries.contains_key(key) && !after.contains(key))
-                } else {
-                    let after: std::collections::HashSet<&K, crate::KeyHasher> =
-                        after.iter().collect();
-                    keys[from..]
-                        .iter()
-                        .any(|key| entries.contains_key(key) && !after.contains(key))
-                };
-                assert!(!repeats, "duplicate component child key");
+            (pass, finished) = (pass + 1, false);
+            // One look at each key after the prefix: its child, if it has
+            // one, marked as shown this pass where it is now. A key met
+            // twice, or one of the prefix's again (placed before `from`, as
+            // it still is), is a duplicate.
+            nodes.clear();
+            fresh.clear();
+            for (at, key) in keys.iter().enumerate().skip(from) {
+                match entries.get_mut(key) {
+                    Some(entry) => {
+                        assert!(
+                            entry.pass != pass && entry.at >= from,
+                            "duplicate component child key"
+                        );
+                        (entry.pass, entry.at) = (pass, at);
+                        nodes.push(Some(entry.node));
+                    }
+                    None => {
+                        fresh.push(at);
+                        nodes.push(None);
+                    }
+                }
             }
+            // Those with none yet, among themselves (a stream's: a key or
+            // two, looked through).
+            let repeats = if fresh.len() <= 8 {
+                (1..fresh.len()).any(|i| fresh[..i].iter().any(|&j| keys[j] == keys[fresh[i]]))
+            } else {
+                let mut unique = std::collections::HashSet::with_capacity_and_hasher(
+                    fresh.len(),
+                    crate::key_hasher(),
+                );
+                !fresh.iter().all(|&at| unique.insert(&keys[at]))
+            };
+            assert!(!repeats, "duplicate component child key");
             if !ui.scene.borrow().contains(root) {
                 return;
             }
-            let order = runtime.untracked(|| {
+            runtime.untracked(|| {
                 let mut transaction = MountTransaction::new(&ui, root);
                 // Stage every new child before changing the committed registry
                 // or removing old children. The mount guard disposes staged
                 // roots if any later constructor panics.
-                let mut added = Vec::new();
-                for key in &keys[from..] {
-                    if entries
-                        .get(key)
-                        .is_some_and(|node| ui.scene.borrow().contains(*node))
-                    {
+                added.clear();
+                for (i, key) in keys[from..].iter().enumerate() {
+                    if nodes[i].is_some_and(|node| ui.scene.borrow().contains(node)) {
                         continue;
                     }
                     let mut cx = Context::new(runtime.clone(), environment.clone());
                     let view = build(key.clone(), &mut cx);
                     let node = mount(&mut ui, root, view, environment.clone());
                     cx.finish(&mut ui, node);
-                    added.push((key.clone(), node));
+                    added.push((i, node));
                 }
-                entries.extend(added);
+                for &(i, node) in &added {
+                    nodes[i] = Some(node);
+                    let (at, key) = (from + i, keys[from + i].clone());
+                    entries.insert(key, Keyed { node, pass, at });
+                }
                 // Every key shown now is held: only more than that left.
                 // Those go in the order they were in, the same every run (a
                 // map's iteration is not), as what their removal repaints
                 // follows it.
                 if entries.len() > keys.len() {
                     for (index, key) in last.0.iter().enumerate().skip(from) {
-                        if !unique.contains(key)
-                            && let Some(node) = entries.remove(key)
+                        if entries.get(key).is_some_and(|entry| entry.pass != pass)
+                            && let Some(entry) = entries.remove(key)
                         {
-                            ui.remove_indexed(node, index);
+                            ui.remove_indexed(entry.node, index);
                         }
                     }
                     // Any not in the last order (left by a pass that did not finish).
                     if from == 0 {
-                        entries.retain(|key, node| {
-                            if unique.contains(key) {
+                        entries.retain(|_, entry| {
+                            if entry.pass == pass {
                                 true
                             } else {
-                                ui.remove_in_effect(*node);
+                                ui.remove_in_effect(entry.node);
                                 false
                             }
                         });
                     }
                 }
-                let mut order = Vec::with_capacity(keys.len());
-                order.extend_from_slice(&last.1[..from]);
-                order.extend(keys[from..].iter().map(|key| entries[key]));
-                assert!(ui.scene.borrow_mut().reorder_children(root, &order));
+                // (In place: the prefix's children are where they were.)
+                let order = &mut last.1;
+                order.truncate(from);
+                order.extend(
+                    nodes
+                        .iter()
+                        .map(|node| node.expect("each key has its child")),
+                );
+                assert!(ui.scene.borrow_mut().reorder_children(root, order));
                 transaction.commit();
-                order
             });
-            last = (keys, order);
+            last.0 = keys;
+            finished = true;
         });
     })))
+}
+/// A `keyed` child: its node, the last pass that showed its key, and where.
+struct Keyed {
+    node: NodeId,
+    pass: u64,
+    at: usize,
 }
 /// What builds a virtual list's row: its index (a signal following it),
 /// its key and the row's context.
