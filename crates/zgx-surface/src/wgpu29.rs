@@ -55,11 +55,148 @@ pub fn vulkan_offer(adapters: &[wgpu::Adapter]) -> Option<Offer> {
     (!devices.is_empty()).then_some(Offer::Vulkan { devices })
 }
 
-/// The adapter among `adapters` on the device `ids` names.
+/// The adapter among `adapters` on the device `ids` names: a Vulkan
+/// device by its UUIDs, or a Metal one (`DeviceIds::metal`, an `IoSurface`
+/// welcome's) by its name, which a device made on it then confirms
+/// (`iosurface_ids_of`).
 pub fn adapter_for(adapters: Vec<wgpu::Adapter>, ids: &DeviceIds) -> Option<wgpu::Adapter> {
+    if let Some(registry_id) = ids.metal_registry_id() {
+        #[cfg(target_os = "macos")]
+        {
+            let name = crate::metal::device_name(registry_id)?;
+            return adapters.into_iter().find(|adapter| {
+                let info = adapter.get_info();
+                info.backend == wgpu::Backend::Metal && info.name == name
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = registry_id;
+            return None;
+        }
+    }
     adapters
         .into_iter()
         .find(|adapter| device_ids(adapter).as_ref() == Some(ids))
+}
+
+/// What to offer a host for `adapters`: IOSurfaces drawn on any of the
+/// system's Metal devices, if any adapter is Metal (macOS).
+pub fn iosurface_offer(adapters: &[wgpu::Adapter]) -> Option<Offer> {
+    #[cfg(target_os = "macos")]
+    {
+        let metal = adapters
+            .iter()
+            .any(|a| a.get_info().backend == wgpu::Backend::Metal);
+        let devices = crate::metal::registry_ids();
+        (metal && !devices.is_empty()).then_some(Offer::IoSurface { devices })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = adapters;
+        None
+    }
+}
+
+/// Whether `device` can share IOSurfaces: it is Metal (macOS).
+pub fn can_share_iosurface(device: &wgpu::Device) -> bool {
+    iosurface_ids_of(device).is_some()
+}
+
+/// `device`'s Metal device as `DeviceIds::metal`, if it is Metal.
+pub fn iosurface_ids_of(device: &wgpu::Device) -> Option<DeviceIds> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_metal::MTLDevice as _;
+        // Safety: only read through.
+        let hal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }?;
+        Some(DeviceIds::metal(hal.raw_device().registryID()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = device;
+        None
+    }
+}
+
+/// A Metal texture over an IOSurface as a wgpu texture on `device`
+/// (`FORMAT`, `USAGE`, viewable as `VIEW_FORMATS`).
+#[cfg(target_os = "macos")]
+fn wrap_metal(
+    device: &wgpu::Device,
+    metal: crate::metal::Texture,
+    width: u32,
+    height: u32,
+) -> wgpu::Texture {
+    // Safety: Metal made the texture on this device as `metal::texture`
+    // describes: 2D, one layer and mip level, `FORMAT`, this size.
+    let raw = unsafe {
+        wgpu::hal::metal::Device::texture_from_raw(
+            metal,
+            FORMAT,
+            objc2_metal::MTLTextureType::Type2D,
+            1,
+            1,
+            wgpu::hal::CopyExtent {
+                width,
+                height,
+                depth: 1,
+            },
+        )
+    };
+    // Safety: made from this device's raw device, its usage covering
+    // `USAGE` and its sRGB views (`PixelFormatView`).
+    unsafe {
+        device.create_texture_from_hal::<wgpu::hal::api::Metal>(
+            raw,
+            &wgpu::TextureDescriptor {
+                label: Some("zgx surface"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: FORMAT,
+                usage: USAGE,
+                view_formats: &VIEW_FORMATS,
+            },
+        )
+    }
+}
+
+/// An IOSurface of `width` by `height` as a texture on `device`, for
+/// another process to draw into: the texture, the surface (for
+/// `iosurface::HostChannel::send`) and what the buffer is
+/// (`BufferDesc::IoSurface`).
+pub fn export_iosurface(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> io::Result<(wgpu::Texture, crate::iosurface::Surface, BufferDesc)> {
+    #[cfg(target_os = "macos")]
+    {
+        let surface = crate::iosurface::Surface::new_bgra(width, height)?;
+        let metal = {
+            // Safety: the raw device only makes a texture, which wgpu then owns.
+            let hal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }
+                .ok_or_else(|| unsupported("not a Metal device"))?;
+            crate::metal::texture(hal.raw_device(), &surface)?
+        };
+        let texture = wrap_metal(device, metal, width, height);
+        let desc = BufferDesc::IoSurface {
+            id: surface.id(),
+            surface: None,
+        };
+        Ok((texture, surface, desc))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (device, width, height);
+        Err(unsupported("IOSurfaces are shared on macOS"))
+    }
 }
 
 /// Whether `device` can share memory with another process
@@ -144,13 +281,33 @@ fn texture_descs(
     )
 }
 
-/// A Vulkan buffer the host sent, as a texture on `device` (`FORMAT`,
-/// `USAGE`, viewable as `VIEW_FORMATS`): draw into it, finish the GPU's
-/// work, then present it.
+/// A Vulkan or IOSurface buffer the host sent, as a texture on `device`
+/// (`FORMAT`, `USAGE`, viewable as `VIEW_FORMATS`): draw into it, finish
+/// the GPU's work, then present it.
 ///
 /// # Safety
 /// `device` is on the adapter the host's `Welcome` names (`adapter_for`).
 pub unsafe fn import(device: &wgpu::Device, buffer: Buffer) -> io::Result<wgpu::Texture> {
+    if let BufferDesc::IoSurface { surface, .. } = &buffer.desc {
+        #[cfg(target_os = "macos")]
+        {
+            let surface = surface
+                .as_ref()
+                .ok_or_else(|| unsupported("an IOSurface buffer whose surface didn't arrive"))?;
+            let metal = {
+                // Safety: the raw device only makes a texture, which wgpu then owns.
+                let hal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }
+                    .ok_or_else(|| unsupported("not a Metal device"))?;
+                crate::metal::texture(hal.raw_device(), surface)?
+            };
+            return Ok(wrap_metal(device, metal, surface.width(), surface.height()));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = surface;
+            return Err(unsupported("IOSurfaces are shared on macOS"));
+        }
+    }
     #[cfg(target_os = "linux")]
     {
         let BufferDesc::Vulkan(desc) = &buffer.desc else {

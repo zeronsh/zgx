@@ -3,6 +3,7 @@
 //! size, and draws the newest presented buffer over the whole box.
 use super::{AppInner, RESIZE_DEBOUNCE, RING};
 use crate::{
+    iosurface::HostChannel,
     protocol::{
         BufferDesc, BufferKind, Generation, HostMessage, Offer, PROTOCOL_VERSION, PixelFormat,
         Welcome,
@@ -111,7 +112,7 @@ impl Viewport for Painter {
         if app.kind.get().is_none()
             && let Some(hello) = app.hello.borrow_mut().take()
         {
-            let (kind, device) = choose(&hello.offers, frame.device);
+            let (kind, device) = choose(&hello.offers, frame.device, app.mach.as_deref());
             app.kind.set(Some(kind));
             app.out.send(HostMessage::Welcome(Welcome {
                 version: PROTOCOL_VERSION,
@@ -179,9 +180,14 @@ impl Painter {
             }
         }
         self.resizing = None;
-        let kind = if kind == BufferKind::Vulkan && !crate::wgpu29::can_share(frame.device) {
-            // Welcomed as Vulkan on a device that has gone (a new renderer
-            // on another backend): nothing it can share.
+        let gone = match kind {
+            BufferKind::Vulkan => !crate::wgpu29::can_share(frame.device),
+            BufferKind::IoSurface => !crate::wgpu29::can_share_iosurface(frame.device),
+            _ => false,
+        };
+        let kind = if gone {
+            // Welcomed as Vulkan or IOSurfaces on a device that has gone (a
+            // new renderer on another backend): nothing it can share.
             return;
         } else {
             kind
@@ -189,6 +195,10 @@ impl Painter {
         let generation = app.shared.lock().unwrap().ring.next_generation(RING);
         let made = match kind {
             BufferKind::Vulkan => vulkan_generation(frame, generation, size),
+            BufferKind::IoSurface => match app.mach.as_deref() {
+                Some(mach) => iosurface_generation(frame, generation, size, mach),
+                None => return,
+            },
             _ => shm_generation(frame, generation, size),
         };
         let (buffers, message) = match made {
@@ -218,7 +228,7 @@ impl Painter {
             return;
         };
         match buffers.kind {
-            BufferKind::Vulkan => {
+            BufferKind::Vulkan | BufferKind::IoSurface => {
                 let newest = {
                     let mut shared = app.shared.lock().unwrap();
                     self.log
@@ -309,16 +319,32 @@ fn release(slot: Slot) -> HostMessage {
 
 /// How to share with a client offering `offers` (best first), from this
 /// device: Vulkan images where it is on one of the client's GPUs and can
-/// export them, else shared memory.
-fn choose(offers: &[Offer], device: &wgpu::Device) -> (BufferKind, Option<crate::DeviceIds>) {
+/// export them, IOSurfaces where it is on one of the client's Metal devices
+/// and the client checked in on the Mach channel (`mach`), else shared
+/// memory.
+fn choose(
+    offers: &[Offer],
+    device: &wgpu::Device,
+    mach: Option<&HostChannel>,
+) -> (BufferKind, Option<crate::DeviceIds>) {
     let forced_shm = std::env::var_os("ZGX_SURFACE_SHM").is_some_and(|v| v != "0");
     let ours = (!forced_shm && crate::wgpu29::can_share(device))
         .then(|| crate::wgpu29::device_ids_of(device))
+        .flatten();
+    let metal = (!forced_shm && mach.is_some_and(HostChannel::is_connected))
+        .then(|| crate::wgpu29::iosurface_ids_of(device))
         .flatten();
     for offer in offers {
         match offer {
             Offer::Vulkan { devices } if ours.is_some_and(|ids| devices.contains(&ids)) => {
                 return (BufferKind::Vulkan, ours);
+            }
+            Offer::IoSurface { devices }
+                if metal
+                    .and_then(|ids| ids.metal_registry_id())
+                    .is_some_and(|id| devices.contains(&id)) =>
+            {
+                return (BufferKind::IoSurface, metal);
             }
             Offer::Shm => return (BufferKind::Shm, None),
             _ => {}
@@ -345,15 +371,80 @@ fn vulkan_generation(
             desc,
         });
     }
-    // Cleared here, before the client has them: the host's first use of
-    // each moves it out of the undefined layout (which may discard) before
-    // the client draws into it.
+    clear_new(frame, &textures)?;
+    Ok((
+        Buffers {
+            generation,
+            size,
+            kind: BufferKind::Vulkan,
+            textures,
+            maps: Vec::new(),
+            upload: None,
+        },
+        Generation {
+            generation,
+            width: size.0,
+            height: size.1,
+            format: PixelFormat::Bgra8Unorm,
+            buffers,
+        },
+    ))
+}
+
+/// IOSurfaces made textures on the host's Metal device, their ports sent to
+/// the client over `mach` before the `Buffers` naming them.
+fn iosurface_generation(
+    frame: &ViewportFrame<'_>,
+    generation: u32,
+    size: (u32, u32),
+    mach: &HostChannel,
+) -> std::io::Result<Made> {
+    let mut textures = Vec::new();
+    let mut surfaces = Vec::new();
+    let mut buffers = Vec::new();
+    for index in 0..RING {
+        let (texture, surface, desc) =
+            crate::wgpu29::export_iosurface(frame.device, size.0, size.1)?;
+        textures.push(texture);
+        surfaces.push(surface);
+        buffers.push(crate::protocol::Buffer {
+            index,
+            handle: None,
+            desc,
+        });
+    }
+    clear_new(frame, &textures)?;
+    mach.send(generation, &surfaces.iter().collect::<Vec<_>>())?;
+    Ok((
+        Buffers {
+            generation,
+            size,
+            kind: BufferKind::IoSurface,
+            textures,
+            maps: Vec::new(),
+            upload: None,
+        },
+        Generation {
+            generation,
+            width: size.0,
+            height: size.1,
+            format: PixelFormat::Bgra8Unorm,
+            buffers,
+        },
+    ))
+}
+
+/// A generation's new shared textures cleared, before the client has them:
+/// the host's first use of each moves it out of the undefined layout (which
+/// may discard) before the client draws into it, and an IOSurface's first
+/// frame is transparent, not what its memory held.
+fn clear_new(frame: &ViewportFrame<'_>, textures: &[wgpu::Texture]) -> std::io::Result<()> {
     let mut encoder = frame
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("zgx surface clear"),
         });
-    for texture in &textures {
+    for texture in textures {
         let view = texture.create_view(&Default::default());
         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("zgx surface clear"),
@@ -377,23 +468,7 @@ fn vulkan_generation(
             timeout: Some(std::time::Duration::from_secs(2)),
         })
         .map_err(std::io::Error::other)?;
-    Ok((
-        Buffers {
-            generation,
-            size,
-            kind: BufferKind::Vulkan,
-            textures,
-            maps: Vec::new(),
-            upload: None,
-        },
-        Generation {
-            generation,
-            width: size.0,
-            height: size.1,
-            format: PixelFormat::Bgra8Unorm,
-            buffers,
-        },
-    ))
+    Ok(())
 }
 
 fn shm_generation(

@@ -1,6 +1,9 @@
-//! External surfaces: the protocol, a session over a socket pair, and Vulkan
-//! memory shared between two devices. One test binary for the crate (see
-//! AGENTS.md): a test file goes beside the others, listed here.
+//! External surfaces: the protocol, a session over a socket pair, Vulkan
+//! memory shared between two devices, and IOSurfaces between two
+//! processes. One test binary for the crate (see AGENTS.md): a test file
+//! goes beside the others, listed here.
+#[path = "../iosurface_share.rs"]
+mod iosurface_share;
 #[path = "../protocol.rs"]
 mod protocol;
 #[path = "../shm_session.rs"]

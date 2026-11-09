@@ -5329,6 +5329,10 @@ version = "0.1.10"
 dependencies = [
  "ash",
  "libc",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-io-surface",
+ "objc2-metal 0.3.2",
  "pollster",
  "wgpu",
  "windows-sys 0.59.0",

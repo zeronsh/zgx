@@ -442,6 +442,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload --all-targets --locked
+      # External surfaces: IOSurface ports over the Mach channel, and a client
+      # process drawing into the host's IOSurfaces with Metal, read back.
+      - run: cargo test -p zgx-surface --features wgpu29 --test surface --locked -- iosurface_share:: protocol::
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
       - run: cargo test -p zgx-fx --locked

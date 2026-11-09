@@ -18,8 +18,9 @@
 mod painter;
 
 use crate::{
+    iosurface::HostChannel,
     protocol::{
-        BufferKind, Button, ClientMessage, Cursor, Hello, HostMessage, KeyEvent, Modifiers,
+        BufferKind, Button, ClientMessage, Cursor, Hello, HostMessage, KeyEvent, Modifiers, Offer,
         WheelUnit,
     },
     ring::{HostRing, Slot},
@@ -52,6 +53,9 @@ pub const RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
 /// Input events queued for a client that isn't reading, beyond which more
 /// are dropped (buffers and releases never are).
 const MAX_QUEUED_INPUT: usize = 1024;
+/// How long a program offering IOSurfaces has to check in on the Mach
+/// channel (it does before its hello: this is a broken one).
+const CHECK_IN: Duration = Duration::from_secs(2);
 /// How long a closing program has to exit before it is killed.
 const CLOSE_GRACE: Duration = Duration::from_millis(1500);
 
@@ -190,6 +194,9 @@ pub(crate) struct AppInner {
     closed: Cell<bool>,
     /// Revoked (`revoke`): its frames show no more, its input goes nowhere.
     pub(crate) revoked: Cell<bool>,
+    /// The Mach channel IOSurfaces go to the program over (macOS), once it
+    /// has checked in (`HostChannel::is_connected`).
+    pub(crate) mach: Option<Arc<HostChannel>>,
     /// The program holds the pointer (a game looking about): its keys are its
     /// own alone, chords included (Control is a game's crouch or sprint, and
     /// Control+W must not close the app). Escape still ends the lock.
@@ -222,6 +229,19 @@ impl App {
         command.envs(options.env.iter().map(|(k, v)| (k, v)));
         let spawning = crate::transport::Spawning::new()?;
         spawning.prepare(&mut command);
+        // macOS: a Mach channel for IOSurfaces, named in its environment.
+        let mach = match HostChannel::new() {
+            Ok(channel) => {
+                channel.prepare(&mut command);
+                Some(Arc::new(channel))
+            }
+            Err(error) => {
+                if cfg!(target_os = "macos") {
+                    eprintln!("zgx-surface: no Mach channel for IOSurfaces: {error}");
+                }
+                None
+            }
+        };
         let child = command.spawn()?;
         let pid = child.id();
         #[cfg(unix)]
@@ -237,12 +257,13 @@ impl App {
             receiver,
             Some(child),
             Some(pid),
+            mach,
         ))
     }
     /// A session over a connection already made, with no program of its
     /// own (tests; a client in this process).
     pub fn over(runtime: &Runtime, sender: Sender, receiver: Receiver) -> App {
-        Self::start(runtime, sender, receiver, None, None)
+        Self::start(runtime, sender, receiver, None, None, None)
     }
 
     fn start(
@@ -251,6 +272,7 @@ impl App {
         receiver: Receiver,
         child: Option<std::process::Child>,
         pid: Option<u32>,
+        mach: Option<Arc<HostChannel>>,
     ) -> App {
         let shared: Arc<Mutex<Shared>> = Arc::default();
         let (wake, woken) = zgx::task::latest::<()>();
@@ -261,7 +283,14 @@ impl App {
             input: Arc::default(),
         };
         writer(sender, rx, out.input.clone());
-        reader(receiver, shared.clone(), out.clone(), wake.clone());
+        let check_in = mach.clone().zip(pid);
+        reader(
+            receiver,
+            shared.clone(),
+            out.clone(),
+            wake.clone(),
+            check_in,
+        );
         if let Some(child) = child {
             waiter(child, shared.clone(), wake.clone(), exited.clone());
         }
@@ -298,6 +327,7 @@ impl App {
             refresh: Cell::new(0.),
             refreshing: RefCell::new(None),
             refresh_checked: Cell::new(None),
+            mach,
         });
         App(inner)
     }
@@ -305,7 +335,7 @@ impl App {
     /// A session whose program couldn't start: its status says why.
     pub fn failed(runtime: &Runtime, why: impl Into<String>) -> App {
         let ((a_tx, a_rx), _) = crate::transport::pair().expect("a socket pair");
-        let app = Self::start(runtime, a_tx, a_rx, None, None);
+        let app = Self::start(runtime, a_tx, a_rx, None, None, None);
         app.0.status.set(AppStatus::Failed(why.into()));
         app.0.closed.set(true);
         app
@@ -627,7 +657,11 @@ impl AppInner {
             return;
         }
         let now = std::time::Instant::now();
-        if self.refresh_checked.get().is_some_and(|at| now.duration_since(at) < Duration::from_secs(2)) {
+        if self
+            .refresh_checked
+            .get()
+            .is_some_and(|at| now.duration_since(at) < Duration::from_secs(2))
+        {
             return;
         }
         let (Some(runner), Some(clock)) = (self.runner(), self.frames.borrow().clone()) else {
@@ -649,7 +683,10 @@ impl AppInner {
         let task = runner.spawn(Box::pin(async move {
             let frame = clock.next().await;
             if log {
-                eprintln!("zgx-surface: the display refreshes at {} Hz", frame.refresh_rate());
+                eprintln!(
+                    "zgx-surface: the display refreshes at {} Hz",
+                    frame.refresh_rate()
+                );
             }
             let Some(app) = weak.upgrade() else { return };
             app.refreshing.borrow_mut().take();
@@ -791,6 +828,7 @@ fn reader(
     shared: Arc<Mutex<Shared>>,
     out: Outbox,
     wake: zgx::task::LatestSender<()>,
+    check_in: Option<(Arc<HostChannel>, u32)>,
 ) {
     let _ = std::thread::Builder::new()
         .name("zgx-surface read".into())
@@ -805,7 +843,24 @@ fn reader(
                     }
                 };
                 let note = match message {
-                    ClientMessage::Hello(hello) => Note::Hello(hello),
+                    ClientMessage::Hello(mut hello) => {
+                        // IOSurfaces only to a program that checked in on
+                        // the session's Mach channel (it does before its
+                        // hello), and only the program this host started.
+                        let iosurface = |o: &Offer| matches!(o, Offer::IoSurface { .. });
+                        if hello.offers.iter().any(iosurface) {
+                            let accepted = check_in.as_ref().is_some_and(|(channel, pid)| {
+                                channel
+                                    .accept(*pid, CHECK_IN)
+                                    .map_err(|e| eprintln!("zgx-surface: {e}"))
+                                    .is_ok()
+                            });
+                            if !accepted {
+                                hello.offers.retain(|o| !iosurface(o));
+                            }
+                        }
+                        Note::Hello(hello)
+                    }
                     ClientMessage::Present { generation, index } => {
                         let presented = {
                             let mut shared = shared.lock().unwrap();
@@ -911,7 +966,9 @@ fn typed(key: &zgx::input::Key, modifiers: zgx::input::Modifiers) -> Option<Stri
         return None;
     }
     match key {
-        zgx::input::Key::Character(text) if !text.chars().any(char::is_control) => Some(text.clone()),
+        zgx::input::Key::Character(text) if !text.chars().any(char::is_control) => {
+            Some(text.clone())
+        }
         zgx::input::Key::Space => Some(" ".to_owned()),
         _ => None,
     }

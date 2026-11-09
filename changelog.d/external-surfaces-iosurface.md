@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **An external surface's frames share GPU memory on macOS too** (zgx-surface): the host allocates its buffers as IOSurfaces, made Metal textures on its own device, and a client on the same GPU draws into them with Metal (wgpu 29's `zgx_surface::wgpu29::import`, or `zgx_surface::metal::texture` from another wgpu), so no CPU copies a pixel. IOSurfaces travel as Mach ports over a channel beside the session's socket: the host's one bootstrap service, named in `ZGX_SURFACE_MACH`, takes a check-in only from the process the host started (by its audit token's pid). `Client::connect` checks in when offered `Offer::IoSurface { devices }` (`wgpu29::iosurface_offer`); the host picks IOSurfaces when the client offers its Metal device (`registryID`, so an Intel Mac's two GPUs pick the same one), else shared memory. `Offer::IoSurface` now carries those devices, and `BufferDesc::IoSurface` the surface once received.

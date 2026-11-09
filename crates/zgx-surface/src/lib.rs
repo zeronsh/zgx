@@ -14,8 +14,11 @@
 //!   client on the same device. No pixel is copied by a CPU.
 //! - `shm` buffers (everywhere): shared memory the client writes pixels
 //!   into and the host uploads.
-//! - `iosurface` (macOS) and `dxgi` (Windows): named, not yet implemented
-//!   (see `docs/external-surfaces.md` for what they need).
+//! - `iosurface` buffers (macOS): IOSurfaces the host allocates, their
+//!   Mach ports sent over a Mach channel beside the socket (`iosurface`),
+//!   made Metal textures by a client on the same GPU. No pixel is copied.
+//! - `dxgi` (Windows): named, not yet implemented (see
+//!   `docs/external-surfaces.md` for what it needs).
 //!
 //! This crate's core has no wgpu: a client on any wgpu version (or none)
 //! uses the protocol (`protocol`), its connection (`transport`, `Client`),
@@ -25,6 +28,9 @@
 pub mod client;
 #[cfg(feature = "host")]
 pub mod host;
+pub mod iosurface;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub mod metal;
 pub mod protocol;
 pub mod ring;
 pub mod shm;
