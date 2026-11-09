@@ -21,7 +21,7 @@ pub fn register(faces: &[fontdb::ID], hook: Hook) {
 }
 
 /// Whether face `id`'s advances come from the platform.
-pub(crate) fn has(id: fontdb::ID) -> bool {
+pub fn has(id: fontdb::ID) -> bool {
     FACES.read().is_ok_and(|known| known.contains(&id))
 }
 

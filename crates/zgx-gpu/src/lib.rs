@@ -1093,6 +1093,49 @@ fn glyph_texture(color: bool, scale: f32) -> f32 {
         1.
     }
 }
+/// Where UIKit's text puts a glyph at `exact` device pixels from its text's
+/// start, in a font `pixels` large: above 33 pixels on the whole pixel before
+/// it, at 33 or below on the half pixel before it (measured from runs of one
+/// letter in UILabel, UITextField and UITextView, iOS 26.5 simulator: one
+/// bitmap for all of them or two, split at a half, floor matching every
+/// position; the change lies between 33 and 33.75 pixels at 3x and between 33
+/// and 34 at 2x, so it counts pixels, not points. Not read from Core Text's
+/// source, nor yet seen on a phone). Below 16 pixels, a third bitmap appears
+/// that this doesn't follow. It was all the difference left in where UIKit and
+/// zgx drew a line's glyphs: quarter-pixel bins put them up to a pixel late.
+#[cfg_attr(not(any(target_os = "ios", test)), allow(dead_code))]
+fn core_text_glyph_x(exact: f32, pixels: f32) -> f32 {
+    if pixels > 33. {
+        exact.floor()
+    } else {
+        (exact * 2.).floor() / 2.
+    }
+}
+/// Whether a glyph of face `id` is placed by `core_text_glyph_x`: on iOS, all
+/// but the emoji, pictures Core Text draws where they fall (snapped, some land
+/// a pixel from UIKit's). The last face's answer is kept: lines are mostly one
+/// face, and this is asked of every glyph.
+#[cfg(target_os = "ios")]
+#[inline]
+fn snaps_to_core_text_pixels(id: cosmic_text::fontdb::ID) -> bool {
+    thread_local! {
+        static LAST: std::cell::Cell<Option<(cosmic_text::fontdb::ID, bool)>> =
+            const { std::cell::Cell::new(None) };
+    }
+    LAST.with(|last| match last.get() {
+        Some((face, snaps)) if face == id => snaps,
+        _ => {
+            let snaps = !cosmic_text::platform_advance::has(id);
+            last.set(Some((id, snaps)));
+            snaps
+        }
+    })
+}
+#[cfg(not(target_os = "ios"))]
+#[inline(always)]
+fn snaps_to_core_text_pixels(_: cosmic_text::fontdb::ID) -> bool {
+    false
+}
 /// `glyphs_of`, each glyph's run from `style` (given its line).
 fn styled_glyphs<'a>(
     mut glyphs: Vec<Glyph>,
@@ -1115,7 +1158,11 @@ fn styled_glyphs<'a>(
             // subpixel bin zero), as Windows' own text is: a stem a quarter
             // pixel off lands on two columns at part strength, which reads
             // as blur on a ~96 dpi screen. Its line keeps its layout.
-            let p = if sharp {
+            let p = if snaps_to_core_text_pixels(glyph.font_id) {
+                let exact = (glyph.x + glyph.font_size * glyph.x_offset) * scale;
+                let placed = core_text_glyph_x(exact, glyph.font_size * scale);
+                glyph.physical((placed - exact, 0.), scale)
+            } else if sharp {
                 let exact = (glyph.x + glyph.font_size * glyph.x_offset) * scale;
                 let placed = line_start.round() + (exact - line_start).round();
                 glyph.physical((placed - exact, 0.), scale)
@@ -17582,6 +17629,22 @@ impl surface::SurfaceSource for GpuRenderer {
         if self.wide_until.is_some() {
             self.set_drawable_count(3);
         }
+    }
+}
+
+#[cfg(test)]
+mod core_text_glyph_x_tests {
+    #[test]
+    fn large_text_floors_to_pixels_and_small_to_half_pixels() {
+        use super::core_text_glyph_x as x;
+        // UIKit's 17 point body at 3x is 51 pixels; rel from a run of H's.
+        assert_eq!([x(0., 51.), x(36.557, 51.), x(73.114, 51.)], [0., 36., 73.]);
+        assert_eq!(x(109.99, 51.), 109.);
+        // At and below 33 pixels, the half before it.
+        assert_eq!([x(24.686, 33.), x(49.372, 33.)], [24.5, 49.]);
+        assert_eq!(x(24.4, 33.), 24.);
+        // The change, measured between 33 and 33.75 pixels.
+        assert_eq!(x(24.75, 33.75), 24.);
     }
 }
 
