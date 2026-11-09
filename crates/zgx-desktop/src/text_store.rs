@@ -609,8 +609,46 @@ pub(crate) fn word_at(units: &[u16], caret: usize) -> Option<(usize, usize)> {
     }
     found
 }
+/// Where a tap that focuses a field leaves the caret, from the offset `caret`
+/// nearest it, as UITextField's first tap does (measured in a reference app
+/// across a line; a tap once focused is `UITextInteraction`'s own): a word's
+/// first two offsets go to its start, the rest of it to its end, and its end
+/// past what follows to the next word. Only spaces around: where it fell.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn first_tap_caret(units: &[u16], caret: usize) -> usize {
+    let Some((start, end)) = word_at(units, caret) else {
+        return caret;
+    };
+    if caret <= start + 1 && caret < end {
+        return start;
+    }
+    if caret < end {
+        return end;
+    }
+    let after = String::from_utf16_lossy(&units[end..]);
+    end + after
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .map(char::len_utf16)
+        .sum::<usize>()
+}
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_first_tap_goes_to_a_word_edge_as_uitextfields_does() {
+        // Every offset of this line and where UIKit puts the caret for it.
+        let text: Vec<u16> = "The quick brown fox jumps over".encode_utf16().collect();
+        let expected = [
+            0, 0, 3, 4, 4, 4, 9, 9, 9, 10, 10, 10, 15, 15, 15, 16, 16, 16, 19, 20, 20, 20, 25, 25,
+            25, 26, 26, 26, 30, 30, 30,
+        ];
+        for (caret, expected) in expected.into_iter().enumerate() {
+            assert_eq!(super::first_tap_caret(&text, caret), expected, "at {caret}");
+        }
+        // Nothing but spaces: where it fell.
+        let spaces: Vec<u16> = "   ".encode_utf16().collect();
+        assert_eq!(super::first_tap_caret(&spaces, 1), 1);
+    }
     #[test]
     fn a_lines_box_grows_about_its_middle_and_never_shrinks() {
         // A body line in a 44 point field, as a UITextField has it.

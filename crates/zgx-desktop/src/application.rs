@@ -2769,7 +2769,25 @@ impl Host {
         #[cfg(target_os = "ios")]
         if let Some(text) = &self.text_input {
             if target != self.ime_target {
+                // A tap inside the field that gets focus, not focus from
+                // elsewhere, which leaves its caret alone.
+                let tapped = editor.as_ref().is_some_and(|editor| {
+                    let bounds = self
+                        .context
+                        .ui
+                        .scene
+                        .borrow()
+                        .transformed_bounds(editor.node);
+                    let (x, y) = self.cursor;
+                    x >= bounds.x
+                        && x <= bounds.x + bounds.width
+                        && y >= bounds.y
+                        && y <= bounds.y + bounds.height
+                });
                 text.focus(editor);
+                if tapped {
+                    text.first_tap();
+                }
                 self.ime_target = target;
             }
             text.after_dispatch();
