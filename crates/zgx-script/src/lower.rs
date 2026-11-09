@@ -2977,8 +2977,24 @@ fn kind_view(
             }
         }
         Kind::Text(text) => lower_text(text, vm),
-        Kind::Markdown { text, options } => {
+        Kind::Markdown {
+            text,
+            options,
+            look,
+        } => {
             use crate::markdown::view::Source;
+            let options = match look {
+                Some(look) => {
+                    let mut options = options.clone();
+                    options.look = Some(Rc::new(ScriptLook {
+                        look: look.clone(),
+                        vm: vm.clone(),
+                        low: low.clone(),
+                    }));
+                    options
+                }
+                None => options.clone(),
+            };
             // A state's text, as it is (`"{reply}"`): not copied into a
             // string, and a long one streamed in is parsed by its edits.
             if let Text::Template(segments) = text
@@ -2986,16 +3002,10 @@ fn kind_view(
                 && path.is_empty()
             {
                 let state = state.clone();
-                crate::markdown::view::view(
-                    move || Source::Held(state.with(Value::clone)),
-                    options.clone(),
-                )
+                crate::markdown::view::view(move || Source::Held(state.with(Value::clone)), options)
             } else {
                 let (text, vm) = (copy_text(text), vm.clone());
-                crate::markdown::view::view(
-                    move || Source::Made(render_text(&text, &vm)),
-                    options.clone(),
-                )
+                crate::markdown::view::view(move || Source::Made(render_text(&text, &vm)), options)
             }
         }
         Kind::Rich(spans) => lower_rich(spans, vm, low),
@@ -8307,6 +8317,18 @@ fn context_menu_items(
     e: &zgx::compose::ContextMenuEvent,
     span: Option<&zgx::compose::ContextMenuSpan>,
 ) -> Vec<View> {
+    context_menu_items_for(vm, low, build, e, span, None)
+}
+/// As `context_menu_items`, `build` told `target` first (a markdown
+/// view's `link_menu(target, e)`).
+fn context_menu_items_for(
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+    build: &mlua::Function,
+    e: &zgx::compose::ContextMenuEvent,
+    span: Option<&zgx::compose::ContextMenuSpan>,
+    target: Option<&str>,
+) -> Vec<View> {
     let point = vm.lua.create_table().and_then(|t| {
         t.set("x", e.x)?;
         t.set("y", e.y)?;
@@ -8322,9 +8344,10 @@ fn context_menu_items(
         Ok(t)
     });
     let items = point.and_then(|p| {
-        vm.runtime
-            .clone()
-            .batch(|| vm.call::<Option<mlua::Table>>(build, p))
+        vm.runtime.clone().batch(|| match target {
+            Some(target) => vm.call::<Option<mlua::Table>>(build, (target, p)),
+            None => vm.call::<Option<mlua::Table>>(build, p),
+        })
     });
     match items {
         Ok(Some(items)) => items
@@ -8343,6 +8366,96 @@ fn context_menu_items(
         Err(error) => {
             vm.report(error);
             Vec::new()
+        }
+    }
+}
+
+/// A markdown view's look as the script gave it (`MarkdownLook`): its runs
+/// made as `ui.span`'s are, its paragraphs styled as `ui.rich`'s, so each
+/// draws as the script's own elements would.
+struct ScriptLook {
+    look: Rc<crate::node::MarkdownLook>,
+    vm: Rc<Vm>,
+    low: Rc<Lowering>,
+}
+/// Where a link goes that is the web's: opened by its address (its menu,
+/// its cursor), where another target is the script's to open.
+fn web_address(target: &str) -> bool {
+    target.starts_with("https://") || target.starts_with("http://") || target.starts_with("mailto:")
+}
+impl crate::markdown::view::Look for ScriptLook {
+    fn span(&self, run: &crate::markdown::view::Run) -> TextSpan {
+        let (vm, look) = (&self.vm, &self.look);
+        let bits = usize::from(run.strong)
+            | usize::from(run.em) << 1
+            | usize::from(run.strike) << 2
+            | usize::from(run.code) << 3
+            | usize::from(run.link.is_some()) << 4;
+        let mut span = match crate::node::look_span(&vm.lua, look, bits) {
+            Ok(span) => span,
+            Err(error) => {
+                vm.report(error);
+                return text_span(run.text);
+            }
+        };
+        span.text = Text::Literal(run.text.to_owned());
+        // (A link still streaming its address goes nowhere yet.)
+        let target = run.link.filter(|t| !t.is_empty());
+        if let Some(target) = target
+            && (web_address(target) || look.on_link.is_none())
+        {
+            span.href = Some(target.into());
+        }
+        let mut out = text_span_of(&own_span(&span), vm, &self.low);
+        let Some(target) = target else {
+            return out;
+        };
+        if let Some(on_link) = &look.on_link {
+            let (on_link, vm, target) = (on_link.clone(), vm.clone(), Rc::<str>::from(target));
+            // Told the keys held, as a span's `on_click` is; `true` back
+            // handled it, and its address stays shut.
+            out = out.on_click_handled(move |held| {
+                let keys = modifiers_table(&vm.lua, held).ok();
+                let back = vm
+                    .runtime
+                    .clone()
+                    .batch(|| vm.call::<mlua::Value>(&on_link, (&*target, keys)));
+                match back {
+                    Ok(back) => back.as_boolean() == Some(true),
+                    Err(error) => {
+                        vm.report(error);
+                        false
+                    }
+                }
+            });
+            // A link, otherwise underlined: `underline = false` too.
+            if span.underline == Some(false) {
+                out = out.no_underline();
+            }
+        }
+        if let Some(build) = &look.link_menu {
+            let (build, vm, low, target) = (
+                build.clone(),
+                vm.clone(),
+                self.low.clone(),
+                target.to_owned(),
+            );
+            out = out.context_menu(move |e| {
+                context_menu_items_for(&vm, &low, &build, e, None, Some(&target))
+            });
+        }
+        out
+    }
+    fn paragraph(&self, view: View) -> View {
+        match &self.look.paragraph {
+            Some(node) => styled(view, node, &self.vm, &self.low, None, None),
+            None => view,
+        }
+    }
+    fn blocks(&self, view: View) -> View {
+        match &self.look.blocks {
+            Some(node) => styled(view, node, &self.vm, &self.low, None, None),
+            None => view.gap(10.),
         }
     }
 }

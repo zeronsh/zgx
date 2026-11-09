@@ -1283,6 +1283,9 @@ export type MarkdownOptions = {
 	breaks: boolean?,
 	-- Repository paths (`src/main.rs:12`) are files: runs with `f`.
 	paths: boolean?,
+	-- Web addresses written bare in the words (`https://…`) are links to
+	-- themselves, as GitHub's autolinks: runs with `a`.
+	autolink: boolean?,
 	-- With `key`: a text this long (true: 4 KB; or bytes) landing whole
 	-- comes back at once, its blocks not parsed yet `{ t = "pending" }`,
 	-- and is parsed over frames, the end first.
@@ -5361,6 +5364,32 @@ export type MarkdownViewProps = {
 	paths: boolean?,
 	-- A Copy button on code blocks (true).
 	copy: boolean?,
+	-- Web addresses written bare in the words are links, as GitHub's
+	-- autolinks: punctuation ending the sentence left out.
+	autolink: boolean?,
+	-- Its prose in the app's own look, drawn as `ui.rich` and `ui.span`
+	-- would draw it (see MarkdownStyle).
+	style: MarkdownStyle?,
+	-- A link clicked: told where it goes and the keys held. `true` back
+	-- handled it, and a web address stays shut; other targets open only
+	-- here.
+	on_link: ((target: string, e: ClickEvent) -> boolean?)?,
+	-- A link's context menu, as `context_menu`'s: told where it goes.
+	link_menu: ((target: string, e: PointerEvent) -> ...{ Node }?)?,
+}
+-- `ui.markdown_view`'s `style`: a paragraph's options as `ui.rich`'s, and
+-- each kind of run's as `ui.span`'s (tokens, states and functions as
+-- theirs), laid over one another in this order for a run of several
+-- kinds. A kind left out keeps the view's own look; one given replaces it.
+export type MarkdownStyle = {
+	-- Room between the top-level blocks (a number or a token).
+	gap: Num?,
+	paragraph: RichProps?,
+	strong: SpanProps?,
+	em: SpanProps?,
+	strike: SpanProps?,
+	code: SpanProps?,
+	link: SpanProps?,
 }
 -- `ui.span`'s options are plain values.
 export type SpanProps = {
@@ -5370,7 +5399,8 @@ export type SpanProps = {
 	-- again, keeping its node and any selection in it.
 	color: Reactive<Color>?,
 	bg: Reactive<Color>?,
-	text_size: Reactive<number>?,
+	-- A number, or a token (`"$font.size.sm"`) read from the theme.
+	text_size: Reactive<number | string>?,
 	weight: Reactive<number>?,
 	bold: Reactive<boolean>?,
 	italic: Reactive<boolean>?,

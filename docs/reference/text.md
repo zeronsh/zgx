@@ -82,7 +82,7 @@ return ui.rich {
 | `[1]` | `Text` | `""` | the run's text: a template or a function follows state |
 | `color` | `Color` | the paragraph's | a state or a function follows, as for the next five rows |
 | `bg` | `Color` | none | behind the run (a highlight) |
-| `text_size` | `number` | the paragraph's | |
+| `text_size` | `number` or a token | the paragraph's | a token (`"$font.size.sm"`) is its value in the theme as the paragraph builds, followed as the theme changes |
 | `weight` | `number` | the paragraph's | `bold = true` is 700 |
 | `bold`, `italic`, `underline`, `strike` | `boolean` | `false` | |
 | `font` | `string` | the paragraph's | as `ui.text`'s: `"mono"`, `"sans"`, `"serif"`, or a family's name |
@@ -163,11 +163,41 @@ return ui.column {
 ui.markdown_view(props: MarkdownViewProps) -> Node
 ```
 
-`ui.markdown_view { text }` draws markdown: paragraphs and headings of styled runs (bold, italic, struck, `code`, links), lists, quotes, rules, tables, and code blocks with their language and a Copy button, in the theme's colours and sizes (`$surface.sunken`, `$border.subtle`, `$text.tertiary`, `$font.size.*`), selectable as prose is. Its text is a string, a template, a state's (`"{reply}"`) or a function. As the text changes it parses only what changed and builds only the blocks whose value changed, so a reply streaming in grows by its last block, and every block before it keeps its nodes, layout and paint. A state's text given as it is (`"{reply}"`) is read where it lies, not copied; streamed in with `reply:append(token)`, a long one (past 64 KB) is parsed from what was appended, without comparing the document again. Options: `breaks` (single newlines break lines), `paths` (repository paths are files), `copy = false` (no Copy buttons); the rest are a column's styles (`gap` between blocks is 10).
+`ui.markdown_view { text }` draws markdown: paragraphs and headings of styled runs (bold, italic, struck, `code`, links), lists, quotes, rules, tables, and code blocks with their language and a Copy button, in the theme's colours and sizes (`$surface.sunken`, `$border.subtle`, `$text.tertiary`, `$font.size.*`), selectable as prose is. Its text is a string, a template, a state's (`"{reply}"`) or a function. As the text changes it parses only what changed and builds only the blocks whose value changed, so a reply streaming in grows by its last block, and every block before it keeps its nodes, layout and paint. A state's text given as it is (`"{reply}"`) is read where it lies, not copied; streamed in with `reply:append(token)`, a long one (past 64 KB) is parsed from what was appended, without comparing the document again. Options: `breaks` (single newlines break lines), `paths` (repository paths are files), `autolink` (web addresses written bare are links, as GitHub's autolinks: `https://…` in words, not in code or a link, the punctuation ending a sentence and a `)` it didn't open left out), `copy = false` (no Copy buttons), `style`, `on_link` and `link_menu` (below); the rest are a column's styles (`gap` between blocks is 10).
 
 ```lua
 local reply = ui.state("reply", "Some **bold** text, then code:\n\n```lua\nprint(1)\n```")
 return ui.markdown_view { "{reply}", w = 520, text_size = 15 }
+```
+
+### An app's own look
+
+`style` draws its prose as the app's own `ui.rich` and `ui.span` would, without the script building them: so far its paragraphs, and the runs of every block. `paragraph` holds a paragraph's options as `ui.rich`'s (`text_size`, `line_height`, `color`…), each kind of run its options as `ui.span`'s (`strong`, `em`, `strike`, `code`, `link`), and `gap` the room between the top-level blocks. They resolve as those elements' do: tokens through the node's theme (a window's or a plugin's overrides apply), and a function or a state is followed (a change makes the runs again, in place). A run of several kinds (bold code in a link) takes each kind's options, laid over one another in that order: a link's colour over code's. A kind left out keeps the view's own look (bold 700, italic, struck, `code` in mono on `$surface.sunken`, links in `$accent`); one given replaces it. A name the style doesn't know is an error.
+
+| Option | Type | |
+| --- | --- | --- |
+| `on_link` | `(target, e: ClickEvent) -> boolean?` | a link clicked, told where it goes and the keys held. `true` back handled it: a web address (`http:`, `https:`, `mailto:`, which the link keeps for its menu and pointing hand) stays shut. Any other target goes to it alone, and opens nothing else |
+| `link_menu` | `(target, e: PointerEvent) -> { Node }?` | a link's context menu, as a span's `context_menu`, told where it goes |
+
+A link whose address is still streaming in is styled as one but goes nowhere: neither is asked of it.
+
+```lua
+local reply = ui.state("reply", "See **the guide** and `ui.rich`: https://zgx.zeron.sh.")
+return ui.markdown_view {
+	"{reply}",
+	autolink = true,
+	style = {
+		gap = "$space.4",
+		paragraph = { text_size = 15, line_height = 24, color = "$text.primary" },
+		strong = { weight = 600 },
+		code = { font = "mono", bg = "$surface.sunken", padding = { 4, 1 }, radius = 4.5, text_size = "$font.size.sm" },
+		link = { color = "$accent", underline = true, underline_offset = 4, hover = { underline = true } },
+	},
+	on_link = function(target)
+		print("open", target)
+		return true
+	end,
+}
 ```
 
 To draw blocks your own way, take them from `ui.markdown`:
@@ -184,6 +214,7 @@ ui.markdown(text: State<string>, opts: MarkdownOptions?) -> ReadOnlyState<{ Mark
 | `key` | `string` | none | names a text that grows (a reply streaming in): each call parses only its new end, and its earlier blocks are the very tables of the last call, so a `ui.each` over them builds only the blocks that changed. A marker left open at the end (`**bold`, a link's address half there) shows closed until the closer arrives, so the text does not restyle and reflow when it does; such a link's `a` is `"zgx:pending-link"` (style it, but it goes nowhere yet) |
 | `breaks` | `boolean` | `false` | single newlines break lines, as people's messages show them |
 | `paths` | `boolean` | `false` | repository paths (`src/main.rs:12`), code spans that are a path whole and relative links that read as one are files: runs with `f` |
+| `autolink` | `boolean` | `false` | web addresses written bare in the words (`https://…`, not in code or a link) are links to themselves, as GitHub's autolinks: runs with `a`, keeping their run's bold, italic and strike. The punctuation ending a sentence (`.,;:!?'"`) and a `)` the address didn't open stay out |
 | `lazy` | `boolean` \| `number` | `false` | with `key`: a text of 4 KB or more (`true`; a number sets the bytes) that lands whole, not by appends (a long reply opened at once), comes back at once with one entry a block, and is parsed over the next frames, the end first, so no frame parses all of it. A block not parsed yet is `{ t = "pending", hint, lines, from, to }`: what it is by its first line (`"p"`, `"h"`, `"code"`, `"list"`, `"quote"`, `"table"`, `"hr"`), its lines, and its bytes in the text as `string.sub` takes them, for holding its place (a windowed transcript's boxes) and finding text in it. A block keeps its index from the first answer, and one parsed stays the same table. A computed around the call runs again as blocks come in (the end's, a block asked for with `first`, all). Appends to it parse as ever; shorter texts, and text with link reference definitions, parse at once |
 | `first` | `number` | none | with `lazy`: parse block `first` (from 1) before the other pending ones (a search found something in it) |
 
@@ -272,7 +303,7 @@ return ui.column {
 - Text from data is a template too: a commit message with `{id}` in it looks for state named `id` (an error if there is none), and `{{` shows as `{`. Pass `literal = true` (on `ui.text`, `ui.rich` or a span) for text the script didn't write.
 - A template names state by its key, not by its Luau variable: `"{count}"` shows `ui.state("count", …)` whatever the local is called (a component's `ui.use_state` has no key: give `ui.text` the state itself, `ui.text { count }`), and `"{state.count}"` is state `state`'s field `count`, not a module's state. A name no state has is an error when the text is built.
 - Text does not wrap by default, and a row shrinks it no narrower than it is (its min-content, unwrapped): `wrap = true` (in a box with a width) lets it wrap down to its longest word, or `truncate = true` lets it shrink past that, ending it with "…", when the text is itself the row's child (a box around it still needs its width: give the box `min_w = 0`). `truncate` on a box is inherited by the text inside, which shrinks the same way in rows of its own.
-- A span's `color`, `bg`, `text_size`, `weight`, `bold`, `italic`, `underline`, `strike` and `font` follow a state or a function, and its text does. Its other options are plain values, read once.
+- A span's `color`, `bg`, `text_size`, `weight`, `bold`, `italic`, `underline`, `strike` and `font` follow a state or a function, and its text does (and a `text_size` token, the theme). Its other options are plain values, read once.
 - A span is used once: putting the same `ui.span` in two paragraphs is an error. Make a new one each time.
 - `ui.text` and `ui.rich` take no children; extra array entries in `ui.text` are an error.
 - A function's text is called again for each change it read; prefer a template for plain state, which costs no script call.

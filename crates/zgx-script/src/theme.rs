@@ -139,6 +139,10 @@ fn off_clock<R>(lua: &Lua, f: impl FnOnce() -> R) -> R {
         None => f(),
     }
 }
+/// A token's value now, as `ui.theme.get(name)` reads it (tracked).
+pub(crate) fn value_of(lua: &Lua, name: &str) -> mlua::Result<Value> {
+    Ok(script_value(themes(lua)?.get(token(name))))
+}
 fn themes(lua: &Lua) -> mlua::Result<Rc<Themes>> {
     Ok(Themes::of(&env(lua)?.runtime))
 }
