@@ -103,6 +103,7 @@ impl Viewport for Painter {
             return;
         };
         app.scale.set(frame.scale);
+        app.tell_refresh();
         if app.device.borrow().as_ref() != Some(frame.device) {
             *app.device.borrow_mut() = Some(frame.device.clone());
         }

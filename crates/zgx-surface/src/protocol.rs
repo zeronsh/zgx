@@ -411,6 +411,10 @@ pub enum HostMessage {
     PointerLock(bool),
     /// The pointer left the surface.
     PointerLeave,
+    /// The display the surface shows on refreshes this many times a second:
+    /// as it's welcomed, and again as it moves to another display. A client
+    /// pacing itself draws at this rate (more would never show).
+    Refresh(f32),
     /// The session is closing: finish and exit. The host kills a client
     /// still running a moment later.
     Close,
@@ -488,6 +492,7 @@ const WHEEL: u16 = 75;
 const POINTER_LOCK: u16 = 76;
 const POINTER_LEAVE: u16 = 77;
 const CLOSE: u16 = 78;
+const REFRESH: u16 = 79;
 
 /// A frame being written: its bytes, and the handles that go with it.
 pub struct Encoded<'a> {
@@ -806,6 +811,10 @@ impl HostMessage {
                 out.bool(*locked);
             }
             HostMessage::PointerLeave => out = Out::new(POINTER_LEAVE),
+            HostMessage::Refresh(hz) => {
+                out = Out::new(REFRESH);
+                out.f32(*hz);
+            }
             HostMessage::Close => out = Out::new(CLOSE),
         }
         out.finish()
@@ -927,6 +936,7 @@ impl HostMessage {
             },
             POINTER_LOCK => HostMessage::PointerLock(r.bool()?),
             POINTER_LEAVE => HostMessage::PointerLeave,
+            REFRESH => HostMessage::Refresh(r.f32()?),
             CLOSE => HostMessage::Close,
             _ => return Ok(None),
         };

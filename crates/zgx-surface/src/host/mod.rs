@@ -197,6 +197,13 @@ pub(crate) struct AppInner {
     /// The element has keyboard focus: modifier keys alone are the
     /// program's then.
     focused: Cell<bool>,
+    /// The window's frame clock, as the element mounts: its display's rate.
+    frames: RefCell<Option<zgx::frame::FrameClock>>,
+    /// The display rate last told the program (`Refresh`), 0 before.
+    refresh: Cell<f32>,
+    /// Awaiting a frame to read the display's rate from, and when it last was.
+    refreshing: RefCell<Option<TaskToken>>,
+    refresh_checked: Cell<Option<std::time::Instant>>,
 }
 
 impl App {
@@ -287,6 +294,10 @@ impl App {
             revoked: Cell::new(false),
             locked: Cell::new(false),
             focused: Cell::new(false),
+            frames: RefCell::new(None),
+            refresh: Cell::new(0.),
+            refreshing: RefCell::new(None),
+            refresh_checked: Cell::new(None),
         });
         App(inner)
     }
@@ -596,6 +607,50 @@ impl Drop for Mounted {
 }
 
 impl AppInner {
+    /// Tell the program its display's refresh rate once welcomed, and again
+    /// as it changes (the window moved to another display): it paces itself
+    /// by it, as more frames than the display shows are work for nothing.
+    /// The clock keeps no frame while nothing waits for one (an idle
+    /// window), so one is awaited: at most every two seconds.
+    pub(crate) fn tell_refresh(self: &Rc<Self>) {
+        if self.kind.get().is_none() || self.refreshing.borrow().is_some() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self.refresh_checked.get().is_some_and(|at| now.duration_since(at) < Duration::from_secs(2)) {
+            return;
+        }
+        let (Some(runner), Some(clock)) = (self.runner(), self.frames.borrow().clone()) else {
+            if std::env::var_os("ZGX_SURFACE_LOG").is_some() {
+                eprintln!(
+                    "zgx-surface: no refresh rate yet (runner {}, frame clock {})",
+                    self.runner().is_some(),
+                    self.frames.borrow().is_some()
+                );
+            }
+            return;
+        };
+        self.refresh_checked.set(Some(now));
+        let weak = Rc::downgrade(self);
+        let log = std::env::var_os("ZGX_SURFACE_LOG").is_some();
+        if log {
+            eprintln!("zgx-surface: awaiting a frame for the display's rate");
+        }
+        let task = runner.spawn(Box::pin(async move {
+            let frame = clock.next().await;
+            if log {
+                eprintln!("zgx-surface: the display refreshes at {} Hz", frame.refresh_rate());
+            }
+            let Some(app) = weak.upgrade() else { return };
+            app.refreshing.borrow_mut().take();
+            let hz = frame.refresh_rate() as f32;
+            if hz.is_finite() && hz > 1. && (hz - app.refresh.get()).abs() > 0.5 {
+                app.refresh.set(hz);
+                app.out.input(HostMessage::Refresh(hz));
+            }
+        }));
+        *self.refreshing.borrow_mut() = Some(task);
+    }
     /// The program holds the pointer (or no longer does): while it does,
     /// focus in its element takes every key, bindings and the menus'
     /// shortcuts none (Control+W mid-sprint must not close the window);
@@ -816,6 +871,9 @@ pub fn surface(app: &App) -> View {
     component(move |cx| {
         if let Some(runner) = cx.try_service::<TaskRunner>() {
             app.attach(&runner);
+        }
+        if let Some(frames) = cx.try_service::<zgx::frame::FrameClock>() {
+            *app.0.frames.borrow_mut() = Some((*frames).clone());
         }
         let (events, mounted) = (app.clone(), app.clone());
         gpu_view("App", &app.0.view)
