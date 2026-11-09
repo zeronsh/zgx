@@ -6747,12 +6747,13 @@ impl Scene {
             || matches!((&self.node(id).kind,&kind),(NodeKind::NativeSurface(old),NodeKind::NativeSurface(new)) if (old.width(),old.height())==(new.width(),new.height()) || (self.node(id).style.width.is_some() && self.node(id).style.height.is_some()));
         // Restyled rich text (a fade recolouring its newest words), or grown:
         // damaged once laid out, from where it changes (`damage_appended`).
-        let restyled = match (&self.node(id).kind, &kind) {
-            (NodeKind::RichText { text: old }, NodeKind::RichText { text: new })
-                if self.node(id).measurement.is_some() =>
-            {
-                new.restyled_from(old).map(|from| (old.text().len(), from))
-            }
+        let restyled = match &kind {
+            NodeKind::RichText { text: new } => match &self.node(id).kind {
+                NodeKind::RichText { text: old } if self.node(id).measurement.is_some() => {
+                    new.restyled_from(old).map(|from| (old.text().len(), from))
+                }
+                _ => None,
+            },
             _ => None,
         };
         if !restyled.is_some_and(|(length, from)| self.defer_damage(id, length, from)) {
@@ -12292,7 +12293,7 @@ impl Scene {
             if keep && flags & (PAINT | PAINTED | COMPOSITE | CHILDREN) != 0 {
                 self.repaints.push((*id, repaint_flags(flags)));
             }
-            if flags & PAINT != 0 && !self.damage_appended(*id) {
+            if flags & PAINT != 0 && (self.appended.is_empty() || !self.damage_appended(*id)) {
                 self.damage_node(*id);
             }
             if flags & COMPOSITE != 0 {
