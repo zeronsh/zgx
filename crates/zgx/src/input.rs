@@ -3291,7 +3291,9 @@ impl InputDispatcher {
                             !self.boxless(&scene, *hit)
                                 && !self.options(*hit).is_some_and(|o| o.pass_through)
                         });
-                        keeps(target) || keeps(under)
+                        // (The target, only while it's still in the scene: a
+                        // listener may have removed it as it took the press.)
+                        keeps(target.filter(|id| scene.contains(*id))) || keeps(under)
                     };
                     if !keep_focus && !held && (target.is_some() || self.focus_scope().is_none()) {
                         self.focus(scene, focus);
