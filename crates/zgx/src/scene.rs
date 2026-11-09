@@ -1363,7 +1363,8 @@ pub enum Justify {
     SpaceEvenly,
     /// An overlay's children fill its height, unless they size themselves
     /// there. Along a row or column it acts as `Start`, as CSS's
-    /// `justify-content: stretch` does in flexbox.
+    /// `justify-content: stretch` does in flexbox. A grid's `auto` tracks
+    /// share its free width.
     Stretch,
 }
 /// A platform text shaper can provide accurate intrinsic and wrapped text metrics.

@@ -362,6 +362,17 @@ fn style_with(
         align_self: options.align_self.map(align),
         align_content: options.align_content.map(content),
         justify_content: Some(match style.justify {
+            // In a grid `stretch` is CSS's own: free width goes to the `auto`
+            // tracks. Not an explicit grid made from an overlay, where it is
+            // only the default `overlay()` sets, nor the leaf a child is in
+            // its parent's tree.
+            Justify::Stretch
+                if !leaf
+                    && layout != Layout::Overlay
+                    && options.display == Some(ViewDisplay::Grid) =>
+            {
+                t::JustifyContent::Stretch
+            }
             // As CSS's `justify-content: stretch` acts in flexbox.
             Justify::Start | Justify::Stretch => t::JustifyContent::Start,
             Justify::End => t::JustifyContent::End,
