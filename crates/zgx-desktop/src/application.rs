@@ -2749,14 +2749,22 @@ impl Host {
                     .display_link
                     .as_ref()
                     .is_some_and(|link| link.on_view_clock());
+                let now = std::time::Instant::now();
+                let refresh = 1. / self.frame_interval.as_secs_f64();
                 format!(
-                    "frame source: {}",
+                    "frame source: {} (wanted {}, rate {:?}, scroll live {}, coasting {}, \
+                     input {})",
                     match (self.link_paced, self.vsync_paced, view) {
                         (true, _, true) => "view link",
                         (true, _, false) => "display link",
                         (false, true, _) => "timer on the grid",
                         (false, false, _) => "input or other",
-                    }
+                    },
+                    self.frames.wants_frame(),
+                    self.frames.demanded_rate(refresh),
+                    self.scroll_live(now),
+                    self.coast.active(),
+                    self.input_until.is_some_and(|until| now < until),
                 )
             });
             let now = std::time::Instant::now();
