@@ -44,9 +44,16 @@ fn scrollbar_track_paging_thumb_capture_resize_and_cancel() {
     ui.prepare_frame();
     let bar = bar(&ui);
     let bounds = ui.scene.borrow().bounds(bar);
+    // At the content's right edge, in the platform's track: zgx's 8, and
+    // Windows' and GNOME's 12.
+    let track = if cfg!(any(windows, target_os = "linux")) {
+        12.
+    } else {
+        8.
+    };
     assert_eq!(
         (bounds.x, bounds.y, bounds.width, bounds.height),
-        (182., 10., 8., 100.)
+        (190. - track, 10., track, 100.)
     );
     down(&mut ui, 186., 90.);
     up(&mut ui, 186., 90.);
