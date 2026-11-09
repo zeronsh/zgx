@@ -2579,6 +2579,10 @@ struct Deferred {
     direct: bool,
     /// The polyline strokes' points (group 2), if it draws any.
     points: Option<wgpu::BindGroup>,
+    /// Drawn from the kept frame, its instances in paint order up to this
+    /// (`kept_ordered`): batched as the kept frame's are when encoded, after
+    /// the kept frame has taken its upload back.
+    kept: Option<u32>,
 }
 /// A batch of backdrop filters' last step: each blur drawn back over the
 /// original pixels, one draw per filter and damaged output (see
@@ -4347,6 +4351,9 @@ pub struct GpuRenderer {
     kept_upload: Option<(upload::KeptQuads, usize)>,
     /// And how many of its quads lie in paint order (`Kept::ordered`).
     kept_ordered: u32,
+    /// Keep no frame to patch (`debug_never_keep`): a reference drawing
+    /// every frame afresh.
+    never_keep: bool,
     /// Texts a kept frame patched (at most `SHAPED_LIKE`): the ones a kept
     /// frame gives spare room to grow into (`text_room`).
     changed_texts: rustc_hash::FxHashSet<NodeId>,
@@ -5065,6 +5072,7 @@ impl GpuRenderer {
             box_quads: Vec::new(),
             kept_upload: None,
             kept_ordered: 0,
+            never_keep: false,
             changed_texts: Default::default(),
             box_draws: Vec::new(),
             draw_made: false,
@@ -5529,6 +5537,13 @@ impl GpuRenderer {
     #[cfg(target_os = "macos")]
     pub fn shows_carets(&self) -> bool {
         self.layer_present.is_some()
+    }
+    /// Test hook: keep no frame to patch, drawing each afresh (a reference
+    /// for frames patched into a kept one).
+    #[doc(hidden)]
+    pub fn debug_never_keep(&mut self) {
+        self.never_keep = true;
+        self.kept = None;
     }
     /// The colour the target clears to where nothing is drawn.
     pub fn set_background(&mut self, color: Color) {
@@ -6040,6 +6055,7 @@ impl GpuRenderer {
         // patching goes on after a change it can't patch, or one after
         // frames it would have patched.
         let keep = !maintained
+            && !self.never_keep
             && !loops_baked
             && self.plane.is_none()
             && !self.in_layer
@@ -10401,6 +10417,7 @@ impl GpuRenderer {
                     first,
                     direct,
                     points: points_bind.clone(),
+                    kept: self.kept_now(),
                 });
                 break;
             }
@@ -10445,6 +10462,7 @@ impl GpuRenderer {
                     pass.set_bind_group(2, points, &[]);
                 }
                 let quads = &self.context.inner.quads;
+                let kept = self.kept_now();
                 for (index, (region, (x, y, w, h))) in regions.iter().enumerate() {
                     pass.set_scissor_rect(*x, *y, *w, *h);
                     let first = first[index];
@@ -10485,6 +10503,7 @@ impl GpuRenderer {
                         *region,
                         rest,
                         first,
+                        kept,
                         &mut stats,
                     );
                 }
@@ -10658,9 +10677,10 @@ impl GpuRenderer {
                 }
                 pass.texture(&atlas);
                 let mut sampled = TextureSource::Atlas;
+                let kept = self.kept_now();
                 for (region, region_scissor) in &band.regions {
                     pass.scissor(*region_scissor);
-                    self.batches(*region, &band.draws, 0, |batch| {
+                    self.batches(*region, &band.draws, 0, kept, |batch| {
                         let Some(rect) = scissor(batch.rect, self.scale, self.width, self.height)
                         else {
                             return;
@@ -10722,13 +10742,14 @@ impl GpuRenderer {
                     pass.mixes(frame, &blur[0], &records, &plan.draws);
                     stats.draw_calls += plan.draws.len();
                 }
+                let kept = self.kept_now();
                 for (index, (region, region_scissor)) in regions.iter().enumerate() {
                     pass.scissor(*region_scissor);
                     if segment == 0 && first[index] == 0 {
                         pass.quads(frame, clear, true, 0..1);
                         stats.draw_calls += 1;
                     }
-                    self.batches(*region, &draws[from..end], first[index], |batch| {
+                    self.batches(*region, &draws[from..end], first[index], kept, |batch| {
                         let Some(rect) = scissor(batch.rect, self.scale, self.width, self.height)
                         else {
                             return;
@@ -11069,13 +11090,14 @@ impl GpuRenderer {
         } else {
             Shading::Full
         };
+        let kept = self.kept_now();
         for (index, (region, region_scissor)) in regions.iter().enumerate() {
             frame.scissor(*region_scissor);
             if first[index] == 0 {
                 frame.quads(clear, true, 0..1);
                 stats.draw_calls += 1;
             }
-            self.batches(*region, &draws, first[index], |batch| {
+            self.batches(*region, &draws, first[index], kept, |batch| {
                 let Some(rect) = scissor(batch.rect, self.scale, self.width, self.height) else {
                     return;
                 };
@@ -11460,7 +11482,15 @@ impl GpuRenderer {
             pass.set_pipeline(quads);
             for (index, (region, (x, y, w, h))) in frame.regions.iter().enumerate() {
                 pass.set_scissor_rect(*x, *y, *w, *h);
-                self.encode_draws(pass, &pick, *region, &frame.draws, first(index), stats);
+                self.encode_draws(
+                    pass,
+                    &pick,
+                    *region,
+                    &frame.draws,
+                    first(index),
+                    frame.kept,
+                    stats,
+                );
             }
             return;
         }
@@ -11477,7 +11507,15 @@ impl GpuRenderer {
             }
             pass.set_pipeline(quads);
             for (index, (region, _)) in frame.regions.iter().enumerate() {
-                self.encode_draws(pass, &pick, *region, &frame.draws, first(index), stats);
+                self.encode_draws(
+                    pass,
+                    &pick,
+                    *region,
+                    &frame.draws,
+                    first(index),
+                    frame.kept,
+                    stats,
+                );
             }
             return;
         }
@@ -11490,7 +11528,15 @@ impl GpuRenderer {
                 stats.draw_calls += 1;
             }
             pass.set_pipeline(quads);
-            self.encode_draws(pass, &pick, *region, &frame.draws, first(index), stats);
+            self.encode_draws(
+                pass,
+                &pick,
+                *region,
+                &frame.draws,
+                first(index),
+                frame.kept,
+                stats,
+            );
         }
     }
     /// One render pass per frame: copy the retained image into the spare
@@ -11862,6 +11908,7 @@ impl GpuRenderer {
         stats.draw_calls += 1;
         stats.instances += (draw.end - draw.start) as usize;
     }
+    #[allow(clippy::too_many_arguments)]
     fn encode_draws<'p>(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -11869,21 +11916,37 @@ impl GpuRenderer {
         region: Rect,
         draws: &[Draw],
         first: u32,
+        kept: Option<u32>,
         stats: &mut GpuStats,
     ) {
         // The pipeline set on `pass`: the caller's, until a batch sets one.
         let mut current = None;
-        self.batches(region, draws, first, |batch| {
+        self.batches(region, draws, first, kept, |batch| {
             self.encode_batch(pass, pipelines, &mut current, batch, stats)
         });
     }
     /// The draws within `region` from instance `first` on, as batches:
     /// consecutive draws sharing a clip, texture source and shading join.
-    fn batches(&self, region: Rect, draws: &[Draw], first: u32, emit: impl FnMut(Batch)) {
-        match self.kept_upload.is_some() {
-            true => self.batches_of::<true>(region, draws, first, emit),
-            false => self.batches_of::<false>(region, draws, first, emit),
+    /// `kept`: the kept frame's `kept_ordered` when these draws are the kept
+    /// frame's, now or deferred (`GpuRenderer::kept_now`, `Deferred::kept`):
+    /// past it their instances are out of paint order, which the kept rules
+    /// allow for.
+    fn batches(
+        &self,
+        region: Rect,
+        draws: &[Draw],
+        first: u32,
+        kept: Option<u32>,
+        emit: impl FnMut(Batch),
+    ) {
+        match kept {
+            Some(ordered) => self.batches_of::<true>(region, draws, first, ordered, emit),
+            None => self.batches_of::<false>(region, draws, first, 0, emit),
         }
+    }
+    /// The kept frame's `kept_ordered` while it is drawn from (`batches`).
+    pub(crate) fn kept_now(&self) -> Option<u32> {
+        self.kept_upload.is_some().then_some(self.kept_ordered)
     }
     /// `batches`, of the kept frame's draws (`KEPT`) or a frame's.
     #[inline(always)]
@@ -11892,6 +11955,7 @@ impl GpuRenderer {
         region: Rect,
         draws: &[Draw],
         first: u32,
+        ordered: u32,
         mut emit: impl FnMut(Batch),
     ) {
         let mut batch: Option<Batch> = None;
@@ -11950,7 +12014,7 @@ impl GpuRenderer {
                     || start == open.end
                     || start > open.end
                         && start - open.end < SKIPPED_SPLIT
-                        && draw.end <= self.kept_ordered)
+                        && draw.end <= ordered)
             {
                 // Another shading joins when what it promotes (quads drawn
                 // with a costlier shader than theirs) stays small.
@@ -18397,7 +18461,7 @@ mod batch_order_tests {
     fn batches(draws: &[Draw]) -> Vec<(u32, u32)> {
         let gpu = GpuRenderer::new(40, 20).unwrap();
         let mut out = Vec::new();
-        gpu.batches(Rect::new(0., 0., 40., 20.), draws, 0, |batch| {
+        gpu.batches(Rect::new(0., 0., 40., 20.), draws, 0, None, |batch| {
             out.push((batch.start, batch.end))
         });
         out
