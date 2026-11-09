@@ -552,8 +552,9 @@ pub(crate) struct Rare {
     line_numbers: Option<bool>,
     /// What a code editor adds to a text area (`View::highlighter`, …).
     code: Option<Box<CodeOptions>>,
-    /// `WINDOW_DRAG` (`View::window_drag`), `HOLLOW` (`View::hollow`) and an
-    /// editor's `AUTOCORRECT` and `SMART_PUNCTUATION`: rare, tested together
+    /// `WINDOW_DRAG` (`View::window_drag`), `HOLLOW` (`View::hollow`),
+    /// `KEEPS_FOCUS` (`View::focus_on_press`) and an editor's `AUTOCORRECT`
+    /// and `SMART_PUNCTUATION`: rare, tested together
     /// as the element mounts.
     mount_flags: u8,
     /// `View::selectable`.
@@ -1237,6 +1238,14 @@ impl View {
         self.rare_mut().pointer_events = Some(Box::new(enabled));
         self
     }
+    /// `false`: a press on the view (or anything in it) leaves focus where
+    /// it is, as the web's `mousedown` with `preventDefault()` does. Its
+    /// clicks still come. A list hanging from a field: its rows and tabs
+    /// take clicks, the field keeping the keys and its caret.
+    pub fn focus_on_press(mut self, moves: bool) -> Self {
+        self.set_mount_flag(KEEPS_FOCUS, !moves);
+        self
+    }
     /// A box laid out around content that may be put away: while nothing
     /// it holds is displayed (`hidden` or `invisible`), the pointer passes
     /// through it as `pointer_events(false)` lets it, to what is under it.
@@ -1890,6 +1899,11 @@ impl View {
         self.rare_mut().row_text = Some(std::rc::Rc::new(text));
         self
     }
+    /// A virtual list's rows for a selection: their text and its keys.
+    pub(crate) fn list_rows(mut self, rows: crate::selection::RowText) -> Self {
+        self.rare_mut().row_text = Some(rows);
+        self
+    }
     /// A canvas's drawing placed by `view` (pan and zoom), following the
     /// reactive values it reads: a change repaints the drawing as it is,
     /// drawing nothing again (`Scene::set_canvas_view`). For a canvas.
@@ -2055,6 +2069,8 @@ pub(crate) struct OverlayLook {
     pub(crate) popover_padding: f32,
     /// How far a menu item's shortcut sits from its label.
     pub(crate) shortcut_gap: f32,
+    /// The shadows a menu's and a popover's panel cast, if any.
+    pub(crate) panel_shadows: Option<&'static [crate::scene::BoxShadow]>,
     /// A text tooltip: its padding (across, above, below), corner radius
     /// and font size.
     pub(crate) tooltip_padding: (f32, f32, f32),
@@ -2077,6 +2093,7 @@ pub(crate) const BUILT_IN_OVERLAY: OverlayLook = OverlayLook {
     popover_radius: crate::theme::Themed::Token(tok::RADIUS_MD.0),
     popover_padding: 16.,
     shortcut_gap: 24.,
+    panel_shadows: None,
     tooltip_padding: (8., 4., 4.),
     tooltip_radius: crate::theme::Themed::Token(tok::RADIUS_SM.0),
     tooltip_font_size: crate::theme::Themed::Token(tok::FONT_SIZE_XS.0),
@@ -2124,6 +2141,7 @@ pub(crate) const LINUX_OVERLAY: OverlayLook = OverlayLook {
     popover_radius: crate::theme::Themed::Value(15.),
     popover_padding: 8.,
     shortcut_gap: 12.,
+    panel_shadows: Some(&GNOME_PANEL_SHADOWS),
     // A tooltip as libadwaita's (`widgets/_tooltip.scss`): dark and
     // translucent in either scheme, white text, a 1 border of white at 10%,
     // padded 10 by 6, rounded 9, its text the body's less a step. (When it
@@ -2140,6 +2158,23 @@ pub(crate) const LINUX_OVERLAY: OverlayLook = OverlayLook {
         crate::theme::Themed::Value(crate::scene::Color(255, 255, 255, 26)),
     ),
 };
+/// libadwaita's popover shadow (`popover > contents { box-shadow }`, its
+/// CSS blur halved to a Gaussian sigma): a 1 outline of black at 5%, then
+/// 1 down blurred 2.5 spread 1 at 9%, and 2 down blurred 7 spread 3 at 5%.
+const GNOME_PANEL_SHADOWS: [crate::scene::BoxShadow; 3] = [
+    panel_shadow(0., 0., 1., 13),
+    panel_shadow(1., 2.5, 1., 23),
+    panel_shadow(2., 7., 3., 13),
+];
+/// A black shadow `y` down, blurred `blur_radius`, grown `spread`.
+const fn panel_shadow(y: f32, blur_radius: f32, spread: f32, alpha: u8) -> crate::scene::BoxShadow {
+    crate::scene::BoxShadow {
+        color: crate::scene::Color(0, 0, 0, alpha),
+        offset: crate::scene::Transform { x: 0., y },
+        blur_radius,
+        spread,
+    }
+}
 pub(crate) const OVERLAY: OverlayLook = if cfg!(windows) {
     WINDOWS_OVERLAY
 } else if cfg!(target_os = "linux") {
@@ -2152,12 +2187,18 @@ pub(crate) const OVERLAY: OverlayLook = if cfg!(windows) {
 /// no border of its own it paints over the control (an inset stroke, taking
 /// no layout room), so focusing never moves its content; otherwise it
 /// colours the control's own border. On Windows, a ring outside it as
-/// WinUI draws one, taking no room either. (Made when first focused.)
+/// WinUI draws one, and on Linux an outline inset over it as GNOME draws
+/// one, taking no room either. (Made when first focused.)
 fn focus_ring(styles: &Styles) -> fn() -> Styles {
     // Windows draws keyboard focus outside the control, bordered or not, as
     // WinUI's focus visual does (`focus_outside`).
     if cfg!(windows) {
         return || widget_style(|w| &w.focus_outside);
+    }
+    // GNOME draws keyboard focus as an outline inset over the control,
+    // bordered or not (`focus_inset`).
+    if cfg!(target_os = "linux") {
+        return || widget_style(|w| &w.focus_inset);
     }
     match bordered(styles) {
         true => || widget_style(|w| &w.focus_recolor),
@@ -2963,6 +3004,29 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
 /// set. Application state written by a constructor is not rolled back.
 pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
     mut keys: impl FnMut() -> Vec<K> + 'static,
+    build: impl FnMut(K, &mut Context) -> View + 'static,
+) -> View {
+    keyed_grown(move || Keys::All(keys()), build)
+}
+/// A pass's keys for [`keyed_grown`]: all of them, or those after the
+/// first `unchanged`, which are the last pass's as it had them (a source
+/// that knows: a list grown at its end, its last item changed).
+pub enum Keys<K> {
+    /// Every key, in order.
+    All(Vec<K>),
+    /// The last pass's first `unchanged` keys, then `rest`.
+    Grown {
+        /// How many of the last pass's keys, from the first, stay.
+        unchanged: usize,
+        /// The keys after them.
+        rest: Vec<K>,
+    },
+}
+/// [`keyed`] whose keys say how many are the last pass's: a list growing at
+/// its end (a streamed reply's rows) is passed in what it adds, its keys
+/// neither compared, copied nor dropped whole.
+pub fn keyed_grown<K: Eq + std::hash::Hash + Clone + 'static>(
+    mut keys: impl FnMut() -> Keys<K> + 'static,
     mut build: impl FnMut(K, &mut Context) -> View + 'static,
 ) -> View {
     View::new(Kind::Region(Box::new(move |ui, root, environment| {
@@ -2972,32 +3036,68 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
         // and that pass (a key met twice in one pass is a duplicate).
         let mut entries: HashMap<K, Keyed, crate::KeyHasher> =
             HashMap::with_hasher(crate::key_hasher());
-        // The last pass's keys and their children, in order.
-        let mut last: (Vec<K>, Vec<NodeId>) = (Vec::new(), Vec::new());
+        // The keys last given, and the children the last pass that finished
+        // put in order.
+        let (mut shown, mut order): (Vec<K>, Vec<NodeId>) = (Vec::new(), Vec::new());
         // This pass, and whether the last one finished: one that did not
-        // (a constructor panicked, the region went) left `entries` marked
-        // for keys `last` does not hold.
+        // (a constructor panicked, the region went) left `entries` and
+        // `order` as they were for keys `shown` no longer holds.
         let (mut pass, mut finished) = (0u64, true);
-        // A pass's children by key after the prefix, the keys with none yet
-        // (by place) and those built: kept from pass to pass, as is the
-        // order, so a pass allocates none of them.
-        let mut nodes: Vec<Option<NodeId>> = Vec::new();
+        // The last keys after the prefix (`gone`'s from `gone_at`), a pass's
+        // children by key after it, the keys with none yet (by place) and
+        // those built: kept from pass to pass, so a pass allocates none of
+        // them.
+        let (mut gone, mut nodes): (Vec<K>, Vec<Option<NodeId>>) = (Vec::new(), Vec::new());
         let (mut fresh, mut added): (Vec<usize>, Vec<(usize, NodeId)>) = (Vec::new(), Vec::new());
         ui.bind(root, move || {
-            let keys = keys();
-            // The same keys in the same order, every child still mounted (a
-            // list whose rows changed in place): nothing to add, remove or
-            // move, and no key hashed to find out.
-            if finished
-                && keys == last.0
-                && let Some(ui) = weak.upgrade()
-            {
-                let scene = ui.scene.borrow();
-                if !scene.contains(root) || last.1.iter().all(|node| scene.contains(*node)) {
-                    return;
+            // Every child the last pass placed still mounted: the root holds
+            // as many (it holds `keyed`'s children alone, and one removed
+            // from elsewhere leaves it).
+            let intact =
+                |ui: &Ui, order: &[NodeId]| ui.scene.borrow().children(root).len() == order.len();
+            // How many first keys are the last pass's, and those it had
+            // after them.
+            let (same, gone_at) = match keys() {
+                Keys::All(keys) => {
+                    // The same keys in the same order, every child still
+                    // mounted (a list whose rows changed in place): nothing
+                    // to add, remove or move, and no key hashed to find out.
+                    if finished
+                        && keys == shown
+                        && let Some(ui) = weak.upgrade()
+                        && (!ui.scene.borrow().contains(root) || intact(&ui, &order))
+                    {
+                        return;
+                    }
+                    let same = keys
+                        .iter()
+                        .zip(&shown)
+                        .take_while(|(now, then)| now == then)
+                        .count();
+                    // (The last keys kept whole, read from `same` on: none
+                    // moved.)
+                    gone = std::mem::replace(&mut shown, keys);
+                    (same, same)
                 }
-            }
+                Keys::Grown { unchanged, rest } => {
+                    let same = unchanged.min(shown.len());
+                    if finished
+                        && same == shown.len()
+                        && rest.is_empty()
+                        && let Some(ui) = weak.upgrade()
+                        && (!ui.scene.borrow().contains(root) || intact(&ui, &order))
+                    {
+                        return;
+                    }
+                    gone.clear();
+                    gone.extend(shown.drain(same..));
+                    shown.extend(rest);
+                    (same, 0)
+                }
+            };
+            let keys = &shown;
             let Some(mut ui) = weak.upgrade() else {
+                finished = false;
                 return;
             };
             // The last pass's keys first, as they were, then others (a list
@@ -3008,20 +3108,14 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
             // it, then and now) is well under the whole list's: an edit near
             // the front passes whole.
             let from = {
-                let prefix = keys
-                    .iter()
-                    .zip(&last.0)
-                    .take_while(|(now, then)| now == then)
-                    .count();
-                let rest = (last.0.len() - prefix) + 2 * (keys.len() - prefix);
-                let scene = ui.scene.borrow();
-                if prefix > 0
+                let rest = (gone.len() - gone_at) + 2 * (keys.len() - same);
+                if same > 0
                     && finished
                     && rest <= keys.len() / 2
-                    && entries.len() == last.0.len()
-                    && last.1[..prefix].iter().all(|node| scene.contains(*node))
+                    && entries.len() == same + gone.len() - gone_at
+                    && intact(&ui, &order)
                 {
-                    prefix
+                    same
                 } else {
                     0
                 }
@@ -3088,9 +3182,9 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
                 // Every key shown now is held: only more than that left.
                 // Those go in the order they were in, the same every run (a
                 // map's iteration is not), as what their removal repaints
-                // follows it.
+                // follows it. (Those before `same` are shown still.)
                 if entries.len() > keys.len() {
-                    for (index, key) in last.0.iter().enumerate().skip(from) {
+                    for (index, key) in (same..).zip(&gone[gone_at..]) {
                         if entries.get(key).is_some_and(|entry| entry.pass != pass)
                             && let Some(entry) = entries.remove(key)
                         {
@@ -3109,18 +3203,19 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
                         });
                     }
                 }
-                // (In place: the prefix's children are where they were.)
-                let order = &mut last.1;
                 order.truncate(from);
                 order.extend(
                     nodes
                         .iter()
                         .map(|node| node.expect("each key has its child")),
                 );
-                assert!(ui.scene.borrow_mut().reorder_children(root, order));
+                assert!(
+                    ui.scene
+                        .borrow_mut()
+                        .reorder_children_from(root, from, &order)
+                );
                 transaction.commit();
             });
-            last.0 = keys;
             finished = true;
         });
     })))
@@ -3162,31 +3257,78 @@ impl<K: 'static> RowSource<K> {
         let build = self.build.clone();
         move |index, key, cx| (build.borrow_mut())(index, key, cx)
     }
-    /// Row `index`'s text, of `len()` rows: the row built as the list builds
-    /// it, not mounted (what it makes ends at once), and read (`view_text`).
-    pub(crate) fn text(
+    /// The list's rows as a selection reads them, of `len()` rows (`None`
+    /// while that can't be read): a row's text, built as the list builds it
+    /// but not mounted (what it makes ends at once), and read (`view_text`);
+    /// a row's key, read as an end is set in it; and where a key is now. One
+    /// allocation, as a plain row text function is.
+    pub(crate) fn rows(
         &self,
-        len: impl Fn() -> usize + 'static,
-    ) -> impl Fn(usize) -> Option<String> + 'static {
-        let (key, build, mounted_in) = (
-            self.key.clone(),
-            self.build.clone(),
-            self.mounted_in.clone(),
-        );
-        move |index| {
-            if index >= len() {
-                return None;
-            }
-            let (runtime, environment) = mounted_in.borrow().clone()?;
-            // Built now (a copy during a row's build): copied as nothing.
-            let row = key.try_borrow_mut().ok().map(|mut key| key(index))?;
-            let mut cx = Context::new(runtime.clone(), environment);
-            let mut view = build
-                .try_borrow_mut()
-                .ok()
-                .map(|mut build| build(runtime.signal(index), row, &mut cx))?;
-            Some(view_text(&mut view))
+        len: impl Fn() -> Option<usize> + 'static,
+    ) -> crate::selection::RowText
+    where
+        K: Eq,
+    {
+        Rc::new(SourceRows {
+            key: self.key.clone(),
+            build: self.build.clone(),
+            mounted_in: self.mounted_in.clone(),
+            len,
+        })
+    }
+}
+/// A virtual list's rows as a selection reads them (`RowSource::rows`).
+struct SourceRows<K, L> {
+    key: Rc<RefCell<dyn FnMut(usize) -> K>>,
+    build: Rc<RefCell<RowBuilder<K>>>,
+    mounted_in: Rc<RefCell<Option<(Runtime, Environment)>>>,
+    len: L,
+}
+impl<K: Eq + 'static, L: Fn() -> Option<usize>> SourceRows<K, L> {
+    /// `read`, untracked, in the runtime the list mounted in.
+    fn untracked<R>(&self, read: impl FnOnce() -> Option<R>) -> Option<R> {
+        let runtime = self
+            .mounted_in
+            .borrow()
+            .as_ref()
+            .map(|(runtime, _)| runtime.clone())?;
+        runtime.untracked(read)
+    }
+}
+impl<K: Eq + 'static, L: Fn() -> Option<usize>> crate::selection::ListRows for SourceRows<K, L> {
+    fn text(&self, index: usize) -> Option<String> {
+        if index >= (self.len)().unwrap_or(0) {
+            return None;
         }
+        let (runtime, environment) = self.mounted_in.borrow().clone()?;
+        // Built now (a copy during a row's build): copied as nothing.
+        let row = self.key.try_borrow_mut().ok().map(|mut key| key(index))?;
+        let mut cx = Context::new(runtime.clone(), environment);
+        let mut view = self
+            .build
+            .try_borrow_mut()
+            .ok()
+            .map(|mut build| build(runtime.signal(index), row, &mut cx))?;
+        Some(view_text(&mut view))
+    }
+    fn key(&self, index: usize) -> Option<Rc<dyn std::any::Any>> {
+        self.untracked(|| {
+            let mut key = self.key.try_borrow_mut().ok()?;
+            Some(Rc::new(key(index)) as Rc<dyn std::any::Any>)
+        })
+    }
+    fn find(&self, wanted: &dyn std::any::Any, seen: usize) -> Option<usize> {
+        let wanted = wanted.downcast_ref::<K>()?;
+        self.untracked(|| {
+            // Asked while the list reads its keys: it stays where it was.
+            let (Some(len), Ok(mut key)) = ((self.len)(), self.key.try_borrow_mut()) else {
+                return Some(seen);
+            };
+            if seen < len && key(seen) == *wanted {
+                return Some(seen);
+            }
+            (0..len).find(|&index| key(index) == *wanted)
+        })
     }
 }
 /// The text `view` shows, as a copy of it takes it: its texts in order, a
@@ -3296,9 +3438,9 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     assert!(row_height.is_finite() && row_height > 0.0);
     let count = Rc::new(RefCell::new(count));
     let rows = RowSource::new(key, build);
-    let text = rows.text({
+    let source = rows.rows({
         let count = count.clone();
-        move || count.try_borrow_mut().map_or(0, |mut count| count())
+        move || count.try_borrow_mut().ok().map(|mut count| count())
     });
     let (mut key, mut build, mounted_in) = (rows.key(), rows.build(), rows.mounted_in.clone());
     let count = move || (count.borrow_mut())();
@@ -3629,7 +3771,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
             });
         },
     )))
-    .row_text(text)
+    .list_rows(source)
 }
 // Roll back newly appended roots if a component constructor or initial binding
 // panics. Existing siblings are never removed by this guard. This is ownership
@@ -4141,6 +4283,10 @@ fn mount_portal_panel(
             (x, y) if x == y => card.p(x),
             (x, y) => card.px(x).py(y),
         };
+        let card = match (OVERLAY.panel_shadows, anchored) {
+            (Some(shadows), true) => card.shadows(shadows.to_vec()),
+            _ => card,
+        };
         card.bg(if is_menu {
             tok::MENU_BG
         } else if anchored {
@@ -4508,6 +4654,10 @@ struct WidgetStyles {
     /// wide), its corners the control's grown by 3.
     #[cfg_attr(not(windows), allow(dead_code))]
     focus_outside: Styles,
+    /// GNOME's focus (libadwaita's `focus-ring`): an outline 2 wide inset
+    /// over the control's edge (offset −2), its corners the control's.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    focus_inset: Styles,
     menu_focus_recolor: Styles,
     menu_item: Styles,
     menu_hover: Styles,
@@ -4533,6 +4683,10 @@ impl WidgetStyles {
                 .outline_color(tok::FOCUS_RING)
                 .outline_offset(1.)
                 .outline_inner(1., tok::BACKGROUND),
+            focus_inset: Styles::new()
+                .outline_width(2.)
+                .outline_color(tok::FOCUS_RING)
+                .outline_offset(-2.),
             menu_focus_recolor: Styles::new()
                 .bg(tok::MENU_HOVER)
                 .border_color(tok::FOCUS_RING),
@@ -4642,11 +4796,22 @@ fn paragraph_effect<const LOCATING: bool>(
             }
             let link = span.action.is_some() || span.href.is_some();
             // Most spans have none of these: one test for all three.
-            let (hover, icon, menu, plain) = match span.extras.take() {
-                None => (None, None, None, false),
+            // With an icon, or room after the text other than before it, the
+            // room is kept apart from the text's run: `room_after` is then
+            // what follows the text. Negative (no room is), otherwise.
+            let (hover, icon, menu, plain, room_after) = match span.extras.take() {
+                None => (None, None, None, false, -1.),
                 Some(extras) => {
                     let extras = *extras;
-                    (extras.hover, extras.icon, extras.menu, extras.plain)
+                    let end = extras.padding_end.unwrap_or(span.padding[0]);
+                    let apart = extras.icon.is_some() || end != span.padding[0];
+                    (
+                        extras.hover,
+                        extras.icon,
+                        extras.menu,
+                        extras.plain,
+                        if apart { end } else { -1. },
+                    )
                 }
             };
             let hover = hover.as_ref();
@@ -4667,8 +4832,9 @@ fn paragraph_effect<const LOCATING: bool>(
                 span.background = span.background.or(span.styles.background);
             }
             // An icon keeps its room before the text: a padded
-            // placeholder run of its own.
-            let icon_at = icon.is_some().then(|| {
+            // placeholder run of its own. So does the room before the text
+            // where it isn't the room after it (`padding_end`).
+            let icon_at = (room_after >= 0.).then(|| {
                 let at = content.len();
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
                 at..content.len()
@@ -4740,41 +4906,72 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, the span's padding goes around both: its
             // room takes the padding before, a placeholder after the
             // text the padding after.
-            let lead = if icon.is_some() { span.padding[0] } else { 0. };
-            if let (Some(range), Some(icon)) = (icon_at, icon) {
-                runs.push(crate::rich_text::TextRun {
+            match (icon, icon_at) {
+                // (No icon, the room before alone: a placeholder that wide.)
+                (None, Some(range)) => runs.push(crate::rich_text::TextRun {
                     background: span.background,
                     underline: None,
                     strikethrough: None,
-                    padding: [(lead + icon.size + icon.gap) / 2., span.padding[1]],
+                    padding: [span.padding[0] / 2., span.padding[1]],
                     radius: span.radius,
-                    range: range.clone(),
+                    range,
                     font: font.clone(),
                     font_size,
                     color,
-                });
-                icons.push(crate::compose_rich::InlineIcon {
-                    range,
-                    svg: match icon.tint {
-                        Some(crate::theme::Themed::Value(tint)) => {
-                            std::sync::Arc::new(icon.svg.tinted(tint))
-                        }
-                        Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
-                            icon.svg.tinted(
-                                theme
-                                    .get(token)
-                                    .color()
-                                    .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                }),
+                (Some(icon), Some(range)) => {
+                    let lead = span.padding[0];
+                    // (A well takes its room round the icon too.)
+                    let pad = if icon.bg.is_some() { icon.pad } else { 0. };
+                    runs.push(crate::rich_text::TextRun {
+                        background: span.background,
+                        underline: None,
+                        strikethrough: None,
+                        padding: [
+                            (lead + icon.size + 2. * pad + icon.gap) / 2.,
+                            span.padding[1],
+                        ],
+                        radius: span.radius,
+                        range: range.clone(),
+                        font: font.clone(),
+                        font_size,
+                        color,
+                    });
+                    icons.push(crate::compose_rich::InlineIcon {
+                        range,
+                        svg: match icon.tint {
+                            Some(crate::theme::Themed::Value(tint)) => {
+                                std::sync::Arc::new(icon.svg.tinted(tint))
+                            }
+                            Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                                icon.svg.tinted(
+                                    theme
+                                        .get(token)
+                                        .color()
+                                        .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                                ),
                             ),
-                        ),
-                        None if icon.svg.follows_text_color() => {
-                            std::sync::Arc::new(icon.svg.tinted(color))
-                        }
-                        None => icon.svg,
-                    },
-                    size: icon.size,
-                    inset: lead,
-                });
+                            None if icon.svg.follows_text_color() => {
+                                std::sync::Arc::new(icon.svg.tinted(color))
+                            }
+                            None => icon.svg,
+                        },
+                        size: icon.size,
+                        inset: lead,
+                        well: icon.bg.and_then(|bg| {
+                            let color = match bg {
+                                crate::theme::Themed::Value(color) => Some(color),
+                                crate::theme::Themed::Token(token) => theme.get(token).color(),
+                            }?;
+                            Some(crate::compose_rich::IconWell {
+                                color,
+                                radius: icon.radius,
+                                pad,
+                            })
+                        }),
+                    });
+                }
+                _ => {}
             }
             let text_end = content.len();
             runs.push(crate::rich_text::TextRun {
@@ -4795,7 +4992,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     }
                 },
                 strikethrough: span.strikethrough,
-                padding: if lead > 0. {
+                padding: if room_after >= 0. {
                     [0., span.padding[1]]
                 } else {
                     span.padding
@@ -4806,13 +5003,14 @@ fn paragraph_effect<const LOCATING: bool>(
                 font_size,
                 color,
             });
-            if lead > 0. {
+            // The room after the text: a placeholder of its own.
+            if room_after > 0. {
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
                 runs.push(crate::rich_text::TextRun {
                     background: span.background,
                     underline: None,
                     strikethrough: None,
-                    padding: [lead / 2., span.padding[1]],
+                    padding: [room_after / 2., span.padding[1]],
                     radius: span.radius,
                     range: text_end..content.len(),
                     font,
@@ -6223,8 +6421,11 @@ const SMART_PUNCTUATION: u8 = 8;
 /// `Rare::mount_flags`: its descendants' container queries read it
 /// (`View::container`).
 const CONTAINER: u8 = 16;
-/// `View::window_drag`, `View::hollow`, `View::container`, and an editor's
-/// `autocorrect` and `smart_punctuation`, rare: apart from the element's
+/// `Rare::mount_flags`: a press on it leaves focus where it is
+/// (`View::focus_on_press`).
+const KEEPS_FOCUS: u8 = 32;
+/// `View::window_drag`, `View::hollow`, `View::focus_on_press`,
+/// `View::container`, and an editor's `autocorrect` and `smart_punctuation`, rare: apart from the element's
 /// common path.
 #[cold]
 #[inline(never)]
@@ -6264,6 +6465,11 @@ fn mount_flagged(
         ui.input
             .set_options(root, ui.input.options(root).unwrap_or_default());
         ui.input.set_hollow(root);
+    }
+    if flags & KEEPS_FOCUS != 0 {
+        ui.input
+            .set_options(root, ui.input.options(root).unwrap_or_default());
+        ui.input.set_keeps_focus(root);
     }
 }
 /// `View::window_drag`: a primary press on `region`, or on a descendant

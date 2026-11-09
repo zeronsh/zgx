@@ -50,12 +50,131 @@ pub enum Value {
     Folded(Rc<Folded>),
 }
 
+/// A list made from another by changing its end alone (a streamed reply's
+/// blocks, `ui.markdown` given a state), held folded (`Appended::into_value`)
+/// rather than as a variant of its own, which would cost every value's drop:
+/// its items in chunks of [`Appended::CHUNK`], those wholly before the
+/// change the very chunks of the list it was made from, so making it costs
+/// what changed, not its length.
+pub struct Appended {
+    chunks: Vec<Rc<[Value]>>,
+    len: usize,
+    /// The list it was made from, and how many first items they share.
+    from: Option<(std::rc::Weak<Appended>, usize)>,
+    /// Its items in one slice, made the first time something reads it as
+    /// a list.
+    flat: std::cell::OnceCell<Rc<[Value]>>,
+}
+impl std::fmt::Debug for Appended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+impl Appended {
+    /// Items a chunk holds (the last may hold fewer).
+    pub const CHUNK: usize = 32;
+    /// `items` as a list grown from `from`, whose first `shared` items are
+    /// `items`' first: the chunks wholly within them are `from`'s own.
+    pub fn grown<'a>(
+        from: Option<&Rc<Appended>>,
+        shared: usize,
+        len: usize,
+        items: impl FnOnce(usize) -> Box<dyn Iterator<Item = &'a Value> + 'a>,
+    ) -> Rc<Appended> {
+        let kept = from.map_or(0, |from| {
+            (shared.min(from.len).min(len) / Self::CHUNK).min(from.chunks.len())
+        });
+        let mut chunks: Vec<Rc<[Value]>> = Vec::with_capacity(len.div_ceil(Self::CHUNK));
+        if let Some(from) = from {
+            chunks.extend(from.chunks[..kept].iter().cloned());
+        }
+        let mut rest = items(kept * Self::CHUNK);
+        for start in (kept * Self::CHUNK..len).step_by(Self::CHUNK) {
+            let size = Self::CHUNK.min(len - start);
+            let chunk: Rc<[Value]> = rest.by_ref().take(size).cloned().collect();
+            assert_eq!(chunk.len(), size, "as many items as said");
+            chunks.push(chunk);
+        }
+        Rc::new(Appended {
+            chunks,
+            len,
+            from: from.map(|from| (Rc::downgrade(from), shared.min(from.len).min(len))),
+            flat: std::cell::OnceCell::new(),
+        })
+    }
+    /// How many items it holds.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    /// Whether it holds none.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    /// Its items, in order.
+    pub fn iter(&self) -> impl Iterator<Item = &Value> {
+        self.chunks.iter().flat_map(|chunk| chunk.iter())
+    }
+    /// Its items from the `from`th (from 0) on: a chunk's look to reach.
+    pub fn iter_from(&self, from: usize) -> impl Iterator<Item = &Value> {
+        let skip = from % Self::CHUNK;
+        self.chunks[(from / Self::CHUNK).min(self.chunks.len())..]
+            .iter()
+            .flat_map(|chunk| chunk.iter())
+            .skip(skip)
+    }
+    /// Its `index`th item (from 0): a chunk's look.
+    pub fn get(&self, index: usize) -> Option<&Value> {
+        self.chunks
+            .get(index / Self::CHUNK)?
+            .get(index % Self::CHUNK)
+    }
+    /// Its items as one slice, made once.
+    pub fn flat(&self) -> &Rc<[Value]> {
+        self.flat.get_or_init(|| self.iter().cloned().collect())
+    }
+    /// How many first items it shares with `then`, if it was made from it.
+    pub fn grown_from(&self, then: &Rc<Appended>) -> Option<usize> {
+        let (from, shared) = self.from.as_ref()?;
+        std::ptr::addr_eq(from.as_ptr(), Rc::as_ptr(then)).then_some(*shared)
+    }
+    /// As a value: folded, opening to the list it holds for scripts and for
+    /// Rust reading it as a list.
+    pub fn into_value(list: Rc<Appended>) -> Value {
+        Value::Folded(Rc::new(Folded {
+            id: Value::Nil,
+            source: Box::new(list),
+            open: RefCell::default(),
+            kept: std::cell::OnceCell::new(),
+        }))
+    }
+}
+impl Unfold for Rc<Appended> {
+    fn unfold(&self) -> Value {
+        Value::List(self.flat().clone())
+    }
+    fn appended(&self) -> Option<&Rc<Appended>> {
+        Some(self)
+    }
+}
+/// The grown list `value` holds, if it holds one (`Appended::into_value`).
+pub(crate) fn grown_list(value: &Value) -> Option<&Rc<Appended>> {
+    match value {
+        Value::Folded(folded) => folded.source.appended(),
+        _ => None,
+    }
+}
+
 /// What a folded value opens to, made as it's read. The host keeps what makes
 /// it however it likes: a long list's row out of view need hold no more than
 /// that.
 pub trait Unfold {
     /// The whole value: the same each time.
     fn unfold(&self) -> Value;
+    /// The grown list it is, if it is one (zgx's own: `Appended`).
+    #[doc(hidden)]
+    fn appended(&self) -> Option<&Rc<Appended>> {
+        None
+    }
 }
 
 /// A table's fields, as `Value::Map` holds them.
@@ -472,6 +591,25 @@ impl Value {
             _ => None,
         }
     }
+    /// Its `index`th item (from 0) if it is a list: a grown list's without
+    /// making it one slice.
+    pub fn item(&self, index: usize) -> Option<&Value> {
+        match self {
+            Value::List(items) => items.get(index),
+            Value::Folded(_) => grown_list(self)?.get(index),
+            _ => None,
+        }
+    }
+    /// Its items if it is a list or a grown list (`Appended`, made one
+    /// slice once), else none: for a reader of a state's list as a whole.
+    /// (`list`, which a table's every read takes, leaves the grown one out.)
+    pub fn items(&self) -> &[Value] {
+        match self {
+            Value::List(items) => items,
+            Value::Folded(_) => grown_list(self).map_or(&[], |list| &list.flat()[..]),
+            _ => &[],
+        }
+    }
     /// Its items if it is a list, else none.
     pub fn list(&self) -> &[Value] {
         match self {
@@ -494,7 +632,7 @@ impl Value {
         for step in path {
             value = match step {
                 PathKey::Key(k) => value.field(k)?,
-                PathKey::Index(i) => value.list().get(i.checked_sub(1)?)?,
+                PathKey::Index(i) => value.item(i.checked_sub(1)?)?,
             };
         }
         Some(value)
@@ -1629,50 +1767,20 @@ fn part_weight(value: &Value) -> usize {
     }
     if large(value) { 1 } else { all(value) }
 }
-thread_local! {
-    /// Lists made from another by changing its end alone (a streamed
-    /// reply's blocks, `ui.markdown`): each, the one it was made from, and
-    /// how many first items they share, the same values. Held weakly, so a
-    /// list gone leaves no address another could take; the last few only.
-    static GROWN: std::cell::RefCell<Vec<Grown>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-/// A list, the one it was made from, and how many first items they share.
-type Grown = (std::rc::Weak<[Value]>, std::rc::Weak<[Value]>, usize);
-/// Note that `list`'s first `shared` items are `from`'s own values: what
-/// reads both passes over them ([`shared_start`]).
-pub(crate) fn grown(list: &Rc<[Value]>, from: &Rc<[Value]>, shared: usize) {
-    GROWN.with_borrow_mut(|grown| {
-        // (One a pass of what reads them had no use for, gone with them.)
-        grown.retain(|(list, from, _)| list.strong_count() > 0 && from.strong_count() > 0);
-        if grown.len() >= 4 {
-            grown.remove(0);
-        }
-        grown.push((Rc::downgrade(list), Rc::downgrade(from), shared));
-    });
-}
-/// How many first items `list` shares with `from` as [`grown`] noted, if it
-/// did: each the same value, none compared.
+/// How many first items `list` shares with `from`, if it was grown from it
+/// (`Appended`): each the same value, none compared.
 pub(crate) fn shared_start(list: &Value, from: &Value) -> Option<usize> {
-    let (Value::List(list), Value::List(from)) = (list, from) else {
-        return None;
-    };
-    GROWN.with_borrow(|grown| {
-        grown.iter().rev().find_map(|(l, f, shared)| {
-            (std::ptr::addr_eq(l.as_ptr(), Rc::as_ptr(list))
-                && std::ptr::addr_eq(f.as_ptr(), Rc::as_ptr(from)))
-            .then(|| (*shared).min(list.len()).min(from.len()))
-        })
-    })
+    grown_list(list)?.grown_from(grown_list(from)?)
 }
-/// Whether `a` (a state's value) and `b` are equal: a list noted as grown
-/// from the other compares its items after those they share alone.
+/// Whether `a` (a state's value) and `b` are equal: a list grown from the
+/// other compares its items after those they share alone.
 pub(crate) fn same(a: &Value, b: &Value) -> bool {
-    match (shared_start(b, a), a, b) {
-        (Some(shared), Value::List(a), Value::List(b)) => {
-            a.len() == b.len() && a[shared..] == b[shared..]
-        }
-        _ => a == b,
+    if let (Some(then), Some(now)) = (grown_list(a), grown_list(b))
+        && let Some(shared) = now.grown_from(then)
+    {
+        return now.len() == then.len() && now.iter_from(shared).eq(then.iter_from(shared));
     }
+    a == b
 }
 pub(crate) fn identity(value: &Value) -> usize {
     match value {
@@ -2809,7 +2917,7 @@ fn add_reads<T: 'static, M: UserDataMethods<T>>(
     // Of a derived list (a sorted view) as it is now: brought up to date
     // first, as `at` is, inside a batch that wrote what it derives from.
     methods.add_method("len", move |_, s: &T, ()| {
-        Ok(state(s).fresh().with(|v| v.list().len()))
+        Ok(state(s).fresh().with(|v| v.items().len()))
     });
     // Where the first item whose `field` is `value` is (from 1), or nil,
     // tracked as `get` is: `messages:index_of("id", 42)`, found without
@@ -2833,7 +2941,7 @@ fn add_reads<T: 'static, M: UserDataMethods<T>>(
         Ok(state(s).fresh().with(|v| {
             index
                 .checked_sub(1)
-                .and_then(|i| v.list().get(i).cloned())
+                .and_then(|i| v.item(i).cloned())
                 .unwrap_or(Value::Nil)
         }))
     });
@@ -3030,6 +3138,7 @@ fn search(
 fn list_of<'a>(value: &'a Value, method: &str) -> mlua::Result<&'a [Value]> {
     match value {
         Value::List(items) => Ok(items),
+        Value::Folded(_) if let Some(list) = grown_list(value) => Ok(list.flat()),
         Value::Nil => Ok(&[]),
         other => Err(fail(
             method,
@@ -3105,6 +3214,12 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A value is three words: every slot of every list and map holds one.
+    #[test]
+    fn a_value_is_three_words() {
+        assert_eq!(std::mem::size_of::<Value>(), 24);
+    }
 
     fn map(pairs: &[(&str, Value)]) -> Value {
         Value::record(pairs.iter().map(|(k, v)| (*k, v.clone())))

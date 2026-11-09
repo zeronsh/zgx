@@ -432,9 +432,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
     measured: bool,
 ) -> View {
     let rows = RowSource::new(key, build);
-    let text = rows.text({
+    let source = rows.rows({
         let heights = heights.clone();
-        move || heights.index.try_borrow().map_or(0, |index| index.count())
+        move || heights.index.try_borrow().ok().map(|index| index.count())
     });
     let (mut key, mut build, mounted_in) = (rows.key(), rows.build(), rows.mounted_in.clone());
     View::new(Kind::VirtualList(Box::new(
@@ -1118,5 +1118,5 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             });
         },
     )))
-    .row_text(text)
+    .list_rows(source)
 }

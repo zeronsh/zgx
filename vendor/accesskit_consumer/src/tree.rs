@@ -711,10 +711,25 @@ impl Tree {
         self.state
             .tree_index_map
             .clone_from(&self.next_state.tree_index_map);
+        // zgx patch: the room a big page's nodes took goes with them.
+        self.state.shed();
+        self.next_state.shed();
     }
 
     pub fn state(&self) -> &State {
         &self.state
+    }
+}
+
+impl State {
+    /// zgx patch: gives back the table's room when it's far more than its nodes
+    /// need. A table only grows by itself, so one big page would keep its size
+    /// for the rest of the window's life.
+    fn shed(&mut self) {
+        const SMALL: usize = 1024;
+        if self.nodes.capacity() > SMALL && self.nodes.capacity() > self.nodes.len() * 4 {
+            self.nodes.shrink_to_fit();
+        }
     }
 }
 
@@ -758,6 +773,30 @@ mod tests {
 
     fn node_id(n: u64) -> NodeId {
         NodeId::new(LocalNodeId(n), TreeIndex(0))
+    }
+
+    #[test]
+    fn a_big_page_gone_gives_its_room_back() {
+        let page = |rows: u64| {
+            let mut root = Node::new(Role::Window);
+            root.set_children((1..=rows).map(LocalNodeId).collect::<Vec<_>>());
+            let mut nodes = vec![(LocalNodeId(0), root)];
+            nodes.extend((1..=rows).map(|i| (LocalNodeId(i), Node::new(Role::Label))));
+            TreeUpdate {
+                nodes,
+                tree: Some(Tree::new(LocalNodeId(0))),
+                tree_id: TreeId::ROOT,
+                focus: LocalNodeId(0),
+            }
+        };
+        let mut tree = super::Tree::new(page(4), true);
+        tree.update_and_process_changes(page(20_000), &mut NoOpHandler);
+        let big = tree.state().nodes.capacity();
+        assert!(big >= 20_000);
+        tree.update_and_process_changes(page(4), &mut NoOpHandler);
+        assert_eq!(tree.state().nodes.len(), 5);
+        assert!(tree.state().nodes.capacity() < big / 8, "both copies, the one read as well");
+        assert!(tree.next_state.nodes.capacity() < big / 8);
     }
 
     #[test]

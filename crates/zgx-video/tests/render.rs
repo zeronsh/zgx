@@ -721,6 +721,34 @@ fn a_chunked_webm_keeps_its_alpha_and_its_sound() {
     assert_eq!(probe(&out, "codec_name,channels", "a").unwrap(), "opus,2");
 }
 
+/// A render stalls nothing, so its scripts run under long limits: a
+/// composition whose build outlasts the budget a window gives a call (a whole
+/// app mounted in it, say) still renders.
+#[test]
+fn a_script_slower_than_a_window_allows_still_renders() {
+    let dir = temp_dir("render-limits");
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "Slow", w = 10, h = 10, fps = 30, duration = 1,
+            render = function()
+                -- Counted, not timed: a video's clock doesn't run on its own.
+                local sum = 0
+                for i = 1, 200000000 do
+                    sum += i % 7
+                end
+                return ui.div { w_full = true, h_full = true, bg = "#00ff00", id = tostring(sum) }
+            end,
+        } }
+        "##,
+    )
+    .unwrap();
+    let mut stage = script_stage(&dir, json!({}));
+    stage.step_to(0).expect("a frame");
+}
+
 /// A frame doesn't wait for another thread: a model read off it would be
 /// missing from a still, and from each chunk's first frames. Its buffer is a
 /// named pipe filled a second from now, so a read on another thread can't

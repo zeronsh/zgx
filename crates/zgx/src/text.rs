@@ -36,6 +36,33 @@ impl Chunk {
             text: text.into(),
         }
     }
+    /// `joined`, which is `first`'s first `keep` bytes, `with`, then
+    /// `last`'s from `from` on: their line breaks where they were, `with`'s
+    /// found, none of the rest read again (an append to a chunk of 16 KiB
+    /// looks at what it adds).
+    fn joined(
+        joined: &str,
+        first: &Chunk,
+        keep: usize,
+        with: &str,
+        last: &Chunk,
+        from: usize,
+    ) -> Self {
+        let head = &first.breaks[..first.breaks.partition_point(|&at| usize::from(at) < keep)];
+        let tail = &last.breaks[last.breaks.partition_point(|&at| usize::from(at) < from)..];
+        let shift = keep + with.len();
+        let mut breaks = Vec::with_capacity(head.len() + tail.len());
+        breaks.extend_from_slice(head);
+        breaks.extend(with.match_indices('\n').map(|(at, _)| (keep + at) as u16));
+        breaks.extend(
+            tail.iter()
+                .map(|&at| (usize::from(at) - from + shift) as u16),
+        );
+        Self {
+            breaks: breaks.into(),
+            text: joined.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -465,14 +492,26 @@ impl Text {
         let made = if joined.len() > MAX {
             cut(&joined)
         } else {
-            vec![Chunk::new(&joined)]
+            let (first, last) = (&chunks.chunks[first], &chunks.chunks[last]);
+            vec![Chunk::joined(
+                &joined,
+                first,
+                start - base,
+                with,
+                last,
+                end - tail_base,
+            )]
         };
-        let returns = |chunk: &Chunk| chunk.text.matches('\r').count();
-        chunks.returns -= chunks.chunks[first..=last]
-            .iter()
-            .map(returns)
-            .sum::<usize>();
-        chunks.returns += made.iter().map(returns).sum::<usize>();
+        // (A text without carriage returns, given none, has none still:
+        // its chunks are not read for them.)
+        if chunks.returns > 0 || with.contains('\r') {
+            let returns = |chunk: &Chunk| chunk.text.matches('\r').count();
+            chunks.returns -= chunks.chunks[first..=last]
+                .iter()
+                .map(returns)
+                .sum::<usize>();
+            chunks.returns += made.iter().map(returns).sum::<usize>();
+        }
         chunks.chunks.splice(first..=last, made);
         // An empty chunk goes, unless it is the only one.
         if chunks.chunks.len() > 1 {
@@ -770,6 +809,44 @@ impl std::fmt::Display for TextValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chunk an edit joins knows its line breaks as one made from its
+    /// text does: an append, an insert, a deletion, a replacement within a
+    /// chunk and across two, at line breaks and between them.
+    #[test]
+    fn an_edited_chunk_knows_its_line_breaks() {
+        let line = |n: usize| format!("line {n} of a long text\n");
+        let mut text = Text::new(&(0..4000).map(line).collect::<String>());
+        let mut seed = 7u64;
+        let mut next = |below: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % below.max(1)
+        };
+        for step in 0..400 {
+            let len = text.len();
+            let start = next(len + 1);
+            let end = (start + [0, 0, 1, 5, 30, 9000][next(6)]).min(len);
+            let with = ["", "x", "\n", "a\nb\n", "two\nlines\nhere", "word "][next(6)];
+            let (start, end) = if step % 3 == 0 {
+                (len, len)
+            } else {
+                (start, end)
+            };
+            let whole = text.to_string();
+            let (start, end) = (
+                whole.floor_char_boundary(start),
+                whole.floor_char_boundary(end),
+            );
+            text.replace_range(start..end, with);
+            for chunk in &text.0.chunks {
+                assert_eq!(chunk.breaks, Chunk::new(&chunk.text).breaks, "step {step}");
+            }
+            let expected = format!("{}{with}{}", &whole[..start], &whole[end..]);
+            assert_eq!(text.to_string(), expected, "step {step}");
+        }
+    }
 
     /// (start, old length, inserted) of the edits since `id`.
     fn since(text: &Text, id: u64) -> Option<Vec<(usize, usize, String)>> {
