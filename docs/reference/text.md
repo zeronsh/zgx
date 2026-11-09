@@ -61,6 +61,22 @@ Any [property](properties.md); these are the text ones (they also set the defaul
 | a string or function | a run in the paragraph's style (templates work) |
 | a table, `{ "text", bold = true }` | a span's options in place: the same as `ui.span { … }` |
 
+Or `spans = function() return { … } end` in place of listed runs: the function returns them (the same entries), and is called again when a state it reads changes. The paragraph is kept: its node, its selection, and the shaped lines of text that only grew at its end, as a streamed reply's paragraph does each chunk. A list's runs are fixed, each following its own states; this makes the runs themselves follow state (how many there are, their links and icons). An error in it is reported as a binding's, and the paragraph shows no runs until it returns some.
+
+```lua
+local words = ui.state("words", { "Hello", "world" })
+return ui.rich {
+	wrap = true,
+	spans = function()
+		local runs = {}
+		for i, word in words:get() do
+			runs[i] = ui.span { word .. " ", literal = true, bold = i == 1 }
+		end
+		return runs
+	end,
+}
+```
+
 | Span option | Type | Default | |
 | --- | --- | --- | --- |
 | `[1]` | `Text` | `""` | the run's text: a template or a function follows state |

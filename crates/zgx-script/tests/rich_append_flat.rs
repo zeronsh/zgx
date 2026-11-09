@@ -20,9 +20,16 @@ function piece(n: number): string
 end
 return ui.column {
 	w = 684,
-	ui.rich { wrap = true, ui.span { reply } },
+	PARAGRAPH,
 }
 "###;
+
+/// The paragraph, its run listed and following the reply's state, and made
+/// by a function (`spans`) reading it: kept in place either way.
+const PARAGRAPHS: [&str; 2] = [
+    "ui.rich { wrap = true, ui.span { reply } }",
+    "ui.rich { wrap = true, spans = function() return { ui.span { reply:get(), literal = true } } end }",
+];
 
 /// The script's append `n` (from 1), 24 bytes each.
 fn piece(n: usize) -> &'static str {
@@ -44,12 +51,16 @@ const PHASES: [Phase; 5] = [
 
 /// Each of `PHASES`' instructions for an append, the median of 9, once the
 /// paragraph holds `chars` (set whole, then a few appends uncounted).
-fn per_append(chars: usize) -> Vec<u64> {
+fn per_append(paragraph: &str, chars: usize) -> Vec<u64> {
     let mut ui = Ui::new(720., 900.);
     let mut gpu = zgx_gpu::GpuRenderer::new(720, 900).expect("a GPU");
     // Measured as a window measures it: from the text the renderer draws.
     gpu.install_text(&mut ui.scene.borrow_mut());
-    let host = ScriptHost::inline(&ui.runtime, "rich_append_flat", SCRIPT.to_string());
+    let host = ScriptHost::inline(
+        &ui.runtime,
+        "rich_append_flat",
+        SCRIPT.replace("PARAGRAPH", paragraph),
+    );
     host.reload().expect("the script loads");
     let _view = ui.mount(host.view());
     let appends = chars / 24;
@@ -95,23 +106,25 @@ fn an_append_costs_the_same_however_long_the_paragraph() {
     // the environment.
     unsafe { std::env::set_var("ZGX_PROFILE", "1") };
     let sizes = [240, 480, 960, 1440, 1920];
-    let runs: Vec<Vec<u64>> = sizes.iter().map(|&n| per_append(n)).collect();
-    if runs[0].iter().all(|n| *n == 0) {
-        eprintln!("no instruction counter here: nothing to compare");
-        return;
+    for paragraph in PARAGRAPHS {
+        let runs: Vec<Vec<u64>> = sizes.iter().map(|&n| per_append(paragraph, n)).collect();
+        if runs[0].iter().all(|n| *n == 0) {
+            eprintln!("no instruction counter here: nothing to compare");
+            return;
+        }
+        eprintln!("{paragraph}: per append, thousands of instructions, at {sizes:?} characters:");
+        for (i, phase) in PHASES.iter().enumerate() {
+            let row: Vec<u64> = runs.iter().map(|r| r[i] / 1000).collect();
+            eprintln!("  {phase:?}: {row:?}");
+        }
+        // Layout (with its text), damage and paint, together: flat as it
+        // grows. (Before each append kept the lines before its last, a frame
+        // at 1920 characters cost 4.3 times one at 240.)
+        let work = |run: &Vec<u64>| run[0] + run[1] + run[2] + run[3];
+        let (first, last) = (work(&runs[0]), work(&runs[runs.len() - 1]));
+        assert!(
+            last as f64 <= first as f64 * 1.25,
+            "{paragraph}: an append at 1920 characters costs {last} instructions, at 240 {first}"
+        );
     }
-    eprintln!("per append, thousands of instructions, at {sizes:?} characters:");
-    for (i, phase) in PHASES.iter().enumerate() {
-        let row: Vec<u64> = runs.iter().map(|r| r[i] / 1000).collect();
-        eprintln!("  {phase:?}: {row:?}");
-    }
-    // Layout (with its text), damage and paint, together: flat as it
-    // grows. (Before each append kept the lines before its last, a frame
-    // at 1920 characters cost 4.3 times one at 240.)
-    let work = |run: &Vec<u64>| run[0] + run[1] + run[2] + run[3];
-    let (first, last) = (work(&runs[0]), work(&runs[runs.len() - 1]));
-    assert!(
-        last as f64 <= first as f64 * 1.25,
-        "an append at 1920 characters costs {last} instructions, at 240 {first}"
-    );
 }
