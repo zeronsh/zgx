@@ -1942,6 +1942,9 @@ export type Styles = {
 	lines: number?,
 	line_height: Num?,
 	letter_spacing: Num?,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Num?,
 	-- Tabular figures: every digit the same width.
 	tabular: boolean?,
 	font_features: string?,
@@ -2127,6 +2130,9 @@ export type StyleProps = {
 	lines: Reactive<number>?,
 	line_height: Reactive<Num>?,
 	letter_spacing: Reactive<Num>?,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",

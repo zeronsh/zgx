@@ -21397,24 +21397,8 @@ export type AlertOptions = {
 	buttons: { { title: string, style: ("default" | "cancel" | "destructive")? } },
 	on_choose: ((button: number) -> ())?,
 }
-export type IosTextStyle =
-	"largeTitle"
-	| "title1"
-	| "title2"
-	| "title3"
-	| "headline"
-	| "body"
-	| "callout"
-	| "subheadline"
-	| "footnote"
-	| "caption1"
-	| "caption2"
 export type IosKit = {
 	settle: (state: State<number>, target: number, done: (() -> ())?) -> () -> (),
-	-- Text in one of UIKit's text styles ("body" if none), as a UILabel in
-	-- `preferredFont(forTextStyle:)` sets it: size, weight, and its lines the
-	-- style's leading apart; read live from the system on iOS.
-	text: (props: TextProps & { style: IosTextStyle? }) -> Node,
 	section: (props: { header: string?, footer: string?, [number]: Node }) -> Node,
 	tile: (symbol: string, tint: Color) -> Node,
 	row: (props: {

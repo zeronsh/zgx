@@ -45,6 +45,7 @@ Any [property](properties.md); these are the text ones (they also set the defaul
 | `truncate` | `boolean` | `false` | end an overflowing line with "…" |
 | `line_height` | `number` | the font's | points |
 | `letter_spacing` | `number` | `0` | points |
+| `leading` | `number` | `0` | points between lines, after each but the last (a font's leading, as UIKit's text styles add it): the first line keeps its own height, and nothing follows the last. Inherited; `0` resets it |
 | `tabular` | `boolean` | `false` | tabular figures (OpenType `tnum`): every digit one width, for numbers that change in place |
 | `font_features` | `string` | none | OpenType features: `"ss01 cv02=3 liga=0"` ([properties](properties.md)) |
 | `lang` | `string` | its parent's | the language its text is in (`"zh-TW"`), inherited: its Han characters take that language's fonts, and screen readers read it in it ([properties](properties.md)) |
