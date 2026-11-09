@@ -12722,6 +12722,15 @@ impl Scene {
     pub fn has_backdrop_blur(&self) -> bool {
         !self.blur_nodes.is_empty() || !self.backdrop_readers().is_empty()
     }
+    /// Whether a backdrop filter or a shader reading the backdrop lies in
+    /// `id`'s subtree. Renderer plumbing, not a stable API.
+    #[doc(hidden)]
+    pub fn backdrop_read_within(&self, id: NodeId) -> bool {
+        self.blur_nodes
+            .iter()
+            .chain(self.backdrop_readers())
+            .any(|node| self.is_within(*node, id))
+    }
     /// Each backdrop filter that shows, as far as it can reach: its box in
     /// the window (around its transformed corners under a transform), left
     /// unclipped, and its blur radius. Whatever the paint walk finds of a
