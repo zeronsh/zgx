@@ -49,7 +49,7 @@ local function editor(language: string): Node
 		line_numbers = true,
 		wrap = state.wrap,
 		font = "mono",
-		size = 13,
+		text_size = 13,
 		grow = 1,
 		w_full = true,
 		h = 0,

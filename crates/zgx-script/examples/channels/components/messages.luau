@@ -42,7 +42,7 @@ local function row(message: Message, _index: State<number>)
 			gap = 8,
 			items = "baseline",
 			ui.text { state.name_of(message.from), weight = 600 },
-			ui.text { time_of(message.at), size = 11, color = "$text.tertiary" },
+			ui.text { time_of(message.at), text_size = 11, color = "$text.tertiary" },
 		},
 		ui.markdown_view { message.text, breaks = true },
 		files_of(message),
@@ -54,7 +54,7 @@ local function row(message: Message, _index: State<number>)
 				ui.text {
 					id = `failed-{message.key}`,
 					color = "$danger",
-					size = 12,
+					text_size = 12,
 					`Not sent: {message.failed or ""}`,
 				},
 				ui.button {
