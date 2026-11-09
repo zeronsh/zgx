@@ -1747,7 +1747,28 @@ struct Placing<'a> {
     origin: (f32, f32),
     scale: f32,
     /// What of the target can show.
-    shows: Rect,
+    shows: Shows<'a>,
+}
+/// What of a layer's target can show: known, or (inside a layer that didn't
+/// work out where it lands) worked out only by a layer that reads it.
+#[derive(Clone, Copy)]
+enum Shows<'a> {
+    Known(Rect),
+    /// Of the layer `id`, drawn in `bounds`, placed by `parent`.
+    Inside {
+        parent: &'a Placing<'a>,
+        scene: &'a Scene,
+        id: NodeId,
+        bounds: Rect,
+    },
+}
+/// Whether something reaches past layer `id`'s pixels (a blur, a mask, a
+/// shader, a drop shadow): what of it shows is then not what bounds it.
+fn reaches_past(scene: &Scene, id: NodeId) -> bool {
+    scene.filter_blur(id) > 0.
+        || scene.mask(id).is_some()
+        || scene.layer_shader(id).is_some()
+        || scene.drop_shadow(id).is_some()
 }
 impl Placing<'_> {
     /// `None` in perspective.
@@ -1762,13 +1783,71 @@ impl Placing<'_> {
         let grid = map
             .then(Affine::translation(-self.origin.0, -self.origin.1))
             .then(Affine::scale(self.scale, self.scale));
+        let target = match self.shows {
+            Shows::Known(shows) => shows,
+            Shows::Inside {
+                parent,
+                scene,
+                id,
+                bounds,
+            } => (parent.placed())
+                .and_then(|placed| placed.visible)
+                .filter(|_| !reaches_past(scene, id))
+                .and_then(|visible| visible.intersection(bounds))
+                .unwrap_or(bounds),
+        };
         let shows = match self.item.clip {
-            Some(clip) => clip.intersection(self.shows),
-            None => Some(self.shows),
+            Some(clip) => clip.intersection(target),
+            None => Some(target),
         };
         let visible = shows.and_then(|shows| Some(map.inverse()?.bounds(shows)));
         Some(Placed { grid, visible })
     }
+}
+/// `prepare_layer`'s plan for a layer that reads where it lands: where it
+/// does (`read`: magnified or drawn in part), whether it moved since the frame
+/// before, the scale its raster was kept at, and what it is seen as now. Out
+/// of line: few layers are magnified, and every layer is prepared each frame.
+#[cold]
+#[inline(never)]
+fn plan_placed(
+    placing: &Placing<'_>,
+    cached: Option<&LayerCache>,
+    magnification: f32,
+    read: bool,
+    serial: u64,
+) -> (Option<Placed>, bool, Option<f32>, Seen) {
+    let placed = read.then(|| placing.placed()).flatten();
+    let grid = placed.map(|placed| placed.grid);
+    let held = cached.map(|cache| {
+        // What it was in the frame before this one (a frame may prepare it
+        // twice: `layer_shifted`).
+        let seen = &cache.seen;
+        let grids = seen.grids.as_deref();
+        let (before_grid, before) = match seen.frame == serial {
+            true => (grids.and_then(|grids| grids.before), seen.before),
+            false => (grids.and_then(|grids| grids.now), seen.magnification),
+        };
+        let moving = match (grid, before_grid) {
+            (Some(grid), Some(was)) => grid != was,
+            _ => before != magnification,
+        };
+        (moving, f32::from_bits(cache.factor), before_grid, before)
+    });
+    let moving = held.is_some_and(|(moving, ..)| moving);
+    let before_grid = held.map_or(grid, |(.., was, _)| was);
+    let seen = Seen {
+        frame: serial,
+        magnification,
+        before: held.map_or(magnification, |(.., before)| before),
+        grids: (grid.is_some() || before_grid.is_some()).then(|| {
+            Box::new(SeenGrids {
+                now: grid,
+                before: before_grid,
+            })
+        }),
+    };
+    (placed, moving, held.map(|(_, kept, ..)| kept), seen)
 }
 /// Where a layer's texels land in the target it composites into, and what
 /// of it can show there (`Placing::placed`).
@@ -6004,7 +6083,7 @@ impl GpuRenderer {
                     item,
                     origin: self.layer_origin,
                     scale: self.scale,
-                    shows: viewport,
+                    shows: Shows::Known(viewport),
                 };
                 self.layer_shifted = false;
                 self.prepare_layer(
@@ -6291,46 +6370,47 @@ impl GpuRenderer {
         let (cropped, current, glyphs) = cached.map_or((false, None, 0.), |cache| {
             (cache.cropped, Some(cache.step), cache.glyphs)
         });
-        // Where it lands, for one that reads it: magnified, or drawn in part
-        // when it was.
-        let placed = (magnifying || cropped).then(|| placing.placed()).flatten();
-        let grid = placed.map(|placed| placed.grid);
         let serial = scene.flush_serial();
-        let held = cached.map(|cache| {
-            // What it was in the frame before this one (a frame may prepare
-            // it twice: `layer_shifted`).
-            let seen = &cache.seen;
-            let grids = seen.grids.as_deref();
-            let (before_grid, before) = match seen.frame == serial {
-                true => (grids.and_then(|grids| grids.before), seen.before),
-                false => (grids.and_then(|grids| grids.now), seen.magnification),
-            };
-            let moving = match (grid, before_grid) {
-                (Some(grid), Some(was)) => grid != was,
-                _ => before != magnification,
-            };
-            (moving, f32::from_bits(cache.factor), before_grid, before)
-        });
-        let moving = held.is_some_and(|(moving, ..)| moving);
-        let before_grid = held.map_or(grid, |(.., was, _)| was);
-        let seen = Seen {
-            frame: serial,
-            magnification,
-            before: held.map_or(magnification, |(.., before)| before),
-            grids: (grid.is_some() || before_grid.is_some()).then(|| {
-                Box::new(SeenGrids {
-                    now: grid,
-                    before: before_grid,
-                })
-            }),
+        // Where it lands, for one that reads it: magnified, drawn in part
+        // when it was, or placed the frame before. Any other is planned as
+        // a layer always was, at no cost of this.
+        let placing_read =
+            magnifying || cropped || cached.is_some_and(|cache| cache.seen.grids.is_some());
+        let (placed, moving, kept, seen) = match placing_read {
+            true => plan_placed(
+                placing,
+                cached,
+                magnification,
+                magnifying || cropped,
+                serial,
+            ),
+            false => {
+                let before =
+                    cached.map_or(magnification, |cache| match cache.seen.frame == serial {
+                        true => cache.seen.before,
+                        false => cache.seen.magnification,
+                    });
+                let seen = Seen {
+                    frame: serial,
+                    magnification,
+                    before,
+                    grids: None,
+                };
+                (
+                    None,
+                    cached.is_some() && before != magnification,
+                    None,
+                    seen,
+                )
+            }
         };
         let mut step = raster_step(magnification, current);
         let mut factor = match (exact || magnifying) && magnification != 1. {
             true if exact || !moving => magnification,
-            true => match held {
+            true => match kept {
                 // Fine enough (stretched by a hundredth at most) and not
                 // past √2 finer than it shows.
-                Some((_, kept, ..))
+                Some(kept)
                     if kept * 1.01 >= magnification
                         && kept <= magnification * std::f32::consts::SQRT_2 =>
                 {
@@ -6348,25 +6428,18 @@ impl GpuRenderer {
         }
         // No finer than its largest glyph fits the atlas, once a raster
         // found it too large (`glyph_too_large`): finer, it would not draw.
-        let glyph_room = GLYPH_ROOM / glyphs;
-        let capped = magnifying && glyphs > 0. && factor > glyph_room;
+        let capped = magnifying && glyphs > 0. && factor > GLYPH_ROOM / glyphs;
         if capped {
-            factor = glyph_room.max(1.);
+            factor = (GLYPH_ROOM / glyphs).max(1.);
         }
         let exact = exact && !capped;
         // What of it can show: all of it may not fit the texture limits or
         // the budget at that scale, while the part in view does. Not where
         // something reaches past its pixels (a blur, a mask, a shader, a
         // drop shadow).
-        let reaches_past = || {
-            scene.filter_blur(id) > 0.
-                || scene.mask(id).is_some()
-                || scene.layer_shader(id).is_some()
-                || scene.drop_shadow(id).is_some()
-        };
         let visible = placed
             .and_then(|placed| placed.visible)
-            .filter(|_| !reaches_past());
+            .filter(|_| !reaches_past(scene, id));
         let frame = self.layer_frame;
         // Still and at its scale, its texels on its target's pixels: drawn
         // again if they moved off them (it moved, and stopped).
@@ -6600,28 +6673,28 @@ impl GpuRenderer {
         // A layer nested in it drawn from another corner differs anywhere
         // in it, and so does it.
         let mut shifted = false;
-        // What of it shows, which is all its layers can show in.
-        // Worked out for its first layer, whether it itself is magnified or
-        // not: one further in may be.
-        let mut inside = None;
+        // What of it shows, which is all its layers can show in: worked out
+        // here when it was placed, else by a layer in it that reads it (one
+        // further in may be magnified when it isn't).
+        let shows = match placed {
+            Some(_) => Shows::Known(
+                (visible.and_then(|visible| visible.intersection(bounds))).unwrap_or(bounds),
+            ),
+            None => Shows::Inside {
+                parent: placing,
+                scene,
+                id,
+                bounds,
+            },
+        };
         for item in &items {
             if item.isolated && item.effects.opacity > 0. {
                 self.layer_shifted = false;
-                let inside = *inside.get_or_insert_with(|| {
-                    let visible = match placed {
-                        Some(_) => visible,
-                        None => placing
-                            .placed()
-                            .and_then(|placed| placed.visible)
-                            .filter(|_| !reaches_past()),
-                    };
-                    (visible.and_then(|visible| visible.intersection(bounds))).unwrap_or(bounds)
-                });
                 let placing = Placing {
                     item,
                     origin: (bounds.x, bounds.y),
                     scale,
-                    shows: inside,
+                    shows,
                 };
                 self.prepare_layer(
                     scene,
